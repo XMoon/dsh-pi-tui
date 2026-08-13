@@ -10,6 +10,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -28,8 +30,11 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 // The commands service merge: ctx.commands typing for execute()/register().
 import type {} from '@deepseek-ai/dsh-commands'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
-import { foldTranscript, renderTranscript } from './transcript.ts'
+import { foldTranscript } from './transcript.ts'
+import { computeStats, formatStats } from './stats.ts'
 import { startProcessTui, type TuiApp } from './tui-app.ts'
+// The tokenMeter service merge for context-pressure measurement.
+import type {} from '@deepseek-ai/dsh-token-meter'
 
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner'
@@ -59,6 +64,29 @@ interface AppExit {
  */
 function repaint(app: TuiApp, events: readonly SessionEvent[]): void {
   app.setTranscript(foldTranscript(events))
+}
+
+/** Current git branch from the nearest .git/HEAD, or empty outside a checkout. */
+function gitBranch(cwd: string): string {
+  let dir = cwd
+  for (let depth = 0; depth < 10; depth += 1) {
+    try {
+      const head = readFileSync(join(dir, '.git', 'HEAD'), 'utf8').trim()
+      if (!head.startsWith('ref: refs/heads/')) return ''
+      return head.slice('ref: refs/heads/'.length)
+    } catch {
+      const parent = join(dir, '..')
+      if (parent === dir) return ''
+      dir = parent
+    }
+  }
+  return ''
+}
+
+/** Short cwd for the footer: last two path segments. */
+function shortCwd(cwd: string): string {
+  const parts = cwd.split('/').filter(Boolean)
+  return parts.slice(-2).join('/') || cwd
 }
 
 /**
@@ -107,6 +135,31 @@ export function apply(ctx: Context, config: Config): void {
     const { agent } = handle
     await agent.whenIdle()
 
+    // Footer state: model label, cwd, git branch, turn/step counters, and
+    // the stats line (LLM timing, tokens, context pressure).
+    const cwd = process.cwd()
+    const refreshStatus = (): void => {
+      const stats = computeStats(agent.session.events)
+      let contextTokens: number | undefined
+      const meter = ctx.get('tokenMeter')
+      if (meter !== undefined) {
+        try {
+          contextTokens = meter.measure(agent.session).totalTokens
+        } catch {
+          // Measurement is best-effort; the footer falls back to no context.
+        }
+      }
+      app.setStatus({
+        model: `${agent.options.provider}/${agent.options.model}`,
+        cwd: shortCwd(cwd),
+        branch: gitBranch(cwd),
+        turns: stats.turns,
+        steps: stats.steps,
+        statsLine: formatStats(stats, contextTokens),
+        ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
+      })
+    }
+
     let app: TuiApp
     // Aborts an in-flight command execution when the TUI quits.
     const signal = new AbortController().signal
@@ -145,6 +198,14 @@ export function apply(ctx: Context, config: Config): void {
 
     const commands = ctx.get('commands')
     if (commands !== undefined) {
+      // Slash-command autocompletion from the command registry.
+      app.setCommandCompletions(
+        commands.list(agent).map(command => ({
+          name: command.name,
+          description: command.description,
+        })),
+        cwd,
+      )
       commands.register({
         name: 'exit',
         description: 'Quit the terminal UI (flush and exit)',
@@ -154,14 +215,53 @@ export function apply(ctx: Context, config: Config): void {
           return { kind: 'success' }
         },
       })
+      commands.register({
+        name: 'settings',
+        description: 'Open the TUI settings panel',
+        handler: () => {
+          app.openSettings(
+            [
+              {
+                id: 'approval',
+                label: 'Approval policy',
+                description: 'How tool approvals are handled in this session',
+                currentValue: 'ask',
+                values: ['ask', 'never'],
+              },
+              {
+                id: 'theme',
+                label: 'Theme',
+                description: 'Color palette (applies immediately)',
+                currentValue: 'dark',
+                values: ['dark', 'light'],
+              },
+            ],
+            (id, value) => {
+              if (id === 'approval') {
+                if (value === 'ask' || value === 'never') ctx.approval?.setPolicy(agent, value)
+              } else if (id === 'theme') {
+                if (value === 'dark' || value === 'light') app.applyTheme(value)
+              }
+            },
+            () => {},
+          )
+          return { kind: 'success' }
+        },
+      })
     }
+    refreshStatus()
 
     ctx.on('session/event', (session, event) => {
       if (session.id !== agent.session.id) return
       repaint(app, agent.session.events)
       if (event.type === 'todo/write') app.setTodoSummary(event.data.todos)
       // Persist each completed turn so a crash loses at most the live turn.
-      if (event.type === 'turn/end') void sessions.flush(agent.session)
+      if (event.type === 'turn/end') {
+        refreshStatus()
+        void sessions.flush(agent.session)
+      } else if (event.type === 'step/start') {
+        refreshStatus()
+      }
     })
     // Initial todo state: the last todo/write snapshot in the log.
     for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {

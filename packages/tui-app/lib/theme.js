@@ -21,8 +21,27 @@ export const darkColors = {
     roleUser: '#FFCB6B',
     shellMode: '#BD93F9',
 };
-/** The active palette; a light theme can swap this later. */
-export const currentPalette = darkColors;
+/** Light palette, tuned for ≥ 4.5:1 contrast on white (pi's values). */
+export const lightColors = {
+    primary: '#1565C0',
+    accent: '#00838F',
+    text: '#1A1A1A',
+    textStrong: '#1A1A1A',
+    textDim: '#454545',
+    textMuted: '#5F5F5F',
+    border: '#737373',
+    success: '#0E7A38',
+    warning: '#92660A',
+    error: '#B91C1C',
+    roleUser: '#9A4A00',
+    shellMode: '#7C3AED',
+};
+/** The active palette; style helpers read it on every call, so swapping is live. */
+export let currentPalette = darkColors;
+/** Switch the active palette; callers must invalidate rendered components. */
+export function setTheme(theme) {
+    currentPalette = theme === 'light' ? lightColors : darkColors;
+}
 const chalk = new Chalk({ level: 3 });
 const hex = (token) => chalk.hex(currentPalette[token] ?? currentPalette.text);
 /** Style helpers by token name. */
@@ -47,6 +66,14 @@ export const selectListTheme = {
     description: (text) => color.textDim(text),
     scrollInfo: (text) => color.textMuted(text),
     noMatch: (text) => color.textMuted(text),
+};
+/** SettingsList palette from the semantic tokens. */
+export const settingsListTheme = {
+    label: (text, selected) => selected ? chalk.bold.hex(currentPalette.textStrong)(text) : color.text(text),
+    value: (text, selected) => selected ? color.primary(text) : color.textDim(text),
+    description: (text) => color.textDim(text),
+    cursor: color.primary('›'),
+    hint: (text) => color.textMuted(text),
 };
 /** Editor palette: focused border uses the brand token. */
 export const editorTheme = {

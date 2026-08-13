@@ -5,7 +5,7 @@
  * below; switching palettes later only swaps this module's exports.
  * @module @dsh-pi-tui/tui-app/theme
  */
-import type { EditorTheme, MarkdownTheme, SelectListTheme } from '@dsh-pi-tui/pi-tui';
+import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme } from '@dsh-pi-tui/pi-tui';
 /** Semantic palette tokens, mirroring pi's ColorPalette vocabulary. */
 export interface ColorPalette {
     /** Dominant interactive/brand colour: links, inline code, selection. */
@@ -35,8 +35,12 @@ export interface ColorPalette {
 }
 /** Dark palette (default), tuned for ≥ 4.5:1 contrast on black. */
 export declare const darkColors: ColorPalette;
-/** The active palette; a light theme can swap this later. */
-export declare const currentPalette: ColorPalette;
+/** Light palette, tuned for ≥ 4.5:1 contrast on white (pi's values). */
+export declare const lightColors: ColorPalette;
+/** The active palette; style helpers read it on every call, so swapping is live. */
+export declare let currentPalette: ColorPalette;
+/** Switch the active palette; callers must invalidate rendered components. */
+export declare function setTheme(theme: 'dark' | 'light'): void;
 /** Style helpers by token name. */
 export declare const color: {
     primary: (text: string) => string;
@@ -54,6 +58,8 @@ export declare const color: {
 };
 /** SelectList palette from the semantic tokens. */
 export declare const selectListTheme: SelectListTheme;
+/** SettingsList palette from the semantic tokens. */
+export declare const settingsListTheme: SettingsListTheme;
 /** Editor palette: focused border uses the brand token. */
 export declare const editorTheme: EditorTheme;
 /** Markdown palette for assistant messages. */
