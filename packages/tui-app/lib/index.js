@@ -162,6 +162,12 @@ export function apply(ctx, config) {
             },
         });
         repaint(app, agent.session.events);
+        app.setWelcomeCard({
+            cwd,
+            sessionId: agent.session.id,
+            model: `${agent.options.provider}/${agent.options.model}`,
+            version: '0.1.0',
+        });
         const commands = ctx.get('commands');
         if (commands !== undefined) {
             // Slash-command autocompletion from the command registry.

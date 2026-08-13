@@ -37,7 +37,7 @@ test('footer shows model, cwd, branch, counters, context bar, and stats', async 
   const view = await viewport(vt)
   assert.ok(view.includes('[opencode-go/deepseek-v4-flash]'), `model missing:\n${view}`)
   assert.ok(view.includes('project/me/dsh-pi-tui'), `cwd missing:\n${view}`)
-  assert.ok(view.includes('git:main'), `branch missing:\n${view}`)
+  assert.ok(view.includes(' main '), `branch missing:\n${view}`)
   assert.ok(view.includes('t2/s5'), `counters missing:\n${view}`)
   assert.ok(view.includes('] 25%'), `context bar missing:\n${view}`)
   assert.ok(view.includes('2 轮 · 5 步| LLM 8.1s'), `stats line missing:\n${view}`)

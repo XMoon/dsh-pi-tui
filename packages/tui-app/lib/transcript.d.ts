@@ -21,6 +21,12 @@ export type TranscriptMessage = {
     kind: 'thinking';
     turn: number;
     text: string;
+}
+/** Injected context (system reminders, skill content) from non-user sources. */
+ | {
+    kind: 'system';
+    turn: number;
+    text: string;
 } | {
     kind: 'tool';
     turn: number;

@@ -33,7 +33,7 @@ test('thinking and tool entries render folded by default', async () => {
   const { vt, app } = startApp()
   app.setTranscript(transcript)
   const view = await viewport(vt)
-  assert.ok(view.includes('thinking…'), `folded thinking marker missing:\n${view}`)
+  assert.ok(view.includes('🐳'), `folded thinking marker missing:\n${view}`)
   assert.ok(view.includes('ctrl+o to'), `expand hint missing:\n${view}`)
   assert.ok(!view.includes('Line three'), `thinking body leaked:\n${view}`)
   assert.ok(view.includes('✓ bash'), `tool header missing:\n${view}`)

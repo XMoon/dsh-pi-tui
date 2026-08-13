@@ -129,6 +129,27 @@ test('command/run + command/done fold into an executed line', () => {
   assert.equal(tool.name, '/compact')
 })
 
+test('plugin-sourced user messages fold as system entries', () => {
+  const messages = foldTranscript([
+    event('user/message', {
+      id: MessageId('msg-4'),
+      role: 'user',
+      content: [{ type: 'text', text: '<system-reminder>\nworkspace instructions…' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, 0),
+    event('user/message', {
+      id: MessageId('msg-5'),
+      role: 'user',
+      content: [{ type: 'text', text: 'real prompt' }],
+      source: { kind: 'user' },
+    }, 1),
+  ])
+  assert.deepEqual(kinds(messages), ['system', 'user'])
+  const system = messages[0]
+  assert.ok(system !== undefined && system.kind === 'system')
+  assert.ok(system.text.includes('<system-reminder>'))
+})
+
 test('renderTranscript produces the markdown document', () => {
   const text = renderTranscript([
     { kind: 'user', text: 'hi' },

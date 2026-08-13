@@ -26,6 +26,7 @@ import {
   TuiAltScreen,
   TuiMainScreen,
   matchesKey,
+  visibleWidth,
   type Component,
   type OverlayHandle,
   type SettingItem,
@@ -33,6 +34,7 @@ import {
   type Terminal,
   type TuiInputListenerResult,
 } from '@dsh-pi-tui/pi-tui'
+import { formatTokens } from './stats.ts'
 import { editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme } from './theme.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
@@ -145,9 +147,11 @@ export class TuiApp {
   /** Footer state. */
   private status: StatusData = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
   /** Header text (todo summary), kept for theme-swap repaints. */
-  private headerText = 'dsh-pi-tui'
+  private headerText = '🐋 dsh-pi-tui'
   /** Footer text, kept for theme-swap repaints. */
   private footerText = ''
+  /** Welcome card shown above the transcript; empty renders nothing. */
+  private welcomeText = ''
 
   constructor(terminal: Terminal, events: TuiAppEvents) {
     this.terminal = terminal
@@ -155,7 +159,7 @@ export class TuiApp {
     this.tui = new TuiMainScreen(terminal)
     this.editor = new Editor(this.tui, editorTheme)
     this.editor.onSubmit = (text) => this.events.onSubmit(text)
-    this.header = new Text('dsh-pi-tui', 0, 0)
+    this.header = new Text('🐋 dsh-pi-tui', 0, 0)
     this.messagesView = new Container()
     this.footer = new Text('', 0, 0)
     this.tui.addChild(this.header)
@@ -229,6 +233,9 @@ export class TuiApp {
   /** Rebuild the message component tree from the current transcript state. */
   private rebuildMessages(): void {
     this.messagesView.clear()
+    if (this.welcomeText !== '') {
+      this.messagesView.addChild(new Text(this.welcomeText, 0, 0))
+    }
     const boundary = this.expandBoundary()
     for (const message of this.messages) {
       this.messagesView.addChild(this.renderMessage(message, boundary))
@@ -236,31 +243,87 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /**
+   * Set the welcome card rendered above the transcript: session facts in a
+   * rounded frame with the whale logo. Replaces any previous card.
+   * @param facts - directory, session id, model, and version to display.
+   */
+  setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string }): void {
+    const innerWidth = 56
+    const pad = '  '
+    const label = (text: string): string => chalkBoldDim(text)
+    const logo = ['🐋🐋🐋', '🐳🐳🐳']
+    const gap = '  '
+    const textWidth = innerWidth - Math.max(...logo.map(line => visibleWidth(line))) - gap.length
+    const rightRow0 = color.primary('Welcome to dsh-pi-tui!').padEnd(textWidth)
+    const rightRow1 = dim('Send /help for help information.').padEnd(textWidth)
+    const info = [
+      label('Directory: ') + facts.cwd,
+      label('Session:   ') + facts.sessionId,
+      label('Model:     ') + facts.model,
+      label('Version:   ') + facts.version,
+    ]
+    const content = [
+      `${color.primary(logo[0])}${gap}${rightRow0}`,
+      `${color.primary(logo[1])}${gap}${rightRow1}`,
+      '',
+      ...info,
+    ]
+    const frame = color.border
+    const lines = [
+      '',
+      frame(`╭${'─'.repeat(innerWidth + 2)}╮`),
+      frame(`│${' '.repeat(innerWidth + 2)}│`),
+    ]
+    for (const line of content) {
+      const vis = visibleWidth(line)
+      const rightPad = Math.max(0, innerWidth + 2 - vis)
+      lines.push(frame('│') + pad + line + ' '.repeat(rightPad) + frame('│'))
+    }
+    lines.push(frame(`│${' '.repeat(innerWidth + 2)}│`))
+    lines.push(frame(`╰${'─'.repeat(innerWidth + 2)}╯`))
+    this.welcomeText = lines.join('\n')
+    this.rebuildMessages()
+  }
+
   /** The turn threshold at or above which collapsible entries expand. */
   private expandBoundary(): number {
     if (!this.toolOutputExpanded || EXPAND_RECENT_TURNS <= 0) return Number.POSITIVE_INFINITY
     const turns = new Set<number>()
     for (const message of this.messages) {
-      if (message.kind === 'thinking' || message.kind === 'tool') turns.add(message.turn)
+      if (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool') turns.add(message.turn)
     }
     const sorted = [...turns].sort((a, b) => b - a)
     if (sorted.length <= EXPAND_RECENT_TURNS) return 0
     return sorted[EXPAND_RECENT_TURNS - 1] ?? 0
   }
 
+
+
   /** Render one transcript message as a pi-tui component. */
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
     if (message.kind === 'user') {
-      return new Text(color.roleUser(`You: ${message.text}`), 0, 0)
+      return new Text(`${color.roleUser('✨')} ${message.text}`, 0, 0)
     }
     if (message.kind === 'assistant') {
-      return new Markdown(message.text, 0, 0, markdownTheme)
+      // The whale bullet is its own Text so it never reflows into the body.
+      const row = new Container()
+      row.addChild(new Text(`${color.primary('🐋')} `, 0, 0))
+      row.addChild(new Markdown(message.text, 0, 0, markdownTheme))
+      return row
     }
     if (message.kind === 'thinking') {
       const expanded = message.turn >= boundary
       const text = expanded
-        ? `${dim('_thinking:_')} ${message.text}`
-        : dim(`_thinking…_ ${preview(message.text, THINKING_PREVIEW_LINES)} (ctrl+o to expand)`)
+        ? `${color.textDim('🐳')} ${message.text}`
+        : color.textDim(`🐳 ${preview(message.text, THINKING_PREVIEW_LINES)} (ctrl+o to expand)`)
+      return new Text(text, 0, 0)
+    }
+    if (message.kind === 'system') {
+      const expanded = message.turn >= boundary
+      const text = expanded
+        ? `${color.warning('📋')} ${message.text}`
+        : color.warning(`📋 ${preview(message.text, 2)} (ctrl+o to expand)`)
       return new Text(text, 0, 0)
     }
     // Tool card: header line, plus args and result when expanded.
@@ -294,20 +357,22 @@ export class TuiApp {
   setTodoSummary(todos: readonly TodoItem[]): void {
     const active = todos.filter(todo => todo.status !== 'completed')
     const done = todos.length - active.length
+    const base = '🐋 dsh-pi-tui'
     if (active.length === 0) {
-      this.headerText = done > 0 ? `dsh-pi-tui · ${done} todo done` : 'dsh-pi-tui'
+      this.headerText = done > 0 ? `${base} · ${done} todo done` : base
     } else {
       const first = active[0]
       const label = first === undefined ? '' : first.content.length > 30 ? `${first.content.slice(0, 30)}…` : first.content
-      this.headerText = `dsh-pi-tui · ${active.length} active · ${label}`
+      this.headerText = `${base} · ${active.length} active · ${label}`
     }
     this.header.setText(this.headerText)
     this.requestRender()
   }
 
   /**
-   * Update the footer: line 1 `[model] cwd · branch [ctx bar] t/steps`,
-   * line 2 the stats line (turns, LLM timing, tokens). Partial updates merge.
+   * Update the footer: line 1 `[model] …/cwd branch [ctx bar] t/steps`,
+   * line 2 the stats line left-aligned with the context readout right-
+   * aligned (kimi layout). Partial updates merge.
    * @param status - the new status values.
    */
   setStatus(status: Partial<StatusData>): void {
@@ -319,12 +384,21 @@ export class TuiApp {
     const line1 = [
       this.status.model === '' ? '' : `[${this.status.model}]`,
       this.status.cwd,
-      this.status.branch === '' ? '' : `git:${this.status.branch}`,
+      this.status.branch === '' ? '' : this.status.branch,
       context,
       `t${this.status.turns}/s${this.status.steps}`,
     ].filter(part => part !== '')
-    const line2 = this.status.statsLine
-    this.footerText = [dim(line1.join('  ')), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n')
+    // Line 2: stats left, `context: pct% (used/window)` right-aligned.
+    const left = this.status.statsLine
+    let line2 = left
+    if (this.status.contextTokens !== undefined && this.status.contextWindow !== undefined && this.status.contextWindow > 0) {
+      const pct = (this.status.contextTokens * 100) / this.status.contextWindow
+      const right = `context: ${pct.toFixed(1)}% (${formatTokens(this.status.contextTokens)}/${formatTokens(this.status.contextWindow)})`
+      const width = this.terminal.columns
+      const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right) - 1)
+      line2 = `${left}${' '.repeat(pad)}${color.textDim(right)}`
+    }
+    this.footerText = [dim(line1.join('  ')), line2 === '' ? '' : line2].filter(line => line !== '').join('\n')
     this.footer.setText(this.footerText)
     this.requestRender()
   }
@@ -421,10 +495,13 @@ export class TuiApp {
 }
 
 // Style helpers from the theme module's token functions.
-import { color } from './theme.ts'
+import { Chalk } from 'chalk'
+import { color, currentPalette } from './theme.ts'
 const dim = color.textDim
 const successMark = color.success
 const errorMark = color.error
+const chalk = new Chalk({ level: 3 })
+const chalkBoldDim = (text: string): string => chalk.bold.hex(currentPalette.textDim)(text)
 
 /** Start the TUI on the process terminal (raw-mode stdin/stdout). */
 export function startProcessTui(events: TuiAppEvents): TuiApp {

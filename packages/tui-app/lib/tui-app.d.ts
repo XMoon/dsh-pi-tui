@@ -93,6 +93,8 @@ export declare class TuiApp {
     private headerText;
     /** Footer text, kept for theme-swap repaints. */
     private footerText;
+    /** Welcome card shown above the transcript; empty renders nothing. */
+    private welcomeText;
     constructor(terminal: Terminal, events: TuiAppEvents);
     /** Enter raw mode and start rendering. */
     start(): void;
@@ -111,6 +113,17 @@ export declare class TuiApp {
     setTranscript(messages: readonly TranscriptMessage[]): void;
     /** Rebuild the message component tree from the current transcript state. */
     private rebuildMessages;
+    /**
+     * Set the welcome card rendered above the transcript: session facts in a
+     * rounded frame with the whale logo. Replaces any previous card.
+     * @param facts - directory, session id, model, and version to display.
+     */
+    setWelcomeCard(facts: {
+        cwd: string;
+        sessionId: string;
+        model: string;
+        version: string;
+    }): void;
     /** The turn threshold at or above which collapsible entries expand. */
     private expandBoundary;
     /** Render one transcript message as a pi-tui component. */
@@ -124,8 +137,9 @@ export declare class TuiApp {
      */
     setTodoSummary(todos: readonly TodoItem[]): void;
     /**
-     * Update the footer: line 1 `[model] cwd · branch [ctx bar] t/steps`,
-     * line 2 the stats line (turns, LLM timing, tokens). Partial updates merge.
+     * Update the footer: line 1 `[model] …/cwd branch [ctx bar] t/steps`,
+     * line 2 the stats line left-aligned with the context readout right-
+     * aligned (kimi layout). Partial updates merge.
      * @param status - the new status values.
      */
     setStatus(status: Partial<StatusData>): void;

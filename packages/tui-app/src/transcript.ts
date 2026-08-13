@@ -20,6 +20,8 @@ export type TranscriptMessage =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
   | { kind: 'thinking'; turn: number; text: string }
+  /** Injected context (system reminders, skill content) from non-user sources. */
+  | { kind: 'system'; turn: number; text: string }
   | {
     kind: 'tool'
     turn: number
@@ -88,7 +90,15 @@ export function foldTranscript(events: readonly SessionEvent[]): TranscriptMessa
       }
       case 'user/message': {
         const text = textOf(event.data.content)
-        if (text !== '') messages.push({ kind: 'user', text })
+        if (text === '') break
+        // Only direct human prompts are user messages; plugin-injected
+        // context (system reminders, skill content) folds into a collapsible
+        // system entry.
+        if (event.data.source.kind === 'user') {
+          messages.push({ kind: 'user', text })
+        } else {
+          messages.push({ kind: 'system', turn: currentTurn, text })
+        }
         break
       }
       case 'assistant/chunk': {
@@ -211,6 +221,13 @@ export function renderTranscript(messages: readonly TranscriptMessage[], expande
       } else {
         lines.push(`> _thinking…_ (ctrl+o to expand)`, '')
       }
+    } else if (message.kind === 'system') {
+      const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns)
+      if (expanded) {
+        lines.push(`> _system:_ ${message.text}`, '')
+      } else {
+        lines.push(`> _system…_ (ctrl+o to expand)`, '')
+      }
     } else {
       const mark = message.status === 'ok' ? '✓' : message.status === 'error' ? '✗' : '…'
       const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns)
@@ -229,7 +246,7 @@ function currentTurnBoundary(messages: readonly TranscriptMessage[], expandedTur
   if (expandedTurns <= 0) return Number.POSITIVE_INFINITY
   const turns = new Set<number>()
   for (const message of messages) {
-    if (message.kind === 'thinking' || message.kind === 'tool') turns.add(message.turn)
+    if (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool') turns.add(message.turn)
   }
   const sorted = [...turns].sort((a, b) => b - a)
   if (sorted.length <= expandedTurns) return 0

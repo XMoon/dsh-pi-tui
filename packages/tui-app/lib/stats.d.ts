@@ -35,6 +35,8 @@ export interface SessionStats {
  * @returns aggregated statistics.
  */
 export declare function computeStats(events: readonly SessionEvent[]): SessionStats;
+/** Format a token count with pi.s footer rules: 1.5k, 190k, 1.0M, 86M. */
+export declare function formatTokens(count: number): string;
 /**
  * Render the stats line in pi's footer vocabulary:
  * `↑33.2k ↓7.9k R138k CH93.9% 1.9%/1.0M (auto) | LLM 138.8s · TTFB 2.6s · 659 tok/s`

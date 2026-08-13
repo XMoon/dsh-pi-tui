@@ -130,8 +130,8 @@ function trimDecimal(value: number): string {
   return text.endsWith('.0') ? text.slice(0, -2) : text
 }
 
-/** Format a token count with pi's footer rules: 1.5k, 190k, 1.0M, 86M. */
-function formatTokens(count: number): string {
+/** Format a token count with pi.s footer rules: 1.5k, 190k, 1.0M, 86M. */
+export function formatTokens(count: number): string {
   if (count < 1000) return String(count)
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`
   if (count < 1_000_000) return `${Math.round(count / 1000)}k`

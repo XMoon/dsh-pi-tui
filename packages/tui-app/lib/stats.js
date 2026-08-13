@@ -104,8 +104,8 @@ function trimDecimal(value) {
     const text = value.toFixed(1);
     return text.endsWith('.0') ? text.slice(0, -2) : text;
 }
-/** Format a token count with pi's footer rules: 1.5k, 190k, 1.0M, 86M. */
-function formatTokens(count) {
+/** Format a token count with pi.s footer rules: 1.5k, 190k, 1.0M, 86M. */
+export function formatTokens(count) {
     if (count < 1000)
         return String(count);
     if (count < 10000)
