@@ -8,6 +8,8 @@
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+// The command/run + command/done event merge (SessionEventMap extension).
+import type {} from '@deepseek-ai/dsh-commands'
 
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage =
@@ -49,6 +51,8 @@ export function foldTranscript(events: readonly SessionEvent[]): TranscriptMessa
   const stepText = new Map<string, string>()
   /** Tool names by callId, from tool/call events. */
   const callNames = new Map<string, string>()
+  /** Command names by commandId, from command/run events. */
+  const commandNames = new Map<string, string>()
   const seenSteps = new Set<string>()
 
   const stepKey = (turn: number, step: number): string => `${turn}/${step}`
@@ -105,6 +109,16 @@ export function foldTranscript(events: readonly SessionEvent[]): TranscriptMessa
           const error = event.data.reason.error
           messages.push({ kind: 'tool', name: 'error', text: `${error.code}: ${error.message}` })
         }
+        break
+      }
+      case 'command/run': {
+        commandNames.set(event.data.commandId, event.data.name)
+        break
+      }
+      case 'command/done': {
+        const name = commandNames.get(event.data.commandId) ?? 'command'
+        const outcome = event.data.kind === 'error' ? ` — error: ${event.data.text ?? 'failed'}` : ''
+        messages.push({ kind: 'tool', name: `/${name}`, text: `executed${outcome}` })
         break
       }
       default:

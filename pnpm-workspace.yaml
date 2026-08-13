@@ -20,3 +20,5 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-system-prompt@0.1.0-rc.6'
   - '@deepseek-ai/dsh-timeout@0.1.0-rc.6'
   - '@deepseek-ai/dsh-typert-protocol@0.1.0-rc.6'
+  - '@deepseek-ai/dsh-user-approval@0.1.0-rc.6'
+  - '@deepseek-ai/dsh-commands@0.1.0-rc.6'

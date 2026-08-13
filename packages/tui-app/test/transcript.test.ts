@@ -7,6 +7,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { foldTranscript, renderTranscript, type TranscriptMessage } from '../src/transcript.ts'
 
@@ -27,7 +29,7 @@ function kinds(messages: readonly TranscriptMessage[]): string[] {
 test('folds a user message into a You message', () => {
   const messages = foldTranscript([
     event('user/message', {
-      id: 'msg-1',
+      id: MessageId('msg-1'),
       role: 'user',
       content: [{ type: 'text', text: 'hello' }],
       source: { kind: 'user' },
@@ -60,7 +62,7 @@ test('assistant/message replaces the streamed text for its step', () => {
       turn: 0,
       step: 0,
       message: {
-        id: 'msg-2',
+        id: MessageId('msg-2'),
         role: 'assistant',
         content: [{ type: 'text', text: 'partial' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
@@ -74,19 +76,19 @@ test('assistant/message replaces the streamed text for its step', () => {
 test('pairs tool calls with their results and caps long summaries', () => {
   const long = 'x'.repeat(300)
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: 'call-1', name: 'bash', arguments: '{}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('call-1'), name: 'bash', arguments: '{}' }, 0),
     event('tool/result', {
       turn: 0,
       step: 0,
       message: {
-        id: 'msg-3',
+        id: MessageId('msg-3'),
         role: 'user',
         content: [{
           type: 'tool-result',
-          toolCallId: 'call-1',
+          toolCallId: CallId('call-1'),
           content: [{ type: 'text', text: long }],
         }],
-        source: { kind: 'tool', toolCallId: 'call-1', toolName: 'bash' },
+        source: { kind: 'tool', callId: CallId('call-1') },
       },
     }, 1),
   ])
@@ -107,6 +109,17 @@ test('turn/end error renders a failure line', () => {
   assert.ok(tool !== undefined && tool.kind === 'tool')
   assert.equal(tool.name, 'error')
   assert.equal(tool.text, 'AUTH: boom')
+})
+
+test('command/run + command/done fold into an executed line', () => {
+  const messages = foldTranscript([
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 0),
+    event('command/done', { commandId: CommandId('cmd-1'), kind: 'success' }, 1),
+  ])
+  assert.deepEqual(kinds(messages), ['tool'])
+  const tool = messages[0]
+  assert.ok(tool !== undefined && tool.kind === 'tool')
+  assert.equal(tool.name, '/compact')
 })
 
 test('renderTranscript produces the markdown document', () => {

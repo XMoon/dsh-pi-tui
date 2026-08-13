@@ -1,0 +1,111 @@
+/**
+ * Headless tests for the approval dialog: overlay rendering, y/n/esc
+ * decisions, FIFO queueing, and abort withdrawal.
+ * @module @dsh-pi-tui/tui-app/approval.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
+
+function startApp(): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  return { vt, app }
+}
+
+/** The visible viewport joined for substring assertions. */
+async function viewport(vt: VirtualTerminal): Promise<string> {
+  await vt.waitForRender()
+  return vt.getViewport().join('\n')
+}
+
+test('approval prompt shows an overlay describing the tool', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  const view = await viewport(vt)
+  assert.ok(view.includes('Approve bash?'), `dialog missing:\n${view}`)
+  assert.ok(view.includes('run a command'), `reason missing:\n${view}`)
+  assert.ok(view.includes('[y] allow once'), `key hints missing:\n${view}`)
+  assert.ok(decision instanceof Promise)
+})
+
+test('y allows once and closes the dialog', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await viewport(vt)
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  const view = await viewport(vt)
+  assert.ok(!view.includes('Approve bash'), `dialog still visible:\n${view}`)
+})
+
+test('n rejects and escape cancels', async () => {
+  const { vt, app } = startApp()
+  const rejected = app.showApprovalPrompt({ toolName: 'bash' })
+  await viewport(vt)
+  vt.sendInput('n')
+  assert.equal(await rejected, 'rejected')
+
+  const cancelled = app.showApprovalPrompt({ toolName: 'fs' })
+  await viewport(vt)
+  vt.sendInput('\x1b') // escape
+  assert.equal(await cancelled, 'cancelled')
+})
+
+test('prompts queue FIFO and consume all keys while showing', async () => {
+  const { vt, app } = startApp()
+  const first = app.showApprovalPrompt({ toolName: 'bash' })
+  const second = app.showApprovalPrompt({ toolName: 'fs' })
+  await viewport(vt)
+  vt.sendInput('y')
+  assert.equal(await first, 'allowed-once')
+  const secondView = await viewport(vt)
+  assert.ok(secondView.includes('Approve fs'), `second dialog missing:\n${secondView}`)
+  vt.sendInput('n')
+  assert.equal(await second, 'rejected')
+})
+
+test('an aborted signal withdraws the prompt as cancelled', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', signal: controller.signal })
+  controller.abort()
+  assert.equal(await decision, 'cancelled')
+  const view = await viewport(vt)
+  assert.ok(!view.includes('Approve bash'), `dialog still visible:\n${view}`)
+  void vt
+})
+
+test('editor input is blocked while a prompt is showing', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} })
+  app.start()
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await viewport(vt)
+  vt.sendInput('hello')
+  vt.sendInput('\r')
+  await viewport(vt)
+  assert.deepEqual(submitted, [])
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+})
+
+test('todo summary reflects active and completed items in the header', async () => {
+  const { vt, app } = startApp()
+  app.setTodoSummary([{ content: 'fix the tests', status: 'in_progress' }, { content: 'ship it', status: 'pending' }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('2 active · fix the tests'), `header missing:
+${view}`)
+  app.setTodoSummary([{ content: 'fix the tests', status: 'completed' }])
+  view = await viewport(vt)
+  assert.ok(view.includes('1 todo done'), `header missing:
+${view}`)
+  app.setTodoSummary([])
+  view = await viewport(vt)
+  assert.ok(view.includes('dsh-pi-tui'), `header missing:
+${view}`)
+})

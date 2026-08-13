@@ -31,6 +31,8 @@ export function foldTranscript(events) {
     const stepText = new Map();
     /** Tool names by callId, from tool/call events. */
     const callNames = new Map();
+    /** Command names by commandId, from command/run events. */
+    const commandNames = new Map();
     const seenSteps = new Set();
     const stepKey = (turn, step) => `${turn}/${step}`;
     for (const event of events) {
@@ -91,6 +93,16 @@ export function foldTranscript(events) {
                     const error = event.data.reason.error;
                     messages.push({ kind: 'tool', name: 'error', text: `${error.code}: ${error.message}` });
                 }
+                break;
+            }
+            case 'command/run': {
+                commandNames.set(event.data.commandId, event.data.name);
+                break;
+            }
+            case 'command/done': {
+                const name = commandNames.get(event.data.commandId) ?? 'command';
+                const outcome = event.data.kind === 'error' ? ` — error: ${event.data.text ?? 'failed'}` : '';
+                messages.push({ kind: 'tool', name: `/${name}`, text: `executed${outcome}` });
                 break;
             }
             default:

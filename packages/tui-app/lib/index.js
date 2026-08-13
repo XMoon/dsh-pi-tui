@@ -76,8 +76,26 @@ export function apply(ctx, config) {
         const { agent } = handle;
         await agent.whenIdle();
         let app;
+        // Aborts an in-flight command execution when the TUI quits.
+        const signal = new AbortController().signal;
         app = startProcessTui({
             onSubmit: (text) => {
+                // A registered slash command dispatches without a model turn; anything
+                // else is a follow-up prompt. The command lifecycle lands in the
+                // session log (command/run + command/done) and re-folds into the
+                // transcript through the session/event listener below.
+                const commands = ctx.get('commands');
+                if (commands !== undefined) {
+                    void commands.execute(agent, text, signal).then((execution) => {
+                        if (execution === undefined) {
+                            agent.followup(createUserMessage({
+                                content: [{ type: 'text', text }],
+                                source: { kind: 'user' },
+                            }));
+                        }
+                    });
+                    return;
+                }
                 agent.followup(createUserMessage({
                     content: [{ type: 'text', text }],
                     source: { kind: 'user' },
@@ -92,13 +110,43 @@ export function apply(ctx, config) {
             },
         });
         repaint(app, agent.session.events);
+        const commands = ctx.get('commands');
+        if (commands !== undefined) {
+            commands.register({
+                name: 'exit',
+                description: 'Quit the terminal UI (flush and exit)',
+                handler: () => {
+                    app.stop();
+                    void sessions.flush(agent.session).then(() => exit(0));
+                    return { kind: 'success' };
+                },
+            });
+        }
         ctx.on('session/event', (session, event) => {
             if (session.id !== agent.session.id)
                 return;
             repaint(app, agent.session.events);
+            if (event.type === 'todo/write')
+                app.setTodoSummary(event.data.todos);
             // Persist each completed turn so a crash loses at most the live turn.
             if (event.type === 'turn/end')
                 void sessions.flush(agent.session);
+        });
+        // Initial todo state: the last todo/write snapshot in the log.
+        for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+            const event = agent.session.events[index];
+            if (event.type === 'todo/write') {
+                app.setTodoSummary(event.data.todos);
+                break;
+            }
+        }
+        // The interactive answerer: every approval ask becomes a dialog. An
+        // already-aborted request settles cancelled synchronously; otherwise the
+        // prompt's own abort signal withdraws it (turn cancel).
+        ctx.on('approval/request', (req, next) => {
+            if (req.signal?.aborted === true)
+                return Promise.resolve('cancelled');
+            return app.showApprovalPrompt({ toolName: req.toolName, reason: req.reason, signal: req.signal });
         });
     })().catch((error) => {
         ctx.logger.error(`tui-runner: ${error instanceof Error ? error.message : String(error)}`);

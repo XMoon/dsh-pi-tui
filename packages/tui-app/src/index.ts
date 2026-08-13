@@ -22,6 +22,11 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // and the cmdline Context merge for the appExit host value.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
+// The approval/request waterfall merge: the TUI is the interactive answerer.
+import type {} from '@deepseek-ai/dsh-user-approval'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
+// The commands service merge: ctx.commands typing for execute()/register().
+import type {} from '@deepseek-ai/dsh-commands'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { foldTranscript, renderTranscript } from './transcript.ts'
 import { startProcessTui, type TuiApp } from './tui-app.ts'
@@ -103,8 +108,26 @@ export function apply(ctx: Context, config: Config): void {
     await agent.whenIdle()
 
     let app: TuiApp
+    // Aborts an in-flight command execution when the TUI quits.
+    const signal = new AbortController().signal
     app = startProcessTui({
       onSubmit: (text) => {
+        // A registered slash command dispatches without a model turn; anything
+        // else is a follow-up prompt. The command lifecycle lands in the
+        // session log (command/run + command/done) and re-folds into the
+        // transcript through the session/event listener below.
+        const commands = ctx.get('commands')
+        if (commands !== undefined) {
+          void commands.execute(agent, text, signal).then((execution) => {
+            if (execution === undefined) {
+              agent.followup(createUserMessage({
+                content: [{ type: 'text', text }],
+                source: { kind: 'user' },
+              }))
+            }
+          })
+          return
+        }
         agent.followup(createUserMessage({
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
@@ -120,11 +143,41 @@ export function apply(ctx: Context, config: Config): void {
     })
     repaint(app, agent.session.events)
 
+    const commands = ctx.get('commands')
+    if (commands !== undefined) {
+      commands.register({
+        name: 'exit',
+        description: 'Quit the terminal UI (flush and exit)',
+        handler: () => {
+          app.stop()
+          void sessions.flush(agent.session).then(() => exit(0))
+          return { kind: 'success' }
+        },
+      })
+    }
+
     ctx.on('session/event', (session, event) => {
       if (session.id !== agent.session.id) return
       repaint(app, agent.session.events)
+      if (event.type === 'todo/write') app.setTodoSummary(event.data.todos)
       // Persist each completed turn so a crash loses at most the live turn.
       if (event.type === 'turn/end') void sessions.flush(agent.session)
+    })
+    // Initial todo state: the last todo/write snapshot in the log.
+    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+      const event = agent.session.events[index]
+      if (event.type === 'todo/write') {
+        app.setTodoSummary(event.data.todos)
+        break
+      }
+    }
+
+    // The interactive answerer: every approval ask becomes a dialog. An
+    // already-aborted request settles cancelled synchronously; otherwise the
+    // prompt's own abort signal withdraws it (turn cancel).
+    ctx.on('approval/request', (req, next) => {
+      if (req.signal?.aborted === true) return Promise.resolve<ApprovalOutcome>('cancelled')
+      return app.showApprovalPrompt({ toolName: req.toolName, reason: req.reason, signal: req.signal })
     })
   })().catch((error: unknown) => {
     ctx.logger.error(`tui-runner: ${error instanceof Error ? error.message : String(error)}`)
