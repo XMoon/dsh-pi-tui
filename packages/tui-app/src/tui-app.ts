@@ -21,11 +21,13 @@ import {
   Editor,
   Markdown,
   ProcessTerminal,
+  SelectList,
   SettingsList,
   Text,
   TuiAltScreen,
   TuiMainScreen,
   matchesKey,
+  truncateToWidth,
   visibleWidth,
   type Component,
   type OverlayHandle,
@@ -34,7 +36,6 @@ import {
   type Terminal,
   type TuiInputListenerResult,
 } from '@dsh-pi-tui/pi-tui'
-import { formatTokens } from './stats.ts'
 import { editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme } from './theme.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
@@ -55,6 +56,51 @@ function preview(text: string, lines: number): string {
 
 /** Context bar width in cells; pi renders `[███░░░] pct` in the footer. */
 const CONTEXT_BAR_WIDTH = 12
+
+/**
+ * Rounded-frame wrapper for overlay content: `╭─╮` border in the border
+ * token, one cell of padding, width sized to the content. Keyboard input
+ * forwards to the wrapped component.
+ */
+export class Frame implements Component {
+  private readonly child: Component
+
+  constructor(child: Component) {
+    this.child = child
+  }
+
+  invalidate(): void {
+    this.child.invalidate?.()
+  }
+
+  handleInput(data: string): void {
+    this.child.handleInput?.(data)
+  }
+
+  get wantsKeyRelease(): boolean | undefined {
+    return this.child.wantsKeyRelease
+  }
+
+  render(width: number): string[] {
+    const inner = Math.max(1, Math.floor(width) - 4)
+    const lines = this.child.render(inner).map(line => truncateToWidth(line, inner, '…'))
+    const contentWidth = Math.min(inner, Math.max(1, ...lines.map(line => visibleWidth(line))))
+    const frameWidth = contentWidth + 4
+    const b = color.border
+    const out = [b(`╭${'─'.repeat(frameWidth - 2)}╮`)]
+    for (const line of lines) {
+      const vis = visibleWidth(line)
+      // Row shape is `│ line pad │`: borders and one padding cell each side
+      // are fixed, so padding only tops the content up to `inner` — the row
+      // is then exactly frameWidth cells and the right border survives
+      // compositing.
+      const pad = Math.max(0, inner - vis)
+      out.push(`${b('│')} ${line}${' '.repeat(pad)} ${b('│')}`)
+    }
+    out.push(b(`╰${'─'.repeat(frameWidth - 2)}╯`))
+    return out
+  }
+}
 
 /** Pi-style context progress bar: `[███░░░░░░░░░] 25%`. */
 function contextBar(used: number, window: number): string {
@@ -142,6 +188,17 @@ export class TuiApp {
   private messages: readonly TranscriptMessage[] = []
   /** Ctrl+O master switch: expand the most recent turns' collapsible entries. */
   private toolOutputExpanded = false
+
+  /** Whether the Ctrl+O expansion master switch is on. */
+  isToolOutputExpanded(): boolean {
+    return this.toolOutputExpanded
+  }
+
+  /** Set the Ctrl+O expansion master switch and repaint. */
+  setToolOutputExpanded(expanded: boolean): void {
+    this.toolOutputExpanded = expanded
+    this.rebuildMessages()
+  }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
   /** Footer state. */
@@ -152,6 +209,8 @@ export class TuiApp {
   private footerText = ''
   /** Welcome card shown above the transcript; empty renders nothing. */
   private welcomeText = ''
+  /** Transient error line shown under the transcript; cleared by setTranscript. */
+  private notifyText = ''
 
   constructor(terminal: Terminal, events: TuiAppEvents) {
     this.terminal = terminal
@@ -240,49 +299,37 @@ export class TuiApp {
     for (const message of this.messages) {
       this.messagesView.addChild(this.renderMessage(message, boundary))
     }
+    if (this.notifyText !== '') {
+      this.messagesView.addChild(new Text(color.error(`✗ ${this.notifyText}`), 0, 0))
+    }
     this.requestRender()
   }
 
+  /** Show a transient error line under the transcript; the next repaint clears it. */
+  notify(text: string): void {
+    this.notifyText = text
+    this.rebuildMessages()
+  }
+
   /**
-   * Set the welcome card rendered above the transcript: session facts in a
-   * rounded frame with the whale logo. Replaces any previous card.
+   * Set the session head rendered above the transcript: one dense line with
+   * the session identity, model, version, and a rule beneath. Replaces any
+   * previous head.
    * @param facts - directory, session id, model, and version to display.
    */
   setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string }): void {
-    const innerWidth = 56
-    const pad = '  '
-    const label = (text: string): string => chalkBoldDim(text)
-    const logo = ['🐋🐋🐋', '🐳🐳🐳']
-    const gap = '  '
-    const textWidth = innerWidth - Math.max(...logo.map(line => visibleWidth(line))) - gap.length
-    const rightRow0 = color.primary('Welcome to dsh-pi-tui!').padEnd(textWidth)
-    const rightRow1 = dim('Send /help for help information.').padEnd(textWidth)
-    const info = [
-      label('Directory: ') + facts.cwd,
-      label('Session:   ') + facts.sessionId,
-      label('Model:     ') + facts.model,
-      label('Version:   ') + facts.version,
-    ]
-    const content = [
-      `${color.primary(logo[0])}${gap}${rightRow0}`,
-      `${color.primary(logo[1])}${gap}${rightRow1}`,
-      '',
-      ...info,
-    ]
-    const frame = color.border
-    const lines = [
-      '',
-      frame(`╭${'─'.repeat(innerWidth + 2)}╮`),
-      frame(`│${' '.repeat(innerWidth + 2)}│`),
-    ]
-    for (const line of content) {
-      const vis = visibleWidth(line)
-      const rightPad = Math.max(0, innerWidth + 2 - vis)
-      lines.push(frame('│') + pad + line + ' '.repeat(rightPad) + frame('│'))
-    }
-    lines.push(frame(`│${' '.repeat(innerWidth + 2)}│`))
-    lines.push(frame(`╰${'─'.repeat(innerWidth + 2)}╯`))
-    this.welcomeText = lines.join('\n')
+    const shortId = facts.sessionId.length > 24 ? `${facts.sessionId.slice(0, 24)}…` : facts.sessionId
+    const items = [
+      `session ${color.textDim(shortId)}`,
+      color.text(facts.model),
+      `v${facts.version}`,
+      color.textMuted(facts.cwd),
+    ].join('  ·  ')
+    const width = Math.max(20, Math.min(80, visibleWidth(items) + 2))
+    this.welcomeText = [
+      `${color.primary('🐋')} ${items}`,
+      color.border('─'.repeat(width)),
+    ].join('\n')
     this.rebuildMessages()
   }
 
@@ -303,7 +350,8 @@ export class TuiApp {
   /** Render one transcript message as a pi-tui component. */
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
     if (message.kind === 'user') {
-      return new Text(`${color.roleUser('✨')} ${message.text}`, 0, 0)
+      // Terminal-prompt style: the user's line reads like a shell command.
+      return new Text(`${color.roleUser('❯')} ${message.text}`, 0, 0)
     }
     if (message.kind === 'assistant') {
       // The whale bullet is its own Text so it never reflows into the body.
@@ -322,8 +370,8 @@ export class TuiApp {
     if (message.kind === 'system') {
       const expanded = message.turn >= boundary
       const text = expanded
-        ? `${color.warning('📋')} ${message.text}`
-        : color.warning(`📋 ${preview(message.text, 2)} (ctrl+o to expand)`)
+        ? `${color.textMuted('§')} ${message.text}`
+        : color.textMuted(`§ ${preview(message.text, 2)} (ctrl+o to expand)`)
       return new Text(text, 0, 0)
     }
     // Tool card: header line, plus args and result when expanded.
@@ -388,17 +436,9 @@ export class TuiApp {
       context,
       `t${this.status.turns}/s${this.status.steps}`,
     ].filter(part => part !== '')
-    // Line 2: stats left, `context: pct% (used/window)` right-aligned.
-    const left = this.status.statsLine
-    let line2 = left
-    if (this.status.contextTokens !== undefined && this.status.contextWindow !== undefined && this.status.contextWindow > 0) {
-      const pct = (this.status.contextTokens * 100) / this.status.contextWindow
-      const right = `context: ${pct.toFixed(1)}% (${formatTokens(this.status.contextTokens)}/${formatTokens(this.status.contextWindow)})`
-      const width = this.terminal.columns
-      const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right) - 1)
-      line2 = `${left}${' '.repeat(pad)}${color.textDim(right)}`
-    }
-    this.footerText = [dim(line1.join('  ')), line2 === '' ? '' : line2].filter(line => line !== '').join('\n')
+    // Line 2: the stats line only; context pressure is the bar on line 1.
+    const line2 = this.status.statsLine
+    this.footerText = [dim(line1.join('  ')), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n')
     this.footer.setText(this.footerText)
     this.requestRender()
   }
@@ -409,6 +449,26 @@ export class TuiApp {
   }
 
   /**
+   * Open a single-choice picker overlay (SelectList). Selecting calls
+   * `onSelect` with the item value and closes; Esc calls `onCancel`.
+   * @param items - choice rows.
+   * @param onSelect - confirmed choice.
+   * @param onCancel - dismissed without a choice.
+   */
+  openPicker(items: readonly { value: string; label: string; description?: string }[], onSelect: (value: string) => void, onCancel: () => void): void {
+    const list = new SelectList(items.map(item => ({ ...item })), 10, selectListTheme)
+    const handle = this.tui.showOverlay(new Frame(list), { width: 64, maxHeight: 24 })
+    list.onSelect = (item) => {
+      handle.hide()
+      onSelect(item.value)
+    }
+    list.onCancel = () => {
+      handle.hide()
+      onCancel()
+    }
+  }
+
+  /**
    * Open the settings overlay as a SettingsList. The runner supplies the
    * items and reacts to changes/cancellation.
    * @param items - setting rows.
@@ -416,8 +476,8 @@ export class TuiApp {
    * @param onCancel - called when the user closes without applying.
    */
   openSettings(items: SettingItem[], onChange: (id: string, value: string) => void, onCancel: () => void): void {
-    const settings = new SettingsList(items, 8, settingsListTheme, onChange, onCancel, { enableSearch: true })
-    this.tui.showOverlay(settings, { width: 72, maxHeight: 20 })
+    const settings = new SettingsList(items, 6, settingsListTheme, onChange, onCancel, { enableSearch: true })
+    this.tui.showOverlay(new Frame(settings), { width: 72, maxHeight: 28 })
   }
 
   /** Switch the active color theme and repaint everything. */
@@ -467,7 +527,7 @@ export class TuiApp {
     }
     dialog.addChild(new Text(''))
     dialog.addChild(new Text('[y] allow once   [n] reject   [esc] cancel'))
-    pending.handle = this.tui.showOverlay(dialog, { width: 60, maxHeight: 10 })
+    pending.handle = this.tui.showOverlay(new Frame(dialog), { width: 60, maxHeight: 14 })
     this.activeApproval = pending
   }
 

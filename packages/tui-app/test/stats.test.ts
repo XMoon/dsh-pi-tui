@@ -74,12 +74,11 @@ test('formats the stats line in pi abbreviation vocabulary', () => {
     outputTokens: 216_000,
     cacheReadTokens: 86_000_000,
     contextWindow: 1_000_000,
-  }, 354_000)
+  })
   assert.ok(line.includes('↑190k'), line)
   assert.ok(line.includes('↓216k'), line)
   assert.ok(line.includes('R86M'), line)
   assert.ok(line.includes('CH93.9%'), line)
-  assert.ok(line.includes('35.4%/1.0M (auto)'), line)
   assert.ok(line.includes('LLM 8.1s'), line)
   assert.ok(line.includes('TTFB 1.1s'), line)
   assert.ok(line.includes('118 tok/s'), line)

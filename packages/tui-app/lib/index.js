@@ -15,9 +15,13 @@ import z from '@deepseek-ai/schemastery';
 import { installModelSelection } from '@deepseek-ai/dsh-agent';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
+import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval';
+// The settings service merge for persisting TUI preferences.
+import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 import { TUI_STARTUP_SERVICE } from "./startup.js";
 import { foldTranscript } from "./transcript.js";
 import { computeStats, formatStats } from "./stats.js";
+import { Text } from '@dsh-pi-tui/pi-tui';
 import { startProcessTui } from "./tui-app.js";
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner';
@@ -88,8 +92,8 @@ export function apply(ctx, config) {
         const agentOptions = { provider: selection.provider, model: selection.model };
         // Same composition as dsh-headless: this bundle composes no preset roster,
         // so the model-facing rows sit in the host plane.
+        const selected = { current: selection, assembled: undefined };
         const setup = (agentCtx) => {
-            const selected = { current: selection, assembled: undefined };
             installModelSelection(agentCtx, selected);
         };
         const handle = config.sessionId !== undefined
@@ -123,7 +127,7 @@ export function apply(ctx, config) {
                 branch: gitBranch(cwd),
                 turns: stats.turns,
                 steps: stats.steps,
-                statsLine: formatStats(stats, contextTokens),
+                statsLine: formatStats(stats),
                 ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
             });
         };
@@ -168,6 +172,12 @@ export function apply(ctx, config) {
             model: `${agent.options.provider}/${agent.options.model}`,
             version: '0.1.0',
         });
+        // Persisted TUI preferences: register the namespace and restore the theme.
+        const tuiSettings = ctx.get('settings')?.register(settingsNamespace('dsh-pi-tui'), z.object({ theme: z.string() }), { base: { theme: 'dark' } });
+        const storedTheme = tuiSettings?.get().theme;
+        if (storedTheme === 'light' || storedTheme === 'dark') {
+            app.applyTheme(storedTheme);
+        }
         const commands = ctx.get('commands');
         if (commands !== undefined) {
             // Slash-command autocompletion from the command registry.
@@ -188,20 +198,40 @@ export function apply(ctx, config) {
                 name: 'settings',
                 description: 'Open the TUI settings panel',
                 handler: () => {
+                    const theme = tuiSettings?.get().theme === 'light' ? 'light' : 'dark';
                     app.openSettings([
                         {
                             id: 'approval',
                             label: 'Approval policy',
                             description: 'How tool approvals are handled in this session',
-                            currentValue: 'ask',
+                            currentValue: effectiveApprovalPolicy(agent.session.events) ?? 'ask',
                             values: ['ask', 'never'],
                         },
                         {
                             id: 'theme',
                             label: 'Theme',
-                            description: 'Color palette (applies immediately)',
-                            currentValue: 'dark',
+                            description: 'Color palette, persisted across restarts',
+                            currentValue: theme,
                             values: ['dark', 'light'],
+                        },
+                        {
+                            id: 'expand',
+                            label: 'Tool output',
+                            description: 'Whether thinking/tool entries start expanded',
+                            currentValue: app.isToolOutputExpanded() ? 'expanded' : 'collapsed',
+                            values: ['collapsed', 'expanded'],
+                        },
+                        {
+                            id: 'session',
+                            label: 'Session',
+                            description: agent.session.id,
+                            currentValue: `${agent.options.provider}/${agent.options.model}`,
+                        },
+                        {
+                            id: 'cwd',
+                            label: 'Working directory',
+                            description: 'Where this session runs',
+                            currentValue: cwd,
                         },
                     ], (id, value) => {
                         if (id === 'approval') {
@@ -209,10 +239,90 @@ export function apply(ctx, config) {
                                 ctx.approval?.setPolicy(agent, value);
                         }
                         else if (id === 'theme') {
-                            if (value === 'dark' || value === 'light')
+                            if (value === 'dark' || value === 'light') {
                                 app.applyTheme(value);
+                                void tuiSettings?.replace({ theme: value });
+                            }
+                        }
+                        else if (id === 'expand') {
+                            app.setToolOutputExpanded(value === 'expanded');
                         }
                     }, () => { });
+                    return { kind: 'success' };
+                },
+            });
+            commands.register({
+                name: 'skill',
+                description: 'Load a skill into the session context',
+                input: { hint: '<name>' },
+                handler: async (invocation) => {
+                    const skills = ctx.get('skills');
+                    if (skills === undefined)
+                        return { kind: 'error', text: 'skill service unavailable' };
+                    const load = async (name) => {
+                        const skill = await skills.get(name, { cwd });
+                        if (skill === undefined)
+                            return { kind: 'error', text: `unknown skill "${name}"` };
+                        agent.inject(createUserMessage({
+                            content: [{ type: 'text', text: `Skill loaded by the user: **${skill.name}**\n\n${skill.content ?? skill.description}` }],
+                            source: { kind: 'plugin', plugin: 'tui-skill' },
+                        }));
+                        return { kind: 'success', text: `skill ${name} loaded` };
+                    };
+                    const name = invocation.rawInput.trim();
+                    if (name !== '')
+                        return load(name);
+                    // No argument: pick from the catalog.
+                    const catalog = await skills.list({ cwd });
+                    if (catalog.length === 0)
+                        return { kind: 'error', text: 'no skills available' };
+                    // SettingsList rows: Enter cycles the `✓` value, which fires onChange.
+                    app.openSettings(catalog.map(skill => ({
+                        id: skill.name,
+                        label: skill.name,
+                        description: skill.description,
+                        currentValue: '',
+                        values: ['✓'],
+                    })), (id) => {
+                        void load(id).then(result => { if (result.kind === 'error')
+                            app.notify(result.text); });
+                    }, () => { });
+                    return { kind: 'success' };
+                },
+            });
+            commands.register({
+                name: 'model',
+                description: 'Switch the model for this session',
+                handler: async () => {
+                    const llm = ctx.get('llm');
+                    const defaultModel = ctx.get('agentDefaultModel');
+                    if (llm === undefined || defaultModel === undefined)
+                        return { kind: 'error', text: 'model service unavailable' };
+                    const providers = llm.listProviders();
+                    const current = defaultModel.currentSelection();
+                    app.openSettings(providers.map(provider => ({
+                        id: provider.id,
+                        label: provider.name,
+                        currentValue: current.provider === provider.id ? current.model : '',
+                        submenu: (value, done) => {
+                            const models = new Text('Loading models…', 0, 0);
+                            void llm.listModels(provider.id).then(list => {
+                                done(undefined);
+                                app.openSettings(list.map(model => ({
+                                    id: model.id,
+                                    label: model.id,
+                                    description: value === model.id ? '← current' : undefined,
+                                    currentValue: value === model.id ? '← current' : '',
+                                    values: ['✓'],
+                                })), (modelId) => {
+                                    void defaultModel.saveSelection({ provider: provider.id, model: modelId });
+                                    selected.current = { provider: provider.id, model: modelId };
+                                    refreshStatus();
+                                }, () => { });
+                            });
+                            return models;
+                        },
+                    })), () => { }, () => { });
                     return { kind: 'success' };
                 },
             });

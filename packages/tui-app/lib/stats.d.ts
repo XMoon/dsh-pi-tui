@@ -38,12 +38,12 @@ export declare function computeStats(events: readonly SessionEvent[]): SessionSt
 /** Format a token count with pi.s footer rules: 1.5k, 190k, 1.0M, 86M. */
 export declare function formatTokens(count: number): string;
 /**
- * Render the stats line in pi's footer vocabulary:
- * `↑33.2k ↓7.9k R138k CH93.9% 1.9%/1.0M (auto) | LLM 138.8s · TTFB 2.6s · 659 tok/s`
- * Cost (`$0.164`) is omitted: dsh's TokenUsage carries no price data. Turn/step
- * counters live in the footer's first line, so they are not repeated here.
+ * Render the stats line in pi abbreviation vocabulary:
+ * `↑34k ↓8.1k R520k CH93.9% | LLM 138.8s · TTFB 2.6s · 659 tok/s`
+ * Cost (`$0.164`) is omitted: dsh's TokenUsage carries no price data.
+ * Context pressure lives in the footer's first line (progress bar), so it
+ * is not repeated here. Turn/step counters live there too.
  * @param stats - the folded statistics.
- * @param contextTokens - current context pressure in tokens, when measured.
  * @returns the display line.
  */
-export declare function formatStats(stats: SessionStats, contextTokens?: number): string;
+export declare function formatStats(stats: SessionStats): string;

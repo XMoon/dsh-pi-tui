@@ -145,25 +145,21 @@ function formatSeconds(ms: number): string {
 }
 
 /**
- * Render the stats line in pi's footer vocabulary:
- * `↑33.2k ↓7.9k R138k CH93.9% 1.9%/1.0M (auto) | LLM 138.8s · TTFB 2.6s · 659 tok/s`
- * Cost (`$0.164`) is omitted: dsh's TokenUsage carries no price data. Turn/step
- * counters live in the footer's first line, so they are not repeated here.
+ * Render the stats line in pi abbreviation vocabulary:
+ * `↑34k ↓8.1k R520k CH93.9% | LLM 138.8s · TTFB 2.6s · 659 tok/s`
+ * Cost (`$0.164`) is omitted: dsh's TokenUsage carries no price data.
+ * Context pressure lives in the footer's first line (progress bar), so it
+ * is not repeated here. Turn/step counters live there too.
  * @param stats - the folded statistics.
- * @param contextTokens - current context pressure in tokens, when measured.
  * @returns the display line.
  */
-export function formatStats(stats: SessionStats, contextTokens?: number): string {
+export function formatStats(stats: SessionStats): string {
   const piParts = [
     `↑${formatTokens(stats.inputTokens)}`,
     `↓${formatTokens(stats.outputTokens)}`,
     stats.cacheReadTokens > 0 ? `R${formatTokens(stats.cacheReadTokens)}` : '',
     stats.cacheReadTokens > 0 ? `CH${stats.cacheHitPct.toFixed(1)}%` : '',
   ].filter(part => part !== '')
-  if (contextTokens !== undefined && stats.contextWindow !== undefined && stats.contextWindow > 0) {
-    const pct = (contextTokens * 100) / stats.contextWindow
-    piParts.push(`${pct.toFixed(1)}%/${formatTokens(stats.contextWindow)} (auto)`)
-  }
   const ownParts = [
     `LLM ${formatSeconds(stats.llmMs)}`,
     `TTFB ${formatSeconds(stats.firstTokenMsAvg)}`,

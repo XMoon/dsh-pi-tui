@@ -13,7 +13,7 @@
  * Ctrl+F toggle fullscreen, Tab autocomplete (slash commands + paths).
  * @module @dsh-pi-tui/tui-app/tui-app
  */
-import { type SettingItem, type SlashCommand, type Terminal } from '@dsh-pi-tui/pi-tui';
+import { type Component, type SettingItem, type SlashCommand, type Terminal } from '@dsh-pi-tui/pi-tui';
 import type { TranscriptMessage } from './transcript.ts';
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export declare const EXPAND_RECENT_TURNS = 3;
@@ -21,6 +21,19 @@ export declare const EXPAND_RECENT_TURNS = 3;
 export declare const THINKING_PREVIEW_LINES = 2;
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export declare const RESULT_PREVIEW_LINES = 3;
+/**
+ * Rounded-frame wrapper for overlay content: `╭─╮` border in the border
+ * token, one cell of padding, width sized to the content. Keyboard input
+ * forwards to the wrapped component.
+ */
+export declare class Frame implements Component {
+    private readonly child;
+    constructor(child: Component);
+    invalidate(): void;
+    handleInput(data: string): void;
+    get wantsKeyRelease(): boolean | undefined;
+    render(width: number): string[];
+}
 /** Callbacks the application surface reports to its host (the dsh bundle). */
 export interface TuiAppEvents {
     /** The user submitted a line in the editor. */
@@ -85,6 +98,10 @@ export declare class TuiApp {
     private messages;
     /** Ctrl+O master switch: expand the most recent turns' collapsible entries. */
     private toolOutputExpanded;
+    /** Whether the Ctrl+O expansion master switch is on. */
+    isToolOutputExpanded(): boolean;
+    /** Set the Ctrl+O expansion master switch and repaint. */
+    setToolOutputExpanded(expanded: boolean): void;
     /** Fullscreen (alt-screen) instance; absent in regular mode. */
     private fullscreen;
     /** Footer state. */
@@ -95,6 +112,8 @@ export declare class TuiApp {
     private footerText;
     /** Welcome card shown above the transcript; empty renders nothing. */
     private welcomeText;
+    /** Transient error line shown under the transcript; cleared by setTranscript. */
+    private notifyText;
     constructor(terminal: Terminal, events: TuiAppEvents);
     /** Enter raw mode and start rendering. */
     start(): void;
@@ -113,9 +132,12 @@ export declare class TuiApp {
     setTranscript(messages: readonly TranscriptMessage[]): void;
     /** Rebuild the message component tree from the current transcript state. */
     private rebuildMessages;
+    /** Show a transient error line under the transcript; the next repaint clears it. */
+    notify(text: string): void;
     /**
-     * Set the welcome card rendered above the transcript: session facts in a
-     * rounded frame with the whale logo. Replaces any previous card.
+     * Set the session head rendered above the transcript: one dense line with
+     * the session identity, model, version, and a rule beneath. Replaces any
+     * previous head.
      * @param facts - directory, session id, model, and version to display.
      */
     setWelcomeCard(facts: {
@@ -145,6 +167,18 @@ export declare class TuiApp {
     setStatus(status: Partial<StatusData>): void;
     /** Install slash-command + file-path autocompletion on the editor. */
     setCommandCompletions(commands: readonly SlashCommand[], cwd: string): void;
+    /**
+     * Open a single-choice picker overlay (SelectList). Selecting calls
+     * `onSelect` with the item value and closes; Esc calls `onCancel`.
+     * @param items - choice rows.
+     * @param onSelect - confirmed choice.
+     * @param onCancel - dismissed without a choice.
+     */
+    openPicker(items: readonly {
+        value: string;
+        label: string;
+        description?: string;
+    }[], onSelect: (value: string) => void, onCancel: () => void): void;
     /**
      * Open the settings overlay as a SettingsList. The runner supplies the
      * items and reacts to changes/cancellation.
