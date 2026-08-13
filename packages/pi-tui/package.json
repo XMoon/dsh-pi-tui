@@ -1,0 +1,70 @@
+{
+	"name": "@dsh-pi-tui/pi-tui",
+	"version": "0.84.2",
+	"private": true,
+	"description": "Terminal User Interface library with differential rendering for efficient text-based applications (vendored fork of @moonshot-ai/pi-tui)",
+	"license": "MIT",
+	"author": "Moonshot AI",
+	"homepage": "https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/MoonshotAI/kimi-code.git",
+		"directory": "packages/pi-tui",
+		"note": "vendored snapshot at commit b6144f94ea6b22455a4e750d1750d220987e7bc2 (v0.84.2)"
+	},
+	"keywords": [
+		"tui",
+		"terminal",
+		"ui",
+		"text-editor",
+		"differential-rendering",
+		"typescript",
+		"cli"
+	],
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"type": "module",
+	"imports": {
+		"#/*": "./src/*.ts"
+	},
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"default": "./src/index.ts"
+		},
+		"./package.json": "./package.json"
+	},
+	"publishConfig": {
+		"access": "public",
+		"exports": {
+			".": {
+				"types": "./dist/index.d.mts",
+				"import": "./dist/index.mjs",
+				"default": "./dist/index.mjs"
+			}
+		},
+		"provenance": true
+	},
+	"scripts": {
+		"build": "tsdown",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"test": "node --test test/*.test.ts",
+		"clean": "rm -rf dist"
+	},
+	"dependencies": {
+		"get-east-asian-width": "1.6.0",
+		"marked": "18.0.5"
+	},
+	"devDependencies": {
+		"@types/node": "^22.0.0",
+		"@xterm/headless": "5.5.0",
+		"chalk": "^5.4.1",
+		"typescript": "^5.9.0"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"//native": "native/ (darwin/win32 modifier-key prebuilds) is deliberately not vendored; loading degrades gracefully without it. See AGENTS.md."
+}

@@ -1,0 +1,11 @@
+packages:
+  - packages/*
+allowBuilds:
+  esbuild: set this to true or false
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/cordis-plugin-loader@1.0.2'
+  - '@deepseek-ai/cordis@4.0.1'
+  - '@deepseek-ai/cosmokit@1.8.2'
+  - '@deepseek-ai/dsh-cmdline@0.1.0-rc.6'
+  - '@deepseek-ai/dsh-invariants@0.1.0-rc.6'
+  - '@deepseek-ai/schemastery@3.18.1'

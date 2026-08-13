@@ -1,0 +1,16 @@
+# The dsh-pi-tui bundle patch: the TUI surface over the dsh-base layer.
+# Applied after dsh-base's insert; rows here override base rows by id, with
+# the profile's own cordis.patch.yml and any --patch overlays still to come.
+#
+# The tui-startup plugin injects `cmdlineArgs` and provides `tuiStartup` as
+# an ordinary Cordis service. The runner row injects that service, so Loader
+# resolves its expressions only after the command line has been parsed.
+# `dsh --profile tui --help` provides nothing, so the TUI never mounts.
+
+- insert:
+    - id: tui-startup
+      name: '@dsh-pi-tui/tui-app/startup'
+
+    - id: tui-app
+      name: '@dsh-pi-tui/tui-app'
+      inject: [tuiStartup]
