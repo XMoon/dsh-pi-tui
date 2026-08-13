@@ -1,5 +1,5 @@
 /**
- * The TUI mode's command-line provider: parses the `dsh --profile tui` flag
+ * The TUI mode's command-line provider: parses the `dsh --profile pi-tui` flag
  * family and provides the parsed values as {@link TUI_STARTUP_SERVICE}.
  * Mirrors the web bundle's startup shape: an ordinary plugin injecting
  * `cmdlineArgs`, providing a service that flag-configured rows inject.
@@ -28,14 +28,14 @@ export interface TuiStartupValues {
 /** This app's command: its flags, its description, and its help text. */
 function tuiCommand(): Command {
   return new Command()
-    .name('dsh --profile tui')
+    .name('dsh --profile pi-tui')
     .description('Run the DeepSeek Harness terminal UI.')
     .helpOption('-h, --help', 'show this help')
     .option('--session <id>', 'resume an existing session instead of creating one')
     .addHelpText('after', `
 Examples:
-  dsh --profile tui                       start the terminal UI
-  dsh --profile tui --session <id>        resume an existing session
+  dsh --profile pi-tui                       start the terminal UI
+  dsh --profile pi-tui --session <id>        resume an existing session
 `)
 }
 

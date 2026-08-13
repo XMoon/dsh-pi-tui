@@ -1,6 +1,6 @@
 /**
  * @dsh-pi-tui/tui-app — the bundle's runtime glue plugin. Waits for the
- * startup service (the parsed `dsh --profile tui` flags), then starts the
+ * startup service (the parsed `dsh --profile pi-tui` flags), then starts the
  * TUI surface on the process terminal. Session wiring (input → session
  * events, approvals, commands) lands in later milestones; today the surface
  * is a self-contained echo loop.

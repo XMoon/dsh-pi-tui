@@ -1,0 +1,76 @@
+# AGENTS.md
+
+dsh-pi-tui — a third-party TUI mode for DeepSeek Harness (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui). Read this file before editing; read [PROGRESS.md](PROGRESS.md) for the milestone plan and current state.
+
+## Naming (hard rules)
+
+Collision-avoidance is a deliberate choice: the official dsh project will plausibly ship its own `dsh-tui` / `@deepseek-ai/dsh-tui`, so nothing here may use that family.
+
+| Thing | Name | Notes |
+|---|---|---|
+| Repository | `dsh-pi-tui` | `repo root (this directory)` |
+| Profile (`dsh --profile`) | `pi-tui` | **Never `tui`** — that is reserved territory |
+| Vendored fork package | `@dsh-pi-tui/pi-tui` | rescopped from `@moonshot-ai/pi-tui`; `private: true`, never published under upstream's name |
+| Bundle package | `@dsh-pi-tui/tui-app` | the `dsh.bundle` patch layer |
+| Plugin row ids | `tui-startup`, `tui-app` | internal Loader ids, fine as-is |
+| Startup service | `tuiStartup` (`TUI_STARTUP_SERVICE`) | |
+
+## Repository layout
+
+```
+packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork — kimi-code commit
+                    b6144f94ea6b22455a4e750d1750d220987e7bc2 (v0.84.2).
+                    Source of record for the five local fixes: its own
+                    AGENTS.md (kept from the fork). native/ prebuilds are
+                    NOT vendored; loading degrades gracefully without them.
+packages/tui-app/   The dsh bundle. cordis.patch.yml inserts the startup row
+                    (parses `dsh --profile pi-tui` flags) and the runner row
+                    (starts the TUI). src/tui-app.ts is the testable surface
+                    core (terminal injected); src/theme.ts the palette;
+                    demo.ts a standalone interactive demo.
+```
+
+## Key decisions (do not silently reverse)
+
+1. **In-process bundle, not BFF client.** Like `dsh-headless`, the TUI runs inside the Cordis context and consumes `ctx.*` services directly. The web surface's remote RPC exists only because a browser cannot be in-process; a TUI has no such constraint. Remote-attach via the apiproxy is a documented non-goal.
+2. **Vendored fork, not npm dependency.** `@moonshot-ai/pi-tui` is not published (npm 404). Vendored from the kimi-code fork (not upstream pi-mono) to keep its five local fixes: CJK wrap recursion guard, container width clamp, overwide-line truncation instead of throw, negative-width guards, per-frame processed-line reuse. Re-verify those on every re-vendor — the fork's AGENTS.md lists them with guarding tests.
+3. **`TuiMainScreen`, not `TUI`.** In this fork the constructible entry is `TuiMainScreen` (main screen + scrollback, `mode: "regular"`); the README's `new TUI(...)` is stale upstream docs. `TuiAltScreen` is the alternative.
+4. **Source exports, Node 24+/tsx to run.** `exports` point at `.ts` sources. Works under Node ≥ 23.6 (native type stripping) or `node --import tsx/esm` (how dsh source-launches). No build step yet; a `dist` build is a later publishing task.
+5. **No native prebuilds.** darwin/win32 modifier-key addons are optional; the loader returns `undefined` on other platforms without attempting a load. Revisit only if modifier detection matters on macOS/Windows.
+6. **`chalk` is a runtime dependency** of `tui-app` (theme.ts lives in `src`, unlike pi-tui's tests-only chalk).
+
+## Development
+
+```sh
+pnpm install
+pnpm test             # pi-tui's own suite (node --test) + tui-app headless tests
+pnpm typecheck        # per-package tsc --noEmit
+node --import tsx/esm packages/tui-app/demo.ts   # interactive demo in a real TTY
+```
+
+Headless UI tests drive `@xterm/headless` through `packages/tui-app/test/virtual-terminal.ts`
+(copied from the fork's `test/virtual-terminal.ts`, import path changed) — rendering
+and input routing are verified without a TTY or a model connection.
+
+## Reusable flow (from the initial build, worth repeating for the next capability)
+
+1. **Read both sides before designing**: the dsh bundle shape (`packages/bundle/web-app`: startup.ts commander row + index.ts glue + `cordis.patch.yml` with `dsh.bundle.patch`), and the library's real API (check `src/index.ts` exports, not the README).
+2. **Vendor**: `rsync -a --exclude native --exclude CHANGELOG.md --exclude node_modules` from the fork; rescope the package name; keep LICENSE + the fork's AGENTS.md; record the upstream commit in `repository.note`; run the fork's own test suite unchanged (960 tests) as the sync gate.
+3. **Bundle skeleton**: package with `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`; patch inserts a `*-startup` row (commander via `@deepseek-ai/dsh-cmdline`'s `parseCmdline`, provides a service) and a runner row injecting that service; exports `./startup` and `./cordis.patch.yml`.
+4. **Testable core**: inject the terminal (`Terminal` interface) so tests drive a `VirtualTerminal`; keep the process entry (`ProcessTerminal`) as a thin wrapper.
+5. **Verification matrix** (all passed in the P0 spike): fork's own tests; headless render/input/exit; the full import chain under the tsx ESM hook (dsh source-launch contract, incl. `@deepseek-ai/dsh-cmdline` + commander); non-TTY stdin guard (`setRawMode` existence check); native graceful fallback.
+6. **Install path**: `dsh plugin --profile pi-tui -- add <package>` — `dsh plugin` reconciles `dsh.profile.bundles` from installed state, so any dependency declaring `dsh.bundle` joins the layer stack automatically; no dsh installation edits needed.
+
+## Traps hit (do not reintroduce)
+
+- **`TUI` is not constructible** — use `TuiMainScreen` (see decisions).
+- **`constructor(private readonly x: T)` parameter properties** fail Node's strip-only mode (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`) — write them as explicit fields.
+- **Returning a mutable counter by value** in test helpers: `return { exits }` copies the number; closures update the local, assertions read the stale copy. Expose a getter or an object.
+- **`TuiInputListener` must return `TuiInputListenerResult`** (or `undefined`) — a bare `void` arrow fails typecheck; return `{ consume: true }` for handled keys like Ctrl+C.
+- **Editor needs a theme** (`EditorTheme`) — pi-tui ships no default; `packages/tui-app/src/theme.ts` is the palette.
+- **`imports` `#/*` alias** in the fork's package.json: fine for its internal `src` imports under tsx/Node 24+, but any future `dist` build must bundle (tsdown) rather than tsc-emit, or the alias must go.
+
+## Docs
+
+- [PROGRESS.md](PROGRESS.md) — milestone plan, completed work, next steps.
+- README.md — install and run instructions for humans.

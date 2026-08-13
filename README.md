@@ -2,7 +2,7 @@
 
 A third-party TUI mode for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui).
 
-Run `dsh --profile tui` for a terminal UI instead of the browser GUI (`dsh --profile web`) or one-shot mode (`dsh --profile headless`).
+Run `dsh --profile pi-tui` for a terminal UI instead of the browser GUI (`dsh --profile web`) or one-shot mode (`dsh --profile headless`).
 
 > **Status: scaffolding + P0 spike.** The vendored fork and the bundle skeleton are in place and verified; session wiring (input → session events, approvals, commands) is the next milestone.
 
@@ -15,7 +15,7 @@ packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork (kimi-code commit b6144f9,
                     guards, per-frame processed-line reuse) are preserved; native/
                     prebuilds are deliberately not vendored (graceful fallback).
 packages/tui-app/   The dsh bundle: @dsh-pi-tui/tui-app. cordis.patch.yml inserts the
-                    startup row (dsh --profile tui flags) and the runner row (TUI glue).
+                    startup row (dsh --profile pi-tui flags) and the runner row (TUI glue).
 ```
 
 ## Prerequisites
@@ -30,12 +30,12 @@ packages/tui-app/   The dsh bundle: @dsh-pi-tui/tui-app. cordis.patch.yml insert
 
 ```sh
 # create/init the profile (dsh-base is the default first layer)
-dsh plugin --profile tui -- add @dsh-pi-tui/tui-app@file:/path/to/dsh-pi-tui/packages/tui-app
+dsh plugin --profile pi-tui -- add @dsh-pi-tui/tui-app@file:/path/to/dsh-pi-tui/packages/tui-app
 # or, from a published registry version:
-dsh plugin --profile tui -- add @dsh-pi-tui/tui-app
+dsh plugin --profile pi-tui -- add @dsh-pi-tui/tui-app
 
 # run it
-dsh --profile tui
+dsh --profile pi-tui
 ```
 
 `dsh plugin` reconciles `dsh.profile.bundles` from installed state: any dependency

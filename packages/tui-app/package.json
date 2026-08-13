@@ -1,7 +1,7 @@
 {
   "name": "@dsh-pi-tui/tui-app",
   "version": "0.1.0",
-  "description": "The dsh-pi-tui bundle: a TUI surface for DeepSeek Harness profiles (dsh --profile tui)",
+  "description": "The dsh-pi-tui bundle: a TUI surface for DeepSeek Harness profiles (dsh --profile pi-tui)",
   "license": "MIT",
   "type": "module",
   "main": "src/index.ts",
