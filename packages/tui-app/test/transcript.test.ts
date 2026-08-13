@@ -36,7 +36,9 @@ test('folds a user message into a You message', () => {
     }, 0),
   ])
   assert.deepEqual(kinds(messages), ['user'])
-  assert.equal(messages[0]?.text, 'hello')
+  const first = messages[0]
+  assert.ok(first !== undefined && first.kind === 'user')
+  assert.equal(first.text, 'hello')
 })
 
 test('accumulates streaming text deltas into one assistant message', () => {
@@ -52,7 +54,9 @@ test('accumulates streaming text deltas into one assistant message', () => {
     chunk(3, ' world'),
   ])
   assert.deepEqual(kinds(messages), ['assistant'])
-  assert.equal(messages[0]?.text, 'Hello world')
+  const first = messages[0]
+  assert.ok(first !== undefined && first.kind === 'assistant')
+  assert.equal(first.text, 'Hello world')
 })
 
 test('assistant/message replaces the streamed text for its step', () => {
@@ -70,7 +74,9 @@ test('assistant/message replaces the streamed text for its step', () => {
     }, 1),
   ])
   assert.deepEqual(kinds(messages), ['assistant'])
-  assert.equal(messages[0]?.text, 'partial')
+  const first = messages[0]
+  assert.ok(first !== undefined && first.kind === 'assistant')
+  assert.equal(first.text, 'partial')
 })
 
 test('pairs tool calls with their results and caps long summaries', () => {
@@ -96,8 +102,9 @@ test('pairs tool calls with their results and caps long summaries', () => {
   const tool = messages[0]
   assert.ok(tool !== undefined && tool.kind === 'tool')
   assert.equal(tool.name, 'bash')
-  assert.ok(tool.text.length <= 201, `summary capped, got ${tool.text.length}`)
-  assert.ok(tool.text.endsWith('…'))
+  assert.equal(tool.status, 'ok')
+  // The fold keeps the full result; preview truncation is a render concern.
+  assert.equal(tool.result.length, 300)
 })
 
 test('turn/end error renders a failure line', () => {
@@ -108,7 +115,7 @@ test('turn/end error renders a failure line', () => {
   const tool = messages[0]
   assert.ok(tool !== undefined && tool.kind === 'tool')
   assert.equal(tool.name, 'error')
-  assert.equal(tool.text, 'AUTH: boom')
+  assert.equal(tool.result, 'AUTH: boom')
 })
 
 test('command/run + command/done fold into an executed line', () => {
@@ -126,9 +133,9 @@ test('renderTranscript produces the markdown document', () => {
   const text = renderTranscript([
     { kind: 'user', text: 'hi' },
     { kind: 'assistant', text: '**hello**' },
-    { kind: 'tool', name: 'bash', text: 'ok' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '', result: 'ok', status: 'ok' },
   ])
   assert.ok(text.includes('**You:** hi'))
   assert.ok(text.includes('**hello**'))
-  assert.ok(text.includes('> `bash` — ok'))
+  assert.ok(text.includes('> `✓ bash`'))
 })

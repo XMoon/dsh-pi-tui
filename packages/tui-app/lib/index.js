@@ -29,7 +29,7 @@ export const Config = z.object({
  * @param events - the session log snapshot.
  */
 function repaint(app, events) {
-    app.setTranscript(renderTranscript(foldTranscript(events)));
+    app.setTranscript(foldTranscript(events));
 }
 /**
  * Mount the TUI: resolve the model selection, create or resume the agent,

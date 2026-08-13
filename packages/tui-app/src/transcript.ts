@@ -3,6 +3,10 @@
  * deterministic so the headless tests can drive it without a dsh tree.
  * Renders the HUMAN transcript (append-origin events), not the model-visible
  * surface: replacement copies shadowed by compaction stay out.
+ *
+ * Thinking (`reasoning-delta` chunks) and tool calls fold into collapsible
+ * entries carrying their owning turn, so the view can expand only the most
+ * recent turns (pi's Ctrl+O semantics).
  * @module @dsh-pi-tui/tui-app/transcript
  */
 
@@ -15,7 +19,15 @@ import type {} from '@deepseek-ai/dsh-commands'
 export type TranscriptMessage =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; name: string; text: string }
+  | { kind: 'thinking'; turn: number; text: string }
+  | {
+    kind: 'tool'
+    turn: number
+    name: string
+    args: string
+    result: string
+    status: 'ok' | 'error' | 'running'
+  }
 
 /** Text of a message's content blocks, joined; empty when there is no text. */
 function textOf(blocks: readonly ContentBlock[]): string {
@@ -25,23 +37,17 @@ function textOf(blocks: readonly ContentBlock[]): string {
     .join('')
 }
 
-/** Single-line summary of a tool result, capped for the transcript. */
-function summarizeResult(text: string): string {
-  const single = text.replace(/\s+/g, ' ').trim()
-  return single.length > 200 ? `${single.slice(0, 200)}…` : single
-}
-
 /** Key identifying one step's model output (turn + step). */
-interface StepKey {
-  turn: number
-  step: number
+function stepKey(turn: number, step: number): string {
+  return `${turn}/${step}`
 }
 
 /**
  * Fold a session event log into the transcript messages, in log order.
- * `assistant/chunk` text deltas accumulate into the message of their own
- * (turn, step); an `assistant/message` replaces the accumulated chunk text
- * for that step (identical content, now complete).
+ * `assistant/chunk` text deltas accumulate into the assistant message of
+ * their own (turn, step); `reasoning-delta` chunks accumulate into a
+ * thinking entry. A tool call and its result merge into one card; an
+ * unanswered call stays `running`.
  * @param events - the session log.
  * @returns ordered renderable messages.
  */
@@ -49,33 +55,62 @@ export function foldTranscript(events: readonly SessionEvent[]): TranscriptMessa
   const messages: TranscriptMessage[] = []
   /** Streaming text per (turn, step); an assistant message for that step is the same slot. */
   const stepText = new Map<string, string>()
-  /** Tool names by callId, from tool/call events. */
+  /** Streaming reasoning per (turn, step), folded into one thinking entry. */
+  const stepReasoning = new Map<string, string>()
+  const seenReasoning = new Set<string>()
+  const seenSteps = new Set<string>()
+  /** Tool calls awaiting their result, keyed by callId. */
+  const pendingCalls = new Map<string, { name: string; args: string; turn: number }>()
+  /** Tool names by callId, for result pairing. */
   const callNames = new Map<string, string>()
   /** Command names by commandId, from command/run events. */
   const commandNames = new Map<string, string>()
-  const seenSteps = new Set<string>()
+  /** The turn most recently opened by turn/start. */
+  let currentTurn = 0
 
-  const stepKey = (turn: number, step: number): string => `${turn}/${step}`
+  /** The thinking entry for one (turn, step), created on first reasoning. */
+  const thinkingEntry = (turn: number, step: number): { turn: number; text: string } | undefined => {
+    const key = stepKey(turn, step)
+    if (!seenReasoning.has(key)) {
+      seenReasoning.add(key)
+      const entry: TranscriptMessage = { kind: 'thinking', turn, text: '' }
+      messages.push(entry)
+      return entry
+    }
+    return messages.findLast(message => message.kind === 'thinking')
+  }
 
   for (const event of events) {
     switch (event.type) {
+      case 'turn/start': {
+        currentTurn = event.data.turn
+        break
+      }
       case 'user/message': {
         const text = textOf(event.data.content)
         if (text !== '') messages.push({ kind: 'user', text })
         break
       }
       case 'assistant/chunk': {
-        if (event.data.chunk.type !== 'text-delta') break
+        const { chunk } = event.data
         const key = stepKey(event.data.turn, event.data.step)
-        const accumulated = stepText.get(key) ?? ''
-        const next = accumulated + event.data.chunk.text
-        stepText.set(key, next)
-        if (!seenSteps.has(key)) {
-          seenSteps.add(key)
-          messages.push({ kind: 'assistant', text: next })
-        } else {
-          const last = messages.at(-1)
-          if (last?.kind === 'assistant') last.text = next
+        if (chunk.type === 'text-delta') {
+          const accumulated = stepText.get(key) ?? ''
+          const next = accumulated + chunk.text
+          stepText.set(key, next)
+          if (!seenSteps.has(key)) {
+            seenSteps.add(key)
+            messages.push({ kind: 'assistant', text: next })
+          } else {
+            const last = messages.at(-1)
+            if (last?.kind === 'assistant') last.text = next
+          }
+        } else if (chunk.type === 'reasoning-delta') {
+          const accumulated = stepReasoning.get(key) ?? ''
+          const next = accumulated + chunk.text
+          stepReasoning.set(key, next)
+          const entry = thinkingEntry(event.data.turn, event.data.step)
+          if (entry !== undefined) entry.text = next
         }
         break
       }
@@ -93,21 +128,47 @@ export function foldTranscript(events: readonly SessionEvent[]): TranscriptMessa
         break
       }
       case 'tool/call': {
-        callNames.set(event.data.callId, event.data.name)
+        const key = event.data.callId
+        callNames.set(key, event.data.name)
+        pendingCalls.set(key, {
+          name: event.data.name,
+          args: event.data.arguments,
+          turn: currentTurn,
+        })
+        messages.push({
+          kind: 'tool',
+          turn: currentTurn,
+          name: event.data.name,
+          args: event.data.arguments,
+          result: '',
+          status: 'running',
+        })
         break
       }
       case 'tool/result': {
-        const toolCallId = event.data.message.content[0]?.toolCallId
-        const name = toolCallId === undefined ? 'tool' : (callNames.get(toolCallId) ?? 'tool')
+        const key = event.data.message.content[0]?.toolCallId
+        const pending = key !== undefined ? pendingCalls.get(key) : undefined
+        const name = key === undefined ? 'tool' : (callNames.get(key) ?? 'tool')
         const text = textOf(event.data.message.content[0]?.content ?? [])
-        const summary = summarizeResult(text)
-        messages.push({ kind: 'tool', name, text: summary === '' ? '(no text result)' : summary })
+        const status = event.data.error !== undefined ? 'error' : 'ok'
+        const turn = pending?.turn ?? currentTurn
+        pendingCalls.delete(key ?? '')
+        // Replace the running entry for this call, or append a completed one.
+        const running = messages.findLast(message => message.kind === 'tool' && message.name === name && message.status === 'running')
+        if (running !== undefined && running.kind === 'tool') {
+          running.status = status
+          running.result = text
+          running.args = pending?.args ?? ''
+          running.turn = turn
+        } else {
+          messages.push({ kind: 'tool', turn, name, args: pending?.args ?? '', result: text, status })
+        }
         break
       }
       case 'turn/end': {
         if (event.data.reason.kind === 'error') {
           const error = event.data.reason.error
-          messages.push({ kind: 'tool', name: 'error', text: `${error.code}: ${error.message}` })
+          messages.push({ kind: 'tool', turn: currentTurn, name: 'error', args: '', result: `${error.code}: ${error.message}`, status: 'error' })
         }
         break
       }
@@ -118,7 +179,7 @@ export function foldTranscript(events: readonly SessionEvent[]): TranscriptMessa
       case 'command/done': {
         const name = commandNames.get(event.data.commandId) ?? 'command'
         const outcome = event.data.kind === 'error' ? ` — error: ${event.data.text ?? 'failed'}` : ''
-        messages.push({ kind: 'tool', name: `/${name}`, text: `executed${outcome}` })
+        messages.push({ kind: 'tool', turn: currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok' })
         break
       }
       default:
@@ -128,17 +189,49 @@ export function foldTranscript(events: readonly SessionEvent[]): TranscriptMessa
   return messages
 }
 
-/** Render the transcript as one Markdown document for the TUI's Markdown view. */
-export function renderTranscript(messages: readonly TranscriptMessage[]): string {
+/**
+ * Render the transcript as one Markdown document for the TUI's Markdown view.
+ * Collapsible entries render in their folded form (preview lines + hint);
+ * use the component view for expandable rendering.
+ * @param messages - the folded transcript.
+ * @param expandedTurns - turns whose collapsible entries render expanded.
+ * @returns the markdown document.
+ */
+export function renderTranscript(messages: readonly TranscriptMessage[], expandedTurns = 0): string {
   const lines: string[] = []
   for (const message of messages) {
     if (message.kind === 'user') {
       lines.push(`**You:** ${message.text}`, '')
     } else if (message.kind === 'assistant') {
       lines.push(message.text, '')
+    } else if (message.kind === 'thinking') {
+      const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns)
+      if (expanded) {
+        lines.push(`> _thinking:_ ${message.text}`, '')
+      } else {
+        lines.push(`> _thinking…_ (ctrl+o to expand)`, '')
+      }
     } else {
-      lines.push(`> \`${message.name}\` — ${message.text}`, '')
+      const mark = message.status === 'ok' ? '✓' : message.status === 'error' ? '✗' : '…'
+      const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns)
+      if (expanded) {
+        lines.push(`> \`${mark} ${message.name}\` ${message.result === '' ? '' : '— ' + message.result}`, '')
+      } else {
+        lines.push(`> \`${mark} ${message.name}\``, '')
+      }
     }
   }
   return lines.join('\n')
+}
+
+/** The turn threshold for expansion: the `expandedTurns` most recent turns. */
+function currentTurnBoundary(messages: readonly TranscriptMessage[], expandedTurns: number): number {
+  if (expandedTurns <= 0) return Number.POSITIVE_INFINITY
+  const turns = new Set<number>()
+  for (const message of messages) {
+    if (message.kind === 'thinking' || message.kind === 'tool') turns.add(message.turn)
+  }
+  const sorted = [...turns].sort((a, b) => b - a)
+  if (sorted.length <= expandedTurns) return 0
+  return sorted[expandedTurns - 1] ?? 0
 }

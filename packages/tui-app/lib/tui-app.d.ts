@@ -6,6 +6,13 @@
  * @module @dsh-pi-tui/tui-app/tui-app
  */
 import { type Terminal } from '@dsh-pi-tui/pi-tui';
+import type { TranscriptMessage } from './transcript.ts';
+/** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
+export declare const EXPAND_RECENT_TURNS = 3;
+/** Folded preview lines for thinking blocks; mirrors pi's THINKING_PREVIEW_LINES. */
+export declare const THINKING_PREVIEW_LINES = 2;
+/** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
+export declare const RESULT_PREVIEW_LINES = 3;
 /** Callbacks the application surface reports to its host (the dsh bundle). */
 export interface TuiAppEvents {
     /** The user submitted a line in the editor. */
@@ -37,20 +44,35 @@ export interface TodoItem {
 export declare class TuiApp {
     private readonly tui;
     private readonly editor;
-    private readonly markdown;
     private readonly header;
+    private readonly messagesView;
     private readonly events;
     /** Prompts awaiting the user's decision; one is shown at a time. */
     private readonly approvalQueue;
     /** The prompt currently on screen, if any. */
     private activeApproval;
+    /** The folded transcript; re-rendered into the messages view on change. */
+    private messages;
+    /** Ctrl+O master switch: expand the most recent turns' collapsible entries. */
+    private toolOutputExpanded;
     constructor(terminal: Terminal, events: TuiAppEvents);
     /** Enter raw mode and start rendering. */
     start(): void;
     /** Leave raw mode and stop rendering. */
     stop(): void;
-    /** Replace the transcript body and request a re-render. */
-    setTranscript(text: string): void;
+    /**
+     * Replace the transcript and rebuild the message components. Collapsible
+     * entries (thinking, tool cards) render folded unless the Ctrl+O master
+     * switch is on and the entry belongs to the most recent turns.
+     * @param messages - the folded transcript.
+     */
+    setTranscript(messages: readonly TranscriptMessage[]): void;
+    /** Rebuild the message component tree from the current transcript state. */
+    private rebuildMessages;
+    /** The turn threshold at or above which collapsible entries expand. */
+    private expandBoundary;
+    /** Render one transcript message as a pi-tui component. */
+    private renderMessage;
     /**
      * Reflect the todo list in the header line: active (non-completed) count
      * and, when the list is non-empty, the first active item's text.

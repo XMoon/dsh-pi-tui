@@ -58,7 +58,7 @@ interface AppExit {
  * @param events - the session log snapshot.
  */
 function repaint(app: TuiApp, events: readonly SessionEvent[]): void {
-  app.setTranscript(renderTranscript(foldTranscript(events)))
+  app.setTranscript(foldTranscript(events))
 }
 
 /**
