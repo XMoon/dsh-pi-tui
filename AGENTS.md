@@ -35,7 +35,7 @@ packages/tui-app/   The dsh bundle. cordis.patch.yml inserts the startup row
 1. **In-process bundle, not BFF client.** Like `dsh-headless`, the TUI runs inside the Cordis context and consumes `ctx.*` services directly. The web surface's remote RPC exists only because a browser cannot be in-process; a TUI has no such constraint. Remote-attach via the apiproxy is a documented non-goal.
 2. **Vendored fork, not npm dependency.** `@moonshot-ai/pi-tui` is not published (npm 404). Vendored from the kimi-code fork (not upstream pi-mono) to keep its five local fixes: CJK wrap recursion guard, container width clamp, overwide-line truncation instead of throw, negative-width guards, per-frame processed-line reuse. Re-verify those on every re-vendor — the fork's AGENTS.md lists them with guarding tests.
 3. **`TuiMainScreen`, not `TUI`.** In this fork the constructible entry is `TuiMainScreen` (main screen + scrollback, `mode: "regular"`); the README's `new TUI(...)` is stale upstream docs. `TuiAltScreen` is the alternative.
-4. **Source exports, Node 24+/tsx to run.** `exports` point at `.ts` sources. Works under Node ≥ 23.6 (native type stripping) or `node --import tsx/esm` (how dsh source-launches). No build step yet; a `dist` build is a later publishing task.
+4. **Source exports, built artifacts.** Both packages build: pi-tui via tsdown (`dist/`), tui-app via tsc with `rewriteRelativeImportExtensions` (`lib/`); `exports` point at built files. Node 26 refuses type-stripping inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `.ts`-exporting package cannot load from a profile's node_modules. Build before installing into a profile.
 5. **No native prebuilds.** darwin/win32 modifier-key addons are optional; the loader returns `undefined` on other platforms without attempting a load. Revisit only if modifier detection matters on macOS/Windows.
 6. **`chalk` is a runtime dependency** of `tui-app` (theme.ts lives in `src`, unlike pi-tui's tests-only chalk).
 
@@ -43,9 +43,23 @@ packages/tui-app/   The dsh bundle. cordis.patch.yml inserts the startup row
 
 ```sh
 pnpm install
-pnpm test             # pi-tui's own suite (node --test) + tui-app headless tests
-pnpm typecheck        # per-package tsc --noEmit
-node --import tsx/esm packages/tui-app/demo.ts   # interactive demo in a real TTY
+pnpm build          # pi-tui tsdown (dist/) + tui-app tsc (lib/)
+pnpm test           # pi-tui's own suite (node --test) + tui-app headless tests
+pnpm typecheck
+node --import tsx/esm packages/tui-app/demo.ts   # standalone demo in a real TTY
+```
+
+### Installing into the local dsh profile (dev loop)
+
+```sh
+dsh plugin --profile pi-tui -- add "@dsh-pi-tui/pi-tui@file:.../packages/pi-tui"
+dsh plugin --profile pi-tui -- add "@dsh-pi-tui/tui-app@file:.../packages/tui-app"
+# both pnpm `file:`/`link:` installs land as store copies, NOT symlinks — for a
+# live dev loop replace them with manual symlinks (pnpm re-add overwrites them):
+ln -sfn <repo>/packages/pi-tui ~/.dsh/profiles/pi-tui/node_modules/@dsh-pi-tui/pi-tui
+ln -sfn <repo>/packages/tui-app ~/.dsh/profiles/pi-tui/node_modules/@dsh-pi-tui/tui-app
+# run against the real dsh install:
+dsh --profile pi-tui [--session <id>]
 ```
 
 Headless UI tests drive `@xterm/headless` through `packages/tui-app/test/virtual-terminal.ts`

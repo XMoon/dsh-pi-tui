@@ -31,8 +31,8 @@
 	},
 	"exports": {
 		".": {
-			"types": "./src/index.ts",
-			"default": "./src/index.ts"
+			"types": "./dist/index.d.mts",
+			"default": "./dist/index.mjs"
 		},
 		"./package.json": "./package.json"
 	},
@@ -61,7 +61,8 @@
 		"@types/node": "^22.0.0",
 		"@xterm/headless": "5.5.0",
 		"chalk": "^5.4.1",
-		"typescript": "^5.9.0"
+		"typescript": "^5.9.0",
+		"tsdown": "0.22.0"
 	},
 	"engines": {
 		"node": ">=22.19.0"

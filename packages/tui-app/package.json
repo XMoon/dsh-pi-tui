@@ -4,22 +4,23 @@
   "description": "The dsh-pi-tui bundle: a TUI surface for DeepSeek Harness profiles (dsh --profile pi-tui)",
   "license": "MIT",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
     },
     "./startup": {
-      "types": "./src/startup.ts",
-      "default": "./src/startup.ts"
+      "types": "./lib/startup.d.ts",
+      "default": "./lib/startup.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
   "files": [
+    "lib",
     "src",
     "cordis.patch.yml",
     "README.md"
@@ -30,24 +31,37 @@
     }
   },
   "dependencies": {
-    "@dsh-pi-tui/pi-tui": "workspace:^",
-    "@deepseek-ai/dsh-cmdline": "^0.1.0-rc.5",
-    "@deepseek-ai/cordis": "^4.0.0-rc.7",
+    "@dsh-pi-tui/pi-tui": "file:../pi-tui",
+    "@deepseek-ai/dsh-cmdline": "^0.1.0-rc.6",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "chalk": "^5.4.1",
     "commander": "^15.0.0"
   },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-default-model": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6"
+  },
   "devDependencies": {
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-default-model": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "@xterm/headless": "5.5.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.0"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.0-rc.7"
   },
   "engines": {
     "node": ">=22.19.0"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.ts"
   }

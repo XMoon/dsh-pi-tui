@@ -8,6 +8,7 @@
 
 import {
   Editor,
+  Markdown,
   ProcessTerminal,
   Text,
   TuiMainScreen,
@@ -15,7 +16,7 @@ import {
   type Terminal,
   type TuiInputListenerResult,
 } from '@dsh-pi-tui/pi-tui'
-import { editorTheme } from './theme.ts'
+import { editorTheme, markdownTheme } from './theme.ts'
 
 /** Callbacks the application surface reports to its host (the dsh bundle). */
 export interface TuiAppEvents {
@@ -33,6 +34,7 @@ export interface TuiAppEvents {
 export class TuiApp {
   private readonly tui: TuiMainScreen
   private readonly editor: Editor
+  private readonly markdown: Markdown
   private readonly events: TuiAppEvents
 
   constructor(terminal: Terminal, events: TuiAppEvents) {
@@ -40,7 +42,9 @@ export class TuiApp {
     this.tui = new TuiMainScreen(terminal)
     this.editor = new Editor(this.tui, editorTheme)
     this.editor.onSubmit = (text) => this.events.onSubmit(text)
+    this.markdown = new Markdown('', 0, 0, markdownTheme)
     this.tui.addChild(new Text('dsh-pi-tui'))
+    this.tui.addChild(this.markdown)
     this.tui.addChild(this.editor)
     this.tui.setFocus(this.editor)
     this.tui.addInputListener((data): TuiInputListenerResult => {
@@ -60,6 +64,12 @@ export class TuiApp {
   /** Leave raw mode and stop rendering. */
   stop(): void {
     this.tui.stop()
+  }
+
+  /** Replace the transcript body and request a re-render. */
+  setTranscript(text: string): void {
+    this.markdown.setText(text)
+    this.tui.requestRender()
   }
 }
 
