@@ -13,7 +13,7 @@
  * Ctrl+F toggle fullscreen, Tab autocomplete (slash commands + paths).
  * @module @dsh-pi-tui/tui-app/tui-app
  */
-import { Box, CombinedAutocompleteProvider, Container, Editor, Markdown, ProcessTerminal, SelectList, SettingsList, Text, TuiAltScreen, TuiMainScreen, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth, } from '@dsh-pi-tui/pi-tui';
+import { Box, CombinedAutocompleteProvider, Container, Editor, Markdown, ProcessTerminal, SelectList, SettingsList, Text, TuiAltScreen, TuiMainScreen, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, } from '@dsh-pi-tui/pi-tui';
 import { detectThemeFromBackground, editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme, } from "./theme.js";
 import { isDiffResult, renderDiffLines } from "./diff.js";
 import { TranscriptSearchComponent } from "./search.js";
@@ -117,6 +117,46 @@ export class Frame {
         return out;
     }
 }
+/** The session head card: identity facts, wrapped to the available width so
+ * nothing is truncated, with a FULL-WIDTH rule that aligns with the editor's
+ * border (a fixed-width rule looked misaligned next to the editor frame). */
+class WelcomeCard {
+    facts;
+    lastWidth = -1;
+    cached = [];
+    /** Replace the facts; the next render rebuilds the card. */
+    setFacts(facts) {
+        this.facts = facts;
+        this.cached = [];
+    }
+    invalidate() {
+        this.cached = [];
+    }
+    render(width) {
+        const facts = this.facts;
+        if (facts === undefined)
+            return [];
+        if (this.lastWidth === width && this.cached.length > 0)
+            return this.cached;
+        this.lastWidth = width;
+        const shortId = facts.sessionId.length > 24 ? `${facts.sessionId.slice(0, 24)}…` : facts.sessionId;
+        const line1 = `🐋 session ${color.textDim(shortId)} · ${color.text(facts.model)}`;
+        const line2 = [
+            facts.preset === undefined ? '' : `preset ${color.textMuted(facts.preset)}`,
+            `v${facts.version}`,
+            color.textMuted(facts.cwd),
+        ].filter(part => part !== '').join(' · ');
+        // Wrap each line to the terminal width so long identities read in full
+        // instead of ending in an ellipsis; the rule spans the same width as the
+        // editor border below it.
+        this.cached = [
+            ...wrapTextWithAnsi(line1, width),
+            ...wrapTextWithAnsi(line2, width),
+            color.border('─'.repeat(Math.max(0, width))),
+        ];
+        return this.cached;
+    }
+}
 /** Pi-style context progress bar: `[███░░░░░░░░░] 25%`. */
 function contextBar(used, window) {
     const ratio = Math.min(1, Math.max(0, used / window));
@@ -192,8 +232,8 @@ export class TuiApp {
     editorBorder;
     /** Todo summary segment of the header (without the base or badges). */
     todoText = '';
-    /** Welcome card shown above the transcript; empty renders nothing. */
-    welcomeText = '';
+    /** Welcome card shown above the transcript; renders nothing without facts. */
+    welcomeCard = new WelcomeCard();
     /** Transient error line shown under the transcript; cleared by the next
      * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
     notifyText = '';
@@ -567,9 +607,7 @@ export class TuiApp {
     /** Rebuild the message component tree from the current transcript state. */
     rebuildMessages() {
         this.messagesView.clear();
-        if (this.welcomeText !== '') {
-            this.messagesView.addChild(new Text(this.welcomeText, 0, 0));
-        }
+        this.messagesView.addChild(this.welcomeCard);
         const boundary = this.expandBoundary();
         for (const message of this.messages) {
             // Alt+T hides thinking entries without touching the fold state.
@@ -620,28 +658,13 @@ export class TuiApp {
         }
     }
     /**
-     * Set the session head rendered above the transcript: one dense line with
-     * the session identity, model, version, and a rule beneath. Replaces any
-     * previous head.
+     * Set the session head rendered above the transcript: the session identity,
+     * model, version, preset, and cwd, wrapped to the terminal width with a
+     * full-width rule beneath. Replaces any previous head.
      * @param facts - directory, session id, model, version, and the optional agent preset to display.
      */
     setWelcomeCard(facts) {
-        const shortId = facts.sessionId.length > 24 ? `${facts.sessionId.slice(0, 24)}…` : facts.sessionId;
-        const items = [
-            `session ${color.textDim(shortId)}`,
-            color.text(facts.model),
-            ...facts.preset === undefined ? [] : [color.textMuted(`preset ${facts.preset}`)],
-            `v${facts.version}`,
-            color.textMuted(facts.cwd),
-        ].join('  ·  ');
-        // The rule tracks the content line's width; an over-wide items line is
-        // truncated so the rule never falls short of the text above it.
-        const width = Math.max(20, Math.min(80, visibleWidth(items) + 2));
-        const content = truncateToWidth(items, width - 2, '…');
-        this.welcomeText = [
-            `${color.primary('🐋')} ${content}`,
-            color.border('─'.repeat(width)),
-        ].join('\n');
+        this.welcomeCard.setFacts(facts);
         this.rebuildMessages();
     }
     /** The turn threshold at or above which collapsible entries expand. */

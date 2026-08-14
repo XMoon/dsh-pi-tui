@@ -31,6 +31,7 @@ import {
   matchesKey,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
   type Component,
   type OverlayHandle,
   type OverlayOptions,
@@ -154,6 +155,48 @@ export class Frame implements Component {
     }
     out.push(b(`╰${'─'.repeat(frameWidth - 2)}╯`))
     return out
+  }
+}
+
+/** The session head card: identity facts, wrapped to the available width so
+ * nothing is truncated, with a FULL-WIDTH rule that aligns with the editor's
+ * border (a fixed-width rule looked misaligned next to the editor frame). */
+class WelcomeCard implements Component {
+  private facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string } | undefined
+  private lastWidth = -1
+  private cached: string[] = []
+
+  /** Replace the facts; the next render rebuilds the card. */
+  setFacts(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
+    this.facts = facts
+    this.cached = []
+  }
+
+  invalidate(): void {
+    this.cached = []
+  }
+
+  render(width: number): string[] {
+    const facts = this.facts
+    if (facts === undefined) return []
+    if (this.lastWidth === width && this.cached.length > 0) return this.cached
+    this.lastWidth = width
+    const shortId = facts.sessionId.length > 24 ? `${facts.sessionId.slice(0, 24)}…` : facts.sessionId
+    const line1 = `🐋 session ${color.textDim(shortId)} · ${color.text(facts.model)}`
+    const line2 = [
+      facts.preset === undefined ? '' : `preset ${color.textMuted(facts.preset)}`,
+      `v${facts.version}`,
+      color.textMuted(facts.cwd),
+    ].filter(part => part !== '').join(' · ')
+    // Wrap each line to the terminal width so long identities read in full
+    // instead of ending in an ellipsis; the rule spans the same width as the
+    // editor border below it.
+    this.cached = [
+      ...wrapTextWithAnsi(line1, width),
+      ...wrapTextWithAnsi(line2, width),
+      color.border('─'.repeat(Math.max(0, width))),
+    ]
+    return this.cached
   }
 }
 
@@ -400,8 +443,8 @@ export class TuiApp {
   private readonly editorBorder: (text: string) => string
   /** Todo summary segment of the header (without the base or badges). */
   private todoText = ''
-  /** Welcome card shown above the transcript; empty renders nothing. */
-  private welcomeText = ''
+  /** Welcome card shown above the transcript; renders nothing without facts. */
+  private readonly welcomeCard = new WelcomeCard()
   /** Transient error line shown under the transcript; cleared by the next
    * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
   private notifyText = ''
@@ -774,9 +817,7 @@ export class TuiApp {
   /** Rebuild the message component tree from the current transcript state. */
   private rebuildMessages(): void {
     this.messagesView.clear()
-    if (this.welcomeText !== '') {
-      this.messagesView.addChild(new Text(this.welcomeText, 0, 0))
-    }
+    this.messagesView.addChild(this.welcomeCard)
     const boundary = this.expandBoundary()
     for (const message of this.messages) {
       // Alt+T hides thinking entries without touching the fold state.
@@ -829,28 +870,13 @@ export class TuiApp {
   }
 
   /**
-   * Set the session head rendered above the transcript: one dense line with
-   * the session identity, model, version, and a rule beneath. Replaces any
-   * previous head.
+   * Set the session head rendered above the transcript: the session identity,
+   * model, version, preset, and cwd, wrapped to the terminal width with a
+   * full-width rule beneath. Replaces any previous head.
    * @param facts - directory, session id, model, version, and the optional agent preset to display.
    */
   setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
-    const shortId = facts.sessionId.length > 24 ? `${facts.sessionId.slice(0, 24)}…` : facts.sessionId
-    const items = [
-      `session ${color.textDim(shortId)}`,
-      color.text(facts.model),
-      ...facts.preset === undefined ? [] : [color.textMuted(`preset ${facts.preset}`)],
-      `v${facts.version}`,
-      color.textMuted(facts.cwd),
-    ].join('  ·  ')
-    // The rule tracks the content line's width; an over-wide items line is
-    // truncated so the rule never falls short of the text above it.
-    const width = Math.max(20, Math.min(80, visibleWidth(items) + 2))
-    const content = truncateToWidth(items, width - 2, '…')
-    this.welcomeText = [
-      `${color.primary('🐋')} ${content}`,
-      color.border('─'.repeat(width)),
-    ].join('\n')
+    this.welcomeCard.setFacts(facts)
     this.rebuildMessages()
   }
 

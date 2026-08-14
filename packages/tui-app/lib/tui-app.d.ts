@@ -227,8 +227,8 @@ export declare class TuiApp {
     private readonly editorBorder;
     /** Todo summary segment of the header (without the base or badges). */
     private todoText;
-    /** Welcome card shown above the transcript; empty renders nothing. */
-    private welcomeText;
+    /** Welcome card shown above the transcript; renders nothing without facts. */
+    private readonly welcomeCard;
     /** Transient error line shown under the transcript; cleared by the next
      * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
     private notifyText;
@@ -341,9 +341,9 @@ export declare class TuiApp {
     /** Clear the transient notify line and its pending auto-clear timer. */
     private clearNotify;
     /**
-     * Set the session head rendered above the transcript: one dense line with
-     * the session identity, model, version, and a rule beneath. Replaces any
-     * previous head.
+     * Set the session head rendered above the transcript: the session identity,
+     * model, version, preset, and cwd, wrapped to the terminal width with a
+     * full-width rule beneath. Replaces any previous head.
      * @param facts - directory, session id, model, version, and the optional agent preset to display.
      */
     setWelcomeCard(facts: {

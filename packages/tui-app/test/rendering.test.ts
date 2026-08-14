@@ -194,3 +194,25 @@ test('fullscreen scrollback search opens with ctrl+shift+f', async () => {
   const view = await viewport(vt)
   assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
 })
+
+test('welcome card wraps long facts and draws a full-width rule', async () => {
+  const { vt, app } = startApp()
+  app.setWelcomeCard({
+    cwd: '/very/long/working/directory/that/keeps/going',
+    sessionId: `session-${'x'.repeat(40)}`,
+    model: 'opencode-go/deepseek-v4-flash',
+    version: '0.1.0-rc.6',
+    preset: 'standard',
+  })
+  const view = await viewport(vt)
+  // Facts render in full: nothing is truncated with an ellipsis on the
+  // session/model line (wrap instead of truncate).
+  assert.ok(view.includes('deepseek-v4-flash'), `model missing:\n${view}`)
+  assert.ok(view.includes('standard'), `preset missing:\n${view}`)
+  assert.ok(view.includes('0.1.0-rc.6'), `version missing:\n${view}`)
+  assert.ok(view.includes('/very/long/working/directory/that/keeps/going'), `cwd truncated:\n${view}`)
+  // The rule spans the full terminal width, matching the editor border below.
+  const ruleLine = view.split('\n').find(line => line.includes('─'.repeat(20)))
+  assert.ok(ruleLine !== undefined, `rule line missing:\n${view}`)
+  assert.equal(ruleLine.length, 100, `rule must be full width, got ${ruleLine.length}`)
+})
