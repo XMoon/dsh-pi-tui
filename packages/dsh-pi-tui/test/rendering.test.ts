@@ -392,10 +392,11 @@ test('fullscreen mouse click toggles one card independently of the global fold',
     { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"pwd"}', result: '/ws', status: 'ok' },
   ])
   await viewport(vt)
-  // Rows: header(1) + user(2) + thinking(3) + tool1(4) + tool2(5) inside the
-  // scroll pane. Click the first tool card: it alone expands.
-  vt.sendInput('\x1b[<0;10;4M')
-  vt.sendInput('\x1b[<0;10;4m')
+  // Rows (blank spacers between blocks): header(1) + user(2) + thinking(4)
+  // + tool1(6) + tool2(8) inside the scroll pane. Click the first tool card:
+  // it alone expands.
+  vt.sendInput('\x1b[<0;10;6M')
+  vt.sendInput('\x1b[<0;10;6m')
   let view = await viewport(vt)
   assert.ok(view.includes('\nb'), `clicked card body missing:\n${view}`)
   assert.ok(view.includes('Bash ls [ok]'), `clicked card header missing:\n${view}`)
@@ -405,8 +406,8 @@ test('fullscreen mouse click toggles one card independently of the global fold',
   // waits past the alt screen's double-click window (a fast repeat selects
   // a word, like a native terminal).
   await new Promise(resolve => setTimeout(resolve, 600))
-  vt.sendInput('\x1b[<0;10;4M')
-  vt.sendInput('\x1b[<0;10;4m')
+  vt.sendInput('\x1b[<0;10;6M')
+  vt.sendInput('\x1b[<0;10;6m')
   view = await viewport(vt)
   assert.ok(!view.includes('\nb'), `card must collapse again:\n${view}`)
   // The keyboard Ctrl+O still expands everything, mouse state or not.
@@ -461,10 +462,10 @@ test('tool card headers carry a per-variant emoji', async () => {
     { kind: 'tool', turn: 0, name: 'subagent', args: 'worker', result: '', status: 'ok' },
   ])
   const view = await viewport(vt)
-  assert.ok(view.includes('📖 Read /ws/src/foo.ts'), `read emoji missing:\n${view}`)
-  assert.ok(view.includes('🖥️ Bash ls'), `bash emoji missing:\n${view}`)
-  assert.ok(view.includes('🔍 Search foo'), `search emoji missing:\n${view}`)
-  assert.ok(view.includes('🤖 Subagent worker'), `subagent emoji missing:\n${view}`)
+  assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `read emoji missing:\n${view}`)
+  assert.ok(view.includes('🖥️  Bash ls'), `bash emoji missing:\n${view}`)
+  assert.ok(view.includes('🔍  Search foo'), `search emoji missing:\n${view}`)
+  assert.ok(view.includes('🤖  Subagent worker'), `subagent emoji missing:\n${view}`)
 })
 
 test('regular mode leaves the mouse entirely to the terminal (no click handling)', async () => {
@@ -519,8 +520,8 @@ test('injected context rows show their emoji in the viewport', async () => {
     emoji: '📚',
   }])
   const view = await viewport(vt)
-  assert.ok(view.includes('📄 Context injection AGENTS.md'), `instruction emoji missing:\n${view}`)
-  assert.ok(view.includes('📚 Context injection skill-catalog'), `catalog emoji missing:\n${view}`)
+  assert.ok(view.includes('📄  Context injection AGENTS.md'), `instruction emoji missing:\n${view}`)
+  assert.ok(view.includes('📚  Context injection skill-catalog'), `catalog emoji missing:\n${view}`)
 })
 
 test('slash command cards carry a control-panel emoji', async () => {
@@ -529,7 +530,7 @@ test('slash command cards carry a control-panel emoji', async () => {
     { kind: 'tool', turn: 0, name: '/compact', args: '', result: 'executed', status: 'ok' },
   ])
   const view = await viewport(vt)
-  assert.ok(view.includes('🎛️ compact [ok]'), `slash emoji missing:\n${view}`)
+  assert.ok(view.includes('🎛️  compact [ok]'), `slash emoji missing:\n${view}`)
 })
 
 

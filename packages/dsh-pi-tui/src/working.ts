@@ -70,7 +70,7 @@ export class WorkingIndicator extends Text {
 
   private updateDisplay(): void {
     const frame = this.frames[this.currentFrame] ?? ''
-    const indicator = frame === '' ? '' : frame + ' '
+    const indicator = frame === '' ? '' : frame + '  '
     this.setText(indicator + color.textDim(this.message))
     this.ui.requestRender()
   }

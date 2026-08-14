@@ -149,7 +149,7 @@ class WelcomeCard implements Component {
     // Three columns: the session identity (full id — never truncated), the
     // model/preset, and the workspace. Each row wraps instead of ellipsizing,
     // so the box keeps the important facts readable.
-    const line1 = `🐋 session ${color.textDim(facts.sessionId)}`
+    const line1 = `🐋  session ${color.textDim(facts.sessionId)}`
     const line2 = [
       color.text(facts.model),
       facts.preset === undefined ? '' : `preset ${color.textMuted(facts.preset)}`,
@@ -172,6 +172,14 @@ class WelcomeCard implements Component {
       b(`╰${'─'.repeat(Math.max(0, width - 2))}╯`),
     ]
     return this.cached
+  }
+}
+
+/** One blank row between consecutive transcript blocks (kimi/pi Spacer(1) parity). */
+class Spacer implements Component {
+  invalidate(): void {}
+  render(): string[] {
+    return ['']
   }
 }
 
@@ -421,7 +429,7 @@ export class TuiApp {
   /** Footer state. */
   private status: StatusData = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
   /** Header text (todo summary), kept for theme-swap repaints. */
-  private headerText = '🐋 dsh-pi-tui'
+  private headerText = '🐋  dsh-pi-tui'
   /** Footer text, kept for theme-swap repaints. */
   private footerText = ''
   /** Plan-mode badge state; appended to the header and footer when active. */
@@ -479,7 +487,7 @@ export class TuiApp {
       this.rememberInput(text)
       this.events.onSubmit(text)
     }
-    this.header = new Text('🐋 dsh-pi-tui', 0, 0)
+    this.header = new Text('🐋  dsh-pi-tui', 0, 0)
     this.messagesView = new Container()
     this.todoPanel = new Text('', 0, 0)
     this.working = new WorkingIndicator(this.tui, options.workingIntervalMs === undefined
@@ -869,18 +877,21 @@ export class TuiApp {
     // the same width the frame pass uses, so the heights match the screen.
     const width = this.terminal.columns
     const rows: Array<{ message: TranscriptMessage; height: number }> = []
-    for (const message of this.messages) {
-      // Alt+T hides thinking entries without touching the fold state.
-      if (message.kind === 'thinking' && this.hideThinking) continue
+    // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
+    // a session never reads as one undifferentiated wall of text. The spacer
+    // row is charged to the preceding message's height, keeping the fullscreen
+    // click hit-testing aligned with the rendered layout.
+    const blocks: TranscriptMessage[] = [
+      ...this.messages.filter(message => !(message.kind === 'thinking' && this.hideThinking)),
+      ...this.localMessages,
+    ]
+    blocks.forEach((message, index) => {
       const component = this.renderMessage(message, boundary)
       this.messagesView.addChild(component)
-      rows.push({ message, height: component.render(width).length })
-    }
-    for (const message of this.localMessages) {
-      const component = this.renderMessage(message, boundary)
-      this.messagesView.addChild(component)
-      rows.push({ message, height: component.render(width).length })
-    }
+      const height = component.render(width).length + (index < blocks.length - 1 ? 1 : 0)
+      rows.push({ message, height })
+      if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
+    })
     if (this.notifyText !== '') {
       this.messagesView.addChild(new Text(color.error(`✗ ${this.notifyText}`), 0, 0))
     }
@@ -1014,7 +1025,7 @@ export class TuiApp {
     if (message.kind === 'assistant') {
       // The whale bullet is its own Text so it never reflows into the body.
       const row = new Container()
-      row.addChild(new Text(`${color.primary('🐋')} `, 0, 0))
+      row.addChild(new Text(`${color.primary('🐋')}  `, 0, 0))
       row.addChild(new Markdown(message.text, 0, 0, markdownTheme))
       return row
     }
@@ -1023,11 +1034,11 @@ export class TuiApp {
       const text = expanded
         // Expanded thinking stays dimmed so reasoning never reads like the
         // assistant's actual output (web parity: a distinct disclosure style).
-        ? color.textDim(`🐳 ${message.text}`)
+        ? color.textDim(`🐳  ${message.text}`)
         // Folded: while the step still streams, the row follows the LATEST
         // line of reasoning (the Web's running summary); once settled it
         // shows the first line (the Web's settled summary).
-        : color.textDim(`🐳 ${
+        : color.textDim(`🐳  ${
           message.running === true
             ? preview(latestLine(message.text), 1)
             : preview(firstLine(message.text), 1)
@@ -1044,13 +1055,13 @@ export class TuiApp {
         const row = new Container()
         const emoji = message.emoji ?? '📎'
         if (expanded) {
-          row.addChild(new Text(color.textMuted(`${emoji} Context injection ${message.label}`), 0, 0))
+          row.addChild(new Text(color.textMuted(`${emoji}  Context injection ${message.label}`), 0, 0))
           // Injected content stays dimmed like tool-card bodies: context is
           // never mistaken for the assistant's actual output.
           row.addChild(new Text(color.textDim(message.text), 0, 0))
         } else {
           const summary = message.summary === undefined ? '' : ` — ${message.summary}`
-          row.addChild(new Text(color.textMuted(`${emoji} Context injection ${message.label}${summary} (ctrl+o to expand)`), 0, 0))
+          row.addChild(new Text(color.textMuted(`${emoji}  Context injection ${message.label}${summary} (ctrl+o to expand)`), 0, 0))
         }
         return row
       }
@@ -1074,7 +1085,7 @@ export class TuiApp {
       : message.status === 'error'
         ? color.error('[error]')
         : color.textDim('[running]')
-    const head = `${emoji} ${header.title}${summary} ${pill}`
+    const head = `${emoji}  ${header.title}${summary} ${pill}`
     if (message.turn >= boundary || this.expandedOverride.get(message) === true) {
       card.addChild(new Text(head, 0, 0))
       this.renderToolBody(card, message)
@@ -1264,7 +1275,7 @@ export class TuiApp {
   private renderHeader(): void {
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
     const title = this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    this.headerText = `🐋 dsh-pi-tui${title}${this.todoText}${badge}`
+    this.headerText = `🐋  dsh-pi-tui${title}${this.todoText}${badge}`
     this.header.setText(this.headerText)
     this.requestRender()
   }
