@@ -99,7 +99,17 @@ export function findWordForward(text: string, cursor: number, options?: WordNavi
 		newCursor += next.value.segment.length;
 	} else if (next.value.isWordLike) {
 		// Skip inside one word-like segment, preserving ASCII punctuation boundaries.
-		newCursor += PUNCTUATION_REGEX.exec(next.value.segment)?.index ?? next.value.segment.length;
+		const match = PUNCTUATION_REGEX.exec(next.value.segment);
+		if (match === null) {
+			newCursor += next.value.segment.length;
+		} else if (match.index === 0) {
+			// Punctuation at the segment START: skip it instead of stopping
+			// before it (which would be a no-op move). Mirrors the backward
+			// direction, which skips whole punctuation runs.
+			newCursor += Math.min(match[0].length, next.value.segment.length);
+		} else {
+			newCursor += match.index;
+		}
 	} else {
 		// Skip non-word non-whitespace run (punctuation)
 		while (
