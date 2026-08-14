@@ -47,6 +47,8 @@ export interface ScrollbarGeometry {
 interface LayoutContext {
 	viewport: { width: number; height: number };
 	renderCache: Map<Component, Map<number, string[]>>;
+	/** Max visible line width per (component, width), for measureWidth. */
+	maxWidthCache: Map<Component, Map<number, number>>;
 	requestRender: () => void;
 	primaryScrollView: ScrollView | undefined;
 }
@@ -79,7 +81,20 @@ function measureHeight(context: LayoutContext, component: Component, width: numb
 }
 
 function measureWidth(context: LayoutContext, component: Component, width: number): number {
-	return renderCached(context, component, width).reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+	const safeWidth = Math.max(1, Math.floor(width));
+	let widths = context.maxWidthCache.get(component);
+	if (!widths) {
+		widths = new Map<number, number>();
+		context.maxWidthCache.set(component, widths);
+	}
+	let max = widths.get(safeWidth);
+	if (max === undefined) {
+		// Scan the cached lines once per (component, width) per frame instead
+		// of re-running visibleWidth over them at every call site.
+		max = renderCached(context, component, safeWidth).reduce((m, line) => Math.max(m, visibleWidth(line)), 0);
+		widths.set(safeWidth, max);
+	}
+	return max;
 }
 
 function withParent(box: LayoutBox, parent: LayoutBox): LayoutBox {
@@ -258,7 +273,7 @@ function styleScrollbarCell(line: string, column: number, totalWidth: number, st
 		targetPrefix += ansi.code;
 		targetIndex += ansi.length;
 	}
-	const targetText = target.slice(targetIndex) || " ".repeat(end - start);
+	const targetText = target.slice(targetIndex) || " ".repeat(Math.max(0, end - start));
 	const beforePadding = " ".repeat(Math.max(0, start - visibleWidth(before)));
 	return `${before}${beforePadding}${targetPrefix}${style(targetText)}${after}`;
 }
@@ -361,6 +376,7 @@ export function renderLayoutFrame(
 	const context: LayoutContext = {
 		viewport: { width: safeWidth, height: safeHeight },
 		renderCache: new Map(),
+		maxWidthCache: new Map(),
 		requestRender,
 		primaryScrollView: undefined,
 	};
