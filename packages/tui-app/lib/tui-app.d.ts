@@ -174,11 +174,6 @@ export interface TuiAppOptions {
     present?: ToolPresenter;
     /** Working-indicator frame interval in ms; injectable so tests stay fast. */
     workingIntervalMs?: number;
-    /**
-     * How long wheel scrolling keeps click reporting disabled (the terminal
-     * scrolls its own scrollback during the window); injectable for tests.
-     */
-    mouseGraceMs?: number;
 }
 /**
  * The interactive surface: header, transcript, editor, footer. Owns the
@@ -263,8 +258,8 @@ export declare class TuiApp {
     private readonly present;
     /** The busy indicator row directly above the editor border; idle renders nothing. */
     private readonly working;
-    /** Wheel-scroll grace window before click reporting comes back, in ms. */
-    private readonly mouseGraceMs;
+    /** The fullscreen transcript ScrollView, for click hit-testing offsets. */
+    private fullscreenScroll;
     /**
      * Per-message expansion overrides from mouse clicks: a message whose entry
      * is true stays expanded even when the global fold is off; absent falls
@@ -276,10 +271,6 @@ export declare class TuiApp {
     private messageRows;
     /** The live session's auto-generated title, shown in the header when set. */
     private sessionTitleText;
-    /** Pending re-enable of click reporting after a wheel scroll. */
-    private wheelTimer;
-    /** How long wheel scrolling suspends click reporting, in ms. */
-    private static readonly WHEEL_GRACE_MS;
     constructor(terminal: Terminal, events: TuiAppEvents, options?: TuiAppOptions);
     /** Enter raw mode and start rendering. */
     start(): void;
@@ -378,24 +369,12 @@ export declare class TuiApp {
      */
     setSessionTitle(title: string | undefined): void;
     /**
-     * Parse and consume an SGR mouse reporting sequence. A left-button press
-     * toggles the clicked transcript card's own expansion (independent of the
-     * global Ctrl+O fold, which still wins); every mouse sequence is consumed
-     * so it never reaches the editor.
-     * @param data - the raw input chunk.
-     * @returns whether the chunk was a mouse sequence.
+     * Map a fullscreen click (0-based screen cell, from the alt screen's
+     * onCellClick) onto a transcript message and toggle its individual
+     * expansion — the web's click-to-disclose behavior for one card at a time.
+     * The global Ctrl+O fold still wins, so keyboard behavior is unchanged.
      */
-    private handleMouseSequence;
-    /** Temporarily disable click reporting so wheel scrolling reaches the
-     * terminal's native scrollback; re-enable after the grace window (skipped
-     * while the alt screen owns mouse handling in fullscreen mode). */
-    private suspendClickMouseForWheel;
-    /**
-     * Map a screen-space click (1-based SGR coords) onto a transcript message
-     * and toggle its individual expansion. Regular mode only: the alt screen
-     * owns its own mouse handling (selection, scrollbar, paste).
-     */
-    private handleTranscriptClick;
+    private handleFullscreenClick;
     /** Toggle one collapsible message's individual expansion (mouse click). */
     private toggleMessageExpanded;
     /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */

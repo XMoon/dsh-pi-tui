@@ -24,9 +24,6 @@ import { WorkingIndicator } from "./working.js";
 export const EXPAND_RECENT_TURNS = 3;
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export const RESULT_PREVIEW_LINES = 3;
-/** SGR button-mode mouse reporting (clicks + release, SGR coords). */
-const ENABLE_CLICK_MOUSE = '\x1b[?1000h\x1b[?1006h';
-const DISABLE_CLICK_MOUSE = '\x1b[?1006l\x1b[?1000l';
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text, lines) {
     const parts = text.split('\n');
@@ -219,8 +216,8 @@ export class TuiApp {
     present;
     /** The busy indicator row directly above the editor border; idle renders nothing. */
     working;
-    /** Wheel-scroll grace window before click reporting comes back, in ms. */
-    mouseGraceMs;
+    /** The fullscreen transcript ScrollView, for click hit-testing offsets. */
+    fullscreenScroll;
     /**
      * Per-message expansion overrides from mouse clicks: a message whose entry
      * is true stays expanded even when the global fold is off; absent falls
@@ -232,17 +229,12 @@ export class TuiApp {
     messageRows = [];
     /** The live session's auto-generated title, shown in the header when set. */
     sessionTitleText = '';
-    /** Pending re-enable of click reporting after a wheel scroll. */
-    wheelTimer;
-    /** How long wheel scrolling suspends click reporting, in ms. */
-    static WHEEL_GRACE_MS = 300;
     constructor(terminal, events, options = {}) {
         this.terminal = terminal;
         this.events = events;
         this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS;
         this.workspaceRoot = options.workspaceRoot;
         this.present = options.present;
-        this.mouseGraceMs = options.mouseGraceMs ?? TuiApp.WHEEL_GRACE_MS;
         this.tui = new TuiMainScreen(terminal);
         this.editor = new Editor(this.tui, editorTheme);
         this.editorBorder = this.editor.borderColor;
@@ -271,27 +263,17 @@ export class TuiApp {
     /** Enter raw mode and start rendering. */
     start() {
         this.tui.start();
-        this.terminal.write(ENABLE_CLICK_MOUSE);
     }
     /** Leave raw mode and stop rendering. */
     stop() {
         this.clearNotify();
         this.working.dispose();
-        if (this.wheelTimer !== undefined) {
-            clearTimeout(this.wheelTimer);
-            this.wheelTimer = undefined;
-        }
-        this.terminal.write(DISABLE_CLICK_MOUSE);
         this.tui.stop();
         this.fullscreen?.stop();
         this.fullscreen = undefined;
     }
     /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
     handleInput(data) {
-        // SGR mouse sequences (click reporting) are consumed here so they never
-        // reach the focused editor as garbage escape bytes.
-        if (this.handleMouseSequence(data))
-            return { consume: true };
         // Kitty-protocol terminals report press, repeat, and release events as
         // separate sequences; the app must act on the PRESS only. A release of
         // Ctrl+O would otherwise double-toggle the fold (press expands, release
@@ -535,22 +517,29 @@ export class TuiApp {
             handle.hide();
         this.overlayHandles.clear();
         if (enabled) {
-            const alt = new TuiAltScreen(this.terminal);
+            // The alt screen owns mouse handling (wheel scroll, drag selection,
+            // right-click paste — pi's fullscreen behavior); a same-cell primary
+            // click reaches us through its onCellClick callback so cards can be
+            // expanded individually, exactly like a web disclosure row.
+            const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
+                onCellClick: (x, y) => this.handleFullscreenClick(x, y),
+            });
             // Fullscreen layout: header and todo pinned, the transcript scrolls in
             // the middle (grow), and the editor + footer stay pinned to the bottom
             // of the screen — the implicit document scrollview would roll the
             // editor away with the transcript when scrolling back. The pinned rows
             // are shrink-proof: when a long transcript overflows the screen the
             // shrink pass must compress the SCROLL pane, never the editor.
+            this.fullscreenScroll = new ScrollView(this.messagesView, {
+                follow: 'end',
+                primary: true,
+                scrollbar: 'auto',
+            });
             const root = new VStack([
                 { component: this.header, shrink: 0 },
                 // grow is a stack-entry option: the transcript pane takes all the
                 // height the pinned rows leave behind.
-                { component: new ScrollView(this.messagesView, {
-                        follow: 'end',
-                        primary: true,
-                        scrollbar: 'auto',
-                    }), grow: 1 },
+                { component: this.fullscreenScroll, grow: 1 },
                 { component: this.todoPanel, shrink: 0 },
                 // The busy indicator row sits directly above the editor border
                 // (pi's statusContainer placement); idle it renders zero rows.
@@ -571,10 +560,8 @@ export class TuiApp {
         else {
             this.fullscreen?.stop();
             this.fullscreen = undefined;
+            this.fullscreenScroll = undefined;
             this.tui.start();
-            // The alt screen disables its own mouse reporting on exit; regular
-            // mode owns click reporting, so re-enable it.
-            this.terminal.write(ENABLE_CLICK_MOUSE);
             // The alt screen's exit repaint starts at the hardware cursor row, so
             // rows above it (e.g. a dialog the alt screen composited) survive in
             // the terminal buffer. Force a full repaint so the regular surface
@@ -690,62 +677,22 @@ export class TuiApp {
         this.renderHeader();
     }
     /**
-     * Parse and consume an SGR mouse reporting sequence. A left-button press
-     * toggles the clicked transcript card's own expansion (independent of the
-     * global Ctrl+O fold, which still wins); every mouse sequence is consumed
-     * so it never reaches the editor.
-     * @param data - the raw input chunk.
-     * @returns whether the chunk was a mouse sequence.
+     * Map a fullscreen click (0-based screen cell, from the alt screen's
+     * onCellClick) onto a transcript message and toggle its individual
+     * expansion — the web's click-to-disclose behavior for one card at a time.
+     * The global Ctrl+O fold still wins, so keyboard behavior is unchanged.
      */
-    handleMouseSequence(data) {
-        const match = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
-        if (match === null)
-            return false;
-        const button = Number(match[1]);
-        if (match[4] === 'M') {
-            if (button === 0) {
-                this.handleTranscriptClick(Number(match[2]), Number(match[3]));
-            }
-            else if (button >= 64 && button <= 67) {
-                // Wheel up/down/left/right: click reporting itself steals wheel
-                // events from the terminal, so a scroll disables it for a grace
-                // window and lets the terminal scroll its own scrollback (or tmux
-                // scroll the pane), then re-enables it for the next click.
-                this.suspendClickMouseForWheel();
-            }
-        }
-        return true;
-    }
-    /** Temporarily disable click reporting so wheel scrolling reaches the
-     * terminal's native scrollback; re-enable after the grace window (skipped
-     * while the alt screen owns mouse handling in fullscreen mode). */
-    suspendClickMouseForWheel() {
-        if (this.fullscreen !== undefined)
-            return;
-        this.terminal.write(DISABLE_CLICK_MOUSE);
-        if (this.wheelTimer !== undefined)
-            clearTimeout(this.wheelTimer);
-        this.wheelTimer = setTimeout(() => {
-            this.wheelTimer = undefined;
-            if (this.fullscreen !== undefined)
-                return;
-            this.terminal.write(ENABLE_CLICK_MOUSE);
-        }, this.mouseGraceMs);
-    }
-    /**
-     * Map a screen-space click (1-based SGR coords) onto a transcript message
-     * and toggle its individual expansion. Regular mode only: the alt screen
-     * owns its own mouse handling (selection, scrollbar, paste).
-     */
-    handleTranscriptClick(x, y) {
-        if (this.fullscreen !== undefined)
-            return;
+    handleFullscreenClick(x, y) {
         void x;
         const width = this.terminal.columns;
-        const viewportTop = this.tui.captureRenderState().previousViewportTop;
-        const documentRow = y - 1 + viewportTop;
-        const fixedRows = this.header.render(width).length + this.welcomeCard.render(width).length;
-        const messageRow = documentRow - fixedRows;
+        // Fullscreen layout: header row(s), then the transcript scroll pane.
+        const headerHeight = this.header.render(width).length;
+        const rowInScroll = y - headerHeight;
+        if (rowInScroll < 0)
+            return;
+        const scrollTop = this.fullscreenScroll?.scrollTop ?? 0;
+        const welcomeHeight = this.welcomeCard.render(width).length;
+        const messageRow = rowInScroll + scrollTop - welcomeHeight;
         if (messageRow < 0)
             return;
         let row = 0;

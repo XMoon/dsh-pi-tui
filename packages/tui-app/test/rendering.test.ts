@@ -377,8 +377,13 @@ test('unlabeled system entries keep the section marker', async () => {
   assert.ok(view.includes('§ llm retry'), `section marker missing:\n${view}`)
 })
 
-test('mouse click toggles one card independently of the global fold', async () => {
+
+
+
+
+test('fullscreen mouse click toggles one card independently of the global fold', async () => {
   const { vt, app } = startApp()
+  app.setFullscreen(true)
   app.setTranscript([
     { kind: 'user', turn: 0, text: 'hello' },
     { kind: 'thinking', turn: 0, text: 'one\ntwo\nthree' },
@@ -386,9 +391,10 @@ test('mouse click toggles one card independently of the global fold', async () =
     { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"pwd"}', result: '/ws', status: 'ok' },
   ])
   await viewport(vt)
-  // Rows: header(1) + user(2) + thinking(3) + tool1(4) + tool2(5). Click the
-  // first tool card: it alone expands, the other collapsibles stay folded.
+  // Rows: header(1) + user(2) + thinking(3) + tool1(4) + tool2(5) inside the
+  // scroll pane. Click the first tool card: it alone expands.
   vt.sendInput('\x1b[<0;10;4M')
+  vt.sendInput('\x1b[<0;10;4m')
   let view = await viewport(vt)
   assert.ok(view.includes('\nb'), `clicked card body missing:\n${view}`)
   assert.ok(view.includes('Bash ls [ok]'), `clicked card header missing:\n${view}`)
@@ -396,6 +402,7 @@ test('mouse click toggles one card independently of the global fold', async () =
   assert.ok(!view.includes('\n/ws'), `second tool card must stay folded:\n${view}`)
   // Clicking the same row again collapses just that card.
   vt.sendInput('\x1b[<0;10;4M')
+  vt.sendInput('\x1b[<0;10;4m')
   view = await viewport(vt)
   assert.ok(!view.includes('\nb'), `card must collapse again:\n${view}`)
   // The keyboard Ctrl+O still expands everything, mouse state or not.
@@ -404,10 +411,12 @@ test('mouse click toggles one card independently of the global fold', async () =
   assert.ok(view.includes('\nthree'), `global expand must show thinking:\n${view}`)
   assert.ok(view.includes('\nc'), `global expand must show the tool body:\n${view}`)
   assert.ok(view.includes('\n/ws'), `global expand must show the second card:\n${view}`)
+  app.setFullscreen(false)
 })
 
-test('mouse click on a thinking row expands it; clicks elsewhere are inert', async () => {
+test('fullscreen click on a thinking row expands it; wheel, right button, and drag stay inert', async () => {
   const { vt, app } = startApp()
+  app.setFullscreen(true)
   app.setTranscript([
     { kind: 'thinking', turn: 0, text: 'line one\nline two\nline three' },
     { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
@@ -415,71 +424,43 @@ test('mouse click on a thinking row expands it; clicks elsewhere are inert', asy
   await viewport(vt)
   // Rows: header(1) + thinking(2) + tool(3). Click the thinking row.
   vt.sendInput('\x1b[<0;5;2M')
+  vt.sendInput('\x1b[<0;5;2m')
   let view = await viewport(vt)
   assert.ok(view.includes('\nline two'), `thinking body missing after click:\n${view}`)
   assert.ok(!view.includes('\nb'), `tool card must stay folded:\n${view}`)
-  // Clicking the user-adjacent non-collapsible area (the header row) is inert.
-  vt.sendInput('\x1b[<0;5;1M')
-  view = await viewport(vt)
-  assert.ok(view.includes('\nline two'), `header click must not collapse anything:\n${view}`)
-  // Mouse sequences never reach the editor: typing still lands and submits.
-  vt.sendInput('draft')
-  vt.sendInput('\r')
-  await viewport(vt)
-})
-
-test('mouse release and non-left buttons are inert', async () => {
-  const { vt, app } = startApp()
-  app.setTranscript([
-    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
-  ])
-  await viewport(vt)
-  // Release (m) and right button (2) on the card row must not toggle.
-  vt.sendInput('\x1b[<0;10;2m')
-  vt.sendInput('\x1b[<2;10;2M')
-  await viewport(vt)
-  const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('\nb'), `release/right-click must not expand the card:\n${view}`)
-})
-
-test('wheel events suspend click reporting briefly and clicks work again after the grace window', async () => {
-  const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { mouseGraceMs: 20 })
-  app.start()
-  app.setTranscript([
-    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
-  ])
-  await viewport(vt)
-  // A wheel press (button 64 = up) must not expand the card, and it must
-  // not disturb the editor: typing still lands afterwards.
-  vt.sendInput('\x1b[<64;10;2M')
-  await viewport(vt)
-  let view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('\nb'), `wheel must not expand the card:\n${view}`)
-  vt.sendInput('draft')
-  // After the grace window, clicking the card row expands it again.
-  await new Promise(resolve => setTimeout(resolve, 40))
-  vt.sendInput('\x1b[<0;10;2M')
+  // A drag (press + moved release) must not toggle either card.
+  vt.sendInput('\x1b[<0;5;2M')
+  vt.sendInput('\x1b[<0;20;2m')
   await viewport(vt)
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('\nb'), `click must work after the wheel grace window:\n${view}`)
-  app.stop()
+  assert.ok(view.includes('\nline two'), `a drag must not collapse the card:\n${view}`)
+  assert.ok(!view.includes('\nb'), `a drag must not expand the tool card:\n${view}`)
+  // A wheel scroll and a right-button press/release must not toggle anything.
+  vt.sendInput('\x1b[<64;5;2M')
+  vt.sendInput('\x1b[<2;5;2M')
+  vt.sendInput('\x1b[<2;5;2m')
+  await viewport(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('\nline two'), `wheel/right must not collapse the card:\n${view}`)
+  assert.ok(!view.includes('\nb'), `wheel/right must not expand the tool card:\n${view}`)
+  app.setFullscreen(false)
 })
 
-test('wheel release and tilt buttons are inert but consumed', async () => {
+test('regular mode leaves the mouse entirely to the terminal (no click handling)', async () => {
+  // pi parity: regular mode never enables mouse reporting, so terminal-native
+  // selection and scrollback scrolling stay intact. A stray SGR sequence is
+  // still inert and never disturbs the editor.
   const { vt, app } = startApp()
   app.setTranscript([
     { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
   ])
   await viewport(vt)
-  vt.sendInput('\x1b[<64;10;2m') // wheel release
-  vt.sendInput('\x1b[<66;10;2M') // wheel tilt left
-  vt.sendInput('\x1b[<67;10;2M') // wheel tilt right
+  vt.sendInput('\x1b[<0;10;2M')
+  vt.sendInput('\x1b[<0;10;2m')
   await viewport(vt)
   const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('\nb'), `wheel variants must not expand the card:\n${view}`)
+  assert.ok(!view.includes('\nb'), `regular mode must not react to clicks:\n${view}`)
 })
-
 
 test('tool cards degrade to generic rendering when the registry lookup is absent', async () => {
   // Mirrors the production guard: the registry is read through ctx.get and

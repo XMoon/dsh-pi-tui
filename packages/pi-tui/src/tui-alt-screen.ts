@@ -153,6 +153,13 @@ export interface TuiAltScreenOptions {
 	openUrl?: (url: string) => void;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
 	onRightClickPaste?: () => void;
+	/**
+	 * Handle a primary-button click on one cell: a press and release at the
+	 * same cell with no drag in between and no OSC 8 URL under the cursor.
+	 * dsh-pi-tui extension: lets the host react to clicks (e.g. expand one
+	 * transcript card) without reimplementing selection.
+	 */
+	onCellClick?: (x: number, y: number) => void;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -192,6 +199,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
+	private readonly onCellClick?: (x: number, y: number) => void;
 
 	constructor(
 		terminal: Terminal,
@@ -214,6 +222,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
+		this.onCellClick = options.onCellClick;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -974,6 +983,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				}
 				this.requestRender();
 				return;
+			}
+			if (
+				!this.selectionDragged &&
+				clickedUrl === undefined &&
+				this.selectionAnchor !== undefined &&
+				this.selectionAnchor.row === point.row &&
+				this.selectionAnchor.col === point.col
+			) {
+				// Coordinates are 0-based screen cells (SGR values minus one).
+				this.onCellClick?.(event.x, event.y);
 			}
 			this.copySelectionToClipboard();
 			this.requestRender();

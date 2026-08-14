@@ -1320,4 +1320,41 @@ describe("TuiAltScreen", () => {
 			assert.ok(restoreEvent.data.indexOf("first") < restoreEvent.data.indexOf("sixth"));
 		}
 	});
+
+	it("fires onCellClick for a same-cell primary press+release without a drag", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const clicks: Array<{ x: number; y: number }> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onCellClick: (x, y) => clicks.push({ x, y }),
+		});
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;5;3M"); // primary press (SGR 1-based)
+		terminal.sendInput("\x1b[<0;5;3m"); // release at the same cell
+		await terminal.waitForRender();
+		// The callback receives 0-based screen coordinates.
+		assert.deepStrictEqual(clicks, [{ x: 4, y: 2 }]);
+		tui.stop();
+	});
+
+	it("does not fire onCellClick for a drag, a wheel, or a secondary button", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const clicks: Array<{ x: number; y: number }> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onCellClick: (x, y) => clicks.push({ x, y }),
+		});
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;5;3M"); // press
+		terminal.sendInput("\x1b[<0;9;3m"); // release elsewhere = a drag
+		terminal.sendInput("\x1b[<64;5;3M"); // wheel up
+		terminal.sendInput("\x1b[<2;5;3M"); // secondary press
+		terminal.sendInput("\x1b[<2;5;3m"); // secondary release
+		await terminal.waitForRender();
+		assert.deepStrictEqual(clicks, []);
+		tui.stop();
+	});
 });
+
