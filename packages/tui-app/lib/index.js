@@ -26,6 +26,7 @@ import { parseCommand } from '@deepseek-ai/dsh-commands';
 import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 // The plan-mode fold for the header badge.
 import { foldPlanMode } from '@deepseek-ai/dsh-plan-mode';
+import { foldSessionTitle } from '@deepseek-ai/dsh-session-title';
 import { TUI_STARTUP_SERVICE } from "./startup.js";
 import { toolPresenterFrom } from "./present.js";
 import { textOf, TranscriptFolder } from "./transcript.js";
@@ -492,6 +493,7 @@ export function apply(ctx, config) {
             statsFolder.apply(liveAgent.session.events);
             goalText = foldGoal(liveAgent.session.events);
             app.setWorking(workingFromLog(liveAgent.session.events));
+            app.setSessionTitle(foldSessionTitle(liveAgent.session.events)?.title);
             app.clearLocalMessages();
             repaint(app, folder);
             refreshStatus();
@@ -952,6 +954,8 @@ export function apply(ctx, config) {
                 app.setTodoSummary(event.data.todos);
             if (event.type === 'plan/mode')
                 app.setPlanMode(event.data.active);
+            if (event.type === 'session/title')
+                app.setSessionTitle(foldSessionTitle([event])?.title);
             // Persist each completed turn so a crash loses at most the live turn.
             // The busy indicator follows turn boundaries: on from the moment a
             // turn starts (model wait + tool calls), off when it ends.
@@ -968,10 +972,11 @@ export function apply(ctx, config) {
                 refreshStatus();
             }
         });
-        // Initial plan badge and busy indicator from the log (a resumed
-        // session may be persisted mid-turn).
+        // Initial plan badge, busy indicator, and auto title from the log (a
+        // resumed session may be persisted mid-turn).
         app.setPlanMode(foldPlanMode(liveAgent.session.events));
         app.setWorking(workingFromLog(liveAgent.session.events));
+        app.setSessionTitle(foldSessionTitle(liveAgent.session.events)?.title);
         // Initial todo state: the last todo/write snapshot in the log.
         for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
             const event = liveAgent.session.events[index];

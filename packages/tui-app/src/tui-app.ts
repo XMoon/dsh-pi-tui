@@ -61,6 +61,9 @@ import { WorkingIndicator } from './working.ts'
 export const EXPAND_RECENT_TURNS = 3
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export const RESULT_PREVIEW_LINES = 3
+/** SGR button-mode mouse reporting (clicks + release, SGR coords). */
+const ENABLE_CLICK_MOUSE = '\x1b[?1000h\x1b[?1006h'
+const DISABLE_CLICK_MOUSE = '\x1b[?1006l\x1b[?1000l'
 
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
@@ -446,6 +449,17 @@ export class TuiApp {
   private readonly present: ToolPresenter | undefined
   /** The busy indicator row directly above the editor border; idle renders nothing. */
   private readonly working: WorkingIndicator
+  /**
+   * Per-message expansion overrides from mouse clicks: a message whose entry
+   * is true stays expanded even when the global fold is off; absent falls
+   * back to the global boundary. The global Ctrl+O fold always wins, so the
+   * keyboard behavior is unaffected by mouse toggles.
+   */
+  private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
+  /** Rendered row heights per transcript message, for mouse hit-testing. */
+  private messageRows: ReadonlyArray<{ message: TranscriptMessage; height: number }> = []
+  /** The live session's auto-generated title, shown in the header when set. */
+  private sessionTitleText = ''
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
     this.terminal = terminal
@@ -482,12 +496,14 @@ export class TuiApp {
   /** Enter raw mode and start rendering. */
   start(): void {
     this.tui.start()
+    this.terminal.write(ENABLE_CLICK_MOUSE)
   }
 
   /** Leave raw mode and stop rendering. */
   stop(): void {
     this.clearNotify()
     this.working.dispose()
+    this.terminal.write(DISABLE_CLICK_MOUSE)
     this.tui.stop()
     this.fullscreen?.stop()
     this.fullscreen = undefined
@@ -495,6 +511,9 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
+    // SGR mouse sequences (click reporting) are consumed here so they never
+    // reach the focused editor as garbage escape bytes.
+    if (this.handleMouseSequence(data)) return { consume: true }
     // Kitty-protocol terminals report press, repeat, and release events as
     // separate sequences; the app must act on the PRESS only. A release of
     // Ctrl+O would otherwise double-toggle the fold (press expands, release
@@ -767,6 +786,9 @@ export class TuiApp {
       this.fullscreen?.stop()
       this.fullscreen = undefined
       this.tui.start()
+      // The alt screen disables its own mouse reporting on exit; regular
+      // mode owns click reporting, so re-enable it.
+      this.terminal.write(ENABLE_CLICK_MOUSE)
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
       // the terminal buffer. Force a full repaint so the regular surface
@@ -838,17 +860,26 @@ export class TuiApp {
     this.messagesView.clear()
     this.messagesView.addChild(this.welcomeCard)
     const boundary = this.expandBoundary()
+    // Row heights for mouse hit-testing: components render (and cache) at
+    // the same width the frame pass uses, so the heights match the screen.
+    const width = this.terminal.columns
+    const rows: Array<{ message: TranscriptMessage; height: number }> = []
     for (const message of this.messages) {
       // Alt+T hides thinking entries without touching the fold state.
       if (message.kind === 'thinking' && this.hideThinking) continue
-      this.messagesView.addChild(this.renderMessage(message, boundary))
+      const component = this.renderMessage(message, boundary)
+      this.messagesView.addChild(component)
+      rows.push({ message, height: component.render(width).length })
     }
     for (const message of this.localMessages) {
-      this.messagesView.addChild(this.renderMessage(message, boundary))
+      const component = this.renderMessage(message, boundary)
+      this.messagesView.addChild(component)
+      rows.push({ message, height: component.render(width).length })
     }
     if (this.notifyText !== '') {
       this.messagesView.addChild(new Text(color.error(`✗ ${this.notifyText}`), 0, 0))
     }
+    this.messageRows = rows
     this.renderTodoPanel()
     this.requestRender()
   }
@@ -866,6 +897,65 @@ export class TuiApp {
       this.working.setText('')
     }
     this.requestRender()
+  }
+
+  /**
+   * Set the live session's auto-generated title (from the session/title
+   * log) for the header; undefined clears it.
+   */
+  setSessionTitle(title: string | undefined): void {
+    this.sessionTitleText = title ?? ''
+    this.renderHeader()
+  }
+
+  /**
+   * Parse and consume an SGR mouse reporting sequence. A left-button press
+   * toggles the clicked transcript card's own expansion (independent of the
+   * global Ctrl+O fold, which still wins); every mouse sequence is consumed
+   * so it never reaches the editor.
+   * @param data - the raw input chunk.
+   * @returns whether the chunk was a mouse sequence.
+   */
+  private handleMouseSequence(data: string): boolean {
+    const match = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data)
+    if (match === null) return false
+    if (match[4] === 'M' && match[1] === '0') this.handleTranscriptClick(Number(match[2]), Number(match[3]))
+    return true
+  }
+
+  /**
+   * Map a screen-space click (1-based SGR coords) onto a transcript message
+   * and toggle its individual expansion. Regular mode only: the alt screen
+   * owns its own mouse handling (selection, scrollbar, paste).
+   */
+  private handleTranscriptClick(x: number, y: number): void {
+    if (this.fullscreen !== undefined) return
+    void x
+    const width = this.terminal.columns
+    const viewportTop = this.tui.captureRenderState().previousViewportTop
+    const documentRow = y - 1 + viewportTop
+    const fixedRows = this.header.render(width).length + this.welcomeCard.render(width).length
+    const messageRow = documentRow - fixedRows
+    if (messageRow < 0) return
+    let row = 0
+    for (const entry of this.messageRows) {
+      if (messageRow < row + entry.height) {
+        this.toggleMessageExpanded(entry.message)
+        return
+      }
+      row += entry.height
+    }
+  }
+
+  /** Toggle one collapsible message's individual expansion (mouse click). */
+  private toggleMessageExpanded(message: TranscriptMessage): void {
+    if (message.kind !== 'thinking' && message.kind !== 'tool' && message.kind !== 'system') return
+    if (this.expandedOverride.get(message) === true) {
+      this.expandedOverride.delete(message)
+    } else {
+      this.expandedOverride.set(message, true)
+    }
+    this.rebuildMessages()
   }
 
   /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
@@ -936,7 +1026,7 @@ export class TuiApp {
       return row
     }
     if (message.kind === 'thinking') {
-      const expanded = message.turn >= boundary
+      const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
       const text = expanded
         ? `${color.textDim('🐳')} ${message.text}`
         // Folded: while the step still streams, the row follows the LATEST
@@ -950,7 +1040,7 @@ export class TuiApp {
       return new Text(text, 0, 0)
     }
     if (message.kind === 'system') {
-      const expanded = message.turn >= boundary
+      const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
       // Labeled entries are context injections: the row names the producer
       // like the Web ContextInjectionRow (上下文注入 · label), with a notice
       // form's one-line account on the folded row. Unlabeled entries keep
@@ -985,7 +1075,7 @@ export class TuiApp {
       : message.status === 'error'
         ? color.error('[error]')
         : color.textDim('[running]')
-    if (message.turn >= boundary) {
+    if (message.turn >= boundary || this.expandedOverride.get(message) === true) {
       card.addChild(new Text(`${header.title}${summary} ${pill}`, 0, 0))
       this.renderToolBody(card, message)
     } else {
@@ -1169,10 +1259,11 @@ export class TuiApp {
     return this.hideThinking
   }
 
-  /** Rebuild the header from base + todo summary + plan badge. */
+  /** Rebuild the header from base + session title + todo summary + plan badge. */
   private renderHeader(): void {
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
-    this.headerText = `🐋 dsh-pi-tui${this.todoText}${badge}`
+    const title = this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
+    this.headerText = `🐋 dsh-pi-tui${title}${this.todoText}${badge}`
     this.header.setText(this.headerText)
     this.requestRender()
   }

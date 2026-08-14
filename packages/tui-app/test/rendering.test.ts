@@ -376,3 +376,69 @@ test('unlabeled system entries keep the section marker', async () => {
   assert.ok(view.includes('§ llm retry'), `section marker missing:\n${view}`)
 })
 
+test('mouse click toggles one card independently of the global fold', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'user', turn: 0, text: 'hello' },
+    { kind: 'thinking', turn: 0, text: 'one\ntwo\nthree' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"pwd"}', result: '/ws', status: 'ok' },
+  ])
+  await viewport(vt)
+  // Rows: header(1) + user(2) + thinking(3) + tool1(4) + tool2(5). Click the
+  // first tool card: it alone expands, the other collapsibles stay folded.
+  vt.sendInput('\x1b[<0;10;4M')
+  let view = await viewport(vt)
+  assert.ok(view.includes('\nb'), `clicked card body missing:\n${view}`)
+  assert.ok(view.includes('Bash ls [ok]'), `clicked card header missing:\n${view}`)
+  assert.ok(!view.includes('\nthree'), `thinking must stay folded after the click:\n${view}`)
+  assert.ok(!view.includes('\n/ws'), `second tool card must stay folded:\n${view}`)
+  // Clicking the same row again collapses just that card.
+  vt.sendInput('\x1b[<0;10;4M')
+  view = await viewport(vt)
+  assert.ok(!view.includes('\nb'), `card must collapse again:\n${view}`)
+  // The keyboard Ctrl+O still expands everything, mouse state or not.
+  vt.sendInput('\x0f')
+  view = await viewport(vt)
+  assert.ok(view.includes('\nthree'), `global expand must show thinking:\n${view}`)
+  assert.ok(view.includes('\nc'), `global expand must show the tool body:\n${view}`)
+  assert.ok(view.includes('\n/ws'), `global expand must show the second card:\n${view}`)
+})
+
+test('mouse click on a thinking row expands it; clicks elsewhere are inert', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'thinking', turn: 0, text: 'line one\nline two\nline three' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+  ])
+  await viewport(vt)
+  // Rows: header(1) + thinking(2) + tool(3). Click the thinking row.
+  vt.sendInput('\x1b[<0;5;2M')
+  let view = await viewport(vt)
+  assert.ok(view.includes('\nline two'), `thinking body missing after click:\n${view}`)
+  assert.ok(!view.includes('\nb'), `tool card must stay folded:\n${view}`)
+  // Clicking the user-adjacent non-collapsible area (the header row) is inert.
+  vt.sendInput('\x1b[<0;5;1M')
+  view = await viewport(vt)
+  assert.ok(view.includes('\nline two'), `header click must not collapse anything:\n${view}`)
+  // Mouse sequences never reach the editor: typing still lands and submits.
+  vt.sendInput('draft')
+  vt.sendInput('\r')
+  await viewport(vt)
+})
+
+test('mouse release and non-left buttons are inert', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+  ])
+  await viewport(vt)
+  // Release (m) and right button (2) on the card row must not toggle.
+  vt.sendInput('\x1b[<0;10;2m')
+  vt.sendInput('\x1b[<2;10;2M')
+  await viewport(vt)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\nb'), `release/right-click must not expand the card:\n${view}`)
+})
+
+

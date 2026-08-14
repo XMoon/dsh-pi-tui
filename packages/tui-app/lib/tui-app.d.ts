@@ -258,6 +258,17 @@ export declare class TuiApp {
     private readonly present;
     /** The busy indicator row directly above the editor border; idle renders nothing. */
     private readonly working;
+    /**
+     * Per-message expansion overrides from mouse clicks: a message whose entry
+     * is true stays expanded even when the global fold is off; absent falls
+     * back to the global boundary. The global Ctrl+O fold always wins, so the
+     * keyboard behavior is unaffected by mouse toggles.
+     */
+    private readonly expandedOverride;
+    /** Rendered row heights per transcript message, for mouse hit-testing. */
+    private messageRows;
+    /** The live session's auto-generated title, shown in the header when set. */
+    private sessionTitleText;
     constructor(terminal: Terminal, events: TuiAppEvents, options?: TuiAppOptions);
     /** Enter raw mode and start rendering. */
     start(): void;
@@ -350,6 +361,28 @@ export declare class TuiApp {
      * derives it from turn/start and turn/end).
      */
     setWorking(active: boolean): void;
+    /**
+     * Set the live session's auto-generated title (from the session/title
+     * log) for the header; undefined clears it.
+     */
+    setSessionTitle(title: string | undefined): void;
+    /**
+     * Parse and consume an SGR mouse reporting sequence. A left-button press
+     * toggles the clicked transcript card's own expansion (independent of the
+     * global Ctrl+O fold, which still wins); every mouse sequence is consumed
+     * so it never reaches the editor.
+     * @param data - the raw input chunk.
+     * @returns whether the chunk was a mouse sequence.
+     */
+    private handleMouseSequence;
+    /**
+     * Map a screen-space click (1-based SGR coords) onto a transcript message
+     * and toggle its individual expansion. Regular mode only: the alt screen
+     * owns its own mouse handling (selection, scrollbar, paste).
+     */
+    private handleTranscriptClick;
+    /** Toggle one collapsible message's individual expansion (mouse click). */
+    private toggleMessageExpanded;
     /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
     setPlanMode(active: boolean): void;
     /**
@@ -411,7 +444,7 @@ export declare class TuiApp {
     toggleThinkingHidden(): boolean;
     /** Whether thinking entries are currently hidden. */
     isThinkingHidden(): boolean;
-    /** Rebuild the header from base + todo summary + plan badge. */
+    /** Rebuild the header from base + session title + todo summary + plan badge. */
     private renderHeader;
     /**
      * Update the footer: line 1 `[model] …/cwd branch [ctx bar] t/steps`,

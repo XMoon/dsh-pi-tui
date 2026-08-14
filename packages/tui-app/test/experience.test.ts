@@ -56,6 +56,17 @@ test('plan mode shows badges in header and footer and tints the editor border', 
   assert.ok(!view.includes('[plan]'), `badge still visible:\n${view}`)
 })
 
+test('the auto session title shows in the header and clears', async () => {
+  const { vt, app } = startApp()
+  app.setSessionTitle('fix the read card')
+  const view = await viewport(vt)
+  assert.ok(view.includes('🐋 dsh-pi-tui · fix the read card'), `title missing from header:\n${view}`)
+  app.setSessionTitle(undefined)
+  const cleared = await viewport(vt)
+  assert.ok(!cleared.includes('fix the read card'), `title survived:\n${cleared}`)
+})
+
+
 test('status merges partial updates', async () => {
   const { vt, app } = startApp()
   app.setStatus({ model: 'm', cwd: 'c' })
