@@ -16,6 +16,8 @@ export declare const TUI_STARTUP_SERVICE = "tuiStartup";
 export interface TuiStartupValues {
     /** `--session`, absent when the invocation did not name one. */
     sessionId?: string;
+    /** `--preset`, the agent preset a fresh session starts on. */
+    presetId?: string;
     /**
      * The shipped agent-preset root bundled with this package. Absolute path of
      * `config/agent-presets/` beside the built `lib/`; rows configured from the

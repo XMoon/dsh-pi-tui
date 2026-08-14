@@ -90,6 +90,22 @@ function shortCwd(cwd) {
     return parts.slice(-2).join('/') || cwd;
 }
 /**
+ * Write raw bytes to a file descriptor, bypassing the cordis-wrapped
+ * `process.stderr` (whose `writeSync` is missing). Startup diagnostics go to
+ * fd 2 so they never corrupt the TUI frame on stdout.
+ * @param fd - the file descriptor (2 for stderr).
+ * @param text - the bytes to write.
+ */
+function writeFd2(fd, text) {
+    try {
+        writeFileSync(fd, text);
+    }
+    catch {
+        // Diagnostics are best-effort: a closed descriptor must not take the
+        // fallback path down.
+    }
+}
+/**
  * The active goal badge text from the session log, or undefined. The latest
  * `goal/change` wins; a clear or completed goal hides the badge.
  * @param events - the session log.
@@ -190,6 +206,29 @@ export async function recordedPreset(ctx, sessionId) {
     }
     return resolveSessionPreset({ header, events });
 }
+/**
+ * Re-compose one agent onto another preset while its session is still blank.
+ *
+ * A started conversation's history was produced under its preset's tools, so
+ * only a session with no `turn/start` event may swap — the same rule as the
+ * official `agentPreset.select` RPC. The selection is appended to the log only
+ * after the swap committed (a rejected mount leaves the old composition).
+ * @param ctx - the runner context.
+ * @param agent - the live agent whose composition to swap.
+ * @param id - the target preset id.
+ * @returns `switched` with the committed preset id, or `locked` when a turn has run.
+ * @throws when the roster supplies no such preset or its composition is unusable.
+ */
+export async function recomposeBlank(ctx, agent, id) {
+    const presets = ctx.get('agentPresets');
+    if (presets === undefined)
+        throw new Error('agent presets unavailable in this deployment');
+    if (agent.session.events.some(event => event.type === 'turn/start'))
+        return { kind: 'locked' };
+    const preset = await presets.recompose(agent.ctx, id);
+    agent.session.append('agent-preset/selected', { agentPreset: preset.id });
+    return { kind: 'switched', preset: preset.id };
+}
 /** Custom-theme directory convention: `~/.dsh-pi-tui/themes/*.json`. */
 function customThemesDir() {
     return join(homedir(), '.dsh-pi-tui', 'themes');
@@ -259,6 +298,26 @@ export function apply(ctx, config) {
         const selected = { current: selection, assembled: undefined };
         const compose = (presetId) => composeAgent(ctx, selected, presetId);
         const withPresetMeta = (composition) => composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset };
+        // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
+        // both fall back to the saved default (settings `agent-presets.default`,
+        // then the roster config) when absent. A fresh session starts on it; a
+        // resumed BLANK session may still be re-composed onto it; a resumed
+        // started session keeps its recorded preset (warned, never overridden).
+        const launchPreset = startup.presetId ?? (process.env.DSH_PI_TUI_PRESET?.trim() || undefined);
+        /** Resolve the launch composition, falling back to the default on an unknown id. */
+        const launchComposition = async () => {
+            try {
+                return { composition: await compose(launchPreset) };
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                ctx.logger.warn(`tui-runner: launch preset unavailable: ${message}`);
+                return {
+                    composition: await compose(),
+                    failure: `preset "${launchPreset}" unavailable; started with the default`,
+                };
+            }
+        };
         // A stale --session id must not kill the TUI: resume falls back to a
         // fresh session and the failure is surfaced as a notify line.
         let resumeFailure;
@@ -269,33 +328,68 @@ export function apply(ctx, config) {
                 // not the header): a session that switched while blank ran every turn
                 // under the newer composition, and rebuilding it differently would
                 // replay tool calls the model can no longer make.
-                const composition = await compose(await recordedPreset(ctx, sessionId));
+                const recorded = await recordedPreset(ctx, sessionId);
+                const composition = await compose(recorded);
                 handle = await agents.resume({
                     resumeSessionId: SessionId(sessionId),
                     agentOptions,
                     setup: composition.setup,
                 });
+                // A launch-time preset may still apply while the session is blank;
+                // the blank check lives inside recomposeBlank (shared with /preset).
+                if (launchPreset !== undefined && launchPreset !== recorded) {
+                    try {
+                        const outcome = await recomposeBlank(ctx, handle.agent, launchPreset);
+                        if (outcome.kind === 'locked') {
+                            ctx.logger.warn(`tui-runner: session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`);
+                        }
+                    }
+                    catch (error) {
+                        ctx.logger.warn(`tui-runner: --preset ${launchPreset} not applied on resume: ${error instanceof Error ? error.message : String(error)}`);
+                    }
+                }
             }
             catch (error) {
                 ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}`);
+                writeFd2(2, `[tui] resume ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}\n`);
                 resumeFailure = `session ${sessionId} could not be resumed; started a fresh session`;
-                const composition = await compose();
+                const launched = await launchComposition();
+                if (launched.failure !== undefined)
+                    resumeFailure = launched.failure;
                 handle = await agents.create({
                     sessionId: SessionId(`session-${randomUUID()}`),
-                    meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
+                    meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
                     agentOptions,
-                    setup: composition.setup,
+                    setup: launched.composition.setup,
                 });
             }
         }
         else {
-            const composition = await compose();
-            handle = await agents.create({
-                sessionId: SessionId(`session-${randomUUID()}`),
-                meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-                agentOptions,
-                setup: composition.setup,
-            });
+            const launched = await launchComposition();
+            if (launched.failure !== undefined)
+                resumeFailure = launched.failure;
+            try {
+                handle = await agents.create({
+                    sessionId: SessionId(`session-${randomUUID()}`),
+                    meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
+                    agentOptions,
+                    setup: launched.composition.setup,
+                });
+            }
+            catch (error) {
+                // A preset that resolves but fails to MOUNT (e.g. a row waiting for a
+                // host service) rejects inside the agent-factory setup. Surface it and
+                // fall back to the default rather than killing the TUI.
+                ctx.logger.warn(`tui-runner: failed to start with preset "${launchPreset ?? 'default'}": ${error instanceof Error ? error.message : String(error)}`);
+                resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${error instanceof Error ? error.message : String(error)}`;
+                const fallback = await compose();
+                handle = await agents.create({
+                    sessionId: SessionId(`session-${randomUUID()}`),
+                    meta: { cwd: process.cwd(), ...withPresetMeta(fallback) },
+                    agentOptions,
+                    setup: fallback.setup,
+                });
+            }
         }
         let liveHandle = handle;
         let liveAgent = handle.agent;
@@ -948,21 +1042,17 @@ export function apply(ctx, config) {
                         // Selecting swaps the composition; only a blank session (no turn
                         // has run yet) may do so — a started conversation's history was
                         // produced under its preset's tools. Same rule as the official
-                        // `agentPreset.select` RPC.
-                        if (liveAgent.session.events.some(event => event.type === 'turn/start')) {
-                            return {
-                                kind: 'error',
-                                text: `session "${liveAgent.session.id}" has already started; its agent preset is fixed`,
-                            };
-                        }
+                        // `agentPreset.select` RPC and the launch-time --preset path.
                         try {
-                            const preset = await presets.recompose(liveAgent.ctx, verb);
-                            // Recorded only after the swap committed: the log states what
-                            // the agent runs, and a rejected mount leaves the old
-                            // composition (official rule).
-                            liveAgent.session.append('agent-preset/selected', { agentPreset: preset.id });
+                            const outcome = await recomposeBlank(ctx, liveAgent, verb);
+                            if (outcome.kind === 'locked') {
+                                return {
+                                    kind: 'error',
+                                    text: `session "${liveAgent.session.id}" has already started; its agent preset is fixed`,
+                                };
+                            }
                             refreshCompletions();
-                            return { kind: 'success', text: `session preset switched to ${preset.id}` };
+                            return { kind: 'success', text: `session preset switched to ${outcome.preset}` };
                         }
                         catch (error) {
                             return { kind: 'error', text: error instanceof Error ? error.message : String(error) };

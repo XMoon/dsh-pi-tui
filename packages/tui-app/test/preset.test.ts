@@ -1,16 +1,16 @@
 /**
  * Headless tests for the P6 preset wiring: `composeAgent` (roster-absent and
- * roster-present composition) and `recordedPreset` (log-first resolution).
- * The `/preset` command itself is covered by the live-TTY matrix (its handler
- * needs the full agent/commands machinery this harness does not mount).
+ * roster-present composition), `recordedPreset` (log-first resolution), and
+ * `recomposeBlank` (blank-only swap shared by /preset and --preset).
  * @module @dsh-pi-tui/tui-app/preset.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import { composeAgent, recordedPreset } from '../src/index.ts'
+import { composeAgent, recordedPreset, recomposeBlank } from '../src/index.ts'
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 /** Minimal roster double recording every mount. */
 function roster(overrides: {
@@ -29,6 +29,10 @@ function roster(overrides: {
       mount: async (_agentCtx: Context, id: string) => {
         if (overrides.mountThrows === true) throw new Error(`agent-presets: preset "${id}" failed to mount: broken`)
         mounted.push(id)
+      },
+      recompose: async (_agentCtx: Context, id: string) => {
+        if (overrides.unknown) throw new Error(`agent-presets: preset "${id}" not found (available: standard)`)
+        return { id }
       },
     },
   }
@@ -125,4 +129,65 @@ test('recordedPreset returns undefined for a pre-roster session log', async () =
   }
   const ctx = ctxWith(name => name === 'sessionPersistence' ? persistence : undefined)
   assert.equal(await recordedPreset(ctx, 's1'), undefined)
+})
+
+/** A blank/started session double recording appended selections. */
+function sessionWith(events: readonly SessionEvent[]): { session: { id: string; events: readonly SessionEvent[]; append: (type: string, data: unknown) => void }; appended: unknown[] } {
+  const appended: unknown[] = []
+  return {
+    appended,
+    session: {
+      id: 's1',
+      events,
+      append: (_type: string, data: unknown) => { appended.push(data) },
+    },
+  }
+}
+
+test('recomposeBlank swaps a blank session and records the selection', async () => {
+  const recomposed: string[] = []
+  const fake = roster()
+  const service = {
+    ...fake.service,
+    recompose: async (_agentCtx: Context, id: string) => { recomposed.push(id); return { id } },
+  }
+  const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
+  const { session, appended } = sessionWith([])
+  const outcome = await recomposeBlank(ctx, { ctx: agentCtx(), session }, 'minimal')
+  assert.deepEqual(outcome, { kind: 'switched', preset: 'minimal' })
+  assert.deepEqual(recomposed, ['minimal'])
+  assert.deepEqual(appended, [{ agentPreset: 'minimal' }])
+})
+
+test('recomposeBlank refuses a started session without touching the roster', async () => {
+  let recomposed = 0
+  const service = {
+    ...roster().service,
+    recompose: async () => { recomposed += 1; return { id: 'x' } },
+  }
+  const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
+  const { session, appended } = sessionWith([{ type: 'turn/start', seq: 1, time: 1, data: {} } as SessionEvent])
+  const outcome = await recomposeBlank(ctx, { ctx: agentCtx(), session }, 'minimal')
+  assert.deepEqual(outcome, { kind: 'locked' })
+  assert.equal(recomposed, 0)
+  assert.equal(appended.length, 0)
+})
+
+test('recomposeBlank throws without a roster', async () => {
+  const ctx = ctxWith(() => undefined)
+  const { session } = sessionWith([])
+  await assert.rejects(
+    recomposeBlank(ctx, { ctx: agentCtx(), session }, 'standard'),
+    /agent presets unavailable/,
+  )
+})
+
+test('recomposeBlank propagates an unknown-preset rejection', async () => {
+  const fake = roster({ unknown: true })
+  const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
+  const { session } = sessionWith([])
+  await assert.rejects(
+    recomposeBlank(ctx, { ctx: agentCtx(), session }, 'nope'),
+    /not found/,
+  )
 })

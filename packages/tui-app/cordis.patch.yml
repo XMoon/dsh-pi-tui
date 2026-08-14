@@ -40,6 +40,12 @@
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
 
+    # Host-plane cordis runner: the `cordis` preset's `tool-cordis` row waits
+    # for `dynamicCordisRunner`/`cordisInspect` and fails the preset at mount
+    # without them (same host row the web bundle inserts).
+    - id: cordis-host-runner
+      name: '@deepseek-ai/dsh-cordis-host-runner'
+
 # ── the agent plane moves behind agent presets ─────────────────────────────
 #
 # Every row below composes what ONE agent contributes to the host registries:

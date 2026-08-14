@@ -21,10 +21,12 @@ function tuiCommand() {
         .description('Run the DeepSeek Harness terminal UI.')
         .helpOption('-h, --help', 'show this help')
         .option('--session <id>', 'resume an existing session instead of creating one')
+        .option('--preset <id>', 'agent preset for a fresh session (falls back to $DSH_PI_TUI_PRESET, then the saved default)')
         .addHelpText('after', `
 Examples:
   dsh --profile pi-tui                       start the terminal UI
   dsh --profile pi-tui --session <id>        resume an existing session
+  dsh --profile pi-tui --preset minimal      fresh session on the minimal preset
 `);
 }
 /**
@@ -39,6 +41,7 @@ export function apply(ctx) {
         const options = program.opts();
         ctx.provide(TUI_STARTUP_SERVICE, {
             ...(options.session !== undefined ? { sessionId: options.session } : {}),
+            ...(options.preset !== undefined ? { presetId: options.preset } : {}),
             // `lib/startup.js` → `../config/agent-presets`; the `config` directory
             // ships with the package (package.json `files`).
             shippedPresetRoot: join(import.meta.dirname, '..', 'config', 'agent-presets'),

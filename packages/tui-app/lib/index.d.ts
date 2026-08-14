@@ -12,6 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent';
+import type { SessionEvent } from '@deepseek-ai/dsh-session';
 /** Stable Cordis plugin name. */
 export declare const name = "tui-runner";
 /** Core services required before the TUI can mount. */
@@ -57,6 +58,38 @@ export declare function composeAgent(ctx: Context, selected: ModelSelectionRef, 
  * @returns the recorded preset id, or undefined to compose the default.
  */
 export declare function recordedPreset(ctx: Context, sessionId: string): Promise<string | undefined>;
+/** The session surface {@link recomposeBlank} needs: its log and the append seam. */
+export interface RecomposableSession {
+    readonly id: string;
+    readonly events: readonly SessionEvent[];
+    append(type: 'agent-preset/selected', data: {
+        agentPreset: string;
+    }): unknown;
+}
+/** Outcome of {@link recomposeBlank}: the swap committed, or the session is locked. */
+export type RecomposeOutcome = {
+    kind: 'switched';
+    preset: string;
+} | {
+    kind: 'locked';
+};
+/**
+ * Re-compose one agent onto another preset while its session is still blank.
+ *
+ * A started conversation's history was produced under its preset's tools, so
+ * only a session with no `turn/start` event may swap — the same rule as the
+ * official `agentPreset.select` RPC. The selection is appended to the log only
+ * after the swap committed (a rejected mount leaves the old composition).
+ * @param ctx - the runner context.
+ * @param agent - the live agent whose composition to swap.
+ * @param id - the target preset id.
+ * @returns `switched` with the committed preset id, or `locked` when a turn has run.
+ * @throws when the roster supplies no such preset or its composition is unusable.
+ */
+export declare function recomposeBlank(ctx: Context, agent: {
+    ctx: Context;
+    session: RecomposableSession;
+}, id: string): Promise<RecomposeOutcome>;
 /**
  * Mount the TUI: resolve the model selection, create or resume the agent,
  * wire the surface to the agent, and subscribe to the session firehose.
