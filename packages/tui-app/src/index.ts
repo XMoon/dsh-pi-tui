@@ -628,16 +628,23 @@ export function apply(ctx: Context, config: Config): void {
       return undefined
     }
 
-    /** Hand the TUI over to another persisted session. */
+    /** Hand the TUI over to another persisted session. Never throws: every
+     * failure (unknown session, broken log, preset mount) returns an error
+     * string so callers' `.then(error => ...)` need no rejection path. */
     const switchSession = async (sessionId: string): Promise<string | undefined> => {
-      // The target session's recorded preset, exactly like the resume path.
-      const composition = await compose(await recordedPreset(ctx, sessionId))
-      const next = await agents.resume({
-        resumeSessionId: SessionId(sessionId),
-        agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
-        setup: composition.setup,
-      })
-      return swapTo(next)
+      try {
+        // The target session's recorded preset, exactly like the resume path.
+        const composition = await compose(await recordedPreset(ctx, sessionId))
+        const next = await agents.resume({
+          resumeSessionId: SessionId(sessionId),
+          agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
+          setup: composition.setup,
+        })
+        return swapTo(next)
+      } catch (error) {
+        ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}`)
+        return `switch failed: ${error instanceof Error ? error.message : String(error)}`
+      }
     }
 
     // Footer state: model label, cwd, git branch, turn/step counters, and
