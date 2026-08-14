@@ -7,6 +7,7 @@
  */
 
 import { Command } from 'commander'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
 
@@ -23,6 +24,13 @@ export const TUI_STARTUP_SERVICE = 'tuiStartup'
 export interface TuiStartupValues {
   /** `--session`, absent when the invocation did not name one. */
   sessionId?: string
+  /**
+   * The shipped agent-preset root bundled with this package. Absolute path of
+   * `config/agent-presets/` beside the built `lib/`; rows configured from the
+   * service (the `agent-presets` roster row) resolve it only after this
+   * service exists, mirroring the web bundle's `webStartup` pattern.
+   */
+  shippedPresetRoot: string
 }
 
 /** This app's command: its flags, its description, and its help text. */
@@ -51,6 +59,9 @@ export function apply(ctx: Context): void {
     const options = program.opts<{ session?: string }>()
     ctx.provide(TUI_STARTUP_SERVICE, {
       ...(options.session !== undefined ? { sessionId: options.session } : {}),
+      // `lib/startup.js` → `../config/agent-presets`; the `config` directory
+      // ships with the package (package.json `files`).
+      shippedPresetRoot: join(import.meta.dirname, '..', 'config', 'agent-presets'),
     } satisfies TuiStartupValues)
   })
   parseCmdline(ctx, program)

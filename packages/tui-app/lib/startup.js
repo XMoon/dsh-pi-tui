@@ -6,6 +6,7 @@
  * @module @dsh-pi-tui/tui-app/startup
  */
 import { Command } from 'commander';
+import { join } from 'node:path';
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline';
 /** Stable Cordis plugin name. */
 export const name = 'tui-startup';
@@ -38,6 +39,9 @@ export function apply(ctx) {
         const options = program.opts();
         ctx.provide(TUI_STARTUP_SERVICE, {
             ...(options.session !== undefined ? { sessionId: options.session } : {}),
+            // `lib/startup.js` → `../config/agent-presets`; the `config` directory
+            // ships with the package (package.json `files`).
+            shippedPresetRoot: join(import.meta.dirname, '..', 'config', 'agent-presets'),
         });
     });
     parseCmdline(ctx, program);

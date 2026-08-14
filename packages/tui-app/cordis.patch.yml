@@ -16,3 +16,114 @@
       inject: [tuiStartup]
       config:
         sessionId: ''
+
+    # The agent-preset roster. The SHIPPED root is an assembly fact of this
+    # bundle: the four presets (standard/code/minimal/cordis) travel with the
+    # package under config/agent-presets and carry `system` trust. The
+    # expression reads the root from the startup service, so it resolves only
+    # after `tuiStartup` exists — the web bundle's `webserver` row pattern
+    # (no `!!js` at boot time, no HMR race). The writable root is
+    # `dsh-agent-presets`' own default (`includeUserRoot`):
+    # `$DSH_HOME/.agent-presets`, where a person authors their own presets.
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      inject: [tuiStartup]
+      config:
+        default: standard
+        roots:
+          - path: !!js ctx.tuiStartup.shippedPresetRoot
+            trust: system
+
+    # Host-plane TypeScript runtime: the `code` preset's `tool-presentation`
+    # row waits for `codeRuntime` and fails the preset at mount without it
+    # (same host row the web bundle inserts).
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+
+# ── the agent plane moves behind agent presets ─────────────────────────────
+#
+# Every row below composes what ONE agent contributes to the host registries:
+# its tools, its prompt sections, its delegation backends. The base keeps them
+# for single-session surfaces that compose their agent process-wide; the TUI
+# now composes one preset per session, so these rows are disabled here and the
+# `agent-presets` row above lets each session mount a preset instead.
+#
+# Disabling rather than deleting is deliberate: the base is shared, and a row
+# absent from a surface overlay would silently reappear the day someone
+# reorders the composition. The disabled set is the web bundle's, unchanged.
+#
+# Rows that STAY on the host plane (not listed): `tools` (registry), `shell-env`
+# (publishes the DSH env the model's shell sees), `subagent` + its spawn/fork
+# backends (process singletons), `tool-subagent-report` (host singleton), the
+# goal/jobs/compaction services and their commands, `permission`, `approval`,
+# `sandbox*`, `fs-observation-policy`, `spill*`, `timeout-policy`,
+# `repeat-tool-reminder`, `session-*`, `token-meter`.
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: tool-jobs
+  disabled: true
+
+- id: tool-fs
+  disabled: true
+
+- id: tool-fs-search
+  disabled: true
+
+- id: tool-str-replace-editor
+  disabled: true
+
+- id: skill-filesystem
+  disabled: true
+
+- id: tool-skill
+  disabled: true
+
+- id: tool-goal
+  disabled: true
+
+- id: plan-mode
+  disabled: true
+
+- id: compaction-basic
+  disabled: true
+
+- id: command-compact
+  disabled: true
+
+- id: tool-result-pruner
+  disabled: true
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- id: workflow-worker-thread
+  disabled: true
+
+- id: tool-workflow
+  disabled: true
+
+- id: tool-ralph
+  disabled: true
+
+- id: agent-instructions
+  disabled: true
+
+- id: tool-todo
+  disabled: true
+
+- id: tool-web
+  disabled: true

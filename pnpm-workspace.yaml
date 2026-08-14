@@ -44,3 +44,7 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-tool-workflow@0.1.0-rc.6'
   - '@deepseek-ai/dsh-workflow@0.1.0-rc.6'
   - '@deepseek-ai/dsh-credentials@0.1.0-rc.6'
+  - '@deepseek-ai/cordis-plugin-include@1.0.6'
+  - '@deepseek-ai/dsh-agent-presets@0.1.0-rc.6'
+  - '@deepseek-ai/dsh-atomic-write@0.1.0-rc.6'
+  - '@deepseek-ai/dsh-home-paths@0.1.0-rc.6'

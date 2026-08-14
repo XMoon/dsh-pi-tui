@@ -22,6 +22,7 @@
   "files": [
     "lib",
     "src",
+    "config",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -60,7 +61,8 @@
     "@deepseek-ai/dsh-session-title": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-jobs": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-shell": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-presets": "^0.1.0-rc.6"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
@@ -88,7 +90,8 @@
     "@deepseek-ai/dsh-session-title": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-jobs": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-shell": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-presets": "^0.1.0-rc.6"
   },
   "engines": {
     "node": ">=22.19.0"
