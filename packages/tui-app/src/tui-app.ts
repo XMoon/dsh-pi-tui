@@ -21,11 +21,13 @@ import {
   Editor,
   Markdown,
   ProcessTerminal,
+  ScrollView,
   SelectList,
   SettingsList,
   Text,
   TuiAltScreen,
   TuiMainScreen,
+  VStack,
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
@@ -532,14 +534,13 @@ export class TuiApp {
         return { consume: true }
       }
       if (matchesKey(data, 'ctrl+f')) {
-        // Fullscreen hides every overlay; close the search first.
+        // Ctrl+F is the search toggle; a second press closes the overlay.
         this.closeTranscriptSearch()
-        this.toggleFullscreen()
         return { consume: true }
       }
       return undefined
     }
-    if (matchesKey(data, 'ctrl+shift+f')) {
+    if (matchesKey(data, 'ctrl+shift+f') || matchesKey(data, 'ctrl+f')) {
       this.startTranscriptSearch()
       return { consume: true }
     }
@@ -586,10 +587,6 @@ export class TuiApp {
       // External editor; overlays own Ctrl+G while up (alt-screen search).
       if (this.overlayHost.hasOverlayEntries) return { consume: true }
       void this.launchExternalEditor()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'ctrl+f')) {
-      this.toggleFullscreen()
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+c')) {
@@ -745,7 +742,24 @@ export class TuiApp {
     this.overlayHandles.clear()
     if (enabled) {
       const alt = new TuiAltScreen(this.terminal)
-      for (const child of this.tui.children) alt.addChild(child)
+      // Fullscreen layout: header and todo pinned, the transcript scrolls in
+      // the middle (grow), and the editor + footer stay pinned to the bottom
+      // of the screen — the implicit document scrollview would roll the
+      // editor away with the transcript when scrolling back.
+      const root = new VStack([
+        this.header,
+        // grow is a stack-entry option: the transcript pane takes all the
+        // height the pinned rows leave behind.
+        { component: new ScrollView(this.messagesView, {
+          follow: 'end',
+          primary: true,
+          scrollbar: 'auto',
+        }), grow: 1 },
+        this.todoPanel,
+        this.editor,
+        this.footer,
+      ])
+      alt.setLayoutRoot(root)
       alt.addInputListener((data) => this.handleInput(data))
       this.tui.stop()
       alt.start()
@@ -758,6 +772,11 @@ export class TuiApp {
       this.fullscreen?.stop()
       this.fullscreen = undefined
       this.tui.start()
+      // The alt screen's exit repaint starts at the hardware cursor row, so
+      // rows above it (e.g. a dialog the alt screen composited) survive in
+      // the terminal buffer. Force a full repaint so the regular surface
+      // redraws cleanly from row 0.
+      this.tui.requestRender(true)
       this.tui.setFocus(this.editor)
     }
     this.events.onFullscreenChange?.(enabled)

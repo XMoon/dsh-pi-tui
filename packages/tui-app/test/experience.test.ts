@@ -64,16 +64,30 @@ test('status merges partial updates', async () => {
   assert.ok(view.includes('t1/s0'), `merged counters missing:\n${view}`)
 })
 
-test('ctrl+f toggles fullscreen without crashing and renders content', async () => {
+test('fullscreen renders content with the editor pinned to the bottom', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'user', turn: 0, text: 'hello' }])
   await viewport(vt)
-  vt.sendInput('\x06') // ctrl+f
+  app.setFullscreen(true)
   const full = await viewport(vt)
   assert.ok(full.includes('hello'), `content missing in fullscreen:\n${full}`)
-  vt.sendInput('\x06') // back to regular
+  // A transcript taller than the screen must scroll INSIDE the middle pane:
+  // the editor border stays pinned to the bottom of the viewport.
+  app.setTranscript(Array.from({ length: 40 }, (_, i) => ({ kind: 'user', turn: i, text: `line ${i}` })))
+  await viewport(vt)
+  const scrolled = vt.getViewport().join('\n')
+  const lines = scrolled.split('\n')
+  const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(editorTop !== -1, `editor border missing:\n${scrolled}`)
+  const footerIndex = lines.findIndex(line => line.includes('dsh-pi-tui') && line.includes('t'))
+  assert.ok(
+    editorTop >= lines.length - 5,
+    `editor must sit at the viewport bottom, found at ${editorTop}/${lines.length}:\n${scrolled}`,
+  )
+  void footerIndex
+  app.setFullscreen(false)
   const regular = await viewport(vt)
-  assert.ok(regular.includes('hello'), `content missing after exit fullscreen:\n${regular}`)
+  assert.ok(regular.includes('line 39'), `content missing after exit fullscreen:\n${regular}`)
 })
 
 test('editor input routes to the alt screen in fullscreen and back', async () => {
@@ -82,13 +96,13 @@ test('editor input routes to the alt screen in fullscreen and back', async () =>
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} })
   app.start()
   await viewport(vt)
-  vt.sendInput('\x06') // ctrl+f: fullscreen
+  app.setFullscreen(true)
   await viewport(vt)
   vt.sendInput('typed in fullscreen')
   vt.sendInput('\r')
   await viewport(vt)
   assert.deepEqual(submitted, ['typed in fullscreen'], 'submit must work in fullscreen')
-  vt.sendInput('\x06') // back to regular
+  app.setFullscreen(false)
   await viewport(vt)
   vt.sendInput('back in regular')
   vt.sendInput('\r')
@@ -120,13 +134,13 @@ test('approval prompt survives a fullscreen toggle', async () => {
   const decision = app.showApprovalPrompt({ toolName: 'bash' })
   await viewport(vt)
   assert.ok((await viewport(vt)).includes('Approve bash'), 'dialog missing before toggle')
-  vt.sendInput('\x06') // ctrl+f: the dialog must re-mount on the alt screen
+  app.setFullscreen(true) // the dialog must re-mount on the alt screen
   const full = await viewport(vt)
   assert.ok(full.includes('Approve bash'), `dialog missing in fullscreen:\n${full}`)
   vt.sendInput('y')
   assert.equal(await decision, 'allowed-once')
   // Back to regular mode: no dialog residue.
-  vt.sendInput('\x06')
+  app.setFullscreen(false)
   const regular = await viewport(vt)
   assert.ok(!regular.includes('Approve bash'), `dialog residue after exit fullscreen:\n${regular}`)
 })

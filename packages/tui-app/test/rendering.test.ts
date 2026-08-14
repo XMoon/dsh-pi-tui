@@ -188,11 +188,25 @@ test('fullscreen scrollback search opens with ctrl+shift+f', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
-  vt.sendInput('\x06') // ctrl+f → fullscreen
+  app.setFullscreen(true)
   await viewport(vt)
   vt.sendInput('\x1b[102;6u') // kitty ctrl+shift+f
   const view = await viewport(vt)
   assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
+})
+
+test('ctrl+f opens and closes the transcript search (no fullscreen toggle)', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
+  await viewport(vt)
+  assert.equal(app.isFullscreen(), false)
+  vt.sendInput('\x06') // ctrl+f → search, NOT fullscreen
+  let view = await viewport(vt)
+  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
+  assert.equal(app.isFullscreen(), false, 'ctrl+f must not toggle fullscreen')
+  vt.sendInput('\x06') // ctrl+f again closes the overlay
+  view = await viewport(vt)
+  assert.ok(!view.includes('Find transcript'), `search bar still open:\n${view}`)
 })
 
 test('welcome card wraps long facts inside a full-width box', async () => {

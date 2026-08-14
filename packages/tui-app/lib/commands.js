@@ -736,7 +736,7 @@ export function registerTuiCommands(runner) {
                 { id: 'k-think', label: 'Alt+T', description: 'Hide/show thinking blocks', currentValue: '' },
                 { id: 'k-steer', label: 'Ctrl+S', description: 'Steer the running turn with the draft', currentValue: '' },
                 { id: 'k-editor', label: 'Ctrl+G', description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
-                { id: 'k-full', label: 'Ctrl+F', description: 'Toggle fullscreen (alt screen)', currentValue: '' },
+                { id: 'k-search', label: 'Ctrl+F', description: 'Search the transcript (Enter/Shift+Enter jump, Esc closes)', currentValue: '' },
                 { id: 'k-tab', label: 'Tab', description: 'Autocomplete slash commands and file paths', currentValue: '' },
                 { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
                 { id: 'k-bang', label: '! cmd', description: 'Run a shell command locally; !! sends it to the model', currentValue: '' },
