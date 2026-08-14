@@ -75,11 +75,27 @@ export function contextProvenance(source: unknown): ContextProvenance {
 }
 
 /**
- * The one-line account a `notice` form puts on its collapsed row, when the
- * source records one (the Web's noticeSummary).
+ * The card-header emoji for one context injection, keyed by source kind so a
+ * reader can tell an instruction file from a skill catalog or a recalled
+ * session at a glance (the Web renders one browse icon for all of them).
  * @param source - the logged user/message source.
- * @returns the account, or null when absent or empty.
+ * @returns the emoji for this injection.
  */
+export function contextEmoji(source: unknown): string {
+  const record = asRecord(source)
+  const kind = record === null ? null : readString(record, 'kind')
+  switch (kind) {
+    case 'agent-instructions': return '📄'
+    case 'skill-invocation': return '📚'
+    case 'plugin': {
+      // A notice is a one-off account; everything else is payload.
+      return readString(record ?? {}, 'form') === 'notice' ? '📌' : '📦'
+    }
+    case 'session-reference': return '🕘'
+    default: return '📎'
+  }
+}
+
 export function contextSummary(source: unknown): string | null {
   const record = asRecord(source)
   if (record === null) return null

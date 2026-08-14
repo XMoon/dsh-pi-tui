@@ -505,5 +505,24 @@ test('tool cards degrade to generic rendering when the registry lookup is absent
   app.stop()
 })
 
+test('injected context rows show their emoji in the viewport', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'system', turn: 0,
+    text: '# AGENTS.md\nRead me first.',
+    label: 'AGENTS.md',
+    emoji: '📄',
+  }, {
+    kind: 'system', turn: 0,
+    text: 'catalog',
+    label: 'skill-catalog',
+    emoji: '📚',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('📄 上下文注入 AGENTS.md'), `instruction emoji missing:\n${view}`)
+  assert.ok(view.includes('📚 上下文注入 skill-catalog'), `catalog emoji missing:\n${view}`)
+})
+
+
 
 

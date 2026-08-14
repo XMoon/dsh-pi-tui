@@ -658,4 +658,25 @@ test('an unreadable injection source degrades to its kind as the label', () => {
   assert.equal(system.label, 'mystery-producer')
 })
 
+test('injected context rows carry a source-kind emoji', () => {
+  const cases: { source: Record<string, unknown>; emoji: string }[] = [
+    { source: { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] }, emoji: '📄' },
+    { source: { kind: 'skill-invocation', form: 'instructions', name: 'skill-catalog' }, emoji: '📚' },
+    { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, emoji: '📦' },
+    { source: { kind: 'plugin', plugin: 'todo', form: 'notice', summary: 'saved' }, emoji: '📌' },
+  ]
+  const events: SessionEvent[] = cases.map((entry, index) => event('user/message', {
+    id: MessageId(`msg-emoji-${index}`),
+    role: 'user',
+    content: [{ type: 'text', text: 'body' }],
+    source: entry.source as never,
+  }, index))
+  const messages = foldTranscript(events)
+  messages.forEach((message, index) => {
+    assert.ok(message !== undefined && message.kind === 'system')
+    assert.equal(message.emoji, cases[index]?.emoji, `emoji for injection ${index}`)
+  })
+})
+
+
 

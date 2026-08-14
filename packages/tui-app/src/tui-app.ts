@@ -1042,12 +1042,13 @@ export class TuiApp {
       // the generic section marker.
       if (message.label !== undefined) {
         const row = new Container()
+        const emoji = message.emoji ?? '📎'
         if (expanded) {
-          row.addChild(new Text(color.textMuted(`上下文注入 ${message.label}`), 0, 0))
+          row.addChild(new Text(color.textMuted(`${emoji} 上下文注入 ${message.label}`), 0, 0))
           row.addChild(new Text(message.text, 0, 0))
         } else {
           const summary = message.summary === undefined ? '' : ` — ${message.summary}`
-          row.addChild(new Text(color.textMuted(`上下文注入 ${message.label}${summary} (ctrl+o to expand)`), 0, 0))
+          row.addChild(new Text(color.textMuted(`${emoji} 上下文注入 ${message.label}${summary} (ctrl+o to expand)`), 0, 0))
         }
         return row
       }

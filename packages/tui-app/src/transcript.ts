@@ -18,7 +18,7 @@
 
 import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { contextProvenance, contextSummary } from './context.ts'
+import { contextEmoji, contextProvenance, contextSummary } from './context.ts'
 // The command/run + command/done event merge (SessionEventMap extension).
 import type {} from '@deepseek-ai/dsh-commands'
 // The subagent/descriptor event merge (SessionEventMap extension).
@@ -36,10 +36,10 @@ export type TranscriptMessage =
   /**
    * Injected context (system reminders, skill content) from non-user sources.
    * Labeled entries carry the Web-provenance producer name (e.g. AGENTS.md,
-   * @deepseek-ai/dsh-system-prompt, skill-catalog) and, for notice forms,
-   * the producer's one-line summary.
+   * @deepseek-ai/dsh-system-prompt, skill-catalog), a source-kind emoji, and,
+   * for notice forms, the producer's one-line summary.
    */
-  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string }
+  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; emoji?: string }
   | {
     kind: 'tool'
     turn: number
@@ -281,12 +281,14 @@ export class TranscriptFolder {
           // (contextProvenance), plus a notice form's one-line account.
           const provenance = contextProvenance(event.data.source)
           const summary = contextSummary(event.data.source)
+          const emoji = contextEmoji(event.data.source)
           this.items.push({
             kind: 'system',
             turn: this.currentTurn,
             text,
             ...provenance.label === null ? {} : { label: provenance.label },
             ...summary === null ? {} : { summary },
+            emoji,
           })
         }
         break
