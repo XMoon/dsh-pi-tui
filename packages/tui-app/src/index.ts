@@ -224,8 +224,12 @@ const DANGER_PATTERNS: readonly RegExp[] = [
  * `rm -rf /`) is dangerous; the remaining patterns are verbatim matches.
  */
 export function dangerCommand(command: string): boolean {
-  if (/\brm\b/i.test(command)) {
-    const flags = command.slice(command.toLowerCase().indexOf('rm') + 2)
+  // Slice the flags from the WORD-BOUNDED rm match itself: slicing from the
+  // first "rm" substring (e.g. inside "alarm") would read flags from the
+  // wrong offset and both miss and misfire depending on what follows.
+  const rm = /\brm\b/i.exec(command)
+  if (rm !== null) {
+    const flags = command.slice(rm.index + rm[0].length)
     const combined = flags.match(/-\w+/g)?.join('') ?? ''
     if (combined.includes('r') && combined.includes('f')) return true
   }

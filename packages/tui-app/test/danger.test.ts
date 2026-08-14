@@ -36,6 +36,11 @@ test('leaves ordinary commands alone', () => {
     'git push origin main',
     'cat /dev/null > /tmp/out',
     'echo hi',
+    // "rm" inside a word must not drag flags from the wrong offset:
+    // "alarm" contains "rm", and the trailing unrelated flags must not
+    // turn the command dangerous.
+    'echo alarm clock -rf',
+    'grep -r -f patterns.txt src',
   ]) {
     assert.equal(dangerCommand(command), false, `should not flag: ${command}`)
   }
