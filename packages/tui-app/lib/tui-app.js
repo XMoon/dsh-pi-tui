@@ -124,6 +124,10 @@ export class TuiApp {
     welcomeText = '';
     /** Transient error line shown under the transcript; cleared by setTranscript. */
     notifyText = '';
+    /** Timestamp of the last Esc press, for double-Esc cancellation. */
+    lastEscapeAt;
+    /** Double-Esc window in ms. */
+    static ESCAPE_CANCEL_WINDOW_MS = 400;
     constructor(terminal, events) {
         this.terminal = terminal;
         this.events = events;
@@ -150,10 +154,24 @@ export class TuiApp {
         this.fullscreen?.stop();
         this.fullscreen = undefined;
     }
-    /** Shared key routing: approval first, then folding/mode/exit. */
+    /** Shared key routing: approval first, then folding/mode/cancel/exit. */
     handleInput(data) {
         if (this.activeApproval !== undefined) {
             return this.handleApprovalKey(data);
+        }
+        if (matchesKey(data, 'escape')) {
+            // Overlays (pickers, settings) own Esc while they are up.
+            if (this.tui.hasOverlayEntries)
+                return undefined;
+            const now = Date.now();
+            if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
+                this.lastEscapeAt = undefined;
+                this.events.onCancel?.();
+            }
+            else {
+                this.lastEscapeAt = now;
+            }
+            return { consume: true };
         }
         if (matchesKey(data, 'ctrl+o')) {
             this.toolOutputExpanded = !this.toolOutputExpanded;

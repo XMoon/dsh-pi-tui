@@ -117,6 +117,8 @@ export interface TuiAppEvents {
   onSubmit: (text: string) => void
   /** The user asked to quit (Ctrl+C in the TUI's own raw mode). */
   onExit: () => void
+  /** Double-Esc: stop the current activity (turn, tool run). Optional. */
+  onCancel?: () => void
 }
 
 /** What an approval prompt shows; mirrors the approval/request payload. */
@@ -215,6 +217,10 @@ export class TuiApp {
   private welcomeText = ''
   /** Transient error line shown under the transcript; cleared by setTranscript. */
   private notifyText = ''
+  /** Timestamp of the last Esc press, for double-Esc cancellation. */
+  private lastEscapeAt: number | undefined
+  /** Double-Esc window in ms. */
+  private static readonly ESCAPE_CANCEL_WINDOW_MS = 400
 
   constructor(terminal: Terminal, events: TuiAppEvents) {
     this.terminal = terminal
@@ -245,10 +251,22 @@ export class TuiApp {
     this.fullscreen = undefined
   }
 
-  /** Shared key routing: approval first, then folding/mode/exit. */
+  /** Shared key routing: approval first, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
     if (this.activeApproval !== undefined) {
       return this.handleApprovalKey(data)
+    }
+    if (matchesKey(data, 'escape')) {
+      // Overlays (pickers, settings) own Esc while they are up.
+      if (this.tui.hasOverlayEntries) return undefined
+      const now = Date.now()
+      if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
+        this.lastEscapeAt = undefined
+        this.events.onCancel?.()
+      } else {
+        this.lastEscapeAt = now
+      }
+      return { consume: true }
     }
     if (matchesKey(data, 'ctrl+o')) {
       this.toolOutputExpanded = !this.toolOutputExpanded

@@ -40,6 +40,8 @@ export interface TuiAppEvents {
     onSubmit: (text: string) => void;
     /** The user asked to quit (Ctrl+C in the TUI's own raw mode). */
     onExit: () => void;
+    /** Double-Esc: stop the current activity (turn, tool run). Optional. */
+    onCancel?: () => void;
 }
 /** What an approval prompt shows; mirrors the approval/request payload. */
 export interface ApprovalPromptRequest {
@@ -118,12 +120,16 @@ export declare class TuiApp {
     private welcomeText;
     /** Transient error line shown under the transcript; cleared by setTranscript. */
     private notifyText;
+    /** Timestamp of the last Esc press, for double-Esc cancellation. */
+    private lastEscapeAt;
+    /** Double-Esc window in ms. */
+    private static readonly ESCAPE_CANCEL_WINDOW_MS;
     constructor(terminal: Terminal, events: TuiAppEvents);
     /** Enter raw mode and start rendering. */
     start(): void;
     /** Leave raw mode and stop rendering. */
     stop(): void;
-    /** Shared key routing: approval first, then folding/mode/exit. */
+    /** Shared key routing: approval first, then folding/mode/cancel/exit. */
     private handleInput;
     /** Toggle between regular (terminal scrollback) and fullscreen (alt screen). */
     toggleFullscreen(): void;

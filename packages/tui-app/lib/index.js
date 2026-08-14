@@ -196,6 +196,10 @@ export function apply(ctx, config) {
                     exit(0);
                 })();
             },
+            onCancel: () => {
+                // Double-Esc: abort the active turn or tool run.
+                liveAgent.cancel({ kind: 'user' });
+            },
         });
         repaint(app, liveAgent.session.events);
         app.setWelcomeCard({

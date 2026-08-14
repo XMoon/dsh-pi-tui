@@ -235,6 +235,10 @@ export function apply(ctx: Context, config: Config): void {
           exit(0)
         })()
       },
+      onCancel: () => {
+        // Double-Esc: abort the active turn or tool run.
+        liveAgent.cancel({ kind: 'user' })
+      },
     })
     repaint(app, liveAgent.session.events)
     app.setWelcomeCard({
