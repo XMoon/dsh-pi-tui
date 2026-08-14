@@ -18,7 +18,7 @@ import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { CallId } from '@deepseek-ai/dsh-llm'
@@ -451,7 +451,7 @@ export function apply(ctx: Context, config: Config): void {
     // A stale --session id must not kill the TUI: resume falls back to a
     // fresh session and the failure is surfaced as a notify line.
     let resumeFailure: string | undefined
-    let handle: Awaited<ReturnType<typeof agents.resume>>
+    let handle: Awaited<ReturnType<typeof agents.resume>> | undefined
     if (sessionId !== undefined) {
       try {
         // The stored session's recorded preset wins (resolved from the log,
@@ -495,38 +495,18 @@ export function apply(ctx: Context, config: Config): void {
         })
       }
     } else {
-      const launched = await launchComposition()
-      if (launched.failure !== undefined) resumeFailure = launched.failure
-      try {
-        handle = await agents.create({
-          sessionId: SessionId(`session-${randomUUID()}`),
-          meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
-          agentOptions,
-          setup: launched.composition.setup,
-        })
-      } catch (error) {
-        // A preset that resolves but fails to MOUNT (e.g. a row waiting for a
-        // host service) rejects inside the agent-factory setup. Surface it and
-        // fall back to the default rather than killing the TUI.
-        ctx.logger.warn(
-          `tui-runner: failed to start with preset "${launchPreset ?? 'default'}": ${error instanceof Error ? error.message : String(error)}`,
-        )
-        resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${error instanceof Error ? error.message : String(error)}`
-        const fallback = await compose()
-        handle = await agents.create({
-          sessionId: SessionId(`session-${randomUUID()}`),
-          meta: { cwd: process.cwd(), ...withPresetMeta(fallback) },
-          agentOptions,
-          setup: fallback.setup,
-        })
-      }
+      // Deferred session creation: without --session the TUI opens with NO
+      // session at all — zero agent, zero log, zero persistence — and the
+      // first user message creates it (see ensureSession below).
     }
     let liveHandle = handle
-    let liveAgent = handle.agent
-    await liveAgent.whenIdle()
+    let liveAgent = handle?.agent
+    if (liveAgent !== undefined) await liveAgent.whenIdle()
     /** The preset the live agent runs on, when the deployment composes one. */
-    const currentPreset = (): string | undefined =>
-      ctx.get('agentPresets')?.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session)
+    const currentPreset = (): string | undefined => {
+      if (liveAgent === undefined) return undefined
+      return ctx.get('agentPresets')?.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session)
+    }
     // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
     // the row; the reloaded row starts its own instance in the same process).
     ctx.effect(function* () {
@@ -534,18 +514,24 @@ export function apply(ctx: Context, config: Config): void {
         app?.stop()
       }
     })
-    // Incremental fold state for the live session's log; reset on switch.
+    // Incremental fold state for the live session's log; reset on switch. The
+    // folder/stats/goal stay empty until a session exists (deferred start).
     let folder = new TranscriptFolder()
-    folder.apply(liveAgent.session.events)
-    // Incremental stats + goal badge: applied per event so the footer stays
-    // O(1) per refresh instead of re-scanning the whole log.
     let statsFolder = new StatsFolder()
-    statsFolder.apply(liveAgent.session.events)
-    let goalText = foldGoal(liveAgent.session.events)
+    let goalText: string | undefined
+    if (liveAgent !== undefined) {
+      folder.apply(liveAgent.session.events)
+      statsFolder.apply(liveAgent.session.events)
+      goalText = foldGoal(liveAgent.session.events)
+    }
 
     /** Repaint the welcome card from the live agent's current facts. Re-read
      * on every call so a still-blank session's preset switch shows up. */
     const updateWelcomeCard = (): void => {
+      if (liveAgent === undefined) {
+        app.setWelcomeIdle(true)
+        return
+      }
       app.setWelcomeCard({
         cwd,
         sessionId: liveAgent.session.id,
@@ -558,8 +544,10 @@ export function apply(ctx: Context, config: Config): void {
     /** Swap the live agent to a new handle, repainting for its session. */
     const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>): Promise<string | undefined> => {
       try {
-        await sessions.flush(liveAgent.session)
-        await liveHandle.dispose()
+        if (liveAgent !== undefined) {
+          await sessions.flush(liveAgent.session)
+          await liveHandle?.dispose()
+        }
         liveHandle = next
         liveAgent = next.agent
         await liveAgent.whenIdle()
@@ -567,19 +555,7 @@ export function apply(ctx: Context, config: Config): void {
         process.stderr.write(`[tui] swap failed: ${error instanceof Error ? error.message : String(error)}\n`)
         return `swap failed: ${error instanceof Error ? error.message : String(error)}`
       }
-      folder = new TranscriptFolder()
-      folder.apply(liveAgent.session.events)
-      statsFolder = new StatsFolder()
-      statsFolder.apply(liveAgent.session.events)
-      goalText = foldGoal(liveAgent.session.events)
-      app.setWorking(workingFromLog(liveAgent.session.events))
-      app.setSessionTitle(foldSessionTitle(liveAgent.session.events)?.title)
-      app.clearLocalMessages()
-      repaint(app, folder)
-      refreshStatus()
-      refreshQueue()
-      setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`)
-      updateWelcomeCard()
+      await initLiveSession(next.agent)
       return undefined
     }
 
@@ -592,7 +568,10 @@ export function apply(ctx: Context, config: Config): void {
         const composition = await compose(await recordedPreset(ctx, sessionId))
         const next = await agents.resume({
           resumeSessionId: SessionId(sessionId),
-          agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
+          agentOptions: {
+            provider: liveAgent?.options.provider ?? selection.provider,
+            model: liveAgent?.options.model ?? selection.model,
+          },
           setup: composition.setup,
         })
         return swapTo(next)
@@ -608,16 +587,19 @@ export function apply(ctx: Context, config: Config): void {
     /** The footer model label: the live selection (with effort) when one exists. */
     const modelLabel = (): string => {
       const selection = selected.current
-      if (selection === undefined) return `${liveAgent.options.provider}/${liveAgent.options.model}`
-      return selection.reasoningEffort === undefined
-        ? `${selection.provider}/${selection.model}`
-        : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
+      if (selection !== undefined) {
+        return selection.reasoningEffort === undefined
+          ? `${selection.provider}/${selection.model}`
+          : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
+      }
+      if (liveAgent === undefined) return 'no model'
+      return `${liveAgent.options.provider}/${liveAgent.options.model}`
     }
     const refreshStatus = (): void => {
       const stats = statsFolder.snapshot()
       let contextTokens: number | undefined
       const meter = ctx.get('tokenMeter')
-      if (meter !== undefined) {
+      if (meter !== undefined && liveAgent !== undefined) {
         try {
           contextTokens = meter.measure(liveAgent.session).totalTokens
         } catch {
@@ -635,7 +617,9 @@ export function apply(ctx: Context, config: Config): void {
         turns: stats.turns,
         steps: stats.steps,
         statsLine: formatStats(stats),
-        ...permission === undefined ? {} : { permission: permission.current(liveAgent.session.events) },
+        ...permission === undefined || liveAgent === undefined
+          ? {}
+          : { permission: permission.current(liveAgent.session.events) },
         ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
       })
     }
@@ -648,7 +632,10 @@ export function apply(ctx: Context, config: Config): void {
     // cordis's inject guard, and an absent registry must degrade to generic
     // cards rather than fail the render.
     const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined
-    const present = toolPresenterFrom(name => tools?.get(name, liveAgent.ctx))
+    const present = toolPresenterFrom(name => {
+      if (liveAgent === undefined) return undefined
+      return tools?.get(name, liveAgent.ctx)
+    })
     // Aborts an in-flight command execution when the TUI quits.
     const signal = new AbortController().signal
     // Abort handle for the currently running `!` shell command.
@@ -661,6 +648,7 @@ export function apply(ctx: Context, config: Config): void {
       const command = text.replace(/^!+/, '').trim()
       if (command === '') return
       if (includeInContext) {
+        if (liveAgent === undefined) return
         liveAgent.followup(createUserMessage({
           content: [{ type: 'text', text: command }],
           source: { kind: 'user' },
@@ -811,46 +799,54 @@ export function apply(ctx: Context, config: Config): void {
         if (history.length > 0) {
           void tuiSettings?.replace({ ...tuiSettings.get(), history: { ...tuiSettings.get().history, [cwd]: history } })
         }
-        // `!` commands run locally through the shell (or into context for `!!`)
-        // without a model turn; everything else dispatches as before.
+        // `!` commands run locally through the shell (or into context for
+        // `!!`) without a model turn; everything else dispatches as before.
+        // A local `!` needs no session at all; every other submission creates
+        // the session first (the FIRST user message is the deferred trigger).
         if (text.startsWith('!')) {
-          runLocalShell(text)
+          if (text.startsWith('!!')) {
+            void ensureSession().then(() => runLocalShell(text))
+          } else {
+            runLocalShell(text)
+          }
           return
         }
-        // A registered slash command dispatches without a model turn; anything
-        // else is a follow-up prompt. The command lifecycle lands in the
-        // session log (command/run + command/done) and re-folds into the
-        // transcript through the session/event listener below.
-        const commands = ctx.get('commands')
-        if (commands !== undefined) {
-          // Bare `/plan` toggles: when plan mode is already active it exits
-          // instead of re-entering (the official command needs `/plan off`).
-          const parsed = parseCommand(text)
-          const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
-            && foldPlanMode(liveAgent.session.events)
-            ? '/plan off'
-            : text
-          void commands.execute(liveAgent, toggled, signal).then((execution) => {
-            if (execution === undefined) {
-              liveAgent.followup(createUserMessage({
-                content: [{ type: 'text', text }],
-                source: { kind: 'user' },
-              }))
-            }
-          }).catch((error: unknown) => {
-            ctx.logger.error(`tui-runner: command execution failed: ${error instanceof Error ? error.message : String(error)}`)
-            app.notify(error instanceof Error ? error.message : String(error))
-          })
-          return
-        }
-        liveAgent.followup(createUserMessage({
-          content: [{ type: 'text', text }],
-          source: { kind: 'user' },
-        }))
+        void ensureSession().then(() => {
+          // A registered slash command dispatches without a model turn; anything
+          // else is a follow-up prompt. The command lifecycle lands in the
+          // session log (command/run + command/done) and re-folds into the
+          // transcript through the session/event listener below.
+          const commands = ctx.get('commands')
+          if (commands !== undefined) {
+            // Bare `/plan` toggles: when plan mode is already active it exits
+            // instead of re-entering (the official command needs `/plan off`).
+            const parsed = parseCommand(text)
+            const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
+              && foldPlanMode(liveAgent?.session.events ?? [])
+              ? '/plan off'
+              : text
+            void commands.execute(liveAgent as Agent, toggled, signal).then((execution) => {
+              if (execution === undefined && liveAgent !== undefined) {
+                liveAgent.followup(createUserMessage({
+                  content: [{ type: 'text', text }],
+                  source: { kind: 'user' },
+                }))
+              }
+            }).catch((error: unknown) => {
+              ctx.logger.error(`tui-runner: command execution failed: ${error instanceof Error ? error.message : String(error)}`)
+              app.notify(error instanceof Error ? error.message : String(error))
+            })
+            return
+          }
+          liveAgent?.followup(createUserMessage({
+            content: [{ type: 'text', text }],
+            source: { kind: 'user' },
+          }))
+        })
       },
       onExit: () => {
         void (async () => {
-          await sessions.flush(liveAgent.session)
+          if (liveAgent !== undefined) await sessions.flush(liveAgent.session)
           app.stop()
           exit(0)
         })()
@@ -858,20 +854,23 @@ export function apply(ctx: Context, config: Config): void {
       onCancel: () => {
         // Double-Esc: abort a running `!` shell command, then the live turn.
         localShellController?.abort()
-        liveAgent.cancel({ kind: 'user' })
+        liveAgent?.cancel({ kind: 'user' })
       },
       onSteer: (text) => {
         // Ctrl+S: inject the draft into the running turn; an idle agent
-        // just starts a regular turn with it.
+        // just starts a regular turn with it. Without a session the first
+        // steer creates one (same trigger as the first submit).
         const message = createUserMessage({
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
         })
-        if (liveAgent.status === 'running') {
-          liveAgent.steer(message)
-        } else {
-          liveAgent.followup(message)
-        }
+        void ensureSession().then(() => {
+          if (liveAgent?.status === 'running') {
+            liveAgent.steer(message)
+          } else {
+            liveAgent?.followup(message)
+          }
+        })
       },
       openExternalEditor: async (draft) => {
         const editor = process.env.VISUAL ?? process.env.EDITOR ?? 'vi'
@@ -931,6 +930,7 @@ export function apply(ctx: Context, config: Config): void {
       // call, no transcript card), with a red warning on the no-approval
       // preset and an immediate footer refresh.
       onCyclePermission: () => {
+        if (liveAgent === undefined) return
         const permission = ctx.get('permissionPresets')
         if (permission === undefined) return
         const names = permission.names
@@ -949,6 +949,7 @@ export function apply(ctx: Context, config: Config): void {
       // dequeue). The inbox is cleared durably and the current draft rides
       // along below the pulled-back queue; submitting re-queues the result.
       onDequeue: () => {
+        if (liveAgent === undefined) return
         const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
         if (queued.length === 0) return
         liveAgent.inbox.clear()
@@ -961,10 +962,6 @@ export function apply(ctx: Context, config: Config): void {
       present,
       workspaceRoot: cwd,
     })
-    paintNow()
-    setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`)
-    updateWelcomeCard()
-    if (resumeFailure !== undefined) app.notify(resumeFailure)
     // Persisted TUI preferences: register the namespace and restore the
     // theme + footer preset. `history` holds per-cwd input history for ↑/↓
     // recall across restarts. Theme values: auto | dark | light | custom:<name>.
@@ -1001,33 +998,8 @@ export function apply(ctx: Context, config: Config): void {
       app.seedInputHistory(storedHistory)
     }
 
-    // The TUI-owned slash commands (/exit /settings /sessions /skill /model
-    // /new /tasks /preset /subagents /search /title /copy /export /fork
-    // /status /login /logout /help) are registered from commands.ts; this
-    // runner surface re-reads the live agent/settings on every access, so a
-    // session swap mid-flight is always reflected.
-    if (ctx.get('commands') !== undefined) {
-      registerTuiCommands({
-        ctx,
-        app,
-        get liveAgent() { return liveAgent },
-        get selected() { return selected },
-        get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
-        agents: agents as unknown as TuiCommandRunner['agents'],
-        sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
-        cwd,
-        signal,
-        compose,
-        switchSession,
-        swapTo: (next) => swapTo(next as Awaited<ReturnType<typeof agents.resume>>),
-        currentPreset,
-        recomposeBlank: (id) => recomposeBlank(ctx, liveAgent, id),
-        refreshStatus,
-        updateWelcomeCard,
-        enterView,
-        exit,
-      })
-    }
+    // The TUI-owned slash commands are registered by registerCommands()
+    // inside initLiveSession, exactly once after the first session exists.
     refreshStatus()
     // The persistent dock's tasks line follows the background-job registry:
     // every change refreshes the active-task snapshot (no polling).
@@ -1052,6 +1024,10 @@ export function apply(ctx: Context, config: Config): void {
     // the agent, and every mutation commits an agent/inbox/spliced session
     // event, so the pane refreshes event-driven with no polling.
     const refreshQueue = (): void => {
+      if (liveAgent === undefined) {
+        app.setQueueItems([])
+        return
+      }
       const queue = [
         ...liveAgent.inbox.nextTurn.map(message => ({
           id: message.id,
@@ -1067,9 +1043,121 @@ export function apply(ctx: Context, config: Config): void {
       app.setQueueItems(queue)
     }
     refreshQueue()
+    // The TUI-owned slash commands are registered exactly once, after the
+    // first session exists (the runner surface re-reads the live agent on
+    // every access, so a session swap mid-flight is always reflected).
+    let commandsRegistered = false
+    const registerCommands = (): void => {
+      if (commandsRegistered) return
+      commandsRegistered = true
+      if (ctx.get('commands') !== undefined) {
+        registerTuiCommands({
+          ctx,
+          app,
+          get liveAgent() { return liveAgent as Agent },
+          get selected() { return selected },
+          get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
+          agents: agents as unknown as TuiCommandRunner['agents'],
+          sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
+          cwd,
+          signal,
+          compose,
+          switchSession,
+          swapTo: (next) => swapTo(next as Awaited<ReturnType<typeof agents.resume>>),
+          currentPreset,
+          recomposeBlank: (id) => recomposeBlank(ctx, liveAgent as Agent, id),
+          refreshStatus,
+          updateWelcomeCard,
+          enterView,
+          exit,
+        })
+      }
+    }
+    /** Rebuild every live-session surface after resume, create, or swap. */
+    const initLiveSession = async (agent: Agent): Promise<void> => {
+      folder = new TranscriptFolder()
+      folder.apply(agent.session.events)
+      statsFolder = new StatsFolder()
+      statsFolder.apply(agent.session.events)
+      goalText = foldGoal(agent.session.events)
+      app.setWorking(workingFromLog(agent.session.events))
+      app.setSessionTitle(foldSessionTitle(agent.session.events)?.title)
+      app.clearLocalMessages()
+      repaint(app, folder)
+      refreshStatus()
+      refreshQueue()
+      setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${agent.session.id}`)
+      updateWelcomeCard()
+      registerCommands()
+    }
+    /**
+     * Create the first session lazily — the FIRST user message triggers it
+     * (deferred session creation). Opening the TUI with no --session carries
+     * zero session side-effects: no agent, no log, no persistence.
+     */
+    let creating: Promise<void> | undefined
+    const ensureSession = async (): Promise<void> => {
+      if (liveAgent !== undefined) return
+      if (creating !== undefined) return creating
+      creating = (async () => {
+        const launched = await launchComposition()
+        if (launched.failure !== undefined) resumeFailure = launched.failure
+        try {
+          const created = await agents.create({
+            sessionId: SessionId(`session-${randomUUID()}`),
+            meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
+            agentOptions,
+            setup: launched.composition.setup,
+          })
+          liveHandle = created
+          liveAgent = created.agent
+          await liveAgent.whenIdle()
+          await initLiveSession(liveAgent)
+        } catch (error) {
+          // A preset that resolves but fails to MOUNT (e.g. a row waiting for
+          // a host service) rejects inside the agent-factory setup. Surface it
+          // and fall back to the default rather than killing the TUI.
+          ctx.logger.warn(
+            `tui-runner: failed to start with preset "${launchPreset ?? 'default'}": ${error instanceof Error ? error.message : String(error)}`,
+          )
+          resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${error instanceof Error ? error.message : String(error)}`
+          const fallback = await compose()
+          const created = await agents.create({
+            sessionId: SessionId(`session-${randomUUID()}`),
+            meta: { cwd: process.cwd(), ...withPresetMeta(fallback) },
+            agentOptions,
+            setup: fallback.setup,
+          })
+          liveHandle = created
+          liveAgent = created.agent
+          await liveAgent.whenIdle()
+          await initLiveSession(liveAgent)
+        }
+        if (resumeFailure !== undefined) {
+          app.notify(resumeFailure)
+          resumeFailure = undefined
+        }
+      })().finally(() => { creating = undefined })
+      return creating
+    }
+    // The startup surface: a resumed session initializes everything; the
+    // deferred path shows the pre-session invitation until the first message.
+    if (liveAgent !== undefined) {
+      await initLiveSession(liveAgent)
+    } else {
+      app.setWelcomeIdle(true)
+      refreshStatus()
+      setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)}`)
+    }
+    if (resumeFailure !== undefined) {
+      app.notify(resumeFailure)
+      resumeFailure = undefined
+    }
     ctx.on('session/event', (session, event) => {
       // The subagent viewer follows its own session's events; everything
-      // else routes to the live agent's folder as before.
+      // else routes to the live agent's folder as before. Without a live
+      // session (deferred start) there is nothing to route to.
+      if (liveAgent === undefined) return
       if (viewing !== undefined) {
         if (session.id !== viewing.id) return
         viewing.folder.apply([event])
@@ -1113,22 +1201,25 @@ export function apply(ctx: Context, config: Config): void {
         app.setWorking(false)
         paintNow()
         refreshStatus()
-        void sessions.flush(liveAgent.session)
+        void sessions.flush(liveAgent!.session)
       } else if (event.type === 'step/start') {
         refreshStatus()
       }
     })
     // Initial plan badge, busy indicator, and auto title from the log (a
-    // resumed session may be persisted mid-turn).
-    app.setPlanMode(foldPlanMode(liveAgent.session.events))
-    app.setWorking(workingFromLog(liveAgent.session.events))
-    app.setSessionTitle(foldSessionTitle(liveAgent.session.events)?.title)
-    // Initial todo state: the last todo/write snapshot in the log.
-    for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
-      const event = liveAgent.session.events[index]
-      if (event.type === 'todo/write') {
-        app.setTodoSummary(event.data.todos)
-        break
+    // resumed session may be persisted mid-turn). Without a session the
+    // surfaces stay at their idle defaults.
+    if (liveAgent !== undefined) {
+      app.setPlanMode(foldPlanMode(liveAgent.session.events))
+      app.setWorking(workingFromLog(liveAgent.session.events))
+      app.setSessionTitle(foldSessionTitle(liveAgent.session.events)?.title)
+      // Initial todo state: the last todo/write snapshot in the log.
+      for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
+        const event = liveAgent.session.events[index]
+        if (event.type === 'todo/write') {
+          app.setTodoSummary(event.data.todos)
+          break
+        }
       }
     }
 

@@ -137,12 +137,24 @@ export class Frame implements Component {
  * border below it (a fixed-width rule looked misaligned next to the frame). */
 class WelcomeCard implements Component {
   private facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string } | undefined
+  private idle = false
   private lastWidth = -1
   private cached: string[] = []
 
   /** Replace the facts; the next render rebuilds the card. */
   setFacts(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
     this.facts = facts
+    this.idle = false
+    this.cached = []
+  }
+
+  /**
+   * The pre-session state (deferred session creation): the card invites the
+   * first message instead of naming a session that does not exist yet.
+   */
+  setIdle(idle: boolean): void {
+    if (this.idle === idle) return
+    this.idle = idle
     this.cached = []
   }
 
@@ -152,6 +164,22 @@ class WelcomeCard implements Component {
 
   render(width: number): string[] {
     const facts = this.facts
+    const b = color.border
+    const inner = Math.max(1, width - 4)
+    const renderRow = (line: string): string[] => wrapTextWithAnsi(line, inner).map(wrapped => {
+      const vis = visibleWidth(wrapped)
+      return `${b('│')} ${wrapped}${' '.repeat(Math.max(0, inner - vis))} ${b('│')}`
+    })
+    if (this.idle) {
+      if (this.lastWidth === width && this.cached.length > 0) return this.cached
+      this.lastWidth = width
+      this.cached = [
+        b(`╭${'─'.repeat(Math.max(0, width - 2))}╮`),
+        ...renderRow(color.textMuted('🐋  dsh-pi-tui — type a message to start a session')),
+        b(`╰${'─'.repeat(Math.max(0, width - 2))}╯`),
+      ]
+      return this.cached
+    }
     if (facts === undefined) return []
     if (this.lastWidth === width && this.cached.length > 0) return this.cached
     this.lastWidth = width
@@ -171,14 +199,9 @@ class WelcomeCard implements Component {
     // Wrap each line to the box's inner width so long identities read in
     // full instead of ending in an ellipsis; the box spans the same width
     // as the editor border below it.
-    const inner = Math.max(1, width - 4)
-    const b = color.border
     this.cached = [
       b(`╭${'─'.repeat(Math.max(0, width - 2))}╮`),
-      ...[line1, line2, line3].flatMap(line => wrapTextWithAnsi(line, inner).map(wrapped => {
-        const vis = visibleWidth(wrapped)
-        return `${b('│')} ${wrapped}${' '.repeat(Math.max(0, inner - vis))} ${b('│')}`
-      })),
+      ...[line1, line2, line3].flatMap(renderRow),
       b(`╰${'─'.repeat(Math.max(0, width - 2))}╯`),
     ]
     return this.cached
@@ -1073,6 +1096,15 @@ export class TuiApp {
    */
   setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
     this.welcomeCard.setFacts(facts)
+    this.rebuildMessages()
+  }
+
+  /**
+   * Toggle the pre-session welcome state (deferred session creation): the
+   * card invites the first message; the first real facts replace it.
+   */
+  setWelcomeIdle(idle: boolean): void {
+    this.welcomeCard.setIdle(idle)
     this.rebuildMessages()
   }
 

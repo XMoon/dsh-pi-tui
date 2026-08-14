@@ -311,3 +311,17 @@ test('setDraft and getDraft round-trip the editor text', async () => {
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'pulled back queue text')
 })
+
+test('the pre-session welcome invites the first message and clears on facts', async () => {
+  const { vt, app } = startApp()
+  app.setWelcomeIdle(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('type a message to start a session'), `idle invitation missing:\n${view}`)
+  // Real facts replace the invitation.
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-1', model: 'p/m', version: '0.1.0' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('session session-1'), `welcome card missing:\n${view}`)
+  assert.ok(!view.includes('type a message to start'), `invitation survived:\n${view}`)
+})
