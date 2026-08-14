@@ -22,16 +22,26 @@ packages/tui-app/   The dsh bundle: @dsh-pi-tui/tui-app. cordis.patch.yml insert
 
 - Node >= 22.19 (`^22.19.0 || >=24`, same range as dsh). Running from source needs
   Node with native TypeScript support (>= 23.6) or the tsx ESM hook
-  (`node --import tsx/esm`, how dsh's own source launch works) — the exports point
-  at `.ts` sources until a build step is added.
+  (`node --import tsx/esm`, how dsh's own source launch works).
 - A DeepSeek Harness installation with profiles support.
 
 ## Install into a dsh profile
 
+Build artifacts are not committed (`dist/` for pi-tui, `lib/` for tui-app are
+gitignored — the package `exports` point at the built files), so build before
+installing from a clone:
+
 ```sh
-# create/init the profile (dsh-base is the default first layer)
+pnpm install
+pnpm build        # pi-tui tsdown (dist/) + tui-app tsc (lib/)
+```
+
+Then create/init the profile and add the bundle (dsh-base is the default
+first layer):
+
+```sh
 dsh plugin --profile pi-tui -- add @dsh-pi-tui/tui-app@file:/path/to/dsh-pi-tui/packages/tui-app
-# or, from a published registry version:
+# or, from a published registry version (ships prebuilt):
 dsh plugin --profile pi-tui -- add @dsh-pi-tui/tui-app
 
 # run it
@@ -45,6 +55,7 @@ whose manifest declares `dsh.bundle` joins the layer stack automatically.
 
 ```sh
 pnpm install
+pnpm build        # pi-tui tsdown (dist/) + tui-app tsc (lib/)
 pnpm test         # pi-tui's own suite (node --test) + tui-app headless tests
 pnpm typecheck
 ```

@@ -27,7 +27,8 @@ packages/tui-app/   The dsh bundle. cordis.patch.yml inserts the startup row
                     (parses `dsh --profile pi-tui` flags) and the runner row
                     (starts the TUI). src/tui-app.ts is the testable surface
                     core (terminal injected); src/theme.ts the palette;
-                    demo.ts a standalone interactive demo.
+                    demo.ts a standalone interactive demo. lib/ (tsc output)
+                    is gitignored like pi-tui's dist/ — build before install.
 ```
 
 ## Key decisions (do not silently reverse)
@@ -35,7 +36,7 @@ packages/tui-app/   The dsh bundle. cordis.patch.yml inserts the startup row
 1. **In-process bundle, not BFF client.** Like `dsh-headless`, the TUI runs inside the Cordis context and consumes `ctx.*` services directly. The web surface's remote RPC exists only because a browser cannot be in-process; a TUI has no such constraint. Remote attach via the apiproxy is **explicitly not planned** (removed from the roadmap).
 2. **Vendored fork, not npm dependency.** `@moonshot-ai/pi-tui` is not published (npm 404). Vendored from the kimi-code fork (not upstream pi-mono) to keep its five local fixes: CJK wrap recursion guard, container width clamp, overwide-line truncation instead of throw, negative-width guards, per-frame processed-line reuse. Re-verify those on every re-vendor — the fork's AGENTS.md lists them with guarding tests.
 3. **`TuiMainScreen`, not `TUI`.** In this fork the constructible entry is `TuiMainScreen` (main screen + scrollback, `mode: "regular"`); the README's `new TUI(...)` is stale upstream docs. `TuiAltScreen` is the alternative.
-4. **Source exports, built artifacts.** Both packages build: pi-tui via tsdown (`dist/`), tui-app via tsc with `rewriteRelativeImportExtensions` (`lib/`); `exports` point at built files. Node 26 refuses type-stripping inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `.ts`-exporting package cannot load from a profile's node_modules. Build before installing into a profile.
+4. **Source exports, built artifacts.** Both packages build: pi-tui via tsdown (`dist/`), tui-app via tsc with `rewriteRelativeImportExtensions` (`lib/`); `exports` point at built files. Neither `dist/` nor `lib/` is committed — build before installing into a profile. Node 26 refuses type-stripping inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `.ts`-exporting package cannot load from a profile's node_modules.
 5. **No native prebuilds.** darwin/win32 modifier-key addons are optional; the loader returns `undefined` on other platforms without attempting a load. Revisit only if modifier detection matters on macOS/Windows.
 6. **`chalk` is a runtime dependency** of `tui-app` (theme.ts lives in `src`, unlike pi-tui's tests-only chalk).
 

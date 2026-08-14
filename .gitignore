@@ -1,5 +1,6 @@
 node_modules/
 dist/
+packages/tui-app/lib/
 *.log
 .DS_Store
 temp/

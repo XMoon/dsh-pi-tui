@@ -9,6 +9,7 @@
     "node": "^22.19.0 || >=24"
   },
   "scripts": {
+    "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"
   },
