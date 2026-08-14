@@ -37,7 +37,7 @@ test('thinking and tool entries render folded by default', async () => {
   assert.ok(view.includes('🐳'), `folded thinking marker missing:\n${view}`)
   assert.ok(view.includes('ctrl+o to'), `expand hint missing:\n${view}`)
   assert.ok(!view.includes('Line three'), `thinking body leaked:\n${view}`)
-  assert.ok(view.includes('✓ bash'), `tool header missing:\n${view}`)
+  assert.ok(view.includes('Bash ls [ok]'), `tool header missing:\n${view}`)
   assert.ok(!view.includes('more.txt'), `tool result leaked:\n${view}`)
 })
 
@@ -98,4 +98,19 @@ test('kitty-protocol Ctrl+O fires once per press (release/repeat do not toggle)'
   } finally {
     setKittyProtocolActive(false)
   }
+})
+
+
+test('running thinking folds to the latest line and settles to the first line', async () => {
+  const { vt, app } = startApp()
+  // While the step streams, the folded row follows the LATEST reasoning line.
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'first line\nsecond line\nlatest line', running: true }])
+  const running = await viewport(vt)
+  assert.ok(running.includes('latest line'), `latest line missing while running:\n${running}`)
+  assert.ok(!running.includes('first line'), `stale first line shown while running:\n${running}`)
+  // Once settled (assistant/message or turn/end), the row shows the FIRST line.
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'first line\nsecond line\nlatest line' }])
+  const settled = await viewport(vt)
+  assert.ok(settled.includes('first line'), `first line missing after settle:\n${settled}`)
+  assert.ok(!settled.includes('latest line'), `latest line still shown after settle:\n${settled}`)
 })

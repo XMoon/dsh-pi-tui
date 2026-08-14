@@ -15,13 +15,13 @@
  */
 import { Box, CombinedAutocompleteProvider, Container, Editor, Markdown, ProcessTerminal, ScrollView, SelectList, SettingsList, Text, TuiAltScreen, TuiMainScreen, VStack, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, } from '@dsh-pi-tui/pi-tui';
 import { detectThemeFromBackground, editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme, } from "./theme.js";
-import { isDiffResult, renderDiffLines } from "./diff.js";
+import { isDiffResult, renderDiffLines, renderDiffView } from "./diff.js";
+import { firstLine, latestLine, relativizeToCwd, toolCardHeader } from "./present.js";
 import { TranscriptSearchComponent } from "./search.js";
 import { recentTurnThreshold } from "./transcript.js";
+import { WorkingIndicator } from "./working.js";
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3;
-/** Folded preview lines for thinking blocks; mirrors pi's THINKING_PREVIEW_LINES. */
-export const THINKING_PREVIEW_LINES = 2;
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export const RESULT_PREVIEW_LINES = 3;
 /** First lines of a multi-line text, joined for folded previews. */
@@ -33,48 +33,6 @@ function preview(text, lines) {
     // surrogate pair / ZWJ emoji in the middle. The overflow marker rides in
     // the ellipsis slot (it is the same '…' the rest-marker would add).
     return truncateToWidth(first, rest === '' ? 120 : 119, rest);
-}
-/**
- * The key argument for a tool card header: the primary field per tool name
- * (e.g. bash → command, write → file_path), falling back to the first
- * string value, then to the raw args JSON.
- * @param name - the tool name.
- * @param args - the raw arguments JSON.
- * @returns a short display string.
- */
-function keyArg(name, args) {
-    let parsed;
-    try {
-        parsed = JSON.parse(args);
-    }
-    catch {
-        return args;
-    }
-    if (typeof parsed !== 'object' || parsed === null)
-        return args;
-    const record = parsed;
-    const fields = {
-        bash: ['command', 'cmd', 'script'],
-        write: ['file_path', 'path', 'file'],
-        edit: ['file_path', 'path', 'file'],
-        read: ['file', 'file_path', 'path'],
-        grep: ['pattern', 'regex', 'query'],
-        glob: ['pattern', 'path'],
-        fetch: ['url', 'uri'],
-        web: ['query', 'url'],
-        skill: ['name', 'skill'],
-        ask_user_question: ['question'],
-    };
-    for (const field of fields[name] ?? []) {
-        const value = record[field];
-        if (typeof value === 'string' && value !== '')
-            return `${field}=${value}`;
-    }
-    for (const value of Object.values(record)) {
-        if (typeof value === 'string' && value !== '')
-            return value;
-    }
-    return args;
 }
 /** Context bar width in cells; pi renders `[███░░░] pct` in the footer. */
 const CONTEXT_BAR_WIDTH = 12;
@@ -252,10 +210,18 @@ export class TuiApp {
     lastEscapeAt;
     /** Double-Esc window in ms. */
     static ESCAPE_CANCEL_WINDOW_MS = 400;
+    /** Session workspace root for path relativization (Web relativizeToCwd). */
+    workspaceRoot;
+    /** The tool presentation bridge, wired by the runner to the live registry. */
+    present;
+    /** The busy indicator row directly above the editor border; idle renders nothing. */
+    working;
     constructor(terminal, events, options = {}) {
         this.terminal = terminal;
         this.events = events;
         this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS;
+        this.workspaceRoot = options.workspaceRoot;
+        this.present = options.present;
         this.tui = new TuiMainScreen(terminal);
         this.editor = new Editor(this.tui, editorTheme);
         this.editorBorder = this.editor.borderColor;
@@ -266,10 +232,16 @@ export class TuiApp {
         this.header = new Text('🐋 dsh-pi-tui', 0, 0);
         this.messagesView = new Container();
         this.todoPanel = new Text('', 0, 0);
+        this.working = new WorkingIndicator(this.tui, options.workingIntervalMs === undefined
+            ? {}
+            : { intervalMs: options.workingIntervalMs });
         this.footer = new Text('', 0, 0);
+        // The working row sits between the todo panel and the editor so it is
+        // always the row directly above the editor border (pi's statusContainer).
         this.tui.addChild(this.header);
         this.tui.addChild(this.messagesView);
         this.tui.addChild(this.todoPanel);
+        this.tui.addChild(this.working);
         this.tui.addChild(this.editor);
         this.tui.addChild(this.footer);
         this.tui.setFocus(this.editor);
@@ -282,6 +254,7 @@ export class TuiApp {
     /** Leave raw mode and stop rendering. */
     stop() {
         this.clearNotify();
+        this.working.dispose();
         this.tui.stop();
         this.fullscreen?.stop();
         this.fullscreen = undefined;
@@ -548,6 +521,9 @@ export class TuiApp {
                         scrollbar: 'auto',
                     }), grow: 1 },
                 { component: this.todoPanel, shrink: 0 },
+                // The busy indicator row sits directly above the editor border
+                // (pi's statusContainer placement); idle it renders zero rows.
+                { component: this.working, shrink: 0 },
                 { component: this.editor, shrink: 0 },
                 { component: this.footer, shrink: 0 },
             ]);
@@ -647,6 +623,21 @@ export class TuiApp {
         this.renderTodoPanel();
         this.requestRender();
     }
+    /**
+     * Show or hide the busy indicator on the row directly above the editor
+     * border: while a turn is streaming or a tool is running (the runner
+     * derives it from turn/start and turn/end).
+     */
+    setWorking(active) {
+        if (active) {
+            this.working.start();
+        }
+        else {
+            this.working.stop();
+            this.working.setText('');
+        }
+        this.requestRender();
+    }
     /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
     setPlanMode(active) {
         this.planMode = active;
@@ -713,7 +704,12 @@ export class TuiApp {
             const expanded = message.turn >= boundary;
             const text = expanded
                 ? `${color.textDim('🐳')} ${message.text}`
-                : color.textDim(`🐳 ${preview(message.text, THINKING_PREVIEW_LINES)} (ctrl+o to expand)`);
+                // Folded: while the step still streams, the row follows the LATEST
+                // line of reasoning (the Web's running summary); once settled it
+                // shows the first line (the Web's settled summary).
+                : color.textDim(`🐳 ${message.running === true
+                    ? preview(latestLine(message.text), 1)
+                    : preview(firstLine(message.text), 1)} (ctrl+o to expand)`);
             return new Text(text, 0, 0);
         }
         if (message.kind === 'system') {
@@ -727,30 +723,123 @@ export class TuiApp {
             // Windowing: turns older than the display window collapse to one line.
             return new Text(color.textDim(message.text), 0, 0);
         }
-        // Tool card: header line, plus args and result when expanded.
-        const mark = message.status === 'ok' ? successMark('✓') : message.status === 'error' ? errorMark('✗') : dim('…');
+        // Tool card: the Web row-model header (design title + relativized args
+        // summary + status pill), with the result body when expanded.
         const card = new Container();
-        const key = message.args.trim() === '' ? '' : ` ${keyArg(message.name, message.args).slice(0, 60)}`;
+        const header = toolCardHeader(message.name, message.args, this.workspaceRoot);
+        const summary = header.summary === '' ? '' : ` ${header.summary}`;
+        const pill = message.status === 'ok'
+            ? color.success('[ok]')
+            : message.status === 'error'
+                ? color.error('[error]')
+                : color.textDim('[running]');
         if (message.turn >= boundary) {
-            card.addChild(new Text(`${mark} ${message.name}${key}`, 0, 0));
-            if (message.result !== '') {
-                if (isDiffResult(message.name, message.result)) {
-                    for (const line of renderDiffLines(message.result)) {
-                        card.addChild(new Text(line, 0, 0));
-                    }
-                }
-                else {
-                    card.addChild(new Text(message.result, 0, 0));
-                }
-            }
+            card.addChild(new Text(`${header.title}${summary} ${pill}`, 0, 0));
+            this.renderToolBody(card, message);
         }
         else {
             const resultPreview = message.result === ''
                 ? ''
                 : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`;
-            card.addChild(new Text(`${mark} ${message.name}${key}${resultPreview}`, 0, 0));
+            card.addChild(new Text(`${header.title}${summary} ${pill}${resultPreview}`, 0, 0));
         }
         return card;
+    }
+    /**
+     * Render one expanded tool card's body. When the runner wired a presenter,
+     * the body follows the tool's own render intent (presentResult): a read
+     * card shows numbered lines plus the relativized path and total line
+     * count, a search card groups matches by file and marks truncation, a
+     * terminal card shows the output and exit status, and a diff card colors
+     * the hunks. Without a view the raw result text renders, diff-colored
+     * when it looks like one.
+     * @param card - the card container to fill.
+     * @param message - the tool message.
+     */
+    renderToolBody(card, message) {
+        // Running: surface the pending call's salient raw input when the tool
+        // offered one (e.g. a background job id); otherwise the header alone.
+        if (message.status === 'running') {
+            const callView = this.present?.call(message.name, message.args);
+            if (callView !== undefined && callView.card === 'generic' && callView.rawInput !== undefined) {
+                const raw = typeof callView.rawInput === 'string' ? callView.rawInput : JSON.stringify(callView.rawInput, null, 2);
+                card.addChild(new Text(raw, 0, 0));
+            }
+            return;
+        }
+        if (message.result === '' && (message.resultBlocks?.length ?? 0) === 0)
+            return;
+        const resultView = this.present?.result(message.name, message.args, {
+            content: message.resultBlocks ?? [],
+            isError: message.status === 'error',
+            ...message.meta === undefined ? {} : { meta: message.meta },
+        });
+        if (resultView !== undefined) {
+            switch (resultView.card) {
+                case 'read': {
+                    for (const line of resultView.lines) {
+                        card.addChild(new Text(`  ${line.number} │ ${line.text}`, 0, 0));
+                    }
+                    card.addChild(new Text(`  path: ${relativizeToCwd(resultView.path, this.workspaceRoot)}`, 0, 0));
+                    card.addChild(new Text(`  total lines: ${resultView.totalLines}`, 0, 0));
+                    return;
+                }
+                case 'search': {
+                    if (resultView.shape === 'matches') {
+                        for (const file of resultView.files) {
+                            card.addChild(new Text(`  ${relativizeToCwd(file.path, this.workspaceRoot)}`, 0, 0));
+                            for (const match of file.matches) {
+                                card.addChild(new Text(`    ${match.lineNumber} │ ${match.line}`, 0, 0));
+                            }
+                        }
+                        if (resultView.truncated) {
+                            card.addChild(new Text(`  … truncated — ${resultView.total} total matches`, 0, 0));
+                        }
+                    }
+                    else {
+                        for (const path of resultView.paths) {
+                            card.addChild(new Text(`  ${relativizeToCwd(path, this.workspaceRoot)}`, 0, 0));
+                        }
+                        if (resultView.truncated) {
+                            card.addChild(new Text(`  … truncated — ${resultView.total} total paths`, 0, 0));
+                        }
+                    }
+                    return;
+                }
+                case 'terminal': {
+                    if (resultView.output !== undefined && resultView.output !== '') {
+                        for (const line of resultView.output.split('\n')) {
+                            card.addChild(new Text(line, 0, 0));
+                        }
+                    }
+                    const exit = resultView.exitCode !== undefined
+                        ? `[exit ${resultView.exitCode}]`
+                        : resultView.signal !== undefined
+                            ? `[signal ${resultView.signal}]`
+                            : '';
+                    if (exit !== '')
+                        card.addChild(new Text(color.textDim(exit), 0, 0));
+                    return;
+                }
+                case 'diff': {
+                    for (const line of renderDiffView(resultView.diffs, this.workspaceRoot)) {
+                        card.addChild(new Text(line, 0, 0));
+                    }
+                    return;
+                }
+                default:
+                    break;
+            }
+        }
+        // Generic fallback: the raw result text, diff-colored when it reads as one.
+        if (isDiffResult(message.name, message.result)) {
+            for (const line of renderDiffLines(message.result)) {
+                card.addChild(new Text(line, 0, 0));
+            }
+        }
+        else {
+            card.addChild(new Text(message.result, 0, 0));
+        }
     }
     /** Request a render on the active screen. Public so in-place submenu
      * components (async content swaps) can trigger the next frame. */
@@ -1234,11 +1323,12 @@ export class TuiApp {
 // Style helpers from the theme module's token functions.
 import { color } from "./theme.js";
 const dim = color.textDim;
-const successMark = color.success;
-const errorMark = color.error;
-/** Start the TUI on the process terminal (raw-mode stdin/stdout). */
-export function startProcessTui(events) {
-    const app = new TuiApp(new ProcessTerminal(), events);
+/**
+ * Start the TUI on the process terminal (raw-mode stdin/stdout). The runner
+ * passes the presentation bridge and workspace root through the options.
+ */
+export function startProcessTui(events, options = {}) {
+    const app = new TuiApp(new ProcessTerminal(), events, options);
     app.start();
     return app;
 }

@@ -35,6 +35,7 @@
     "@dsh-pi-tui/pi-tui": "file:../pi-tui",
     "@deepseek-ai/dsh-cmdline": "^0.1.0-rc.6",
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
     "chalk": "^5.4.1",
     "commander": "^15.0.0"
@@ -55,6 +56,7 @@
     "@deepseek-ai/dsh-user-questions": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-subagent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-goal": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tool-workflow": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm-retry": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-permission-presets": "^0.1.0-rc.6",
@@ -85,6 +87,7 @@
     "@deepseek-ai/dsh-user-questions": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-subagent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-goal": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tool-workflow": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm-retry": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-permission-presets": "^0.1.0-rc.6",

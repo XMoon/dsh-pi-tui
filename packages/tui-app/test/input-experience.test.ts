@@ -115,7 +115,7 @@ test('local shell cards render, settle in place, and clear', async () => {
     args: 'ls -la', result: '', status: 'running',
   })
   let view = await viewport(vt)
-  assert.ok(view.includes('shell'), `running card missing:\n${view}`)
+  assert.ok(view.includes('Shell ls -la [running]'), `running card missing:\n${view}`)
   assert.ok(view.includes('ls -la'), `args missing:\n${view}`)
   app.updateLastLocalMessage({
     kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
@@ -125,7 +125,7 @@ test('local shell cards render, settle in place, and clear', async () => {
   assert.ok(view.includes('exit 0'), `result missing:\n${view}`)
   app.clearLocalMessages()
   view = await viewport(vt)
-  assert.ok(!view.includes('shell'), `card not cleared:\n${view}`)
+  assert.ok(!view.includes('Shell'), `card not cleared:\n${view}`)
 })
 
 test('a settled card updates by identity, never the newest card', async () => {

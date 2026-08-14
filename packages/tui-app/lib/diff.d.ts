@@ -4,6 +4,7 @@
  * so the headless tests can drive them without a TUI.
  * @module @dsh-pi-tui/tui-app/diff
  */
+import type { FileDiff } from '@deepseek-ai/dsh-tools';
 /**
  * Whether a tool result should render as a diff: edit-class tools always,
  * anything else only when the text carries diff structure.
@@ -24,3 +25,13 @@ export declare function renderDiffLine(line: string): string;
  * @returns the colorized lines.
  */
 export declare function renderDiffLines(text: string): string[];
+/**
+ * Render a result-side diff view (a `card: 'diff'` presentResult intent) as
+ * colored lines: one dimmed File: header per hunk, prior lines as `-` (red),
+ * new lines as `+` (green). Hunks whose oldText is null (creates) show only
+ * the new lines. Paths relativize against the workspace root when given.
+ * @param diffs - the diff view's hunks.
+ * @param cwd - workspace root for path relativization; optional.
+ * @returns the colored render lines.
+ */
+export declare function renderDiffView(diffs: readonly FileDiff[], cwd?: string): string[];

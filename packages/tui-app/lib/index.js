@@ -27,6 +27,7 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 // The plan-mode fold for the header badge.
 import { foldPlanMode } from '@deepseek-ai/dsh-plan-mode';
 import { TUI_STARTUP_SERVICE } from "./startup.js";
+import { toolPresenterFrom } from "./present.js";
 import { textOf, TranscriptFolder } from "./transcript.js";
 import { formatStats, StatsFolder } from "./stats.js";
 import { color, loadCustomTheme, resolveCustomTheme } from "./theme.js";
@@ -176,6 +177,23 @@ export function dangerCommand(command) {
  * @param events - the session log.
  * @returns e.g. `goal ● fix the build`, or undefined.
  */
+/**
+ * Whether the agent is busy from a session log: the newest turn-boundary
+ * event decides. A resumed session can be persisted mid-turn, so the scan
+ * cannot assume the log ends idle.
+ * @param events - the session log.
+ * @returns whether the newest turn is still open.
+ */
+function workingFromLog(events) {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (event.type === 'turn/start')
+            return true;
+        if (event.type === 'turn/end')
+            return false;
+    }
+    return false;
+}
 function foldGoal(events) {
     for (let index = events.length - 1; index >= 0; index -= 1) {
         const event = events[index];
@@ -473,6 +491,7 @@ export function apply(ctx, config) {
             statsFolder = new StatsFolder();
             statsFolder.apply(liveAgent.session.events);
             goalText = foldGoal(liveAgent.session.events);
+            app.setWorking(workingFromLog(liveAgent.session.events));
             app.clearLocalMessages();
             repaint(app, folder);
             refreshStatus();
@@ -535,6 +554,10 @@ export function apply(ctx, config) {
             });
         };
         let app;
+        // Tool-card presentation bridge: the Web's render intents resolved from
+        // the LIVE tool registry as the agent sees it (scoped lookup), so the
+        // rendered card matches the definition that actually executed.
+        const present = toolPresenterFrom(name => ctx.tools.get(name, liveAgent.ctx));
         // Aborts an in-flight command execution when the TUI quits.
         const signal = new AbortController().signal;
         // Abort handle for the currently running `!` shell command.
@@ -821,6 +844,9 @@ export function apply(ctx, config) {
             // P7d: a single Esc with no overlay up exits the subagent viewer
             // instead of arming the double-Esc cancel.
             onSingleEscape: () => exitView(),
+        }, {
+            present,
+            workspaceRoot: cwd,
         });
         paintNow();
         setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`);
@@ -927,7 +953,13 @@ export function apply(ctx, config) {
             if (event.type === 'plan/mode')
                 app.setPlanMode(event.data.active);
             // Persist each completed turn so a crash loses at most the live turn.
-            if (event.type === 'turn/end') {
+            // The busy indicator follows turn boundaries: on from the moment a
+            // turn starts (model wait + tool calls), off when it ends.
+            if (event.type === 'turn/start') {
+                app.setWorking(true);
+            }
+            else if (event.type === 'turn/end') {
+                app.setWorking(false);
                 paintNow();
                 refreshStatus();
                 void sessions.flush(liveAgent.session);
@@ -936,8 +968,10 @@ export function apply(ctx, config) {
                 refreshStatus();
             }
         });
-        // Initial plan badge from the log.
+        // Initial plan badge and busy indicator from the log (a resumed
+        // session may be persisted mid-turn).
         app.setPlanMode(foldPlanMode(liveAgent.session.events));
+        app.setWorking(workingFromLog(liveAgent.session.events));
         // Initial todo state: the last todo/write snapshot in the log.
         for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
             const event = liveAgent.session.events[index];

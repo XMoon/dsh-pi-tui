@@ -5,7 +5,9 @@
  * @module @dsh-pi-tui/tui-app/diff
  */
 
+import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import { color } from './theme.ts'
+import { relativizeToCwd } from './present.ts'
 
 /**
  * Whether a tool result should render as a diff: edit-class tools always,
@@ -43,4 +45,24 @@ export function renderDiffLine(line: string): string {
  */
 export function renderDiffLines(text: string): string[] {
   return text.split('\n').map(renderDiffLine)
+}
+/**
+ * Render a result-side diff view (a `card: 'diff'` presentResult intent) as
+ * colored lines: one dimmed File: header per hunk, prior lines as `-` (red),
+ * new lines as `+` (green). Hunks whose oldText is null (creates) show only
+ * the new lines. Paths relativize against the workspace root when given.
+ * @param diffs - the diff view's hunks.
+ * @param cwd - workspace root for path relativization; optional.
+ * @returns the colored render lines.
+ */
+export function renderDiffView(diffs: readonly FileDiff[], cwd?: string): string[] {
+  const lines: string[] = []
+  for (const hunk of diffs) {
+    lines.push(color.textDim('File: ' + relativizeToCwd(hunk.path, cwd)))
+    if (hunk.oldText !== null) {
+      for (const line of hunk.oldText.split('\n')) lines.push(renderDiffLine('-' + line))
+    }
+    for (const line of hunk.newText.split('\n')) lines.push(renderDiffLine('+' + line))
+  }
+  return lines
 }

@@ -152,7 +152,7 @@ test('esc cancels an askQuestions flow with a rejection', async () => {
   await assert.rejects(promise, /cancelled/)
 })
 
-test('tool card headers show the key argument instead of raw args', async () => {
+test('tool card headers show the design title and the args summary', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
@@ -160,7 +160,8 @@ test('tool card headers show the key argument instead of raw args', async () => 
     result: 'done', status: 'ok',
   }])
   const view = await viewport(vt)
-  assert.ok(view.includes('command=ls -la'), `key arg missing:\n${view}`)
+  assert.ok(view.includes('Bash ls -la [ok]'), `design title missing:\n${view}`)
+  assert.ok(!view.includes('command=ls -la'), `raw key-arg format leaked:\n${view}`)
 })
 
 test('footer preset hides the stats line in compact mode', async () => {
@@ -232,4 +233,108 @@ test('welcome card wraps long facts inside a full-width box', async () => {
   assert.equal(top.length, 100, `box top must be full width, got ${top.length}`)
   assert.ok(lines.some(line => line.includes('╰') && line.includes('╯')), `box bottom missing:\n${view}`)
   assert.ok(lines.some(line => line.includes('│')), `box sides missing:\n${view}`)
+})
+test('working indicator shows on the row directly above the editor while active', async () => {
+  const { vt, app } = startApp()
+  app.setWorking(true)
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const workingIndex = lines.findIndex(line => line.includes('Working'))
+  assert.ok(workingIndex !== -1, `working row missing:\n${view}`)
+  const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(editorTop !== -1, `editor border missing:\n${view}`)
+  assert.equal(workingIndex + 1, editorTop, `working row must sit directly above the editor border:\n${view}`)
+  app.setWorking(false)
+  const idle = await viewport(vt)
+  assert.ok(!idle.includes('Working'), `working row survived:\n${idle}`)
+})
+
+test('working indicator alternates between the whale emojis', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
+  app.start()
+  app.setWorking(true)
+  await vt.waitForRender()
+  const seen = new Set<string>()
+  for (let i = 0; i < 30 && seen.size < 2; i += 1) {
+    const view = vt.getViewport().join('\n')
+    const line = view.split('\n').find(candidate => candidate.includes('Working'))
+    if (line !== undefined) {
+      if (line.includes('🐋')) seen.add('🐋')
+      if (line.includes('🐳')) seen.add('🐳')
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(seen.has('🐋') && seen.has('🐳'), `both whale emojis must appear, saw: ${[...seen].join(', ')}`)
+  app.setWorking(false)
+  app.stop()
+})
+
+test('working indicator shows above the editor in fullscreen too', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setWorking(true)
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const workingIndex = lines.findIndex(line => line.includes('Working'))
+  assert.ok(workingIndex !== -1, `working row missing in fullscreen:\n${view}`)
+  const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(editorTop !== -1, `editor border missing:\n${view}`)
+  assert.equal(workingIndex + 1, editorTop, `working row must sit above the editor border in fullscreen:\n${view}`)
+  app.setWorking(false)
+  app.setFullscreen(false)
+})
+
+test('search cards group matches by file and mark truncation', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: '/ws',
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'search',
+        shape: 'matches',
+        files: [{ path: '/ws/src/foo.ts', matches: [{ lineNumber: 12, line: 'const a = 1' }] }],
+        truncated: true,
+        total: 42,
+      }),
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep',
+    args: '{"pattern":"const","path":"/ws/src"}',
+    result: '12: const a = 1', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Search const [ok]'), `search header missing:\n${view}`)
+  assert.ok(view.includes('src/foo.ts'), `relativized file group missing:\n${view}`)
+  assert.ok(view.includes('12 │ const a = 1'), `match line missing:\n${view}`)
+  assert.ok(view.includes('… truncated — 42 total matches'), `truncation marker missing:\n${view}`)
+  assert.ok(!view.includes('/ws/src/foo.ts'), `absolute path leaked:\n${view}`)
+  app.stop()
+})
+
+test('terminal cards show the output and the exit code', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({ card: 'terminal', output: 'hello\nworld', exitCode: 0 }),
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"echo hi"}',
+    result: 'hello\nworld', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Bash echo hi [ok]'), `terminal header missing:\n${view}`)
+  assert.ok(view.includes('hello'), `output line missing:\n${view}`)
+  assert.ok(view.includes('world'), `output line missing:\n${view}`)
+  assert.ok(view.includes('[exit 0]'), `exit pill missing:\n${view}`)
+  app.stop()
 })

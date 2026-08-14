@@ -513,3 +513,67 @@ test('window anchored at endTurn shows the match turn instead of the newest', ()
   const recent = foldTranscript(events, { maxTurns: 5, endTurn: 4 })
   assert.equal(recent[0]?.kind, 'user', `no summary expected when the window fits:\n${JSON.stringify(recent[0])}`)
 })
+
+test('thinking entries run while deltas stream and settle on the step message', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1),
+  ])
+  const thinking = messages[0]
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.running, true, 'streaming thinking must be running')
+  const settled = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-2'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, 2),
+  ])
+  const done = settled[0]
+  assert.ok(done !== undefined && done.kind === 'thinking')
+  assert.equal(done.running, false, 'the step message must settle its thinking entry')
+})
+
+test('an interrupted turn settles every live thinking entry', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 2),
+  ])
+  const thinking = messages[0]
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.running, false, 'turn/end must settle live thinking entries')
+})
+
+test('tool results keep their content blocks and meta for presentation', () => {
+  const messages = foldTranscript([
+    event('tool/call', { turn: 0, step: 0, callId: CallId('call-1'), name: 'read', arguments: '{"file_path":"/ws/src/foo.ts"}' }, 0),
+    event('tool/result', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-3'),
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('call-1'),
+          content: [{ type: 'text', text: 'hi' }],
+        }],
+        source: { kind: 'tool', callId: CallId('call-1') },
+      },
+      meta: { path: '/ws/src/foo.ts', totalLines: 1 },
+    }, 1),
+  ])
+  const tool = messages[0]
+  assert.ok(tool !== undefined && tool.kind === 'tool')
+  assert.equal(tool.resultBlocks?.length, 1, 'result content blocks must be kept')
+  assert.deepEqual(tool.meta, { path: '/ws/src/foo.ts', totalLines: 1 }, 'result meta must be kept')
+})
+

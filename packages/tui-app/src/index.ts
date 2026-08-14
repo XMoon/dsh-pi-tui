@@ -65,6 +65,7 @@ import type {} from '@deepseek-ai/dsh-shell'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
+import { toolPresenterFrom } from './present.ts'
 import { textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
@@ -230,6 +231,22 @@ export function dangerCommand(command: string): boolean {
  * @param events - the session log.
  * @returns e.g. `goal ● fix the build`, or undefined.
  */
+/**
+ * Whether the agent is busy from a session log: the newest turn-boundary
+ * event decides. A resumed session can be persisted mid-turn, so the scan
+ * cannot assume the log ends idle.
+ * @param events - the session log.
+ * @returns whether the newest turn is still open.
+ */
+function workingFromLog(events: readonly SessionEvent[]): boolean {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type === 'turn/start') return true
+    if (event.type === 'turn/end') return false
+  }
+  return false
+}
+
 function foldGoal(events: readonly SessionEvent[]): string | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
@@ -553,6 +570,7 @@ export function apply(ctx: Context, config: Config): void {
       statsFolder = new StatsFolder()
       statsFolder.apply(liveAgent.session.events)
       goalText = foldGoal(liveAgent.session.events)
+      app.setWorking(workingFromLog(liveAgent.session.events))
       app.clearLocalMessages()
       repaint(app, folder)
       refreshStatus()
@@ -615,6 +633,10 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     let app: TuiApp
+    // Tool-card presentation bridge: the Web's render intents resolved from
+    // the LIVE tool registry as the agent sees it (scoped lookup), so the
+    // rendered card matches the definition that actually executed.
+    const present = toolPresenterFrom(name => ctx.tools.get(name, liveAgent.ctx))
     // Aborts an in-flight command execution when the TUI quits.
     const signal = new AbortController().signal
     // Abort handle for the currently running `!` shell command.
@@ -891,6 +913,9 @@ export function apply(ctx: Context, config: Config): void {
       // P7d: a single Esc with no overlay up exits the subagent viewer
       // instead of arming the double-Esc cancel.
       onSingleEscape: () => exitView(),
+    }, {
+      present,
+      workspaceRoot: cwd,
     })
     paintNow()
     setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`)
@@ -988,7 +1013,12 @@ export function apply(ctx: Context, config: Config): void {
       if (event.type === 'todo/write') app.setTodoSummary(event.data.todos)
       if (event.type === 'plan/mode') app.setPlanMode(event.data.active)
       // Persist each completed turn so a crash loses at most the live turn.
-      if (event.type === 'turn/end') {
+      // The busy indicator follows turn boundaries: on from the moment a
+      // turn starts (model wait + tool calls), off when it ends.
+      if (event.type === 'turn/start') {
+        app.setWorking(true)
+      } else if (event.type === 'turn/end') {
+        app.setWorking(false)
         paintNow()
         refreshStatus()
         void sessions.flush(liveAgent.session)
@@ -996,8 +1026,10 @@ export function apply(ctx: Context, config: Config): void {
         refreshStatus()
       }
     })
-    // Initial plan badge from the log.
+    // Initial plan badge and busy indicator from the log (a resumed
+    // session may be persisted mid-turn).
     app.setPlanMode(foldPlanMode(liveAgent.session.events))
+    app.setWorking(workingFromLog(liveAgent.session.events))
     // Initial todo state: the last todo/write snapshot in the log.
     for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
       const event = liveAgent.session.events[index]

@@ -15,11 +15,10 @@
  */
 import { type Component, type SettingItem, type SlashCommand, type Terminal } from '@dsh-pi-tui/pi-tui';
 import { type ColorPalette } from './theme.ts';
+import { type ToolPresenter } from './present.ts';
 import { type TranscriptMessage } from './transcript.ts';
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export declare const EXPAND_RECENT_TURNS = 3;
-/** Folded preview lines for thinking blocks; mirrors pi's THINKING_PREVIEW_LINES. */
-export declare const THINKING_PREVIEW_LINES = 2;
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export declare const RESULT_PREVIEW_LINES = 3;
 /**
@@ -165,6 +164,17 @@ export interface StatusData {
     /** Context window in tokens, when known. */
     contextWindow?: number;
 }
+/** Injectable TuiApp options; every field is optional. */
+export interface TuiAppOptions {
+    /** How long a notify line stays before it auto-clears, in ms. */
+    notifyDurationMs?: number;
+    /** Session workspace root; workspace-rooted path summaries display relative to it. */
+    workspaceRoot?: string;
+    /** Tool presentation bridge (web-parity cards via the live tool registry). */
+    present?: ToolPresenter;
+    /** Working-indicator frame interval in ms; injectable so tests stay fast. */
+    workingIntervalMs?: number;
+}
 /**
  * The interactive surface: header, transcript, editor, footer. Owns the
  * TUI lifecycle, mode switching, folding, approval dialogs, and settings
@@ -242,9 +252,13 @@ export declare class TuiApp {
     private lastEscapeAt;
     /** Double-Esc window in ms. */
     private static readonly ESCAPE_CANCEL_WINDOW_MS;
-    constructor(terminal: Terminal, events: TuiAppEvents, options?: {
-        notifyDurationMs?: number;
-    });
+    /** Session workspace root for path relativization (Web relativizeToCwd). */
+    private readonly workspaceRoot;
+    /** The tool presentation bridge, wired by the runner to the live registry. */
+    private readonly present;
+    /** The busy indicator row directly above the editor border; idle renders nothing. */
+    private readonly working;
+    constructor(terminal: Terminal, events: TuiAppEvents, options?: TuiAppOptions);
     /** Enter raw mode and start rendering. */
     start(): void;
     /** Leave raw mode and stop rendering. */
@@ -330,6 +344,12 @@ export declare class TuiApp {
     setTranscript(messages: readonly TranscriptMessage[]): void;
     /** Rebuild the message component tree from the current transcript state. */
     private rebuildMessages;
+    /**
+     * Show or hide the busy indicator on the row directly above the editor
+     * border: while a turn is streaming or a tool is running (the runner
+     * derives it from turn/start and turn/end).
+     */
+    setWorking(active: boolean): void;
     /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
     setPlanMode(active: boolean): void;
     /**
@@ -357,6 +377,18 @@ export declare class TuiApp {
     private expandBoundary;
     /** Render one transcript message as a pi-tui component. */
     private renderMessage;
+    /**
+     * Render one expanded tool card's body. When the runner wired a presenter,
+     * the body follows the tool's own render intent (presentResult): a read
+     * card shows numbered lines plus the relativized path and total line
+     * count, a search card groups matches by file and marks truncation, a
+     * terminal card shows the output and exit status, and a diff card colors
+     * the hunks. Without a view the raw result text renders, diff-colored
+     * when it looks like one.
+     * @param card - the card container to fill.
+     * @param message - the tool message.
+     */
+    private renderToolBody;
     /** Request a render on the active screen. Public so in-place submenu
      * components (async content swaps) can trigger the next frame. */
     requestRender(): void;
@@ -471,5 +503,8 @@ export declare class TuiApp {
     /** Resolve the question flow with its answers, or reject on cancel. */
     private settleQuestions;
 }
-/** Start the TUI on the process terminal (raw-mode stdin/stdout). */
-export declare function startProcessTui(events: TuiAppEvents): TuiApp;
+/**
+ * Start the TUI on the process terminal (raw-mode stdin/stdout). The runner
+ * passes the presentation bridge and workspace root through the options.
+ */
+export declare function startProcessTui(events: TuiAppEvents, options?: TuiAppOptions): TuiApp;

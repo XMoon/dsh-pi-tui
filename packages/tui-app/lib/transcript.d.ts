@@ -15,7 +15,7 @@
  * component tree on long sessions.
  * @module @dsh-pi-tui/tui-app/transcript
  */
-import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session';
+import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage = {
@@ -29,7 +29,8 @@ export type TranscriptMessage = {
 } | {
     kind: 'thinking';
     turn: number;
-    text: string;
+    text: string; /** Still streaming reasoning deltas for its step. */
+    running?: boolean;
 }
 /** Injected context (system reminders, skill content) from non-user sources. */
  | {
@@ -43,6 +44,10 @@ export type TranscriptMessage = {
     args: string;
     result: string;
     status: 'ok' | 'error' | 'running';
+    /** The completed result's content blocks, for tool-owned presentation. */
+    resultBlocks?: readonly ContentBlock[];
+    /** The tool-private presentation payload from the tool/result event. */
+    meta?: JsonValue;
 }
 /** Older-than-window turns collapsed into one line (windowing). */
  | {

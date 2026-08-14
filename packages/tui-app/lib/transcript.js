@@ -194,7 +194,7 @@ export class TranscriptFolder {
         const key = stepKey(turn, step);
         let entry = this.thinkingEntries.get(key);
         if (entry === undefined) {
-            entry = { kind: 'thinking', turn, text: '' };
+            entry = { kind: 'thinking', turn, text: '', running: true };
             this.thinkingEntries.set(key, entry);
             this.items.push(entry);
         }
@@ -258,6 +258,10 @@ export class TranscriptFolder {
                     this.assistantEntries.set(key, created);
                     this.items.push(created);
                 }
+                // The step is complete: its thinking entry stops streaming.
+                const thinking = this.thinkingEntries.get(key);
+                if (thinking !== undefined)
+                    thinking.running = false;
                 break;
             }
             case 'tool/call': {
@@ -299,6 +303,9 @@ export class TranscriptFolder {
                     card.result = text;
                     card.args = pending.args;
                     card.turn = turn;
+                    // Raw result data for the tool-owned presentation (presentResult).
+                    card.resultBlocks = block?.content;
+                    card.meta = event.data.meta;
                 }
                 else {
                     // Unknown call (e.g. post-compaction): fall back to the last
@@ -309,14 +316,20 @@ export class TranscriptFolder {
                         running.result = text;
                         running.args = '';
                         running.turn = turn;
+                        running.resultBlocks = block?.content;
+                        running.meta = event.data.meta;
                     }
                     else {
-                        this.items.push({ kind: 'tool', turn, name, args: '', result: text, status });
+                        this.items.push({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta });
                     }
                 }
                 break;
             }
             case 'turn/end': {
+                // Every thinking entry stops streaming when the turn closes
+                // (interrupted steps never see their assistant/message).
+                for (const entry of this.thinkingEntries.values())
+                    entry.running = false;
                 if (event.data.reason.kind === 'error') {
                     const error = event.data.reason.error;
                     this.items.push({ kind: 'tool', turn: this.currentTurn, name: 'error', args: '', result: `${error.code}: ${error.message}`, status: 'error' });
