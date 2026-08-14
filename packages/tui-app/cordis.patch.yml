@@ -15,4 +15,4 @@
       name: '@dsh-pi-tui/tui-app'
       inject: [tuiStartup]
       config:
-        sessionId: !!js ctx.tuiStartup.sessionId
+        sessionId: ''

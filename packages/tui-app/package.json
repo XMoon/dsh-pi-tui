@@ -50,7 +50,17 @@
     "@deepseek-ai/dsh-skill": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-plan-mode": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-session-persistence": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-session-persistence": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-user-questions": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-subagent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-goal": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-workflow": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm-retry": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-permission-presets": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session-title": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-jobs": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-shell": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
@@ -68,7 +78,17 @@
     "@deepseek-ai/dsh-skill": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-plan-mode": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-session-persistence": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-session-persistence": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-user-questions": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-subagent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-goal": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-workflow": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm-retry": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-permission-presets": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session-title": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-jobs": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-shell": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6"
   },
   "engines": {
     "node": ">=22.19.0"
