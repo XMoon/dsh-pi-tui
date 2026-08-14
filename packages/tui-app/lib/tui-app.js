@@ -219,6 +219,8 @@ export class TuiApp {
     present;
     /** The busy indicator row directly above the editor border; idle renders nothing. */
     working;
+    /** Wheel-scroll grace window before click reporting comes back, in ms. */
+    mouseGraceMs;
     /**
      * Per-message expansion overrides from mouse clicks: a message whose entry
      * is true stays expanded even when the global fold is off; absent falls
@@ -230,12 +232,17 @@ export class TuiApp {
     messageRows = [];
     /** The live session's auto-generated title, shown in the header when set. */
     sessionTitleText = '';
+    /** Pending re-enable of click reporting after a wheel scroll. */
+    wheelTimer;
+    /** How long wheel scrolling suspends click reporting, in ms. */
+    static WHEEL_GRACE_MS = 300;
     constructor(terminal, events, options = {}) {
         this.terminal = terminal;
         this.events = events;
         this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS;
         this.workspaceRoot = options.workspaceRoot;
         this.present = options.present;
+        this.mouseGraceMs = options.mouseGraceMs ?? TuiApp.WHEEL_GRACE_MS;
         this.tui = new TuiMainScreen(terminal);
         this.editor = new Editor(this.tui, editorTheme);
         this.editorBorder = this.editor.borderColor;
@@ -270,6 +277,10 @@ export class TuiApp {
     stop() {
         this.clearNotify();
         this.working.dispose();
+        if (this.wheelTimer !== undefined) {
+            clearTimeout(this.wheelTimer);
+            this.wheelTimer = undefined;
+        }
         this.terminal.write(DISABLE_CLICK_MOUSE);
         this.tui.stop();
         this.fullscreen?.stop();
@@ -690,9 +701,36 @@ export class TuiApp {
         const match = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
         if (match === null)
             return false;
-        if (match[4] === 'M' && match[1] === '0')
-            this.handleTranscriptClick(Number(match[2]), Number(match[3]));
+        const button = Number(match[1]);
+        if (match[4] === 'M') {
+            if (button === 0) {
+                this.handleTranscriptClick(Number(match[2]), Number(match[3]));
+            }
+            else if (button >= 64 && button <= 67) {
+                // Wheel up/down/left/right: click reporting itself steals wheel
+                // events from the terminal, so a scroll disables it for a grace
+                // window and lets the terminal scroll its own scrollback (or tmux
+                // scroll the pane), then re-enables it for the next click.
+                this.suspendClickMouseForWheel();
+            }
+        }
         return true;
+    }
+    /** Temporarily disable click reporting so wheel scrolling reaches the
+     * terminal's native scrollback; re-enable after the grace window (skipped
+     * while the alt screen owns mouse handling in fullscreen mode). */
+    suspendClickMouseForWheel() {
+        if (this.fullscreen !== undefined)
+            return;
+        this.terminal.write(DISABLE_CLICK_MOUSE);
+        if (this.wheelTimer !== undefined)
+            clearTimeout(this.wheelTimer);
+        this.wheelTimer = setTimeout(() => {
+            this.wheelTimer = undefined;
+            if (this.fullscreen !== undefined)
+                return;
+            this.terminal.write(ENABLE_CLICK_MOUSE);
+        }, this.mouseGraceMs);
     }
     /**
      * Map a screen-space click (1-based SGR coords) onto a transcript message

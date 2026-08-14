@@ -442,6 +442,45 @@ test('mouse release and non-left buttons are inert', async () => {
   assert.ok(!view.includes('\nb'), `release/right-click must not expand the card:\n${view}`)
 })
 
+test('wheel events suspend click reporting briefly and clicks work again after the grace window', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { mouseGraceMs: 20 })
+  app.start()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+  ])
+  await viewport(vt)
+  // A wheel press (button 64 = up) must not expand the card, and it must
+  // not disturb the editor: typing still lands afterwards.
+  vt.sendInput('\x1b[<64;10;2M')
+  await viewport(vt)
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\nb'), `wheel must not expand the card:\n${view}`)
+  vt.sendInput('draft')
+  // After the grace window, clicking the card row expands it again.
+  await new Promise(resolve => setTimeout(resolve, 40))
+  vt.sendInput('\x1b[<0;10;2M')
+  await viewport(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('\nb'), `click must work after the wheel grace window:\n${view}`)
+  app.stop()
+})
+
+test('wheel release and tilt buttons are inert but consumed', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+  ])
+  await viewport(vt)
+  vt.sendInput('\x1b[<64;10;2m') // wheel release
+  vt.sendInput('\x1b[<66;10;2M') // wheel tilt left
+  vt.sendInput('\x1b[<67;10;2M') // wheel tilt right
+  await viewport(vt)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\nb'), `wheel variants must not expand the card:\n${view}`)
+})
+
+
 test('tool cards degrade to generic rendering when the registry lookup is absent', async () => {
   // Mirrors the production guard: the registry is read through ctx.get and
   // may be absent (or hide behind cordis's inject guard), in which case the
