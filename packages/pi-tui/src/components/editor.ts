@@ -314,7 +314,6 @@ export class Editor implements Component, Focusable {
 	private autocompleteMaxVisible: number = 5;
 	private autocompleteAbort?: AbortController;
 	private autocompleteDebounceTimer?: ReturnType<typeof setTimeout>;
-	private autocompleteRequestTask: Promise<void> = Promise.resolve();
 	private autocompleteStartToken: number = 0;
 	private autocompleteRequestId: number = 0;
 
@@ -2319,23 +2318,33 @@ export class Editor implements Component, Focusable {
 		startToken: number,
 		options: { force: boolean; explicitTab: boolean },
 	): Promise<void> {
-		const previousTask = this.autocompleteRequestTask;
-		this.autocompleteRequestTask = (async () => {
-			await previousTask;
-			if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
-				return;
-			}
+		// No serialization queue: the latest request wins. runAutocomplete
+		// Request's requestId + text/cursor snapshot check rejects stale
+		// results, so concurrent requests cannot clobber each other's UI —
+		// the old task-chaining design stacked every request behind the
+		// previous one, so an abort that never settled (a provider that
+		// ignores the signal) stalled the whole chain forever.
+		if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
+			return;
+		}
 
-			const controller = new AbortController();
-			this.autocompleteAbort = controller;
-			const requestId = ++this.autocompleteRequestId;
-			const snapshotText = this.getText();
-			const snapshotLine = this.state.cursorLine;
-			const snapshotCol = this.state.cursorCol;
+		const controller = new AbortController();
+		this.autocompleteAbort = controller;
+		const requestId = ++this.autocompleteRequestId;
+		const snapshotText = this.getText();
+		const snapshotLine = this.state.cursorLine;
+		const snapshotCol = this.state.cursorCol;
 
+		try {
 			await this.runAutocompleteRequest(requestId, controller, snapshotText, snapshotLine, snapshotCol, options);
-		})();
-		await this.autocompleteRequestTask;
+		} catch (error) {
+			// A request aborted by newer input settles silently; anything
+			// else must not take the editor down.
+			if (!controller.signal.aborted) {
+				console.error("autocomplete request failed", error);
+			}
+			this.autocompleteAbort = undefined;
+		}
 	}
 
 	private setAutocompleteTriggerCharacters(triggerCharacters: string[]): void {
