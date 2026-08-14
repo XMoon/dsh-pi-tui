@@ -107,6 +107,7 @@ test('formats the stats line in pi abbreviation vocabulary', () => {
     inputTokens: 190_000,
     outputTokens: 216_000,
     cacheReadTokens: 86_000_000,
+    cacheWriteTokens: 0,
     contextWindow: 1_000_000,
   })
   assert.ok(line.includes('↑190k'), line)
@@ -116,4 +117,85 @@ test('formats the stats line in pi abbreviation vocabulary', () => {
   assert.ok(line.includes('LLM 8.1s'), line)
   assert.ok(line.includes('TTFB 1.1s'), line)
   assert.ok(line.includes('118 tok/s'), line)
+})
+
+test('usage is counted once per step despite chunk and message both carrying it', () => {
+  const t = 1_700_000_000_000
+  const stats = computeStats([
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 9_000, outputTokens: 832, cacheReadTokens: 1_000 } } }, 1, t + 1_000),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('m-1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 9_000, outputTokens: 832, cacheReadTokens: 1_000 },
+    }, 2, t + 2_000),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 3_000),
+  ])
+  // The same assembler usage rides both events; adding both would double it.
+  assert.equal(stats.inputTokens, 9_000)
+  assert.equal(stats.outputTokens, 832)
+  assert.equal(stats.cacheReadTokens, 1_000)
+  assert.equal(stats.cacheHitPct, 10)
+})
+
+test('tok/s samples only steps carrying both a decode window and usage', () => {
+  const t = 1_700_000_000_000
+  // Step 0: reasoning only — usage but no text delta (must not inflate tok/s).
+  // Step 1: decode + usage — the only sampled pair.
+  // Step 2: decode but no usage (must not enter the denominator alone).
+  const log = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 10_000, cacheReadTokens: 0 } } }, 1, t + 500),
+    event('step/end', { turn: 0, step: 0 }, 2, t + 5_000),
+    event('step/start', { turn: 0, step: 1 }, 3, t + 6_000),
+    event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } }, 4, t + 6_100),
+    event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } }, 5, t + 6_200),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('m-2'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ab' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 500, cacheReadTokens: 0 },
+    }, 6, t + 7_000),
+    event('step/end', { turn: 0, step: 1 }, 7, t + 8_000),
+    event('step/start', { turn: 0, step: 2 }, 8, t + 9_000),
+    event('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: 'x' } }, 9, t + 9_100),
+    event('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: 'y' } }, 10, t + 9_200),
+    event('step/end', { turn: 0, step: 2 }, 11, t + 10_000),
+  ]
+  const stats = computeStats(log)
+  // Step 1: 500 tokens over (7000 - 6100) = 900 ms → 555 tok/s.
+  assert.equal(stats.tokensPerSec, Math.round(500 / 0.9))
+  // Total output includes the reasoning-only step (10_000 + 500).
+  assert.equal(stats.outputTokens, 10_500)
+  // The decode end uses the assistant/message time, not the last delta
+  // (6100→7000 window above proves it: last delta was at 6200).
+})
+
+test('llmMs spans step/start to assistant/message, not to step/end', () => {
+  const t = 1_700_000_000_000
+  const stats = computeStats([
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-3'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 1, t + 2_000),
+    // A long tool run after the message must not extend the LLM wall time.
+    event('step/end', { turn: 0, step: 0 }, 2, t + 9_000),
+  ])
+  assert.equal(stats.llmMs, 2_000)
 })
