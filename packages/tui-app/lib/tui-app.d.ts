@@ -181,6 +181,8 @@ export declare class TuiApp {
      * @param status - the new status values.
      */
     setStatus(status: Partial<StatusData>): void;
+    /** Rebuild the two footer lines from the current status and plan badge. */
+    private renderFooter;
     /** Install slash-command + file-path autocompletion on the editor. */
     setCommandCompletions(commands: readonly SlashCommand[], cwd: string): void;
     /**

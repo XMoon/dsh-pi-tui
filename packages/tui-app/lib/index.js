@@ -16,6 +16,8 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval';
+// The commands service merge: ctx.commands typing for execute()/register().
+import { parseCommand } from '@deepseek-ai/dsh-commands';
 // The settings service merge for persisting TUI preferences.
 import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 // The plan-mode fold for the header badge.
@@ -174,7 +176,14 @@ export function apply(ctx, config) {
                 // transcript through the session/event listener below.
                 const commands = ctx.get('commands');
                 if (commands !== undefined) {
-                    void commands.execute(liveAgent, text, signal).then((execution) => {
+                    // Bare `/plan` toggles: when plan mode is already active it exits
+                    // instead of re-entering (the official command needs `/plan off`).
+                    const parsed = parseCommand(text);
+                    const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
+                        && foldPlanMode(liveAgent.session.events)
+                        ? '/plan off'
+                        : text;
+                    void commands.execute(liveAgent, toggled, signal).then((execution) => {
                         if (execution === undefined) {
                             liveAgent.followup(createUserMessage({
                                 content: [{ type: 'text', text }],

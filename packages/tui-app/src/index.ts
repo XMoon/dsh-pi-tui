@@ -29,6 +29,7 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 // The commands service merge: ctx.commands typing for execute()/register().
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-commands'
 // The skill registry merge for the /skill command.
 import type {} from '@deepseek-ai/dsh-skill'
@@ -213,7 +214,14 @@ export function apply(ctx: Context, config: Config): void {
         // transcript through the session/event listener below.
         const commands = ctx.get('commands')
         if (commands !== undefined) {
-          void commands.execute(liveAgent, text, signal).then((execution) => {
+          // Bare `/plan` toggles: when plan mode is already active it exits
+          // instead of re-entering (the official command needs `/plan off`).
+          const parsed = parseCommand(text)
+          const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
+            && foldPlanMode(liveAgent.session.events)
+            ? '/plan off'
+            : text
+          void commands.execute(liveAgent, toggled, signal).then((execution) => {
             if (execution === undefined) {
               liveAgent.followup(createUserMessage({
                 content: [{ type: 'text', text }],

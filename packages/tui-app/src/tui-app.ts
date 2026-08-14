@@ -334,6 +334,7 @@ export class TuiApp {
   setPlanMode(active: boolean): void {
     this.planMode = active
     this.renderHeader()
+    this.renderFooter()
     this.editor.borderColor = active ? color.warning : this.editorBorder
     this.editor.invalidate()
     this.requestRender()
@@ -465,6 +466,11 @@ export class TuiApp {
    */
   setStatus(status: Partial<StatusData>): void {
     this.status = { ...this.status, ...status }
+    this.renderFooter()
+  }
+
+  /** Rebuild the two footer lines from the current status and plan badge. */
+  private renderFooter(): void {
     const context = this.status.contextTokens !== undefined && this.status.contextWindow !== undefined
       && this.status.contextWindow > 0
       ? contextBar(this.status.contextTokens, this.status.contextWindow)
