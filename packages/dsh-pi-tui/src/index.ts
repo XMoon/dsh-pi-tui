@@ -577,6 +577,7 @@ export function apply(ctx: Context, config: Config): void {
       app.clearLocalMessages()
       repaint(app, folder)
       refreshStatus()
+      refreshQueue()
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`)
       updateWelcomeCard()
       return undefined
@@ -944,6 +945,18 @@ export function apply(ctx: Context, config: Config): void {
           : `permission: ${next}`)
         refreshStatus()
       },
+      // Ctrl+Q: pull every queued message back into the editor draft (pi's
+      // dequeue). The inbox is cleared durably and the current draft rides
+      // along below the pulled-back queue; submitting re-queues the result.
+      onDequeue: () => {
+        const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
+        if (queued.length === 0) return
+        liveAgent.inbox.clear()
+        const queuedText = queued.map(message => textOf(message.content)).join('\n\n')
+        const current = app.getDraft()
+        app.setDraft([queuedText, current].filter(part => part.trim() !== '').join('\n\n'))
+        refreshQueue()
+      },
     }, {
       present,
       workspaceRoot: cwd,
@@ -1034,6 +1047,26 @@ export function apply(ctx: Context, config: Config): void {
       jobs.onJobsChanged(() => refreshTasks())
       refreshTasks()
     }
+    // The queue pane mirrors the agent's durable inbox: next-turn followups
+    // first, then next-step steers, in delivery order. The inbox is public on
+    // the agent, and every mutation commits an agent/inbox/spliced session
+    // event, so the pane refreshes event-driven with no polling.
+    const refreshQueue = (): void => {
+      const queue = [
+        ...liveAgent.inbox.nextTurn.map(message => ({
+          id: message.id,
+          text: textOf(message.content),
+          mode: 'followup' as const,
+        })),
+        ...liveAgent.inbox.nextStep.map(message => ({
+          id: message.id,
+          text: textOf(message.content),
+          mode: 'steer' as const,
+        })),
+      ]
+      app.setQueueItems(queue)
+    }
+    refreshQueue()
     ctx.on('session/event', (session, event) => {
       // The subagent viewer follows its own session's events; everything
       // else routes to the live agent's folder as before.
@@ -1068,6 +1101,9 @@ export function apply(ctx: Context, config: Config): void {
       if (event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode') {
         refreshStatus()
       }
+      // Every durable inbox mutation (followup, steer, /queue edits) commits
+      // an agent/inbox/spliced event: keep the queue pane in step.
+      if (event.type === 'agent/inbox/spliced') refreshQueue()
       // Persist each completed turn so a crash loses at most the live turn.
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.

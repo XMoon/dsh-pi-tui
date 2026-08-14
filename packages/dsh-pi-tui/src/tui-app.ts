@@ -240,6 +240,12 @@ export interface TuiAppEvents {
    * refreshes the footer. Optional.
    */
   onCyclePermission?: () => void
+  /**
+   * Ctrl+Q with queued input and no overlay up: pull every queued message
+   * back into the editor draft (pi's dequeue). The host clears the inbox and
+   * the draft lands via {@link TuiApp.setDraft}. Optional.
+   */
+  onDequeue?: () => void
 }
 
 /** What an approval prompt shows; mirrors the approval/request payload. */
@@ -365,6 +371,16 @@ export interface StatusData {
   contextWindow?: number
 }
 
+/** One queued inbox row for the queue pane (mirrors the agent Inbox's lists). */
+export interface QueueItem {
+  /** The pending message id (agent inbox identity). */
+  id: string
+  /** The message text, single-line display form. */
+  text: string
+  /** next-turn followup vs next-step steer. */
+  mode: 'followup' | 'steer'
+}
+
 /** One queued prompt awaiting the user's y/n/esc decision. */
 interface PendingApproval {
   request: ApprovalPromptRequest
@@ -433,6 +449,14 @@ export class TuiApp {
   private readonly dock: Text
   /** Active background tasks for the dock line (label + status). */
   private dockTasks: readonly { label: string; status: string }[] = []
+  /**
+   * The queued-input pane below the todo panel (kimi QueuePane parity):
+   * a border rule plus one `❯ text` row per pending message and a dim hint.
+   * Renders nothing while the queue is empty.
+   */
+  private readonly queuePane: Text
+  /** The pending inbox messages (next-turn followups and next-step steers). */
+  private queueItems: readonly QueueItem[] = []
 
   /** Whether the Ctrl+O expansion master switch is on. */
   isToolOutputExpanded(): boolean {
@@ -517,6 +541,7 @@ export class TuiApp {
     this.messagesView = new Container()
     this.dock = new Text('', 0, 0)
     this.todoPanel = new Text('', 0, 0)
+    this.queuePane = new Text('', 0, 0)
     this.working = new WorkingIndicator(this.tui, options.workingIntervalMs === undefined
       ? {}
       : { intervalMs: options.workingIntervalMs })
@@ -527,6 +552,7 @@ export class TuiApp {
     this.tui.addChild(this.messagesView)
     this.tui.addChild(this.dock)
     this.tui.addChild(this.todoPanel)
+    this.tui.addChild(this.queuePane)
     this.tui.addChild(this.working)
     this.tui.addChild(this.editor)
     this.tui.addChild(this.footer)
@@ -593,6 +619,12 @@ export class TuiApp {
       // Cycle the permission preset; overlays keep Shift+Tab for themselves.
       if (this.overlayHost.hasOverlayEntries) return undefined
       this.events.onCyclePermission?.()
+      return { consume: true }
+    }
+    if (matchesKey(data, 'ctrl+q')) {
+      // Dequeue: pull queued input back into the editor; overlays keep it.
+      if (this.overlayHost.hasOverlayEntries) return undefined
+      this.events.onDequeue?.()
       return { consume: true }
     }
     if (matchesKey(data, 'escape')) {
@@ -817,6 +849,7 @@ export class TuiApp {
         { component: this.fullscreenScroll, grow: 1 },
         { component: this.dock, shrink: 0 },
         { component: this.todoPanel, shrink: 0 },
+        { component: this.queuePane, shrink: 0 },
         // The busy indicator row sits directly above the editor border
         // (pi's statusContainer placement); idle it renders zero rows.
         { component: this.working, shrink: 0 },
@@ -1429,6 +1462,53 @@ export class TuiApp {
   setTasks(tasks: readonly { label: string; status: string }[]): void {
     this.dockTasks = tasks
     this.renderDock()
+  }
+
+  /**
+   * Replace the pending inbox rows for the queue pane (kimi QueuePane
+   * parity): a border rule, one `❯ text` row per message, and a dim hint.
+   * An empty queue renders nothing at all.
+   * @param items - pending followups/steers, in delivery order.
+   */
+  setQueueItems(items: readonly QueueItem[]): void {
+    this.queueItems = items
+    this.renderQueuePane()
+  }
+
+  /** Rebuild the queue pane text from the current inbox rows. */
+  private renderQueuePane(): void {
+    const items = this.queueItems
+    if (items.length === 0) {
+      this.queuePane.setText('')
+      this.requestRender()
+      return
+    }
+    const width = Math.max(1, this.terminal.columns)
+    const lines = [color.border('─'.repeat(width))]
+    for (const item of items) {
+      const prefix = `${color.accent('❯')} `
+      const text = item.text.replace(/\s+/g, ' ').trim()
+      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth(prefix)), '…')
+      lines.push(prefix + truncated)
+    }
+    const hint = 'ctrl+q to edit all · /queue for per-item actions'
+    lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, width - 2), '…')))
+    this.queuePane.setText(lines.join('\n'))
+    this.requestRender()
+  }
+
+  /**
+   * Replace the editor draft wholesale (the Ctrl+Q dequeue path pulls every
+   * queued message back into the editor for editing).
+   */
+  setDraft(text: string): void {
+    this.editor.setText(text)
+    this.requestRender()
+  }
+
+  /** The editor's current draft text (the Ctrl+Q dequeue merge reads it). */
+  getDraft(): string {
+    return this.editor.getText()
   }
 
   /**

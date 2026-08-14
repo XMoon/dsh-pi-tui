@@ -272,3 +272,42 @@ test('the dock strip shows permission, goal, todo, and task lines only while non
   assert.ok(!view.includes('☑'), `cleared todo line survived:\n${view}`)
   assert.ok(!view.includes('⏳'), `cleared task line survived:\n${view}`)
 })
+
+test('the queue pane renders pending rows and hides when empty', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('❯'), `empty queue must render no pane:\n${view}`)
+  app.setQueueItems([
+    { id: 'm-1', text: 'follow up on the audit', mode: 'followup' },
+    { id: 'm-2', text: 'steer a correction', mode: 'steer' },
+  ])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ follow up on the audit'), `followup row missing:\n${view}`)
+  assert.ok(view.includes('❯ steer a correction'), `steer row missing:\n${view}`)
+  assert.ok(view.includes('ctrl+q to edit all'), `hint row missing:\n${view}`)
+  app.setQueueItems([])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('❯ follow up'), `cleared queue still rendered:\n${view}`)
+})
+
+test('ctrl+q with no overlay reaches the dequeue host', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let dequeued = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onDequeue: () => { dequeued += 1 } })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x11') // ctrl+q
+  await vt.waitForRender()
+  assert.equal(dequeued, 1, `ctrl+q must reach the host`)
+  app.stop()
+})
+
+test('setDraft and getDraft round-trip the editor text', async () => {
+  const { vt, app } = startApp()
+  app.setDraft('pulled back queue text')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'pulled back queue text')
+})

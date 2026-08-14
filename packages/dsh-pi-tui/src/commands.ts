@@ -26,7 +26,7 @@ import type { TuiApp } from './tui-app.ts'
 import { color, loadCustomTheme, settingsListTheme } from './theme.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
-import { renderTranscriptMarkdown } from './transcript.ts'
+import { renderTranscriptMarkdown, textOf } from './transcript.ts'
 import {
   MAX_PICKER_SESSIONS,
   findSessionMatch,
@@ -592,6 +592,82 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
       const error = await runner.swapTo(next)
       if (error !== undefined) app.notify(error)
       return { kind: 'success', text: 'started a fresh session' }
+    },
+  })
+
+  commands.register({
+    name: 'queue',
+    description: 'Manage queued input: edit, delete, steer, or insert',
+    handler: async () => {
+      const liveAgent = runner.liveAgent
+      const inbox = liveAgent.inbox
+      const queued = [
+        ...inbox.nextTurn.map((message, index) => ({ message, slot: `next ${index + 1}` })),
+        ...inbox.nextStep.map((message, index) => ({ message, slot: `steer ${index + 1}` })),
+      ]
+      if (queued.length === 0) return { kind: 'success', text: 'no queued input' }
+      const running = liveAgent.status === 'running'
+      // The pane covers the fine-grained verbs; the queue strip above the
+      // editor handles the at-a-glance view and Ctrl+Q pulls everything back.
+      app.openSettings(
+        queued.map(({ message, slot }) => ({
+          id: message.id,
+          label: `[${slot}] ${textOf(message.content).replace(/\s+/g, ' ').trim().slice(0, 40)}`,
+          description: message.id,
+          currentValue: '',
+          submenu: (value, done) => new SettingsList(
+            [
+              { id: 'edit', label: 'Edit', description: 'Rewrite this queued message', currentValue: '', values: ['✓'] },
+              { id: 'delete', label: 'Delete', description: 'Remove it from the queue', currentValue: '', values: ['✓'] },
+              ...(running
+                ? [{ id: 'steer', label: 'Steer', description: 'Send it immediately into the running turn', currentValue: '', values: ['✓'] }]
+                : []),
+              { id: 'insert', label: 'Insert before', description: 'Queue a new message ahead of this one', currentValue: '', values: ['✓'] },
+            ],
+            6,
+            settingsListTheme,
+            (action) => done(action),
+            () => done(),
+            {},
+          ),
+        })),
+        (id, action) => {
+          const target = queued.find(item => item.message.id === id)
+          if (target === undefined) return
+          const message = target.message
+          if (action === 'delete') {
+            inbox.remove(message.id)
+            app.notify('queued message deleted')
+          } else if (action === 'steer') {
+            if (liveAgent.status === 'running') {
+              inbox.remove(message.id)
+              liveAgent.steer(message)
+              app.notify('steering queued message')
+            }
+          } else if (action === 'edit' || action === 'insert') {
+            // The free-text question flow collects the replacement/new text;
+            // every mutation commits an inbox splice that refreshes the pane.
+            void app.askQuestions([{ id: 'q', question: action === 'edit' ? 'Edit queued message:' : 'New message to insert:' }])
+              .then(answers => {
+                const text = answers[0]?.custom?.trim() ?? ''
+                if (text === '') return
+                const next = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+                if (action === 'edit') {
+                  inbox.replace(message.id, next)
+                  app.notify('queued message updated')
+                } else {
+                  inbox.prepend('next-turn', next)
+                  app.notify('message inserted at the front')
+                }
+              })
+              .catch(() => {
+                // The user cancelled the edit; the queue stays untouched.
+              })
+          }
+        },
+        () => {},
+      )
+      return { kind: 'success' }
     },
   })
 
