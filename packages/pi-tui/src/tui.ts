@@ -44,6 +44,13 @@ export interface Component {
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
 	invalidate(): void;
+
+	/**
+	 * Release resources (timers, listeners, render callbacks) when the
+	 * component is removed from a container. Containers call this on
+	 * removeChild/clear.
+	 */
+	dispose?(): void;
 }
 
 export type TuiInputListenerResult = { consume?: boolean; data?: string } | undefined;
@@ -219,11 +226,17 @@ export class Container implements Component {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			component.dispose?.();
 		}
 	}
 
 	clear(): void {
+		for (const child of this.children) child.dispose?.();
 		this.children = [];
+	}
+
+	dispose(): void {
+		for (const child of this.children) child.dispose?.();
 	}
 
 	invalidate(): void {

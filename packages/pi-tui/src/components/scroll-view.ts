@@ -209,6 +209,18 @@ export class ScrollView extends Container {
 		throw new Error("ScrollView child cannot be cleared");
 	}
 
+	/**
+	 * Release the component's resources: the scrollbar hide timer and the
+	 * layout's render callback. Called by containers on removeChild/clear, so
+	 * a discarded ScrollView neither fires stray renders nor keeps the TUI
+	 * (and itself) alive through the timer closure.
+	 */
+	override dispose(): void {
+		this.hideTransientScrollbar();
+		this.requestRenderCallback = undefined;
+		super.dispose();
+	}
+
 	override render(width: number): string[] {
 		const contentWidth = this.getContentWidth(width);
 		const lines = this.child.render(contentWidth);
