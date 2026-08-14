@@ -89,6 +89,34 @@ test('an aborted signal withdraws the prompt as cancelled', async () => {
   void vt
 })
 
+test('an already-aborted signal settles immediately without hanging', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  controller.abort()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', signal: controller.signal })
+  // Must settle, never hang: a cancelled request needs no dialog at all.
+  assert.equal(await decision, 'cancelled')
+  const view = await viewport(vt)
+  assert.ok(!view.includes('Approve bash'), `dialog must not appear:\n${view}`)
+  void vt
+})
+
+test('a queued prompt aborted while waiting never reaches the screen', async () => {
+  const { vt, app } = startApp()
+  const first = app.showApprovalPrompt({ toolName: 'bash' })
+  const secondController = new AbortController()
+  const second = app.showApprovalPrompt({ toolName: 'fs', signal: secondController.signal })
+  await viewport(vt)
+  // The turn is cancelled while the fs prompt is still queued: its signal
+  // aborts, but no stale dialog may pop after the first prompt settles.
+  secondController.abort()
+  vt.sendInput('y')
+  assert.equal(await first, 'allowed-once')
+  assert.equal(await second, 'cancelled')
+  const view = await viewport(vt)
+  assert.ok(!view.includes('Approve fs'), `stale queued dialog popped:\n${view}`)
+})
+
 test('editor input is blocked while a prompt is showing', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []

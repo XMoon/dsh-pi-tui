@@ -324,6 +324,8 @@ interface PendingApproval {
   resolve: (outcome: ApprovalOutcome) => void
   handle?: OverlayHandle
   onAbort?: () => void
+  /** Settled once: an abort and a user decision must not double-resolve. */
+  settled?: boolean
 }
 
 /**
@@ -1153,6 +1155,13 @@ export class TuiApp {
     if (this.activeApproval !== undefined || this.approvalQueue.length === 0) return
     const pending = this.approvalQueue.shift()
     if (pending === undefined) return
+    // A signal that aborted while the prompt was queued (e.g. a turn cancel
+    // aborts every in-flight request) must never reach the screen: settle it
+    // cancelled right away instead of popping a stale dialog.
+    if (pending.request.signal?.aborted === true) {
+      this.settleApproval(pending, 'cancelled')
+      return
+    }
     this.renderApprovalDialog(pending)
     this.activeApproval = pending
   }
@@ -1187,16 +1196,28 @@ export class TuiApp {
     return { consume: true }
   }
 
-  /** Resolve one prompt, hide its dialog, and show the next in line. */
+  /**
+   * Resolve one prompt and hide its dialog. The prompt may be on screen
+   * (active), queued behind another, or never queued at all (its signal was
+   * already aborted on arrival) — every state must settle the promise
+   * exactly once and never leave a cancelled prompt in the queue.
+   */
   private settleApproval(pending: PendingApproval, outcome: ApprovalOutcome): void {
-    if (this.activeApproval !== pending) return
-    this.activeApproval = undefined
-    pending.handle?.hide()
-    pending.onAbort !== undefined && pending.request.signal !== undefined
-      && pending.request.signal.removeEventListener('abort', pending.onAbort)
+    if (pending.settled === true) return
+    pending.settled = true
+    if (this.activeApproval === pending) {
+      this.activeApproval = undefined
+      pending.handle?.hide()
+      this.overlayHost.setFocus(this.editor)
+    } else {
+      const queued = this.approvalQueue.indexOf(pending)
+      if (queued !== -1) this.approvalQueue.splice(queued, 1)
+    }
+    if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
+      pending.request.signal.removeEventListener('abort', pending.onAbort)
+    }
     pending.resolve(outcome)
-    this.overlayHost.setFocus(this.editor)
-    this.showNextApproval()
+    if (this.activeApproval === undefined) this.showNextApproval()
   }
 
   /**
