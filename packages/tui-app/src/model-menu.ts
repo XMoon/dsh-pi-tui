@@ -6,10 +6,10 @@
  * mounted beneath the inner one and layered Esc handling — the ghost
  * overlay the `/subagents` flow warns about. Each level's Esc returns to
  * the level above; selecting a model or effort applies it immediately.
- * @module @dsh-pi-tui/tui-app/model-menu
+ * @module @xmoon76/tui-app/model-menu
  */
 
-import { SettingsList, Text, matchesKey, type Component } from '@dsh-pi-tui/pi-tui'
+import { SettingsList, Text, matchesKey, type Component } from '@xmoon76/pi-tui'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { settingsListTheme } from './theme.ts'

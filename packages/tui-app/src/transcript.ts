@@ -13,7 +13,7 @@
  * wrapper. Both support an optional display window (`maxTurns`): turns older
  * than the window collapse into one summary entry, bounding the rendered
  * component tree on long sessions.
- * @module @dsh-pi-tui/tui-app/transcript
+ * @module @xmoon76/tui-app/transcript
  */
 
 import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session'

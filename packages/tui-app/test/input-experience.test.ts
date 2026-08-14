@@ -2,7 +2,7 @@
  * Headless tests for the P5b input experience: fork editor keybindings
  * (undo / kill-ring), input-history seeding and recall, Ctrl+S steering,
  * the external-editor hook, and local `!` shell cards.
- * @module @dsh-pi-tui/tui-app/input-experience.test
+ * @module @xmoon76/tui-app/input-experience.test
  */
 
 import assert from 'node:assert/strict'

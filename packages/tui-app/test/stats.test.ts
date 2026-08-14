@@ -1,7 +1,7 @@
 /**
  * Unit tests for session statistics folding: timing, tokens, cache rate,
  * and the pi-vocabulary stats line.
- * @module @dsh-pi-tui/tui-app/stats.test
+ * @module @xmoon76/tui-app/stats.test
  */
 
 import assert from 'node:assert/strict'

@@ -11,7 +11,7 @@
  *
  * Keys: Enter submit, Ctrl+C/Ctrl+D exit, Ctrl+O expand/collapse recent turns,
  * Ctrl+F toggle fullscreen, Tab autocomplete (slash commands + paths).
- * @module @dsh-pi-tui/tui-app/tui-app
+ * @module @xmoon76/tui-app/tui-app
  */
 
 import {
@@ -41,7 +41,7 @@ import {
   type SlashCommand,
   type Terminal,
   type TuiInputListenerResult,
-} from '@dsh-pi-tui/pi-tui'
+} from '@xmoon76/pi-tui'
 import {
   detectThemeFromBackground,
   editorTheme,

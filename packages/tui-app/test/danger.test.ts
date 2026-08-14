@@ -1,7 +1,7 @@
 /**
  * Headless tests for the P7c dangerous-command detector backing the approval
  * dialog's warning banner.
- * @module @dsh-pi-tui/tui-app/danger.test
+ * @module @xmoon76/tui-app/danger.test
  */
 
 import assert from 'node:assert/strict'

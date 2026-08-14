@@ -6,7 +6,7 @@
  * tolerant: a source arrives as opaque JSON (MessageSource is merge-
  * extensible), so every unreadable shape degrades to `inject` with whatever
  * name the record still carries.
- * @module @dsh-pi-tui/tui-app/context
+ * @module @xmoon76/tui-app/context
  */
 
 /** One durable source narrowed to the readable-record shape; null for anything else. */

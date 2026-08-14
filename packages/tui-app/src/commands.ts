@@ -6,7 +6,7 @@
  * shrinks. Every command reads the live runner state through the
  * {@link TuiCommandRunner} interface, whose accessors re-read the current
  * agent/settings on every access (sessions can swap the live agent).
- * @module @dsh-pi-tui/tui-app/commands
+ * @module @xmoon76/tui-app/commands
  */
 
 import { randomUUID } from 'node:crypto'
@@ -21,7 +21,7 @@ import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
-import { SettingsList, type SettingItem } from '@dsh-pi-tui/pi-tui'
+import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { TuiApp } from './tui-app.ts'
 import { color, loadCustomTheme, settingsListTheme } from './theme.ts'
 import { ModelSubmenu } from './model-menu.ts'

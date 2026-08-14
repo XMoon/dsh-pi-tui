@@ -54,8 +54,8 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: ^3.18.1
         version: 3.18.1
-      '@dsh-pi-tui/pi-tui':
-        specifier: file:../pi-tui
+      '@xmoon76/pi-tui':
+        specifier: workspace:^0.84.2
         version: link:../pi-tui
       chalk:
         specifier: ^5.4.1

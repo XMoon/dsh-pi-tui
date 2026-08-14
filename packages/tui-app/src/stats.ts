@@ -3,7 +3,7 @@
  * footer usage line: turns/steps, LLM wall time, first-token latency,
  * output tokens per second, cache hit rate, and token totals.
  * Pure and deterministic for headless tests.
- * @module @dsh-pi-tui/tui-app/stats
+ * @module @xmoon76/tui-app/stats
  */
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'

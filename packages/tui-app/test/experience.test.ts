@@ -1,12 +1,12 @@
 /**
  * Headless tests for the P4b experience features: footer status, fullscreen
  * toggle, settings overlay, and slash-command autocompletion.
- * @module @dsh-pi-tui/tui-app/experience.test
+ * @module @xmoon76/tui-app/experience.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { SettingItem } from '@dsh-pi-tui/pi-tui'
+import type { SettingItem } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

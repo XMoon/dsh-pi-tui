@@ -3,7 +3,7 @@
  * theme-token vocabulary (colors.ts): brand, text, surface, state, diff,
  * and role tokens. Components read tokens through the helper functions
  * below; switching palettes later only swaps this module's exports.
- * @module @dsh-pi-tui/tui-app/theme
+ * @module @xmoon76/tui-app/theme
  */
 
 import { Chalk } from 'chalk'
@@ -15,7 +15,7 @@ import type {
   MarkdownTheme,
   SelectListTheme,
   SettingsListTheme,
-} from '@dsh-pi-tui/pi-tui'
+} from '@xmoon76/pi-tui'
 
 /** Semantic palette tokens, mirroring pi's ColorPalette vocabulary. */
 export interface ColorPalette {

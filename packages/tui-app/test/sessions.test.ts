@@ -2,7 +2,7 @@
  * Headless tests for the `/sessions` picker support: pure row assembly,
  * title loading (sessionQuery batch + persistence fallback), and the
  * searchable picker overlay driven through the virtual terminal.
- * @module @dsh-pi-tui/tui-app/sessions.test
+ * @module @xmoon76/tui-app/sessions.test
  */
 
 import assert from 'node:assert/strict'

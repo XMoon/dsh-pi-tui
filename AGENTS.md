@@ -10,8 +10,8 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
 |---|---|---|
 | Repository | `dsh-pi-tui` | repo root (this directory) |
 | Profile (`dsh --profile`) | `pi-tui` | **Never `tui`** — that is reserved territory |
-| Vendored fork package | `@dsh-pi-tui/pi-tui` | rescopped from `@moonshot-ai/pi-tui`; `private: true`, never published under upstream's name |
-| Bundle package | `@dsh-pi-tui/tui-app` | the `dsh.bundle` patch layer |
+| Vendored fork package | `@xmoon76/pi-tui` | rescopped from `@moonshot-ai/pi-tui`; published (never under upstream's name or scope) |
+| Bundle package | `@xmoon76/tui-app` | the `dsh.bundle` patch layer |
 | Plugin row ids | `tui-startup`, `tui-app` | internal Loader ids, fine as-is |
 | Startup service | `tuiStartup` (`TUI_STARTUP_SERVICE`) | |
 
@@ -53,12 +53,12 @@ node --import tsx/esm packages/tui-app/demo.ts   # standalone demo in a real TTY
 ### Installing into the local dsh profile (dev loop)
 
 ```sh
-dsh plugin --profile pi-tui -- add "@dsh-pi-tui/pi-tui@file:.../packages/pi-tui"
-dsh plugin --profile pi-tui -- add "@dsh-pi-tui/tui-app@file:.../packages/tui-app"
+dsh plugin --profile pi-tui -- add "@xmoon76/pi-tui@file:.../packages/pi-tui"
+dsh plugin --profile pi-tui -- add "@xmoon76/tui-app@file:.../packages/tui-app"
 # both pnpm `file:`/`link:` installs land as store copies, NOT symlinks — for a
 # live dev loop replace them with manual symlinks (pnpm re-add overwrites them):
-ln -sfn <repo>/packages/pi-tui ~/.dsh/profiles/pi-tui/node_modules/@dsh-pi-tui/pi-tui
-ln -sfn <repo>/packages/tui-app ~/.dsh/profiles/pi-tui/node_modules/@dsh-pi-tui/tui-app
+ln -sfn <repo>/packages/pi-tui ~/.dsh/profiles/pi-tui/node_modules/@xmoon76/pi-tui
+ln -sfn <repo>/packages/tui-app ~/.dsh/profiles/pi-tui/node_modules/@xmoon76/tui-app
 # run against the real dsh install:
 dsh --profile pi-tui [--session <id>]
 ```

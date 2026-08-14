@@ -1,5 +1,5 @@
 /**
- * @dsh-pi-tui/tui-app — the bundle's runner plugin. Waits for the startup
+ * @xmoon76/tui-app — the bundle's runner plugin. Waits for the startup
  * service (the parsed `dsh --profile pi-tui` flags) and Loader settlement,
  * creates or resumes an Agent through the core registry, renders its session
  * log into the TUI transcript, and routes editor submissions back through
@@ -7,7 +7,7 @@
  * a persistent `TranscriptFolder` folds appended events incrementally and a
  * coalesced repaint flushes the windowed transcript (older turns collapse
  * into a summary), so long sessions never re-scan the whole log per event.
- * @module @dsh-pi-tui/tui-app
+ * @module @xmoon76/tui-app
  */
 
 import { randomUUID } from 'node:crypto'

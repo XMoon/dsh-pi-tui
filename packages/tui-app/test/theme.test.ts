@@ -1,7 +1,7 @@
 /**
  * Unit tests for the theme module: background-based dark/light detection
  * and custom theme resolution.
- * @module @dsh-pi-tui/tui-app/theme.test
+ * @module @xmoon76/tui-app/theme.test
  */
 
 import assert from 'node:assert/strict'

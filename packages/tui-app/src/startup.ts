@@ -3,7 +3,7 @@
  * family and provides the parsed values as {@link TUI_STARTUP_SERVICE}.
  * Mirrors the web bundle's startup shape: an ordinary plugin injecting
  * `cmdlineArgs`, providing a service that flag-configured rows inject.
- * @module @dsh-pi-tui/tui-app/startup
+ * @module @xmoon76/tui-app/startup
  */
 
 import { Command } from 'commander'

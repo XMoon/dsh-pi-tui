@@ -3,7 +3,7 @@
  * list → effort list, with immediate apply and Esc walking back one level.
  * No second overlay is mounted at any point (the ghost-overlay trap the
  * nested-openSettings pattern fell into).
- * @module @dsh-pi-tui/tui-app/model-menu.test
+ * @module @xmoon76/tui-app/model-menu.test
  */
 
 import assert from 'node:assert/strict'

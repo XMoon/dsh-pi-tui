@@ -2,7 +2,7 @@
  * Headless tests for the P6 preset wiring: `composeAgent` (roster-absent and
  * roster-present composition), `recordedPreset` (log-first resolution), and
  * `recomposeBlank` (blank-only swap shared by /preset and --preset).
- * @module @dsh-pi-tui/tui-app/preset.test
+ * @module @xmoon76/tui-app/preset.test
  */
 
 import assert from 'node:assert/strict'

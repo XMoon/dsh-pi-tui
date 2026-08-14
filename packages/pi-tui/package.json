@@ -1,16 +1,15 @@
 {
-	"name": "@dsh-pi-tui/pi-tui",
+	"name": "@xmoon76/pi-tui",
 	"version": "0.84.2",
-	"private": true,
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications (vendored fork of @moonshot-ai/pi-tui)",
 	"license": "MIT",
 	"author": "Moonshot AI",
-	"homepage": "https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui#readme",
+	"homepage": "https://github.com/XMoon/dsh-pi-tui#readme",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/MoonshotAI/kimi-code.git",
+		"url": "git+https://github.com/XMoon/dsh-pi-tui.git",
 		"directory": "packages/pi-tui",
-		"note": "vendored snapshot at commit b6144f94ea6b22455a4e750d1750d220987e7bc2 (v0.84.2)"
+		"note": "vendored snapshot of @moonshot-ai/pi-tui at kimi-code commit b6144f94ea6b22455a4e750d1750d220987e7bc2 (v0.84.2); carries the five local fixes listed in packages/pi-tui/AGENTS.md"
 	},
 	"keywords": [
 		"tui",

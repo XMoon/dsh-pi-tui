@@ -6,7 +6,7 @@
  * Type a message and press Enter; the transcript area echoes it plus a
  * canned assistant reply (no model is connected in this milestone).
  * Ctrl+C exits.
- * @module @dsh-pi-tui/tui-app/demo
+ * @module @xmoon76/tui-app/demo
  */
 
 import {
@@ -17,7 +17,7 @@ import {
   TuiMainScreen,
   matchesKey,
   type TuiInputListenerResult,
-} from '@dsh-pi-tui/pi-tui'
+} from '@xmoon76/pi-tui'
 import { editorTheme, markdownTheme } from './src/theme.ts'
 
 const terminal = new ProcessTerminal()

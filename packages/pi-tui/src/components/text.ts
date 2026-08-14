@@ -22,6 +22,9 @@ export class Text implements Component {
 		this.customBgFn = customBgFn;
 	}
 
+	/** No-op lifecycle hook; subclasses (e.g. Loader) may override it. */
+	dispose(): void {}
+
 	setText(text: string): void {
 		this.text = text;
 		this.cachedText = undefined;

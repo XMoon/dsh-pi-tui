@@ -4,12 +4,12 @@
  * (Component + Focusable) so the main-screen overlay host can mount it; the
  * search itself runs in the runner against the folded transcript, not against
  * rendered lines (the terminal scrollback is not addressable programmatically).
- * @module @dsh-pi-tui/tui-app/search
+ * @module @xmoon76/tui-app/search
  */
 
-import { Input } from '@dsh-pi-tui/pi-tui'
-import type { Component, Focusable } from '@dsh-pi-tui/pi-tui'
-import { visibleWidth } from '@dsh-pi-tui/pi-tui'
+import { Input } from '@xmoon76/pi-tui'
+import type { Component, Focusable } from '@xmoon76/pi-tui'
+import { visibleWidth } from '@xmoon76/pi-tui'
 
 /** One-line search input with a "Find transcript" title and N/M counter. */
 export class TranscriptSearchComponent implements Component, Focusable {

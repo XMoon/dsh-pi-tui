@@ -2,7 +2,7 @@
  * Headless tests for the P5c rendering features: diff colorization, LaTeX
  * in assistant markdown, the todo panel, the thinking hide toggle,
  * user-questions dialogs, and fullscreen scrollback search.
- * @module @dsh-pi-tui/tui-app/rendering.test
+ * @module @xmoon76/tui-app/rendering.test
  */
 
 import assert from 'node:assert/strict'

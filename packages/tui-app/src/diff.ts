@@ -2,7 +2,7 @@
  * Unified-diff line rendering for tool results: `+` lines green, `-` lines
  * red, structural lines (hunk headers, file headers) dimmed. Pure functions
  * so the headless tests can drive them without a TUI.
- * @module @dsh-pi-tui/tui-app/diff
+ * @module @xmoon76/tui-app/diff
  */
 
 import type { FileDiff } from '@deepseek-ai/dsh-tools'

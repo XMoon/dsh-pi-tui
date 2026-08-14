@@ -15,9 +15,9 @@ Never overwrite this directory wholesale when syncing from upstream. Each of the
 
 ## Acceptance after syncing from upstream
 
-- `pnpm --filter @dsh-pi-tui/pi-tui test` must pass in full; any failure among the guarding tests above means a local divergence was overwritten and lost.
+- `pnpm --filter @xmoon76/pi-tui test` must pass in full; any failure among the guarding tests above means a local divergence was overwritten and lost.
 
 ## Testing
 
-- This package's tests run with `node --test` (`pnpm --filter @dsh-pi-tui/pi-tui test`), not vitest; the root `vitest run` does not execute them.
+- This package's tests run with `node --test` (`pnpm --filter @xmoon76/pi-tui test`), not vitest; the root `vitest run` does not execute them.
 - Prefer adding new narrow-width tests to the existing test file of the corresponding component.

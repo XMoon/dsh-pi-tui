@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "description": "A third-party TUI mode for DeepSeek Harness (dsh), built on a vendored pi-tui fork",
+  "license": "MIT",
+  "author": "XMoon <xmoonox@gmail.com>",
+  "homepage": "https://github.com/XMoon/dsh-pi-tui#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/XMoon/dsh-pi-tui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/XMoon/dsh-pi-tui/issues"
+  },
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {

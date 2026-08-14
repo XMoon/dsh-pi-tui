@@ -1,6 +1,6 @@
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import xterm from "@xterm/headless";
-import type { Terminal } from "@dsh-pi-tui/pi-tui";
+import type { Terminal } from "@xmoon76/pi-tui";
 
 // Extract Terminal class from the module
 const XtermTerminal = xterm.Terminal;

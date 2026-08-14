@@ -6,7 +6,7 @@
  * (presentCall/presentResult) exactly as the host apiproxy invokes them, so
  * a TUI card renders from the same source as a Web card. All pure: the
  * real tool registry is injected by the runner through toolPresenterFrom.
- * @module @dsh-pi-tui/tui-app/present
+ * @module @xmoon76/tui-app/present
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'

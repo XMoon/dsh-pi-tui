@@ -3,7 +3,7 @@
  * loading. The row model mirrors the kimicode web session rail — a short id,
  * a relative age, an optional title, and a workspace group — rendered as one
  * line per session in the TUI picker.
- * @module @dsh-pi-tui/tui-app/sessions
+ * @module @xmoon76/tui-app/sessions
  */
 
 import { SessionId } from '@deepseek-ai/dsh-session'

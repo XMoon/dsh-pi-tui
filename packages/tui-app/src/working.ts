@@ -4,10 +4,10 @@
  * whale emojis alternate before a dim Working label, mirroring pi's
  * WorkingStatusIndicator placement. A Text subclass whose idle text renders
  * zero rows, so the row disappears entirely when idle.
- * @module @dsh-pi-tui/tui-app/working
+ * @module @xmoon76/tui-app/working
  */
 
-import { Text, type TuiMainScreen } from '@dsh-pi-tui/pi-tui'
+import { Text, type TuiMainScreen } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
 
 export interface WorkingIndicatorOptions {

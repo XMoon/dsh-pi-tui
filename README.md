@@ -4,52 +4,83 @@ A third-party TUI mode for [DeepSeek Harness](https://github.com/deepseek-ai/dee
 
 Run `dsh --profile pi-tui` for a terminal UI instead of the browser GUI (`dsh --profile web`) or one-shot mode (`dsh --profile headless`).
 
-> **Status: scaffolding + P0 spike.** The vendored fork and the bundle skeleton are in place and verified; session wiring (input → session events, approvals, commands) is the next milestone.
+> **Status: working.** The TUI covers the main session loop — input → session events,
+> approvals, commands, session switching and full-text search — plus presets, skills,
+> model/settings menus, and slash commands. Rendering and input routing are verified
+> by headless tests (`@xterm/headless`) with no TTY or model connection needed.
 
 ## Layout
 
 ```
 packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork (kimi-code commit b6144f9, v0.84.2),
-                    rescoped to @dsh-pi-tui/pi-tui. The five local fixes from the fork
+                    rescoped to @xmoon76/pi-tui. The five local fixes from the fork
                     (CJK wrap guard, width clamps, overwide truncation, negative-width
                     guards, per-frame processed-line reuse) are preserved; native/
                     prebuilds are deliberately not vendored (graceful fallback).
-packages/tui-app/   The dsh bundle: @dsh-pi-tui/tui-app. cordis.patch.yml inserts the
+packages/tui-app/   The dsh bundle: @xmoon76/tui-app. cordis.patch.yml inserts the
                     startup row (dsh --profile pi-tui flags) and the runner row (TUI glue).
 ```
 
 ## Prerequisites
 
-- Node >= 22.19 (`^22.19.0 || >=24`, same range as dsh). Running from source needs
-  Node with native TypeScript support (>= 23.6) or the tsx ESM hook
+- A DeepSeek Harness installation with profiles support (`dsh` on your `PATH`).
+- Node >= 22.19 (`^22.19.0 || >=24`, same range as dsh). Running from source
+  needs Node with native TypeScript support (>= 23.6) or the tsx ESM hook
   (`node --import tsx/esm`, how dsh's own source launch works).
-- A DeepSeek Harness installation with profiles support.
+- [pnpm](https://pnpm.io) only when installing from source.
 
-## Install into a dsh profile
+## Install
 
-Build artifacts are not committed (`dist/` for pi-tui, `lib/` for tui-app are
-gitignored — the package `exports` point at the built files), so build before
-installing from a clone:
+`dsh plugin` runs pnpm inside the target profile's directory, so the usual
+pnpm verbs (`add`, `remove`, `update`, `list`) all work.
 
-```sh
-pnpm install
-pnpm build        # pi-tui tsdown (dist/) + tui-app tsc (lib/)
-```
+### Option A — from the npm registry (recommended)
 
-Then create/init the profile and add the bundle (dsh-base is the default
-first layer):
+The published package ships prebuilt (`@xmoon76/tui-app` pulls in
+`@xmoon76/pi-tui` automatically):
 
 ```sh
-dsh plugin --profile pi-tui -- add @dsh-pi-tui/tui-app@file:/path/to/dsh-pi-tui/packages/tui-app
-# or, from a published registry version (ships prebuilt):
-dsh plugin --profile pi-tui -- add @dsh-pi-tui/tui-app
+# install the bundle into the pi-tui profile (creates the profile if needed)
+dsh plugin --profile pi-tui -- add @xmoon76/tui-app
 
 # run it
 dsh --profile pi-tui
 ```
 
-`dsh plugin` reconciles `dsh.profile.bundles` from installed state: any dependency
-whose manifest declares `dsh.bundle` joins the layer stack automatically.
+Any dependency whose manifest declares `dsh.bundle` joins the profile's layer
+stack automatically — no manual `cordis.patch.yml` wiring.
+
+### Option B — from source
+
+Build artifacts are not committed (`dist/` for pi-tui, `lib/` for tui-app are
+gitignored and the package `exports` point at the built files), so build before
+installing from a clone:
+
+```sh
+git clone https://github.com/XMoon/dsh-pi-tui
+cd dsh-pi-tui
+pnpm install
+pnpm build        # pi-tui tsdown (dist/) + tui-app tsc (lib/)
+dsh plugin --profile pi-tui -- add @xmoon76/tui-app@file:$PWD/packages/tui-app
+```
+
+### Verify the install
+
+```sh
+dsh plugin --profile pi-tui -- list          # both @xmoon76 packages present
+dsh --profile pi-tui                         # TUI starts instead of the web GUI
+```
+
+### Update / uninstall
+
+```sh
+# registry installs:
+dsh plugin --profile pi-tui -- update @xmoon76/tui-app
+# or rebuild + re-add for file: installs:
+pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/tui-app@file:$PWD/packages/tui-app
+
+dsh plugin --profile pi-tui -- remove @xmoon76/tui-app
+```
 
 ## Development
 

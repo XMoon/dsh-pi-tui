@@ -2,7 +2,7 @@
  * Headless tests for the TUI application core: a virtual xterm drives the
  * surface exactly like a real TTY, so rendering and input routing are
  * verified without a terminal or a model connection.
- * @module @dsh-pi-tui/tui-app/tui-app.test
+ * @module @xmoon76/tui-app/tui-app.test
  */
 
 import assert from 'node:assert/strict'
@@ -65,7 +65,7 @@ test('ctrl+d triggers the exit event (like /exit)', async () => {
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 1)
   // A kitty-protocol Ctrl+D press exits exactly once; the release does not.
-  const { setKittyProtocolActive } = await import('@dsh-pi-tui/pi-tui')
+  const { setKittyProtocolActive } = await import('@xmoon76/pi-tui')
   setKittyProtocolActive(true)
   try {
     surface.vt.sendInput('\x1b[100;5:1u') // ctrl+d press

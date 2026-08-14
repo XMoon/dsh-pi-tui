@@ -5,7 +5,7 @@
  * the published `@deepseek-ai/dsh-agent-presets` exports map does not expose
  * that subpath, so the TUI cannot import it. Interface merging makes this
  * declaration compatible with the official one whenever both are in scope.
- * @module @dsh-pi-tui/tui-app/preset-events
+ * @module @xmoon76/tui-app/preset-events
  */
 
 import type {} from '@deepseek-ai/dsh-session/types'

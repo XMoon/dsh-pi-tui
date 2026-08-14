@@ -1,12 +1,12 @@
 /**
  * Headless tests for transcript folding: thinking/tool entries render
  * collapsed by default and Ctrl+O expands the most recent turns.
- * @module @dsh-pi-tui/tui-app/folding.test
+ * @module @xmoon76/tui-app/folding.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { setKittyProtocolActive } from '@dsh-pi-tui/pi-tui'
+import { setKittyProtocolActive } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'

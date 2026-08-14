@@ -1,12 +1,12 @@
 /**
  * Headless tests for double-Esc cancellation: a fast second Esc fires
  * onCancel, a single Esc does not, and overlays keep their own Esc.
- * @module @dsh-pi-tui/tui-app/cancel.test
+ * @module @xmoon76/tui-app/cancel.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { SettingItem } from '@dsh-pi-tui/pi-tui'
+import type { SettingItem } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

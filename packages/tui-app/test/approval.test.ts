@@ -1,7 +1,7 @@
 /**
  * Headless tests for the approval dialog: overlay rendering, y/n/esc
  * decisions, FIFO queueing, and abort withdrawal.
- * @module @dsh-pi-tui/tui-app/approval.test
+ * @module @xmoon76/tui-app/approval.test
  */
 
 import assert from 'node:assert/strict'

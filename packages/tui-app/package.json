@@ -1,8 +1,26 @@
 {
-  "name": "@dsh-pi-tui/tui-app",
+  "name": "@xmoon76/tui-app",
   "version": "0.1.0",
   "description": "The dsh-pi-tui bundle: a TUI surface for DeepSeek Harness profiles (dsh --profile pi-tui)",
   "license": "MIT",
+  "author": "XMoon <xmoonox@gmail.com>",
+  "homepage": "https://github.com/XMoon/dsh-pi-tui#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/XMoon/dsh-pi-tui.git",
+    "directory": "packages/tui-app"
+  },
+  "bugs": {
+    "url": "https://github.com/XMoon/dsh-pi-tui/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "tui",
+    "terminal",
+    "cordis",
+    "cli"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -26,13 +44,16 @@
     "cordis.patch.yml",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
   },
   "dependencies": {
-    "@dsh-pi-tui/pi-tui": "file:../pi-tui",
+    "@xmoon76/pi-tui": "workspace:^0.84.2",
     "@deepseek-ai/dsh-cmdline": "^0.1.0-rc.6",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",

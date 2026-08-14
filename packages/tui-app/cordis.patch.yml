@@ -9,10 +9,10 @@
 
 - insert:
     - id: tui-startup
-      name: '@dsh-pi-tui/tui-app/startup'
+      name: '@xmoon76/tui-app/startup'
 
     - id: tui-app
-      name: '@dsh-pi-tui/tui-app'
+      name: '@xmoon76/tui-app'
       inject: [tuiStartup]
       config:
         sessionId: ''

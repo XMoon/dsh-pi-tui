@@ -2,7 +2,7 @@
  * Unit tests for the transcript folding: session events → renderable
  * messages, with streaming chunk accumulation and tool call pairing.
  * Pure functions, no dsh tree needed.
- * @module @dsh-pi-tui/tui-app/transcript.test
+ * @module @xmoon76/tui-app/transcript.test
  */
 
 import assert from 'node:assert/strict'
