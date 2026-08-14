@@ -1401,13 +1401,10 @@ export class TuiApp {
 }
 
 // Style helpers from the theme module's token functions.
-import { Chalk } from 'chalk'
-import { color, currentPalette } from './theme.ts'
+import { color } from './theme.ts'
 const dim = color.textDim
 const successMark = color.success
 const errorMark = color.error
-const chalk = new Chalk({ level: 3 })
-const chalkBoldDim = (text: string): string => chalk.bold.hex(currentPalette.textDim)(text)
 
 /** Start the TUI on the process terminal (raw-mode stdin/stdout). */
 export function startProcessTui(events: TuiAppEvents): TuiApp {

@@ -10,7 +10,7 @@ import test from 'node:test'
 import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldTranscript, renderTranscript, TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -183,17 +183,6 @@ test('aborted turn/end folds into an interrupted card', () => {
   assert.equal(tool.name, 'interrupted')
   assert.equal(tool.status, 'error')
   assert.equal(tool.result, 'cancelled by user')
-})
-
-test('renderTranscript produces the markdown document', () => {
-  const text = renderTranscript([
-    { kind: 'user', turn: 0, text: 'hi' },
-    { kind: 'assistant', turn: 0, text: '**hello**' },
-    { kind: 'tool', turn: 0, name: 'bash', args: '', result: 'ok', status: 'ok' },
-  ])
-  assert.ok(text.includes('**You:** hi'))
-  assert.ok(text.includes('**hello**'))
-  assert.ok(text.includes('> `✓ bash`'))
 })
 
 test('parallel same-name tool calls pair results by callId', () => {

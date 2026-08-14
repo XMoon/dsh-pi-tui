@@ -68,8 +68,7 @@ import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { computeStats, formatStats, StatsFolder } from './stats.ts'
-import { Text, type SettingItem } from '@dsh-pi-tui/pi-tui'
-import { SettingsList } from '@dsh-pi-tui/pi-tui'
+import { SettingsList, Text, type SettingItem } from '@dsh-pi-tui/pi-tui'
 import { color, resolveCustomTheme, settingsListTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type TuiApp } from './tui-app.ts'
 import {
@@ -184,6 +183,11 @@ function gitBranch(cwd: string): string {
 function shortCwd(cwd: string): string {
   const parts = cwd.split('/').filter(Boolean)
   return parts.slice(-2).join('/') || cwd
+}
+
+/** Shorten a session id for read-only display rows, capped at 28 characters. */
+function displaySessionId(id: string): string {
+  return id.length > 28 ? `${id.slice(0, 28)}…` : id
 }
 
 /**
@@ -1097,7 +1101,7 @@ export function apply(ctx: Context, config: Config): void {
                 id: 'session',
                 label: color.textDim('Session'),
                 description: color.textDim(liveAgent.session.id),
-                currentValue: color.textDim(liveAgent.session.id.length > 28 ? `${liveAgent.session.id.slice(0, 28)}…` : liveAgent.session.id),
+                currentValue: color.textDim(displaySessionId(liveAgent.session.id)),
               },
               {
                 id: 'model',
@@ -1655,7 +1659,7 @@ export function apply(ctx: Context, config: Config): void {
                 id: 'session-id',
                 label: color.textDim('Session'),
                 description: color.textDim(liveAgent.session.id),
-                currentValue: color.textDim(liveAgent.session.id.length > 28 ? `${liveAgent.session.id.slice(0, 28)}…` : liveAgent.session.id),
+                currentValue: color.textDim(displaySessionId(liveAgent.session.id)),
               },
               { id: 'session-stats', label: 'Stats', description: formatStats(stats), currentValue: '' },
               {
@@ -1755,7 +1759,7 @@ export function apply(ctx: Context, config: Config): void {
           ? event.data.arguments
           : JSON.stringify(event.data.arguments))
       } else if (event.type === 'tool/result') {
-        callArgs.delete(event.data.message.content[0]?.toolCallId ?? '' as CallId)
+        callArgs.delete(event.data.message.content[0]?.toolCallId ?? ('' as CallId))
       }
       folder.apply([event])
       statsFolder.apply([event])
