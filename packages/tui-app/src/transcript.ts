@@ -189,11 +189,7 @@ export function groupConsecutiveReads(messages: readonly TranscriptMessage[]): T
  */
 export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
-  /** Streaming text per (turn, step); an assistant message for that step is the same slot. */
-  private readonly stepText = new Map<string, string>()
-  /** Streaming reasoning per (turn, step), folded into one thinking entry. */
-  private readonly stepReasoning = new Map<string, string>()
-  /** The assistant message object per (turn, step), for in-place text updates. */
+  /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
   /** The thinking entry object per (turn, step), for in-place text updates. */
   private readonly thinkingEntries = new Map<string, Extract<TranscriptMessage, { kind: 'thinking' }>>()
@@ -244,6 +240,18 @@ export class TranscriptFolder {
     return entry
   }
 
+  /** The assistant entry object for one (turn, step), created on first text. */
+  private assistantEntry(turn: number, step: number): Extract<TranscriptMessage, { kind: 'assistant' }> {
+    const key = stepKey(turn, step)
+    let entry = this.assistantEntries.get(key)
+    if (entry === undefined) {
+      entry = { kind: 'assistant', turn, text: '' }
+      this.assistantEntries.set(key, entry)
+      this.items.push(entry)
+    }
+    return entry
+  }
+
   private applyEvent(event: SessionEvent): void {
     switch (event.type) {
       case 'turn/start': {
@@ -265,31 +273,20 @@ export class TranscriptFolder {
       }
       case 'assistant/chunk': {
         const { chunk } = event.data
-        const key = stepKey(event.data.turn, event.data.step)
+        const step = event.data.step
+        // Streaming text accumulates in place on the entry itself; there is
+        // no separate accumulator map, so a long session's text is stored
+        // once, not twice.
         if (chunk.type === 'text-delta') {
-          const accumulated = this.stepText.get(key) ?? ''
-          const next = accumulated + chunk.text
-          this.stepText.set(key, next)
-          let entry = this.assistantEntries.get(key)
-          if (entry === undefined) {
-            entry = { kind: 'assistant', turn: event.data.turn, text: next }
-            this.assistantEntries.set(key, entry)
-            this.items.push(entry)
-          } else {
-            entry.text = next
-          }        } else if (chunk.type === 'reasoning-delta') {
-          const accumulated = this.stepReasoning.get(key) ?? ''
-          const next = accumulated + chunk.text
-          this.stepReasoning.set(key, next)
-          const entry = this.thinkingEntry(event.data.turn, event.data.step)
-          entry.text = next
+          this.assistantEntry(event.data.turn, step).text += chunk.text
+        } else if (chunk.type === 'reasoning-delta') {
+          this.thinkingEntry(event.data.turn, step).text += chunk.text
         }
         break
       }
       case 'assistant/message': {
         const key = stepKey(event.data.turn, event.data.step)
         const text = textOf(event.data.message.content)
-        this.stepText.set(key, text)
         const entry = this.assistantEntries.get(key)
         if (entry !== undefined) {
           entry.text = text
@@ -329,6 +326,7 @@ export class TranscriptFolder {
         const status = event.data.error !== undefined || block?.isError === true ? 'error' : 'ok'
         const turn = pending?.turn ?? this.currentTurn
         this.pendingCalls.delete(key ?? '')
+        if (key !== undefined) this.callNames.delete(key)
         if (pending !== undefined) {
           // The call's own running card: parallel same-name calls pair
           // correctly because the card is keyed by callId, not by name.
@@ -405,6 +403,12 @@ export class TranscriptFolder {
           card.status = event.data.stopReason === 'completed' ? 'ok' : 'error'
           card.result = `stop: ${event.data.stopReason}`
         }
+        // The run's bookkeeping is done: drop the run card and every member
+        // card keyed under it so long sessions do not accumulate stale maps.
+        this.workflowRuns.delete(event.data.runId)
+        for (const memberKey of this.workflowMembers.keys()) {
+          if (memberKey.startsWith(`${event.data.runId}/`)) this.workflowMembers.delete(memberKey)
+        }
         break
       }
       case 'llm/retry': {
@@ -422,6 +426,7 @@ export class TranscriptFolder {
       }
       case 'command/done': {
         const name = this.commandNames.get(event.data.commandId) ?? 'command'
+        this.commandNames.delete(event.data.commandId)
         // Success text (e.g. "title set: x") carries the command's settlement
         // message; errors prefix it with the failure marker.
         const outcome = event.data.kind === 'error'
