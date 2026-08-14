@@ -350,12 +350,12 @@ test('injected context renders a web-style labeled row and expands to its body',
   }])
   // Folded: the row names the producer, the body stays hidden.
   const folded = await viewport(vt)
-  assert.ok(folded.includes('上下文注入 AGENTS.md'), `injected label missing:\n${folded}`)
+  assert.ok(folded.includes('Context injection AGENTS.md'), `injected label missing:\n${folded}`)
   assert.ok(!folded.includes('Do the thing'), `injected body leaked while folded:\n${folded}`)
   // Expanded: the body appears under the labeled header.
   app.setToolOutputExpanded(true)
   const expanded = await viewport(vt)
-  assert.ok(expanded.includes('上下文注入 AGENTS.md'), `labeled header missing when expanded:\n${expanded}`)
+  assert.ok(expanded.includes('Context injection AGENTS.md'), `labeled header missing when expanded:\n${expanded}`)
   assert.ok(expanded.includes('Do the thing carefully.'), `injected body missing:\n${expanded}`)
 })
 
@@ -368,7 +368,7 @@ test('a notice injection folds with its one-line summary', async () => {
     summary: 'saved the todo list',
   }])
   const view = await viewport(vt)
-  assert.ok(view.includes('上下文注入 todo — saved the todo list'), `notice summary missing:\n${view}`)
+  assert.ok(view.includes('Context injection todo — saved the todo list'), `notice summary missing:\n${view}`)
 })
 
 test('unlabeled system entries keep the section marker', async () => {
@@ -519,8 +519,8 @@ test('injected context rows show their emoji in the viewport', async () => {
     emoji: '📚',
   }])
   const view = await viewport(vt)
-  assert.ok(view.includes('📄 上下文注入 AGENTS.md'), `instruction emoji missing:\n${view}`)
-  assert.ok(view.includes('📚 上下文注入 skill-catalog'), `catalog emoji missing:\n${view}`)
+  assert.ok(view.includes('📄 Context injection AGENTS.md'), `instruction emoji missing:\n${view}`)
+  assert.ok(view.includes('📚 Context injection skill-catalog'), `catalog emoji missing:\n${view}`)
 })
 
 test('slash command cards carry a control-panel emoji', async () => {

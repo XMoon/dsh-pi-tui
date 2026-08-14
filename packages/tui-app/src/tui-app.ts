@@ -1037,20 +1037,20 @@ export class TuiApp {
     if (message.kind === 'system') {
       const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
       // Labeled entries are context injections: the row names the producer
-      // like the Web ContextInjectionRow (上下文注入 · label), with a notice
+      // like the Web ContextInjectionRow (Context injection · label), with a notice
       // form's one-line account on the folded row. Unlabeled entries keep
       // the generic section marker.
       if (message.label !== undefined) {
         const row = new Container()
         const emoji = message.emoji ?? '📎'
         if (expanded) {
-          row.addChild(new Text(color.textMuted(`${emoji} 上下文注入 ${message.label}`), 0, 0))
+          row.addChild(new Text(color.textMuted(`${emoji} Context injection ${message.label}`), 0, 0))
           // Injected content stays dimmed like tool-card bodies: context is
           // never mistaken for the assistant's actual output.
           row.addChild(new Text(color.textDim(message.text), 0, 0))
         } else {
           const summary = message.summary === undefined ? '' : ` — ${message.summary}`
-          row.addChild(new Text(color.textMuted(`${emoji} 上下文注入 ${message.label}${summary} (ctrl+o to expand)`), 0, 0))
+          row.addChild(new Text(color.textMuted(`${emoji} Context injection ${message.label}${summary} (ctrl+o to expand)`), 0, 0))
         }
         return row
       }
