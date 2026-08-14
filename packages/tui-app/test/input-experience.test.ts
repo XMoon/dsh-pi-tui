@@ -127,3 +127,30 @@ test('local shell cards render, settle in place, and clear', async () => {
   view = await viewport(vt)
   assert.ok(!view.includes('shell'), `card not cleared:\n${view}`)
 })
+
+test('a settled card updates by identity, never the newest card', async () => {
+  const { vt, app } = startApp()
+  // `!cmd1` running; its settle callback holds this reference.
+  const first = app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'cmd1', result: '', status: 'running',
+  })
+  // `!cmd2` starts before cmd1 settles (cmd1 was aborted/killed).
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'cmd2', result: '', status: 'running',
+  })
+  // cmd1's close event arrives late: it must touch only ITS card.
+  app.updateLocalMessage(first, {
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'cmd1', result: 'aborted', status: 'error',
+  })
+  await viewport(vt)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('aborted'), `cmd1 settlement missing:\n${view}`)
+  assert.ok(!view.includes('abortedcmd2') && view.includes('cmd2'), `cmd2 card corrupted:\n${view}`)
+  assert.ok(
+    !view.includes('cmd1') || view.includes('aborted'),
+    `cmd1 card must show its own settlement:\n${view}`,
+  )
+})

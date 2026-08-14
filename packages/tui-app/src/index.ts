@@ -696,7 +696,10 @@ export function apply(ctx: Context, config: Config): void {
       localShellController?.abort()
       localShellController = new AbortController()
       const localSignal = localShellController.signal
-      app.pushLocalMessage({
+      // The card reference this run owns: settling by identity keeps a
+      // settled old run from overwriting a newer run's card (updateLastLocal
+      // Message would hit whatever card is newest at settle time).
+      const card = app.pushLocalMessage({
         kind: 'tool',
         turn: Number.POSITIVE_INFINITY,
         name: 'shell',
@@ -704,8 +707,12 @@ export function apply(ctx: Context, config: Config): void {
         result: '',
         status: 'running',
       })
+      /** Release the controller only when it still guards THIS run. */
+      const releaseController = (): void => {
+        if (localShellController?.signal === localSignal) localShellController = undefined
+      }
       const settle = (result: string, status: 'ok' | 'error'): void => {
-        app.updateLastLocalMessage({
+        app.updateLocalMessage(card, {
           kind: 'tool',
           turn: Number.POSITIVE_INFINITY,
           name: 'shell',
@@ -720,6 +727,7 @@ export function apply(ctx: Context, config: Config): void {
         // composition provides it; completion-based like the spawn fallback.
         const spec = shell.resolve({ command, workdir: cwd, signal: localSignal })
         void shell.run(spec).then((result) => {
+          releaseController()
           if (localSignal.aborted) {
             settle('aborted', 'error')
             return
@@ -728,6 +736,7 @@ export function apply(ctx: Context, config: Config): void {
           const exit = result.exitCode !== null ? `exit ${result.exitCode}` : `signal ${result.signal ?? '?'}`
           settle(output === '' ? exit : `${output}\n[${exit}]`, result.exitCode === 0 ? 'ok' : 'error')
         }).catch((error: unknown) => {
+          releaseController()
           settle(`failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
         })
         return
@@ -738,9 +747,12 @@ export function apply(ctx: Context, config: Config): void {
       child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
       child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
       localSignal.addEventListener('abort', () => child.kill(), { once: true })
-      child.on('error', (error) => settle(`failed: ${error.message}`, 'error'))
+      child.on('error', (error) => {
+        releaseController()
+        settle(`failed: ${error.message}`, 'error')
+      })
       child.on('close', (code, childSignal) => {
-        localShellController = undefined
+        releaseController()
         if (localSignal.aborted) {
           settle('aborted', 'error')
           return

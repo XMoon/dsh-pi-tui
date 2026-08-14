@@ -618,9 +618,25 @@ export class TuiApp {
    * Append a local card rendered after the session transcript (e.g. `!`
    * shell runs). The card is always expanded (its turn is unbounded).
    * @param message - the local card to show.
+   * @returns the stored card reference, for {@link updateLocalMessage}.
    */
-  pushLocalMessage(message: TranscriptMessage): void {
+  pushLocalMessage(message: TranscriptMessage): TranscriptMessage {
     this.localMessages.push(message)
+    this.rebuildMessages()
+    return message
+  }
+
+  /**
+   * Replace one local card by reference. Settling a card by its own identity
+   * (not "the last one") keeps concurrent cards independent: a card settled
+   * after a newer one was pushed must not overwrite the newer card.
+   * @param message - the card reference {@link pushLocalMessage} returned.
+   * @param next - the settled replacement.
+   */
+  updateLocalMessage(message: TranscriptMessage, next: TranscriptMessage): void {
+    const index = this.localMessages.indexOf(message)
+    if (index === -1) return
+    this.localMessages[index] = next
     this.rebuildMessages()
   }
 
