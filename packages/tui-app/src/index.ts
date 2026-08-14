@@ -1683,7 +1683,7 @@ export function apply(ctx: Context, config: Config): void {
         handler: () => {
           const rows: SettingItem[] = [
             { id: 'k-enter', label: 'Enter', description: 'Submit (slash commands dispatch without a model turn)', currentValue: '' },
-            { id: 'k-exit', label: 'Ctrl+C', description: 'Quit the TUI', currentValue: '' },
+            { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
             { id: 'k-cancel', label: 'Double-Esc', description: 'Cancel the active turn / tool / shell command', currentValue: '' },
             { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool output and thinking', currentValue: '' },
             { id: 'k-todo', label: 'Ctrl+T', description: 'Toggle the todo panel', currentValue: '' },

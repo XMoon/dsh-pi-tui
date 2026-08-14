@@ -9,7 +9,7 @@
  * component tree through TuiAltScreen's layout engine, where the transcript
  * scrolls inside the alt screen.
  *
- * Keys: Enter submit, Ctrl+C exit, Ctrl+O expand/collapse recent turns,
+ * Keys: Enter submit, Ctrl+C/Ctrl+D exit, Ctrl+O expand/collapse recent turns,
  * Ctrl+F toggle fullscreen, Tab autocomplete (slash commands + paths).
  * @module @dsh-pi-tui/tui-app/tui-app
  */
@@ -531,6 +531,12 @@ export class TuiApp {
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+c')) {
+      this.events.onExit()
+      return { consume: true }
+    }
+    if (matchesKey(data, 'ctrl+d')) {
+      // Ctrl+D quits like /exit (and Ctrl+C). The editor's delete-char-
+      // forward remains on the Delete key.
       this.events.onExit()
       return { consume: true }
     }

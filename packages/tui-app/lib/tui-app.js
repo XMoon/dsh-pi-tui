@@ -9,11 +9,11 @@
  * component tree through TuiAltScreen's layout engine, where the transcript
  * scrolls inside the alt screen.
  *
- * Keys: Enter submit, Ctrl+C exit, Ctrl+O expand/collapse recent turns,
+ * Keys: Enter submit, Ctrl+C/Ctrl+D exit, Ctrl+O expand/collapse recent turns,
  * Ctrl+F toggle fullscreen, Tab autocomplete (slash commands + paths).
  * @module @dsh-pi-tui/tui-app/tui-app
  */
-import { Box, CombinedAutocompleteProvider, Container, Editor, Markdown, ProcessTerminal, SelectList, SettingsList, Text, TuiAltScreen, TuiMainScreen, matchesKey, truncateToWidth, visibleWidth, } from '@dsh-pi-tui/pi-tui';
+import { Box, CombinedAutocompleteProvider, Container, Editor, Markdown, ProcessTerminal, SelectList, SettingsList, Text, TuiAltScreen, TuiMainScreen, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth, } from '@dsh-pi-tui/pi-tui';
 import { detectThemeFromBackground, editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme, } from "./theme.js";
 import { isDiffResult, renderDiffLines } from "./diff.js";
 import { TranscriptSearchComponent } from "./search.js";

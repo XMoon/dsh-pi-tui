@@ -48,3 +48,24 @@ test('ctrl+c triggers the exit event', async () => {
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 1)
 })
+
+test('ctrl+d triggers the exit event (like /exit)', async () => {
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+  // A kitty-protocol Ctrl+D press exits exactly once; the release does not.
+  const { setKittyProtocolActive } = await import('@dsh-pi-tui/pi-tui')
+  setKittyProtocolActive(true)
+  try {
+    surface.vt.sendInput('\x1b[100;5:1u') // ctrl+d press
+    await surface.vt.waitForRender()
+    assert.equal(surface.exits, 2)
+    surface.vt.sendInput('\x1b[100;5:3u') // ctrl+d release
+    await surface.vt.waitForRender()
+    assert.equal(surface.exits, 2, 'release must not exit again')
+  } finally {
+    setKittyProtocolActive(false)
+  }
+})
