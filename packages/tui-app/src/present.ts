@@ -172,11 +172,15 @@ const VARIANT_EMOJIS: Record<ToolVariant, string> = {
 
 /**
  * The card header's leading emoji: exact-name entries first (synthetic
- * cards), then the tool's row-variant icon, then the generic wrench.
+ * cards), then slash commands (a control action, not a tool), then the
+ * tool's row-variant icon, then the generic wrench.
  * @param name - the tool name.
  */
 export function toolEmoji(name: string): string {
-  return TOOL_EMOJIS[name] ?? VARIANT_EMOJIS[classifyTool(name)]
+  const exact = TOOL_EMOJIS[name]
+  if (exact !== undefined) return exact
+  if (name.startsWith('/')) return '🎛️'
+  return VARIANT_EMOJIS[classifyTool(name)]
 }
 
 /** The rendered card header: design title plus the relativized args summary. */

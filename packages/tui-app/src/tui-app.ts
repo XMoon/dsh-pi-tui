@@ -1045,7 +1045,9 @@ export class TuiApp {
         const emoji = message.emoji ?? '📎'
         if (expanded) {
           row.addChild(new Text(color.textMuted(`${emoji} 上下文注入 ${message.label}`), 0, 0))
-          row.addChild(new Text(message.text, 0, 0))
+          // Injected content stays dimmed like tool-card bodies: context is
+          // never mistaken for the assistant's actual output.
+          row.addChild(new Text(color.textDim(message.text), 0, 0))
         } else {
           const summary = message.summary === undefined ? '' : ` — ${message.summary}`
           row.addChild(new Text(color.textMuted(`${emoji} 上下文注入 ${message.label}${summary} (ctrl+o to expand)`), 0, 0))

@@ -523,6 +523,16 @@ test('injected context rows show their emoji in the viewport', async () => {
   assert.ok(view.includes('📚 上下文注入 skill-catalog'), `catalog emoji missing:\n${view}`)
 })
 
+test('slash command cards carry a control-panel emoji', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: '/compact', args: '', result: 'executed', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('🎛️ compact [ok]'), `slash emoji missing:\n${view}`)
+})
+
+
 
 
 
