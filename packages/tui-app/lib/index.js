@@ -11,9 +11,9 @@
  */
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { installModelSelection } from '@deepseek-ai/dsh-agent';
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
@@ -30,7 +30,8 @@ import { TUI_STARTUP_SERVICE } from "./startup.js";
 import { textOf, TranscriptFolder } from "./transcript.js";
 import { computeStats, formatStats } from "./stats.js";
 import { Text } from '@dsh-pi-tui/pi-tui';
-import { color, resolveCustomTheme } from "./theme.js";
+import { SettingsList } from '@dsh-pi-tui/pi-tui';
+import { color, resolveCustomTheme, settingsListTheme } from "./theme.js";
 import { startProcessTui } from "./tui-app.js";
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner';
@@ -44,17 +45,52 @@ const WINDOW_TURNS = 15;
 /** Coalesced repaint interval for streaming events, in ms. */
 const REPAINT_FLUSH_MS = 50;
 /**
+ * The installed dsh version (e.g. `0.1.0-rc.6`), resolved from the launcher's
+ * real path: `process.argv[1]` is the `dsh` bin, whose realpath walks up to
+ * the `@deepseek-ai/dsh/package.json` that owns it. The version the welcome
+ * card shows is the harness the TUI runs on, not this bundle's own patch
+ * level. Undefined when the launcher path is unreadable.
+ * @returns the installed dsh version string, or undefined.
+ */
+function dshVersion() {
+    const bin = process.argv[1];
+    if (bin === undefined)
+        return undefined;
+    try {
+        let dir = dirname(realpathSync(bin));
+        for (let depth = 0; depth < 8; depth += 1) {
+            try {
+                const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+                if (pkg.name === '@deepseek-ai/dsh' && typeof pkg.version === 'string')
+                    return pkg.version;
+            }
+            catch {
+                // Not a manifest directory; keep walking up.
+            }
+            const parent = dirname(dir);
+            if (parent === dir)
+                return undefined;
+            dir = parent;
+        }
+    }
+    catch {
+        // Unreadable launcher path: fall back to the bundle version.
+    }
+    return undefined;
+}
+/**
  * The bundle's own version, read from package.json at runtime so the welcome
- * card never drifts from the shipped version.
+ * card never drifts from the shipped version. The DISPLAYED version prefers
+ * the installed dsh version (`dshVersion`), falling back to this one.
  * @returns the version string, or a fallback when the file is unreadable.
  */
 function packageVersion() {
     try {
         const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'));
-        return pkg.version ?? '0.0.0';
+        return dshVersion() ?? pkg.version ?? '0.0.0';
     }
     catch {
-        return '0.0.0';
+        return dshVersion() ?? '0.0.0';
     }
 }
 /**
@@ -104,6 +140,31 @@ function writeFd2(fd, text) {
         // Diagnostics are best-effort: a closed descriptor must not take the
         // fallback path down.
     }
+}
+/** Shell commands the approval dialog flags as dangerous (kimi-inspired). */
+const DANGER_PATTERNS = [
+    /\bmkfs(\.\w+)?\b/,
+    /\bdd\s+if=.*of=\/dev\//,
+    /^:\(\)\s*\{\s*:\|:&\s*\}\s*;\s*:/,
+    /\bchmod\s+-R\s+777\s+\//,
+    /\bgit\s+push\b[^\n|;]*(--force\b|\s-f\b)/,
+    /\b(shutdown|reboot|poweroff|init\s+0)\b/,
+    />+\s*\/dev\/sd/,
+    /\bcurl\b[^\n|]*\|\s*(ba)?sh\b/,
+];
+/**
+ * Whether a shell command matches a destructive pattern. `rm` is treated
+ * specially: any spelling of recursive + force flags (`rm -rf`, `rm -r -f`,
+ * `rm -rf /`) is dangerous; the remaining patterns are verbatim matches.
+ */
+export function dangerCommand(command) {
+    if (/\brm\b/i.test(command)) {
+        const flags = command.slice(command.toLowerCase().indexOf('rm') + 2);
+        const combined = flags.match(/-\w+/g)?.join('') ?? '';
+        if (combined.includes('r') && combined.includes('f'))
+            return true;
+    }
+    return DANGER_PATTERNS.some(pattern => pattern.test(command));
 }
 /** Render one session's log as a readable markdown transcript for `/export md`. */
 export function renderTranscriptMarkdown(session) {
@@ -604,21 +665,27 @@ export function apply(ctx, config) {
         // (cheap) but the view rebuild flushes at most every REPAINT_FLUSH_MS,
         // and immediately on turn/end.
         let repaintTimer;
+        // P7d: subagent viewer — while set, the transcript shows another live
+        // session's log read-only and Esc returns to the parent session.
+        let viewing;
+        const activeFolder = () => viewing?.folder ?? folder;
         const paintNow = () => {
             if (repaintTimer !== undefined) {
                 clearTimeout(repaintTimer);
                 repaintTimer = undefined;
             }
-            repaint(app, folder);
+            repaint(app, activeFolder());
         };
         const schedulePaint = () => {
             if (repaintTimer !== undefined)
                 return;
             repaintTimer = setTimeout(() => {
                 repaintTimer = undefined;
-                repaint(app, folder);
+                repaint(app, activeFolder());
             }, REPAINT_FLUSH_MS);
         };
+        // Tool-call arguments by callId, for the approval-preview dialog.
+        const callArgs = new Map();
         // Transcript-search state (see the onSearch* events below).
         let searchMatches = [];
         let searchCurrent = -1;
@@ -627,11 +694,44 @@ export function apply(ctx, config) {
             if (match === undefined)
                 return;
             const turn = 'turn' in match ? match.turn : undefined;
-            app.setTranscript(folder.messages({
+            app.setTranscript(activeFolder().messages({
                 maxTurns: WINDOW_TURNS,
                 ...turn === undefined ? {} : { endTurn: turn },
             }));
             app.setSearchResult(searchCurrent + 1, searchMatches.length);
+        };
+        /** Enter the read-only subagent viewer for one session (live or persisted). */
+        const enterView = async (childId, label) => {
+            const childFolder = new TranscriptFolder();
+            const child = sessions.get(childId);
+            if (child !== undefined) {
+                childFolder.apply(child.events);
+            }
+            else {
+                // An inactive child is no longer in the live store; load its log.
+                const persistence = ctx.get('sessionPersistence');
+                if (persistence !== undefined) {
+                    try {
+                        childFolder.apply((await persistence.inspect(childId)).events);
+                    }
+                    catch {
+                        // No persisted log either: the view stays empty.
+                    }
+                }
+            }
+            viewing = { id: childId, folder: childFolder };
+            repaint(app, childFolder);
+            app.notify(`viewing subagent ${label ?? childId} — Esc returns`);
+        };
+        /** Leave the subagent viewer (single Esc). Returns whether it exited. */
+        const exitView = () => {
+            if (viewing === undefined)
+                return false;
+            viewing = undefined;
+            app.clearLocalMessages();
+            repaint(app, folder);
+            refreshStatus();
+            return true;
         };
         app = startProcessTui({
             onSubmit: (text) => {
@@ -754,8 +854,11 @@ export function apply(ctx, config) {
             onSearchClose: () => {
                 searchMatches = [];
                 searchCurrent = -1;
-                repaint(app, folder);
+                repaint(app, activeFolder());
             },
+            // P7d: a single Esc with no overlay up exits the subagent viewer
+            // instead of arming the double-Esc cancel.
+            onSingleEscape: () => exitView(),
         });
         paintNow();
         setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`);
@@ -1209,6 +1312,102 @@ export function apply(ctx, config) {
                 },
             });
             commands.register({
+                name: 'subagents',
+                description: 'List child agents; view a transcript or interrupt one',
+                handler: async () => {
+                    const subagents = ctx.get('subagents');
+                    if (subagents === undefined)
+                        return { kind: 'error', text: 'subagent service unavailable' };
+                    const children = (await subagents.listChildren(liveAgent.session.id))
+                        .filter(child => child.kind === 'child');
+                    if (children.length === 0)
+                        return { kind: 'success', text: 'no subagents for this session' };
+                    const labelOf = (child) => child.label ?? child.id;
+                    app.openSettings(children.map(child => ({
+                        id: child.id,
+                        label: labelOf(child),
+                        description: `${child.mode} · ${child.activity}${child.hasChildren ? ' · has children' : ''}`,
+                        currentValue: '',
+                        // The submenu is rendered INSIDE the list (SettingsList mounts
+                        // the returned component in place); picking an action reports
+                        // it through the list's onChange. Opening a second panel here
+                        // would leave this list mounted as a ghost overlay that eats
+                        // every later Esc.
+                        submenu: (value, done) => new SettingsList([
+                            { id: 'view', label: 'View transcript', description: 'Watch this session read-only (Esc to return)', currentValue: '', values: ['✓'] },
+                            { id: 'interrupt', label: 'Interrupt', description: 'Cancel the child agent', currentValue: '', values: ['✓'] },
+                        ], 6, settingsListTheme, 
+                        // The action is the row ID; the cycled value is a checkmark.
+                        (id) => done(id), () => done(), {}),
+                    })), (childId, action) => {
+                        const child = children.find(candidate => candidate.id === childId);
+                        if (child === undefined)
+                            return;
+                        if (action === 'view') {
+                            void enterView(child.id, labelOf(child));
+                        }
+                        else if (action === 'interrupt') {
+                            subagents.interrupt(child.id, { kind: 'user', parentSessionId: liveAgent.session.id });
+                            app.notify(`interrupting ${labelOf(child)}`);
+                        }
+                    }, () => { });
+                    return { kind: 'success' };
+                },
+            });
+            commands.register({
+                name: 'search',
+                description: 'Search persisted sessions for text and switch to a hit',
+                input: { hint: '<query>' },
+                handler: async (invocation) => {
+                    const persistence = ctx.get('sessionPersistence');
+                    if (persistence === undefined)
+                        return { kind: 'error', text: 'session persistence unavailable' };
+                    const query = invocation.rawInput.trim();
+                    if (query === '')
+                        return { kind: 'error', text: 'search needs a query' };
+                    const needle = query.toLowerCase();
+                    const headers = (await persistence.list())
+                        .sort((a, b) => b.createdAt - a.createdAt)
+                        .slice(0, 100);
+                    const hits = [];
+                    for (const header of headers) {
+                        let raw;
+                        try {
+                            raw = await persistence.readRaw(header.id);
+                        }
+                        catch {
+                            continue;
+                        }
+                        if (raw === undefined)
+                            continue;
+                        const index = raw.content.toLowerCase().indexOf(needle);
+                        if (index === -1)
+                            continue;
+                        const start = Math.max(0, index - 40);
+                        const snippet = raw.content.slice(start, index + query.length + 40).replace(/\s+/g, ' ').trim();
+                        hits.push({ id: header.id, createdAt: header.createdAt, snippet });
+                        if (hits.length >= 20)
+                            break;
+                    }
+                    if (hits.length === 0)
+                        return { kind: 'success', text: `no persisted session contains "${query}"` };
+                    const now = Date.now();
+                    app.openPicker(hits.map(hit => ({
+                        value: hit.id,
+                        label: hit.id.length > 26 ? `${hit.id.slice(0, 26)}…` : hit.id,
+                        description: `${Math.max(0, Math.floor((now - hit.createdAt) / 60000))}m ago · …${hit.snippet}…`,
+                    })), (id) => {
+                        if (id === liveAgent.session.id)
+                            return;
+                        void switchSession(id).then(error => {
+                            if (error !== undefined)
+                                app.notify(error);
+                        });
+                    }, () => { });
+                    return { kind: 'success' };
+                },
+            });
+            commands.register({
                 name: 'title',
                 description: 'Set or show the session title',
                 input: { hint: '<title>' },
@@ -1408,8 +1607,28 @@ export function apply(ctx, config) {
         }
         refreshStatus();
         ctx.on('session/event', (session, event) => {
+            // The subagent viewer follows its own session's events; everything
+            // else routes to the live agent's folder as before.
+            if (viewing !== undefined) {
+                if (session.id !== viewing.id)
+                    return;
+                viewing.folder.apply([event]);
+                schedulePaint();
+                if (event.type === 'turn/end')
+                    paintNow();
+                return;
+            }
             if (session.id !== liveAgent.session.id)
                 return;
+            // Pair approval previews: remember each tool call's arguments by callId.
+            if (event.type === 'tool/call') {
+                callArgs.set(event.data.callId, typeof event.data.arguments === 'string'
+                    ? event.data.arguments
+                    : JSON.stringify(event.data.arguments));
+            }
+            else if (event.type === 'tool/result') {
+                callArgs.delete(event.data.message.content[0]?.toolCallId ?? '');
+            }
             folder.apply([event]);
             schedulePaint();
             if (event.type === 'todo/write')
@@ -1438,11 +1657,19 @@ export function apply(ctx, config) {
         }
         // The interactive answerer: every approval ask becomes a dialog. An
         // already-aborted request settles cancelled synchronously; otherwise the
-        // prompt's own abort signal withdraws it (turn cancel).
+        // prompt's own abort signal withdraws it (turn cancel). P7c: the dialog
+        // previews the paired tool call's arguments and flags dangerous commands.
         ctx.on('approval/request', (req, next) => {
             if (req.signal?.aborted === true)
                 return Promise.resolve('cancelled');
-            return app.showApprovalPrompt({ toolName: req.toolName, reason: req.reason, signal: req.signal });
+            const args = req.callId === undefined ? undefined : callArgs.get(req.callId);
+            return app.showApprovalPrompt({
+                toolName: req.toolName,
+                reason: req.reason,
+                signal: req.signal,
+                ...args === undefined ? {} : { arguments: args },
+                ...args !== undefined && req.toolName === 'bash' && dangerCommand(args) ? { danger: true } : {},
+            });
         });
         // The interactive question answerer: ask_user_question tool calls become
         // dialog flows; the tool receives the structured answers.

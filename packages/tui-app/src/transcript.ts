@@ -111,12 +111,13 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
     if (anchor === -1) return windowMessages(messages, maxTurns)
     const windowTurns = new Set(sorted.slice(anchor, anchor + maxTurns))
     const kept = messages.filter(message => !('turn' in message) || windowTurns.has(message.turn))
+    const newerTurns = new Set(sorted.slice(0, anchor))
     const oldTurns = new Set(sorted.slice(anchor + maxTurns))
-    const oldTools = kept.length === messages.length ? 0
-      : messages.filter(message => 'turn' in message && oldTurns.has(message.turn) && message.kind === 'tool').length
-    const turnsText = `${oldTurns.size} earlier turn${oldTurns.size === 1 ? '' : 's'}`
-    const toolsText = `${oldTools} tool call${oldTools === 1 ? '' : 's'}`
-    kept.unshift({ kind: 'summary', text: `… ${turnsText} · ${toolsText} — window ${maxTurns} turns` })
+    if (newerTurns.size === 0 && oldTurns.size === 0) return kept
+    const parts: string[] = []
+    if (newerTurns.size > 0) parts.push(`${newerTurns.size} newer turn${newerTurns.size === 1 ? '' : 's'}`)
+    if (oldTurns.size > 0) parts.push(`${oldTurns.size} earlier turn${oldTurns.size === 1 ? '' : 's'}`)
+    kept.unshift({ kind: 'summary', text: `… ${parts.join(' · ')} — window ${maxTurns} turns` })
     return kept
   }
   const boundary = turnBoundary(messages, maxTurns)

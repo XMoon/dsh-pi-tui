@@ -512,11 +512,15 @@ test('window anchored at endTurn shows the match turn instead of the newest', ()
   assert.equal(newest[0]?.kind, 'summary')
   const newestTurns = newest.slice(1).flatMap(m => 'turn' in m ? [m.turn] : [])
   assert.deepEqual([...new Set(newestTurns)].sort(), [3, 4])
-  // Anchored window: 2 turns ending at turn 1 → shows 0 and 1.
+  // Anchored window: 2 turns ending at turn 1 → shows 0 and 1, hiding 2-4.
   const anchored = foldTranscript(events, { maxTurns: 2, endTurn: 1 })
   assert.equal(anchored[0]?.kind, 'summary')
+  assert.ok((anchored[0] as { text: string }).text.includes('3 newer turns'), `summary:\n${JSON.stringify(anchored[0])}`)
   const anchoredTurns = anchored.slice(1).flatMap(m => 'turn' in m ? [m.turn] : [])
   assert.deepEqual([...new Set(anchoredTurns)].sort(), [0, 1])
   // The anchored view actually contains the older message text.
   assert.ok(anchored.some(m => 'text' in m && m.text.includes('question-0')), `anchored text:\n${JSON.stringify(anchored, null, 2)}`)
+  // A window covering everything hides nothing: no summary noise.
+  const recent = foldTranscript(events, { maxTurns: 5, endTurn: 4 })
+  assert.equal(recent[0]?.kind, 'user', `no summary expected when the window fits:\n${JSON.stringify(recent[0])}`)
 })

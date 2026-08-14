@@ -61,6 +61,12 @@ export interface TuiAppEvents {
     onSearchPrev?: () => void;
     /** The search was closed (Escape). Optional. */
     onSearchClose?: () => void;
+    /**
+     * The FIRST Esc press with no overlay up. The host may consume it (return
+     * true) to exit a runner-owned mode (e.g. the subagent viewer) instead of
+     * arming the double-Esc cancel. Optional.
+     */
+    onSingleEscape?: () => boolean | void;
 }
 /** What an approval prompt shows; mirrors the approval/request payload. */
 export interface ApprovalPromptRequest {
@@ -70,6 +76,10 @@ export interface ApprovalPromptRequest {
     reason?: string;
     /** Aborting withdraws the prompt and settles `cancelled`. */
     signal?: AbortSignal;
+    /** The tool call's arguments (paired via the request's callId), when known. */
+    arguments?: string;
+    /** A destructive command matched a danger pattern; render a warning. */
+    danger?: boolean;
 }
 /** Closed approval outcomes the user can produce at the prompt. */
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled';

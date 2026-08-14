@@ -119,3 +119,26 @@ ${view}`)
   assert.ok(view.includes('dsh-pi-tui'), `header missing:
 ${view}`)
 })
+
+test('approval prompt previews arguments and flags dangerous commands', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({
+    toolName: 'bash',
+    arguments: 'rm -rf /home/user/backup',
+    danger: true,
+  })
+  const view = await viewport(vt)
+  assert.ok(view.includes('DANGEROUS'), `danger banner missing:\n${view}`)
+  assert.ok(view.includes('rm -rf /home/user/backup'), `argument preview missing:\n${view}`)
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+})
+
+test('approval prompt truncates long argument previews to six lines', async () => {
+  const { vt, app } = startApp()
+  const lines = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n')
+  app.showApprovalPrompt({ toolName: 'bash', arguments: lines })
+  const view = await viewport(vt)
+  assert.ok(view.includes('line-0'), `preview start missing:\n${view}`)
+  assert.ok(!view.includes('line-11'), `preview not truncated:\n${view}`)
+})

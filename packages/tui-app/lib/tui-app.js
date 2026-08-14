@@ -267,6 +267,10 @@ export class TuiApp {
             // Overlays (pickers, settings) own Esc while they are up.
             if (this.overlayHost.hasOverlayEntries)
                 return undefined;
+            // The host may consume the first Esc (runner-owned modes like the
+            // subagent viewer); otherwise it arms the double-Esc cancel.
+            if (this.events.onSingleEscape?.() === true)
+                return { consume: true };
             const now = Date.now();
             if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
                 this.lastEscapeAt = undefined;
@@ -876,12 +880,19 @@ export class TuiApp {
     renderApprovalDialog(pending) {
         const dialog = new Box(1, 1);
         dialog.addChild(new Text(`Approve ${pending.request.toolName}?`));
+        if (pending.request.danger === true) {
+            dialog.addChild(new Text(color.error('⚠ DANGEROUS COMMAND — confirm carefully')));
+        }
+        if (pending.request.arguments !== undefined && pending.request.arguments !== '') {
+            const preview = pending.request.arguments.split('\n').slice(0, 6).join('\n');
+            dialog.addChild(new Text(color.textDim(preview.length > 240 ? `${preview.slice(0, 240)}…` : preview)));
+        }
         if (pending.request.reason !== undefined && pending.request.reason !== '') {
             dialog.addChild(new Text(pending.request.reason));
         }
         dialog.addChild(new Text(''));
         dialog.addChild(new Text('[y] allow once   [n] reject   [esc/ctrl+c] cancel'));
-        pending.handle = this.showOverlayOnHost(new Frame(dialog), { width: 60, maxHeight: 14 });
+        pending.handle = this.showOverlayOnHost(new Frame(dialog), { width: 60, maxHeight: 16 });
     }
     /** Route a key while a prompt is showing; every key is consumed. */
     handleApprovalKey(data) {

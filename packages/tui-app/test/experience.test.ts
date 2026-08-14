@@ -175,3 +175,44 @@ test('ctrl+shift+f opens transcript search; typing reports queries; escape close
   await viewport(vt)
   assert.equal(closed, 2)
 })
+
+test('a single escape without overlays reaches onSingleEscape and can be consumed', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let singleEscapes = 0
+  let cancels = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+    onSingleEscape: () => { singleEscapes += 1; return true },
+  })
+  app.start()
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  await viewport(vt)
+  assert.equal(singleEscapes, 1, 'onSingleEscape should fire on the first Esc')
+  assert.equal(cancels, 0, 'a consumed Esc must not arm the double-Esc cancel')
+})
+
+test('onSingleEscape fires on the Esc AFTER a settings panel closed', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let singleEscapes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSingleEscape: () => { singleEscapes += 1; return true },
+  })
+  app.start()
+  await viewport(vt)
+  app.openSettings(
+    [{ id: 'a', label: 'A', currentValue: '', values: ['x'] }],
+    () => {},
+    () => {},
+  )
+  await viewport(vt)
+  vt.sendInput('\x1b') // close the panel
+  await viewport(vt)
+  vt.sendInput('\x1b') // should reach onSingleEscape now
+  await viewport(vt)
+  assert.equal(singleEscapes, 1, 'the Esc after the panel closed must reach onSingleEscape')
+})

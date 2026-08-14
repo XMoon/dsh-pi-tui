@@ -23,6 +23,12 @@ export interface Config {
     sessionId?: string;
 }
 export declare const Config: z<Config>;
+/**
+ * Whether a shell command matches a destructive pattern. `rm` is treated
+ * specially: any spelling of recursive + force flags (`rm -rf`, `rm -r -f`,
+ * `rm -rf /`) is dangerous; the remaining patterns are verbatim matches.
+ */
+export declare function dangerCommand(command: string): boolean;
 /** Render one session's log as a readable markdown transcript for `/export md`. */
 export declare function renderTranscriptMarkdown(session: {
     header: SessionHeader;
