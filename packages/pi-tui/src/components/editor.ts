@@ -1220,7 +1220,10 @@ export class Editor implements Component, Focusable {
 			];
 
 			this.state.cursorLine += insertedLines.length - 1;
-			this.setCursorCol((insertedLines[insertedLines.length - 1] || "").length);
+			// Cursor columns are grapheme indices, not code units: an emoji or
+			// combining sequence at the end of the last inserted line must not
+			// land the cursor mid-grapheme.
+			this.setCursorCol([...this.segment(insertedLines[insertedLines.length - 1] || "", "grapheme")].length);
 		}
 
 		if (this.onChange) {
