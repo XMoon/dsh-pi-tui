@@ -18,6 +18,8 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval';
 // The settings service merge for persisting TUI preferences.
 import { settingsNamespace } from '@deepseek-ai/dsh-settings';
+// The plan-mode fold for the header badge.
+import { foldPlanMode } from '@deepseek-ai/dsh-plan-mode';
 import { TUI_STARTUP_SERVICE } from "./startup.js";
 import { foldTranscript } from "./transcript.js";
 import { computeStats, formatStats } from "./stats.js";
@@ -105,25 +107,54 @@ export function apply(ctx, config) {
                 agentOptions,
                 setup,
             });
-        const { agent } = handle;
-        await agent.whenIdle();
+        let liveHandle = handle;
+        let liveAgent = handle.agent;
+        await liveAgent.whenIdle();
+        /** Hand the TUI over to another persisted session, disposing the old agent. */
+        const switchSession = async (sessionId) => {
+            try {
+                await sessions.flush(liveAgent.session);
+                await liveHandle.dispose();
+                const next = await agents.resume({
+                    resumeSessionId: SessionId(sessionId),
+                    agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
+                    setup,
+                });
+                liveHandle = next;
+                liveAgent = next.agent;
+                await liveAgent.whenIdle();
+            }
+            catch (error) {
+                process.stderr.write(`[tui] switch failed: ${error instanceof Error ? error.message : String(error)}\n`);
+                return `switch failed: ${error instanceof Error ? error.message : String(error)}`;
+            }
+            repaint(app, liveAgent.session.events);
+            refreshStatus();
+            app.setWelcomeCard({
+                cwd,
+                sessionId: liveAgent.session.id,
+                model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
+                version: '0.1.0',
+            });
+            return undefined;
+        };
         // Footer state: model label, cwd, git branch, turn/step counters, and
         // the stats line (LLM timing, tokens, context pressure).
         const cwd = process.cwd();
         const refreshStatus = () => {
-            const stats = computeStats(agent.session.events);
+            const stats = computeStats(liveAgent.session.events);
             let contextTokens;
             const meter = ctx.get('tokenMeter');
             if (meter !== undefined) {
                 try {
-                    contextTokens = meter.measure(agent.session).totalTokens;
+                    contextTokens = meter.measure(liveAgent.session).totalTokens;
                 }
                 catch {
                     // Measurement is best-effort; the footer falls back to no context.
                 }
             }
             app.setStatus({
-                model: `${agent.options.provider}/${agent.options.model}`,
+                model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
                 cwd: shortCwd(cwd),
                 branch: gitBranch(cwd),
                 turns: stats.turns,
@@ -143,9 +174,9 @@ export function apply(ctx, config) {
                 // transcript through the session/event listener below.
                 const commands = ctx.get('commands');
                 if (commands !== undefined) {
-                    void commands.execute(agent, text, signal).then((execution) => {
+                    void commands.execute(liveAgent, text, signal).then((execution) => {
                         if (execution === undefined) {
-                            agent.followup(createUserMessage({
+                            liveAgent.followup(createUserMessage({
                                 content: [{ type: 'text', text }],
                                 source: { kind: 'user' },
                             }));
@@ -153,24 +184,24 @@ export function apply(ctx, config) {
                     });
                     return;
                 }
-                agent.followup(createUserMessage({
+                liveAgent.followup(createUserMessage({
                     content: [{ type: 'text', text }],
                     source: { kind: 'user' },
                 }));
             },
             onExit: () => {
                 void (async () => {
-                    await sessions.flush(agent.session);
+                    await sessions.flush(liveAgent.session);
                     app.stop();
                     exit(0);
                 })();
             },
         });
-        repaint(app, agent.session.events);
+        repaint(app, liveAgent.session.events);
         app.setWelcomeCard({
             cwd,
-            sessionId: agent.session.id,
-            model: `${agent.options.provider}/${agent.options.model}`,
+            sessionId: liveAgent.session.id,
+            model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
             version: '0.1.0',
         });
         // Persisted TUI preferences: register the namespace and restore the theme.
@@ -184,7 +215,7 @@ export function apply(ctx, config) {
             // Refresh completions after every registration below so TUI-owned
             // commands (/exit /settings /skill /model) appear in the tab list.
             const refreshCompletions = () => {
-                app.setCommandCompletions(commands.list(agent).map(command => ({
+                app.setCommandCompletions(commands.list(liveAgent).map(command => ({
                     name: command.name,
                     description: command.description,
                 })), cwd);
@@ -195,7 +226,7 @@ export function apply(ctx, config) {
                 description: 'Quit the terminal UI (flush and exit)',
                 handler: () => {
                     app.stop();
-                    void sessions.flush(agent.session).then(() => exit(0));
+                    void sessions.flush(liveAgent.session).then(() => exit(0));
                     return { kind: 'success' };
                 },
             });
@@ -209,7 +240,7 @@ export function apply(ctx, config) {
                             id: 'approval',
                             label: 'Approval policy',
                             description: 'How tool approvals are handled in this session',
-                            currentValue: effectiveApprovalPolicy(agent.session.events) ?? 'ask',
+                            currentValue: effectiveApprovalPolicy(liveAgent.session.events) ?? 'ask',
                             values: ['ask', 'never'],
                         },
                         {
@@ -235,14 +266,14 @@ export function apply(ctx, config) {
                         {
                             id: 'session',
                             label: color.textDim('Session'),
-                            description: color.textDim(agent.session.id),
-                            currentValue: color.textDim(agent.session.id.length > 28 ? `${agent.session.id.slice(0, 28)}…` : agent.session.id),
+                            description: color.textDim(liveAgent.session.id),
+                            currentValue: color.textDim(liveAgent.session.id.length > 28 ? `${liveAgent.session.id.slice(0, 28)}…` : liveAgent.session.id),
                         },
                         {
                             id: 'model',
                             label: color.textDim('Model'),
                             description: color.textDim('Provider and model routing this session'),
-                            currentValue: color.textDim(`${agent.options.provider}/${agent.options.model}`),
+                            currentValue: color.textDim(`${liveAgent.options.provider}/${liveAgent.options.model}`),
                         },
                         {
                             id: 'cwd',
@@ -253,7 +284,7 @@ export function apply(ctx, config) {
                     ], (id, value) => {
                         if (id === 'approval') {
                             if (value === 'ask' || value === 'never')
-                                ctx.get('approval')?.setPolicy(agent, value);
+                                ctx.get('approval')?.setPolicy(liveAgent, value);
                         }
                         else if (id === 'theme') {
                             if (value === 'dark' || value === 'light') {
@@ -264,6 +295,39 @@ export function apply(ctx, config) {
                         else if (id === 'expand') {
                             app.setToolOutputExpanded(value === 'expanded');
                         }
+                    }, () => { });
+                    return { kind: 'success' };
+                },
+            });
+            commands.register({
+                name: 'sessions',
+                description: 'List persisted sessions and switch to one',
+                handler: async () => {
+                    const persistence = ctx.get('sessionPersistence');
+                    if (persistence === undefined)
+                        return { kind: 'error', text: 'session persistence unavailable' };
+                    const headers = await persistence.list();
+                    if (headers.length === 0)
+                        return { kind: 'error', text: 'no persisted sessions' };
+                    const now = Date.now();
+                    app.openPicker(headers
+                        .sort((a, b) => b.createdAt - a.createdAt)
+                        .map(header => {
+                        const age = Math.max(0, Math.floor((now - header.createdAt) / 1000));
+                        const ageText = age < 60 ? `${age}s` : age < 3600 ? `${Math.floor(age / 60)}m` : `${Math.floor(age / 3600)}h`;
+                        const current = header.id === liveAgent.session.id ? ' ← current' : '';
+                        return {
+                            value: header.id,
+                            label: header.id.length > 26 ? `${header.id.slice(0, 26)}…` : header.id,
+                            description: `${ageText} ago${header.cwd === undefined ? '' : ` · ${header.cwd}`}${current}`,
+                        };
+                    }), (id) => {
+                        if (id === liveAgent.session.id)
+                            return;
+                        void switchSession(id).then(error => {
+                            if (error !== undefined)
+                                app.notify(error);
+                        });
                     }, () => { });
                     return { kind: 'success' };
                 },
@@ -280,7 +344,7 @@ export function apply(ctx, config) {
                         const skill = await skills.get(name, { cwd });
                         if (skill === undefined)
                             return { kind: 'error', text: `unknown skill "${name}"` };
-                        agent.inject(createUserMessage({
+                        liveAgent.inject(createUserMessage({
                             content: [{ type: 'text', text: `Skill loaded by the user: **${skill.name}**\n\n${skill.content ?? skill.description}` }],
                             source: { kind: 'plugin', plugin: 'tui-skill' },
                         }));
@@ -348,23 +412,27 @@ export function apply(ctx, config) {
         }
         refreshStatus();
         ctx.on('session/event', (session, event) => {
-            if (session.id !== agent.session.id)
+            if (session.id !== liveAgent.session.id)
                 return;
-            repaint(app, agent.session.events);
+            repaint(app, liveAgent.session.events);
             if (event.type === 'todo/write')
                 app.setTodoSummary(event.data.todos);
+            if (event.type === 'plan/mode')
+                app.setPlanMode(event.data.active);
             // Persist each completed turn so a crash loses at most the live turn.
             if (event.type === 'turn/end') {
                 refreshStatus();
-                void sessions.flush(agent.session);
+                void sessions.flush(liveAgent.session);
             }
             else if (event.type === 'step/start') {
                 refreshStatus();
             }
         });
+        // Initial plan badge from the log.
+        app.setPlanMode(foldPlanMode(liveAgent.session.events));
         // Initial todo state: the last todo/write snapshot in the log.
-        for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-            const event = agent.session.events[index];
+        for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
+            const event = liveAgent.session.events[index];
             if (event.type === 'todo/write') {
                 app.setTodoSummary(event.data.todos);
                 break;

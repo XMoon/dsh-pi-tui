@@ -116,6 +116,10 @@ export class TuiApp {
     headerText = '🐋 dsh-pi-tui';
     /** Footer text, kept for theme-swap repaints. */
     footerText = '';
+    /** Plan-mode badge state; appended to the header when active. */
+    planMode = false;
+    /** Todo summary segment of the header (without the base or badges). */
+    todoText = '';
     /** Welcome card shown above the transcript; empty renders nothing. */
     welcomeText = '';
     /** Transient error line shown under the transcript; cleared by setTranscript. */
@@ -207,6 +211,11 @@ export class TuiApp {
             this.messagesView.addChild(new Text(color.error(`✗ ${this.notifyText}`), 0, 0));
         }
         this.requestRender();
+    }
+    /** Show or clear the plan-mode badge in the header line. */
+    setPlanMode(active) {
+        this.planMode = active;
+        this.renderHeader();
     }
     /** Show a transient error line under the transcript; the next repaint clears it. */
     notify(text) {
@@ -306,15 +315,20 @@ export class TuiApp {
     setTodoSummary(todos) {
         const active = todos.filter(todo => todo.status !== 'completed');
         const done = todos.length - active.length;
-        const base = '🐋 dsh-pi-tui';
         if (active.length === 0) {
-            this.headerText = done > 0 ? `${base} · ${done} todo done` : base;
+            this.todoText = done > 0 ? ` · ${done} todo done` : '';
         }
         else {
             const first = active[0];
             const label = first === undefined ? '' : first.content.length > 30 ? `${first.content.slice(0, 30)}…` : first.content;
-            this.headerText = `${base} · ${active.length} active · ${label}`;
+            this.todoText = ` · ${active.length} active · ${label}`;
         }
+        this.renderHeader();
+    }
+    /** Rebuild the header from base + todo summary + plan badge. */
+    renderHeader() {
+        const badge = this.planMode ? ` ${color.warning('[plan]')}` : '';
+        this.headerText = `🐋 dsh-pi-tui${this.todoText}${badge}`;
         this.header.setText(this.headerText);
         this.requestRender();
     }

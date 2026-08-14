@@ -110,6 +110,10 @@ export declare class TuiApp {
     private headerText;
     /** Footer text, kept for theme-swap repaints. */
     private footerText;
+    /** Plan-mode badge state; appended to the header when active. */
+    private planMode;
+    /** Todo summary segment of the header (without the base or badges). */
+    private todoText;
     /** Welcome card shown above the transcript; empty renders nothing. */
     private welcomeText;
     /** Transient error line shown under the transcript; cleared by setTranscript. */
@@ -132,6 +136,8 @@ export declare class TuiApp {
     setTranscript(messages: readonly TranscriptMessage[]): void;
     /** Rebuild the message component tree from the current transcript state. */
     private rebuildMessages;
+    /** Show or clear the plan-mode badge in the header line. */
+    setPlanMode(active: boolean): void;
     /** Show a transient error line under the transcript; the next repaint clears it. */
     notify(text: string): void;
     /**
@@ -158,6 +164,8 @@ export declare class TuiApp {
      * @param todos - the latest todo/write snapshot.
      */
     setTodoSummary(todos: readonly TodoItem[]): void;
+    /** Rebuild the header from base + todo summary + plan badge. */
+    private renderHeader;
     /**
      * Update the footer: line 1 `[model] …/cwd branch [ctx bar] t/steps`,
      * line 2 the stats line left-aligned with the context readout right-
