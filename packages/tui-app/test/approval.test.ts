@@ -55,6 +55,16 @@ test('n rejects and escape cancels', async () => {
   assert.equal(await cancelled, 'cancelled')
 })
 
+test('ctrl+c cancels the prompt like escape', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await viewport(vt)
+  vt.sendInput('\x03') // ctrl+c
+  assert.equal(await decision, 'cancelled')
+  const view = await viewport(vt)
+  assert.ok(!view.includes('Approve bash'), `dialog still visible:\n${view}`)
+})
+
 test('prompts queue FIFO and consume all keys while showing', async () => {
   const { vt, app } = startApp()
   const first = app.showApprovalPrompt({ toolName: 'bash' })

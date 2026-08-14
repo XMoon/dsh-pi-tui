@@ -66,7 +66,7 @@ test('status merges partial updates', async () => {
 
 test('ctrl+f toggles fullscreen without crashing and renders content', async () => {
   const { vt, app } = startApp()
-  app.setTranscript([{ kind: 'user', text: 'hello' }])
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'hello' }])
   await viewport(vt)
   vt.sendInput('\x06') // ctrl+f
   const full = await viewport(vt)
@@ -74,6 +74,22 @@ test('ctrl+f toggles fullscreen without crashing and renders content', async () 
   vt.sendInput('\x06') // back to regular
   const regular = await viewport(vt)
   assert.ok(regular.includes('hello'), `content missing after exit fullscreen:\n${regular}`)
+})
+
+test('approval prompt survives a fullscreen toggle', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await viewport(vt)
+  assert.ok((await viewport(vt)).includes('Approve bash'), 'dialog missing before toggle')
+  vt.sendInput('\x06') // ctrl+f: the dialog must re-mount on the alt screen
+  const full = await viewport(vt)
+  assert.ok(full.includes('Approve bash'), `dialog missing in fullscreen:\n${full}`)
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // Back to regular mode: no dialog residue.
+  vt.sendInput('\x06')
+  const regular = await viewport(vt)
+  assert.ok(!regular.includes('Approve bash'), `dialog residue after exit fullscreen:\n${regular}`)
 })
 
 test('settings overlay shows items and reports changes', async () => {

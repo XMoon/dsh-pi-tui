@@ -23,10 +23,10 @@ async function viewport(vt: VirtualTerminal): Promise<string> {
 }
 
 const transcript: TranscriptMessage[] = [
-  { kind: 'user', text: 'do the thing' },
+  { kind: 'user', turn: 0, text: 'do the thing' },
   { kind: 'thinking', turn: 0, text: 'I need to consider carefully what to do here.\nLine two.\nLine three.' },
   { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a.txt\nb.txt\nc.txt\nmore.txt', status: 'ok' },
-  { kind: 'assistant', text: 'done' },
+  { kind: 'assistant', turn: 0, text: 'done' },
 ]
 
 test('thinking and tool entries render folded by default', async () => {
