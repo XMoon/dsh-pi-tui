@@ -1576,7 +1576,7 @@ export function apply(ctx: Context, config: Config): void {
         },
       })
       commands.register({
-        name: 'session',
+        name: 'status',
         description: 'Show session stats and identity',
         handler: () => {
           const stats = computeStats(liveAgent.session.events)
