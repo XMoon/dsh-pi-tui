@@ -374,44 +374,61 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     },
   })
 
-  // Load one skill into the live session; shared by /skill and the
-  // per-skill /skill-<name> commands.
-  const loadSkill = async (name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+  // The skills registry the live agent actually sees: its preset's scoped
+  // instance when the preset mounts one (the web surface's serviceFor path),
+  // else the host registry. The scope passed to lookups is the AGENT itself,
+  // exactly like the host apiproxy's presenterScopeFor — an agent context
+  // object does not identity-match the preset's standing mount.
+  const skillService = (): { list: (options: { cwd?: string; scope?: object }) => Promise<readonly { name: string; description: string }[]>; get: (name: string, options: { cwd?: string; scope?: object }) => Promise<{ name: string; content?: string; description: string } | undefined> } | undefined => {
     const liveAgent = runner.liveAgent
-    const skills = ctx.get('skills')
-    if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
-    const skill = await skills.get(name, { cwd, scope: liveAgent.ctx })
-    if (skill === undefined) return { kind: 'error', text: `unknown skill "${name}"` }
-    liveAgent.inject(createUserMessage({
-      content: [{ type: 'text', text: `Skill loaded by the user: **${skill.name}**\n\n${skill.content ?? skill.description}` }],
-      source: { kind: 'plugin', plugin: 'tui-skill' },
-    }))
-    return { kind: 'success', text: `skill ${name} loaded` }
+    const presets = ctx.get('agentPresets')
+    return presets?.serviceFor(liveAgent, 'skills') ?? ctx.get('skills')
   }
 
-  // Per-skill slash commands (/skill-<name>), pi-style: each catalog skill is
-  // directly selectable from the editor autocomplete and injects on Enter.
-  // Refreshed by /reload and at boot.
+  /** The workspace the live session runs in; fallback to the TUI's cwd. */
+  const sessionCwd = (): string => runner.liveAgent.session.header.cwd ?? cwd
+
+  // Load one skill into the live session; shared by /skill and the
+  // per-skill slash commands.
+  const loadSkill = async (name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+    const liveAgent = runner.liveAgent
+    const skills = skillService()
+    if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
+    const skill = await skills.get(name, { cwd: sessionCwd(), scope: liveAgent })
+    if (skill === undefined) return { kind: 'error', text: 'unknown skill "' + name + '"' }
+    liveAgent.inject(createUserMessage({
+      content: [{ type: 'text', text: 'Skill loaded by the user: **' + skill.name + '**\n\n' + (skill.content ?? skill.description) }],
+      source: { kind: 'plugin', plugin: 'tui-skill' },
+    }))
+    return { kind: 'success', text: 'skill ' + name + ' loaded' }
+  }
+
+  // Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
+  // catalog skill is directly selectable from the editor autocomplete and
+  // injects on Enter. The description carries a [skill] tag so skill rows
+  // stand apart from built-in commands. Refreshed by /reload and at boot.
   const skillDisposers = new Map<string, () => void>()
   const registerSkillCommands = async (): Promise<number> => {
     for (const dispose of skillDisposers.values()) dispose()
     skillDisposers.clear()
-    const skills = ctx.get('skills')
     const liveAgent = runner.liveAgent
+    const skills = skillService()
     if (skills === undefined) return 0
-    const catalog = await skills.list({ cwd, scope: liveAgent.ctx })
+    const taken = new Set(commands.list(liveAgent).map(command => command.name))
+    const catalog = await skills.list({ cwd: sessionCwd(), scope: liveAgent })
     for (const skill of catalog) {
-      const commandName = `skill-${skill.name}`
+      // A colliding name (a built-in or another plugin's command) skips the
+      // slash command; the catalog picker still lists the skill.
+      if (taken.has(skill.name)) continue
       try {
         const dispose = commands.register({
-          name: commandName,
-          description: `Load skill: ${skill.description}`,
+          name: skill.name,
+          description: '[skill] ' + skill.description,
           handler: async () => loadSkill(skill.name),
         })
-        skillDisposers.set(commandName, dispose)
+        skillDisposers.set(skill.name, dispose)
       } catch {
-        // A colliding registration (another plugin owns the name) skips the
-        // command; the catalog picker still lists the skill.
+        // Registration raced with another plugin; the picker still works.
       }
     }
     refreshCompletions()
@@ -426,14 +443,15 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     description: 'Load a skill into the session context',
     input: { hint: '<name>' },
     handler: async (invocation) => {
-      const skills = ctx.get('skills')
+      const liveAgent = runner.liveAgent
+      const skills = skillService()
       if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
       const name = invocation.rawInput.trim()
       if (name !== '') return loadSkill(name)
       // No argument: pick from the catalog.
-      const catalog = await skills.list({ cwd, scope: runner.liveAgent.ctx })
+      const catalog = await skills.list({ cwd: sessionCwd(), scope: liveAgent })
       if (catalog.length === 0) return { kind: 'error', text: 'no skills available' }
-      // SettingsList rows: Enter cycles the `✓` value, which fires onChange.
+      // SettingsList rows: Enter cycles the value, which fires onChange.
       app.openSettings(
         catalog.map(skill => ({
           id: skill.name,
