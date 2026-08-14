@@ -622,6 +622,23 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
   // base layer already registers it (text form: `/permission` shows the
   // current preset, `/permission <name>` switches). Registering it again
   // would throw "command already registered" and kill the TUI.
+  // `/yolo` IS a TUI-owned alias: it delegates to the official command line,
+  // so the switch takes the exact official path (sandbox + live approval
+  // writer + the injected policy-change model message + the preset log).
+  commands.register({
+    name: 'yolo',
+    description: 'Switch to danger-full-access (alias of /permission danger-full-access)',
+    handler: async () => {
+      const commands = ctx.get('commands')
+      if (commands === undefined) return { kind: 'error', text: 'commands service unavailable' }
+      const execution = await commands.execute(runner.liveAgent, '/permission danger-full-access', signal)
+      if (execution === undefined) {
+        return { kind: 'error', text: '/permission unavailable (permission presets not composed)' }
+      }
+      return { kind: 'success', text: 'danger-full-access — approvals off' }
+    },
+  })
+
   // `/preset` IS TUI-owned: the base composes no roster and registers no
   // preset command, so this cannot collide (P5.7 lesson, positive case).
   commands.register({
