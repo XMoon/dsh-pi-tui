@@ -912,8 +912,9 @@ export class TuiApp {
     return card
   }
 
-  /** Request a render on the active screen. */
-  private requestRender(): void {
+  /** Request a render on the active screen. Public so in-place submenu
+   * components (async content swaps) can trigger the next frame. */
+  requestRender(): void {
     ;(this.fullscreen ?? this.tui).requestRender()
   }
 

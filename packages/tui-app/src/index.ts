@@ -20,7 +20,7 @@ import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { CallId } from '@deepseek-ai/dsh-llm'
 // P7d: the subagent registry merge for ctx.subagents (listChildren/interrupt).
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -68,9 +68,10 @@ import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { computeStats, formatStats, StatsFolder } from './stats.ts'
-import { SettingsList, Text, type SettingItem } from '@dsh-pi-tui/pi-tui'
+import { SettingsList, type SettingItem } from '@dsh-pi-tui/pi-tui'
 import { color, resolveCustomTheme, settingsListTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type TuiApp } from './tui-app.ts'
+import { ModelSubmenu } from './model-menu.ts'
 import {
   MAX_PICKER_SESSIONS,
   headerToPickerRow,
@@ -1281,67 +1282,23 @@ export function apply(ctx: Context, config: Config): void {
             selected.current = next
             refreshStatus()
           }
+          // The model and effort levels render INSIDE the provider list's
+          // submenu slot (ModelSubmenu/EffortSubmenu): selecting applies
+          // immediately and Esc walks back one level. A nested openSettings
+          // would mount a second overlay and leave the first one hanging
+          // (the ghost-overlay trap the /subagents flow documents).
           app.openSettings(
             providers.map(provider => ({
               id: provider.id,
               label: provider.name,
               currentValue: current.provider === provider.id ? current.model : '',
-              submenu: (value, done) => {
-                const models = new Text('Loading models…', 0, 0)
-                void llm.listModels(provider.id).then(list => {
-                  done(undefined)
-                  app.openSettings(
-                    list.map(model => ({
-                      id: model.id,
-                      label: model.id,
-                      description: value === model.id ? '← current' : undefined,
-                      currentValue: value === model.id ? '← current' : '',
-                      values: ['✓'],
-                    })),
-                    (modelId) => {
-                      // Effort is adapter-owned per exact route: resolve the
-                      // model's reasoning metadata and offer its efforts when
-                      // it has any (the web surface's effort menu).
-                      void llm.resolveModelInfo(provider.id, modelId)
-                        .then(info => {
-                          const efforts = info.reasoning?.efforts
-                          if (efforts === undefined || efforts.length === 0) {
-                            apply({ provider: provider.id, model: modelId })
-                            return
-                          }
-                          const currentEffort = selected.current?.reasoningEffort
-                          app.openSettings(
-                            [
-                              {
-                                id: '__default',
-                                label: 'Default',
-                                description: 'Provider default reasoning effort',
-                                currentValue: currentEffort === undefined ? '← current' : '',
-                                values: ['✓'],
-                              },
-                              ...efforts.map(effort => ({
-                                id: effort.id,
-                                label: effort.name,
-                                description: effort.description,
-                                currentValue: currentEffort === effort.id ? '← current' : '',
-                                values: ['✓'],
-                              })),
-                            ],
-                            (effortId) => {
-                              apply(effortId === '__default'
-                                ? { provider: provider.id, model: modelId }
-                                : { provider: provider.id, model: modelId, reasoningEffort: ReasoningEffortId(effortId) })
-                            },
-                            () => {},
-                          )
-                        })
-                        .catch(() => apply({ provider: provider.id, model: modelId }))
-                    },
-                    () => {},
-                  )
-                })
-                return models
-              },
+              submenu: (value, done) => new ModelSubmenu(provider.id, current.model, selected.current?.reasoningEffort, {
+                listModels: (id) => llm.listModels(id),
+                resolveModelInfo: (id, modelId) => llm.resolveModelInfo(id, modelId),
+                apply,
+                requestRender: () => app.requestRender(),
+                done,
+              }),
             })),
             () => {},
             () => {},
