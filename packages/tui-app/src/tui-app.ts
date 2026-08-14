@@ -64,7 +64,10 @@ function preview(text: string, lines: number): string {
   const parts = text.split('\n')
   const first = parts.slice(0, lines).join(' ').trim()
   const rest = parts.length > lines ? '…' : ''
-  return `${first.slice(0, 120)}${rest}`
+  // Width-based truncation, not code-unit slicing: a raw slice can split a
+  // surrogate pair / ZWJ emoji in the middle. The overflow marker rides in
+  // the ellipsis slot (it is the same '…' the rest-marker would add).
+  return truncateToWidth(first, rest === '' ? 120 : 119, rest)
 }
 
 /**
@@ -835,9 +838,12 @@ export class TuiApp {
       `v${facts.version}`,
       color.textMuted(facts.cwd),
     ].join('  ·  ')
+    // The rule tracks the content line's width; an over-wide items line is
+    // truncated so the rule never falls short of the text above it.
     const width = Math.max(20, Math.min(80, visibleWidth(items) + 2))
+    const content = truncateToWidth(items, width - 2, '…')
     this.welcomeText = [
-      `${color.primary('🐋')} ${items}`,
+      `${color.primary('🐋')} ${content}`,
       color.border('─'.repeat(width)),
     ].join('\n')
     this.rebuildMessages()
