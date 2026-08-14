@@ -609,3 +609,25 @@ test('merged read groups expand into one tree row per file', async () => {
   assert.ok(!view.includes('<path>'), `raw XML leaked:\n${view}`)
   app.stop()
 })
+
+test('assistant and user messages align continuation lines under the bullet', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'user', turn: 0, text: 'line one\nline two' },
+    { kind: 'assistant', turn: 0, text: 'para one\n\npara two' },
+  ])
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const user = lines.findIndex(line => line.includes('❯ line one'))
+  assert.ok(user >= 0, `user first line missing:\n${view}`)
+  assert.ok(lines[user + 1]?.includes('line two'), `user continuation must follow on the next row:\n${view}`)
+  assert.ok(!lines[user + 1]!.includes('❯'), `user continuation must not repeat the bullet:\n${view}`)
+  // The assistant whale leads the first paragraph; the second paragraph's
+  // first line indents under the bullet (a markdown blank line sits between).
+  const assistant = lines.findIndex(line => line.includes('🐋') && line.includes('para one'))
+  assert.ok(assistant >= 0, `assistant first line missing:\n${view}`)
+  const paraTwo = lines.findIndex(line => line.includes('para two'))
+  assert.ok(paraTwo > assistant, `assistant continuation missing:\n${view}`)
+  assert.ok(!lines[paraTwo]!.includes('🐋'), `continuation must not repeat the bullet:\n${view}`)
+  assert.ok(lines[paraTwo]!.startsWith('    '), `continuation must indent under the bullet:\n${view}`)
+})

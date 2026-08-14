@@ -157,15 +157,16 @@ class WelcomeCard implements Component {
     this.lastWidth = width
     // Three columns: the session identity (full id — never truncated), the
     // model/preset, and the workspace. Each row wraps instead of ellipsizing,
-    // so the box keeps the important facts readable.
-    const line1 = `🐋  session ${color.textDim(facts.sessionId)}`
+    // so the box keeps the important facts readable. The card is session
+    // chrome, so it reads muted — never as bright as user/assistant content.
+    const line1 = `🐋  session ${color.textMuted(facts.sessionId)}`
     const line2 = [
-      color.text(facts.model),
+      color.textMuted(facts.model),
       facts.preset === undefined ? '' : `preset ${color.textMuted(facts.preset)}`,
     ].filter(part => part !== '').join(' · ')
     const line3 = [
       color.textMuted(facts.cwd),
-      `v${facts.version}`,
+      color.textMuted(`v${facts.version}`),
     ].filter(part => part !== '').join(' · ')
     // Wrap each line to the box's inner width so long identities read in
     // full instead of ending in an ellipsis; the box spans the same width
@@ -1029,14 +1030,22 @@ export class TuiApp {
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
     if (message.kind === 'user') {
       // Terminal-prompt style: the user's line reads like a shell command.
-      return new Text(`${color.roleUser('❯')} ${message.text}`, 0, 0)
+      // The ❯ leads the FIRST line; wrapped continuation lines indent under
+      // it (kimi prefix+indent parity), so multi-line input stays aligned.
+      const prefix = `${color.roleUser('❯')} `
+      const indent = ' '.repeat(visibleWidth(prefix))
+      const lines = new Text(message.text, 0, 0).render(Math.max(1, this.terminal.columns - visibleWidth(prefix)))
+      return new Text(lines.map((line, index) => (index === 0 ? prefix : indent) + line).join('\n'), 0, 0)
     }
     if (message.kind === 'assistant') {
-      // The whale bullet is its own Text so it never reflows into the body.
-      const row = new Container()
-      row.addChild(new Text(`${color.primary('🐋')}  `, 0, 0))
-      row.addChild(new Markdown(message.text, 0, 0, markdownTheme))
-      return row
+      // The whale bullet leads the FIRST markdown line; wrapped continuation
+      // lines indent under it (kimi prefix+indent parity), so the bullet
+      // never floats alone on its own row.
+      const prefix = `${color.primary('🐋')}  `
+      const indent = ' '.repeat(visibleWidth(prefix))
+      const lines = new Markdown(message.text, 0, 0, markdownTheme)
+        .render(Math.max(1, this.terminal.columns - visibleWidth(prefix)))
+      return new Text(lines.map((line, index) => (index === 0 ? prefix : indent) + line).join('\n'), 0, 0)
     }
     if (message.kind === 'thinking') {
       const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
@@ -1096,7 +1105,7 @@ export class TuiApp {
         return row
       }
       const text = expanded
-        ? `${color.textMuted('§')} ${message.text}`
+        ? `${color.textMuted('§')} ${color.textDim(message.text)}`
         : color.textMuted(`§ ${truncateToWidth(preview(message.text, 2), Math.max(1, this.terminal.columns - 22), '…')} (ctrl+o to expand)`)
       return new Text(text, 0, 0)
     }
@@ -1105,7 +1114,9 @@ export class TuiApp {
       return new Text(color.textDim(message.text), 0, 0)
     }
     // Tool card: the Web row-model header (design title + relativized args
-    // summary + status pill), with the result body when expanded.
+    // summary + status pill), with the result body when expanded. The whole
+    // header reads dim like every other intermediate step; only the status
+    // pill keeps its semantic color (ok/error/running).
     const card = new Container()
     const header = toolCardHeader(message.name, message.args, this.workspaceRoot)
     const summary = header.summary === '' ? '' : ` ${header.summary}`
@@ -1115,7 +1126,7 @@ export class TuiApp {
       : message.status === 'error'
         ? color.error('[error]')
         : color.textDim('[running]')
-    const head = `${emoji}  ${header.title}${summary} ${pill}`
+    const head = `${color.textDim(`${emoji}  ${header.title}${summary}`)} ${pill}`
     if (message.turn >= boundary || this.expandedOverride.get(message) === true) {
       card.addChild(new Text(head, 0, 0))
       this.renderToolBody(card, message)
