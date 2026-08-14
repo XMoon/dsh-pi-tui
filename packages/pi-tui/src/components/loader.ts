@@ -56,6 +56,12 @@ export class Loader extends Text {
 		}
 	}
 
+	/** Release the animation timer; containers call this on removal. */
+	override dispose(): void {
+		this.stop();
+		super.dispose();
+	}
+
 	setMessage(message: string): void {
 		this.message = message;
 		this.updateDisplay();
@@ -66,7 +72,12 @@ export class Loader extends Text {
 		this.frames = indicator?.frames !== undefined ? [...indicator.frames] : [...DEFAULT_FRAMES];
 		this.intervalMs = indicator?.intervalMs && indicator.intervalMs > 0 ? indicator.intervalMs : DEFAULT_INTERVAL_MS;
 		this.currentFrame = 0;
-		this.start();
+		// Reconfigure WITHOUT restarting a stopped loader: setIndicator after
+		// stop() must stay stopped (the old code unconditionally re-started).
+		if (this.intervalId !== null) {
+			this.restartAnimation();
+		}
+		this.updateDisplay();
 	}
 
 	private restartAnimation(): void {
