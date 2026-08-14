@@ -77,9 +77,48 @@ export const lightColors: ColorPalette = {
 /** The active palette; style helpers read it on every call, so swapping is live. */
 export let currentPalette: ColorPalette = darkColors
 
-/** Switch the active palette; callers must invalidate rendered components. */
-export function setTheme(theme: 'dark' | 'light'): void {
-  currentPalette = theme === 'light' ? lightColors : darkColors
+/** Theme selection modes: built-in palettes or a custom palette file. */
+export type ThemeMode = 'dark' | 'light' | 'custom'
+
+/** One custom theme file: optional base palette plus color overrides. */
+export interface CustomThemeFile {
+  /** Display name, echoed in the theme picker. */
+  name: string
+  /** Base palette to inherit unset tokens from; defaults to dark. */
+  base?: 'dark' | 'light'
+  /** Token overrides; any subset of {@link ColorPalette}. */
+  colors?: Partial<ColorPalette>
+}
+
+/**
+ * Switch the active palette; callers must invalidate rendered components.
+ * `custom` uses the full palette in `customPalette`, or falls back to dark.
+ * @param theme - the palette family.
+ * @param custom - the resolved custom palette when `theme` is `custom`.
+ */
+export function setTheme(theme: ThemeMode, custom?: ColorPalette): void {
+  if (theme === 'custom' && custom !== undefined) {
+    currentPalette = custom
+  } else {
+    currentPalette = theme === 'light' ? lightColors : darkColors
+  }
+}
+
+/** Build a full palette from a custom theme file (base + overrides). */
+export function resolveCustomTheme(file: CustomThemeFile): ColorPalette {
+  const base = file.base === 'light' ? lightColors : darkColors
+  return { ...base, ...file.colors }
+}
+
+/**
+ * Classify a terminal background colour (OSC 11 reply) as dark or light by
+ * relative luminance; a bright background selects the light palette.
+ * @param rgb - the reported background colour.
+ * @returns the matching palette family.
+ */
+export function detectThemeFromBackground(rgb: { r: number; g: number; b: number }): 'dark' | 'light' {
+  const luminance = (0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b) / 255
+  return luminance >= 0.5 ? 'light' : 'dark'
 }
 
 const chalk = new Chalk({ level: 3 })
