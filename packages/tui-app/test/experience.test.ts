@@ -76,6 +76,26 @@ test('ctrl+f toggles fullscreen without crashing and renders content', async () 
   assert.ok(regular.includes('hello'), `content missing after exit fullscreen:\n${regular}`)
 })
 
+test('editor input routes to the alt screen in fullscreen and back', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} })
+  app.start()
+  await viewport(vt)
+  vt.sendInput('\x06') // ctrl+f: fullscreen
+  await viewport(vt)
+  vt.sendInput('typed in fullscreen')
+  vt.sendInput('\r')
+  await viewport(vt)
+  assert.deepEqual(submitted, ['typed in fullscreen'], 'submit must work in fullscreen')
+  vt.sendInput('\x06') // back to regular
+  await viewport(vt)
+  vt.sendInput('back in regular')
+  vt.sendInput('\r')
+  await viewport(vt)
+  assert.deepEqual(submitted, ['typed in fullscreen', 'back in regular'], 'submit must work after exiting fullscreen')
+})
+
 test('setFullscreen reports changes and stays idempotent', async () => {
   const vt = new VirtualTerminal(100, 24)
   const changes: boolean[] = []

@@ -701,11 +701,16 @@ export class TuiApp {
       alt.addInputListener((data) => this.handleInput(data))
       this.tui.stop()
       alt.start()
+      // The alt screen starts with NO focused component: without this, every
+      // key after Ctrl+F is dropped (the app-level listener still sees
+      // shortcuts, but the editor never receives text or Enter).
+      alt.setFocus(this.editor)
       this.fullscreen = alt
     } else {
       this.fullscreen?.stop()
       this.fullscreen = undefined
       this.tui.start()
+      this.tui.setFocus(this.editor)
     }
     this.events.onFullscreenChange?.(enabled)
     if (pending !== undefined) this.renderApprovalDialog(pending)
