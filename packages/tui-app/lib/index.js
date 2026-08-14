@@ -229,6 +229,12 @@ export function apply(ctx, config) {
                             id: 'session',
                             label: 'Session',
                             description: agent.session.id,
+                            currentValue: agent.session.id.length > 28 ? `${agent.session.id.slice(0, 28)}…` : agent.session.id,
+                        },
+                        {
+                            id: 'model',
+                            label: 'Model',
+                            description: 'Provider and model routing this session',
                             currentValue: `${agent.options.provider}/${agent.options.model}`,
                         },
                         {

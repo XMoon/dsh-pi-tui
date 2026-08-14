@@ -476,8 +476,14 @@ export class TuiApp {
    * @param onCancel - called when the user closes without applying.
    */
   openSettings(items: SettingItem[], onChange: (id: string, value: string) => void, onCancel: () => void): void {
-    const settings = new SettingsList(items, 6, settingsListTheme, onChange, onCancel, { enableSearch: true })
-    this.tui.showOverlay(new Frame(settings), { width: 72, maxHeight: 28 })
+    // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
+    // so the cancel callback closes the handle captured after mounting.
+    let handle: OverlayHandle | undefined
+    const settings = new SettingsList(items, 6, settingsListTheme, onChange, () => {
+      handle?.hide()
+      onCancel()
+    }, { enableSearch: true })
+    handle = this.tui.showOverlay(new Frame(settings), { width: 72, maxHeight: 28 })
   }
 
   /** Switch the active color theme and repaint everything. */
