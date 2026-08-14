@@ -81,6 +81,8 @@ export interface TuiCommandRunner {
         kind: 'locked';
     }>;
     refreshStatus(): void;
+    /** Repaint the welcome card from the live agent's current facts (e.g. after a preset switch). */
+    updateWelcomeCard(): void;
     enterView(childId: SessionId, label?: string): Promise<void>;
     exit(code: number): void;
 }

@@ -524,6 +524,18 @@ export function apply(ctx: Context, config: Config): void {
     statsFolder.apply(liveAgent.session.events)
     let goalText = foldGoal(liveAgent.session.events)
 
+    /** Repaint the welcome card from the live agent's current facts. Re-read
+     * on every call so a still-blank session's preset switch shows up. */
+    const updateWelcomeCard = (): void => {
+      app.setWelcomeCard({
+        cwd,
+        sessionId: liveAgent.session.id,
+        model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
+        version: packageVersion(),
+        ...currentPreset() === undefined ? {} : { preset: currentPreset() },
+      })
+    }
+
     /** Swap the live agent to a new handle, repainting for its session. */
     const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>): Promise<string | undefined> => {
       try {
@@ -545,13 +557,7 @@ export function apply(ctx: Context, config: Config): void {
       repaint(app, folder)
       refreshStatus()
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`)
-      app.setWelcomeCard({
-        cwd,
-        sessionId: liveAgent.session.id,
-        model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
-        version: packageVersion(),
-        ...currentPreset() === undefined ? {} : { preset: currentPreset() },
-      })
+      updateWelcomeCard()
       return undefined
     }
 
@@ -888,13 +894,7 @@ export function apply(ctx: Context, config: Config): void {
     })
     paintNow()
     setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`)
-    app.setWelcomeCard({
-      cwd,
-      sessionId: liveAgent.session.id,
-      model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
-      version: packageVersion(),
-      ...currentPreset() === undefined ? {} : { preset: currentPreset() },
-    })
+    updateWelcomeCard()
     if (resumeFailure !== undefined) app.notify(resumeFailure)
     // Persisted TUI preferences: register the namespace and restore the
     // theme + footer preset. `history` holds per-cwd input history for ↑/↓
@@ -954,6 +954,7 @@ export function apply(ctx: Context, config: Config): void {
         currentPreset,
         recomposeBlank: (id) => recomposeBlank(ctx, liveAgent, id),
         refreshStatus,
+        updateWelcomeCard,
         enterView,
         exit,
       })

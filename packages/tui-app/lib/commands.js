@@ -433,6 +433,9 @@ export function registerTuiCommands(runner) {
                         };
                     }
                     refreshCompletions();
+                    // A still-blank session's welcome card shows the preset: repaint it
+                    // so the switch is visible before any conversation starts.
+                    runner.updateWelcomeCard();
                     return { kind: 'success', text: `session preset switched to ${outcome.preset}` };
                 }
                 catch (error) {

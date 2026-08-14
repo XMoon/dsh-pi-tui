@@ -444,6 +444,17 @@ export function apply(ctx, config) {
         let statsFolder = new StatsFolder();
         statsFolder.apply(liveAgent.session.events);
         let goalText = foldGoal(liveAgent.session.events);
+        /** Repaint the welcome card from the live agent's current facts. Re-read
+         * on every call so a still-blank session's preset switch shows up. */
+        const updateWelcomeCard = () => {
+            app.setWelcomeCard({
+                cwd,
+                sessionId: liveAgent.session.id,
+                model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
+                version: packageVersion(),
+                ...currentPreset() === undefined ? {} : { preset: currentPreset() },
+            });
+        };
         /** Swap the live agent to a new handle, repainting for its session. */
         const swapTo = async (next) => {
             try {
@@ -466,13 +477,7 @@ export function apply(ctx, config) {
             repaint(app, folder);
             refreshStatus();
             setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`);
-            app.setWelcomeCard({
-                cwd,
-                sessionId: liveAgent.session.id,
-                model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
-                version: packageVersion(),
-                ...currentPreset() === undefined ? {} : { preset: currentPreset() },
-            });
+            updateWelcomeCard();
             return undefined;
         };
         /** Hand the TUI over to another persisted session. Never throws: every
@@ -819,13 +824,7 @@ export function apply(ctx, config) {
         });
         paintNow();
         setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`);
-        app.setWelcomeCard({
-            cwd,
-            sessionId: liveAgent.session.id,
-            model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
-            version: packageVersion(),
-            ...currentPreset() === undefined ? {} : { preset: currentPreset() },
-        });
+        updateWelcomeCard();
         if (resumeFailure !== undefined)
             app.notify(resumeFailure);
         // Persisted TUI preferences: register the namespace and restore the
@@ -887,6 +886,7 @@ export function apply(ctx, config) {
                 currentPreset,
                 recomposeBlank: (id) => recomposeBlank(ctx, liveAgent, id),
                 refreshStatus,
+                updateWelcomeCard,
                 enterView,
                 exit,
             });

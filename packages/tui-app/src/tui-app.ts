@@ -159,8 +159,8 @@ export class Frame implements Component {
 }
 
 /** The session head card: identity facts, wrapped to the available width so
- * nothing is truncated, with a FULL-WIDTH rule that aligns with the editor's
- * border (a fixed-width rule looked misaligned next to the editor frame). */
+ * nothing is truncated, framed with a box whose width matches the editor's
+ * border below it (a fixed-width rule looked misaligned next to the frame). */
 class WelcomeCard implements Component {
   private facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string } | undefined
   private lastWidth = -1
@@ -188,13 +188,18 @@ class WelcomeCard implements Component {
       `v${facts.version}`,
       color.textMuted(facts.cwd),
     ].filter(part => part !== '').join(' · ')
-    // Wrap each line to the terminal width so long identities read in full
-    // instead of ending in an ellipsis; the rule spans the same width as the
-    // editor border below it.
+    // Wrap each line to the box's inner width so long identities read in
+    // full instead of ending in an ellipsis; the box spans the same width
+    // as the editor border below it.
+    const inner = Math.max(1, width - 4)
+    const b = color.border
     this.cached = [
-      ...wrapTextWithAnsi(line1, width),
-      ...wrapTextWithAnsi(line2, width),
-      color.border('─'.repeat(Math.max(0, width))),
+      b(`╭${'─'.repeat(Math.max(0, width - 2))}╮`),
+      ...[line1, line2].flatMap(line => wrapTextWithAnsi(line, inner).map(wrapped => {
+        const vis = visibleWidth(wrapped)
+        return `${b('│')} ${wrapped}${' '.repeat(Math.max(0, inner - vis))} ${b('│')}`
+      })),
+      b(`╰${'─'.repeat(Math.max(0, width - 2))}╯`),
     ]
     return this.cached
   }

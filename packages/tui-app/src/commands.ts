@@ -101,6 +101,8 @@ export interface TuiCommandRunner {
   /** Re-compose a still-blank session onto another preset (see recomposeBlank). */
   recomposeBlank(presetId: string): Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshStatus(): void
+  /** Repaint the welcome card from the live agent's current facts (e.g. after a preset switch). */
+  updateWelcomeCard(): void
   enterView(childId: SessionId, label?: string): Promise<void>
   exit(code: number): void
 }
@@ -502,6 +504,9 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
             }
           }
           refreshCompletions()
+          // A still-blank session's welcome card shows the preset: repaint it
+          // so the switch is visible before any conversation starts.
+          runner.updateWelcomeCard()
           return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
         } catch (error) {
           return { kind: 'error', text: error instanceof Error ? error.message : String(error) }

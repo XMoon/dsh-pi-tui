@@ -195,7 +195,7 @@ test('fullscreen scrollback search opens with ctrl+shift+f', async () => {
   assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
 })
 
-test('welcome card wraps long facts and draws a full-width rule', async () => {
+test('welcome card wraps long facts inside a full-width box', async () => {
   const { vt, app } = startApp()
   app.setWelcomeCard({
     cwd: '/very/long/working/directory/that/keeps/going',
@@ -211,8 +211,11 @@ test('welcome card wraps long facts and draws a full-width rule', async () => {
   assert.ok(view.includes('standard'), `preset missing:\n${view}`)
   assert.ok(view.includes('0.1.0-rc.6'), `version missing:\n${view}`)
   assert.ok(view.includes('/very/long/working/directory/that/keeps/going'), `cwd truncated:\n${view}`)
-  // The rule spans the full terminal width, matching the editor border below.
-  const ruleLine = view.split('\n').find(line => line.includes('─'.repeat(20)))
-  assert.ok(ruleLine !== undefined, `rule line missing:\n${view}`)
-  assert.equal(ruleLine.length, 100, `rule must be full width, got ${ruleLine.length}`)
+  // The box spans the full terminal width, matching the editor border below.
+  const lines = view.split('\n')
+  const top = lines.find(line => line.includes('╭') && line.includes('╮'))
+  assert.ok(top !== undefined, `box top missing:\n${view}`)
+  assert.equal(top.length, 100, `box top must be full width, got ${top.length}`)
+  assert.ok(lines.some(line => line.includes('╰') && line.includes('╯')), `box bottom missing:\n${view}`)
+  assert.ok(lines.some(line => line.includes('│')), `box sides missing:\n${view}`)
 })
