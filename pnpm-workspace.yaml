@@ -48,3 +48,4 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-agent-presets@0.1.0-rc.6'
   - '@deepseek-ai/dsh-atomic-write@0.1.0-rc.6'
   - '@deepseek-ai/dsh-home-paths@0.1.0-rc.6'
+  - '@deepseek-ai/dsh-session-query@0.1.0-rc.6'
