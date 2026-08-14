@@ -49,10 +49,16 @@ export type TranscriptMessage =
 export interface FoldOptions {
   /** Keep this many most-recent turns; older turns collapse into a summary entry. */
   maxTurns?: number
+  /**
+   * Window ENDS at this turn instead of the newest (pairs with `maxTurns`):
+   * the kept turns are `[endTurn - maxTurns + 1 .. endTurn]`. Used by the
+   * transcript search to jump the view to a match deep in history.
+   */
+  endTurn?: number
 }
 
 /** Text of a message's content blocks, joined; empty when there is no text. */
-function textOf(blocks: readonly ContentBlock[]): string {
+export function textOf(blocks: readonly ContentBlock[]): string {
   return blocks
     .filter(block => block.type === 'text')
     .map(block => block.text)
@@ -87,10 +93,32 @@ function turnBoundary(messages: readonly TranscriptMessage[], maxTurns: number):
  * result is a fresh array when anything collapses.
  * @param messages - the folded transcript.
  * @param maxTurns - window size in turns; entries of older turns collapse.
+ * @param endTurn - window end turn (newest when absent), see {@link FoldOptions}.
  * @returns the windowed transcript.
  */
-export function windowMessages(messages: readonly TranscriptMessage[], maxTurns: number): TranscriptMessage[] {
+export function windowMessages(messages: readonly TranscriptMessage[], maxTurns: number, endTurn?: number): TranscriptMessage[] {
   if (maxTurns <= 0) return [...messages]
+  if (endTurn !== undefined) {
+    // Anchored window (transcript search): keep exactly the maxTurns distinct
+    // turns ENDING at endTurn and collapse the older turns above them; turns
+    // newer than the anchor are hidden (the search jumped back in history).
+    const turns = new Set<number>()
+    for (const message of messages) {
+      if ('turn' in message) turns.add(message.turn)
+    }
+    const sorted = [...turns].sort((a, b) => b - a)
+    const anchor = sorted.indexOf(endTurn)
+    if (anchor === -1) return windowMessages(messages, maxTurns)
+    const windowTurns = new Set(sorted.slice(anchor, anchor + maxTurns))
+    const kept = messages.filter(message => !('turn' in message) || windowTurns.has(message.turn))
+    const oldTurns = new Set(sorted.slice(anchor + maxTurns))
+    const oldTools = kept.length === messages.length ? 0
+      : messages.filter(message => 'turn' in message && oldTurns.has(message.turn) && message.kind === 'tool').length
+    const turnsText = `${oldTurns.size} earlier turn${oldTurns.size === 1 ? '' : 's'}`
+    const toolsText = `${oldTools} tool call${oldTools === 1 ? '' : 's'}`
+    kept.unshift({ kind: 'summary', text: `… ${turnsText} · ${toolsText} — window ${maxTurns} turns` })
+    return kept
+  }
   const boundary = turnBoundary(messages, maxTurns)
   if (boundary === 0) return [...messages]
   const oldTurns = new Set<number>()
@@ -190,7 +218,7 @@ export class TranscriptFolder {
     const grouped = groupConsecutiveReads(this.items)
     const maxTurns = options?.maxTurns
     if (maxTurns === undefined || maxTurns <= 0) return grouped
-    return windowMessages(grouped, maxTurns)
+    return windowMessages(grouped, maxTurns, options?.endTurn)
   }
 
   /** The thinking entry object for one (turn, step), created on first reasoning. */

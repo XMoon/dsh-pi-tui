@@ -12,7 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent';
-import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session';
 /** Stable Cordis plugin name. */
 export declare const name = "tui-runner";
 /** Core services required before the TUI can mount. */
@@ -23,6 +23,11 @@ export interface Config {
     sessionId?: string;
 }
 export declare const Config: z<Config>;
+/** Render one session's log as a readable markdown transcript for `/export md`. */
+export declare function renderTranscriptMarkdown(session: {
+    header: SessionHeader;
+    events: readonly SessionEvent[];
+}): string;
 /** One agent's preset composition: the id to record and the setup that installs it. */
 export interface AgentComposition {
     /** Preset id for the session header, absent when the deployment composes no roster. */

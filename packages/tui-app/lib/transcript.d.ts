@@ -16,6 +16,7 @@
  * @module @dsh-pi-tui/tui-app/transcript
  */
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage = {
     kind: 'user';
@@ -52,16 +53,25 @@ export type TranscriptMessage = {
 export interface FoldOptions {
     /** Keep this many most-recent turns; older turns collapse into a summary entry. */
     maxTurns?: number;
+    /**
+     * Window ENDS at this turn instead of the newest (pairs with `maxTurns`):
+     * the kept turns are `[endTurn - maxTurns + 1 .. endTurn]`. Used by the
+     * transcript search to jump the view to a match deep in history.
+     */
+    endTurn?: number;
 }
+/** Text of a message's content blocks, joined; empty when there is no text. */
+export declare function textOf(blocks: readonly ContentBlock[]): string;
 /**
  * Collapse turns older than the display window into one leading summary
  * entry with aggregate counts. Entries at/after the boundary survive; the
  * result is a fresh array when anything collapses.
  * @param messages - the folded transcript.
  * @param maxTurns - window size in turns; entries of older turns collapse.
+ * @param endTurn - window end turn (newest when absent), see {@link FoldOptions}.
  * @returns the windowed transcript.
  */
-export declare function windowMessages(messages: readonly TranscriptMessage[], maxTurns: number): TranscriptMessage[];
+export declare function windowMessages(messages: readonly TranscriptMessage[], maxTurns: number, endTurn?: number): TranscriptMessage[];
 /**
  * Merge consecutive completed `read` tool cards into one card ("N files").
  * A single read stays untouched; groups break on any other kind or status.

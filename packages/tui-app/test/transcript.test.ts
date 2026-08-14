@@ -487,3 +487,36 @@ test('max-tokens turn end folds into a notice', () => {
   assert.ok(entry !== undefined && entry.kind === 'system')
   assert.ok(entry.text.includes('max tokens'), `text:\n${entry.text}`)
 })
+
+test('window anchored at endTurn shows the match turn instead of the newest', () => {
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 5; turn += 1) {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('user/message', {
+      id: MessageId(`msg-${turn}`), role: 'user',
+      content: [{ type: 'text', text: `question-${turn}` }],
+      source: { kind: 'user' },
+    }, seq++))
+    events.push(event('assistant/message', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`ans-${turn}`), role: 'assistant',
+        content: [{ type: 'text', text: `answer-${turn}` }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, seq++))
+  }
+  // Default window: newest 2 turns (3, 4).
+  const newest = foldTranscript(events, { maxTurns: 2 })
+  assert.equal(newest[0]?.kind, 'summary')
+  const newestTurns = newest.slice(1).flatMap(m => 'turn' in m ? [m.turn] : [])
+  assert.deepEqual([...new Set(newestTurns)].sort(), [3, 4])
+  // Anchored window: 2 turns ending at turn 1 → shows 0 and 1.
+  const anchored = foldTranscript(events, { maxTurns: 2, endTurn: 1 })
+  assert.equal(anchored[0]?.kind, 'summary')
+  const anchoredTurns = anchored.slice(1).flatMap(m => 'turn' in m ? [m.turn] : [])
+  assert.deepEqual([...new Set(anchoredTurns)].sort(), [0, 1])
+  // The anchored view actually contains the older message text.
+  assert.ok(anchored.some(m => 'text' in m && m.text.includes('question-0')), `anchored text:\n${JSON.stringify(anchored, null, 2)}`)
+})

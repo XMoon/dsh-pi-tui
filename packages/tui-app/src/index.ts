@@ -18,9 +18,9 @@ import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 // P6: the agent-preset roster — ctx.agentPresets, the session preset
@@ -62,7 +62,8 @@ import type {} from '@deepseek-ai/dsh-shell'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
-import { TranscriptFolder } from './transcript.ts'
+import { textOf, TranscriptFolder } from './transcript.ts'
+import type { TranscriptMessage } from './transcript.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { Text, type SettingItem } from '@dsh-pi-tui/pi-tui'
 import { color, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
@@ -156,6 +157,51 @@ function writeFd2(fd: number, text: string): void {
     // Diagnostics are best-effort: a closed descriptor must not take the
     // fallback path down.
   }
+}
+
+/** Render one session's log as a readable markdown transcript for `/export md`. */
+export function renderTranscriptMarkdown(session: {
+  header: SessionHeader
+  events: readonly SessionEvent[]
+}): string {
+  const lines: string[] = [
+    `# Session ${session.header.id}`,
+    `- cwd: ${session.header.cwd ?? 'unknown'}`,
+    ...session.header.agentPreset === undefined ? [] : [`- agent preset: ${session.header.agentPreset}`],
+    '',
+  ]
+  for (const event of session.events) {
+    switch (event.type) {
+      case 'user/message': {
+        const text = textOf(event.data.content)
+        if (text !== '') lines.push(`## User\n\n${text}\n`)
+        break
+      }
+      case 'assistant/message': {
+        const text = textOf(event.data.message.content)
+        if (text !== '') lines.push(`## Assistant\n\n${text}\n`)
+        break
+      }
+      case 'tool/call': {
+        const args = typeof event.data.arguments === 'string' ? event.data.arguments : JSON.stringify(event.data.arguments)
+        lines.push(`### Tool ${event.data.name}\n\n\`\`\`json\n${args}\n\`\`\`\n`)
+        break
+      }
+      case 'tool/result': {
+        const block = event.data.message.content[0]
+        const text = textOf(block?.content ?? [])
+        if (text !== '') lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`)
+        break
+      }
+      case 'command/run': {
+        lines.push(`> /${event.data.name}${event.data.args === '' ? '' : ` ${event.data.args}`}\n`)
+        break
+      }
+      default:
+        break
+    }
+  }
+  return lines.join('\n')
 }
 
 /**
@@ -528,6 +574,14 @@ export function apply(ctx: Context, config: Config): void {
     // Footer state: model label, cwd, git branch, turn/step counters, and
     // the stats line (LLM timing, tokens, context pressure).
     const cwd = process.cwd()
+    /** The footer model label: the live selection (with effort) when one exists. */
+    const modelLabel = (): string => {
+      const selection = selected.current
+      if (selection === undefined) return `${liveAgent.options.provider}/${liveAgent.options.model}`
+      return selection.reasoningEffort === undefined
+        ? `${selection.provider}/${selection.model}`
+        : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
+    }
     const refreshStatus = (): void => {
       const stats = computeStats(liveAgent.session.events)
       let contextTokens: number | undefined
@@ -540,7 +594,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       app.setStatus({
-        model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
+        model: modelLabel(),
         cwd: shortCwd(cwd),
         branch: gitBranch(cwd),
         goal: foldGoal(liveAgent.session.events),
@@ -645,6 +699,19 @@ export function apply(ctx: Context, config: Config): void {
         repaint(app, folder)
       }, REPAINT_FLUSH_MS)
     }
+    // Transcript-search state (see the onSearch* events below).
+    let searchMatches: TranscriptMessage[] = []
+    let searchCurrent = -1
+    const jumpToSearchMatch = (): void => {
+      const match = searchMatches[searchCurrent]
+      if (match === undefined) return
+      const turn = 'turn' in match ? match.turn : undefined
+      app.setTranscript(folder.messages({
+        maxTurns: WINDOW_TURNS,
+        ...turn === undefined ? {} : { endTurn: turn },
+      }))
+      app.setSearchResult(searchCurrent + 1, searchMatches.length)
+    }
     app = startProcessTui({
       onSubmit: (text) => {
         // Persist the (newest-first) input history for this cwd; the editor
@@ -735,6 +802,34 @@ export function apply(ctx: Context, config: Config): void {
       // lazily at toggle time.
       onFullscreenChange: (fullscreen) => {
         void tuiSettings?.replace({ ...tuiSettings.get(), fullscreen: fullscreen ? 'on' : 'off' })
+      },
+      // Transcript search (Ctrl+Shift+F): matches run over the FULL folded
+      // transcript; each jump re-windows the view so the matched turn is
+      // visible (older turns collapse above it into the summary entry).
+      onSearchQuery: (query) => {
+        const needle = query.trim().toLowerCase()
+        const searchable = (message: TranscriptMessage): string =>
+          message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}` : message.text
+        const full = folder.messages()
+        searchMatches = needle === '' ? [] : full.filter(message => searchable(message).toLowerCase().includes(needle))
+        searchCurrent = searchMatches.length > 0 ? 0 : -1
+        app.setSearchResult(searchCurrent + 1, searchMatches.length)
+        if (searchCurrent >= 0) jumpToSearchMatch()
+      },
+      onSearchNext: () => {
+        if (searchMatches.length === 0) return
+        searchCurrent = (searchCurrent + 1) % searchMatches.length
+        jumpToSearchMatch()
+      },
+      onSearchPrev: () => {
+        if (searchMatches.length === 0) return
+        searchCurrent = (searchCurrent - 1 + searchMatches.length) % searchMatches.length
+        jumpToSearchMatch()
+      },
+      onSearchClose: () => {
+        searchMatches = []
+        searchCurrent = -1
+        repaint(app, folder)
       },
     })
     paintNow()
@@ -1005,13 +1100,19 @@ export function apply(ctx: Context, config: Config): void {
       })
       commands.register({
         name: 'model',
-        description: 'Switch the model for this session',
+        description: 'Switch the model (and reasoning effort) for this session',
         handler: async () => {
           const llm = ctx.get('llm')
           const defaultModel = ctx.get('agentDefaultModel')
           if (llm === undefined || defaultModel === undefined) return { kind: 'error', text: 'model service unavailable' }
           const providers = llm.listProviders()
           const current = defaultModel.currentSelection()
+          /** Commit a selection (model, optional effort) and refresh the footer. */
+          const apply = (next: ModelSelection): void => {
+            void defaultModel.saveSelection(next)
+            selected.current = next
+            refreshStatus()
+          }
           app.openSettings(
             providers.map(provider => ({
               id: provider.id,
@@ -1030,9 +1131,43 @@ export function apply(ctx: Context, config: Config): void {
                       values: ['✓'],
                     })),
                     (modelId) => {
-                      void defaultModel.saveSelection({ provider: provider.id, model: modelId })
-                      selected.current = { provider: provider.id, model: modelId }
-                      refreshStatus()
+                      // Effort is adapter-owned per exact route: resolve the
+                      // model's reasoning metadata and offer its efforts when
+                      // it has any (the web surface's effort menu).
+                      void llm.resolveModelInfo(provider.id, modelId)
+                        .then(info => {
+                          const efforts = info.reasoning?.efforts
+                          if (efforts === undefined || efforts.length === 0) {
+                            apply({ provider: provider.id, model: modelId })
+                            return
+                          }
+                          const currentEffort = selected.current?.reasoningEffort
+                          app.openSettings(
+                            [
+                              {
+                                id: '__default',
+                                label: 'Default',
+                                description: 'Provider default reasoning effort',
+                                currentValue: currentEffort === undefined ? '← current' : '',
+                                values: ['✓'],
+                              },
+                              ...efforts.map(effort => ({
+                                id: effort.id,
+                                label: effort.name,
+                                description: effort.description,
+                                currentValue: currentEffort === effort.id ? '← current' : '',
+                                values: ['✓'],
+                              })),
+                            ],
+                            (effortId) => {
+                              apply(effortId === '__default'
+                                ? { provider: provider.id, model: modelId }
+                                : { provider: provider.id, model: modelId, reasoningEffort: ReasoningEffortId(effortId) })
+                            },
+                            () => {},
+                          )
+                        })
+                        .catch(() => apply({ provider: provider.id, model: modelId }))
                     },
                     () => {},
                   )
@@ -1186,6 +1321,35 @@ export function apply(ctx: Context, config: Config): void {
           if (process.stdout.isTTY !== true) return { kind: 'error', text: 'clipboard needs a TTY (OSC 52)' }
           process.stdout.write(`\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`)
           return { kind: 'success', text: 'copied last assistant message' }
+        },
+      })
+      commands.register({
+        name: 'export',
+        description: 'Export this session log (JSONL by default, `md` for a readable transcript)',
+        input: { hint: '[md|<path>]' },
+        handler: async (invocation) => {
+          const persistence = ctx.get('sessionPersistence')
+          if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
+          const arg = invocation.rawInput.trim()
+          const shortId = liveAgent.session.id.replace(/^session-/, '').slice(0, 8)
+          const markdown = arg === 'md'
+          const target = arg !== '' && !markdown
+            ? arg
+            : join(cwd, markdown ? `dsh-session-${shortId}.md` : `dsh-session-${shortId}.jsonl`)
+          try {
+            if (markdown) {
+              writeFileSync(target, renderTranscriptMarkdown(liveAgent.session))
+              return { kind: 'success', text: `exported markdown transcript to ${target}` }
+            }
+            // The raw artifact is the backend's verbatim JSONL (decoded from
+            // its physical encoding) — a faithful, portable session log.
+            const raw = await persistence.readRaw(liveAgent.session.id)
+            if (raw === undefined) return { kind: 'error', text: 'no materialized session log to export' }
+            writeFileSync(target, raw.content)
+            return { kind: 'success', text: `exported ${raw.filename} to ${target}` }
+          } catch (error) {
+            return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+          }
         },
       })
       commands.register({

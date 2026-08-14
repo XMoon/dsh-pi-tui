@@ -16,7 +16,7 @@
  * @module @dsh-pi-tui/tui-app/transcript
  */
 /** Text of a message's content blocks, joined; empty when there is no text. */
-function textOf(blocks) {
+export function textOf(blocks) {
     return blocks
         .filter(block => block.type === 'text')
         .map(block => block.text)
@@ -50,11 +50,35 @@ function turnBoundary(messages, maxTurns) {
  * result is a fresh array when anything collapses.
  * @param messages - the folded transcript.
  * @param maxTurns - window size in turns; entries of older turns collapse.
+ * @param endTurn - window end turn (newest when absent), see {@link FoldOptions}.
  * @returns the windowed transcript.
  */
-export function windowMessages(messages, maxTurns) {
+export function windowMessages(messages, maxTurns, endTurn) {
     if (maxTurns <= 0)
         return [...messages];
+    if (endTurn !== undefined) {
+        // Anchored window (transcript search): keep exactly the maxTurns distinct
+        // turns ENDING at endTurn and collapse the older turns above them; turns
+        // newer than the anchor are hidden (the search jumped back in history).
+        const turns = new Set();
+        for (const message of messages) {
+            if ('turn' in message)
+                turns.add(message.turn);
+        }
+        const sorted = [...turns].sort((a, b) => b - a);
+        const anchor = sorted.indexOf(endTurn);
+        if (anchor === -1)
+            return windowMessages(messages, maxTurns);
+        const windowTurns = new Set(sorted.slice(anchor, anchor + maxTurns));
+        const kept = messages.filter(message => !('turn' in message) || windowTurns.has(message.turn));
+        const oldTurns = new Set(sorted.slice(anchor + maxTurns));
+        const oldTools = kept.length === messages.length ? 0
+            : messages.filter(message => 'turn' in message && oldTurns.has(message.turn) && message.kind === 'tool').length;
+        const turnsText = `${oldTurns.size} earlier turn${oldTurns.size === 1 ? '' : 's'}`;
+        const toolsText = `${oldTools} tool call${oldTools === 1 ? '' : 's'}`;
+        kept.unshift({ kind: 'summary', text: `… ${turnsText} · ${toolsText} — window ${maxTurns} turns` });
+        return kept;
+    }
     const boundary = turnBoundary(messages, maxTurns);
     if (boundary === 0)
         return [...messages];
@@ -155,7 +179,7 @@ export class TranscriptFolder {
         const maxTurns = options?.maxTurns;
         if (maxTurns === undefined || maxTurns <= 0)
             return grouped;
-        return windowMessages(grouped, maxTurns);
+        return windowMessages(grouped, maxTurns, options?.endTurn);
     }
     /** The thinking entry object for one (turn, step), created on first reasoning. */
     thinkingEntry(turn, step) {

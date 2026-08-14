@@ -145,3 +145,33 @@ test('slash-command autocompletion installs without breaking input', async () =>
   const view = await viewport(vt)
   assert.ok(view.includes('/s'), `editor content missing:\n${view}`)
 })
+
+test('ctrl+shift+f opens transcript search; typing reports queries; escape closes', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const queries: string[] = []
+  let closed = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchQuery: (query) => { queries.push(query) },
+    onSearchClose: () => { closed += 1 },
+  })
+  app.start()
+  vt.sendInput('\x1b[102;6u') // ctrl+shift+f (kitty CSI u, modifiers ctrl+shift)
+  await viewport(vt)
+  assert.ok(app.isSearching(), 'search overlay should open')
+  vt.sendInput('needle')
+  await viewport(vt)
+  assert.ok(queries.includes('needle'), `queries: ${JSON.stringify(queries)}`)
+  vt.sendInput('\x1b') // escape closes the search
+  await viewport(vt)
+  assert.equal(app.isSearching(), false)
+  assert.equal(closed, 1)
+  // Opening again focuses the same overlay without a second close cycle.
+  vt.sendInput('\x1b[102;6u')
+  await viewport(vt)
+  assert.ok(app.isSearching())
+  vt.sendInput('\x1b')
+  await viewport(vt)
+  assert.equal(closed, 2)
+})

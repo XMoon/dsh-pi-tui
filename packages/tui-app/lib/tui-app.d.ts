@@ -53,6 +53,14 @@ export interface TuiAppEvents {
     openExternalEditor?: (draft: string) => Promise<string>;
     /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
     onFullscreenChange?: (fullscreen: boolean) => void;
+    /** The transcript-search query changed (Ctrl+Shift+F opens the search). Optional. */
+    onSearchQuery?: (query: string) => void;
+    /** Enter inside the search: jump to the next match. Optional. */
+    onSearchNext?: () => void;
+    /** Shift+Enter inside the search: jump to the previous match. Optional. */
+    onSearchPrev?: () => void;
+    /** The search was closed (Escape). Optional. */
+    onSearchClose?: () => void;
 }
 /** What an approval prompt shows; mirrors the approval/request payload. */
 export interface ApprovalPromptRequest {
@@ -160,6 +168,10 @@ export declare class TuiApp {
     setToolOutputExpanded(expanded: boolean): void;
     /** Fullscreen (alt-screen) instance; absent in regular mode. */
     private fullscreen;
+    /** The mounted transcript-search overlay, while one is open. */
+    private searchOverlay;
+    /** The search input component, while one is open (for match counts). */
+    private searchComponent;
     /** Overlay handles currently mounted on the active screen, for mode switches. */
     private readonly overlayHandles;
     /** Footer state. */
@@ -238,6 +250,18 @@ export declare class TuiApp {
      * @param enabled - true renders the alt screen, false returns to the main screen.
      */
     setFullscreen(enabled: boolean): void;
+    /**
+     * Open the transcript-search overlay (Ctrl+Shift+F) and focus its input.
+     * The search itself runs in the host against the folded transcript; this
+     * surface only collects the query and reports navigation keys.
+     */
+    startTranscriptSearch(): void;
+    /** Close the transcript-search overlay and report the close. */
+    closeTranscriptSearch(): void;
+    /** Publish the current match position for the overlay header (1-based, total). */
+    setSearchResult(index: number, count: number): void;
+    /** Whether the transcript search is open. */
+    isSearching(): boolean;
     /**
      * Replace the transcript and rebuild the message components. Collapsible
      * entries (thinking, tool cards) render folded unless the Ctrl+O master

@@ -47,6 +47,7 @@ import {
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines } from './diff.ts'
+import { TranscriptSearchComponent } from './search.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
@@ -178,6 +179,14 @@ export interface TuiAppEvents {
   openExternalEditor?: (draft: string) => Promise<string>
   /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
+  /** The transcript-search query changed (Ctrl+Shift+F opens the search). Optional. */
+  onSearchQuery?: (query: string) => void
+  /** Enter inside the search: jump to the next match. Optional. */
+  onSearchNext?: () => void
+  /** Shift+Enter inside the search: jump to the previous match. Optional. */
+  onSearchPrev?: () => void
+  /** The search was closed (Escape). Optional. */
+  onSearchClose?: () => void
 }
 
 /** What an approval prompt shows; mirrors the approval/request payload. */
@@ -322,6 +331,10 @@ export class TuiApp {
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
+  /** The mounted transcript-search overlay, while one is open. */
+  private searchOverlay: OverlayHandle | undefined
+  /** The search input component, while one is open (for match counts). */
+  private searchComponent: TranscriptSearchComponent | undefined
   /** Overlay handles currently mounted on the active screen, for mode switches. */
   private readonly overlayHandles = new Set<OverlayHandle>()
   /** Footer state. */
@@ -387,6 +400,33 @@ export class TuiApp {
     }
     if (this.activeApproval !== undefined) {
       return this.handleApprovalKey(data)
+    }
+    // Transcript search owns these keys while its overlay is up; everything
+    // else falls through to the focused search input.
+    if (this.searchOverlay !== undefined) {
+      if (matchesKey(data, 'escape')) {
+        this.closeTranscriptSearch()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'enter')) {
+        this.events.onSearchNext?.()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'shift+enter')) {
+        this.events.onSearchPrev?.()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'ctrl+f')) {
+        // Fullscreen hides every overlay; close the search first.
+        this.closeTranscriptSearch()
+        this.toggleFullscreen()
+        return { consume: true }
+      }
+      return undefined
+    }
+    if (matchesKey(data, 'ctrl+shift+f')) {
+      this.startTranscriptSearch()
+      return { consume: true }
     }
     if (matchesKey(data, 'escape')) {
       // Overlays (pickers, settings) own Esc while they are up.
@@ -577,6 +617,48 @@ export class TuiApp {
     }
     this.events.onFullscreenChange?.(enabled)
     if (pending !== undefined) this.renderApprovalDialog(pending)
+  }
+
+  /**
+   * Open the transcript-search overlay (Ctrl+Shift+F) and focus its input.
+   * The search itself runs in the host against the folded transcript; this
+   * surface only collects the query and reports navigation keys.
+   */
+  startTranscriptSearch(): void {
+    if (this.searchOverlay !== undefined) {
+      this.searchOverlay.focus()
+      return
+    }
+    const component = new TranscriptSearchComponent((query) => {
+      this.events.onSearchQuery?.(query)
+    })
+    this.searchComponent = component
+    this.searchOverlay = this.showOverlayOnHost(component, {
+      anchor: 'top-right',
+      width: '40%',
+      minWidth: 24,
+      margin: 1,
+    })
+  }
+
+  /** Close the transcript-search overlay and report the close. */
+  closeTranscriptSearch(): void {
+    if (this.searchOverlay === undefined) return
+    this.searchOverlay.hide()
+    this.searchOverlay = undefined
+    this.searchComponent = undefined
+    this.events.onSearchClose?.()
+  }
+
+  /** Publish the current match position for the overlay header (1-based, total). */
+  setSearchResult(index: number, count: number): void {
+    this.searchComponent?.setResult(index, count)
+    this.searchComponent?.invalidate()
+  }
+
+  /** Whether the transcript search is open. */
+  isSearching(): boolean {
+    return this.searchOverlay !== undefined
   }
 
   /**

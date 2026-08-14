@@ -16,6 +16,7 @@
 import { Box, CombinedAutocompleteProvider, Container, Editor, Markdown, ProcessTerminal, SelectList, SettingsList, Text, TuiAltScreen, TuiMainScreen, matchesKey, truncateToWidth, visibleWidth, } from '@dsh-pi-tui/pi-tui';
 import { detectThemeFromBackground, editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme, } from "./theme.js";
 import { isDiffResult, renderDiffLines } from "./diff.js";
+import { TranscriptSearchComponent } from "./search.js";
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3;
 /** Folded preview lines for thinking blocks; mirrors pi's THINKING_PREVIEW_LINES. */
@@ -169,6 +170,10 @@ export class TuiApp {
     }
     /** Fullscreen (alt-screen) instance; absent in regular mode. */
     fullscreen;
+    /** The mounted transcript-search overlay, while one is open. */
+    searchOverlay;
+    /** The search input component, while one is open (for match counts). */
+    searchComponent;
     /** Overlay handles currently mounted on the active screen, for mode switches. */
     overlayHandles = new Set();
     /** Footer state. */
@@ -230,6 +235,33 @@ export class TuiApp {
         }
         if (this.activeApproval !== undefined) {
             return this.handleApprovalKey(data);
+        }
+        // Transcript search owns these keys while its overlay is up; everything
+        // else falls through to the focused search input.
+        if (this.searchOverlay !== undefined) {
+            if (matchesKey(data, 'escape')) {
+                this.closeTranscriptSearch();
+                return { consume: true };
+            }
+            if (matchesKey(data, 'enter')) {
+                this.events.onSearchNext?.();
+                return { consume: true };
+            }
+            if (matchesKey(data, 'shift+enter')) {
+                this.events.onSearchPrev?.();
+                return { consume: true };
+            }
+            if (matchesKey(data, 'ctrl+f')) {
+                // Fullscreen hides every overlay; close the search first.
+                this.closeTranscriptSearch();
+                this.toggleFullscreen();
+                return { consume: true };
+            }
+            return undefined;
+        }
+        if (matchesKey(data, 'ctrl+shift+f')) {
+            this.startTranscriptSearch();
+            return { consume: true };
         }
         if (matchesKey(data, 'escape')) {
             // Overlays (pickers, settings) own Esc while they are up.
@@ -428,6 +460,45 @@ export class TuiApp {
         this.events.onFullscreenChange?.(enabled);
         if (pending !== undefined)
             this.renderApprovalDialog(pending);
+    }
+    /**
+     * Open the transcript-search overlay (Ctrl+Shift+F) and focus its input.
+     * The search itself runs in the host against the folded transcript; this
+     * surface only collects the query and reports navigation keys.
+     */
+    startTranscriptSearch() {
+        if (this.searchOverlay !== undefined) {
+            this.searchOverlay.focus();
+            return;
+        }
+        const component = new TranscriptSearchComponent((query) => {
+            this.events.onSearchQuery?.(query);
+        });
+        this.searchComponent = component;
+        this.searchOverlay = this.showOverlayOnHost(component, {
+            anchor: 'top-right',
+            width: '40%',
+            minWidth: 24,
+            margin: 1,
+        });
+    }
+    /** Close the transcript-search overlay and report the close. */
+    closeTranscriptSearch() {
+        if (this.searchOverlay === undefined)
+            return;
+        this.searchOverlay.hide();
+        this.searchOverlay = undefined;
+        this.searchComponent = undefined;
+        this.events.onSearchClose?.();
+    }
+    /** Publish the current match position for the overlay header (1-based, total). */
+    setSearchResult(index, count) {
+        this.searchComponent?.setResult(index, count);
+        this.searchComponent?.invalidate();
+    }
+    /** Whether the transcript search is open. */
+    isSearching() {
+        return this.searchOverlay !== undefined;
     }
     /**
      * Replace the transcript and rebuild the message components. Collapsible
