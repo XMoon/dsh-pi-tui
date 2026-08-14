@@ -425,6 +425,14 @@ export class TuiApp {
   private todoPanelVisible = false
   /** The todo panel Text; empty when hidden. */
   private readonly todoPanel: Text
+  /**
+   * The persistent dock strip directly above the todo panel: one line each
+   * for the current permission, the live goal, the todo summary, and running
+   * background tasks (kimi chrome parity). Empty lines drop out entirely.
+   */
+  private readonly dock: Text
+  /** Active background tasks for the dock line (label + status). */
+  private dockTasks: readonly { label: string; status: string }[] = []
 
   /** Whether the Ctrl+O expansion master switch is on. */
   isToolOutputExpanded(): boolean {
@@ -507,6 +515,7 @@ export class TuiApp {
     }
     this.header = new Text('🐋  dsh-pi-tui', 0, 0)
     this.messagesView = new Container()
+    this.dock = new Text('', 0, 0)
     this.todoPanel = new Text('', 0, 0)
     this.working = new WorkingIndicator(this.tui, options.workingIntervalMs === undefined
       ? {}
@@ -516,6 +525,7 @@ export class TuiApp {
     // always the row directly above the editor border (pi's statusContainer).
     this.tui.addChild(this.header)
     this.tui.addChild(this.messagesView)
+    this.tui.addChild(this.dock)
     this.tui.addChild(this.todoPanel)
     this.tui.addChild(this.working)
     this.tui.addChild(this.editor)
@@ -805,6 +815,7 @@ export class TuiApp {
         // grow is a stack-entry option: the transcript pane takes all the
         // height the pinned rows leave behind.
         { component: this.fullscreenScroll, grow: 1 },
+        { component: this.dock, shrink: 0 },
         { component: this.todoPanel, shrink: 0 },
         // The busy indicator row sits directly above the editor border
         // (pi's statusContainer placement); idle it renders zero rows.
@@ -1170,6 +1181,35 @@ export class TuiApp {
    * @param message - the tool message.
    */
   private renderToolBody(card: Container, message: Extract<TranscriptMessage, { kind: 'tool' }>): void {
+    // Workflow run cards: the body is the run's member tree, grouped by phase
+    // in arrival order (Web WorkflowRunPanel parity). Rows render even while
+    // the run is still streaming (members land incrementally).
+    if (message.name === 'workflow' && message.members !== undefined) {
+      const groups = new Map<string, NonNullable<Extract<TranscriptMessage, { kind: 'tool' }>['members']>>()
+      for (const member of message.members) {
+        const key = member.phase ?? ''
+        const list = groups.get(key)
+        if (list === undefined) groups.set(key, [member])
+        else list.push(member)
+      }
+      for (const [phase, members] of groups) {
+        if (phase !== '') card.addChild(new Text(color.textMuted(`  ${phase}`), 0, 0))
+        for (const member of members) {
+          const mark = member.status === 'ok'
+            ? color.success('•')
+            : member.status === 'error'
+              ? color.error('✗')
+              : color.primary('●')
+          const statusText = member.status === 'ok'
+            ? 'completed'
+            : member.status === 'error'
+              ? 'failed'
+              : 'running'
+          card.addChild(new Text(`  ${mark} ${member.label} — ${color.textDim(statusText)}`, 0, 0))
+        }
+      }
+      return
+    }
     // Running: surface the pending call's salient raw input when the tool
     // offered one (e.g. a background job id); otherwise the header alone.
     if (message.status === 'running') {
@@ -1304,6 +1344,7 @@ export class TuiApp {
       this.todoText = ` · ${active.length} active · ${label}`
     }
     this.renderHeader()
+    this.renderDock()
     if (this.todoPanelVisible) this.renderTodoPanel()
   }
 
@@ -1378,6 +1419,64 @@ export class TuiApp {
   setStatus(status: Partial<StatusData>): void {
     this.status = { ...this.status, ...status }
     this.renderFooter()
+    this.renderDock()
+  }
+
+  /**
+   * Replace the active background-task list for the dock line.
+   * @param tasks - active jobs (label + lifecycle status), empty to hide.
+   */
+  setTasks(tasks: readonly { label: string; status: string }[]): void {
+    this.dockTasks = tasks
+    this.renderDock()
+  }
+
+  /**
+   * Rebuild the persistent dock strip above the todo panel: permission,
+   * goal, todo summary, and background tasks — one truncated line each, only
+   * while non-empty (kimi chrome parity). The dock is the "at a glance"
+   * surface under the transcript; the full todo list stays on Ctrl+T.
+   */
+  private renderDock(): void {
+    const lines: string[] = []
+    const permission = this.status.permission
+    if (permission !== undefined && permission !== '') {
+      const label = permission === 'danger-full-access'
+        ? 'full access'
+        : permission === 'workspace-write'
+          ? 'workspace write'
+          : permission
+      const styled = permission === 'danger-full-access'
+        ? color.error(`perm: ${label}`)
+        : permission === 'custom'
+          ? color.warning(`perm: ${label}`)
+          : permission === 'read-only'
+            ? color.textMuted(`perm: ${label}`)
+            : color.text(`perm: ${label}`)
+      lines.push(styled)
+    }
+    if (this.status.goal !== undefined && this.status.goal !== '') {
+      lines.push(color.text(`⚑  ${this.status.goal}`))
+    }
+    if (this.todoItems.length > 0) {
+      const active = this.todoItems.filter(todo => todo.status !== 'completed')
+      const done = this.todoItems.length - active.length
+      const first = active[0]
+      const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
+      const summary = [
+        done > 0 ? `${done} done` : '',
+        active.length > 0 ? `${active.length} active` : '',
+        label,
+      ].filter(part => part !== '').join(' · ')
+      lines.push(color.textDim(`☑  ${summary}`))
+    }
+    if (this.dockTasks.length > 0) {
+      const first = this.dockTasks[0]
+      const label = first.label.length > 40 ? `${first.label.slice(0, 40)}…` : first.label
+      lines.push(color.textDim(`⏳  ${this.dockTasks.length} task${this.dockTasks.length === 1 ? '' : 's'} · ${label}`))
+    }
+    this.dock.setText(lines.join('\n'))
+    this.requestRender()
   }
 
   /** Footer density presets: full keeps the stats line, compact drops it. */

@@ -416,7 +416,7 @@ test('subagent/descriptor folds into a delegation card', () => {
   assert.ok(card.result.includes('model: deepseek-chat'))
 })
 
-test('workflow run events fold into run and member cards', () => {
+test('workflow run events fold into one run card with member rows', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 1),
@@ -424,31 +424,26 @@ test('workflow run events fold into run and member cards', () => {
     rawEvent('tool-workflow/agent-end', { runId: 'run-1', seq: 0, outcome: 'completed' }, 3),
     rawEvent('tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }, 4),
   ])
-  assert.deepEqual(kinds(messages), ['tool', 'tool'])
+  assert.deepEqual(kinds(messages), ['tool'])
   const run = messages[0]
-  const member = messages[1]
-  assert.ok(run !== undefined && run.kind === 'tool' && member !== undefined && member.kind === 'tool')
+  assert.ok(run !== undefined && run.kind === 'tool')
   assert.equal(run.name, 'workflow')
   assert.equal(run.args, 'audit')
   assert.equal(run.status, 'ok')
   assert.equal(run.result, 'stop: completed')
-  assert.equal(member.name, 'workflow-member')
-  assert.equal(member.args, 'checker')
-  assert.equal(member.status, 'ok')
-  assert.equal(member.result, 'completed')
+  assert.deepEqual(run.members, [{ label: 'checker', phase: 'review', status: 'ok' }])
 })
 
-test('a failed workflow member settles its card as error', () => {
+test('a failed workflow member settles its row as error', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 1),
     rawEvent('tool-workflow/agent-start', { runId: 'run-2', seq: 0, label: 'checker', childId: 'session-x' }, 2),
     rawEvent('tool-workflow/agent-end', { runId: 'run-2', seq: 0, outcome: 'failed' }, 3),
   ])
-  const member = messages[1]
-  assert.ok(member !== undefined && member.kind === 'tool')
-  assert.equal(member.status, 'error')
-  assert.equal(member.result, 'outcome: failed')
+  const run = messages[0]
+  assert.ok(run !== undefined && run.kind === 'tool')
+  assert.deepEqual(run.members, [{ label: 'checker', status: 'error' }])
 })
 
 test('llm/retry folds into a system line with the delay', () => {

@@ -51,9 +51,24 @@ export type TranscriptMessage =
     resultBlocks?: readonly ContentBlock[]
     /** The tool-private presentation payload from the tool/result event. */
     meta?: JsonValue
+    /**
+     * Workflow run cards only: the run's member rows, folded into the card
+     * (Web WorkflowRunPanel parity) instead of standalone member cards.
+     */
+    members?: WorkflowMemberView[]
   }
   /** Older-than-window turns collapsed into one line (windowing). */
   | { kind: 'summary'; text: string }
+
+/** One member row of a workflow run card. */
+export interface WorkflowMemberView {
+  /** The member agent's label. */
+  label: string
+  /** The run phase the member ran under, when the event carried one. */
+  phase?: string
+  /** The member's settled state (running until agent-end). */
+  status: 'ok' | 'error' | 'running'
+}
 
 /** Fold options: the display window in turns. */
 export interface FoldOptions {
@@ -211,8 +226,8 @@ export class TranscriptFolder {
   private readonly commandNames = new Map<string, string>()
   /** Workflow run cards by runId, for member/run settlement. */
   private readonly workflowRuns = new Map<string, Extract<TranscriptMessage, { kind: 'tool' }>>()
-  /** Workflow member cards by `${runId}/${seq}`, for agent-end settlement. */
-  private readonly workflowMembers = new Map<string, Extract<TranscriptMessage, { kind: 'tool' }>>()
+  /** Workflow member rows by `${runId}/${seq}`, for agent-end settlement. */
+  private readonly workflowMembers = new Map<string, WorkflowMemberView>()
   /** The turn most recently opened by turn/start. */
   private currentTurn = 0
 
@@ -402,6 +417,7 @@ export class TranscriptFolder {
           args: event.data.name,
           result: '',
           status: 'running',
+          members: [],
         }
         this.workflowRuns.set(event.data.runId, card)
         this.items.push(card)
@@ -409,24 +425,23 @@ export class TranscriptFolder {
       }
       case 'tool-workflow/agent-start': {
         const { runId, seq, label, phase } = event.data
-        const card: Extract<TranscriptMessage, { kind: 'tool' }> = {
-          kind: 'tool',
-          turn: this.currentTurn,
-          name: 'workflow-member',
-          args: label,
-          result: phase ?? '',
+        const run = this.workflowRuns.get(runId)
+        // The member folds INTO the run card (Web WorkflowRunPanel parity):
+        // phase grouping happens at render time over the arrival-ordered rows.
+        const member: WorkflowMemberView = {
+          label,
+          ...phase === undefined ? {} : { phase },
           status: 'running',
         }
-        this.workflowMembers.set(`${runId}/${seq}`, card)
-        this.items.push(card)
+        this.workflowMembers.set(`${runId}/${seq}`, member)
+        run?.members?.push(member)
         break
       }
       case 'tool-workflow/agent-end': {
-        const card = this.workflowMembers.get(`${event.data.runId}/${event.data.seq}`)
+        const member = this.workflowMembers.get(`${event.data.runId}/${event.data.seq}`)
         const outcome = event.data.outcome
-        if (card !== undefined) {
-          card.status = outcome === 'completed' ? 'ok' : 'error'
-          card.result = outcome === 'completed' ? 'completed' : `outcome: ${outcome}`
+        if (member !== undefined) {
+          member.status = outcome === 'completed' ? 'ok' : 'error'
         }
         break
       }

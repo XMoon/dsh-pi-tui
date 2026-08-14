@@ -1016,6 +1016,24 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
     refreshStatus()
+    // The persistent dock's tasks line follows the background-job registry:
+    // every change refreshes the active-task snapshot (no polling).
+    const jobs = ctx.get('jobs')
+    if (jobs !== undefined) {
+      const refreshTasks = (): void => {
+        let tasks: { label: string; status: string }[] = []
+        try {
+          tasks = jobs.list(liveAgent)
+            .filter(job => job.status === 'running' || job.status === 'stopping')
+            .map(job => ({ label: job.label, status: job.status }))
+        } catch {
+          // The registry read is best-effort; the dock line just stays stale.
+        }
+        app.setTasks(tasks)
+      }
+      jobs.onJobsChanged(() => refreshTasks())
+      refreshTasks()
+    }
     ctx.on('session/event', (session, event) => {
       // The subagent viewer follows its own session's events; everything
       // else routes to the live agent's folder as before.

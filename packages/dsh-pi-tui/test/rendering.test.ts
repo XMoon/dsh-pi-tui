@@ -631,3 +631,46 @@ test('assistant and user messages align continuation lines under the bullet', as
   assert.ok(!lines[paraTwo]!.includes('🐋'), `continuation must not repeat the bullet:\n${view}`)
   assert.ok(lines[paraTwo]!.startsWith('    '), `continuation must indent under the bullet:\n${view}`)
 })
+
+test('workflow runs expand into a phase-grouped member tree', async () => {
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool',
+    turn: 0,
+    name: 'workflow',
+    args: 'audit',
+    result: 'stop: completed',
+    status: 'ok',
+    members: [
+      { label: 'checker', phase: 'review', status: 'ok' },
+      { label: 'patcher', phase: 'review', status: 'error' },
+      { label: 'reporter', phase: 'report', status: 'ok' },
+      { label: 'live-agent', status: 'running' },
+    ],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Workflow audit [ok]'), `run header missing:\n${view}`)
+  assert.ok(view.includes('  review'), `phase header missing:\n${view}`)
+  assert.ok(view.includes('checker — completed'), `completed member missing:\n${view}`)
+  assert.ok(view.includes('patcher — failed'), `failed member missing:\n${view}`)
+  assert.ok(view.includes('  report'), `second phase missing:\n${view}`)
+  assert.ok(view.includes('reporter — completed'), `report member missing:\n${view}`)
+  assert.ok(view.includes('live-agent — running'), `running member missing:\n${view}`)
+})
+
+test('workflow runs stay a single folded row until expanded', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool',
+    turn: 0,
+    name: 'workflow',
+    args: 'audit',
+    result: 'stop: completed',
+    status: 'ok',
+    members: [{ label: 'checker', phase: 'review', status: 'ok' }],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Workflow audit [ok]'), `folded header missing:\n${view}`)
+  assert.ok(!view.includes('checker — completed'), `members leaked while folded:\n${view}`)
+})
