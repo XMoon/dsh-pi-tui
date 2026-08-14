@@ -159,6 +159,11 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	start(onInput: (data: string) => void, onResize: () => void): void {
+		// A repeated start() must not stack resize listeners: stop() can only
+		// remove the CURRENT reference, so any earlier listener would leak.
+		if (this.resizeHandler) {
+			process.stdout.removeListener("resize", this.resizeHandler);
+		}
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
 
