@@ -117,9 +117,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 	protected override beforeTerminalStop(options: TuiStopOptions): void {
 		if (options.preserveScreen || this.previousLines.length === 0) return;
-		this.terminal.write(" ");
 		const targetRow = this.previousLines.length;
 		const lineDiff = targetRow - this.hardwareCursorRow;
+		// Only write the spacer when the cursor must actually move: on the
+		// final row a stray blank would stay visible after the TUI exits.
+		if (lineDiff !== 0) this.terminal.write(" ");
 		if (lineDiff > 0) this.terminal.write(`\x1b[${lineDiff}B`);
 		else if (lineDiff < 0) this.terminal.write(`\x1b[${-lineDiff}A`);
 		this.terminal.write("\r\n");
