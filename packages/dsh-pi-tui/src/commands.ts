@@ -154,15 +154,37 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
       const tuiSettings = runner.tuiSettings
       const theme = tuiSettings?.get().theme ?? 'auto'
       const themeValue = theme.startsWith('custom:') ? theme.slice('custom:'.length) : theme
+      // The permission-presets service owns the composed preset table and the
+      // persisted default for new sessions (settings namespace 'permission').
+      // Both panel rows degrade gracefully when the service is absent.
+      const settings = ctx.get('settings')
+      const permission = ctx.get('permissionPresets')
+      const permissionNames: string[] = [...(permission?.names ?? [])]
+      let defaultPermission: string | undefined
+      if (settings !== undefined) {
+        try {
+          const doc = settings.get(settingsNamespace('permission')) as { defaultPreset?: string } | undefined
+          defaultPermission = doc?.defaultPreset
+        } catch {
+          // The namespace is absent until the presets service registers it.
+        }
+      }
       app.openSettings(
         [
           {
             id: 'approval',
-            label: 'Approval policy',
+            label: 'Approval policy (this session)',
             description: 'How tool approvals are handled in this session',
             currentValue: effectiveApprovalPolicy(liveAgent.session.events) ?? 'ask',
             values: ['ask', 'never'],
           },
+          ...permissionNames.length > 0 ? [{
+            id: 'default-permission',
+            label: 'Default permission',
+            description: 'Preset new sessions start with (persisted; Shift+Tab cycles this session)',
+            currentValue: defaultPermission ?? permissionNames[0] ?? '',
+            values: permissionNames,
+          }] : [],
           {
             id: 'theme',
             label: 'Theme',
@@ -231,7 +253,17 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
         ],
         (id, value) => {
           if (id === 'approval') {
-            if (value === 'ask' || value === 'never') ctx.get('approval')?.setPolicy(liveAgent, value)
+            if (value === 'ask' || value === 'never') {
+              ctx.get('approval')?.setPolicy(liveAgent, value)
+              // The footer's permission badge derives from the knob folds;
+              // reflect the change immediately.
+              runner.refreshStatus()
+            }
+          } else if (id === 'default-permission') {
+            const settings = ctx.get('settings')
+            if (settings !== undefined && permissionNames.includes(value)) {
+              void settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }])
+            }
           } else if (id === 'theme') {
             if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)) {
               if (value === 'auto') {

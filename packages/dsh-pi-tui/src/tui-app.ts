@@ -234,6 +234,12 @@ export interface TuiAppEvents {
    * arming the double-Esc cancel. Optional.
    */
   onSingleEscape?: () => boolean | void
+  /**
+   * Shift+Tab with no overlay up: cycle the permission preset (read-only →
+   * workspace-write → danger-full-access). The host applies the switch and
+   * refreshes the footer. Optional.
+   */
+  onCyclePermission?: () => void
 }
 
 /** What an approval prompt shows; mirrors the approval/request payload. */
@@ -351,6 +357,8 @@ export interface StatusData {
   steps: number
   /** Stats line (pi vocabulary), preformatted by the runner. */
   statsLine: string
+  /** Current permission preset (read-only/workspace-write/danger-full-access/custom). */
+  permission?: string
   /** Current context pressure in tokens, when measured. */
   contextTokens?: number
   /** Context window in tokens, when known. */
@@ -569,6 +577,12 @@ export class TuiApp {
     }
     if (matchesKey(data, 'ctrl+shift+f') || matchesKey(data, 'ctrl+f')) {
       this.startTranscriptSearch()
+      return { consume: true }
+    }
+    if (matchesKey(data, 'shift+tab')) {
+      // Cycle the permission preset; overlays keep Shift+Tab for themselves.
+      if (this.overlayHost.hasOverlayEntries) return undefined
+      this.events.onCyclePermission?.()
       return { consume: true }
     }
     if (matchesKey(data, 'escape')) {
@@ -1386,7 +1400,18 @@ export class TuiApp {
       && this.status.contextWindow > 0
       ? contextBar(this.status.contextTokens, this.status.contextWindow)
       : ''
+    // The mode slot (kimi parity): [yolo] flags the no-approval preset, and
+    // non-default presets badge too; the default workspace-write shows
+    // nothing so the footer stays calm in the common case.
+    const permissionBadge = this.status.permission === 'danger-full-access'
+      ? color.warning('[yolo]')
+      : this.status.permission === 'read-only'
+        ? color.textMuted('[read-only]')
+        : this.status.permission === 'custom'
+          ? color.warning('[custom]')
+          : ''
     const line1 = [
+      permissionBadge,
       this.planMode ? color.warning('[plan]') : '',
       this.status.goal === undefined || this.status.goal === '' ? '' : color.primary(this.status.goal),
       this.status.model === '' ? '' : `[${this.status.model}]`,

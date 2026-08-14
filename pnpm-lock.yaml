@@ -20,6 +20,9 @@ importers:
       '@deepseek-ai/dsh-cmdline':
         specifier: ^0.1.0-rc.6
         version: 0.1.0-rc.6(@deepseek-ai/cordis-plugin-loader@1.0.2)(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))
+      '@deepseek-ai/dsh-sandbox-policy':
+        specifier: ^0.1.0-rc.6
+        version: 0.1.0-rc.6(f2d88dfbfb0adb714a7b0a9be7dd6b42)
       '@deepseek-ai/dsh-session-query':
         specifier: ^0.1.0-rc.6
         version: 0.1.0-rc.6(544b8438a28525db12c0e9ef99074d42)

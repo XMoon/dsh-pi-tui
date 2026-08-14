@@ -59,6 +59,8 @@ import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-goal'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
+// The sandbox/mode knob event merge (permission presets fold it too).
+import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 // P5e merges: shell capability for `!` mode and credentials for /login.
 import type {} from '@deepseek-ai/dsh-shell'
@@ -621,6 +623,9 @@ export function apply(ctx: Context, config: Config): void {
           // Measurement is best-effort; the footer falls back to no context.
         }
       }
+      // The footer's [yolo]/[read-only]/[custom] mode badge rides the
+      // effective preset (derived from the sandbox+approval knob folds).
+      const permission = ctx.get('permissionPresets')
       app.setStatus({
         model: modelLabel(),
         cwd: shortCwd(cwd),
@@ -629,6 +634,7 @@ export function apply(ctx: Context, config: Config): void {
         turns: stats.turns,
         steps: stats.steps,
         statsLine: formatStats(stats),
+        ...permission === undefined ? {} : { permission: permission.current(liveAgent.session.events) },
         ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
       })
     }
@@ -918,6 +924,26 @@ export function apply(ctx: Context, config: Config): void {
       // P7d: a single Esc with no overlay up exits the subagent viewer
       // instead of arming the double-Esc cancel.
       onSingleEscape: () => exitView(),
+      // Shift+Tab: cycle the permission preset through the composed table
+      // (read-only → workspace-write → danger-full-access). The switch goes
+      // through the official service (sandbox + approval + preset log in one
+      // call, no transcript card), with a red warning on the no-approval
+      // preset and an immediate footer refresh.
+      onCyclePermission: () => {
+        const permission = ctx.get('permissionPresets')
+        if (permission === undefined) return
+        const names = permission.names
+        if (names.length === 0) return
+        const current = permission.current(liveAgent.session.events)
+        const index = names.indexOf(current)
+        const next = names[(index + 1) % names.length] ?? names[0]
+        if (next === undefined || next === current) return
+        permission.set(liveAgent.session, next)
+        app.notify(next === 'danger-full-access'
+          ? `⚠ ${next} — no approvals`
+          : `permission: ${next}`)
+        refreshStatus()
+      },
     }, {
       present,
       workspaceRoot: cwd,
@@ -1018,6 +1044,12 @@ export function apply(ctx: Context, config: Config): void {
       if (event.type === 'todo/write') app.setTodoSummary(event.data.todos)
       if (event.type === 'plan/mode') app.setPlanMode(event.data.active)
       if (event.type === 'session/title') app.setSessionTitle(foldSessionTitle([event])?.title)
+      // A permission switch (command, Shift+Tab, settings panel) lands as
+      // knob events between turns: refresh the footer mode badge right away
+      // instead of waiting for the next step/turn boundary.
+      if (event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode') {
+        refreshStatus()
+      }
       // Persist each completed turn so a crash loses at most the live turn.
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.

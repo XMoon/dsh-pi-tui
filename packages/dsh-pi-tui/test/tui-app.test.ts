@@ -211,3 +211,37 @@ test('tool cards present through the real registry: read shows the relativized p
   }
 })
 
+
+test('footer mode slot badges non-default permission presets', async () => {
+  const { vt, app } = startApp()
+  app.setStatus({ model: 'm', cwd: 'c', permission: 'danger-full-access' })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[yolo]'), `yolo badge missing:\n${view}`)
+  app.setStatus({ permission: 'read-only' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[read-only]'), `read-only badge missing:\n${view}`)
+  app.setStatus({ permission: 'custom' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[custom]'), `custom badge missing:\n${view}`)
+  // The default preset shows nothing, so the footer stays calm.
+  app.setStatus({ permission: 'workspace-write' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('[workspace-write]'), `default preset must not badge:\n${view}`)
+  assert.ok(!view.includes('[yolo]'), `stale badge:\n${view}`)
+})
+
+test('shift+tab with no overlay cycles the permission through the host', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let cycled = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCyclePermission: () => { cycled += 1 } })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[Z') // shift+tab
+  await vt.waitForRender()
+  assert.equal(cycled, 1, `shift+tab must reach the host:\n`)
+  app.stop()
+})
