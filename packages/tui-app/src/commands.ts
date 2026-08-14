@@ -374,27 +374,64 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     },
   })
 
+  // Load one skill into the live session; shared by /skill and the
+  // per-skill /skill-<name> commands.
+  const loadSkill = async (name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+    const liveAgent = runner.liveAgent
+    const skills = ctx.get('skills')
+    if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
+    const skill = await skills.get(name, { cwd, scope: liveAgent.ctx })
+    if (skill === undefined) return { kind: 'error', text: `unknown skill "${name}"` }
+    liveAgent.inject(createUserMessage({
+      content: [{ type: 'text', text: `Skill loaded by the user: **${skill.name}**\n\n${skill.content ?? skill.description}` }],
+      source: { kind: 'plugin', plugin: 'tui-skill' },
+    }))
+    return { kind: 'success', text: `skill ${name} loaded` }
+  }
+
+  // Per-skill slash commands (/skill-<name>), pi-style: each catalog skill is
+  // directly selectable from the editor autocomplete and injects on Enter.
+  // Refreshed by /reload and at boot.
+  const skillDisposers = new Map<string, () => void>()
+  const registerSkillCommands = async (): Promise<number> => {
+    for (const dispose of skillDisposers.values()) dispose()
+    skillDisposers.clear()
+    const skills = ctx.get('skills')
+    const liveAgent = runner.liveAgent
+    if (skills === undefined) return 0
+    const catalog = await skills.list({ cwd, scope: liveAgent.ctx })
+    for (const skill of catalog) {
+      const commandName = `skill-${skill.name}`
+      try {
+        const dispose = commands.register({
+          name: commandName,
+          description: `Load skill: ${skill.description}`,
+          handler: async () => loadSkill(skill.name),
+        })
+        skillDisposers.set(commandName, dispose)
+      } catch {
+        // A colliding registration (another plugin owns the name) skips the
+        // command; the catalog picker still lists the skill.
+      }
+    }
+    refreshCompletions()
+    return catalog.length
+  }
+  void registerSkillCommands().catch(() => {
+    // The catalog is best-effort; /skill still reports real failures.
+  })
+
   commands.register({
     name: 'skill',
     description: 'Load a skill into the session context',
     input: { hint: '<name>' },
     handler: async (invocation) => {
-      const liveAgent = runner.liveAgent
       const skills = ctx.get('skills')
       if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
-      const load = async (name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
-        const skill = await skills.get(name, { cwd, scope: liveAgent.ctx })
-        if (skill === undefined) return { kind: 'error', text: `unknown skill "${name}"` }
-        liveAgent.inject(createUserMessage({
-          content: [{ type: 'text', text: `Skill loaded by the user: **${skill.name}**\n\n${skill.content ?? skill.description}` }],
-          source: { kind: 'plugin', plugin: 'tui-skill' },
-        }))
-        return { kind: 'success', text: `skill ${name} loaded` }
-      }
       const name = invocation.rawInput.trim()
-      if (name !== '') return load(name)
+      if (name !== '') return loadSkill(name)
       // No argument: pick from the catalog.
-      const catalog = await skills.list({ cwd, scope: liveAgent.ctx })
+      const catalog = await skills.list({ cwd, scope: runner.liveAgent.ctx })
       if (catalog.length === 0) return { kind: 'error', text: 'no skills available' }
       // SettingsList rows: Enter cycles the `✓` value, which fires onChange.
       app.openSettings(
@@ -406,10 +443,44 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
           values: ['✓'],
         })),
         (id) => {
-          void load(id).then(result => { if (result.kind === 'error') app.notify(result.text) })
+          void loadSkill(id).then(result => { if (result.kind === 'error') app.notify(result.text) })
         },
         () => {},
       )
+      return { kind: 'success' }
+    },
+  })
+
+
+
+  commands.register({
+    name: 'reload',
+    description: 'Reload TUI settings and refresh skill commands',
+    handler: async () => {
+      // 1. Rebuild the per-skill slash commands from the live catalog.
+      let skillCount = 0
+      try {
+        skillCount = await registerSkillCommands()
+      } catch {
+        // The catalog read is best-effort; the settings pass still runs.
+      }
+      // 2. Re-apply the persisted TUI settings (theme, footer, fullscreen),
+      // the same policy the runner applies at boot.
+      const settings = runner.tuiSettings
+      if (settings !== undefined) {
+        const doc = settings.get()
+        if (doc.theme === 'auto') {
+          void app.autoDetectTheme()
+        } else if (doc.theme === 'dark' || doc.theme === 'light') {
+          app.applyTheme(doc.theme)
+        } else if (doc.theme.startsWith('custom:')) {
+          const palette = loadCustomTheme(doc.theme.slice('custom:'.length))
+          if (palette !== undefined) app.applyPalette(palette)
+        }
+        app.setFooterPreset(doc.footer === 'compact' ? 'compact' : 'full')
+        app.setFullscreen(doc.fullscreen === 'on')
+      }
+      app.notify(`reloaded — ${skillCount} skills \u00b7 settings reapplied`)
       return { kind: 'success' }
     },
   })
