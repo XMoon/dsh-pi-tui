@@ -17,6 +17,7 @@ import { Box, CombinedAutocompleteProvider, Container, Editor, Markdown, Process
 import { detectThemeFromBackground, editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme, } from "./theme.js";
 import { isDiffResult, renderDiffLines } from "./diff.js";
 import { TranscriptSearchComponent } from "./search.js";
+import { recentTurnThreshold } from "./transcript.js";
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3;
 /** Folded preview lines for thinking blocks; mirrors pi's THINKING_PREVIEW_LINES. */
@@ -28,7 +29,10 @@ function preview(text, lines) {
     const parts = text.split('\n');
     const first = parts.slice(0, lines).join(' ').trim();
     const rest = parts.length > lines ? '…' : '';
-    return `${first.slice(0, 120)}${rest}`;
+    // Width-based truncation, not code-unit slicing: a raw slice can split a
+    // surrogate pair / ZWJ emoji in the middle. The overflow marker rides in
+    // the ellipsis slot (it is the same '…' the rest-marker would add).
+    return truncateToWidth(first, rest === '' ? 120 : 119, rest);
 }
 /**
  * The key argument for a tool card header: the primary field per tool name
@@ -190,15 +194,23 @@ export class TuiApp {
     todoText = '';
     /** Welcome card shown above the transcript; empty renders nothing. */
     welcomeText = '';
-    /** Transient error line shown under the transcript; cleared by setTranscript. */
+    /** Transient error line shown under the transcript; cleared by the next
+     * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
     notifyText = '';
+    /** The pending auto-clear for {@link notifyText}, while one is armed. */
+    notifyTimer;
+    /** How long a notify line stays before it auto-clears, in ms. */
+    static NOTIFY_DURATION_MS = 8000;
+    /** The notify auto-clear window; injectable so tests stay fast. */
+    notifyDurationMs;
     /** Timestamp of the last Esc press, for double-Esc cancellation. */
     lastEscapeAt;
     /** Double-Esc window in ms. */
     static ESCAPE_CANCEL_WINDOW_MS = 400;
-    constructor(terminal, events) {
+    constructor(terminal, events, options = {}) {
         this.terminal = terminal;
         this.events = events;
+        this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS;
         this.tui = new TuiMainScreen(terminal);
         this.editor = new Editor(this.tui, editorTheme);
         this.editorBorder = this.editor.borderColor;
@@ -224,6 +236,7 @@ export class TuiApp {
     }
     /** Leave raw mode and stop rendering. */
     stop() {
+        this.clearNotify();
         this.tui.stop();
         this.fullscreen?.stop();
         this.fullscreen = undefined;
@@ -415,9 +428,25 @@ export class TuiApp {
      * Append a local card rendered after the session transcript (e.g. `!`
      * shell runs). The card is always expanded (its turn is unbounded).
      * @param message - the local card to show.
+     * @returns the stored card reference, for {@link updateLocalMessage}.
      */
     pushLocalMessage(message) {
         this.localMessages.push(message);
+        this.rebuildMessages();
+        return message;
+    }
+    /**
+     * Replace one local card by reference. Settling a card by its own identity
+     * (not "the last one") keeps concurrent cards independent: a card settled
+     * after a newer one was pushed must not overwrite the newer card.
+     * @param message - the card reference {@link pushLocalMessage} returned.
+     * @param next - the settled replacement.
+     */
+    updateLocalMessage(message, next) {
+        const index = this.localMessages.indexOf(message);
+        if (index === -1)
+            return;
+        this.localMessages[index] = next;
         this.rebuildMessages();
     }
     /** Replace the most recent local card (running → settled). */
@@ -526,6 +555,8 @@ export class TuiApp {
      */
     setTranscript(messages) {
         this.messages = messages;
+        // A fresh transcript is a repaint: the transient notify line clears.
+        this.clearNotify();
         this.rebuildMessages();
     }
     /** Rebuild the message component tree from the current transcript state. */
@@ -559,10 +590,29 @@ export class TuiApp {
         this.editor.invalidate();
         this.requestRender();
     }
-    /** Show a transient error line under the transcript; the next repaint clears it. */
+    /**
+     * Show a transient error line under the transcript. Cleared by the next
+     * `setTranscript` repaint or after {@link TuiApp.NOTIFY_DURATION_MS},
+     * whichever comes first, so a one-off notice never lingers forever.
+     */
     notify(text) {
         this.notifyText = text;
+        if (this.notifyTimer !== undefined)
+            clearTimeout(this.notifyTimer);
+        this.notifyTimer = setTimeout(() => {
+            this.notifyTimer = undefined;
+            this.notifyText = '';
+            this.rebuildMessages();
+        }, this.notifyDurationMs);
         this.rebuildMessages();
+    }
+    /** Clear the transient notify line and its pending auto-clear timer. */
+    clearNotify() {
+        this.notifyText = '';
+        if (this.notifyTimer !== undefined) {
+            clearTimeout(this.notifyTimer);
+            this.notifyTimer = undefined;
+        }
     }
     /**
      * Set the session head rendered above the transcript: one dense line with
@@ -579,9 +629,12 @@ export class TuiApp {
             `v${facts.version}`,
             color.textMuted(facts.cwd),
         ].join('  ·  ');
+        // The rule tracks the content line's width; an over-wide items line is
+        // truncated so the rule never falls short of the text above it.
         const width = Math.max(20, Math.min(80, visibleWidth(items) + 2));
+        const content = truncateToWidth(items, width - 2, '…');
         this.welcomeText = [
-            `${color.primary('🐋')} ${items}`,
+            `${color.primary('🐋')} ${content}`,
             color.border('─'.repeat(width)),
         ].join('\n');
         this.rebuildMessages();
@@ -590,15 +643,7 @@ export class TuiApp {
     expandBoundary() {
         if (!this.toolOutputExpanded || EXPAND_RECENT_TURNS <= 0)
             return Number.POSITIVE_INFINITY;
-        const turns = new Set();
-        for (const message of this.messages) {
-            if (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool')
-                turns.add(message.turn);
-        }
-        const sorted = [...turns].sort((a, b) => b - a);
-        if (sorted.length <= EXPAND_RECENT_TURNS)
-            return 0;
-        return sorted[EXPAND_RECENT_TURNS - 1] ?? 0;
+        return recentTurnThreshold(this.messages, EXPAND_RECENT_TURNS, ['thinking', 'system', 'tool']);
     }
     /** Render one transcript message as a pi-tui component. */
     renderMessage(message, boundary) {
@@ -656,7 +701,8 @@ export class TuiApp {
         }
         return card;
     }
-    /** Request a render on the active screen. */
+    /** Request a render on the active screen. Public so in-place submenu
+     * components (async content swaps) can trigger the next frame. */
     requestRender() {
         ;
         (this.fullscreen ?? this.tui).requestRender();
@@ -903,6 +949,13 @@ export class TuiApp {
         const pending = this.approvalQueue.shift();
         if (pending === undefined)
             return;
+        // A signal that aborted while the prompt was queued (e.g. a turn cancel
+        // aborts every in-flight request) must never reach the screen: settle it
+        // cancelled right away instead of popping a stale dialog.
+        if (pending.request.signal?.aborted === true) {
+            this.settleApproval(pending, 'cancelled');
+            return;
+        }
         this.renderApprovalDialog(pending);
         this.activeApproval = pending;
     }
@@ -939,17 +992,32 @@ export class TuiApp {
             this.settleApproval(pending, 'cancelled');
         return { consume: true };
     }
-    /** Resolve one prompt, hide its dialog, and show the next in line. */
+    /**
+     * Resolve one prompt and hide its dialog. The prompt may be on screen
+     * (active), queued behind another, or never queued at all (its signal was
+     * already aborted on arrival) — every state must settle the promise
+     * exactly once and never leave a cancelled prompt in the queue.
+     */
     settleApproval(pending, outcome) {
-        if (this.activeApproval !== pending)
+        if (pending.settled === true)
             return;
-        this.activeApproval = undefined;
-        pending.handle?.hide();
-        pending.onAbort !== undefined && pending.request.signal !== undefined
-            && pending.request.signal.removeEventListener('abort', pending.onAbort);
+        pending.settled = true;
+        if (this.activeApproval === pending) {
+            this.activeApproval = undefined;
+            pending.handle?.hide();
+            this.overlayHost.setFocus(this.editor);
+        }
+        else {
+            const queued = this.approvalQueue.indexOf(pending);
+            if (queued !== -1)
+                this.approvalQueue.splice(queued, 1);
+        }
+        if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
+            pending.request.signal.removeEventListener('abort', pending.onAbort);
+        }
         pending.resolve(outcome);
-        this.overlayHost.setFocus(this.editor);
-        this.showNextApproval();
+        if (this.activeApproval === undefined)
+            this.showNextApproval();
     }
     /**
      * Ask the user one or more questions through the dialog overlay. One
@@ -1113,13 +1181,10 @@ export class TuiApp {
     }
 }
 // Style helpers from the theme module's token functions.
-import { Chalk } from 'chalk';
-import { color, currentPalette } from "./theme.js";
+import { color } from "./theme.js";
 const dim = color.textDim;
 const successMark = color.success;
 const errorMark = color.error;
-const chalk = new Chalk({ level: 3 });
-const chalkBoldDim = (text) => chalk.bold.hex(currentPalette.textDim)(text);
 /** Start the TUI on the process terminal (raw-mode stdin/stdout). */
 export function startProcessTui(events) {
     const app = new TuiApp(new ProcessTerminal(), events);

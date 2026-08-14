@@ -27,22 +27,30 @@ function stepKey(turn, step) {
     return `${turn}/${step}`;
 }
 /**
- * The turn threshold at or above which entries survive a display window.
- * Zero means every turn fits.
+ * The turn threshold at or above which entries count as "recent": the
+ * `recentTurns` most recent distinct turns among the given message kinds.
+ * Shared by the display window (all kinds), the markdown view, and the
+ * Ctrl+O expansion boundary (foldable kinds only).
  * @param messages - the folded transcript.
- * @param maxTurns - window size in turns.
- * @returns the oldest surviving turn number, or 0 when nothing is windowed.
+ * @param recentTurns - how many most-recent turns survive; <= 0 keeps nothing.
+ * @param kinds - kinds whose turns count; undefined counts every kind.
+ * @returns the oldest recent turn number; 0 when everything is recent;
+ *   `Infinity` when nothing is (every entry folds).
  */
-function turnBoundary(messages, maxTurns) {
+export function recentTurnThreshold(messages, recentTurns, kinds) {
+    if (recentTurns <= 0)
+        return Number.POSITIVE_INFINITY;
     const turns = new Set();
     for (const message of messages) {
-        if ('turn' in message)
+        if (message.kind === 'summary')
+            continue;
+        if (kinds === undefined || kinds.includes(message.kind))
             turns.add(message.turn);
     }
     const sorted = [...turns].sort((a, b) => b - a);
-    if (sorted.length <= maxTurns)
+    if (sorted.length <= recentTurns)
         return 0;
-    return sorted[maxTurns - 1] ?? 0;
+    return sorted[recentTurns - 1] ?? 0;
 }
 /**
  * Collapse turns older than the display window into one leading summary
@@ -83,7 +91,7 @@ export function windowMessages(messages, maxTurns, endTurn) {
         kept.unshift({ kind: 'summary', text: `… ${parts.join(' · ')} — window ${maxTurns} turns` });
         return kept;
     }
-    const boundary = turnBoundary(messages, maxTurns);
+    const boundary = recentTurnThreshold(messages, maxTurns);
     if (boundary === 0)
         return [...messages];
     const oldTurns = new Set();
@@ -143,11 +151,7 @@ export function groupConsecutiveReads(messages) {
  */
 export class TranscriptFolder {
     items = [];
-    /** Streaming text per (turn, step); an assistant message for that step is the same slot. */
-    stepText = new Map();
-    /** Streaming reasoning per (turn, step), folded into one thinking entry. */
-    stepReasoning = new Map();
-    /** The assistant message object per (turn, step), for in-place text updates. */
+    /** The assistant message object per (turn, step); streaming text lands in place. */
     assistantEntries = new Map();
     /** The thinking entry object per (turn, step), for in-place text updates. */
     thinkingEntries = new Map();
@@ -196,6 +200,17 @@ export class TranscriptFolder {
         }
         return entry;
     }
+    /** The assistant entry object for one (turn, step), created on first text. */
+    assistantEntry(turn, step) {
+        const key = stepKey(turn, step);
+        let entry = this.assistantEntries.get(key);
+        if (entry === undefined) {
+            entry = { kind: 'assistant', turn, text: '' };
+            this.assistantEntries.set(key, entry);
+            this.items.push(entry);
+        }
+        return entry;
+    }
     applyEvent(event) {
         switch (event.type) {
             case 'turn/start': {
@@ -219,34 +234,21 @@ export class TranscriptFolder {
             }
             case 'assistant/chunk': {
                 const { chunk } = event.data;
-                const key = stepKey(event.data.turn, event.data.step);
+                const step = event.data.step;
+                // Streaming text accumulates in place on the entry itself; there is
+                // no separate accumulator map, so a long session's text is stored
+                // once, not twice.
                 if (chunk.type === 'text-delta') {
-                    const accumulated = this.stepText.get(key) ?? '';
-                    const next = accumulated + chunk.text;
-                    this.stepText.set(key, next);
-                    let entry = this.assistantEntries.get(key);
-                    if (entry === undefined) {
-                        entry = { kind: 'assistant', turn: event.data.turn, text: next };
-                        this.assistantEntries.set(key, entry);
-                        this.items.push(entry);
-                    }
-                    else {
-                        entry.text = next;
-                    }
+                    this.assistantEntry(event.data.turn, step).text += chunk.text;
                 }
                 else if (chunk.type === 'reasoning-delta') {
-                    const accumulated = this.stepReasoning.get(key) ?? '';
-                    const next = accumulated + chunk.text;
-                    this.stepReasoning.set(key, next);
-                    const entry = this.thinkingEntry(event.data.turn, event.data.step);
-                    entry.text = next;
+                    this.thinkingEntry(event.data.turn, step).text += chunk.text;
                 }
                 break;
             }
             case 'assistant/message': {
                 const key = stepKey(event.data.turn, event.data.step);
                 const text = textOf(event.data.message.content);
-                this.stepText.set(key, text);
                 const entry = this.assistantEntries.get(key);
                 if (entry !== undefined) {
                     entry.text = text;
@@ -287,6 +289,8 @@ export class TranscriptFolder {
                 const status = event.data.error !== undefined || block?.isError === true ? 'error' : 'ok';
                 const turn = pending?.turn ?? this.currentTurn;
                 this.pendingCalls.delete(key ?? '');
+                if (key !== undefined)
+                    this.callNames.delete(key);
                 if (pending !== undefined) {
                     // The call's own running card: parallel same-name calls pair
                     // correctly because the card is keyed by callId, not by name.
@@ -367,6 +371,13 @@ export class TranscriptFolder {
                     card.status = event.data.stopReason === 'completed' ? 'ok' : 'error';
                     card.result = `stop: ${event.data.stopReason}`;
                 }
+                // The run's bookkeeping is done: drop the run card and every member
+                // card keyed under it so long sessions do not accumulate stale maps.
+                this.workflowRuns.delete(event.data.runId);
+                for (const memberKey of this.workflowMembers.keys()) {
+                    if (memberKey.startsWith(`${event.data.runId}/`))
+                        this.workflowMembers.delete(memberKey);
+                }
                 break;
             }
             case 'llm/retry': {
@@ -384,6 +395,7 @@ export class TranscriptFolder {
             }
             case 'command/done': {
                 const name = this.commandNames.get(event.data.commandId) ?? 'command';
+                this.commandNames.delete(event.data.commandId);
                 // Success text (e.g. "title set: x") carries the command's settlement
                 // message; errors prefix it with the failure marker.
                 const outcome = event.data.kind === 'error'
@@ -433,68 +445,47 @@ export function foldTranscript(events, options) {
     folder.apply(events);
     return folder.messages(options);
 }
-/**
- * Render the transcript as one Markdown document for the TUI's Markdown view.
- * Collapsible entries render in their folded form (preview lines + hint);
- * use the component view for expandable rendering.
- * @param messages - the folded transcript.
- * @param expandedTurns - turns whose collapsible entries render expanded.
- * @returns the markdown document.
- */
-export function renderTranscript(messages, expandedTurns = 0) {
-    const lines = [];
-    for (const message of messages) {
-        if (message.kind === 'user') {
-            lines.push(`**You:** ${message.text}`, '');
-        }
-        else if (message.kind === 'assistant') {
-            lines.push(message.text, '');
-        }
-        else if (message.kind === 'thinking') {
-            const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns);
-            if (expanded) {
-                lines.push(`> _thinking:_ ${message.text}`, '');
+/** Render one session's log as a readable markdown transcript for `/export md`. */
+export function renderTranscriptMarkdown(session) {
+    const lines = [
+        `# Session ${session.header.id}`,
+        `- cwd: ${session.header.cwd ?? 'unknown'}`,
+        ...session.header.agentPreset === undefined ? [] : [`- agent preset: ${session.header.agentPreset}`],
+        '',
+    ];
+    for (const event of session.events) {
+        switch (event.type) {
+            case 'user/message': {
+                const text = textOf(event.data.content);
+                if (text !== '')
+                    lines.push(`## User\n\n${text}\n`);
+                break;
             }
-            else {
-                lines.push(`> _thinking…_ (ctrl+o to expand)`, '');
+            case 'assistant/message': {
+                const text = textOf(event.data.message.content);
+                if (text !== '')
+                    lines.push(`## Assistant\n\n${text}\n`);
+                break;
             }
-        }
-        else if (message.kind === 'system') {
-            const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns);
-            if (expanded) {
-                lines.push(`> _system:_ ${message.text}`, '');
+            case 'tool/call': {
+                const args = typeof event.data.arguments === 'string' ? event.data.arguments : JSON.stringify(event.data.arguments);
+                lines.push(`### Tool ${event.data.name}\n\n\`\`\`json\n${args}\n\`\`\`\n`);
+                break;
             }
-            else {
-                lines.push(`> _system…_ (ctrl+o to expand)`, '');
+            case 'tool/result': {
+                const block = event.data.message.content[0];
+                const text = textOf(block?.content ?? []);
+                if (text !== '')
+                    lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`);
+                break;
             }
-        }
-        else if (message.kind === 'summary') {
-            lines.push(`> _${message.text}_`, '');
-        }
-        else {
-            const mark = message.status === 'ok' ? '✓' : message.status === 'error' ? '✗' : '…';
-            const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns);
-            if (expanded) {
-                lines.push(`> \`${mark} ${message.name}\` ${message.result === '' ? '' : '— ' + message.result}`, '');
+            case 'command/run': {
+                lines.push(`> /${event.data.name}${event.data.args === '' ? '' : ` ${event.data.args}`}\n`);
+                break;
             }
-            else {
-                lines.push(`> \`${mark} ${message.name}\``, '');
-            }
+            default:
+                break;
         }
     }
     return lines.join('\n');
-}
-/** The turn threshold for expansion: the `expandedTurns` most recent turns. */
-function currentTurnBoundary(messages, expandedTurns) {
-    if (expandedTurns <= 0)
-        return Number.POSITIVE_INFINITY;
-    const turns = new Set();
-    for (const message of messages) {
-        if (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool')
-            turns.add(message.turn);
-    }
-    const sorted = [...turns].sort((a, b) => b - a);
-    if (sorted.length <= expandedTurns)
-        return 0;
-    return sorted[expandedTurns - 1] ?? 0;
 }

@@ -16,7 +16,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { installModelSelection } from '@deepseek-ai/dsh-agent';
-import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets';
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval';
@@ -28,12 +28,11 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 import { foldPlanMode } from '@deepseek-ai/dsh-plan-mode';
 import { TUI_STARTUP_SERVICE } from "./startup.js";
 import { textOf, TranscriptFolder } from "./transcript.js";
-import { computeStats, formatStats } from "./stats.js";
-import { Text } from '@dsh-pi-tui/pi-tui';
-import { SettingsList } from '@dsh-pi-tui/pi-tui';
-import { color, resolveCustomTheme, settingsListTheme } from "./theme.js";
+import { formatStats, StatsFolder } from "./stats.js";
+import { color, loadCustomTheme, resolveCustomTheme } from "./theme.js";
 import { startProcessTui } from "./tui-app.js";
-import { MAX_PICKER_SESSIONS, headerToPickerRow, loadSessionTitles, sessionPickerItem, } from "./sessions.js";
+import { registerTuiCommands } from "./commands.js";
+import { customThemeNames } from "./theme.js";
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner';
 /** Core services required before the TUI can mount. */
@@ -159,57 +158,17 @@ const DANGER_PATTERNS = [
  * `rm -rf /`) is dangerous; the remaining patterns are verbatim matches.
  */
 export function dangerCommand(command) {
-    if (/\brm\b/i.test(command)) {
-        const flags = command.slice(command.toLowerCase().indexOf('rm') + 2);
+    // Slice the flags from the WORD-BOUNDED rm match itself: slicing from the
+    // first "rm" substring (e.g. inside "alarm") would read flags from the
+    // wrong offset and both miss and misfire depending on what follows.
+    const rm = /\brm\b/i.exec(command);
+    if (rm !== null) {
+        const flags = command.slice(rm.index + rm[0].length);
         const combined = flags.match(/-\w+/g)?.join('') ?? '';
         if (combined.includes('r') && combined.includes('f'))
             return true;
     }
     return DANGER_PATTERNS.some(pattern => pattern.test(command));
-}
-/** Render one session's log as a readable markdown transcript for `/export md`. */
-export function renderTranscriptMarkdown(session) {
-    const lines = [
-        `# Session ${session.header.id}`,
-        `- cwd: ${session.header.cwd ?? 'unknown'}`,
-        ...session.header.agentPreset === undefined ? [] : [`- agent preset: ${session.header.agentPreset}`],
-        '',
-    ];
-    for (const event of session.events) {
-        switch (event.type) {
-            case 'user/message': {
-                const text = textOf(event.data.content);
-                if (text !== '')
-                    lines.push(`## User\n\n${text}\n`);
-                break;
-            }
-            case 'assistant/message': {
-                const text = textOf(event.data.message.content);
-                if (text !== '')
-                    lines.push(`## Assistant\n\n${text}\n`);
-                break;
-            }
-            case 'tool/call': {
-                const args = typeof event.data.arguments === 'string' ? event.data.arguments : JSON.stringify(event.data.arguments);
-                lines.push(`### Tool ${event.data.name}\n\n\`\`\`json\n${args}\n\`\`\`\n`);
-                break;
-            }
-            case 'tool/result': {
-                const block = event.data.message.content[0];
-                const text = textOf(block?.content ?? []);
-                if (text !== '')
-                    lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`);
-                break;
-            }
-            case 'command/run': {
-                lines.push(`> /${event.data.name}${event.data.args === '' ? '' : ` ${event.data.args}`}\n`);
-                break;
-            }
-            default:
-                break;
-        }
-    }
-    return lines.join('\n');
 }
 /**
  * The active goal badge text from the session log, or undefined. The latest
@@ -238,13 +197,7 @@ function foldGoal(events) {
  * @param events - the session log.
  * @returns the fork seed events, or undefined.
  */
-function forkSeed(events) {
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-        if (events[index]?.type === 'turn/end')
-            return events.slice(0, index + 1);
-    }
-    return undefined;
-}
+export { forkSeed } from "./commands.js";
 /**
  * Resolve the preset an agent will be composed from, and the setup that
  * installs it.
@@ -334,32 +287,6 @@ export async function recomposeBlank(ctx, agent, id) {
     const preset = await presets.recompose(agent.ctx, id);
     agent.session.append('agent-preset/selected', { agentPreset: preset.id });
     return { kind: 'switched', preset: preset.id };
-}
-/** Custom-theme directory convention: `~/.dsh-pi-tui/themes/*.json`. */
-function customThemesDir() {
-    return join(homedir(), '.dsh-pi-tui', 'themes');
-}
-/** Names of the custom theme files (basename without the extension). */
-function customThemeNames() {
-    try {
-        return readdirSync(customThemesDir())
-            .filter(file => file.endsWith('.json'))
-            .map(file => file.slice(0, -'.json'.length));
-    }
-    catch {
-        return [];
-    }
-}
-/** Load and resolve one custom theme file, or undefined when missing/broken. */
-function loadCustomTheme(name) {
-    try {
-        const raw = readFileSync(join(customThemesDir(), `${name}.json`), 'utf8');
-        const file = JSON.parse(raw);
-        return resolveCustomTheme(file);
-    }
-    catch {
-        return undefined;
-    }
 }
 /** Set the terminal window title (OSC 0); a no-op without a TTY. */
 function setTerminalTitle(title) {
@@ -512,6 +439,11 @@ export function apply(ctx, config) {
         // Incremental fold state for the live session's log; reset on switch.
         let folder = new TranscriptFolder();
         folder.apply(liveAgent.session.events);
+        // Incremental stats + goal badge: applied per event so the footer stays
+        // O(1) per refresh instead of re-scanning the whole log.
+        let statsFolder = new StatsFolder();
+        statsFolder.apply(liveAgent.session.events);
+        let goalText = foldGoal(liveAgent.session.events);
         /** Swap the live agent to a new handle, repainting for its session. */
         const swapTo = async (next) => {
             try {
@@ -527,6 +459,9 @@ export function apply(ctx, config) {
             }
             folder = new TranscriptFolder();
             folder.apply(liveAgent.session.events);
+            statsFolder = new StatsFolder();
+            statsFolder.apply(liveAgent.session.events);
+            goalText = foldGoal(liveAgent.session.events);
             app.clearLocalMessages();
             repaint(app, folder);
             refreshStatus();
@@ -540,16 +475,24 @@ export function apply(ctx, config) {
             });
             return undefined;
         };
-        /** Hand the TUI over to another persisted session. */
+        /** Hand the TUI over to another persisted session. Never throws: every
+         * failure (unknown session, broken log, preset mount) returns an error
+         * string so callers' `.then(error => ...)` need no rejection path. */
         const switchSession = async (sessionId) => {
-            // The target session's recorded preset, exactly like the resume path.
-            const composition = await compose(await recordedPreset(ctx, sessionId));
-            const next = await agents.resume({
-                resumeSessionId: SessionId(sessionId),
-                agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
-                setup: composition.setup,
-            });
-            return swapTo(next);
+            try {
+                // The target session's recorded preset, exactly like the resume path.
+                const composition = await compose(await recordedPreset(ctx, sessionId));
+                const next = await agents.resume({
+                    resumeSessionId: SessionId(sessionId),
+                    agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
+                    setup: composition.setup,
+                });
+                return swapTo(next);
+            }
+            catch (error) {
+                ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}`);
+                return `switch failed: ${error instanceof Error ? error.message : String(error)}`;
+            }
         };
         // Footer state: model label, cwd, git branch, turn/step counters, and
         // the stats line (LLM timing, tokens, context pressure).
@@ -564,7 +507,7 @@ export function apply(ctx, config) {
                 : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`;
         };
         const refreshStatus = () => {
-            const stats = computeStats(liveAgent.session.events);
+            const stats = statsFolder.snapshot();
             let contextTokens;
             const meter = ctx.get('tokenMeter');
             if (meter !== undefined) {
@@ -579,7 +522,7 @@ export function apply(ctx, config) {
                 model: modelLabel(),
                 cwd: shortCwd(cwd),
                 branch: gitBranch(cwd),
-                goal: foldGoal(liveAgent.session.events),
+                goal: goalText,
                 turns: stats.turns,
                 steps: stats.steps,
                 statsLine: formatStats(stats),
@@ -608,7 +551,10 @@ export function apply(ctx, config) {
             localShellController?.abort();
             localShellController = new AbortController();
             const localSignal = localShellController.signal;
-            app.pushLocalMessage({
+            // The card reference this run owns: settling by identity keeps a
+            // settled old run from overwriting a newer run's card (updateLastLocal
+            // Message would hit whatever card is newest at settle time).
+            const card = app.pushLocalMessage({
                 kind: 'tool',
                 turn: Number.POSITIVE_INFINITY,
                 name: 'shell',
@@ -616,8 +562,13 @@ export function apply(ctx, config) {
                 result: '',
                 status: 'running',
             });
+            /** Release the controller only when it still guards THIS run. */
+            const releaseController = () => {
+                if (localShellController?.signal === localSignal)
+                    localShellController = undefined;
+            };
             const settle = (result, status) => {
-                app.updateLastLocalMessage({
+                app.updateLocalMessage(card, {
                     kind: 'tool',
                     turn: Number.POSITIVE_INFINITY,
                     name: 'shell',
@@ -632,6 +583,7 @@ export function apply(ctx, config) {
                 // composition provides it; completion-based like the spawn fallback.
                 const spec = shell.resolve({ command, workdir: cwd, signal: localSignal });
                 void shell.run(spec).then((result) => {
+                    releaseController();
                     if (localSignal.aborted) {
                         settle('aborted', 'error');
                         return;
@@ -640,6 +592,7 @@ export function apply(ctx, config) {
                     const exit = result.exitCode !== null ? `exit ${result.exitCode}` : `signal ${result.signal ?? '?'}`;
                     settle(output === '' ? exit : `${output}\n[${exit}]`, result.exitCode === 0 ? 'ok' : 'error');
                 }).catch((error) => {
+                    releaseController();
                     settle(`failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
                 });
                 return;
@@ -650,9 +603,12 @@ export function apply(ctx, config) {
             child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
             child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
             localSignal.addEventListener('abort', () => child.kill(), { once: true });
-            child.on('error', (error) => settle(`failed: ${error.message}`, 'error'));
+            child.on('error', (error) => {
+                releaseController();
+                settle(`failed: ${error.message}`, 'error');
+            });
             child.on('close', (code, childSignal) => {
-                localShellController = undefined;
+                releaseController();
                 if (localSignal.aborted) {
                     settle('aborted', 'error');
                     return;
@@ -909,727 +865,31 @@ export function apply(ctx, config) {
         if (storedHistory !== undefined && storedHistory.length > 0) {
             app.seedInputHistory(storedHistory);
         }
-        const commands = ctx.get('commands');
-        if (commands !== undefined) {
-            // Refresh completions after every registration below so TUI-owned
-            // commands (/exit /settings /skill /model) appear in the tab list.
-            const refreshCompletions = () => {
-                app.setCommandCompletions(commands.list(liveAgent).map(command => ({
-                    name: command.name,
-                    description: command.description,
-                    argumentHint: command.input?.hint,
-                })), cwd);
-            };
-            refreshCompletions();
-            commands.register({
-                name: 'exit',
-                description: 'Quit the terminal UI (flush and exit)',
-                handler: () => {
-                    app.stop();
-                    void sessions.flush(liveAgent.session).then(() => exit(0));
-                    return { kind: 'success' };
-                },
+        // The TUI-owned slash commands (/exit /settings /sessions /skill /model
+        // /new /tasks /preset /subagents /search /title /copy /export /fork
+        // /status /login /logout /help) are registered from commands.ts; this
+        // runner surface re-reads the live agent/settings on every access, so a
+        // session swap mid-flight is always reflected.
+        if (ctx.get('commands') !== undefined) {
+            registerTuiCommands({
+                ctx,
+                app,
+                get liveAgent() { return liveAgent; },
+                get selected() { return selected; },
+                get tuiSettings() { return tuiSettings; },
+                agents: agents,
+                sessions: { flush: (session) => sessions.flush(session) },
+                cwd,
+                signal,
+                compose,
+                switchSession,
+                swapTo: (next) => swapTo(next),
+                currentPreset,
+                recomposeBlank: (id) => recomposeBlank(ctx, liveAgent, id),
+                refreshStatus,
+                enterView,
+                exit,
             });
-            commands.register({
-                name: 'settings',
-                description: 'Open the TUI settings panel',
-                handler: () => {
-                    const theme = tuiSettings?.get().theme ?? 'auto';
-                    const themeValue = theme.startsWith('custom:') ? theme.slice('custom:'.length) : theme;
-                    app.openSettings([
-                        {
-                            id: 'approval',
-                            label: 'Approval policy',
-                            description: 'How tool approvals are handled in this session',
-                            currentValue: effectiveApprovalPolicy(liveAgent.session.events) ?? 'ask',
-                            values: ['ask', 'never'],
-                        },
-                        {
-                            id: 'theme',
-                            label: 'Theme',
-                            description: 'Palette: auto follows the terminal; custom from ~/.dsh-pi-tui/themes',
-                            currentValue: themeValue,
-                            values: ['auto', 'dark', 'light', ...customThemeNames()],
-                        },
-                        {
-                            id: 'expand',
-                            label: 'Tool output',
-                            description: 'Whether thinking/tool entries start expanded',
-                            currentValue: app.isToolOutputExpanded() ? 'expanded' : 'collapsed',
-                            values: ['collapsed', 'expanded'],
-                        },
-                        {
-                            id: 'thinking',
-                            label: 'Thinking blocks',
-                            description: 'Whether reasoning entries render at all',
-                            currentValue: app.isThinkingHidden() ? 'hidden' : 'shown',
-                            values: ['shown', 'hidden'],
-                        },
-                        {
-                            id: 'footer',
-                            label: 'Status line',
-                            description: 'Footer density: full keeps the stats line',
-                            currentValue: app.getFooterPreset(),
-                            values: ['full', 'compact'],
-                        },
-                        {
-                            id: 'fullscreen',
-                            label: 'Fullscreen',
-                            description: 'Alt-screen mode: off keeps the terminal scrollback',
-                            currentValue: app.isFullscreen() ? 'on' : 'off',
-                            values: ['off', 'on'],
-                        },
-                        // ── read-only session facts ─────────────────────────────
-                        {
-                            id: 'separator',
-                            label: color.border('─'.repeat(34)),
-                            currentValue: '',
-                        },
-                        {
-                            id: 'session',
-                            label: color.textDim('Session'),
-                            description: color.textDim(liveAgent.session.id),
-                            currentValue: color.textDim(liveAgent.session.id.length > 28 ? `${liveAgent.session.id.slice(0, 28)}…` : liveAgent.session.id),
-                        },
-                        {
-                            id: 'model',
-                            label: color.textDim('Model'),
-                            description: color.textDim('Provider and model routing this session'),
-                            currentValue: color.textDim(`${liveAgent.options.provider}/${liveAgent.options.model}`),
-                        },
-                        {
-                            id: 'preset',
-                            label: color.textDim('Agent preset'),
-                            description: color.textDim('Composition this session runs on (see /preset)'),
-                            currentValue: color.textDim(currentPreset() ?? 'none'),
-                        },
-                        {
-                            id: 'cwd',
-                            label: color.textDim('Working directory'),
-                            description: color.textDim('Where this session runs'),
-                            currentValue: color.textDim(cwd),
-                        },
-                    ], (id, value) => {
-                        if (id === 'approval') {
-                            if (value === 'ask' || value === 'never')
-                                ctx.get('approval')?.setPolicy(liveAgent, value);
-                        }
-                        else if (id === 'theme') {
-                            if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)) {
-                                if (value === 'auto') {
-                                    void app.autoDetectTheme();
-                                }
-                                else if (value === 'dark' || value === 'light') {
-                                    app.applyTheme(value);
-                                }
-                                else {
-                                    const palette = loadCustomTheme(value);
-                                    if (palette !== undefined) {
-                                        app.applyPalette(palette);
-                                    }
-                                    else {
-                                        app.notify(`theme ${value} not found`);
-                                        return;
-                                    }
-                                }
-                                // Spread the current doc: a replace is wholesale, so the
-                                // persisted input history must ride along.
-                                void tuiSettings?.replace({ ...tuiSettings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` });
-                            }
-                        }
-                        else if (id === 'expand') {
-                            app.setToolOutputExpanded(value === 'expanded');
-                        }
-                        else if (id === 'thinking') {
-                            if ((value === 'shown') === app.isThinkingHidden())
-                                app.toggleThinkingHidden();
-                        }
-                        else if (id === 'footer') {
-                            if (value === 'full' || value === 'compact') {
-                                app.setFooterPreset(value);
-                                void tuiSettings?.replace({ ...tuiSettings.get(), footer: value });
-                            }
-                        }
-                        else if (id === 'fullscreen') {
-                            if (value === 'off' || value === 'on') {
-                                app.setFullscreen(value === 'on');
-                                // setFullscreen reports through onFullscreenChange, which
-                                // persists the same field (this branch is the panel write).
-                            }
-                        }
-                    }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            commands.register({
-                name: 'sessions',
-                description: 'List, search, and switch persisted sessions',
-                input: { hint: '[query]' },
-                handler: async (invocation) => {
-                    const persistence = ctx.get('sessionPersistence');
-                    if (persistence === undefined)
-                        return { kind: 'error', text: 'session persistence unavailable' };
-                    // Live-preferred listing (sessionQuery) marks sessions currently
-                    // loaded in the store; the persistence fallback is the plain list.
-                    // The engine is read structurally off the context (no package
-                    // import): `dsh-base` mounts it in every profile.
-                    const query = ctx.get('sessionQuery');
-                    let rows;
-                    if (query !== undefined) {
-                        rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live));
-                    }
-                    else {
-                        rows = (await persistence.list()).map(header => headerToPickerRow(header, header.id === liveAgent.session.id));
-                    }
-                    rows.sort((a, b) => b.createdAt - a.createdAt);
-                    if (rows.length === 0)
-                        return { kind: 'error', text: 'no persisted sessions' };
-                    // The picker opens instantly on the headers; titles land in the
-                    // background below. The cap keeps the title read bounded.
-                    const shown = rows.slice(0, MAX_PICKER_SESSIONS);
-                    const picker = app.openPicker(shown.map(row => sessionPickerItem(row, liveAgent.session.id)), (id) => {
-                        if (id === liveAgent.session.id)
-                            return;
-                        void switchSession(id).then(error => {
-                            if (error !== undefined)
-                                app.notify(error);
-                        });
-                    }, () => { }, {
-                        enableSearch: true,
-                        header: 'sessions',
-                        noMatchText: '  no matching sessions',
-                        initialQuery: invocation.rawInput.trim(),
-                        width: 76,
-                        maxHeight: 26,
-                        showHint: true,
-                    });
-                    // Enrich rows with titles as they load; the active search query is
-                    // re-applied by the picker, and the current marker is re-read so a
-                    // session switch mid-load does not mislabel.
-                    void loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
-                        .then(titles => {
-                        if (titles.size === 0)
-                            return;
-                        picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, liveAgent.session.id)));
-                    })
-                        .catch(() => {
-                        // Cancellation (TUI quit) or an unexpected batch failure only
-                        // loses the titles, never the picker.
-                    });
-                    return { kind: 'success' };
-                },
-            });
-            commands.register({
-                name: 'skill',
-                description: 'Load a skill into the session context',
-                input: { hint: '<name>' },
-                handler: async (invocation) => {
-                    const skills = ctx.get('skills');
-                    if (skills === undefined)
-                        return { kind: 'error', text: 'skill service unavailable' };
-                    const load = async (name) => {
-                        const skill = await skills.get(name, { cwd });
-                        if (skill === undefined)
-                            return { kind: 'error', text: `unknown skill "${name}"` };
-                        liveAgent.inject(createUserMessage({
-                            content: [{ type: 'text', text: `Skill loaded by the user: **${skill.name}**\n\n${skill.content ?? skill.description}` }],
-                            source: { kind: 'plugin', plugin: 'tui-skill' },
-                        }));
-                        return { kind: 'success', text: `skill ${name} loaded` };
-                    };
-                    const name = invocation.rawInput.trim();
-                    if (name !== '')
-                        return load(name);
-                    // No argument: pick from the catalog.
-                    const catalog = await skills.list({ cwd });
-                    if (catalog.length === 0)
-                        return { kind: 'error', text: 'no skills available' };
-                    // SettingsList rows: Enter cycles the `✓` value, which fires onChange.
-                    app.openSettings(catalog.map(skill => ({
-                        id: skill.name,
-                        label: skill.name,
-                        description: skill.description,
-                        currentValue: '',
-                        values: ['✓'],
-                    })), (id) => {
-                        void load(id).then(result => { if (result.kind === 'error')
-                            app.notify(result.text); });
-                    }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            commands.register({
-                name: 'model',
-                description: 'Switch the model (and reasoning effort) for this session',
-                handler: async () => {
-                    const llm = ctx.get('llm');
-                    const defaultModel = ctx.get('agentDefaultModel');
-                    if (llm === undefined || defaultModel === undefined)
-                        return { kind: 'error', text: 'model service unavailable' };
-                    const providers = llm.listProviders();
-                    const current = defaultModel.currentSelection();
-                    /** Commit a selection (model, optional effort) and refresh the footer. */
-                    const apply = (next) => {
-                        void defaultModel.saveSelection(next);
-                        selected.current = next;
-                        refreshStatus();
-                    };
-                    app.openSettings(providers.map(provider => ({
-                        id: provider.id,
-                        label: provider.name,
-                        currentValue: current.provider === provider.id ? current.model : '',
-                        submenu: (value, done) => {
-                            const models = new Text('Loading models…', 0, 0);
-                            void llm.listModels(provider.id).then(list => {
-                                done(undefined);
-                                app.openSettings(list.map(model => ({
-                                    id: model.id,
-                                    label: model.id,
-                                    description: value === model.id ? '← current' : undefined,
-                                    currentValue: value === model.id ? '← current' : '',
-                                    values: ['✓'],
-                                })), (modelId) => {
-                                    // Effort is adapter-owned per exact route: resolve the
-                                    // model's reasoning metadata and offer its efforts when
-                                    // it has any (the web surface's effort menu).
-                                    void llm.resolveModelInfo(provider.id, modelId)
-                                        .then(info => {
-                                        const efforts = info.reasoning?.efforts;
-                                        if (efforts === undefined || efforts.length === 0) {
-                                            apply({ provider: provider.id, model: modelId });
-                                            return;
-                                        }
-                                        const currentEffort = selected.current?.reasoningEffort;
-                                        app.openSettings([
-                                            {
-                                                id: '__default',
-                                                label: 'Default',
-                                                description: 'Provider default reasoning effort',
-                                                currentValue: currentEffort === undefined ? '← current' : '',
-                                                values: ['✓'],
-                                            },
-                                            ...efforts.map(effort => ({
-                                                id: effort.id,
-                                                label: effort.name,
-                                                description: effort.description,
-                                                currentValue: currentEffort === effort.id ? '← current' : '',
-                                                values: ['✓'],
-                                            })),
-                                        ], (effortId) => {
-                                            apply(effortId === '__default'
-                                                ? { provider: provider.id, model: modelId }
-                                                : { provider: provider.id, model: modelId, reasoningEffort: ReasoningEffortId(effortId) });
-                                        }, () => { });
-                                    })
-                                        .catch(() => apply({ provider: provider.id, model: modelId }));
-                                }, () => { });
-                            });
-                            return models;
-                        },
-                    })), () => { }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            commands.register({
-                name: 'new',
-                description: 'Start a fresh session in this workspace',
-                handler: async () => {
-                    const composition = await compose();
-                    const next = await agents.create({
-                        sessionId: SessionId(`session-${randomUUID()}`),
-                        meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-                        agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
-                        setup: composition.setup,
-                    });
-                    const error = await swapTo(next);
-                    if (error !== undefined)
-                        app.notify(error);
-                    return { kind: 'success', text: 'started a fresh session' };
-                },
-            });
-            commands.register({
-                name: 'tasks',
-                description: 'List background jobs for this session',
-                handler: () => {
-                    const jobs = ctx.get('jobs');
-                    if (jobs === undefined)
-                        return { kind: 'error', text: 'jobs service unavailable' };
-                    const snapshots = jobs.list(liveAgent);
-                    if (snapshots.length === 0)
-                        return { kind: 'error', text: 'no background jobs' };
-                    const now = Date.now();
-                    app.openPicker(snapshots.map(job => ({
-                        value: job.id,
-                        label: `${job.kind} · ${job.label}`,
-                        description: `${job.status}${job.detail === undefined ? '' : ` — ${job.detail}`} · ${Math.max(0, Math.floor((now - job.startedAt) / 1000))}s`,
-                    })), () => { }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            // `/permission` is NOT registered here: dsh-permission-presets in the
-            // base layer already registers it (text form: `/permission` shows the
-            // current preset, `/permission <name>` switches). Registering it again
-            // would throw "command already registered" and kill the TUI.
-            // `/preset` IS TUI-owned: the base composes no roster and registers no
-            // preset command, so this cannot collide (P5.7 lesson, positive case).
-            commands.register({
-                name: 'preset',
-                description: 'Show or switch the session agent preset',
-                input: { hint: '[status|<id>|default [<id>]]' },
-                handler: async (invocation) => {
-                    const presets = ctx.get('agentPresets');
-                    if (presets === undefined) {
-                        return { kind: 'error', text: 'agent presets unavailable in this deployment' };
-                    }
-                    const current = presets.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session);
-                    const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/);
-                    const verb = matched?.[1] ?? '';
-                    const rest = matched?.[2]?.trim() ?? '';
-                    if (verb === 'status') {
-                        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${presets.defaultId}` };
-                    }
-                    if (verb === 'default') {
-                        const settings = ctx.get('settings');
-                        if (settings === undefined)
-                            return { kind: 'error', text: 'settings service unavailable' };
-                        const ns = settingsNamespace('agent-presets');
-                        if (rest === '') {
-                            const doc = settings.get(ns);
-                            return { kind: 'success', text: `default preset: ${doc?.default ?? presets.defaultId}` };
-                        }
-                        await settings.mutate(ns, [{ op: 'set', path: ['default'], value: rest }]);
-                        return { kind: 'success', text: `default preset set: ${rest}` };
-                    }
-                    if (verb !== '') {
-                        // Selecting swaps the composition; only a blank session (no turn
-                        // has run yet) may do so — a started conversation's history was
-                        // produced under its preset's tools. Same rule as the official
-                        // `agentPreset.select` RPC and the launch-time --preset path.
-                        try {
-                            const outcome = await recomposeBlank(ctx, liveAgent, verb);
-                            if (outcome.kind === 'locked') {
-                                return {
-                                    kind: 'error',
-                                    text: `session "${liveAgent.session.id}" has already started; its agent preset is fixed`,
-                                };
-                            }
-                            refreshCompletions();
-                            return { kind: 'success', text: `session preset switched to ${outcome.preset}` };
-                        }
-                        catch (error) {
-                            return { kind: 'error', text: error instanceof Error ? error.message : String(error) };
-                        }
-                    }
-                    const roster = await presets.list();
-                    if (roster.length === 0)
-                        return { kind: 'success', text: 'no agent presets configured' };
-                    app.openSettings(roster.map(preset => ({
-                        id: preset.id,
-                        label: preset.name === undefined ? preset.id : `${preset.name} (${preset.id})`,
-                        description: [
-                            preset.trust === 'system' ? 'system' : 'user',
-                            preset.id === presets.defaultId ? 'default' : undefined,
-                            preset.id === current ? '← current' : undefined,
-                            preset.broken,
-                        ].filter(Boolean).join(' · '),
-                        currentValue: '',
-                    })), () => { }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            commands.register({
-                name: 'subagents',
-                description: 'List child agents; view a transcript or interrupt one',
-                handler: async () => {
-                    const subagents = ctx.get('subagents');
-                    if (subagents === undefined)
-                        return { kind: 'error', text: 'subagent service unavailable' };
-                    const children = (await subagents.listChildren(liveAgent.session.id))
-                        .filter(child => child.kind === 'child');
-                    if (children.length === 0)
-                        return { kind: 'success', text: 'no subagents for this session' };
-                    const labelOf = (child) => child.label ?? child.id;
-                    app.openSettings(children.map(child => ({
-                        id: child.id,
-                        label: labelOf(child),
-                        description: `${child.mode} · ${child.activity}${child.hasChildren ? ' · has children' : ''}`,
-                        currentValue: '',
-                        // The submenu is rendered INSIDE the list (SettingsList mounts
-                        // the returned component in place); picking an action reports
-                        // it through the list's onChange. Opening a second panel here
-                        // would leave this list mounted as a ghost overlay that eats
-                        // every later Esc.
-                        submenu: (value, done) => new SettingsList([
-                            { id: 'view', label: 'View transcript', description: 'Watch this session read-only (Esc to return)', currentValue: '', values: ['✓'] },
-                            { id: 'interrupt', label: 'Interrupt', description: 'Cancel the child agent', currentValue: '', values: ['✓'] },
-                        ], 6, settingsListTheme, 
-                        // The action is the row ID; the cycled value is a checkmark.
-                        (id) => done(id), () => done(), {}),
-                    })), (childId, action) => {
-                        const child = children.find(candidate => candidate.id === childId);
-                        if (child === undefined)
-                            return;
-                        if (action === 'view') {
-                            void enterView(child.id, labelOf(child));
-                        }
-                        else if (action === 'interrupt') {
-                            subagents.interrupt(child.id, { kind: 'user', parentSessionId: liveAgent.session.id });
-                            app.notify(`interrupting ${labelOf(child)}`);
-                        }
-                    }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            commands.register({
-                name: 'search',
-                description: 'Search persisted sessions for text and switch to a hit',
-                input: { hint: '<query>' },
-                handler: async (invocation) => {
-                    const persistence = ctx.get('sessionPersistence');
-                    if (persistence === undefined)
-                        return { kind: 'error', text: 'session persistence unavailable' };
-                    const query = invocation.rawInput.trim();
-                    if (query === '')
-                        return { kind: 'error', text: 'search needs a query' };
-                    const needle = query.toLowerCase();
-                    const headers = (await persistence.list())
-                        .sort((a, b) => b.createdAt - a.createdAt)
-                        .slice(0, 100);
-                    const hits = [];
-                    for (const header of headers) {
-                        let raw;
-                        try {
-                            raw = await persistence.readRaw(header.id);
-                        }
-                        catch {
-                            continue;
-                        }
-                        if (raw === undefined)
-                            continue;
-                        const index = raw.content.toLowerCase().indexOf(needle);
-                        if (index === -1)
-                            continue;
-                        const start = Math.max(0, index - 40);
-                        const snippet = raw.content.slice(start, index + query.length + 40).replace(/\s+/g, ' ').trim();
-                        hits.push({ id: header.id, createdAt: header.createdAt, snippet });
-                        if (hits.length >= 20)
-                            break;
-                    }
-                    if (hits.length === 0)
-                        return { kind: 'success', text: `no persisted session contains "${query}"` };
-                    const now = Date.now();
-                    app.openPicker(hits.map(hit => ({
-                        value: hit.id,
-                        label: hit.id.length > 26 ? `${hit.id.slice(0, 26)}…` : hit.id,
-                        description: `${Math.max(0, Math.floor((now - hit.createdAt) / 60000))}m ago · …${hit.snippet}…`,
-                    })), (id) => {
-                        if (id === liveAgent.session.id)
-                            return;
-                        void switchSession(id).then(error => {
-                            if (error !== undefined)
-                                app.notify(error);
-                        });
-                    }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            commands.register({
-                name: 'title',
-                description: 'Set or show the session title',
-                input: { hint: '<title>' },
-                handler: (invocation) => {
-                    const titles = ctx.get('sessionTitle');
-                    if (titles === undefined)
-                        return { kind: 'error', text: 'session title service unavailable' };
-                    const name = invocation.rawInput.trim();
-                    if (name === '') {
-                        const current = titles.get(liveAgent.session);
-                        return { kind: 'success', text: current === undefined ? 'no title set' : `title: ${current.title}` };
-                    }
-                    titles.rename(liveAgent.session, name);
-                    return { kind: 'success', text: `title set: ${name}` };
-                },
-            });
-            commands.register({
-                name: 'copy',
-                description: 'Copy the last assistant message (OSC 52 clipboard)',
-                handler: () => {
-                    const last = liveAgent.session.events.findLast((event) => event.type === 'assistant/message');
-                    if (last === undefined)
-                        return { kind: 'error', text: 'no assistant message yet' };
-                    const text = last.data.message.content
-                        .filter(block => block.type === 'text')
-                        .map(block => block.text)
-                        .join('');
-                    if (text === '')
-                        return { kind: 'error', text: 'last assistant message has no text' };
-                    if (process.stdout.isTTY !== true)
-                        return { kind: 'error', text: 'clipboard needs a TTY (OSC 52)' };
-                    process.stdout.write(`\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`);
-                    return { kind: 'success', text: 'copied last assistant message' };
-                },
-            });
-            commands.register({
-                name: 'export',
-                description: 'Export this session log (JSONL by default, `md` for a readable transcript)',
-                input: { hint: '[md|<path>]' },
-                handler: async (invocation) => {
-                    const persistence = ctx.get('sessionPersistence');
-                    if (persistence === undefined)
-                        return { kind: 'error', text: 'session persistence unavailable' };
-                    const arg = invocation.rawInput.trim();
-                    const shortId = liveAgent.session.id.replace(/^session-/, '').slice(0, 8);
-                    const markdown = arg === 'md';
-                    const target = arg !== '' && !markdown
-                        ? arg
-                        : join(cwd, markdown ? `dsh-session-${shortId}.md` : `dsh-session-${shortId}.jsonl`);
-                    try {
-                        if (markdown) {
-                            writeFileSync(target, renderTranscriptMarkdown(liveAgent.session));
-                            return { kind: 'success', text: `exported markdown transcript to ${target}` };
-                        }
-                        // The raw artifact is the backend's verbatim JSONL (decoded from
-                        // its physical encoding) — a faithful, portable session log.
-                        const raw = await persistence.readRaw(liveAgent.session.id);
-                        if (raw === undefined)
-                            return { kind: 'error', text: 'no materialized session log to export' };
-                        writeFileSync(target, raw.content);
-                        return { kind: 'success', text: `exported ${raw.filename} to ${target}` };
-                    }
-                    catch (error) {
-                        return { kind: 'error', text: error instanceof Error ? error.message : String(error) };
-                    }
-                },
-            });
-            commands.register({
-                name: 'fork',
-                description: 'Fork this session at the last completed turn',
-                handler: async () => {
-                    const seed = forkSeed(liveAgent.session.events);
-                    if (seed === undefined)
-                        return { kind: 'error', text: 'no completed turn to fork from' };
-                    // The child inherits the parent's recorded preset (official fork
-                    // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
-                    const composition = await compose(resolveSessionPreset(liveAgent.session));
-                    const next = await agents.create({
-                        sessionId: SessionId(`session-${randomUUID()}`),
-                        meta: {
-                            cwd,
-                            parentSession: liveAgent.session.id,
-                            seedLength: seed.length,
-                            ...withPresetMeta(composition),
-                        },
-                        agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
-                        setup: composition.setup,
-                        seed,
-                    });
-                    const error = await swapTo(next);
-                    if (error !== undefined)
-                        app.notify(error);
-                    return { kind: 'success', text: `forked as ${next.agent.session.id}` };
-                },
-            });
-            commands.register({
-                name: 'status',
-                description: 'Show session stats and identity',
-                handler: () => {
-                    const stats = computeStats(liveAgent.session.events);
-                    let contextTokens;
-                    const meter = ctx.get('tokenMeter');
-                    if (meter !== undefined) {
-                        try {
-                            contextTokens = meter.measure(liveAgent.session).totalTokens;
-                        }
-                        catch {
-                            // Measurement is best-effort; the panel falls back to unmeasured.
-                        }
-                    }
-                    app.openSettings([
-                        {
-                            id: 'session-id',
-                            label: color.textDim('Session'),
-                            description: color.textDim(liveAgent.session.id),
-                            currentValue: color.textDim(liveAgent.session.id.length > 28 ? `${liveAgent.session.id.slice(0, 28)}…` : liveAgent.session.id),
-                        },
-                        { id: 'session-stats', label: 'Stats', description: formatStats(stats), currentValue: '' },
-                        {
-                            id: 'session-context',
-                            label: 'Context',
-                            description: contextTokens === undefined ? 'unmeasured' : `${Math.round(contextTokens / 1000)}k tokens in window`,
-                            currentValue: '',
-                        },
-                    ], () => { }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            commands.register({
-                name: 'login',
-                description: 'Set an API key credential for a provider (default DEEPSEEK_API_KEY)',
-                input: { hint: '[<env-var>]' },
-                handler: async (invocation) => {
-                    const credentials = ctx.get('credentials');
-                    if (credentials === undefined)
-                        return { kind: 'error', text: 'credentials service unavailable' };
-                    const ref = (invocation.rawInput.trim() || 'DEEPSEEK_API_KEY').toUpperCase();
-                    try {
-                        const answers = await app.askQuestions([
-                            { id: 'key', question: `Paste the API key for ${ref}:` },
-                        ]);
-                        const key = answers[0]?.custom ?? '';
-                        if (key === '')
-                            return { kind: 'error', text: 'empty key; nothing set' };
-                        await credentials.set(ref, key);
-                        return { kind: 'success', text: `${ref} set` };
-                    }
-                    catch {
-                        return { kind: 'error', text: 'login cancelled' };
-                    }
-                },
-            });
-            commands.register({
-                name: 'logout',
-                description: 'Clear a stored API key credential (default DEEPSEEK_API_KEY)',
-                input: { hint: '[<env-var>]' },
-                handler: async (invocation) => {
-                    const credentials = ctx.get('credentials');
-                    if (credentials === undefined)
-                        return { kind: 'error', text: 'credentials service unavailable' };
-                    const ref = (invocation.rawInput.trim() || 'DEEPSEEK_API_KEY').toUpperCase();
-                    await credentials.unset(ref);
-                    return { kind: 'success', text: `${ref} cleared` };
-                },
-            });
-            commands.register({
-                name: 'help',
-                description: 'Show keybindings and available commands',
-                handler: () => {
-                    const rows = [
-                        { id: 'k-enter', label: 'Enter', description: 'Submit (slash commands dispatch without a model turn)', currentValue: '' },
-                        { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
-                        { id: 'k-cancel', label: 'Double-Esc', description: 'Cancel the active turn / tool / shell command', currentValue: '' },
-                        { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool output and thinking', currentValue: '' },
-                        { id: 'k-todo', label: 'Ctrl+T', description: 'Toggle the todo panel', currentValue: '' },
-                        { id: 'k-think', label: 'Alt+T', description: 'Hide/show thinking blocks', currentValue: '' },
-                        { id: 'k-steer', label: 'Ctrl+S', description: 'Steer the running turn with the draft', currentValue: '' },
-                        { id: 'k-editor', label: 'Ctrl+G', description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
-                        { id: 'k-full', label: 'Ctrl+F', description: 'Toggle fullscreen (alt screen)', currentValue: '' },
-                        { id: 'k-tab', label: 'Tab', description: 'Autocomplete slash commands and file paths', currentValue: '' },
-                        { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
-                        { id: 'k-bang', label: '! cmd', description: 'Run a shell command locally; !! sends it to the model', currentValue: '' },
-                        { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
-                        ...commands.list(liveAgent).map(command => ({
-                            id: `cmd-${command.name}`,
-                            label: `/${command.name}`,
-                            description: command.description,
-                            currentValue: '',
-                        })),
-                    ];
-                    app.openSettings(rows, () => { }, () => { });
-                    return { kind: 'success' };
-                },
-            });
-            // All TUI commands are registered now; include them in completion.
-            refreshCompletions();
         }
         refreshStatus();
         ctx.on('session/event', (session, event) => {
@@ -1656,6 +916,11 @@ export function apply(ctx, config) {
                 callArgs.delete(event.data.message.content[0]?.toolCallId ?? '');
             }
             folder.apply([event]);
+            statsFolder.apply([event]);
+            // The goal badge folds incrementally: the newest goal/change event
+            // decides, so one event is enough (clear/completed hide the badge).
+            if (event.type === 'goal/change')
+                goalText = foldGoal([event]);
             schedulePaint();
             if (event.type === 'todo/write')
                 app.setTodoSummary(event.data.todos);

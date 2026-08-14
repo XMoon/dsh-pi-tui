@@ -12,7 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent';
-import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session';
+import type { SessionEvent } from '@deepseek-ai/dsh-session';
 /** Stable Cordis plugin name. */
 export declare const name = "tui-runner";
 /** Core services required before the TUI can mount. */
@@ -29,11 +29,12 @@ export declare const Config: z<Config>;
  * `rm -rf /`) is dangerous; the remaining patterns are verbatim matches.
  */
 export declare function dangerCommand(command: string): boolean;
-/** Render one session's log as a readable markdown transcript for `/export md`. */
-export declare function renderTranscriptMarkdown(session: {
-    header: SessionHeader;
-    events: readonly SessionEvent[];
-}): string;
+/** A balanced completed-turn prefix for forking: the log up to (and including)
+ * the last `turn/end`. Undefined when no turn has completed yet.
+ * @param events - the session log.
+ * @returns the fork seed events, or undefined.
+ */
+export { forkSeed } from './commands.ts';
 /** One agent's preset composition: the id to record and the setup that installs it. */
 export interface AgentComposition {
     /** Preset id for the session header, absent when the deployment composes no roster. */

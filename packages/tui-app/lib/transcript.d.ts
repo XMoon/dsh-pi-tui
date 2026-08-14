@@ -15,7 +15,7 @@
  * component tree on long sessions.
  * @module @dsh-pi-tui/tui-app/transcript
  */
-import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage = {
@@ -63,6 +63,18 @@ export interface FoldOptions {
 /** Text of a message's content blocks, joined; empty when there is no text. */
 export declare function textOf(blocks: readonly ContentBlock[]): string;
 /**
+ * The turn threshold at or above which entries count as "recent": the
+ * `recentTurns` most recent distinct turns among the given message kinds.
+ * Shared by the display window (all kinds), the markdown view, and the
+ * Ctrl+O expansion boundary (foldable kinds only).
+ * @param messages - the folded transcript.
+ * @param recentTurns - how many most-recent turns survive; <= 0 keeps nothing.
+ * @param kinds - kinds whose turns count; undefined counts every kind.
+ * @returns the oldest recent turn number; 0 when everything is recent;
+ *   `Infinity` when nothing is (every entry folds).
+ */
+export declare function recentTurnThreshold(messages: readonly TranscriptMessage[], recentTurns: number, kinds?: readonly TranscriptMessage['kind'][]): number;
+/**
  * Collapse turns older than the display window into one leading summary
  * entry with aggregate counts. Entries at/after the boundary survive; the
  * result is a fresh array when anything collapses.
@@ -86,11 +98,7 @@ export declare function groupConsecutiveReads(messages: readonly TranscriptMessa
  */
 export declare class TranscriptFolder {
     private readonly items;
-    /** Streaming text per (turn, step); an assistant message for that step is the same slot. */
-    private readonly stepText;
-    /** Streaming reasoning per (turn, step), folded into one thinking entry. */
-    private readonly stepReasoning;
-    /** The assistant message object per (turn, step), for in-place text updates. */
+    /** The assistant message object per (turn, step); streaming text lands in place. */
     private readonly assistantEntries;
     /** The thinking entry object per (turn, step), for in-place text updates. */
     private readonly thinkingEntries;
@@ -121,6 +129,8 @@ export declare class TranscriptFolder {
     messages(options?: FoldOptions): TranscriptMessage[];
     /** The thinking entry object for one (turn, step), created on first reasoning. */
     private thinkingEntry;
+    /** The assistant entry object for one (turn, step), created on first text. */
+    private assistantEntry;
     private applyEvent;
 }
 /**
@@ -134,12 +144,8 @@ export declare class TranscriptFolder {
  * @returns ordered renderable messages.
  */
 export declare function foldTranscript(events: readonly SessionEvent[], options?: FoldOptions): TranscriptMessage[];
-/**
- * Render the transcript as one Markdown document for the TUI's Markdown view.
- * Collapsible entries render in their folded form (preview lines + hint);
- * use the component view for expandable rendering.
- * @param messages - the folded transcript.
- * @param expandedTurns - turns whose collapsible entries render expanded.
- * @returns the markdown document.
- */
-export declare function renderTranscript(messages: readonly TranscriptMessage[], expandedTurns?: number): string;
+/** Render one session's log as a readable markdown transcript for `/export md`. */
+export declare function renderTranscriptMarkdown(session: {
+    header: SessionHeader;
+    events: readonly SessionEvent[];
+}): string;

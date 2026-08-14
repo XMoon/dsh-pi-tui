@@ -59,6 +59,12 @@ export interface CustomThemeFile {
 export declare function setTheme(theme: ThemeMode, custom?: ColorPalette): void;
 /** Build a full palette from a custom theme file (base + overrides). */
 export declare function resolveCustomTheme(file: CustomThemeFile): ColorPalette;
+/** Custom-theme directory convention: `~/.dsh-pi-tui/themes/*.json`. */
+export declare function customThemesDir(): string;
+/** Names of the custom theme files (basename without the extension). */
+export declare function customThemeNames(): string[];
+/** Load and resolve one custom theme file, or undefined when missing/broken. */
+export declare function loadCustomTheme(name: string): ColorPalette | undefined;
 /**
  * Classify a terminal background colour (OSC 11 reply) as dark or light by
  * relative luminance; a bright background selects the light palette.

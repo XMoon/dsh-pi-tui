@@ -15,7 +15,7 @@
  */
 import { type Component, type SettingItem, type SlashCommand, type Terminal } from '@dsh-pi-tui/pi-tui';
 import { type ColorPalette } from './theme.ts';
-import type { TranscriptMessage } from './transcript.ts';
+import { type TranscriptMessage } from './transcript.ts';
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export declare const EXPAND_RECENT_TURNS = 3;
 /** Folded preview lines for thinking blocks; mirrors pi's THINKING_PREVIEW_LINES. */
@@ -229,13 +229,22 @@ export declare class TuiApp {
     private todoText;
     /** Welcome card shown above the transcript; empty renders nothing. */
     private welcomeText;
-    /** Transient error line shown under the transcript; cleared by setTranscript. */
+    /** Transient error line shown under the transcript; cleared by the next
+     * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
     private notifyText;
+    /** The pending auto-clear for {@link notifyText}, while one is armed. */
+    private notifyTimer;
+    /** How long a notify line stays before it auto-clears, in ms. */
+    private static readonly NOTIFY_DURATION_MS;
+    /** The notify auto-clear window; injectable so tests stay fast. */
+    private readonly notifyDurationMs;
     /** Timestamp of the last Esc press, for double-Esc cancellation. */
     private lastEscapeAt;
     /** Double-Esc window in ms. */
     private static readonly ESCAPE_CANCEL_WINDOW_MS;
-    constructor(terminal: Terminal, events: TuiAppEvents);
+    constructor(terminal: Terminal, events: TuiAppEvents, options?: {
+        notifyDurationMs?: number;
+    });
     /** Enter raw mode and start rendering. */
     start(): void;
     /** Leave raw mode and stop rendering. */
@@ -271,8 +280,17 @@ export declare class TuiApp {
      * Append a local card rendered after the session transcript (e.g. `!`
      * shell runs). The card is always expanded (its turn is unbounded).
      * @param message - the local card to show.
+     * @returns the stored card reference, for {@link updateLocalMessage}.
      */
-    pushLocalMessage(message: TranscriptMessage): void;
+    pushLocalMessage(message: TranscriptMessage): TranscriptMessage;
+    /**
+     * Replace one local card by reference. Settling a card by its own identity
+     * (not "the last one") keeps concurrent cards independent: a card settled
+     * after a newer one was pushed must not overwrite the newer card.
+     * @param message - the card reference {@link pushLocalMessage} returned.
+     * @param next - the settled replacement.
+     */
+    updateLocalMessage(message: TranscriptMessage, next: TranscriptMessage): void;
     /** Replace the most recent local card (running → settled). */
     updateLastLocalMessage(message: TranscriptMessage): void;
     /** Drop all local cards (session switch). */
@@ -314,8 +332,14 @@ export declare class TuiApp {
     private rebuildMessages;
     /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
     setPlanMode(active: boolean): void;
-    /** Show a transient error line under the transcript; the next repaint clears it. */
+    /**
+     * Show a transient error line under the transcript. Cleared by the next
+     * `setTranscript` repaint or after {@link TuiApp.NOTIFY_DURATION_MS},
+     * whichever comes first, so a one-off notice never lingers forever.
+     */
     notify(text: string): void;
+    /** Clear the transient notify line and its pending auto-clear timer. */
+    private clearNotify;
     /**
      * Set the session head rendered above the transcript: one dense line with
      * the session identity, model, version, and a rule beneath. Replaces any
@@ -333,8 +357,9 @@ export declare class TuiApp {
     private expandBoundary;
     /** Render one transcript message as a pi-tui component. */
     private renderMessage;
-    /** Request a render on the active screen. */
-    private requestRender;
+    /** Request a render on the active screen. Public so in-place submenu
+     * components (async content swaps) can trigger the next frame. */
+    requestRender(): void;
     /**
      * Reflect the todo list in the header line: active (non-completed) count
      * and, when the list is non-empty, the first active item's text.
@@ -422,7 +447,12 @@ export declare class TuiApp {
     private renderApprovalDialog;
     /** Route a key while a prompt is showing; every key is consumed. */
     private handleApprovalKey;
-    /** Resolve one prompt, hide its dialog, and show the next in line. */
+    /**
+     * Resolve one prompt and hide its dialog. The prompt may be on screen
+     * (active), queued behind another, or never queued at all (its signal was
+     * already aborted on arrival) — every state must settle the promise
+     * exactly once and never leave a cancelled prompt in the queue.
+     */
     private settleApproval;
     /**
      * Ask the user one or more questions through the dialog overlay. One

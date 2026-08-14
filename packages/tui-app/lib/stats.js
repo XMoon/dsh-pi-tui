@@ -16,6 +16,10 @@ const EMPTY = {
     outputTokens: 0,
     cacheReadTokens: 0,
 };
+/** Key identifying one step's model output (turn + step). */
+function stepKey(turn, step) {
+    return `${turn}/${step}`;
+}
 /**
  * Fold the session log into performance statistics.
  * @param events - the session log.
@@ -29,7 +33,6 @@ export function computeStats(events) {
     const outputMs = [];
     let firstTokenTotal = 0;
     let firstTokenCount = 0;
-    const stepKey = (turn, step) => `${turn}/${step}`;
     for (const event of events) {
         switch (event.type) {
             case 'turn/end':
@@ -98,6 +101,95 @@ function addUsage(stats, usage) {
     stats.inputTokens += usage.inputTokens;
     stats.outputTokens += usage.outputTokens;
     stats.cacheReadTokens += usage.cacheReadTokens ?? 0;
+}
+/**
+ * Incremental stats folding: apply appended events and read `snapshot()`
+ * anytime. The footer refreshes on every step/turn boundary, so a per-event
+ * fold keeps a long session's status line O(1) instead of re-scanning the
+ * whole log (computeStats) per refresh.
+ */
+export class StatsFolder {
+    stats = { ...EMPTY };
+    stepStart = new Map();
+    firstDelta = new Map();
+    lastDelta = new Map();
+    outputMs = [];
+    firstTokenTotal = 0;
+    firstTokenCount = 0;
+    /**
+     * Apply appended events in log order (a full log on resume, suffixes after).
+     * @param events - the appended session events.
+     */
+    apply(events) {
+        for (const event of events)
+            this.applyEvent(event);
+    }
+    /** The derived stats as of the last applied event. */
+    snapshot() {
+        const derived = { ...this.stats };
+        if (this.firstTokenCount > 0)
+            derived.firstTokenMsAvg = this.firstTokenTotal / this.firstTokenCount;
+        const streamMs = this.outputMs.reduce((sum, ms) => sum + ms, 0);
+        if (streamMs > 0)
+            derived.tokensPerSec = Math.round((derived.outputTokens * 1000) / streamMs);
+        const totalInput = derived.inputTokens + derived.cacheReadTokens;
+        if (totalInput > 0)
+            derived.cacheHitPct = (derived.cacheReadTokens * 100) / totalInput;
+        return derived;
+    }
+    applyEvent(event) {
+        switch (event.type) {
+            case 'turn/end':
+                this.stats.turns += 1;
+                break;
+            case 'step/start':
+                this.stats.steps += 1;
+                this.stepStart.set(stepKey(event.data.turn, event.data.step), event.time);
+                break;
+            case 'step/end': {
+                const key = stepKey(event.data.turn, event.data.step);
+                const start = this.stepStart.get(key);
+                if (start !== undefined)
+                    this.stats.llmMs += event.time - start;
+                const first = this.firstDelta.get(key);
+                const last = this.lastDelta.get(key);
+                if (first !== undefined && last !== undefined)
+                    this.outputMs.push(last - first);
+                break;
+            }
+            case 'assistant/chunk': {
+                const { chunk } = event.data;
+                if (chunk.type === 'text-delta') {
+                    const key = stepKey(event.data.turn, event.data.step);
+                    if (!this.firstDelta.has(key)) {
+                        this.firstDelta.set(key, event.time);
+                        const start = this.stepStart.get(key);
+                        if (start !== undefined) {
+                            this.firstTokenTotal += event.time - start;
+                            this.firstTokenCount += 1;
+                        }
+                    }
+                    this.lastDelta.set(key, event.time);
+                }
+                else if (chunk.type === 'usage') {
+                    addUsage(this.stats, chunk.usage);
+                }
+                break;
+            }
+            case 'assistant/message': {
+                if (event.data.usage !== undefined)
+                    addUsage(this.stats, event.data.usage);
+                break;
+            }
+            case 'request/context': {
+                if (event.data.contextWindow !== undefined)
+                    this.stats.contextWindow = event.data.contextWindow;
+                break;
+            }
+            default:
+                break;
+        }
+    }
 }
 /** One decimal place, dropping a redundant ".0". */
 function trimDecimal(value) {

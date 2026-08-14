@@ -35,6 +35,29 @@ export interface SessionStats {
  * @returns aggregated statistics.
  */
 export declare function computeStats(events: readonly SessionEvent[]): SessionStats;
+/**
+ * Incremental stats folding: apply appended events and read `snapshot()`
+ * anytime. The footer refreshes on every step/turn boundary, so a per-event
+ * fold keeps a long session's status line O(1) instead of re-scanning the
+ * whole log (computeStats) per refresh.
+ */
+export declare class StatsFolder {
+    private readonly stats;
+    private readonly stepStart;
+    private readonly firstDelta;
+    private readonly lastDelta;
+    private readonly outputMs;
+    private firstTokenTotal;
+    private firstTokenCount;
+    /**
+     * Apply appended events in log order (a full log on resume, suffixes after).
+     * @param events - the appended session events.
+     */
+    apply(events: readonly SessionEvent[]): void;
+    /** The derived stats as of the last applied event. */
+    snapshot(): SessionStats;
+    private applyEvent;
+}
 /** Format a token count with pi.s footer rules: 1.5k, 190k, 1.0M, 86M. */
 export declare function formatTokens(count: number): string;
 /**
