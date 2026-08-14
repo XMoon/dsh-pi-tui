@@ -387,6 +387,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousViewportTop = prevViewportTop;
 			this.previousHeight = height;
+			// Keep the width state in sync too: widthChanged is checked before
+			// this path today, but a reordered branch must not compare against
+			// a stale width on the next frame.
+			this.previousWidth = width;
 			// Processed output is unchanged, but keep the raw/image-id caches in
 			// sync so future frames keep hitting the reuse fast path (e.g. the
 			// cursor-marker line gets a fresh string every frame).
