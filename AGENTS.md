@@ -1,6 +1,6 @@
 # AGENTS.md
 
-dsh-pi-tui — a third-party TUI mode for DeepSeek Harness (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui). Read this file before editing; read [PROGRESS.md](PROGRESS.md) for the milestone plan and current state.
+dsh-pi-tui — a third-party TUI mode for DeepSeek Harness (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui). Read this file before editing. (The milestone plan and work log live in `temp/PROGRESS.md`, kept outside the repository.)
 
 ## Naming (hard rules)
 
@@ -8,7 +8,7 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
 
 | Thing | Name | Notes |
 |---|---|---|
-| Repository | `dsh-pi-tui` | `repo root (this directory)` |
+| Repository | `dsh-pi-tui` | repo root (this directory) |
 | Profile (`dsh --profile`) | `pi-tui` | **Never `tui`** — that is reserved territory |
 | Vendored fork package | `@dsh-pi-tui/pi-tui` | rescopped from `@moonshot-ai/pi-tui`; `private: true`, never published under upstream's name |
 | Bundle package | `@dsh-pi-tui/tui-app` | the `dsh.bundle` patch layer |
@@ -86,5 +86,4 @@ and input routing are verified without a TTY or a model connection.
 
 ## Docs
 
-- [PROGRESS.md](PROGRESS.md) — milestone plan, completed work, next steps.
 - README.md — install and run instructions for humans.
