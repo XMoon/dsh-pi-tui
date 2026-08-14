@@ -116,8 +116,10 @@ export class TuiApp {
     headerText = '🐋 dsh-pi-tui';
     /** Footer text, kept for theme-swap repaints. */
     footerText = '';
-    /** Plan-mode badge state; appended to the header when active. */
+    /** Plan-mode badge state; appended to the header and footer when active. */
     planMode = false;
+    /** The editor's normal border style, restored when plan mode ends. */
+    editorBorder;
     /** Todo summary segment of the header (without the base or badges). */
     todoText = '';
     /** Welcome card shown above the transcript; empty renders nothing. */
@@ -133,6 +135,7 @@ export class TuiApp {
         this.events = events;
         this.tui = new TuiMainScreen(terminal);
         this.editor = new Editor(this.tui, editorTheme);
+        this.editorBorder = this.editor.borderColor;
         this.editor.onSubmit = (text) => this.events.onSubmit(text);
         this.header = new Text('🐋 dsh-pi-tui', 0, 0);
         this.messagesView = new Container();
@@ -230,10 +233,13 @@ export class TuiApp {
         }
         this.requestRender();
     }
-    /** Show or clear the plan-mode badge in the header line. */
+    /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
     setPlanMode(active) {
         this.planMode = active;
         this.renderHeader();
+        this.editor.borderColor = active ? color.warning : this.editorBorder;
+        this.editor.invalidate();
+        this.requestRender();
     }
     /** Show a transient error line under the transcript; the next repaint clears it. */
     notify(text) {
@@ -363,6 +369,7 @@ export class TuiApp {
             ? contextBar(this.status.contextTokens, this.status.contextWindow)
             : '';
         const line1 = [
+            this.planMode ? color.warning('[plan]') : '',
             this.status.model === '' ? '' : `[${this.status.model}]`,
             this.status.cwd,
             this.status.branch === '' ? '' : this.status.branch,

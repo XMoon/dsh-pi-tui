@@ -150,6 +150,18 @@ test('plugin-sourced user messages fold as system entries', () => {
   assert.ok(system.text.includes('<system-reminder>'))
 })
 
+test('aborted turn/end folds into an interrupted card', () => {
+  const messages = foldTranscript([
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 0),
+  ])
+  assert.deepEqual(kinds(messages), ['tool'])
+  const tool = messages[0]
+  assert.ok(tool !== undefined && tool.kind === 'tool')
+  assert.equal(tool.name, 'interrupted')
+  assert.equal(tool.status, 'error')
+  assert.equal(tool.result, 'cancelled by user')
+})
+
 test('renderTranscript produces the markdown document', () => {
   const text = renderTranscript([
     { kind: 'user', text: 'hi' },

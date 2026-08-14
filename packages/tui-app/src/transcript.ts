@@ -179,6 +179,8 @@ export function foldTranscript(events: readonly SessionEvent[]): TranscriptMessa
         if (event.data.reason.kind === 'error') {
           const error = event.data.reason.error
           messages.push({ kind: 'tool', turn: currentTurn, name: 'error', args: '', result: `${error.code}: ${error.message}`, status: 'error' })
+        } else if (event.data.reason.kind === 'aborted') {
+          messages.push({ kind: 'tool', turn: currentTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
         }
         break
       }

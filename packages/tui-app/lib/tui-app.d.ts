@@ -112,8 +112,10 @@ export declare class TuiApp {
     private headerText;
     /** Footer text, kept for theme-swap repaints. */
     private footerText;
-    /** Plan-mode badge state; appended to the header when active. */
+    /** Plan-mode badge state; appended to the header and footer when active. */
     private planMode;
+    /** The editor's normal border style, restored when plan mode ends. */
+    private readonly editorBorder;
     /** Todo summary segment of the header (without the base or badges). */
     private todoText;
     /** Welcome card shown above the transcript; empty renders nothing. */
@@ -142,7 +144,7 @@ export declare class TuiApp {
     setTranscript(messages: readonly TranscriptMessage[]): void;
     /** Rebuild the message component tree from the current transcript state. */
     private rebuildMessages;
-    /** Show or clear the plan-mode badge in the header line. */
+    /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
     setPlanMode(active: boolean): void;
     /** Show a transient error line under the transcript; the next repaint clears it. */
     notify(text: string): void;

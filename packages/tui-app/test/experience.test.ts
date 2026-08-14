@@ -43,6 +43,19 @@ test('footer shows model, cwd, branch, counters, context bar, and stats', async 
   assert.ok(view.includes('2 轮 · 5 步| LLM 8.1s'), `stats line missing:\n${view}`)
 })
 
+test('plan mode shows badges in header and footer and tints the editor border', async () => {
+  const { vt, app } = startApp()
+  app.setStatus({ model: 'm', cwd: 'c' })
+  app.setPlanMode(true)
+  await vt.waitForRender()
+  let view = await viewport(vt)
+  assert.ok(view.includes('[plan]'), `plan badge missing:\n${view}`)
+  assert.ok(view.includes('🐋 dsh-pi-tui [plan]'), `header badge missing:\n${view}`)
+  app.setPlanMode(false)
+  view = await viewport(vt)
+  assert.ok(!view.includes('[plan]'), `badge still visible:\n${view}`)
+})
+
 test('status merges partial updates', async () => {
   const { vt, app } = startApp()
   app.setStatus({ model: 'm', cwd: 'c' })
