@@ -29,6 +29,7 @@ import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown } from './transcript.ts'
 import {
   MAX_PICKER_SESSIONS,
+  findSessionMatch,
   headerToPickerRow,
   loadSessionTitles,
   sessionPickerItem,
@@ -273,63 +274,103 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     },
   })
 
+  // Shared /sessions + /resume body: list persisted sessions newest-first,
+  // open the picker, and enrich rows with titles in the background. The
+  // header parameter lets the resume alias present itself under its own name.
+  const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
+    const liveAgent = runner.liveAgent
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
+    // Live-preferred listing (sessionQuery) marks sessions currently
+    // loaded in the store; the persistence fallback is the plain list.
+    // The engine is read structurally off the context (no package
+    // import): `dsh-base` mounts it in every profile.
+    const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
+    let rows: SessionPickerRow[]
+    if (query !== undefined) {
+      rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
+    } else {
+      rows = (await persistence.list()).map(header =>
+        headerToPickerRow(header, header.id === liveAgent.session.id))
+    }
+    rows.sort((a, b) => b.createdAt - a.createdAt)
+    if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
+    // The picker opens instantly on the headers; titles land in the
+    // background below. The cap keeps the title read bounded.
+    const shown = rows.slice(0, MAX_PICKER_SESSIONS)
+    const picker = app.openPicker(
+      shown.map(row => sessionPickerItem(row, liveAgent.session.id)),
+      (id) => {
+        if (id === liveAgent.session.id) return
+        void runner.switchSession(id).then(error => {
+          if (error !== undefined) app.notify(error)
+        })
+      },
+      () => {},
+      {
+        enableSearch: true,
+        header,
+        noMatchText: '  no matching sessions',
+        initialQuery: invocation.rawInput.trim(),
+        width: 76,
+        maxHeight: 26,
+        showHint: true,
+      },
+    )
+    // Enrich rows with titles as they load; the active search query is
+    // re-applied by the picker, and the current marker is re-read so a
+    // session switch mid-load does not mislabel.
+    void loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
+      .then(titles => {
+        if (titles.size === 0) return
+        picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, liveAgent.session.id)))
+      })
+      .catch(() => {
+        // Cancellation (TUI quit) or an unexpected batch failure only
+        // loses the titles, never the picker.
+      })
+    return { kind: 'success' }
+  }
+
   commands.register({
     name: 'sessions',
     description: 'List, search, and switch persisted sessions',
     input: { hint: '[query]' },
+    handler: (invocation) => openSessionPicker(invocation, 'sessions'),
+  })
+
+  commands.register({
+    name: 'resume',
+    description: 'Resume a session by id or pick from the list (alias of /sessions)',
+    input: { hint: '[id|query]' },
     handler: async (invocation) => {
-      const liveAgent = runner.liveAgent
-      const persistence = ctx.get('sessionPersistence')
-      if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
-      // Live-preferred listing (sessionQuery) marks sessions currently
-      // loaded in the store; the persistence fallback is the plain list.
-      // The engine is read structurally off the context (no package
-      // import): `dsh-base` mounts it in every profile.
-      const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-      let rows: SessionPickerRow[]
-      if (query !== undefined) {
-        rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
-      } else {
-        rows = (await persistence.list()).map(header =>
-          headerToPickerRow(header, header.id === liveAgent.session.id))
+      const raw = invocation.rawInput.trim()
+      if (raw !== '') {
+        // Direct resume: exact id, a session- prefixed prefix, or the short
+        // id prefix. Falls back to the picker when nothing matches.
+        const liveAgent = runner.liveAgent
+        const persistence = ctx.get('sessionPersistence')
+        if (persistence !== undefined) {
+          const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
+          let rows: SessionPickerRow[]
+          if (query !== undefined) {
+            rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
+          } else {
+            rows = (await persistence.list()).map(header =>
+              headerToPickerRow(header, header.id === liveAgent.session.id))
+          }
+          rows.sort((a, b) => b.createdAt - a.createdAt)
+          const match = findSessionMatch(rows, raw)
+          if (match !== undefined) {
+            if (match.id === liveAgent.session.id) return { kind: 'error', text: 'already on this session' }
+            void runner.switchSession(match.id).then(error => {
+              if (error !== undefined) app.notify(error)
+            })
+            return { kind: 'success' }
+          }
+        }
       }
-      rows.sort((a, b) => b.createdAt - a.createdAt)
-      if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
-      // The picker opens instantly on the headers; titles land in the
-      // background below. The cap keeps the title read bounded.
-      const shown = rows.slice(0, MAX_PICKER_SESSIONS)
-      const picker = app.openPicker(
-        shown.map(row => sessionPickerItem(row, liveAgent.session.id)),
-        (id) => {
-          if (id === liveAgent.session.id) return
-          void runner.switchSession(id).then(error => {
-            if (error !== undefined) app.notify(error)
-          })
-        },
-        () => {},
-        {
-          enableSearch: true,
-          header: 'sessions',
-          noMatchText: '  no matching sessions',
-          initialQuery: invocation.rawInput.trim(),
-          width: 76,
-          maxHeight: 26,
-          showHint: true,
-        },
-      )
-      // Enrich rows with titles as they load; the active search query is
-      // re-applied by the picker, and the current marker is re-read so a
-      // session switch mid-load does not mislabel.
-      void loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
-        .then(titles => {
-          if (titles.size === 0) return
-          picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, liveAgent.session.id)))
-        })
-        .catch(() => {
-          // Cancellation (TUI quit) or an unexpected batch failure only
-          // loses the titles, never the picker.
-        })
-      return { kind: 'success' }
+      return openSessionPicker(invocation, 'resume')
     },
   })
 
@@ -342,7 +383,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
       const skills = ctx.get('skills')
       if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
       const load = async (name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
-        const skill = await skills.get(name, { cwd })
+        const skill = await skills.get(name, { cwd, scope: liveAgent.ctx })
         if (skill === undefined) return { kind: 'error', text: `unknown skill "${name}"` }
         liveAgent.inject(createUserMessage({
           content: [{ type: 'text', text: `Skill loaded by the user: **${skill.name}**\n\n${skill.content ?? skill.description}` }],
@@ -353,7 +394,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
       const name = invocation.rawInput.trim()
       if (name !== '') return load(name)
       // No argument: pick from the catalog.
-      const catalog = await skills.list({ cwd })
+      const catalog = await skills.list({ cwd, scope: liveAgent.ctx })
       if (catalog.length === 0) return { kind: 'error', text: 'no skills available' }
       // SettingsList rows: Enter cycles the `✓` value, which fires onChange.
       app.openSettings(

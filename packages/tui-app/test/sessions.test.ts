@@ -15,6 +15,7 @@ import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
   MAX_PICKER_SESSIONS,
+  findSessionMatch,
   formatSessionAge,
   headerToPickerRow,
   loadSessionTitles,
@@ -267,3 +268,16 @@ test('picker Esc cancels', async () => {
   assert.equal(cancelled, 1)
   handle.close()
 })
+
+test('findSessionMatch resolves full ids, session- prefixes, and short ids', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-11111111-2222-3333-4444-555555555555', createdAt: 2, live: false },
+    { id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', createdAt: 3, live: false },
+    { id: 'session-99999999-8888-7777-6666-555555555555', createdAt: 1, live: false },
+  ]
+  assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+  assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+  assert.equal(findSessionMatch(rows, 'aaaaaaa')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+  assert.equal(findSessionMatch(rows, 'nope'), undefined)
+})
+

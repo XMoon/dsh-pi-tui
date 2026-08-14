@@ -115,6 +115,24 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string): Ses
   }
 }
 
+/**
+ * Resolve one session row for a resume query: an exact id, a
+ * `session-`-prefixed prefix, or a short-id prefix. Rows are newest-first,
+ * so the first match is the most recent candidate.
+ * @param rows - the picker rows, newest first.
+ * @param query - the resume query (trimmed).
+ * @returns the matching row, or undefined.
+ */
+export function findSessionMatch(rows: readonly SessionPickerRow[], query: string): SessionPickerRow | undefined {
+  // Strip an optional session- prefix before prefix matching so both
+  // `session-aaaaaaaa-bbbb` and `aaaaaaaa-bbbb` resolve.
+  const bare = query.replace(/^session[-_]/i, '')
+  return rows.find(row =>
+    row.id === query
+    || row.id.startsWith(`session-${bare}`)
+    || shortSessionId(row.id).startsWith(bare))
+}
+
 /** Map a persistence header onto the picker row shape. */
 export function headerToPickerRow(header: SessionHeader, live: boolean): SessionPickerRow {
   return {
