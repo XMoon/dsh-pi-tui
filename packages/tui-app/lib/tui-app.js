@@ -714,6 +714,22 @@ export class TuiApp {
         }
         if (message.kind === 'system') {
             const expanded = message.turn >= boundary;
+            // Labeled entries are context injections: the row names the producer
+            // like the Web ContextInjectionRow (上下文注入 · label), with a notice
+            // form's one-line account on the folded row. Unlabeled entries keep
+            // the generic section marker.
+            if (message.label !== undefined) {
+                const row = new Container();
+                if (expanded) {
+                    row.addChild(new Text(color.textMuted(`上下文注入 ${message.label}`), 0, 0));
+                    row.addChild(new Text(message.text, 0, 0));
+                }
+                else {
+                    const summary = message.summary === undefined ? '' : ` — ${message.summary}`;
+                    row.addChild(new Text(color.textMuted(`上下文注入 ${message.label}${summary} (ctrl+o to expand)`), 0, 0));
+                }
+                return row;
+            }
             const text = expanded
                 ? `${color.textMuted('§')} ${message.text}`
                 : color.textMuted(`§ ${preview(message.text, 2)} (ctrl+o to expand)`);

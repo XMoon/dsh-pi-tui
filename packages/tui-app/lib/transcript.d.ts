@@ -32,11 +32,18 @@ export type TranscriptMessage = {
     text: string; /** Still streaming reasoning deltas for its step. */
     running?: boolean;
 }
-/** Injected context (system reminders, skill content) from non-user sources. */
+/**
+ * Injected context (system reminders, skill content) from non-user sources.
+ * Labeled entries carry the Web-provenance producer name (e.g. AGENTS.md,
+ * @deepseek-ai/dsh-system-prompt, skill-catalog) and, for notice forms,
+ * the producer's one-line summary.
+ */
  | {
     kind: 'system';
     turn: number;
     text: string;
+    label?: string;
+    summary?: string;
 } | {
     kind: 'tool';
     turn: number;

@@ -18,6 +18,7 @@
 
 import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { contextProvenance, contextSummary } from './context.ts'
 // The command/run + command/done event merge (SessionEventMap extension).
 import type {} from '@deepseek-ai/dsh-commands'
 // The subagent/descriptor event merge (SessionEventMap extension).
@@ -32,8 +33,13 @@ export type TranscriptMessage =
   | { kind: 'user'; turn: number; text: string }
   | { kind: 'assistant'; turn: number; text: string }
   | { kind: 'thinking'; turn: number; text: string; /** Still streaming reasoning deltas for its step. */ running?: boolean }
-  /** Injected context (system reminders, skill content) from non-user sources. */
-  | { kind: 'system'; turn: number; text: string }
+  /**
+   * Injected context (system reminders, skill content) from non-user sources.
+   * Labeled entries carry the Web-provenance producer name (e.g. AGENTS.md,
+   * @deepseek-ai/dsh-system-prompt, skill-catalog) and, for notice forms,
+   * the producer's one-line summary.
+   */
+  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string }
   | {
     kind: 'tool'
     turn: number
@@ -271,7 +277,17 @@ export class TranscriptFolder {
         if (event.data.source.kind === 'user') {
           this.items.push({ kind: 'user', turn: this.currentTurn, text })
         } else {
-          this.items.push({ kind: 'system', turn: this.currentTurn, text })
+          // Injected context: name the producer the way the Web row does
+          // (contextProvenance), plus a notice form's one-line account.
+          const provenance = contextProvenance(event.data.source)
+          const summary = contextSummary(event.data.source)
+          this.items.push({
+            kind: 'system',
+            turn: this.currentTurn,
+            text,
+            ...provenance.label === null ? {} : { label: provenance.label },
+            ...summary === null ? {} : { summary },
+          })
         }
         break
       }

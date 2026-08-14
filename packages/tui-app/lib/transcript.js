@@ -15,6 +15,7 @@
  * component tree on long sessions.
  * @module @dsh-pi-tui/tui-app/transcript
  */
+import { contextProvenance, contextSummary } from "./context.js";
 /** Text of a message's content blocks, joined; empty when there is no text. */
 export function textOf(blocks) {
     return blocks
@@ -228,7 +229,17 @@ export class TranscriptFolder {
                     this.items.push({ kind: 'user', turn: this.currentTurn, text });
                 }
                 else {
-                    this.items.push({ kind: 'system', turn: this.currentTurn, text });
+                    // Injected context: name the producer the way the Web row does
+                    // (contextProvenance), plus a notice form's one-line account.
+                    const provenance = contextProvenance(event.data.source);
+                    const summary = contextSummary(event.data.source);
+                    this.items.push({
+                        kind: 'system',
+                        turn: this.currentTurn,
+                        text,
+                        ...provenance.label === null ? {} : { label: provenance.label },
+                        ...summary === null ? {} : { summary },
+                    });
                 }
                 break;
             }

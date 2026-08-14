@@ -171,6 +171,7 @@ test('plugin-sourced user messages fold as system entries', () => {
   const system = messages[0]
   assert.ok(system !== undefined && system.kind === 'system')
   assert.ok(system.text.includes('<system-reminder>'))
+  assert.equal(system.label, 'agent-instructions', 'the producer label must be projected')
 })
 
 test('aborted turn/end folds into an interrupted card', () => {
@@ -576,4 +577,85 @@ test('tool results keep their content blocks and meta for presentation', () => {
   assert.equal(tool.resultBlocks?.length, 1, 'result content blocks must be kept')
   assert.deepEqual(tool.meta, { path: '/ws/src/foo.ts', totalLines: 1 }, 'result meta must be kept')
 })
+
+test('injected context rows carry their producer labels (web provenance)', () => {
+  const injections: { source: Record<string, unknown>; label: string }[] = [
+    {
+      source: { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md', kind: 'baseline' }] },
+      label: 'AGENTS.md',
+    },
+    {
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
+      label: '@deepseek-ai/dsh-system-prompt',
+    },
+    {
+      source: { kind: 'skill-invocation', form: 'instructions', name: 'skill-catalog' },
+      label: 'skill-catalog',
+    },
+  ]
+  const events: SessionEvent[] = injections.flatMap((injection, index) => [event('user/message', {
+    id: MessageId(`msg-inj-${index}`),
+    role: 'user',
+    content: [{ type: 'text', text: 'injected body' }],
+    source: injection.source as never,
+  }, index)])
+  const messages = foldTranscript(events)
+  assert.deepEqual(kinds(messages), ['system', 'system', 'system'])
+  messages.forEach((message, index) => {
+    assert.ok(message !== undefined && message.kind === 'system')
+    assert.equal(message.label, injections[index]?.label, `label for injection ${index}`)
+  })
+})
+
+test('a session-reference source folds as recall with its joined labels', () => {
+  const messages = foldTranscript([
+    event('user/message', {
+      id: MessageId('msg-ref'),
+      role: 'user',
+      content: [{ type: 'text', text: 'recalled material' }],
+      source: {
+        kind: 'session-reference',
+        form: 'recall',
+        version: 1,
+        references: [
+          { sessionId: 's1', label: 'old chat', capturedThroughSeq: 3, compacted: false, originalMessages: 4, retainedMessages: 4, omittedMessages: 0, omittedBytes: 0, truncated: false, inputIndex: 0 },
+          { sessionId: 's2', label: 'old chat', capturedThroughSeq: null, compacted: false, originalMessages: 2, retainedMessages: 2, omittedMessages: 0, omittedBytes: 0, truncated: false, inputIndex: 1 },
+        ],
+      } as never,
+    }, 0),
+  ])
+  const system = messages[0]
+  assert.ok(system !== undefined && system.kind === 'system')
+  assert.equal(system.label, 'old chat', 'distinct reference labels join as one label')
+})
+
+test('a notice-form injection records its one-line summary', () => {
+  const messages = foldTranscript([
+    event('user/message', {
+      id: MessageId('msg-notice'),
+      role: 'user',
+      content: [{ type: 'text', text: '3 files written' }],
+      source: { kind: 'plugin', plugin: 'todo', form: 'notice', summary: 'saved the todo list' },
+    }, 0),
+  ])
+  const system = messages[0]
+  assert.ok(system !== undefined && system.kind === 'system')
+  assert.equal(system.label, 'todo')
+  assert.equal(system.summary, 'saved the todo list')
+})
+
+test('an unreadable injection source degrades to its kind as the label', () => {
+  const messages = foldTranscript([
+    event('user/message', {
+      id: MessageId('msg-unknown'),
+      role: 'user',
+      content: [{ type: 'text', text: 'opaque' }],
+      source: { kind: 'mystery-producer' } as never,
+    }, 0),
+  ])
+  const system = messages[0]
+  assert.ok(system !== undefined && system.kind === 'system')
+  assert.equal(system.label, 'mystery-producer')
+})
+
 

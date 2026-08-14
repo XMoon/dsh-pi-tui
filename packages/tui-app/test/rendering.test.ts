@@ -338,3 +338,41 @@ test('terminal cards show the output and the exit code', async () => {
   assert.ok(view.includes('[exit 0]'), `exit pill missing:\n${view}`)
   app.stop()
 })
+
+test('injected context renders a web-style labeled row and expands to its body', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'system', turn: 0,
+    text: '# AGENTS.md\nDo the thing carefully.\nNever break the build.',
+    label: 'AGENTS.md',
+  }])
+  // Folded: the row names the producer, the body stays hidden.
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('上下文注入 AGENTS.md'), `injected label missing:\n${folded}`)
+  assert.ok(!folded.includes('Do the thing'), `injected body leaked while folded:\n${folded}`)
+  // Expanded: the body appears under the labeled header.
+  app.setToolOutputExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('上下文注入 AGENTS.md'), `labeled header missing when expanded:\n${expanded}`)
+  assert.ok(expanded.includes('Do the thing carefully.'), `injected body missing:\n${expanded}`)
+})
+
+test('a notice injection folds with its one-line summary', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'system', turn: 0,
+    text: '3 files written',
+    label: 'todo',
+    summary: 'saved the todo list',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('上下文注入 todo — saved the todo list'), `notice summary missing:\n${view}`)
+})
+
+test('unlabeled system entries keep the section marker', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'system', turn: 0, text: 'llm retry 1/3 — BUSY: overloaded' }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('§ llm retry'), `section marker missing:\n${view}`)
+})
+
