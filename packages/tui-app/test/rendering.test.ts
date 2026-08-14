@@ -221,8 +221,9 @@ test('welcome card wraps long facts inside a full-width box', async () => {
     preset: 'standard',
   })
   const view = await viewport(vt)
-  // Facts render in full: nothing is truncated with an ellipsis on the
-  // session/model line (wrap instead of truncate).
+  // Facts render in full: the session id is never truncated, and long lines
+  // wrap instead of ending in an ellipsis.
+  assert.ok(view.includes(`session-${'x'.repeat(40)}`), `session id truncated:\n${view}`)
   assert.ok(view.includes('deepseek-v4-flash'), `model missing:\n${view}`)
   assert.ok(view.includes('standard'), `preset missing:\n${view}`)
   assert.ok(view.includes('0.1.0-rc.6'), `version missing:\n${view}`)
@@ -400,7 +401,10 @@ test('fullscreen mouse click toggles one card independently of the global fold',
   assert.ok(view.includes('Bash ls [ok]'), `clicked card header missing:\n${view}`)
   assert.ok(!view.includes('\nthree'), `thinking must stay folded after the click:\n${view}`)
   assert.ok(!view.includes('\n/ws'), `second tool card must stay folded:\n${view}`)
-  // Clicking the same row again collapses just that card.
+  // Clicking the same row again collapses just that card. The second click
+  // waits past the alt screen's double-click window (a fast repeat selects
+  // a word, like a native terminal).
+  await new Promise(resolve => setTimeout(resolve, 600))
   vt.sendInput('\x1b[<0;10;4M')
   vt.sendInput('\x1b[<0;10;4m')
   view = await viewport(vt)
@@ -444,6 +448,23 @@ test('fullscreen click on a thinking row expands it; wheel, right button, and dr
   assert.ok(view.includes('\nline two'), `wheel/right must not collapse the card:\n${view}`)
   assert.ok(!view.includes('\nb'), `wheel/right must not expand the tool card:\n${view}`)
   app.setFullscreen(false)
+})
+
+
+
+test('tool card headers carry a per-variant emoji', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"/ws/src/foo.ts"}', result: 'x', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'x', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"foo"}', result: 'x', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'subagent', args: 'worker', result: '', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('📖 Read /ws/src/foo.ts'), `read emoji missing:\n${view}`)
+  assert.ok(view.includes('🖥️ Bash ls'), `bash emoji missing:\n${view}`)
+  assert.ok(view.includes('🔍 Search foo'), `search emoji missing:\n${view}`)
+  assert.ok(view.includes('🤖 Subagent worker'), `subagent emoji missing:\n${view}`)
 })
 
 test('regular mode leaves the mouse entirely to the terminal (no click handling)', async () => {

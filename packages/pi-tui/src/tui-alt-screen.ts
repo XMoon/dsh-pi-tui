@@ -989,10 +989,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				clickedUrl === undefined &&
 				this.selectionAnchor !== undefined &&
 				this.selectionAnchor.row === point.row &&
-				this.selectionAnchor.col === point.col
+				this.selectionAnchor.col === point.col &&
+				// Character granularity = a single click: a double click
+				// selects a word and stays a selection, never a disclosure.
+				this.selectionGranularity === "character"
 			) {
 				// Coordinates are 0-based screen cells (SGR values minus one).
+				// A plain click is a disclosure action, not a selection: skip
+				// the clipboard feedback so the host callback owns the click.
 				this.onCellClick?.(event.x, event.y);
+				this.requestRender();
+				return;
 			}
 			this.copySelectionToClipboard();
 			this.requestRender();

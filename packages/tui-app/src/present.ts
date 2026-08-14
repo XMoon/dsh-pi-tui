@@ -149,6 +149,36 @@ export function classifyTool(name: string): ToolVariant {
   return TOOL_VARIANTS[name] ?? 'others'
 }
 
+/** Emoji per exact tool name, for synthetic cards without a registry entry. */
+const TOOL_EMOJIS: Record<string, string> = {
+  shell: '🖥️',
+  subagent: '🤖',
+  workflow: '🧵',
+  'workflow-member': '🤖',
+  error: '❌',
+  interrupted: '⏹️',
+}
+
+/** Emoji per row variant, applied to every registered tool of that class. */
+const VARIANT_EMOJIS: Record<ToolVariant, string> = {
+  read: '📖',
+  search: '🔍',
+  bash: '🖥️',
+  write: '📝',
+  edit: '✏️',
+  code: '⚙️',
+  others: '🛠️',
+}
+
+/**
+ * The card header's leading emoji: exact-name entries first (synthetic
+ * cards), then the tool's row-variant icon, then the generic wrench.
+ * @param name - the tool name.
+ */
+export function toolEmoji(name: string): string {
+  return TOOL_EMOJIS[name] ?? VARIANT_EMOJIS[classifyTool(name)]
+}
+
 /** The rendered card header: design title plus the relativized args summary. */
 export interface ToolCardHeader {
   /** Design title (e.g. Read, Search, Bash, a tool-owned title). */

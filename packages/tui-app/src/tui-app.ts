@@ -52,7 +52,7 @@ import {
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
-import { firstLine, latestLine, relativizeToCwd, toolCardHeader, type ToolPresenter } from './present.ts'
+import { firstLine, latestLine, relativizeToCwd, toolCardHeader, toolEmoji, type ToolPresenter } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
 import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
@@ -146,12 +146,17 @@ class WelcomeCard implements Component {
     if (facts === undefined) return []
     if (this.lastWidth === width && this.cached.length > 0) return this.cached
     this.lastWidth = width
-    const shortId = facts.sessionId.length > 24 ? `${facts.sessionId.slice(0, 24)}…` : facts.sessionId
-    const line1 = `🐋 session ${color.textDim(shortId)} · ${color.text(facts.model)}`
+    // Three columns: the session identity (full id — never truncated), the
+    // model/preset, and the workspace. Each row wraps instead of ellipsizing,
+    // so the box keeps the important facts readable.
+    const line1 = `🐋 session ${color.textDim(facts.sessionId)}`
     const line2 = [
+      color.text(facts.model),
       facts.preset === undefined ? '' : `preset ${color.textMuted(facts.preset)}`,
-      `v${facts.version}`,
+    ].filter(part => part !== '').join(' · ')
+    const line3 = [
       color.textMuted(facts.cwd),
+      `v${facts.version}`,
     ].filter(part => part !== '').join(' · ')
     // Wrap each line to the box's inner width so long identities read in
     // full instead of ending in an ellipsis; the box spans the same width
@@ -160,7 +165,7 @@ class WelcomeCard implements Component {
     const b = color.border
     this.cached = [
       b(`╭${'─'.repeat(Math.max(0, width - 2))}╮`),
-      ...[line1, line2].flatMap(line => wrapTextWithAnsi(line, inner).map(wrapped => {
+      ...[line1, line2, line3].flatMap(line => wrapTextWithAnsi(line, inner).map(wrapped => {
         const vis = visibleWidth(wrapped)
         return `${b('│')} ${wrapped}${' '.repeat(Math.max(0, inner - vis))} ${b('│')}`
       })),
@@ -1016,7 +1021,9 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
       const text = expanded
-        ? `${color.textDim('🐳')} ${message.text}`
+        // Expanded thinking stays dimmed so reasoning never reads like the
+        // assistant's actual output (web parity: a distinct disclosure style).
+        ? color.textDim(`🐳 ${message.text}`)
         // Folded: while the step still streams, the row follows the LATEST
         // line of reasoning (the Web's running summary); once settled it
         // shows the first line (the Web's settled summary).
@@ -1058,19 +1065,21 @@ export class TuiApp {
     const card = new Container()
     const header = toolCardHeader(message.name, message.args, this.workspaceRoot)
     const summary = header.summary === '' ? '' : ` ${header.summary}`
+    const emoji = toolEmoji(message.name)
     const pill = message.status === 'ok'
       ? color.success('[ok]')
       : message.status === 'error'
         ? color.error('[error]')
         : color.textDim('[running]')
+    const head = `${emoji} ${header.title}${summary} ${pill}`
     if (message.turn >= boundary || this.expandedOverride.get(message) === true) {
-      card.addChild(new Text(`${header.title}${summary} ${pill}`, 0, 0))
+      card.addChild(new Text(head, 0, 0))
       this.renderToolBody(card, message)
     } else {
       const resultPreview = message.result === ''
         ? ''
         : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
-      card.addChild(new Text(`${header.title}${summary} ${pill}${resultPreview}`, 0, 0))
+      card.addChild(new Text(`${head}${resultPreview}`, 0, 0))
     }
     return card
   }
@@ -1093,7 +1102,7 @@ export class TuiApp {
       const callView = this.present?.call(message.name, message.args)
       if (callView !== undefined && callView.card === 'generic' && callView.rawInput !== undefined) {
         const raw = typeof callView.rawInput === 'string' ? callView.rawInput : JSON.stringify(callView.rawInput, null, 2)
-        card.addChild(new Text(raw, 0, 0))
+        card.addChild(new Text(color.textDim(raw), 0, 0))
       }
       return
     }
@@ -1107,29 +1116,29 @@ export class TuiApp {
       switch (resultView.card) {
         case 'read': {
           for (const line of resultView.lines) {
-            card.addChild(new Text(`  ${line.number} │ ${line.text}`, 0, 0))
+            card.addChild(new Text(color.textDim(`  ${line.number} │ ${line.text}`), 0, 0))
           }
-          card.addChild(new Text(`  path: ${relativizeToCwd(resultView.path, this.workspaceRoot)}`, 0, 0))
-          card.addChild(new Text(`  total lines: ${resultView.totalLines}`, 0, 0))
+          card.addChild(new Text(color.textMuted(`  path: ${relativizeToCwd(resultView.path, this.workspaceRoot)}`), 0, 0))
+          card.addChild(new Text(color.textMuted(`  total lines: ${resultView.totalLines}`), 0, 0))
           return
         }
         case 'search': {
           if (resultView.shape === 'matches') {
             for (const file of resultView.files) {
-              card.addChild(new Text(`  ${relativizeToCwd(file.path, this.workspaceRoot)}`, 0, 0))
+              card.addChild(new Text(color.textMuted(`  ${relativizeToCwd(file.path, this.workspaceRoot)}`), 0, 0))
               for (const match of file.matches) {
-                card.addChild(new Text(`    ${match.lineNumber} │ ${match.line}`, 0, 0))
+                card.addChild(new Text(color.textDim(`    ${match.lineNumber} │ ${match.line}`), 0, 0))
               }
             }
             if (resultView.truncated) {
-              card.addChild(new Text(`  … truncated — ${resultView.total} total matches`, 0, 0))
+              card.addChild(new Text(color.textMuted(`  … truncated — ${resultView.total} total matches`), 0, 0))
             }
           } else {
             for (const path of resultView.paths) {
-              card.addChild(new Text(`  ${relativizeToCwd(path, this.workspaceRoot)}`, 0, 0))
+              card.addChild(new Text(color.textDim(`  ${relativizeToCwd(path, this.workspaceRoot)}`), 0, 0))
             }
             if (resultView.truncated) {
-              card.addChild(new Text(`  … truncated — ${resultView.total} total paths`, 0, 0))
+              card.addChild(new Text(color.textMuted(`  … truncated — ${resultView.total} total paths`), 0, 0))
             }
           }
           return
@@ -1137,7 +1146,7 @@ export class TuiApp {
         case 'terminal': {
           if (resultView.output !== undefined && resultView.output !== '') {
             for (const line of resultView.output.split('\n')) {
-              card.addChild(new Text(line, 0, 0))
+              card.addChild(new Text(color.textDim(line), 0, 0))
             }
           }
           const exit = resultView.exitCode !== undefined
@@ -1158,13 +1167,14 @@ export class TuiApp {
           break
       }
     }
-    // Generic fallback: the raw result text, diff-colored when it reads as one.
+    // Generic fallback: the raw result text dimmed (diffs keep their own
+    // + / − colors, which already distinguish them from assistant output).
     if (isDiffResult(message.name, message.result)) {
       for (const line of renderDiffLines(message.result)) {
         card.addChild(new Text(line, 0, 0))
       }
     } else {
-      card.addChild(new Text(message.result, 0, 0))
+      card.addChild(new Text(color.textDim(message.result), 0, 0))
     }
   }
 
