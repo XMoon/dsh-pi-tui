@@ -69,3 +69,28 @@ test('ctrl+d triggers the exit event (like /exit)', async () => {
     setKittyProtocolActive(false)
   }
 })
+
+test('notify is transient: cleared by the next transcript repaint', async () => {
+  const { vt, app } = startApp()
+  app.notify('resume failed')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('resume failed'), `notify line missing:\n${view}`)
+  app.setTranscript([])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('resume failed'), `notify line survived a repaint:\n${view}`)
+})
+
+test('notify is transient: cleared by its auto-clear timeout', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { notifyDurationMs: 200 })
+  app.start()
+  app.notify('transient note')
+  await new Promise(resolve => setTimeout(resolve, 40))
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('transient note'), 'notify line missing before timeout')
+  await new Promise(resolve => setTimeout(resolve, 300))
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('transient note'), 'notify line survived its timeout')
+})

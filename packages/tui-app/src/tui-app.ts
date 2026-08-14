@@ -399,16 +399,24 @@ export class TuiApp {
   private todoText = ''
   /** Welcome card shown above the transcript; empty renders nothing. */
   private welcomeText = ''
-  /** Transient error line shown under the transcript; cleared by setTranscript. */
+  /** Transient error line shown under the transcript; cleared by the next
+   * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
   private notifyText = ''
+  /** The pending auto-clear for {@link notifyText}, while one is armed. */
+  private notifyTimer: NodeJS.Timeout | undefined
+  /** How long a notify line stays before it auto-clears, in ms. */
+  private static readonly NOTIFY_DURATION_MS = 8000
+  /** The notify auto-clear window; injectable so tests stay fast. */
+  private readonly notifyDurationMs: number
   /** Timestamp of the last Esc press, for double-Esc cancellation. */
   private lastEscapeAt: number | undefined
   /** Double-Esc window in ms. */
   private static readonly ESCAPE_CANCEL_WINDOW_MS = 400
 
-  constructor(terminal: Terminal, events: TuiAppEvents) {
+  constructor(terminal: Terminal, events: TuiAppEvents, options: { notifyDurationMs?: number } = {}) {
     this.terminal = terminal
     this.events = events
+    this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS
     this.tui = new TuiMainScreen(terminal)
     this.editor = new Editor(this.tui, editorTheme)
     this.editorBorder = this.editor.borderColor
@@ -436,6 +444,7 @@ export class TuiApp {
 
   /** Leave raw mode and stop rendering. */
   stop(): void {
+    this.clearNotify()
     this.tui.stop()
     this.fullscreen?.stop()
     this.fullscreen = undefined
@@ -749,6 +758,8 @@ export class TuiApp {
    */
   setTranscript(messages: readonly TranscriptMessage[]): void {
     this.messages = messages
+    // A fresh transcript is a repaint: the transient notify line clears.
+    this.clearNotify()
     this.rebuildMessages()
   }
 
@@ -784,10 +795,29 @@ export class TuiApp {
     this.requestRender()
   }
 
-  /** Show a transient error line under the transcript; the next repaint clears it. */
+  /**
+   * Show a transient error line under the transcript. Cleared by the next
+   * `setTranscript` repaint or after {@link TuiApp.NOTIFY_DURATION_MS},
+   * whichever comes first, so a one-off notice never lingers forever.
+   */
   notify(text: string): void {
     this.notifyText = text
+    if (this.notifyTimer !== undefined) clearTimeout(this.notifyTimer)
+    this.notifyTimer = setTimeout(() => {
+      this.notifyTimer = undefined
+      this.notifyText = ''
+      this.rebuildMessages()
+    }, this.notifyDurationMs)
     this.rebuildMessages()
+  }
+
+  /** Clear the transient notify line and its pending auto-clear timer. */
+  private clearNotify(): void {
+    this.notifyText = ''
+    if (this.notifyTimer !== undefined) {
+      clearTimeout(this.notifyTimer)
+      this.notifyTimer = undefined
+    }
   }
 
   /**
