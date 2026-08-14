@@ -395,8 +395,8 @@ test('fullscreen mouse click toggles one card independently of the global fold',
   // Rows (blank spacers between blocks): header(1) + user(2) + thinking(4)
   // + tool1(6) + tool2(8) inside the scroll pane. Click the first tool card:
   // it alone expands.
-  vt.sendInput('\x1b[<0;10;6M')
-  vt.sendInput('\x1b[<0;10;6m')
+  vt.sendInput('\x1b[<0;10;8M')
+  vt.sendInput('\x1b[<0;10;8m')
   let view = await viewport(vt)
   assert.ok(view.includes('\nb'), `clicked card body missing:\n${view}`)
   assert.ok(view.includes('Bash ls [ok]'), `clicked card header missing:\n${view}`)
@@ -406,8 +406,8 @@ test('fullscreen mouse click toggles one card independently of the global fold',
   // waits past the alt screen's double-click window (a fast repeat selects
   // a word, like a native terminal).
   await new Promise(resolve => setTimeout(resolve, 600))
-  vt.sendInput('\x1b[<0;10;6M')
-  vt.sendInput('\x1b[<0;10;6m')
+  vt.sendInput('\x1b[<0;10;8M')
+  vt.sendInput('\x1b[<0;10;8m')
   view = await viewport(vt)
   assert.ok(!view.includes('\nb'), `card must collapse again:\n${view}`)
   // The keyboard Ctrl+O still expands everything, mouse state or not.

@@ -168,6 +168,10 @@ export const color = {
   error: (text: string) => hex('error')(text),
   roleUser: (text: string) => hex('roleUser')(text),
   shellMode: (text: string) => hex('shellMode')(text),
+  /** Plain italics (kimi thinking parity). */
+  italic: (text: string) => chalk.italic(text),
+  /** Dim + italic for reasoning: intermediate thinking never reads like output. */
+  textDimItalic: (text: string) => chalk.italic.hex(currentPalette.textDim)(text),
 }
 
 /** SelectList palette from the semantic tokens. */

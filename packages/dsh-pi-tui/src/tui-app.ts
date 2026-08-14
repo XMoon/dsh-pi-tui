@@ -1031,19 +1031,34 @@ export class TuiApp {
     }
     if (message.kind === 'thinking') {
       const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
-      const text = expanded
-        // Expanded thinking stays dimmed so reasoning never reads like the
-        // assistant's actual output (web parity: a distinct disclosure style).
-        ? color.textDim(`🐳  ${message.text}`)
-        // Folded: while the step still streams, the row follows the LATEST
-        // line of reasoning (the Web's running summary); once settled it
-        // shows the first line (the Web's settled summary).
-        : color.textDim(`🐳  ${
-          message.running === true
-            ? preview(latestLine(message.text), 1)
-            : preview(firstLine(message.text), 1)
-        } (ctrl+o to expand)`)
-      return new Text(text, 0, 0)
+      if (expanded) {
+        // Expanded thinking stays dim+italic so reasoning never reads like
+        // the assistant's actual output (web parity: a distinct style).
+        return new Text(color.textDimItalic(`🐳  ${message.text}`), 0, 0)
+      }
+      // Folded: exactly two content rows plus the expand hint, so the block's
+      // height is stable while reasoning streams (no per-frame jump). While a
+      // step streams the rows follow the LATEST reasoning lines (the Web's
+      // running summary); once settled they show the FIRST lines (settled
+      // summary). Every row truncates to the terminal width, so a folded
+      // block never wraps.
+      const lines = message.text.split('\n').filter(line => line !== '')
+      const shown = message.running === true ? lines.slice(-2) : lines.slice(0, 2)
+      const prefix = '🐳  '
+      const prefixWidth = visibleWidth(prefix)
+      const contentWidth = Math.max(1, this.terminal.columns - prefixWidth)
+      const rows = Array.from({ length: 2 }, (_, index) => {
+        const text = shown[index] ?? ''
+        const body = text === '' ? '' : truncateToWidth(text, contentWidth, '…')
+        const pad = index === 0 ? prefix : ' '.repeat(prefixWidth)
+        return color.textDimItalic(pad + body)
+      })
+      const remaining = lines.length - 2
+      const hint = remaining > 0
+        ? `... (${remaining} more lines, ctrl+o to expand)`
+        : '(ctrl+o to expand)'
+      rows.push(color.textDim(`${' '.repeat(prefixWidth)}${truncateToWidth(hint, contentWidth, '…')}`))
+      return new Text(rows.join('\n'), 0, 0)
     }
     if (message.kind === 'system') {
       const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
@@ -1061,13 +1076,19 @@ export class TuiApp {
           row.addChild(new Text(color.textDim(message.text), 0, 0))
         } else {
           const summary = message.summary === undefined ? '' : ` — ${message.summary}`
-          row.addChild(new Text(color.textMuted(`${emoji}  Context injection ${message.label}${summary} (ctrl+o to expand)`), 0, 0))
+          // Folded rows truncate to one line: a long label/summary must not
+          // wrap the context row (same rule as folded thinking).
+          row.addChild(new Text(truncateToWidth(
+            color.textMuted(`${emoji}  Context injection ${message.label}${summary} (ctrl+o to expand)`),
+            this.terminal.columns,
+            '…',
+          ), 0, 0))
         }
         return row
       }
       const text = expanded
         ? `${color.textMuted('§')} ${message.text}`
-        : color.textMuted(`§ ${preview(message.text, 2)} (ctrl+o to expand)`)
+        : color.textMuted(`§ ${truncateToWidth(preview(message.text, 2), Math.max(1, this.terminal.columns - 22), '…')} (ctrl+o to expand)`)
       return new Text(text, 0, 0)
     }
     if (message.kind === 'summary') {
@@ -1093,7 +1114,9 @@ export class TuiApp {
       const resultPreview = message.result === ''
         ? ''
         : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
-      card.addChild(new Text(`${head}${resultPreview}`, 0, 0))
+      // Folded rows stay one line: the head + preview truncates instead of
+      // wrapping, so the card's collapsed height is stable.
+      card.addChild(new Text(truncateToWidth(`${head}${resultPreview}`, this.terminal.columns, '…'), 0, 0))
     }
     return card
   }

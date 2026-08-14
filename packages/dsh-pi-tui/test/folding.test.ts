@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { setKittyProtocolActive } from '@xmoon76/pi-tui'
+import { setKittyProtocolActive, visibleWidth } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -113,4 +113,54 @@ test('running thinking folds to the latest line and settles to the first line', 
   const settled = await viewport(vt)
   assert.ok(settled.includes('first line'), `first line missing after settle:\n${settled}`)
   assert.ok(!settled.includes('latest line'), `latest line still shown after settle:\n${settled}`)
+})
+
+test('folded thinking holds exactly two content rows plus a hint and never wraps', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  // Three long lines: running shows the LAST two (truncated), settled the first two.
+  app.setTranscript([{
+    kind: 'thinking', turn: 0,
+    text: `${'a'.repeat(90)}\n${'b'.repeat(90)}\n${'c'.repeat(90)}`,
+    running: true,
+  }])
+  await vt.waitForRender()
+  let lines = vt.getViewport()
+  let start = lines.findIndex(line => line.includes('🐳'))
+  assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
+  let block = lines.slice(start, start + 3)
+  assert.equal(block.length, 3, `running block must be exactly 3 rows:\n${block.join('\n')}`)
+  for (const line of block) {
+    assert.ok(visibleWidth(line) <= 40, `folded row exceeds 40 cols: ${JSON.stringify(line)}`)
+  }
+  assert.ok(block[0]!.includes('bbb'), `latest reasoning missing on row 1:\n${block[0]}`)
+  assert.ok(block[1]!.includes('ccc'), `latest reasoning missing on row 2:\n${block[1]}`)
+  assert.ok(block[2]!.includes('ctrl+o'), `hint row missing:\n${block[2]}`)
+  // Settled: same three-row geometry, first two lines, hint keeps its height.
+  app.setTranscript([{
+    kind: 'thinking', turn: 0,
+    text: `${'a'.repeat(90)}\n${'b'.repeat(90)}\n${'c'.repeat(90)}`,
+  }])
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  start = lines.findIndex(line => line.includes('🐳'))
+  block = lines.slice(start, start + 3)
+  assert.equal(block.length, 3, `settled block must be exactly 3 rows:\n${block.join('\n')}`)
+  assert.ok(block[0]!.includes('aaa'), `first line missing after settle:\n${block[0]}`)
+  assert.ok(!block[0]!.includes('ccc'), `latest line leaked after settle:\n${block[0]}`)
+  assert.ok(block[2]!.includes('1 more'), `remaining hint missing:\n${block[2]}`)
+  app.stop()
+})
+
+test('folded thinking keeps its three-row height even with little content', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'only one line' }])
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const start = lines.findIndex(line => line.includes('🐳'))
+  assert.ok(start >= 0, `thinking block missing:\n${view}`)
+  const block = lines.slice(start, start + 3)
+  assert.equal(block.length, 3, `short block must stay 3 rows:\n${block.join('\n')}`)
+  assert.ok(block[2]!.includes('ctrl+o'), `hint row missing:\n${block[2]}`)
 })
