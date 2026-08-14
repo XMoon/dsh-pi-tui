@@ -186,6 +186,25 @@ describe("SelectList", () => {
 			assert.ok(!rendered.some((line) => line.includes("alpha")), "setItems kept non-matching item");
 		});
 
+		it("keeps the selected row (by value) when setItems refreshes the list", () => {
+			const items = [
+				{ value: "a", label: "alpha" },
+				{ value: "b", label: "beta" },
+				{ value: "c", label: "gamma" },
+			];
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true });
+			list.handleInput("\x1b[B"); // down to beta
+			list.handleInput("\x1b[B"); // down to gamma
+			// Background title enrichment arrives: fresh objects, same values.
+			list.setItems(items.map(item => ({ ...item, description: "enriched" })));
+			const selected = list.getSelectedItem();
+			assert.ok(selected !== null && selected.value === "c", "selection must survive setItems");
+			// A query change still resets to the top.
+			list.handleInput("a");
+			const afterFilter = list.getSelectedItem();
+			assert.ok(afterFilter !== null && afterFilter.value === "a", "new query resets selection");
+		});
+
 		it("shows filtered/total counts in the header", () => {
 			const list = new SelectList(
 				[{ value: "a", label: "alpha" }, { value: "b", label: "zulu" }, { value: "c", label: "mike" }],

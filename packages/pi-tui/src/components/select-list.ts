@@ -77,6 +77,8 @@ export interface SelectListOptions {
 export class SelectList implements Component {
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
+	/** Lowercased value+label+description per item, rebuilt on setItems. */
+	private searchTexts = new Map<SelectItem, string>();
 	private selectedIndex: number = 0;
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
@@ -98,6 +100,7 @@ export class SelectList implements Component {
 	) {
 		this.items = items;
 		this.filteredItems = items;
+		this.searchTexts = this.buildSearchTexts(items);
 		this.maxVisible = maxVisible;
 		this.theme = theme;
 		this.layout = layout;
@@ -115,13 +118,15 @@ export class SelectList implements Component {
 
 	/**
 	 * Replace the item list while the picker is open (e.g. enriching rows
-	 * with titles as they load). The active search query is re-applied and
-	 * the selection stays clamped to the new list.
+	 * with titles as they load). The active search query is re-applied; the
+	 * currently selected row (matched by value) stays selected when it
+	 * survives the refresh, instead of snapping back to the top.
 	 * (dsh-pi-tui extension.)
 	 */
 	setItems(items: SelectItem[]): void {
 		this.items = items;
-		this.applyFilter(this.searchInput?.getValue() ?? "");
+		this.searchTexts = this.buildSearchTexts(items);
+		this.applyFilter(this.searchInput?.getValue() ?? "", true);
 	}
 
 	/** The current search query (empty when search is disabled). */
@@ -256,20 +261,41 @@ export class SelectList implements Component {
 		}
 	}
 
-	/** Re-derive the filtered list from the current query and clamp selection. */
-	private applyFilter(query: string): void {
+	/** Re-derive the filtered list from the current query and clamp selection.
+	 * `preserveSelection` keeps the currently selected row (by value) when it
+	 * survives the filter — used by setItems, where the query did not change
+	 * and snapping back to the top would fight the user's cursor. */
+	private applyFilter(query: string, preserveSelection = false): void {
+		const previousValue = preserveSelection ? this.filteredItems[this.selectedIndex]?.value : undefined;
 		if (query === "") {
 			this.filteredItems = this.items;
 		} else {
 			const needle = query.toLowerCase();
 			this.filteredItems = this.items.filter((item) => {
-				if (item.value.toLowerCase().includes(needle)) return true;
-				if (item.label.toLowerCase().includes(needle)) return true;
-				return item.description !== undefined && item.description.toLowerCase().includes(needle);
+				// Precomputed lowercased search text: filtering a large picker
+				// no longer re-lowercases every field on every keystroke.
+				const searchable = this.searchTexts.get(item);
+				return searchable === undefined
+					? `${item.value}\n${item.label}\n${item.description ?? ""}`.toLowerCase().includes(needle)
+					: searchable.includes(needle);
 			});
 		}
-		// Reset selection when filter changes
+		if (previousValue !== undefined) {
+			const index = this.filteredItems.findIndex(item => item.value === previousValue);
+			if (index !== -1) {
+				this.selectedIndex = index;
+				return;
+			}
+		}
 		this.selectedIndex = 0;
+	}
+
+	/** Lowercased value+label+description per item, for fast filtering. */
+	private buildSearchTexts(items: SelectItem[]): Map<SelectItem, string> {
+		return new Map(items.map(item => [
+			item,
+			`${item.value}\n${item.label}\n${item.description ?? ""}`.toLowerCase(),
+		]));
 	}
 
 	private addHintLine(lines: string[], width: number): void {
