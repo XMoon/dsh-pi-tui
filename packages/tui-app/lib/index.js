@@ -33,6 +33,7 @@ import { Text } from '@dsh-pi-tui/pi-tui';
 import { SettingsList } from '@dsh-pi-tui/pi-tui';
 import { color, resolveCustomTheme, settingsListTheme } from "./theme.js";
 import { startProcessTui } from "./tui-app.js";
+import { MAX_PICKER_SESSIONS, headerToPickerRow, loadSessionTitles, sessionPickerItem, } from "./sessions.js";
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner';
 /** Core services required before the TUI can mount. */
@@ -1062,34 +1063,59 @@ export function apply(ctx, config) {
             });
             commands.register({
                 name: 'sessions',
-                description: 'List persisted sessions and switch to one',
-                handler: async () => {
+                description: 'List, search, and switch persisted sessions',
+                input: { hint: '[query]' },
+                handler: async (invocation) => {
                     const persistence = ctx.get('sessionPersistence');
                     if (persistence === undefined)
                         return { kind: 'error', text: 'session persistence unavailable' };
-                    const headers = await persistence.list();
-                    if (headers.length === 0)
+                    // Live-preferred listing (sessionQuery) marks sessions currently
+                    // loaded in the store; the persistence fallback is the plain list.
+                    // The engine is read structurally off the context (no package
+                    // import): `dsh-base` mounts it in every profile.
+                    const query = ctx.get('sessionQuery');
+                    let rows;
+                    if (query !== undefined) {
+                        rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live));
+                    }
+                    else {
+                        rows = (await persistence.list()).map(header => headerToPickerRow(header, header.id === liveAgent.session.id));
+                    }
+                    rows.sort((a, b) => b.createdAt - a.createdAt);
+                    if (rows.length === 0)
                         return { kind: 'error', text: 'no persisted sessions' };
-                    const now = Date.now();
-                    app.openPicker(headers
-                        .sort((a, b) => b.createdAt - a.createdAt)
-                        .map(header => {
-                        const age = Math.max(0, Math.floor((now - header.createdAt) / 1000));
-                        const ageText = age < 60 ? `${age}s` : age < 3600 ? `${Math.floor(age / 60)}m` : `${Math.floor(age / 3600)}h`;
-                        const current = header.id === liveAgent.session.id ? ' ← current' : '';
-                        return {
-                            value: header.id,
-                            label: header.id.length > 26 ? `${header.id.slice(0, 26)}…` : header.id,
-                            description: `${ageText} ago${header.cwd === undefined ? '' : ` · ${header.cwd}`}${current}`,
-                        };
-                    }), (id) => {
+                    // The picker opens instantly on the headers; titles land in the
+                    // background below. The cap keeps the title read bounded.
+                    const shown = rows.slice(0, MAX_PICKER_SESSIONS);
+                    const picker = app.openPicker(shown.map(row => sessionPickerItem(row, liveAgent.session.id)), (id) => {
                         if (id === liveAgent.session.id)
                             return;
                         void switchSession(id).then(error => {
                             if (error !== undefined)
                                 app.notify(error);
                         });
-                    }, () => { });
+                    }, () => { }, {
+                        enableSearch: true,
+                        header: 'sessions',
+                        noMatchText: '  no matching sessions',
+                        initialQuery: invocation.rawInput.trim(),
+                        width: 76,
+                        maxHeight: 26,
+                        showHint: true,
+                    });
+                    // Enrich rows with titles as they load; the active search query is
+                    // re-applied by the picker, and the current marker is re-read so a
+                    // session switch mid-load does not mislabel.
+                    void loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
+                        .then(titles => {
+                        if (titles.size === 0)
+                            return;
+                        picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, liveAgent.session.id)));
+                    })
+                        .catch(() => {
+                        // Cancellation (TUI quit) or an unexpected batch failure only
+                        // loses the titles, never the picker.
+                    });
                     return { kind: 'success' };
                 },
             });

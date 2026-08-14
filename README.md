@@ -52,6 +52,19 @@ pnpm typecheck
 Tests drive the UI through `@xterm/headless` (see `packages/tui-app/test/virtual-terminal.ts`),
 so rendering and input routing are verified without a TTY or a model connection.
 
+## Slash commands (selection)
+
+- `/sessions [query]` — open the session picker: search-as-you-type over
+  session ids, titles, and workspaces, rows grouped by workspace with live
+  `filtered/total` counts, and titles loaded in the background as they are
+  read. Enter switches to the selected session.
+- `/search <query>` — full-text search over persisted session logs, then
+  switch to a hit.
+- `/title [title]` — show or set the current session's title (titles appear
+  in the `/sessions` picker).
+- `/preset`, `/model`, `/settings`, `/export`, `/fork`, `/subagents` — see
+  `dsh --profile pi-tui`'s command autocomplete (`/` + Tab).
+
 ## Verified in the P0 spike
 
 - Vendored pi-tui: 960/960 tests pass under Node 26 (`node --test`).

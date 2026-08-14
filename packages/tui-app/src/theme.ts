@@ -147,6 +147,7 @@ export const selectListTheme: SelectListTheme = {
   description: (text: string) => color.textDim(text),
   scrollInfo: (text: string) => color.textMuted(text),
   noMatch: (text: string) => color.textMuted(text),
+  groupHeader: (text: string) => chalk.bold.hex(currentPalette.textMuted)(text),
 }
 
 /** SettingsList palette from the semantic tokens. */

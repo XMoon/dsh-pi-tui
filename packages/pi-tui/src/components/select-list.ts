@@ -1,6 +1,7 @@
 import { getKeybindings } from "../keybindings.ts";
 import type { Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
+import { Input } from "./input.ts";
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
 const PRIMARY_COLUMN_GAP = 2;
@@ -13,6 +14,12 @@ export interface SelectItem {
 	value: string;
 	label: string;
 	description?: string;
+	/**
+	 * Optional group label. When set, a non-interactive header row renders
+	 * before the first item of each group (dsh-pi-tui extension; upstream
+	 * renders a flat list).
+	 */
+	group?: string;
 }
 
 export interface SelectListTheme {
@@ -21,6 +28,8 @@ export interface SelectListTheme {
 	description: (text: string) => string;
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
+	/** Optional style for group header rows (dsh-pi-tui extension). */
+	groupHeader?: (text: string) => string;
 }
 
 export interface SelectListTruncatePrimaryContext {
@@ -37,6 +46,34 @@ export interface SelectListLayoutOptions {
 	truncatePrimary?: (context: SelectListTruncatePrimaryContext) => string;
 }
 
+export interface SelectListOptions {
+	/**
+	 * Show a search input above the list. Typing filters items by a
+	 * case-insensitive substring over value, label, and description (the
+	 * plain `setFilter` prefix match is kept for callers that want it).
+	 * (dsh-pi-tui extension.)
+	 */
+	enableSearch?: boolean;
+	/**
+	 * Optional header line rendered above the search input. When search is
+	 * enabled the header also carries the live `filtered/total` counts.
+	 * (dsh-pi-tui extension.)
+	 */
+	header?: string;
+	/** Message rendered when the (filtered) list is empty. (dsh-pi-tui extension.) */
+	noMatchText?: string;
+	/**
+	 * Render the key-hint footer line. Off by default so inline usages (the
+	 * editor autocomplete) keep their compact height. (dsh-pi-tui extension.)
+	 */
+	showHint?: boolean;
+	/**
+	 * Pre-fill the search box when the picker opens (e.g. `/sessions <query>`).
+	 * (dsh-pi-tui extension.)
+	 */
+	initialQuery?: string;
+}
+
 export class SelectList implements Component {
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
@@ -44,23 +81,56 @@ export class SelectList implements Component {
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
+	private options: SelectListOptions;
+	private searchInput?: Input;
+	private searchEnabled: boolean;
 
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
 	public onSelectionChange?: (item: SelectItem) => void;
 
-	constructor(items: SelectItem[], maxVisible: number, theme: SelectListTheme, layout: SelectListLayoutOptions = {}) {
+	constructor(
+		items: SelectItem[],
+		maxVisible: number,
+		theme: SelectListTheme,
+		layout: SelectListLayoutOptions = {},
+		options: SelectListOptions = {},
+	) {
 		this.items = items;
 		this.filteredItems = items;
 		this.maxVisible = maxVisible;
 		this.theme = theme;
 		this.layout = layout;
+		this.options = options;
+		this.searchEnabled = options.enableSearch ?? false;
+		if (this.searchEnabled) {
+			this.searchInput = new Input();
+			const initial = options.initialQuery ?? "";
+			if (initial !== "") {
+				this.searchInput.setValue(initial);
+				this.applyFilter(initial);
+			}
+		}
+	}
+
+	/**
+	 * Replace the item list while the picker is open (e.g. enriching rows
+	 * with titles as they load). The active search query is re-applied and
+	 * the selection stays clamped to the new list.
+	 * (dsh-pi-tui extension.)
+	 */
+	setItems(items: SelectItem[]): void {
+		this.items = items;
+		this.applyFilter(this.searchInput?.getValue() ?? "");
+	}
+
+	/** The current search query (empty when search is disabled). */
+	getFilter(): string {
+		return this.searchInput?.getValue() ?? "";
 	}
 
 	setFilter(filter: string): void {
-		this.filteredItems = this.items.filter((item) => item.value.toLowerCase().startsWith(filter.toLowerCase()));
-		// Reset selection when filter changes
-		this.selectedIndex = 0;
+		this.applyFilter(filter);
 	}
 
 	setSelectedIndex(index: number): void {
@@ -74,9 +144,22 @@ export class SelectList implements Component {
 	render(width: number): string[] {
 		const lines: string[] = [];
 
+		if (this.options.header !== undefined) {
+			const countSuffix = this.searchEnabled ? `  ${this.filteredItems.length}/${this.items.length}` : "";
+			const headerText = truncateToWidth(`${this.options.header}${countSuffix}`, width, "");
+			lines.push((this.theme.groupHeader ?? this.theme.description)(headerText));
+			lines.push("");
+		}
+
+		if (this.searchEnabled && this.searchInput) {
+			lines.push(...this.searchInput.render(width));
+			lines.push("");
+		}
+
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
-			lines.push(this.theme.noMatch("  No matching commands"));
+			lines.push(this.theme.noMatch(this.options.noMatchText ?? "  No matching commands"));
+			if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, width);
 			return lines;
 		}
 
@@ -89,10 +172,31 @@ export class SelectList implements Component {
 		);
 		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
 
-		// Render visible items
+		// Group counts over the full (filtered) sequence, so a header inside
+		// the visible window can show how many items its group holds.
+		const groupCounts = new Map<string, number>();
+		for (const item of this.filteredItems) {
+			if (item.group === undefined) continue;
+			groupCounts.set(item.group, (groupCounts.get(item.group) ?? 0) + 1);
+		}
+
+		// Render visible items, emitting a header row whenever the group of
+		// the next item differs from the previous one (ungrouped items form
+		// an implicit anonymous group so groups do not bleed across them).
+		let lastGroup: string | undefined = undefined;
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredItems[i];
 			if (!item) continue;
+
+			const group = item.group ?? "";
+			if (group !== lastGroup) {
+				if (group !== "") {
+					const count = groupCounts.get(group) ?? 0;
+					const headerText = truncateToWidth(`  ${group} · ${count}`, width, "");
+					lines.push((this.theme.groupHeader ?? this.theme.description)(headerText));
+				}
+				lastGroup = group;
+			}
 
 			const isSelected = i === this.selectedIndex;
 			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
@@ -106,24 +210,35 @@ export class SelectList implements Component {
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
 		}
 
+		if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, width);
+
 		return lines;
 	}
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
+		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
+			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
 			this.notifySelectionChange();
 		}
 		// Down arrow - wrap to top when at bottom
 		else if (kb.matches(keyData, "tui.select.down")) {
-			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+			this.selectedIndex = this.selectedIndex === displayItems.length - 1 ? 0 : this.selectedIndex + 1;
+			this.notifySelectionChange();
+		}
+		// Page up/down - move by a visible page
+		else if (kb.matches(keyData, "tui.select.pageUp")) {
+			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisible);
+			this.notifySelectionChange();
+		} else if (kb.matches(keyData, "tui.select.pageDown")) {
+			this.selectedIndex = Math.min(displayItems.length - 1, this.selectedIndex + this.maxVisible);
 			this.notifySelectionChange();
 		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
-			const selectedItem = this.filteredItems[this.selectedIndex];
+			const selectedItem = displayItems[this.selectedIndex];
 			if (selectedItem && this.onSelect) {
 				this.onSelect(selectedItem);
 			}
@@ -134,6 +249,35 @@ export class SelectList implements Component {
 				this.onCancel();
 			}
 		}
+		// Any other key edits the search box when search is enabled
+		else if (this.searchEnabled && this.searchInput) {
+			this.searchInput.handleInput(keyData);
+			this.applyFilter(this.searchInput.getValue());
+		}
+	}
+
+	/** Re-derive the filtered list from the current query and clamp selection. */
+	private applyFilter(query: string): void {
+		if (query === "") {
+			this.filteredItems = this.items;
+		} else {
+			const needle = query.toLowerCase();
+			this.filteredItems = this.items.filter((item) => {
+				if (item.value.toLowerCase().includes(needle)) return true;
+				if (item.label.toLowerCase().includes(needle)) return true;
+				return item.description !== undefined && item.description.toLowerCase().includes(needle);
+			});
+		}
+		// Reset selection when filter changes
+		this.selectedIndex = 0;
+	}
+
+	private addHintLine(lines: string[], width: number): void {
+		const hint = this.searchEnabled
+			? "type to filter · ↑↓ navigate · enter select · esc close"
+			: "↑↓ navigate · enter select · esc close";
+		lines.push("");
+		lines.push(this.theme.scrollInfo(truncateToWidth(`  ${hint}`, width - 2, "")));
 	}
 
 	private renderItem(

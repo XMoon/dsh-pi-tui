@@ -775,10 +775,19 @@ export class TuiApp {
      * @param items - choice rows.
      * @param onSelect - confirmed choice.
      * @param onCancel - dismissed without a choice.
+     * @param options - search/hint/group configuration for the picker.
+     * @returns a handle to close the picker or replace its rows (e.g. when
+     * background data such as session titles arrives while it is open).
      */
-    openPicker(items, onSelect, onCancel) {
-        const list = new SelectList(items.map(item => ({ ...item })), 10, selectListTheme);
-        const handle = this.showOverlayOnHost(new Frame(list), { width: 64, maxHeight: 24 });
+    openPicker(items, onSelect, onCancel, options = {}) {
+        const list = new SelectList(items.map(item => ({ ...item })), 10, selectListTheme, {}, {
+            enableSearch: options.enableSearch,
+            header: options.header,
+            noMatchText: options.noMatchText,
+            showHint: options.showHint,
+            initialQuery: options.initialQuery,
+        });
+        const handle = this.showOverlayOnHost(new Frame(list), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 });
         list.onSelect = (item) => {
             handle.hide();
             onSelect(item.value);
@@ -786,6 +795,13 @@ export class TuiApp {
         list.onCancel = () => {
             handle.hide();
             onCancel();
+        };
+        return {
+            close: () => handle.hide(),
+            setItems: (next) => {
+                list.setItems(next.map(item => ({ ...item })));
+                this.requestRender();
+            },
         };
     }
     /**

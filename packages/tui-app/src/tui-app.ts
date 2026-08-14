@@ -260,6 +260,40 @@ interface QuestionState {
   onAbort?: () => void
 }
 
+/** One picker row; `group` renders a workspace-style header before the group. */
+export interface PickerItem {
+  value: string
+  label: string
+  description?: string
+  group?: string
+}
+
+/** Options for {@link TuiApp.openPicker}. */
+export interface PickerOptions {
+  /** Show a search input; typing filters rows by id/label/description. */
+  enableSearch?: boolean
+  /** Title line above the rows (carries `filtered/total` when search is on). */
+  header?: string
+  /** Text shown when no row matches the filter. */
+  noMatchText?: string
+  /** Pre-fill the search input (e.g. `/sessions <query>`). */
+  initialQuery?: string
+  /** Overlay width in cells (default 64). */
+  width?: number
+  /** Overlay max height in rows (default 24). */
+  maxHeight?: number
+  /** Render the key-hint footer line. */
+  showHint?: boolean
+}
+
+/** Live control of an open picker. */
+export interface PickerHandle {
+  /** Close the picker without a selection. */
+  close(): void
+  /** Replace the rows while the picker is open; the active query re-applies. */
+  setItems(items: readonly PickerItem[]): void
+}
+
 /** Footer status data supplied by the runner. */
 export interface StatusData {
   /** Provider/model label, e.g. `opencode-go/deepseek-v4-flash`. */
@@ -959,10 +993,30 @@ export class TuiApp {
    * @param items - choice rows.
    * @param onSelect - confirmed choice.
    * @param onCancel - dismissed without a choice.
+   * @param options - search/hint/group configuration for the picker.
+   * @returns a handle to close the picker or replace its rows (e.g. when
+   * background data such as session titles arrives while it is open).
    */
-  openPicker(items: readonly { value: string; label: string; description?: string }[], onSelect: (value: string) => void, onCancel: () => void): void {
-    const list = new SelectList(items.map(item => ({ ...item })), 10, selectListTheme)
-    const handle = this.showOverlayOnHost(new Frame(list), { width: 64, maxHeight: 24 })
+  openPicker(
+    items: readonly PickerItem[],
+    onSelect: (value: string) => void,
+    onCancel: () => void,
+    options: PickerOptions = {},
+  ): PickerHandle {
+    const list = new SelectList(
+      items.map(item => ({ ...item })),
+      10,
+      selectListTheme,
+      {},
+      {
+        enableSearch: options.enableSearch,
+        header: options.header,
+        noMatchText: options.noMatchText,
+        showHint: options.showHint,
+        initialQuery: options.initialQuery,
+      },
+    )
+    const handle = this.showOverlayOnHost(new Frame(list), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     list.onSelect = (item) => {
       handle.hide()
       onSelect(item.value)
@@ -970,6 +1024,13 @@ export class TuiApp {
     list.onCancel = () => {
       handle.hide()
       onCancel()
+    }
+    return {
+      close: () => handle.hide(),
+      setItems: (next) => {
+        list.setItems(next.map(item => ({ ...item })))
+        this.requestRender()
+      },
     }
   }
 
