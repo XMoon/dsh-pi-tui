@@ -558,8 +558,12 @@ export function apply(ctx, config) {
         let app;
         // Tool-card presentation bridge: the Web's render intents resolved from
         // the LIVE tool registry as the agent sees it (scoped lookup), so the
-        // rendered card matches the definition that actually executed.
-        const present = toolPresenterFrom(name => ctx.tools.get(name, liveAgent.ctx));
+        // rendered card matches the definition that actually executed. The
+        // registry is read through ctx.get: property access (ctx.tools) trips
+        // cordis's inject guard, and an absent registry must degrade to generic
+        // cards rather than fail the render.
+        const tools = ctx.get('tools');
+        const present = toolPresenterFrom(name => tools?.get(name, liveAgent.ctx));
         // Aborts an in-flight command execution when the TUI quits.
         const signal = new AbortController().signal;
         // Abort handle for the currently running `!` shell command.

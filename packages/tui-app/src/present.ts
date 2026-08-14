@@ -11,7 +11,7 @@
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import type { ToolCallView, ToolDefinition, ToolResultView } from '@deepseek-ai/dsh-tools'
+import type { ToolCallView, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
 
 /** Figma row titles per variant (design literals, not translatable copy). */
 const VARIANT_TITLES = {
@@ -201,13 +201,25 @@ export interface ToolPresenter {
 }
 
 /**
+ * The tool-definition surface a presenter needs (presentCall/presentResult).
+ * Structural, so the runner can hand over a registry read without importing
+ * the full ToolDefinition type graph.
+ */
+export interface ToolDefinitionLike {
+  presentCall?(args: unknown): ToolCallView | undefined
+  presentResult?(args: unknown, result: ToolResult): ToolResultView | undefined
+}
+
+/**
  * Build the presentation bridge over a tool-definition lookup (the runner
- * passes `name => ctx.tools.get(name, scope)`). Mirrors the host apiproxy's
- * presenter invocations: args are JSON-parsed and the callbacks are guarded so
- * a throwing tool presenter degrades to the generic card.
+ * passes a scoped registry read, e.g. `ctx.get('tools')?.get(name, scope)`).
+ * Mirrors the host apiproxy's presenter invocations: args are JSON-parsed and
+ * the callbacks are guarded so a throwing tool presenter degrades to the
+ * generic card. An absent registry yields no views, so the cards fall back to
+ * the generic presentation instead of failing.
  * @param get - resolve one tool definition by name (scope already applied).
  */
-export function toolPresenterFrom(get: (name: string) => ToolDefinition | undefined): ToolPresenter {
+export function toolPresenterFrom(get: (name: string) => ToolDefinitionLike | undefined): ToolPresenter {
   return {
     call(name, argsRaw) {
       const definition = get(name)

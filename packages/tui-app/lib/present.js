@@ -158,9 +158,11 @@ export function toolCardHeader(name, argsRaw, cwd) {
 }
 /**
  * Build the presentation bridge over a tool-definition lookup (the runner
- * passes `name => ctx.tools.get(name, scope)`). Mirrors the host apiproxy's
- * presenter invocations: args are JSON-parsed and the callbacks are guarded so
- * a throwing tool presenter degrades to the generic card.
+ * passes a scoped registry read, e.g. `ctx.get('tools')?.get(name, scope)`).
+ * Mirrors the host apiproxy's presenter invocations: args are JSON-parsed and
+ * the callbacks are guarded so a throwing tool presenter degrades to the
+ * generic card. An absent registry yields no views, so the cards fall back to
+ * the generic presentation instead of failing.
  * @param get - resolve one tool definition by name (scope already applied).
  */
 export function toolPresenterFrom(get) {

@@ -65,7 +65,7 @@ import type {} from '@deepseek-ai/dsh-shell'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
-import { toolPresenterFrom } from './present.ts'
+import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
 import { textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
@@ -636,8 +636,12 @@ export function apply(ctx: Context, config: Config): void {
     let app: TuiApp
     // Tool-card presentation bridge: the Web's render intents resolved from
     // the LIVE tool registry as the agent sees it (scoped lookup), so the
-    // rendered card matches the definition that actually executed.
-    const present = toolPresenterFrom(name => ctx.tools.get(name, liveAgent.ctx))
+    // rendered card matches the definition that actually executed. The
+    // registry is read through ctx.get: property access (ctx.tools) trips
+    // cordis's inject guard, and an absent registry must degrade to generic
+    // cards rather than fail the render.
+    const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined
+    const present = toolPresenterFrom(name => tools?.get(name, liveAgent.ctx))
     // Aborts an in-flight command execution when the TUI quits.
     const signal = new AbortController().signal
     // Abort handle for the currently running `!` shell command.

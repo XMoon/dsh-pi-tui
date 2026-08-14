@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
+import { toolPresenterFrom } from '../src/present.ts'
 import { color, currentPalette } from '../src/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -440,5 +441,28 @@ test('mouse release and non-left buttons are inert', async () => {
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('\nb'), `release/right-click must not expand the card:\n${view}`)
 })
+
+test('tool cards degrade to generic rendering when the registry lookup is absent', async () => {
+  // Mirrors the production guard: the registry is read through ctx.get and
+  // may be absent (or hide behind cordis's inject guard), in which case the
+  // presenter yields no views and cards render generically instead of failing.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: toolPresenterFrom(() => undefined),
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read',
+    args: '{"file_path":"/ws/src/foo.ts"}',
+    result: 'line one', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Read /ws/src/foo.ts [ok]'), `generic header missing:\n${view}`)
+  assert.ok(view.includes('line one'), `generic body missing:\n${view}`)
+  app.stop()
+})
+
 
 
