@@ -113,8 +113,27 @@ so rendering and input routing are verified without a TTY or a model connection.
   switch to a hit.
 - `/title [title]` — show or set the current session's title (titles appear
   in the `/sessions` picker).
+- `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
+- `/queue` — manage queued input while a turn runs: edit, delete, steer, or
+  insert messages in the agent's inbox (the queue pane above the editor shows
+  pending messages; `Ctrl+Q` pulls them all back into the editor).
 - `/preset`, `/model`, `/settings`, `/export`, `/fork`, `/subagents` — see
   `dsh --profile pi-tui`'s command autocomplete (`/` + Tab).
+
+## Keybindings (selection)
+
+- `Shift+Tab` — cycle the permission preset (read-only → workspace-write →
+  danger-full-access); the footer's `[yolo]` badge flags the no-approval mode.
+- `Ctrl+Q` — dequeue: pull every queued message back into the editor draft.
+- `Ctrl+T` — toggle the full todo list; the dock above the editor always shows
+  the permission, goal, todo summary, background tasks, and queued input.
+
+## Session lifecycle
+
+Opening the TUI with no `--session` creates **no session at all**: the first
+user message (text, slash command, `Ctrl+S` steer, or `!!` shell) starts it
+lazily. `--session <id>` still resumes immediately, and a local `!` command
+runs without needing a session.
 
 ## Verified in the P0 spike
 

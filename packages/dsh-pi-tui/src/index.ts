@@ -1190,8 +1190,11 @@ export function apply(ctx: Context, config: Config): void {
         refreshStatus()
       }
       // Every durable inbox mutation (followup, steer, /queue edits) commits
-      // an agent/inbox/spliced event: keep the queue pane in step.
-      if (event.type === 'agent/inbox/spliced') refreshQueue()
+      // an agent/inbox/spliced event. The upstream Inbox commits the event
+      // BEFORE its live projection mutates (synchronous observers see the
+      // pre-splice lists), so the pane must read the inbox on the next
+      // microtask — after the splice has actually landed.
+      if (event.type === 'agent/inbox/spliced') queueMicrotask(refreshQueue)
       // Persist each completed turn so a crash loses at most the live turn.
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.
