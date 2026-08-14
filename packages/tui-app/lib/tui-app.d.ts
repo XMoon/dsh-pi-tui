@@ -245,13 +245,14 @@ export declare class TuiApp {
      * Set the session head rendered above the transcript: one dense line with
      * the session identity, model, version, and a rule beneath. Replaces any
      * previous head.
-     * @param facts - directory, session id, model, and version to display.
+     * @param facts - directory, session id, model, version, and the optional agent preset to display.
      */
     setWelcomeCard(facts: {
         cwd: string;
         sessionId: string;
         model: string;
         version: string;
+        preset?: string;
     }): void;
     /** The turn threshold at or above which collapsible entries expand. */
     private expandBoundary;

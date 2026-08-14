@@ -613,13 +613,14 @@ export class TuiApp {
    * Set the session head rendered above the transcript: one dense line with
    * the session identity, model, version, and a rule beneath. Replaces any
    * previous head.
-   * @param facts - directory, session id, model, and version to display.
+   * @param facts - directory, session id, model, version, and the optional agent preset to display.
    */
-  setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string }): void {
+  setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
     const shortId = facts.sessionId.length > 24 ? `${facts.sessionId.slice(0, 24)}…` : facts.sessionId
     const items = [
       `session ${color.textDim(shortId)}`,
       color.text(facts.model),
+      ...facts.preset === undefined ? [] : [color.textMuted(`preset ${facts.preset}`)],
       `v${facts.version}`,
       color.textMuted(facts.cwd),
     ].join('  ·  ')

@@ -18,6 +18,7 @@ import z from '@deepseek-ai/schemastery';
 import { installModelSelection } from '@deepseek-ai/dsh-agent';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets';
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval';
 // The commands service merge: ctx.commands typing for execute()/register().
 import { parseCommand } from '@deepseek-ai/dsh-commands';
@@ -110,8 +111,7 @@ function foldGoal(events) {
     }
     return undefined;
 }
-/**
- * A balanced completed-turn prefix for forking: the log up to (and including)
+/** A balanced completed-turn prefix for forking: the log up to (and including)
  * the last `turn/end`. Undefined when no turn has completed yet.
  * @param events - the session log.
  * @returns the fork seed events, or undefined.
@@ -122,6 +122,73 @@ function forkSeed(events) {
             return events.slice(0, index + 1);
     }
     return undefined;
+}
+/**
+ * Resolve the preset an agent will be composed from, and the setup that
+ * installs it.
+ *
+ * The id is resolved BEFORE the session exists because the session boundary
+ * snapshots `meta` before asynchronous setup begins — a preset discovered
+ * during setup could never reach the header. Mounting still happens in setup,
+ * where a failure rolls the whole creation back rather than leaving a
+ * published session whose capabilities are half-installed.
+ *
+ * A deployment with no roster composes nothing and every session shares the
+ * host composition, which is the behavior before presets existed.
+ * @param ctx - the runner context (services read through `ctx.get`).
+ * @param selected - the mutable model selection every setup installs.
+ * @param presetId - the requested preset, or `undefined` for the default.
+ * @returns the id to record on the header (absent without a roster) and the setup callback.
+ * @throws when the roster supplies no such preset.
+ */
+export async function composeAgent(ctx, selected, presetId) {
+    const presets = ctx.get('agentPresets');
+    if (presets === undefined) {
+        return {
+            setup: (agentCtx) => {
+                installModelSelection(agentCtx, selected);
+            },
+        };
+    }
+    const resolvedId = (await presets.resolve(presetId)).id;
+    return {
+        agentPreset: resolvedId,
+        setup: async (agentCtx) => {
+            installModelSelection(agentCtx, selected);
+            await presets.mount(agentCtx, resolvedId);
+        },
+    };
+}
+/**
+ * The preset a persisted session actually runs, from its log (newest
+ * selection winning), or undefined when persistence is absent, the session is
+ * unknown, or its log predates the roster.
+ * @param ctx - the runner context.
+ * @param sessionId - the persisted session id.
+ * @returns the recorded preset id, or undefined to compose the default.
+ */
+export async function recordedPreset(ctx, sessionId) {
+    const persistence = ctx.get('sessionPersistence');
+    if (persistence === undefined)
+        return undefined;
+    let header;
+    try {
+        header = (await persistence.list()).find(candidate => candidate.id === sessionId);
+    }
+    catch {
+        return undefined;
+    }
+    if (header === undefined)
+        return undefined;
+    let events = [];
+    try {
+        events = (await persistence.inspect(SessionId(sessionId))).events;
+    }
+    catch {
+        // Header-only fallback: an unreadable log still resumes under the
+        // creation-time preset rather than the deployment default.
+    }
+    return resolveSessionPreset({ header, events });
 }
 /** Custom-theme directory convention: `~/.dsh-pi-tui/themes/*.json`. */
 function customThemesDir() {
@@ -186,42 +253,55 @@ export function apply(ctx, config) {
             return;
         const selection = defaultModel.currentSelection();
         const agentOptions = { provider: selection.provider, model: selection.model };
-        // Same composition as dsh-headless: this bundle composes no preset roster,
-        // so the model-facing rows sit in the host plane.
+        // P6: compose one preset per session when the roster is mounted; with no
+        // roster this is exactly the headless shape (model-facing rows in the
+        // host plane). The `selected` ref stays process-wide like before.
         const selected = { current: selection, assembled: undefined };
-        const setup = (agentCtx) => {
-            installModelSelection(agentCtx, selected);
-        };
+        const compose = (presetId) => composeAgent(ctx, selected, presetId);
+        const withPresetMeta = (composition) => composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset };
         // A stale --session id must not kill the TUI: resume falls back to a
         // fresh session and the failure is surfaced as a notify line.
         let resumeFailure;
         let handle;
         if (sessionId !== undefined) {
             try {
-                handle = await agents.resume({ resumeSessionId: SessionId(sessionId), agentOptions, setup });
+                // The stored session's recorded preset wins (resolved from the log,
+                // not the header): a session that switched while blank ran every turn
+                // under the newer composition, and rebuilding it differently would
+                // replay tool calls the model can no longer make.
+                const composition = await compose(await recordedPreset(ctx, sessionId));
+                handle = await agents.resume({
+                    resumeSessionId: SessionId(sessionId),
+                    agentOptions,
+                    setup: composition.setup,
+                });
             }
             catch (error) {
                 ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}`);
                 resumeFailure = `session ${sessionId} could not be resumed; started a fresh session`;
+                const composition = await compose();
                 handle = await agents.create({
                     sessionId: SessionId(`session-${randomUUID()}`),
-                    meta: { cwd: process.cwd() },
+                    meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
                     agentOptions,
-                    setup,
+                    setup: composition.setup,
                 });
             }
         }
         else {
+            const composition = await compose();
             handle = await agents.create({
                 sessionId: SessionId(`session-${randomUUID()}`),
-                meta: { cwd: process.cwd() },
+                meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
                 agentOptions,
-                setup,
+                setup: composition.setup,
             });
         }
         let liveHandle = handle;
         let liveAgent = handle.agent;
         await liveAgent.whenIdle();
+        /** The preset the live agent runs on, when the deployment composes one. */
+        const currentPreset = () => ctx.get('agentPresets')?.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session);
         // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
         // the row; the reloaded row starts its own instance in the same process).
         ctx.effect(function* () {
@@ -256,15 +336,18 @@ export function apply(ctx, config) {
                 sessionId: liveAgent.session.id,
                 model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
                 version: packageVersion(),
+                ...currentPreset() === undefined ? {} : { preset: currentPreset() },
             });
             return undefined;
         };
         /** Hand the TUI over to another persisted session. */
         const switchSession = async (sessionId) => {
+            // The target session's recorded preset, exactly like the resume path.
+            const composition = await compose(await recordedPreset(ctx, sessionId));
             const next = await agents.resume({
                 resumeSessionId: SessionId(sessionId),
                 agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
-                setup,
+                setup: composition.setup,
             });
             return swapTo(next);
         };
@@ -484,6 +567,7 @@ export function apply(ctx, config) {
             sessionId: liveAgent.session.id,
             model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
             version: packageVersion(),
+            ...currentPreset() === undefined ? {} : { preset: currentPreset() },
         });
         if (resumeFailure !== undefined)
             app.notify(resumeFailure);
@@ -599,6 +683,12 @@ export function apply(ctx, config) {
                             label: color.textDim('Model'),
                             description: color.textDim('Provider and model routing this session'),
                             currentValue: color.textDim(`${liveAgent.options.provider}/${liveAgent.options.model}`),
+                        },
+                        {
+                            id: 'preset',
+                            label: color.textDim('Agent preset'),
+                            description: color.textDim('Composition this session runs on (see /preset)'),
+                            currentValue: color.textDim(currentPreset() ?? 'none'),
                         },
                         {
                             id: 'cwd',
@@ -763,11 +853,12 @@ export function apply(ctx, config) {
                 name: 'new',
                 description: 'Start a fresh session in this workspace',
                 handler: async () => {
+                    const composition = await compose();
                     const next = await agents.create({
                         sessionId: SessionId(`session-${randomUUID()}`),
-                        meta: { cwd: process.cwd() },
+                        meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
                         agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
-                        setup,
+                        setup: composition.setup,
                     });
                     const error = await swapTo(next);
                     if (error !== undefined)
@@ -798,6 +889,77 @@ export function apply(ctx, config) {
             // base layer already registers it (text form: `/permission` shows the
             // current preset, `/permission <name>` switches). Registering it again
             // would throw "command already registered" and kill the TUI.
+            // `/preset` IS TUI-owned: the base composes no roster and registers no
+            // preset command, so this cannot collide (P5.7 lesson, positive case).
+            commands.register({
+                name: 'preset',
+                description: 'Show or switch the session agent preset',
+                input: { hint: '[status|<id>|default [<id>]]' },
+                handler: async (invocation) => {
+                    const presets = ctx.get('agentPresets');
+                    if (presets === undefined) {
+                        return { kind: 'error', text: 'agent presets unavailable in this deployment' };
+                    }
+                    const current = presets.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session);
+                    const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/);
+                    const verb = matched?.[1] ?? '';
+                    const rest = matched?.[2]?.trim() ?? '';
+                    if (verb === 'status') {
+                        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${presets.defaultId}` };
+                    }
+                    if (verb === 'default') {
+                        const settings = ctx.get('settings');
+                        if (settings === undefined)
+                            return { kind: 'error', text: 'settings service unavailable' };
+                        const ns = settingsNamespace('agent-presets');
+                        if (rest === '') {
+                            const doc = settings.get(ns);
+                            return { kind: 'success', text: `default preset: ${doc?.default ?? presets.defaultId}` };
+                        }
+                        await settings.mutate(ns, [{ op: 'set', path: ['default'], value: rest }]);
+                        return { kind: 'success', text: `default preset set: ${rest}` };
+                    }
+                    if (verb !== '') {
+                        // Selecting swaps the composition; only a blank session (no turn
+                        // has run yet) may do so — a started conversation's history was
+                        // produced under its preset's tools. Same rule as the official
+                        // `agentPreset.select` RPC.
+                        if (liveAgent.session.events.some(event => event.type === 'turn/start')) {
+                            return {
+                                kind: 'error',
+                                text: `session "${liveAgent.session.id}" has already started; its agent preset is fixed`,
+                            };
+                        }
+                        try {
+                            const preset = await presets.recompose(liveAgent.ctx, verb);
+                            // Recorded only after the swap committed: the log states what
+                            // the agent runs, and a rejected mount leaves the old
+                            // composition (official rule).
+                            liveAgent.session.append('agent-preset/selected', { agentPreset: preset.id });
+                            refreshCompletions();
+                            return { kind: 'success', text: `session preset switched to ${preset.id}` };
+                        }
+                        catch (error) {
+                            return { kind: 'error', text: error instanceof Error ? error.message : String(error) };
+                        }
+                    }
+                    const roster = await presets.list();
+                    if (roster.length === 0)
+                        return { kind: 'success', text: 'no agent presets configured' };
+                    app.openSettings(roster.map(preset => ({
+                        id: preset.id,
+                        label: preset.name === undefined ? preset.id : `${preset.name} (${preset.id})`,
+                        description: [
+                            preset.trust === 'system' ? 'system' : 'user',
+                            preset.id === presets.defaultId ? 'default' : undefined,
+                            preset.id === current ? '← current' : undefined,
+                            preset.broken,
+                        ].filter(Boolean).join(' · '),
+                        currentValue: '',
+                    })), () => { }, () => { });
+                    return { kind: 'success' };
+                },
+            });
             commands.register({
                 name: 'title',
                 description: 'Set or show the session title',
@@ -841,11 +1003,19 @@ export function apply(ctx, config) {
                     const seed = forkSeed(liveAgent.session.events);
                     if (seed === undefined)
                         return { kind: 'error', text: 'no completed turn to fork from' };
+                    // The child inherits the parent's recorded preset (official fork
+                    // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
+                    const composition = await compose(resolveSessionPreset(liveAgent.session));
                     const next = await agents.create({
                         sessionId: SessionId(`session-${randomUUID()}`),
-                        meta: { cwd, parentSession: liveAgent.session.id, seedLength: seed.length },
+                        meta: {
+                            cwd,
+                            parentSession: liveAgent.session.id,
+                            seedLength: seed.length,
+                            ...withPresetMeta(composition),
+                        },
                         agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
-                        setup,
+                        setup: composition.setup,
                         seed,
                     });
                     const error = await swapTo(next);
