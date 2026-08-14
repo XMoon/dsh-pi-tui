@@ -7,6 +7,9 @@
  */
 
 import { Chalk } from 'chalk'
+import { readFileSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type {
   EditorTheme,
   MarkdownTheme,
@@ -108,6 +111,33 @@ export function setTheme(theme: ThemeMode, custom?: ColorPalette): void {
 export function resolveCustomTheme(file: CustomThemeFile): ColorPalette {
   const base = file.base === 'light' ? lightColors : darkColors
   return { ...base, ...file.colors }
+}
+
+/** Custom-theme directory convention: `~/.dsh-pi-tui/themes/*.json`. */
+export function customThemesDir(): string {
+  return join(homedir(), '.dsh-pi-tui', 'themes')
+}
+
+/** Names of the custom theme files (basename without the extension). */
+export function customThemeNames(): string[] {
+  try {
+    return readdirSync(customThemesDir())
+      .filter(file => file.endsWith('.json'))
+      .map(file => file.slice(0, -'.json'.length))
+  } catch {
+    return []
+  }
+}
+
+/** Load and resolve one custom theme file, or undefined when missing/broken. */
+export function loadCustomTheme(name: string): ColorPalette | undefined {
+  try {
+    const raw = readFileSync(join(customThemesDir(), `${name}.json`), 'utf8')
+    const file = JSON.parse(raw) as CustomThemeFile
+    return resolveCustomTheme(file)
+  } catch {
+    return undefined
+  }
 }
 
 /**

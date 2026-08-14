@@ -16,7 +16,7 @@
  * @module @dsh-pi-tui/tui-app/transcript
  */
 
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 // The command/run + command/done event merge (SessionEventMap extension).
 import type {} from '@deepseek-ai/dsh-commands'
@@ -476,4 +476,49 @@ export function foldTranscript(events: readonly SessionEvent[], options?: FoldOp
   const folder = new TranscriptFolder()
   folder.apply(events)
   return folder.messages(options)
+}
+
+/** Render one session's log as a readable markdown transcript for `/export md`. */
+export function renderTranscriptMarkdown(session: {
+  header: SessionHeader
+  events: readonly SessionEvent[]
+}): string {
+  const lines: string[] = [
+    `# Session ${session.header.id}`,
+    `- cwd: ${session.header.cwd ?? 'unknown'}`,
+    ...session.header.agentPreset === undefined ? [] : [`- agent preset: ${session.header.agentPreset}`],
+    '',
+  ]
+  for (const event of session.events) {
+    switch (event.type) {
+      case 'user/message': {
+        const text = textOf(event.data.content)
+        if (text !== '') lines.push(`## User\n\n${text}\n`)
+        break
+      }
+      case 'assistant/message': {
+        const text = textOf(event.data.message.content)
+        if (text !== '') lines.push(`## Assistant\n\n${text}\n`)
+        break
+      }
+      case 'tool/call': {
+        const args = typeof event.data.arguments === 'string' ? event.data.arguments : JSON.stringify(event.data.arguments)
+        lines.push(`### Tool ${event.data.name}\n\n\`\`\`json\n${args}\n\`\`\`\n`)
+        break
+      }
+      case 'tool/result': {
+        const block = event.data.message.content[0]
+        const text = textOf(block?.content ?? [])
+        if (text !== '') lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`)
+        break
+      }
+      case 'command/run': {
+        lines.push(`> /${event.data.name}${event.data.args === '' ? '' : ` ${event.data.args}`}\n`)
+        break
+      }
+      default:
+        break
+    }
+  }
+  return lines.join('\n')
 }
