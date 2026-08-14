@@ -9,6 +9,10 @@ Run `dsh --profile pi-tui` for a terminal UI instead of the browser GUI (`dsh --
 > model/settings menus, and slash commands. Rendering and input routing are verified
 > by headless tests (`@xterm/headless`) with no TTY or model connection needed.
 
+## Screenshot
+
+![dsh-pi-tui running in a terminal](https://raw.githubusercontent.com/XMoon/dsh-pi-tui/main/docs/dsh-pi-tui.png)
+
 ## Layout
 
 ```
