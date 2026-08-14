@@ -1,6 +1,7 @@
 node_modules/
 dist/
-packages/tui-app/lib/
+packages/pi-tui/dist/
+packages/dsh-pi-tui/dist/
 *.log
 .DS_Store
 temp/

@@ -1,6 +1,7 @@
 {
 	"name": "@xmoon76/pi-tui",
 	"version": "0.84.2",
+	"private": true,
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications (vendored fork of @moonshot-ai/pi-tui)",
 	"license": "MIT",
 	"author": "Moonshot AI",
@@ -34,17 +35,6 @@
 			"default": "./dist/index.mjs"
 		},
 		"./package.json": "./package.json"
-	},
-	"publishConfig": {
-		"access": "public",
-		"exports": {
-			".": {
-				"types": "./dist/index.d.mts",
-				"import": "./dist/index.mjs",
-				"default": "./dist/index.mjs"
-			}
-		},
-		"provenance": true
 	},
 	"scripts": {
 		"build": "tsdown",

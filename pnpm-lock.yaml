@@ -12,32 +12,7 @@ importers:
         specifier: ^4.23.12
         version: 4.23.12
 
-  packages/pi-tui:
-    dependencies:
-      get-east-asian-width:
-        specifier: 1.6.0
-        version: 1.6.0
-      marked:
-        specifier: 18.0.5
-        version: 18.0.5
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.20.1
-      '@xterm/headless':
-        specifier: 5.5.0
-        version: 5.5.0
-      chalk:
-        specifier: ^5.4.1
-        version: 5.6.2
-      tsdown:
-        specifier: 0.22.0
-        version: 0.22.0(tsx@4.23.12)(typescript@5.9.3)
-      typescript:
-        specifier: ^5.9.0
-        version: 5.9.3
-
-  packages/tui-app:
+  packages/dsh-pi-tui:
     dependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -54,15 +29,18 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: ^3.18.1
         version: 3.18.1
-      '@xmoon76/pi-tui':
-        specifier: workspace:^0.84.2
-        version: link:../pi-tui
       chalk:
         specifier: ^5.4.1
         version: 5.6.2
       commander:
         specifier: ^15.0.0
         version: 15.0.0
+      get-east-asian-width:
+        specifier: 1.6.0
+        version: 1.6.0
+      marked:
+        specifier: 18.0.5
+        version: 18.0.5
     devDependencies:
       '@deepseek-ai/cordis-plugin-loader':
         specifier: ^1.0.2
@@ -136,9 +114,40 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
+      '@xmoon76/pi-tui':
+        specifier: workspace:^0.84.2
+        version: link:../pi-tui
       '@xterm/headless':
         specifier: 5.5.0
         version: 5.5.0
+      tsdown:
+        specifier: 0.22.0
+        version: 0.22.0(tsx@4.23.12)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+
+  packages/pi-tui:
+    dependencies:
+      get-east-asian-width:
+        specifier: 1.6.0
+        version: 1.6.0
+      marked:
+        specifier: 18.0.5
+        version: 18.0.5
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      '@xterm/headless':
+        specifier: 5.5.0
+        version: 5.5.0
+      chalk:
+        specifier: ^5.4.1
+        version: 5.6.2
+      tsdown:
+        specifier: 0.22.0
+        version: 0.22.0(tsx@4.23.12)(typescript@5.9.3)
       typescript:
         specifier: ^5.9.0
         version: 5.9.3
@@ -1105,7 +1114,7 @@ snapshots:
 
   '@babel/generator@8.0.0-rc.6':
     dependencies:
-      '@babel/parser': 8.0.0-rc.6
+      '@babel/parser': 8.0.4
       '@babel/types': 8.0.4
       '@jridgewell/gen-mapping': 0.3.13
       '@jridgewell/trace-mapping': 0.3.31

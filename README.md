@@ -17,8 +17,11 @@ packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork (kimi-code commit b6144f9,
                     (CJK wrap guard, width clamps, overwide truncation, negative-width
                     guards, per-frame processed-line reuse) are preserved; native/
                     prebuilds are deliberately not vendored (graceful fallback).
-packages/tui-app/   The dsh bundle: @xmoon76/tui-app. cordis.patch.yml inserts the
-                    startup row (dsh --profile pi-tui flags) and the runner row (TUI glue).
+packages/dsh-pi-tui/   The dsh bundle: @xmoon76/dsh-pi-tui (the only published
+                    package). cordis.patch.yml inserts the startup row
+                    (dsh --profile pi-tui flags) and the runner row (TUI glue).
+                    tsdown bundles the pi-tui fork into dist/, so the tarball
+                    is self-contained.
 ```
 
 ## Prerequisites
@@ -36,12 +39,14 @@ pnpm verbs (`add`, `remove`, `update`, `list`) all work.
 
 ### Option A — from the npm registry (recommended)
 
-The published package ships prebuilt (`@xmoon76/tui-app` pulls in
-`@xmoon76/pi-tui` automatically):
+The published package is self-contained: the vendored pi-tui fork is bundled
+into its build output, so `@xmoon76/dsh-pi-tui` is the only package you install
+(`@xmoon76/pi-tui` stays private in this repo, like kimi-code keeps
+`@moonshot-ai/pi-tui` private):
 
 ```sh
 # install the bundle into the pi-tui profile (creates the profile if needed)
-dsh plugin --profile pi-tui -- add @xmoon76/tui-app
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
 
 # run it
 dsh --profile pi-tui
@@ -52,22 +57,22 @@ stack automatically — no manual `cordis.patch.yml` wiring.
 
 ### Option B — from source
 
-Build artifacts are not committed (`dist/` for pi-tui, `lib/` for tui-app are
-gitignored and the package `exports` point at the built files), so build before
-installing from a clone:
+Build artifacts are not committed (`dist/` for both packages is gitignored and
+the package `exports` point at the built files), so build before installing
+from a clone:
 
 ```sh
 git clone https://github.com/XMoon/dsh-pi-tui
 cd dsh-pi-tui
 pnpm install
-pnpm build        # pi-tui tsdown (dist/) + tui-app tsc (lib/)
-dsh plugin --profile pi-tui -- add @xmoon76/tui-app@file:$PWD/packages/tui-app
+pnpm build        # pi-tui tsdown (dist/) + dsh-pi-tui tsdown (dist/, bundles pi-tui)
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
 ```
 
 ### Verify the install
 
 ```sh
-dsh plugin --profile pi-tui -- list          # both @xmoon76 packages present
+dsh plugin --profile pi-tui -- list          # @xmoon76/dsh-pi-tui present
 dsh --profile pi-tui                         # TUI starts instead of the web GUI
 ```
 
@@ -75,11 +80,11 @@ dsh --profile pi-tui                         # TUI starts instead of the web GUI
 
 ```sh
 # registry installs:
-dsh plugin --profile pi-tui -- update @xmoon76/tui-app
+dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
 # or rebuild + re-add for file: installs:
-pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/tui-app@file:$PWD/packages/tui-app
+pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
 
-dsh plugin --profile pi-tui -- remove @xmoon76/tui-app
+dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
 ```
 
 ## Development
@@ -91,7 +96,7 @@ pnpm test         # pi-tui's own suite (node --test) + tui-app headless tests
 pnpm typecheck
 ```
 
-Tests drive the UI through `@xterm/headless` (see `packages/tui-app/test/virtual-terminal.ts`),
+Tests drive the UI through `@xterm/headless` (see `packages/dsh-pi-tui/test/virtual-terminal.ts`),
 so rendering and input routing are verified without a TTY or a model connection.
 
 ## Slash commands (selection)

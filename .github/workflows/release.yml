@@ -1,9 +1,11 @@
 name: Release
 
-# Publish both packages to npm when a `v*` tag is pushed.
-# Uses npm's OIDC provenance integration: no NPM_TOKEN secret required.
-# `publishConfig.provenance: true` in packages/pi-tui/package.json makes
-# npm attach a signed build provenance (source = this repo).
+# Publish @xmoon76/dsh-pi-tui to npm when a `v*` tag is pushed.
+# The vendored fork (@xmoon76/pi-tui) is private and bundled into the
+# release package's dist at build time, so `pnpm -r publish` publishes
+# exactly one package (pnpm skips private ones).
+# Uses npm's OIDC provenance integration: with `id-token: write` npm
+# attaches a signed build provenance (source = this repo).
 
 on:
   push:
@@ -28,7 +30,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test
-      # Topological order: @xmoon76/pi-tui first, then @xmoon76/tui-app.
       - run: pnpm -r publish --access public --provenance --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
