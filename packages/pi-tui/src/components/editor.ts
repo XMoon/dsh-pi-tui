@@ -22,6 +22,14 @@ const wordSegmenter = getWordSegmenter();
 /** Regex matching paste markers like `[paste #1 +123 lines]` or `[paste #2 1234 chars]`. */
 const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
 
+/**
+ * Pastes larger than this are NOT stored in the pastes map: a stored paste
+ * is cloned into every undo snapshot (structuredClone), so a multi-MB paste
+ * multiplies its memory across the whole undo stack. Beyond the cap the
+ * marker trade-off reverses — expand inline like ordinary multi-line text.
+ */
+const MAX_PASTE_STORED_CHARS = 256 * 1024;
+
 /** Non-global version for single-segment testing. */
 const PASTE_MARKER_SINGLE = /^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$/;
 
@@ -511,7 +519,14 @@ export class Editor implements Component, Focusable {
 		// Capture state when first entering history browsing mode
 		if (entering && newIndex >= 0) {
 			this.pushUndoSnapshot();
-			this.historyDraft = structuredClone(this.state);
+			// Shallow copy: line strings are immutable, so the detached
+			// array is a full snapshot (structuredClone would copy every
+			// line's text on every history entry).
+			this.historyDraft = {
+				lines: [...this.state.lines],
+				cursorLine: this.state.cursorLine,
+				cursorCol: this.state.cursorCol,
+			};
 			this.hostHistoryDraft = pendingHostDraft;
 		}
 
@@ -1317,7 +1332,7 @@ export class Editor implements Component, Focusable {
 
 		// Check if this is a large paste (> 10 lines or > 1000 characters)
 		const totalChars = filteredText.length;
-		if (pastedLines.length > 10 || totalChars > 1000) {
+		if ((pastedLines.length > 10 || totalChars > 1000) && totalChars <= MAX_PASTE_STORED_CHARS) {
 			// Store the paste and insert a marker
 			this.pasteCounter++;
 			const pasteId = this.pasteCounter;
@@ -2131,7 +2146,20 @@ export class Editor implements Component, Focusable {
 	}
 
 	private pushUndoSnapshot(): void {
-		this.undoStack.push({ state: this.state, pastes: this.pastes, pasteCounter: this.pasteCounter });
+		// Shallow-clone the mutable containers only: line strings and paste
+		// bodies are immutable, so copying the ARRAY/MAP detaches the
+		// snapshot completely. structuredClone would copy every line's text
+		// AND every stored paste body on every edit — O(document) memory
+		// churn per edit, exploding with multi-MB pastes.
+		this.undoStack.push({
+			state: {
+				lines: [...this.state.lines],
+				cursorLine: this.state.cursorLine,
+				cursorCol: this.state.cursorCol,
+			},
+			pastes: new Map(this.pastes),
+			pasteCounter: this.pasteCounter,
+		});
 	}
 
 	private undo(): void {
@@ -2139,7 +2167,11 @@ export class Editor implements Component, Focusable {
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
 		Object.assign(this.state, snapshot.state);
-		this.pastes = snapshot.pastes;
+		// Re-copy the containers so the popped snapshot stays detached: the
+		// live state mutates its lines array in place (splices), which must
+		// never corrupt a snapshot that a later undo will restore.
+		this.state.lines = [...snapshot.state.lines];
+		this.pastes = new Map(snapshot.pastes);
 		this.pasteCounter = snapshot.pasteCounter;
 		this.lastAction = null;
 		this.preferredVisualCol = null;

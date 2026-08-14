@@ -4567,3 +4567,32 @@ describe("Editor narrow width rendering", () => {
 		assert.doesNotThrow(() => editor.render(-1));
 	});
 });
+
+describe("Oversized paste and undo snapshot isolation", () => {
+	it("expands pastes beyond the storage cap inline instead of markers", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const big = "x".repeat(300 * 1024); // > MAX_PASTE_STORED_CHARS
+		editor.handleInput(`\x1b[200~${big}\x1b[201~`);
+		const text = editor.getText();
+		assert.strictEqual(text, big);
+		assert.ok(!text.includes("[paste #"), "oversized paste must not use a marker");
+	});
+
+	it("undo snapshots survive in-place splices after undo", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.handleInput("a");
+		editor.handleInput("\n");
+		editor.handleInput("b");
+		editor.handleInput("\x1f"); // undo -> "a\n"
+		assert.strictEqual(editor.getText(), "a\n");
+		// Splice-heavy edits after undo (new lines) must not corrupt the
+		// snapshot chain: each later undo still restores its own document.
+		editor.handleInput("x");
+		editor.handleInput("\n");
+		editor.handleInput("y");
+		editor.handleInput("\x1f");
+		assert.strictEqual(editor.getText(), "a\nx\n");
+		editor.handleInput("\x1f");
+		assert.strictEqual(editor.getText(), "a\nx");
+	});
+});
