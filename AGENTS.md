@@ -1,6 +1,6 @@
 # AGENTS.md
 
-dsh-pi-tui — a third-party TUI mode for DeepSeek Harness (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui). Read this file before editing. (The milestone plan and work log live in `temp/PROGRESS.md`, kept outside the repository.)
+dsh-pi-tui — a third-party TUI mode for DeepSeek Harness (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui). Read this file before editing.
 
 ## Naming (hard rules)
 
