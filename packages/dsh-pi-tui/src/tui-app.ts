@@ -63,6 +63,7 @@ import {
   type ToolPresenter,
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
+import { QuestionFlow } from './question.ts'
 import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
 
@@ -302,10 +303,14 @@ export interface TuiQuestion {
   question: string
   /** Optional short heading/group label. */
   header?: string
+  /** Optional detail block rendered dimmed above the options (Web parity). */
+  detail?: string
   /** Optional choices rendered as a numbered menu. */
   options?: readonly { label: string; description?: string }[]
   /** Whether more than one option may be selected. */
   multiSelect?: boolean
+  /** Presentation intent: approve names the recommended option label. */
+  intent?: { kind: string; approve?: string }
 }
 
 /** One answered question, keyed by id. */
@@ -318,17 +323,9 @@ export interface TuiQuestionAnswer {
   custom?: string
 }
 
-/** Live state of one user-questions flow (one question on screen at a time). */
+/** Live state of one user-questions flow (the QuestionFlow overlay). */
 interface QuestionState {
-  questions: readonly TuiQuestion[]
-  /** The question currently on screen. */
-  index: number
-  /** Selected labels per question id. */
-  selected: Map<string, Set<string>>
-  /** Free-text answers per question id (no-option questions). */
-  custom: Map<string, string>
-  /** Typed free-text for the current no-option question. */
-  customText: string
+  flow: QuestionFlow
   handle?: OverlayHandle
   resolve: (answers: TuiQuestionAnswer[]) => void
   reject: (error: unknown) => void
@@ -1859,11 +1856,19 @@ export class TuiApp {
         return
       }
       const state: QuestionState = {
-        questions,
-        index: 0,
-        selected: new Map(),
-        custom: new Map(),
-        customText: '',
+        flow: new QuestionFlow(
+          questions.map(question => ({
+            id: question.id,
+            question: question.question,
+            ...question.header !== undefined ? { header: question.header } : {},
+            ...question.detail !== undefined ? { detail: question.detail } : {},
+            ...question.options !== undefined ? { options: question.options } : {},
+            ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
+            ...question.intent !== undefined ? { intent: question.intent } : {},
+          })),
+          (answers) => this.settleQuestions(state, answers),
+          () => this.settleQuestions(state, undefined),
+        ),
         resolve,
         reject,
         signal,
@@ -1873,110 +1878,26 @@ export class TuiApp {
         return
       }
       if (signal !== undefined) {
-        const onAbort = (): void => this.settleQuestions(state, 'cancelled')
+        const onAbort = (): void => this.settleQuestions(state, undefined)
         state.onAbort = onAbort
         signal.addEventListener('abort', onAbort, { once: true })
       }
       this.activeQuestions = state
-      this.renderQuestion(state)
+      state.handle = this.showOverlayOnHost(new Frame(state.flow), { width: 76, maxHeight: 26 })
     })
   }
 
-  /** Build and mount the dialog for the state's current question. */
-  private renderQuestion(state: QuestionState): void {
-    const question = state.questions[state.index]
-    if (question === undefined) {
-      this.settleQuestions(state, 'done')
-      return
-    }
-    const dialog = new Box(1, 1)
-    if (question.header !== undefined && question.header !== '') {
-      dialog.addChild(new Text(color.textDim(question.header)))
-    }
-    dialog.addChild(new Text(question.question))
-    const options = question.options ?? []
-    if (options.length > 0) {
-      options.forEach((option, index) => {
-        const checked = state.selected.get(question.id)?.has(option.label) === true ? color.success('✓') : ' '
-        dialog.addChild(new Text(`${checked} ${index + 1}) ${option.label}${option.description === undefined ? '' : ` — ${option.description}`}`))
-      })
-    } else if (question.multiSelect !== true) {
-      dialog.addChild(new Text(`> ${state.customText}`))
-      dialog.addChild(new Text('(type an answer, enter to confirm)'))
-    }
-    dialog.addChild(new Text(''))
-    const verb = question.multiSelect === true ? 'toggle' : 'select'
-    dialog.addChild(new Text(`[1-9] ${verb}   [enter] confirm   [esc] cancel   (${state.index + 1}/${state.questions.length})`))
-    state.handle?.hide()
-    state.handle = this.showOverlayOnHost(new Frame(dialog), { width: 72, maxHeight: 24 })
-  }
-
-  /** Route a key while a question is showing; every key is consumed. */
+  /** Route a key while a question flow is showing; every key is consumed. */
   private handleQuestionKey(data: string): TuiInputListenerResult {
     const state = this.activeQuestions
     if (state === undefined) return undefined
-    const question = state.questions[state.index]
-    if (question === undefined) {
-      this.settleQuestions(state, 'done')
-      return { consume: true }
-    }
-    const options = question.options ?? []
-    const digit = /^[1-9]$/.exec(data)
-    if (digit !== null) {
-      const option = options[Number(digit[0]) - 1]
-      if (option !== undefined) {
-        const selected = state.selected.get(question.id) ?? new Set<string>()
-        if (question.multiSelect === true) {
-          if (selected.has(option.label)) selected.delete(option.label)
-          else selected.add(option.label)
-        } else {
-          selected.clear()
-          selected.add(option.label)
-        }
-        state.selected.set(question.id, selected)
-        this.renderQuestion(state)
-      }
-      return { consume: true }
-    }
-    if (matchesKey(data, 'enter')) {
-      if (options.length > 0) {
-        state.index += 1
-        this.renderQuestion(state)
-      } else if (question.multiSelect !== true) {
-        // Free-text answer collected above the hint line.
-        state.custom.set(question.id, state.customText)
-        state.customText = ''
-        state.index += 1
-        this.renderQuestion(state)
-      }
-      return { consume: true }
-    }
-    if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) {
-      this.settleQuestions(state, 'cancelled')
-      return { consume: true }
-    }
-    // Free-text input for no-option questions; a chunk may carry several
-    // printable characters (paste-like delivery), so append every one.
-    if (options.length === 0 && question.multiSelect !== true) {
-      if (data === '\x7f' || data === '\b') {
-        state.customText = [...state.customText].slice(0, -1).join('')
-        this.renderQuestion(state)
-      } else {
-        let appended = false
-        for (const char of data) {
-          if (char.charCodeAt(0) >= 32) {
-            state.customText += char
-            appended = true
-          }
-        }
-        if (appended) this.renderQuestion(state)
-      }
-    }
+    state.flow.handleInput(data)
+    this.requestRender()
     return { consume: true }
   }
 
-  /** Resolve the question flow with its answers, or reject on cancel. */
-  private settleQuestions(state: QuestionState, outcome: 'done' | 'cancelled'): void {
+  /** Resolve the question flow with its answers, or reject on cancel/abort. */
+  private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (this.activeQuestions !== state) return
     this.activeQuestions = undefined
     state.handle?.hide()
@@ -1984,17 +1905,10 @@ export class TuiApp {
       state.signal.removeEventListener('abort', state.onAbort)
     }
     this.overlayHost.setFocus(this.editor)
-    if (outcome === 'cancelled') {
+    if (answers === undefined) {
       state.reject(new Error('question flow cancelled'))
       return
     }
-    const answers: TuiQuestionAnswer[] = state.questions.map(question => {
-      const selected = [...(state.selected.get(question.id) ?? [])]
-      const custom = (question.options ?? []).length === 0 && question.multiSelect !== true
-        ? state.custom.get(question.id)
-        : undefined
-      return custom === undefined ? { id: question.id, selected } : { id: question.id, selected, custom }
-    })
     state.resolve(answers)
   }
 }

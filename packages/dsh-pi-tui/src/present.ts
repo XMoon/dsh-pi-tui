@@ -72,6 +72,10 @@ const TUI_TOOL_TITLES: Record<string, string> = {
   'workflow-member': 'Workflow Agent',
   error: 'Error',
   interrupted: 'Interrupted',
+  // The ask_user_question tool carries no tool-owned presentation; its card
+  // names the interaction (Web AskQuestionRow parity) instead of the generic
+  // "Tool call" row.
+  ask_user_question: 'Question',
 }
 
 /** Summary key preference per variant (args-derived). */
@@ -157,6 +161,7 @@ const TOOL_EMOJIS: Record<string, string> = {
   'workflow-member': '🤖',
   error: '❌',
   interrupted: '⏹️',
+  ask_user_question: '❓',
 }
 
 /** Emoji per row variant, applied to every registered tool of that class. */

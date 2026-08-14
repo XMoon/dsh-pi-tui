@@ -1248,8 +1248,10 @@ export function apply(ctx: Context, config: Config): void {
             id: question.id,
             question: question.question,
             ...question.header !== undefined ? { header: question.header } : {},
+            ...question.detail !== undefined ? { detail: question.detail } : {},
             ...question.options !== undefined ? { options: question.options } : {},
             ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
+            ...question.intent !== undefined ? { intent: question.intent } : {},
           })), request.signal)
           return {
             answers: answers.map(answer => ({

@@ -87,7 +87,7 @@ test('askQuestions collects a single selection', async () => {
   }])
   let view = await viewport(vt)
   assert.ok(view.includes('Continue?'), `question missing:\n${view}`)
-  assert.ok(view.includes('1) Yes'), `option missing:\n${view}`)
+  assert.ok(view.includes('[1] Yes'), `option missing:\n${view}`)
   vt.sendInput('2')
   await viewport(vt)
   vt.sendInput('\r')
@@ -111,6 +111,9 @@ test('askQuestions toggles multi-select options', async () => {
   await viewport(vt)
   vt.sendInput('2') // toggle B on
   await viewport(vt)
+  // Multi-select Enter toggles; → pages to the review page, Enter submits.
+  vt.sendInput('\x1b[C')
+  await viewport(vt)
   vt.sendInput('\r')
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['C', 'B'] }])
 })
@@ -120,7 +123,9 @@ test('askQuestions collects free text for option-less questions', async () => {
   const promise = app.askQuestions([{ id: 'q1', question: 'Your name?' }])
   await viewport(vt)
   vt.sendInput('alice')
-  vt.sendInput('\r')
+  vt.sendInput('\r') // commit the typed answer
+  await viewport(vt)
+  vt.sendInput('\r') // review page: submit the batch
   assert.deepEqual(await promise, [{ id: 'q1', selected: [], custom: 'alice' }])
 })
 
@@ -132,12 +137,14 @@ test('askQuestions walks through multiple questions', async () => {
   ])
   let view = await viewport(vt)
   assert.ok(view.includes('First?'), `first question missing:\n${view}`)
+  // A single-select Enter advances immediately (Web parity).
   vt.sendInput('1')
-  vt.sendInput('\r')
   await viewport(vt)
   view = await viewport(vt)
   assert.ok(view.includes('Second?'), `second question missing:\n${view}`)
   vt.sendInput('2')
+  await viewport(vt)
+  // The review page: Enter submits the whole batch.
   vt.sendInput('\r')
   assert.deepEqual(await promise, [
     { id: 'q1', selected: ['A'] },
@@ -673,4 +680,105 @@ test('workflow runs stay a single folded row until expanded', async () => {
   const view = await viewport(vt)
   assert.ok(view.includes('Workflow audit [ok]'), `folded header missing:\n${view}`)
   assert.ok(!view.includes('checker — completed'), `members leaked while folded:\n${view}`)
+})
+
+test('askQuestions marks recommended options and renders detail blocks', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one?',
+    detail: 'Some context about the choice.',
+    options: [
+      { label: 'Plain' },
+      { label: 'Best (recommended)' },
+    ],
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Some context about the choice.'), `detail missing:\n${view}`)
+  assert.ok(view.includes('[recommended]'), `recommended badge missing:\n${view}`)
+  assert.ok(!view.includes('(recommended)'), `suffix must be stripped from the display:\n${view}`)
+  vt.sendInput('\r') // the recommended row is the default highlight → review
+  await viewport(vt)
+  vt.sendInput('\r') // review: submit
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Best (recommended)'] }])
+})
+
+test('askQuestions skip pages through and preserves drafts', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([
+    { id: 'q1', question: 'First?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?' },
+  ])
+  await viewport(vt)
+  vt.sendInput('s') // skip Q1 (empty answer)
+  await viewport(vt)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `skipped past the first question:\n${view}`)
+  vt.sendInput('hello')
+  vt.sendInput('\r') // commit the typed answer → review page
+  await viewport(vt)
+  // b returns from the review page; drafts survive the round trip.
+  vt.sendInput('b')
+  await viewport(vt)
+  view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `back to the second question:\n${view}`)
+  vt.sendInput('\x1b[D') // Q2 text mode: ← pages back to Q1
+  await viewport(vt)
+  view = await viewport(vt)
+  assert.ok(view.includes('First?'), `back to the first question:\n${view}`)
+  vt.sendInput('\x1b[C') // back to Q2
+  await viewport(vt)
+  vt.sendInput('\x1b[C') // Q2 → review
+  await viewport(vt)
+  vt.sendInput('\r') // submit
+  assert.deepEqual(await promise, [
+    { id: 'q1', selected: [] },
+    { id: 'q2', selected: [], custom: 'hello' },
+  ])
+})
+
+test('askQuestions review page shows every answer before submitting', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([
+    { id: 'q1', question: 'One?', options: [{ label: 'X' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'Y' }] },
+  ])
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  const view = await viewport(vt)
+  assert.ok(view.includes('Review your answer before submit'), `review page missing:\n${view}`)
+  assert.ok(view.includes('One?'), `Q1 answer missing:\n${view}`)
+  assert.ok(view.includes('Two?'), `Q2 answer missing:\n${view}`)
+  assert.ok(view.includes('X'), `Q1 value missing:\n${view}`)
+  assert.ok(view.includes('Y'), `Q2 value missing:\n${view}`)
+  vt.sendInput('\r') // submit
+  assert.deepEqual(await promise, [
+    { id: 'q1', selected: ['X'] },
+    { id: 'q2', selected: ['Y'] },
+  ])
+})
+
+test('an aborted signal settles the question flow as cancelled', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Any?', options: [{ label: 'Yes' }] }], controller.signal)
+  await viewport(vt)
+  controller.abort()
+  await assert.rejects(promise, /cancelled/)
+  const view = await viewport(vt)
+  assert.ok(!view.includes('Any?'), `dialog must close on abort:\n${view}`)
+  void vt
+})
+
+test('ask_user_question cards carry the Question identity instead of Tool call', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'ask_user_question', args: '{"questions":[{"id":"q","question":"Go?"}]}', result: '', status: 'running' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('❓  Question'), `question card missing:\n${view}`)
+  assert.ok(!view.includes('Tool call'), `generic card leaked:\n${view}`)
 })
