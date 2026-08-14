@@ -535,9 +535,11 @@ export class TuiApp {
             // Fullscreen layout: header and todo pinned, the transcript scrolls in
             // the middle (grow), and the editor + footer stay pinned to the bottom
             // of the screen — the implicit document scrollview would roll the
-            // editor away with the transcript when scrolling back.
+            // editor away with the transcript when scrolling back. The pinned rows
+            // are shrink-proof: when a long transcript overflows the screen the
+            // shrink pass must compress the SCROLL pane, never the editor.
             const root = new VStack([
-                this.header,
+                { component: this.header, shrink: 0 },
                 // grow is a stack-entry option: the transcript pane takes all the
                 // height the pinned rows leave behind.
                 { component: new ScrollView(this.messagesView, {
@@ -545,9 +547,9 @@ export class TuiApp {
                         primary: true,
                         scrollbar: 'auto',
                     }), grow: 1 },
-                this.todoPanel,
-                this.editor,
-                this.footer,
+                { component: this.todoPanel, shrink: 0 },
+                { component: this.editor, shrink: 0 },
+                { component: this.footer, shrink: 0 },
             ]);
             alt.setLayoutRoot(root);
             alt.addInputListener((data) => this.handleInput(data));

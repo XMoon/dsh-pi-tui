@@ -77,14 +77,18 @@ test('fullscreen renders content with the editor pinned to the bottom', async ()
   await viewport(vt)
   const scrolled = vt.getViewport().join('\n')
   const lines = scrolled.split('\n')
+  // The editor frame must survive the shrink pass in FULL: both borders
+  // visible near the bottom, never compressed to a single row.
   const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
   assert.ok(editorTop !== -1, `editor border missing:\n${scrolled}`)
-  const footerIndex = lines.findIndex(line => line.includes('dsh-pi-tui') && line.includes('t'))
   assert.ok(
     editorTop >= lines.length - 5,
     `editor must sit at the viewport bottom, found at ${editorTop}/${lines.length}:\n${scrolled}`,
   )
-  void footerIndex
+  assert.ok(
+    lines.slice(editorTop + 1).some(line => line.includes('─'.repeat(10))),
+    `editor bottom border missing (frame compressed):\n${scrolled}`,
+  )
   app.setFullscreen(false)
   const regular = await viewport(vt)
   assert.ok(regular.includes('line 39'), `content missing after exit fullscreen:\n${regular}`)
