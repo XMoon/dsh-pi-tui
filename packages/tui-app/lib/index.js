@@ -22,6 +22,7 @@ import { TUI_STARTUP_SERVICE } from "./startup.js";
 import { foldTranscript } from "./transcript.js";
 import { computeStats, formatStats } from "./stats.js";
 import { Text } from '@dsh-pi-tui/pi-tui';
+import { color } from "./theme.js";
 import { startProcessTui } from "./tui-app.js";
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner';
@@ -225,23 +226,29 @@ export function apply(ctx, config) {
                             currentValue: app.isToolOutputExpanded() ? 'expanded' : 'collapsed',
                             values: ['collapsed', 'expanded'],
                         },
+                        // ── read-only session facts ─────────────────────────────
+                        {
+                            id: 'separator',
+                            label: color.border('─'.repeat(34)),
+                            currentValue: '',
+                        },
                         {
                             id: 'session',
-                            label: 'Session',
-                            description: agent.session.id,
-                            currentValue: agent.session.id.length > 28 ? `${agent.session.id.slice(0, 28)}…` : agent.session.id,
+                            label: color.textDim('Session'),
+                            description: color.textDim(agent.session.id),
+                            currentValue: color.textDim(agent.session.id.length > 28 ? `${agent.session.id.slice(0, 28)}…` : agent.session.id),
                         },
                         {
                             id: 'model',
-                            label: 'Model',
-                            description: 'Provider and model routing this session',
-                            currentValue: `${agent.options.provider}/${agent.options.model}`,
+                            label: color.textDim('Model'),
+                            description: color.textDim('Provider and model routing this session'),
+                            currentValue: color.textDim(`${agent.options.provider}/${agent.options.model}`),
                         },
                         {
                             id: 'cwd',
-                            label: 'Working directory',
-                            description: 'Where this session runs',
-                            currentValue: cwd,
+                            label: color.textDim('Working directory'),
+                            description: color.textDim('Where this session runs'),
+                            currentValue: color.textDim(cwd),
                         },
                     ], (id, value) => {
                         if (id === 'approval') {
