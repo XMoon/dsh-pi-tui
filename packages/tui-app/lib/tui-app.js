@@ -230,6 +230,14 @@ export class TuiApp {
     }
     /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
     handleInput(data) {
+        // Kitty-protocol terminals report press, repeat, and release events as
+        // separate sequences; the app must act on the PRESS only. A release of
+        // Ctrl+O would otherwise double-toggle the fold (press expands, release
+        // collapses — a single press would appear to do nothing), and a release
+        // of Esc would trip the double-Esc cancel. The framework already filters
+        // releases for the focused component; listeners are on their own.
+        if (isKeyRelease(data) || isKeyRepeat(data))
+            return undefined;
         if (this.activeQuestions !== undefined) {
             return this.handleQuestionKey(data);
         }
@@ -319,6 +327,12 @@ export class TuiApp {
             return { consume: true };
         }
         if (matchesKey(data, 'ctrl+c')) {
+            this.events.onExit();
+            return { consume: true };
+        }
+        if (matchesKey(data, 'ctrl+d')) {
+            // Ctrl+D quits like /exit (and Ctrl+C). The editor's delete-char-
+            // forward remains on the Delete key.
             this.events.onExit();
             return { consume: true };
         }

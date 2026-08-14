@@ -26,6 +26,8 @@ import {
   Text,
   TuiAltScreen,
   TuiMainScreen,
+  isKeyRelease,
+  isKeyRepeat,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -439,6 +441,13 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
+    // Kitty-protocol terminals report press, repeat, and release events as
+    // separate sequences; the app must act on the PRESS only. A release of
+    // Ctrl+O would otherwise double-toggle the fold (press expands, release
+    // collapses — a single press would appear to do nothing), and a release
+    // of Esc would trip the double-Esc cancel. The framework already filters
+    // releases for the focused component; listeners are on their own.
+    if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
     if (this.activeQuestions !== undefined) {
       return this.handleQuestionKey(data)
     }

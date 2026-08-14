@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { setKittyProtocolActive } from '@dsh-pi-tui/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -70,4 +71,31 @@ test('older turns stay folded when recent ones expand', async () => {
   assert.ok(view.includes('recent thinking body'), `recent thinking not expanded:\n${view}`)
   assert.ok(view.includes('recent result body'), `recent tool not expanded:\n${view}`)
   assert.ok(!view.includes('hidden-line-4'), `old turn leaked expanded:\n${view}`)
+})
+
+test('kitty-protocol Ctrl+O fires once per press (release/repeat do not toggle)', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(transcript)
+  await viewport(vt)
+  setKittyProtocolActive(true)
+  try {
+    // Press: \x1b[<codepoint>;<mod>:<event>u — event 1 = press, 2 = repeat, 3 = release.
+    vt.sendInput('\x1b[111;5:1u') // ctrl+o press
+    await viewport(vt)
+    assert.ok(app.isToolOutputExpanded(), 'press should expand')
+    vt.sendInput('\x1b[111;5:3u') // ctrl+o release
+    await viewport(vt)
+    assert.ok(app.isToolOutputExpanded(), 'release must not collapse the fold')
+    vt.sendInput('\x1b[111;5:2u') // ctrl+o key repeat
+    await viewport(vt)
+    assert.ok(app.isToolOutputExpanded(), 'key repeat must not toggle the fold')
+    vt.sendInput('\x1b[111;5:1u') // press again
+    await viewport(vt)
+    assert.ok(!app.isToolOutputExpanded(), 'second press should collapse')
+    vt.sendInput('\x1b[111;5:3u')
+    await viewport(vt)
+    assert.ok(!app.isToolOutputExpanded(), 'release after the second press must not expand')
+  } finally {
+    setKittyProtocolActive(false)
+  }
 })
