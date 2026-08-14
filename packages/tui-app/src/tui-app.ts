@@ -50,7 +50,7 @@ import {
 } from './theme.ts'
 import { isDiffResult, renderDiffLines } from './diff.ts'
 import { TranscriptSearchComponent } from './search.ts'
-import type { TranscriptMessage } from './transcript.ts'
+import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
@@ -846,13 +846,7 @@ export class TuiApp {
   /** The turn threshold at or above which collapsible entries expand. */
   private expandBoundary(): number {
     if (!this.toolOutputExpanded || EXPAND_RECENT_TURNS <= 0) return Number.POSITIVE_INFINITY
-    const turns = new Set<number>()
-    for (const message of this.messages) {
-      if (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool') turns.add(message.turn)
-    }
-    const sorted = [...turns].sort((a, b) => b - a)
-    if (sorted.length <= EXPAND_RECENT_TURNS) return 0
-    return sorted[EXPAND_RECENT_TURNS - 1] ?? 0
+    return recentTurnThreshold(this.messages, EXPAND_RECENT_TURNS, ['thinking', 'system', 'tool'])
   }
 
 

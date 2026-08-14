@@ -71,20 +71,30 @@ function stepKey(turn: number, step: number): string {
 }
 
 /**
- * The turn threshold at or above which entries survive a display window.
- * Zero means every turn fits.
+ * The turn threshold at or above which entries count as "recent": the
+ * `recentTurns` most recent distinct turns among the given message kinds.
+ * Shared by the display window (all kinds), the markdown view, and the
+ * Ctrl+O expansion boundary (foldable kinds only).
  * @param messages - the folded transcript.
- * @param maxTurns - window size in turns.
- * @returns the oldest surviving turn number, or 0 when nothing is windowed.
+ * @param recentTurns - how many most-recent turns survive; <= 0 keeps nothing.
+ * @param kinds - kinds whose turns count; undefined counts every kind.
+ * @returns the oldest recent turn number; 0 when everything is recent;
+ *   `Infinity` when nothing is (every entry folds).
  */
-function turnBoundary(messages: readonly TranscriptMessage[], maxTurns: number): number {
+export function recentTurnThreshold(
+  messages: readonly TranscriptMessage[],
+  recentTurns: number,
+  kinds?: readonly TranscriptMessage['kind'][],
+): number {
+  if (recentTurns <= 0) return Number.POSITIVE_INFINITY
   const turns = new Set<number>()
   for (const message of messages) {
-    if ('turn' in message) turns.add(message.turn)
+    if (message.kind === 'summary') continue
+    if (kinds === undefined || kinds.includes(message.kind)) turns.add(message.turn)
   }
   const sorted = [...turns].sort((a, b) => b - a)
-  if (sorted.length <= maxTurns) return 0
-  return sorted[maxTurns - 1] ?? 0
+  if (sorted.length <= recentTurns) return 0
+  return sorted[recentTurns - 1] ?? 0
 }
 
 /**
@@ -120,7 +130,7 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
     kept.unshift({ kind: 'summary', text: `… ${parts.join(' · ')} — window ${maxTurns} turns` })
     return kept
   }
-  const boundary = turnBoundary(messages, maxTurns)
+  const boundary = recentTurnThreshold(messages, maxTurns)
   if (boundary === 0) return [...messages]
   const oldTurns = new Set<number>()
   const kept: TranscriptMessage[] = []
@@ -473,20 +483,21 @@ export function foldTranscript(events: readonly SessionEvent[], options?: FoldOp
  */
 export function renderTranscript(messages: readonly TranscriptMessage[], expandedTurns = 0): string {
   const lines: string[] = []
+  const boundary = recentTurnThreshold(messages, expandedTurns, ['thinking', 'system', 'tool'])
   for (const message of messages) {
     if (message.kind === 'user') {
       lines.push(`**You:** ${message.text}`, '')
     } else if (message.kind === 'assistant') {
       lines.push(message.text, '')
     } else if (message.kind === 'thinking') {
-      const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns)
+      const expanded = message.turn >= boundary
       if (expanded) {
         lines.push(`> _thinking:_ ${message.text}`, '')
       } else {
         lines.push(`> _thinking…_ (ctrl+o to expand)`, '')
       }
     } else if (message.kind === 'system') {
-      const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns)
+      const expanded = message.turn >= boundary
       if (expanded) {
         lines.push(`> _system:_ ${message.text}`, '')
       } else {
@@ -496,7 +507,7 @@ export function renderTranscript(messages: readonly TranscriptMessage[], expande
       lines.push(`> _${message.text}_`, '')
     } else {
       const mark = message.status === 'ok' ? '✓' : message.status === 'error' ? '✗' : '…'
-      const expanded = message.turn >= currentTurnBoundary(messages, expandedTurns)
+      const expanded = message.turn >= boundary
       if (expanded) {
         lines.push(`> \`${mark} ${message.name}\` ${message.result === '' ? '' : '— ' + message.result}`, '')
       } else {
@@ -505,16 +516,4 @@ export function renderTranscript(messages: readonly TranscriptMessage[], expande
     }
   }
   return lines.join('\n')
-}
-
-/** The turn threshold for expansion: the `expandedTurns` most recent turns. */
-function currentTurnBoundary(messages: readonly TranscriptMessage[], expandedTurns: number): number {
-  if (expandedTurns <= 0) return Number.POSITIVE_INFINITY
-  const turns = new Set<number>()
-  for (const message of messages) {
-    if (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool') turns.add(message.turn)
-  }
-  const sorted = [...turns].sort((a, b) => b - a)
-  if (sorted.length <= expandedTurns) return 0
-  return sorted[expandedTurns - 1] ?? 0
 }
