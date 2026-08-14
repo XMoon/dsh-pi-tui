@@ -39,8 +39,37 @@ export declare const darkColors: ColorPalette;
 export declare const lightColors: ColorPalette;
 /** The active palette; style helpers read it on every call, so swapping is live. */
 export declare let currentPalette: ColorPalette;
-/** Switch the active palette; callers must invalidate rendered components. */
-export declare function setTheme(theme: 'dark' | 'light'): void;
+/** Theme selection modes: built-in palettes or a custom palette file. */
+export type ThemeMode = 'dark' | 'light' | 'custom';
+/** One custom theme file: optional base palette plus color overrides. */
+export interface CustomThemeFile {
+    /** Display name, echoed in the theme picker. */
+    name: string;
+    /** Base palette to inherit unset tokens from; defaults to dark. */
+    base?: 'dark' | 'light';
+    /** Token overrides; any subset of {@link ColorPalette}. */
+    colors?: Partial<ColorPalette>;
+}
+/**
+ * Switch the active palette; callers must invalidate rendered components.
+ * `custom` uses the full palette in `customPalette`, or falls back to dark.
+ * @param theme - the palette family.
+ * @param custom - the resolved custom palette when `theme` is `custom`.
+ */
+export declare function setTheme(theme: ThemeMode, custom?: ColorPalette): void;
+/** Build a full palette from a custom theme file (base + overrides). */
+export declare function resolveCustomTheme(file: CustomThemeFile): ColorPalette;
+/**
+ * Classify a terminal background colour (OSC 11 reply) as dark or light by
+ * relative luminance; a bright background selects the light palette.
+ * @param rgb - the reported background colour.
+ * @returns the matching palette family.
+ */
+export declare function detectThemeFromBackground(rgb: {
+    r: number;
+    g: number;
+    b: number;
+}): 'dark' | 'light';
 /** Style helpers by token name. */
 export declare const color: {
     primary: (text: string) => string;

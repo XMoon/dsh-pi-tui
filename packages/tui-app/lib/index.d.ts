@@ -4,8 +4,9 @@
  * creates or resumes an Agent through the core registry, renders its session
  * log into the TUI transcript, and routes editor submissions back through
  * `agent.followup`. Streaming arrives through the `session/event` firehose;
- * the transcript view re-folds the log per event (small logs keep this
- * simple and always consistent).
+ * a persistent `TranscriptFolder` folds appended events incrementally and a
+ * coalesced repaint flushes the windowed transcript (older turns collapse
+ * into a summary), so long sessions never re-scan the whole log per event.
  * @module @dsh-pi-tui/tui-app
  */
 import type { Context } from '@deepseek-ai/cordis';

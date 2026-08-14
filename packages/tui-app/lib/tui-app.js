@@ -14,7 +14,8 @@
  * @module @dsh-pi-tui/tui-app/tui-app
  */
 import { Box, CombinedAutocompleteProvider, Container, Editor, Markdown, ProcessTerminal, SelectList, SettingsList, Text, TuiAltScreen, TuiMainScreen, matchesKey, truncateToWidth, visibleWidth, } from '@dsh-pi-tui/pi-tui';
-import { editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme } from "./theme.js";
+import { detectThemeFromBackground, editorTheme, markdownTheme, selectListTheme, settingsListTheme, setTheme, } from "./theme.js";
+import { isDiffResult, renderDiffLines } from "./diff.js";
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3;
 /** Folded preview lines for thinking blocks; mirrors pi's THINKING_PREVIEW_LINES. */
@@ -27,6 +28,48 @@ function preview(text, lines) {
     const first = parts.slice(0, lines).join(' ').trim();
     const rest = parts.length > lines ? '…' : '';
     return `${first.slice(0, 120)}${rest}`;
+}
+/**
+ * The key argument for a tool card header: the primary field per tool name
+ * (e.g. bash → command, write → file_path), falling back to the first
+ * string value, then to the raw args JSON.
+ * @param name - the tool name.
+ * @param args - the raw arguments JSON.
+ * @returns a short display string.
+ */
+function keyArg(name, args) {
+    let parsed;
+    try {
+        parsed = JSON.parse(args);
+    }
+    catch {
+        return args;
+    }
+    if (typeof parsed !== 'object' || parsed === null)
+        return args;
+    const record = parsed;
+    const fields = {
+        bash: ['command', 'cmd', 'script'],
+        write: ['file_path', 'path', 'file'],
+        edit: ['file_path', 'path', 'file'],
+        read: ['file', 'file_path', 'path'],
+        grep: ['pattern', 'regex', 'query'],
+        glob: ['pattern', 'path'],
+        fetch: ['url', 'uri'],
+        web: ['query', 'url'],
+        skill: ['name', 'skill'],
+        ask_user_question: ['question'],
+    };
+    for (const field of fields[name] ?? []) {
+        const value = record[field];
+        if (typeof value === 'string' && value !== '')
+            return `${field}=${value}`;
+    }
+    for (const value of Object.values(record)) {
+        if (typeof value === 'string' && value !== '')
+            return value;
+    }
+    return args;
 }
 /** Context bar width in cells; pi renders `[███░░░] pct` in the footer. */
 const CONTEXT_BAR_WIDTH = 12;
@@ -95,10 +138,26 @@ export class TuiApp {
     approvalQueue = [];
     /** The prompt currently on screen, if any. */
     activeApproval;
+    /** The active user-questions flow, if any (one at a time). */
+    activeQuestions;
     /** The folded transcript; re-rendered into the messages view on change. */
     messages = [];
+    /** Local (non-session) cards — e.g. `!` shell runs — rendered after the transcript. */
+    localMessages = [];
+    /** Submitted input history (newest first), mirrored for persistence. */
+    inputHistory = [];
+    /** Cap for the persisted input history per working directory. */
+    static INPUT_HISTORY_LIMIT = 100;
     /** Ctrl+O master switch: expand the most recent turns' collapsible entries. */
     toolOutputExpanded = false;
+    /** Alt+T: hide thinking entries entirely (they stay in the log). */
+    hideThinking = false;
+    /** The latest todo/write snapshot; rendered as a panel when visible. */
+    todoItems = [];
+    /** Ctrl+T: whether the todo panel between transcript and editor is shown. */
+    todoPanelVisible = false;
+    /** The todo panel Text; empty when hidden. */
+    todoPanel;
     /** Whether the Ctrl+O expansion master switch is on. */
     isToolOutputExpanded() {
         return this.toolOutputExpanded;
@@ -110,6 +169,8 @@ export class TuiApp {
     }
     /** Fullscreen (alt-screen) instance; absent in regular mode. */
     fullscreen;
+    /** Overlay handles currently mounted on the active screen, for mode switches. */
+    overlayHandles = new Set();
     /** Footer state. */
     status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' };
     /** Header text (todo summary), kept for theme-swap repaints. */
@@ -136,12 +197,17 @@ export class TuiApp {
         this.tui = new TuiMainScreen(terminal);
         this.editor = new Editor(this.tui, editorTheme);
         this.editorBorder = this.editor.borderColor;
-        this.editor.onSubmit = (text) => this.events.onSubmit(text);
+        this.editor.onSubmit = (text) => {
+            this.rememberInput(text);
+            this.events.onSubmit(text);
+        };
         this.header = new Text('🐋 dsh-pi-tui', 0, 0);
         this.messagesView = new Container();
+        this.todoPanel = new Text('', 0, 0);
         this.footer = new Text('', 0, 0);
         this.tui.addChild(this.header);
         this.tui.addChild(this.messagesView);
+        this.tui.addChild(this.todoPanel);
         this.tui.addChild(this.editor);
         this.tui.addChild(this.footer);
         this.tui.setFocus(this.editor);
@@ -157,14 +223,17 @@ export class TuiApp {
         this.fullscreen?.stop();
         this.fullscreen = undefined;
     }
-    /** Shared key routing: approval first, then folding/mode/cancel/exit. */
+    /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
     handleInput(data) {
+        if (this.activeQuestions !== undefined) {
+            return this.handleQuestionKey(data);
+        }
         if (this.activeApproval !== undefined) {
             return this.handleApprovalKey(data);
         }
         if (matchesKey(data, 'escape')) {
             // Overlays (pickers, settings) own Esc while they are up.
-            if (this.tui.hasOverlayEntries)
+            if (this.overlayHost.hasOverlayEntries)
                 return undefined;
             const now = Date.now();
             if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
@@ -181,6 +250,34 @@ export class TuiApp {
             this.rebuildMessages();
             return { consume: true };
         }
+        if (matchesKey(data, 'ctrl+t')) {
+            // Todo panel toggle (kimi semantics; Ctrl+T never reaches the editor).
+            this.toggleTodoPanel();
+            return { consume: true };
+        }
+        if (matchesKey(data, 'alt+t')) {
+            // Hide/show thinking entries independently of the Ctrl+O fold.
+            this.toggleThinkingHidden();
+            return { consume: true };
+        }
+        if (matchesKey(data, 'ctrl+s')) {
+            // Steer: send the draft into the running turn and clear the editor.
+            if (this.overlayHost.hasOverlayEntries)
+                return { consume: true };
+            const draft = this.editor.getText();
+            if (draft.trim() === '')
+                return { consume: true };
+            this.editor.setText('');
+            this.events.onSteer?.(draft);
+            return { consume: true };
+        }
+        if (matchesKey(data, 'ctrl+g')) {
+            // External editor; overlays own Ctrl+G while up (alt-screen search).
+            if (this.overlayHost.hasOverlayEntries)
+                return { consume: true };
+            void this.launchExternalEditor();
+            return { consume: true };
+        }
         if (matchesKey(data, 'ctrl+f')) {
             this.toggleFullscreen();
             return { consume: true };
@@ -191,8 +288,114 @@ export class TuiApp {
         }
         return undefined;
     }
-    /** Toggle between regular (terminal scrollback) and fullscreen (alt screen). */
+    /** The screen currently rendering: the alt screen in fullscreen mode. */
+    get overlayHost() {
+        return this.fullscreen ?? this.tui;
+    }
+    /**
+     * Show an overlay on the active screen and track its handle, so a
+     * fullscreen toggle can hide every mounted overlay on the old screen.
+     * @param component - the overlay content.
+     * @param options - overlay sizing/positioning.
+     * @returns the handle; hide() also forgets the handle.
+     */
+    showOverlayOnHost(component, options) {
+        const handle = this.overlayHost.showOverlay(component, options);
+        this.overlayHandles.add(handle);
+        return {
+            ...handle,
+            hide: () => {
+                this.overlayHandles.delete(handle);
+                handle.hide();
+            },
+        };
+    }
+    /**
+     * Launch the external editor with the current draft. The TUI stops first
+     * (raw mode released) and restarts after the editor returns; a fullscreen
+     * mode is not restored (the editor session ends in regular mode).
+     */
+    async launchExternalEditor() {
+        const open = this.events.openExternalEditor;
+        if (open === undefined)
+            return;
+        const draft = this.editor.getText();
+        this.stop();
+        try {
+            const next = await open(draft);
+            if (next !== '')
+                this.editor.setText(next);
+        }
+        finally {
+            this.start();
+        }
+    }
+    /** Record a submitted line into the editor history and the persistence mirror. */
+    rememberInput(text) {
+        const trimmed = text.trim();
+        if (trimmed === '')
+            return;
+        this.editor.addToHistory(trimmed);
+        if (this.inputHistory[0] === trimmed)
+            return;
+        this.inputHistory.unshift(trimmed);
+        if (this.inputHistory.length > TuiApp.INPUT_HISTORY_LIMIT)
+            this.inputHistory.pop();
+    }
+    /**
+     * Seed the editor's recall history from persisted entries (newest first).
+     * @param entries - persisted entries, most recent first.
+     */
+    seedInputHistory(entries) {
+        // addToHistory unshifts, so seed oldest→newest to keep the persisted order.
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+            const entry = entries[index];
+            if (entry === undefined)
+                continue;
+            const trimmed = entry.trim();
+            if (trimmed !== '')
+                this.editor.addToHistory(trimmed);
+        }
+    }
+    /** The current input history (newest first) for persistence. */
+    getInputHistory() {
+        return [...this.inputHistory];
+    }
+    /**
+     * Append a local card rendered after the session transcript (e.g. `!`
+     * shell runs). The card is always expanded (its turn is unbounded).
+     * @param message - the local card to show.
+     */
+    pushLocalMessage(message) {
+        this.localMessages.push(message);
+        this.rebuildMessages();
+    }
+    /** Replace the most recent local card (running → settled). */
+    updateLastLocalMessage(message) {
+        const index = this.localMessages.length - 1;
+        if (index < 0)
+            return;
+        this.localMessages[index] = message;
+        this.rebuildMessages();
+    }
+    /** Drop all local cards (session switch). */
+    clearLocalMessages() {
+        if (this.localMessages.length === 0)
+            return;
+        this.localMessages.length = 0;
+        this.rebuildMessages();
+    }
+    /**
+     * Toggle between regular (terminal scrollback) and fullscreen (alt screen).
+     * Overlays live on the active screen, so the switch hides every mounted
+     * overlay; a pending approval prompt is re-rendered on the new screen.
+     */
     toggleFullscreen() {
+        const pending = this.activeApproval;
+        pending?.handle?.hide();
+        for (const handle of this.overlayHandles)
+            handle.hide();
+        this.overlayHandles.clear();
         if (this.fullscreen === undefined) {
             const alt = new TuiAltScreen(this.terminal);
             for (const child of this.tui.children)
@@ -207,6 +410,8 @@ export class TuiApp {
             this.fullscreen = undefined;
             this.tui.start();
         }
+        if (pending !== undefined)
+            this.renderApprovalDialog(pending);
     }
     /**
      * Replace the transcript and rebuild the message components. Collapsible
@@ -226,11 +431,18 @@ export class TuiApp {
         }
         const boundary = this.expandBoundary();
         for (const message of this.messages) {
+            // Alt+T hides thinking entries without touching the fold state.
+            if (message.kind === 'thinking' && this.hideThinking)
+                continue;
+            this.messagesView.addChild(this.renderMessage(message, boundary));
+        }
+        for (const message of this.localMessages) {
             this.messagesView.addChild(this.renderMessage(message, boundary));
         }
         if (this.notifyText !== '') {
             this.messagesView.addChild(new Text(color.error(`✗ ${this.notifyText}`), 0, 0));
         }
+        this.renderTodoPanel();
         this.requestRender();
     }
     /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
@@ -309,21 +521,32 @@ export class TuiApp {
                 : color.textMuted(`§ ${preview(message.text, 2)} (ctrl+o to expand)`);
             return new Text(text, 0, 0);
         }
+        if (message.kind === 'summary') {
+            // Windowing: turns older than the display window collapse to one line.
+            return new Text(color.textDim(message.text), 0, 0);
+        }
         // Tool card: header line, plus args and result when expanded.
         const mark = message.status === 'ok' ? successMark('✓') : message.status === 'error' ? errorMark('✗') : dim('…');
         const card = new Container();
-        const argsLine = message.args.trim() === '' ? '' : ` ${message.args.slice(0, 60)}`;
+        const key = message.args.trim() === '' ? '' : ` ${keyArg(message.name, message.args).slice(0, 60)}`;
         if (message.turn >= boundary) {
-            card.addChild(new Text(`${mark} ${message.name}${argsLine}`, 0, 0));
+            card.addChild(new Text(`${mark} ${message.name}${key}`, 0, 0));
             if (message.result !== '') {
-                card.addChild(new Text(message.result, 0, 0));
+                if (isDiffResult(message.name, message.result)) {
+                    for (const line of renderDiffLines(message.result)) {
+                        card.addChild(new Text(line, 0, 0));
+                    }
+                }
+                else {
+                    card.addChild(new Text(message.result, 0, 0));
+                }
             }
         }
         else {
             const resultPreview = message.result === ''
                 ? ''
                 : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`;
-            card.addChild(new Text(`${mark} ${message.name}${resultPreview}`, 0, 0));
+            card.addChild(new Text(`${mark} ${message.name}${key}${resultPreview}`, 0, 0));
         }
         return card;
     }
@@ -338,6 +561,7 @@ export class TuiApp {
      * @param todos - the latest todo/write snapshot.
      */
     setTodoSummary(todos) {
+        this.todoItems = todos;
         const active = todos.filter(todo => todo.status !== 'completed');
         const done = todos.length - active.length;
         if (active.length === 0) {
@@ -349,6 +573,56 @@ export class TuiApp {
             this.todoText = ` · ${active.length} active · ${label}`;
         }
         this.renderHeader();
+        if (this.todoPanelVisible)
+            this.renderTodoPanel();
+    }
+    /** Toggle the todo panel between the transcript and the editor. */
+    toggleTodoPanel() {
+        this.todoPanelVisible = !this.todoPanelVisible;
+        this.renderTodoPanel();
+        this.requestRender();
+        return this.todoPanelVisible;
+    }
+    /** Whether the todo panel is currently shown. */
+    isTodoPanelVisible() {
+        return this.todoPanelVisible;
+    }
+    /**
+     * Rebuild the todo panel text: a header line plus up to five rows,
+     * in_progress first, then pending, then completed (strikethrough).
+     */
+    renderTodoPanel() {
+        if (!this.todoPanelVisible) {
+            this.todoPanel.setText('');
+            return;
+        }
+        const mark = (todo) => todo.status === 'in_progress'
+            ? color.primary('●')
+            : todo.status === 'completed' ? color.success('✓') : color.textDim('○');
+        const ordered = [
+            ...this.todoItems.filter(todo => todo.status === 'in_progress'),
+            ...this.todoItems.filter(todo => todo.status === 'pending'),
+            ...this.todoItems.filter(todo => todo.status === 'completed'),
+        ].slice(0, 5);
+        if (ordered.length === 0) {
+            this.todoPanel.setText(color.border('─ todo ─'));
+            return;
+        }
+        const lines = ordered.map(todo => {
+            const body = todo.status === 'completed' ? `\x1b[9m${todo.content}\x1b[29m` : todo.content;
+            return `${mark(todo)} ${body}`;
+        });
+        this.todoPanel.setText([color.border('─ todo ─'), ...lines].join('\n'));
+    }
+    /** Hide/show thinking entries; the fold state is untouched. */
+    toggleThinkingHidden() {
+        this.hideThinking = !this.hideThinking;
+        this.rebuildMessages();
+        return this.hideThinking;
+    }
+    /** Whether thinking entries are currently hidden. */
+    isThinkingHidden() {
+        return this.hideThinking;
     }
     /** Rebuild the header from base + todo summary + plan badge. */
     renderHeader() {
@@ -359,13 +633,24 @@ export class TuiApp {
     }
     /**
      * Update the footer: line 1 `[model] …/cwd branch [ctx bar] t/steps`,
-     * line 2 the stats line left-aligned with the context readout right-
-     * aligned (kimi layout). Partial updates merge.
+     * line 2 the stats line (full preset) or nothing (compact). Partial
+     * updates merge.
      * @param status - the new status values.
      */
     setStatus(status) {
         this.status = { ...this.status, ...status };
         this.renderFooter();
+    }
+    /** Footer density presets: full keeps the stats line, compact drops it. */
+    footerPreset = 'full';
+    /** Set the footer density preset and repaint. */
+    setFooterPreset(preset) {
+        this.footerPreset = preset;
+        this.renderFooter();
+    }
+    /** Whether the footer currently uses the compact preset. */
+    getFooterPreset() {
+        return this.footerPreset;
     }
     /** Rebuild the two footer lines from the current status and plan badge. */
     renderFooter() {
@@ -375,6 +660,7 @@ export class TuiApp {
             : '';
         const line1 = [
             this.planMode ? color.warning('[plan]') : '',
+            this.status.goal === undefined || this.status.goal === '' ? '' : color.primary(this.status.goal),
             this.status.model === '' ? '' : `[${this.status.model}]`,
             this.status.cwd,
             this.status.branch === '' ? '' : this.status.branch,
@@ -382,7 +668,7 @@ export class TuiApp {
             `t${this.status.turns}/s${this.status.steps}`,
         ].filter(part => part !== '');
         // Line 2: the stats line only; context pressure is the bar on line 1.
-        const line2 = this.status.statsLine;
+        const line2 = this.footerPreset === 'compact' ? '' : this.status.statsLine;
         this.footerText = [dim(line1.join('  ')), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n');
         this.footer.setText(this.footerText);
         this.requestRender();
@@ -400,7 +686,7 @@ export class TuiApp {
      */
     openPicker(items, onSelect, onCancel) {
         const list = new SelectList(items.map(item => ({ ...item })), 10, selectListTheme);
-        const handle = this.tui.showOverlay(new Frame(list), { width: 64, maxHeight: 24 });
+        const handle = this.showOverlayOnHost(new Frame(list), { width: 64, maxHeight: 24 });
         list.onSelect = (item) => {
             handle.hide();
             onSelect(item.value);
@@ -425,7 +711,7 @@ export class TuiApp {
             handle?.hide();
             onCancel();
         }, { enableSearch: true });
-        handle = this.tui.showOverlay(new Frame(settings), { width: 72, maxHeight: 28 });
+        handle = this.showOverlayOnHost(new Frame(settings), { width: 72, maxHeight: 28 });
     }
     /** Switch the active color theme and repaint everything. */
     applyTheme(theme) {
@@ -436,6 +722,34 @@ export class TuiApp {
         this.footer.setText(this.footerText);
         this.editor.invalidate();
         this.requestRender();
+    }
+    /** Apply a resolved custom palette and repaint everything. */
+    applyPalette(palette) {
+        setTheme('custom', palette);
+        this.rebuildMessages();
+        this.header.setText(this.headerText);
+        this.footer.setText(this.footerText);
+        this.editor.invalidate();
+        this.requestRender();
+    }
+    /**
+     * Query the terminal background (OSC 11) and apply the matching palette.
+     * A terminal that never answers leaves the current theme untouched.
+     */
+    async autoDetectTheme() {
+        const rgb = await this.tui.queryTerminalBackgroundColor({ timeoutMs: 800 });
+        if (rgb === undefined)
+            return;
+        this.applyTheme(detectThemeFromBackground(rgb));
+    }
+    /**
+     * Register a live terminal-theme listener (colour-scheme reports). The
+     * runner uses it to follow the terminal when the preference is `auto`.
+     * @param listener - receives the detected palette family.
+     * @returns a disposer.
+     */
+    onTerminalThemeChange(listener) {
+        return this.tui.onTerminalColorSchemeChange((scheme) => listener(scheme));
     }
     /**
      * Queue an approval prompt and resolve when the user decides. Requests
@@ -467,15 +781,19 @@ export class TuiApp {
         const pending = this.approvalQueue.shift();
         if (pending === undefined)
             return;
+        this.renderApprovalDialog(pending);
+        this.activeApproval = pending;
+    }
+    /** Build and mount the approval dialog for one prompt on the active screen. */
+    renderApprovalDialog(pending) {
         const dialog = new Box(1, 1);
         dialog.addChild(new Text(`Approve ${pending.request.toolName}?`));
         if (pending.request.reason !== undefined && pending.request.reason !== '') {
             dialog.addChild(new Text(pending.request.reason));
         }
         dialog.addChild(new Text(''));
-        dialog.addChild(new Text('[y] allow once   [n] reject   [esc] cancel'));
-        pending.handle = this.tui.showOverlay(new Frame(dialog), { width: 60, maxHeight: 14 });
-        this.activeApproval = pending;
+        dialog.addChild(new Text('[y] allow once   [n] reject   [esc/ctrl+c] cancel'));
+        pending.handle = this.showOverlayOnHost(new Frame(dialog), { width: 60, maxHeight: 14 });
     }
     /** Route a key while a prompt is showing; every key is consumed. */
     handleApprovalKey(data) {
@@ -488,6 +806,8 @@ export class TuiApp {
             this.settleApproval(pending, 'rejected');
         else if (matchesKey(data, 'escape'))
             this.settleApproval(pending, 'cancelled');
+        else if (matchesKey(data, 'ctrl+c'))
+            this.settleApproval(pending, 'cancelled');
         return { consume: true };
     }
     /** Resolve one prompt, hide its dialog, and show the next in line. */
@@ -499,8 +819,168 @@ export class TuiApp {
         pending.onAbort !== undefined && pending.request.signal !== undefined
             && pending.request.signal.removeEventListener('abort', pending.onAbort);
         pending.resolve(outcome);
-        this.tui.setFocus(this.editor);
+        this.overlayHost.setFocus(this.editor);
         this.showNextApproval();
+    }
+    /**
+     * Ask the user one or more questions through the dialog overlay. One
+     * question is on screen at a time; numbered keys select/toggle options,
+     * Enter confirms the current question, Esc (or an aborted signal) rejects.
+     * Questions without options collect a typed free-text answer.
+     * @param questions - the questions to ask.
+     * @param signal - optional abort; settles the flow rejected.
+     * @returns the answers, in question order.
+     */
+    askQuestions(questions, signal) {
+        return new Promise((resolve, reject) => {
+            if (questions.length === 0) {
+                resolve([]);
+                return;
+            }
+            const state = {
+                questions,
+                index: 0,
+                selected: new Map(),
+                custom: new Map(),
+                customText: '',
+                resolve,
+                reject,
+                signal,
+            };
+            if (signal?.aborted === true) {
+                reject(new Error('question flow aborted'));
+                return;
+            }
+            if (signal !== undefined) {
+                const onAbort = () => this.settleQuestions(state, 'cancelled');
+                state.onAbort = onAbort;
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+            this.activeQuestions = state;
+            this.renderQuestion(state);
+        });
+    }
+    /** Build and mount the dialog for the state's current question. */
+    renderQuestion(state) {
+        const question = state.questions[state.index];
+        if (question === undefined) {
+            this.settleQuestions(state, 'done');
+            return;
+        }
+        const dialog = new Box(1, 1);
+        if (question.header !== undefined && question.header !== '') {
+            dialog.addChild(new Text(color.textDim(question.header)));
+        }
+        dialog.addChild(new Text(question.question));
+        const options = question.options ?? [];
+        if (options.length > 0) {
+            options.forEach((option, index) => {
+                const checked = state.selected.get(question.id)?.has(option.label) === true ? color.success('✓') : ' ';
+                dialog.addChild(new Text(`${checked} ${index + 1}) ${option.label}${option.description === undefined ? '' : ` — ${option.description}`}`));
+            });
+        }
+        else if (question.multiSelect !== true) {
+            dialog.addChild(new Text(`> ${state.customText}`));
+            dialog.addChild(new Text('(type an answer, enter to confirm)'));
+        }
+        dialog.addChild(new Text(''));
+        const verb = question.multiSelect === true ? 'toggle' : 'select';
+        dialog.addChild(new Text(`[1-9] ${verb}   [enter] confirm   [esc] cancel   (${state.index + 1}/${state.questions.length})`));
+        state.handle?.hide();
+        state.handle = this.showOverlayOnHost(new Frame(dialog), { width: 72, maxHeight: 24 });
+    }
+    /** Route a key while a question is showing; every key is consumed. */
+    handleQuestionKey(data) {
+        const state = this.activeQuestions;
+        if (state === undefined)
+            return undefined;
+        const question = state.questions[state.index];
+        if (question === undefined) {
+            this.settleQuestions(state, 'done');
+            return { consume: true };
+        }
+        const options = question.options ?? [];
+        const digit = /^[1-9]$/.exec(data);
+        if (digit !== null) {
+            const option = options[Number(digit[0]) - 1];
+            if (option !== undefined) {
+                const selected = state.selected.get(question.id) ?? new Set();
+                if (question.multiSelect === true) {
+                    if (selected.has(option.label))
+                        selected.delete(option.label);
+                    else
+                        selected.add(option.label);
+                }
+                else {
+                    selected.clear();
+                    selected.add(option.label);
+                }
+                state.selected.set(question.id, selected);
+                this.renderQuestion(state);
+            }
+            return { consume: true };
+        }
+        if (matchesKey(data, 'enter')) {
+            if (options.length > 0) {
+                state.index += 1;
+                this.renderQuestion(state);
+            }
+            else if (question.multiSelect !== true) {
+                // Free-text answer collected above the hint line.
+                state.custom.set(question.id, state.customText);
+                state.customText = '';
+                state.index += 1;
+                this.renderQuestion(state);
+            }
+            return { consume: true };
+        }
+        if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) {
+            this.settleQuestions(state, 'cancelled');
+            return { consume: true };
+        }
+        // Free-text input for no-option questions; a chunk may carry several
+        // printable characters (paste-like delivery), so append every one.
+        if (options.length === 0 && question.multiSelect !== true) {
+            if (data === '\x7f' || data === '\b') {
+                state.customText = [...state.customText].slice(0, -1).join('');
+                this.renderQuestion(state);
+            }
+            else {
+                let appended = false;
+                for (const char of data) {
+                    if (char.charCodeAt(0) >= 32) {
+                        state.customText += char;
+                        appended = true;
+                    }
+                }
+                if (appended)
+                    this.renderQuestion(state);
+            }
+        }
+        return { consume: true };
+    }
+    /** Resolve the question flow with its answers, or reject on cancel. */
+    settleQuestions(state, outcome) {
+        if (this.activeQuestions !== state)
+            return;
+        this.activeQuestions = undefined;
+        state.handle?.hide();
+        if (state.onAbort !== undefined && state.signal !== undefined) {
+            state.signal.removeEventListener('abort', state.onAbort);
+        }
+        this.overlayHost.setFocus(this.editor);
+        if (outcome === 'cancelled') {
+            state.reject(new Error('question flow cancelled'));
+            return;
+        }
+        const answers = state.questions.map(question => {
+            const selected = [...(state.selected.get(question.id) ?? [])];
+            const custom = (question.options ?? []).length === 0 && question.multiSelect !== true
+                ? state.custom.get(question.id)
+                : undefined;
+            return custom === undefined ? { id: question.id, selected } : { id: question.id, selected, custom };
+        });
+        state.resolve(answers);
     }
 }
 // Style helpers from the theme module's token functions.
