@@ -221,14 +221,18 @@ export function apply(ctx: Context, config: Config): void {
 
     const commands = ctx.get('commands')
     if (commands !== undefined) {
-      // Slash-command autocompletion from the command registry.
-      app.setCommandCompletions(
-        commands.list(agent).map(command => ({
-          name: command.name,
-          description: command.description,
-        })),
-        cwd,
-      )
+      // Refresh completions after every registration below so TUI-owned
+      // commands (/exit /settings /skill /model) appear in the tab list.
+      const refreshCompletions = (): void => {
+        app.setCommandCompletions(
+          commands.list(agent).map(command => ({
+            name: command.name,
+            description: command.description,
+          })),
+          cwd,
+        )
+      }
+      refreshCompletions()
       commands.register({
         name: 'exit',
         description: 'Quit the terminal UI (flush and exit)',
@@ -281,7 +285,7 @@ export function apply(ctx: Context, config: Config): void {
             ],
             (id, value) => {
               if (id === 'approval') {
-                if (value === 'ask' || value === 'never') ctx.approval?.setPolicy(agent, value)
+                if (value === 'ask' || value === 'never') ctx.get('approval')?.setPolicy(agent, value)
               } else if (id === 'theme') {
                 if (value === 'dark' || value === 'light') {
                   app.applyTheme(value)
@@ -377,6 +381,8 @@ export function apply(ctx: Context, config: Config): void {
           return { kind: 'success' }
         },
       })
+      // All TUI commands are registered now; include them in completion.
+      refreshCompletions()
     }
     refreshStatus()
 

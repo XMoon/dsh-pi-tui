@@ -180,11 +180,15 @@ export function apply(ctx, config) {
         }
         const commands = ctx.get('commands');
         if (commands !== undefined) {
-            // Slash-command autocompletion from the command registry.
-            app.setCommandCompletions(commands.list(agent).map(command => ({
-                name: command.name,
-                description: command.description,
-            })), cwd);
+            // Refresh completions after every registration below so TUI-owned
+            // commands (/exit /settings /skill /model) appear in the tab list.
+            const refreshCompletions = () => {
+                app.setCommandCompletions(commands.list(agent).map(command => ({
+                    name: command.name,
+                    description: command.description,
+                })), cwd);
+            };
+            refreshCompletions();
             commands.register({
                 name: 'exit',
                 description: 'Quit the terminal UI (flush and exit)',
@@ -236,7 +240,7 @@ export function apply(ctx, config) {
                     ], (id, value) => {
                         if (id === 'approval') {
                             if (value === 'ask' || value === 'never')
-                                ctx.approval?.setPolicy(agent, value);
+                                ctx.get('approval')?.setPolicy(agent, value);
                         }
                         else if (id === 'theme') {
                             if (value === 'dark' || value === 'light') {
@@ -326,6 +330,8 @@ export function apply(ctx, config) {
                     return { kind: 'success' };
                 },
             });
+            // All TUI commands are registered now; include them in completion.
+            refreshCompletions();
         }
         refreshStatus();
         ctx.on('session/event', (session, event) => {
