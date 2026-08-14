@@ -898,12 +898,13 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private consumeOsc11BackgroundResponse(data: string): boolean {
-		if (this.pendingOsc11BackgroundReplies <= 0) {
-			return false;
-		}
-
+		// A reply that arrives after its query timed out must still be
+		// swallowed: it is a terminal protocol response, never editor input.
 		if (!isOsc11BackgroundColorResponse(data)) {
 			return false;
+		}
+		if (this.pendingOsc11BackgroundReplies <= 0) {
+			return true;
 		}
 
 		const rgb = parseOsc11BackgroundColor(data);
@@ -1221,6 +1222,16 @@ export abstract class TuiBase extends Container implements TUI {
 				}
 				query.settled = true;
 				query.timer = undefined;
+				// The reply may still arrive late. Drop the query from the queue so
+				// the pending counter stays in sync: without this, every timed-out
+				// query leaked +1 into pendingOsc11BackgroundReplies, which made
+				// later unrelated input get consumed as replies and shifted the
+				// queue/counter pair out of alignment.
+				const index = this.pendingOsc11BackgroundQueries.indexOf(query);
+				if (index !== -1) {
+					this.pendingOsc11BackgroundQueries.splice(index, 1);
+					this.pendingOsc11BackgroundReplies -= 1;
+				}
 				query.resolve?.(undefined);
 				query.resolve = undefined;
 			}, timeoutMs);
