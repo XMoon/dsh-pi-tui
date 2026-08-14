@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
-import { toolPresenterFrom } from '../src/present.ts'
+import { parseReadEnvelopes, toolPresenterFrom } from '../src/present.ts'
 import { color, currentPalette } from '../src/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -537,3 +537,75 @@ test('slash command cards carry a control-panel emoji', async () => {
 
 
 
+
+test('read envelopes parse single, merged, and non-envelope results', () => {
+  const single = `<path>/ws/a.ts</path>
+<type>file</type>
+<content>
+1: line one
+2: line two
+
+(End of file - total 2 lines)
+</content>`
+  const envelopes = parseReadEnvelopes(single)
+  assert.equal(envelopes.length, 1)
+  assert.equal(envelopes[0]?.path, '/ws/a.ts')
+  assert.equal(envelopes[0]?.lines.length, 2)
+  assert.equal(envelopes[0]?.lines[1]?.text, 'line two')
+  assert.equal(envelopes[0]?.totalLines, 2)
+  // Merged group card: two consecutive envelopes parse into two entries.
+  const merged = `${single}\n\n${single.replace('/ws/a.ts', '/ws/b.ts')}`
+  const mergedEnvelopes = parseReadEnvelopes(merged)
+  assert.equal(mergedEnvelopes.length, 2)
+  assert.equal(mergedEnvelopes[1]?.path, '/ws/b.ts')
+  // Not an envelope: no entries, no throw.
+  assert.equal(parseReadEnvelopes('plain output').length, 0)
+  assert.equal(parseReadEnvelopes('').length, 0)
+})
+
+test('read cards preview their envelope summary, never the raw XML', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read',
+    args: '{"file_path":"/ws/a.ts"}',
+    result: `<path>/ws/a.ts</path>
+<type>file</type>
+<content>
+1: line one
+2: line two
+
+(End of file - total 2 lines)
+</content>`,
+    status: 'ok',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Read /ws/a.ts [ok] — 2 lines'), `summary preview missing:\n${view}`)
+  assert.ok(!view.includes('<path>'), `raw envelope leaked into the folded row:\n${view}`)
+  assert.ok(!view.includes('<content>'), `raw content leaked into the folded row:\n${view}`)
+})
+
+test('merged read groups expand into one tree row per file', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: toolPresenterFrom(() => undefined),
+    workspaceRoot: '/ws',
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  // The merged card is what groupConsecutiveReads produces: args "N files"
+  // plus the consecutive envelopes joined in the result.
+  const envelopeA = `<path>/ws/a.ts</path>\n<type>file</type>\n<content>\n1: a\n\n(End of file - total 1 lines)\n</content>`
+  const envelopeB = envelopeA.replace('/ws/a.ts', '/ws/b.ts').replace('1: a', '1: b')
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read',
+    args: '2 files',
+    result: `${envelopeA}\n\n${envelopeB}`,
+    status: 'ok',
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('├─ a.ts · 1 lines'), `first tree row missing:\n${view}`)
+  assert.ok(view.includes('└─ b.ts · 1 lines'), `last tree row missing:\n${view}`)
+  assert.ok(!view.includes('<path>'), `raw XML leaked:\n${view}`)
+  app.stop()
+})

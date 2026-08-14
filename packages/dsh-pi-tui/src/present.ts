@@ -191,6 +191,71 @@ export interface ToolCardHeader {
   summary: string
 }
 
+/** One parsed read envelope: the read tool's model-facing file shape. */
+export interface ReadEnvelope {
+  /** The path the read reported. */
+  path: string
+  /** Numbered content lines inside the `<content>` body. */
+  lines: { number: number; text: string }[]
+  /** Total file lines, when the envelope footer reports them. */
+  totalLines?: number
+}
+
+/**
+ * Parse the read tool's model-facing envelopes from a result: one
+ * `<path>…</path> <type>…</type> <content>…numbered lines…</content>` block
+ * per file read. A merged group card (groupConsecutiveReads) carries several
+ * consecutive envelopes, hence the plural form; the single-envelope helper
+ * below is the common-case convenience.
+ * @param result - the tool result text.
+ * @returns every parsed envelope; empty when the result is not a read envelope.
+ */
+export function parseReadEnvelopes(result: string): ReadEnvelope[] {
+  const out: ReadEnvelope[] = []
+  const block = /<path>([\s\S]*?)<\/path>\s*<type>[^<]*<\/type>\s*<content>([\s\S]*?)<\/content>/g
+  let match: RegExpExecArray | null
+  while ((match = block.exec(result)) !== null) {
+    const path = match[1] ?? ''
+    const body = match[2] ?? ''
+    const lines: { number: number; text: string }[] = []
+    let totalLines: number | undefined
+    for (const raw of body.split('\n')) {
+      const numbered = /^(\d+): (.*)$/.exec(raw)
+      if (numbered !== null) {
+        lines.push({ number: Number(numbered[1]), text: numbered[2] ?? '' })
+        continue
+      }
+      const end = /^\(End of file - total (\d+) lines\)$/.exec(raw)
+      if (end !== null) {
+        totalLines = Number(end[1])
+        continue
+      }
+      const showing = /^\(Showing lines \d+-\d+ of (\d+) lines/.exec(raw)
+      if (showing !== null) totalLines = Number(showing[1])
+    }
+    out.push({ path, lines, ...(totalLines === undefined ? {} : { totalLines }) })
+  }
+  return out
+}
+
+/** Parse the FIRST read envelope of a result, or undefined when none exists. */
+export function parseReadEnvelope(result: string): ReadEnvelope | undefined {
+  return parseReadEnvelopes(result)[0]
+}
+
+/**
+ * The folded preview suffix for a read card: `— {N} lines` when the envelope
+ * reports a total (or a line count), empty otherwise. A merged group card
+ * (multiple envelopes) yields nothing — its head already carries "N files".
+ */
+export function readFoldedPreview(result: string): string {
+  const envelopes = parseReadEnvelopes(result)
+  if (envelopes.length !== 1) return ''
+  const envelope = envelopes[0] as ReadEnvelope
+  const total = envelope.totalLines ?? (envelope.lines.length > 0 ? envelope.lines.length : undefined)
+  return total === undefined ? '' : ` — ${total} lines`
+}
+
 /**
  * The Web row-model header for one tool card: title = tool-owned title or the
  * variant design title; summary = SUMMARY_KEYS-derived args summary relativized

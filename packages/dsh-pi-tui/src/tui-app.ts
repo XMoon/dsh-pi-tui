@@ -52,7 +52,16 @@ import {
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
-import { firstLine, latestLine, relativizeToCwd, toolCardHeader, toolEmoji, type ToolPresenter } from './present.ts'
+import {
+  firstLine,
+  latestLine,
+  parseReadEnvelopes,
+  readFoldedPreview,
+  relativizeToCwd,
+  toolCardHeader,
+  toolEmoji,
+  type ToolPresenter,
+} from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
 import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
@@ -1111,11 +1120,14 @@ export class TuiApp {
       card.addChild(new Text(head, 0, 0))
       this.renderToolBody(card, message)
     } else {
-      const resultPreview = message.result === ''
-        ? ''
-        : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
-      // Folded rows stay one line: the head + preview truncates instead of
-      // wrapping, so the card's collapsed height is stable.
+      // A read card's folded preview is the envelope summary (`— N lines`),
+      // never a dump of the raw `<path>/<content>` XML. Every other tool keeps
+      // the leading result lines, and the whole row truncates to one line.
+      const resultPreview = message.name === 'read'
+        ? readFoldedPreview(message.result)
+        : message.result === ''
+          ? ''
+          : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
       card.addChild(new Text(truncateToWidth(`${head}${resultPreview}`, this.terminal.columns, '…'), 0, 0))
     }
     return card
@@ -1206,6 +1218,35 @@ export class TuiApp {
     }
     // Generic fallback: the raw result text dimmed (diffs keep their own
     // + / − colors, which already distinguish them from assistant output).
+    // A read card without a presenter still renders its envelope as numbered
+    // lines (never the raw XML); a merged group card renders one tree row per
+    // file (kimi ReadGroup parity).
+    if (message.name === 'read') {
+      const envelopes = parseReadEnvelopes(message.result)
+      if (envelopes.length > 0) {
+        if (envelopes.length === 1) {
+          const envelope = envelopes[0] as (typeof envelopes)[number]
+          for (const line of envelope.lines) {
+            card.addChild(new Text(color.textDim(`  ${line.number} │ ${line.text}`), 0, 0))
+          }
+          if (envelope.path !== '') {
+            card.addChild(new Text(color.textMuted(`  path: ${relativizeToCwd(envelope.path, this.workspaceRoot)}`), 0, 0))
+          }
+          if (envelope.totalLines !== undefined) {
+            card.addChild(new Text(color.textMuted(`  total lines: ${envelope.totalLines}`), 0, 0))
+          }
+        } else {
+          envelopes.forEach((envelope, index) => {
+            const branch = index === envelopes.length - 1 ? '└─' : '├─'
+            const count = envelope.totalLines ?? (envelope.lines.length > 0 ? envelope.lines.length : undefined)
+            card.addChild(new Text(color.textDim(
+              `  ${branch} ${relativizeToCwd(envelope.path, this.workspaceRoot)}${count === undefined ? '' : ` · ${count} lines`}`,
+            ), 0, 0))
+          })
+        }
+        return
+      }
+    }
     if (isDiffResult(message.name, message.result)) {
       for (const line of renderDiffLines(message.result)) {
         card.addChild(new Text(line, 0, 0))
