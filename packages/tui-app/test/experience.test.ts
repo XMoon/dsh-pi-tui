@@ -76,6 +76,25 @@ test('ctrl+f toggles fullscreen without crashing and renders content', async () 
   assert.ok(regular.includes('hello'), `content missing after exit fullscreen:\n${regular}`)
 })
 
+test('setFullscreen reports changes and stays idempotent', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const changes: boolean[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onFullscreenChange: (fullscreen) => { changes.push(fullscreen) },
+  })
+  app.start()
+  assert.equal(app.isFullscreen(), false)
+  app.setFullscreen(true)
+  assert.equal(app.isFullscreen(), true)
+  app.setFullscreen(true) // no-op: no duplicate change
+  app.setFullscreen(false)
+  assert.equal(app.isFullscreen(), false)
+  assert.deepEqual(changes, [true, false])
+  await viewport(vt)
+})
+
 test('approval prompt survives a fullscreen toggle', async () => {
   const { vt, app } = startApp()
   const decision = app.showApprovalPrompt({ toolName: 'bash' })

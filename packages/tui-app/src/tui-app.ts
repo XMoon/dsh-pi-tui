@@ -176,6 +176,8 @@ export interface TuiAppEvents {
    * Optional.
    */
   openExternalEditor?: (draft: string) => Promise<string>
+  /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
+  onFullscreenChange?: (fullscreen: boolean) => void
 }
 
 /** What an approval prompt shows; mirrors the approval/request payload. */
@@ -541,11 +543,27 @@ export class TuiApp {
    * overlay; a pending approval prompt is re-rendered on the new screen.
    */
   toggleFullscreen(): void {
+    this.setFullscreen(this.fullscreen === undefined)
+  }
+
+  /** Whether the alt screen is currently active (fullscreen mode). */
+  isFullscreen(): boolean {
+    return this.fullscreen !== undefined
+  }
+
+  /**
+   * Enter or leave fullscreen (alt screen), reporting the change through
+   * {@link TuiAppEvents.onFullscreenChange} so the host can persist it.
+   * @param enabled - true renders the alt screen, false returns to the main screen.
+   */
+  setFullscreen(enabled: boolean): void {
+    const active = this.fullscreen !== undefined
+    if (enabled === active) return
     const pending = this.activeApproval
     pending?.handle?.hide()
     for (const handle of this.overlayHandles) handle.hide()
     this.overlayHandles.clear()
-    if (this.fullscreen === undefined) {
+    if (enabled) {
       const alt = new TuiAltScreen(this.terminal)
       for (const child of this.tui.children) alt.addChild(child)
       alt.addInputListener((data) => this.handleInput(data))
@@ -553,10 +571,11 @@ export class TuiApp {
       alt.start()
       this.fullscreen = alt
     } else {
-      this.fullscreen.stop()
+      this.fullscreen?.stop()
       this.fullscreen = undefined
       this.tui.start()
     }
+    this.events.onFullscreenChange?.(enabled)
     if (pending !== undefined) this.renderApprovalDialog(pending)
   }
 

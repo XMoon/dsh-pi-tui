@@ -51,6 +51,8 @@ export interface TuiAppEvents {
      * Optional.
      */
     openExternalEditor?: (draft: string) => Promise<string>;
+    /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
+    onFullscreenChange?: (fullscreen: boolean) => void;
 }
 /** What an approval prompt shows; mirrors the approval/request payload. */
 export interface ApprovalPromptRequest {
@@ -228,6 +230,14 @@ export declare class TuiApp {
      * overlay; a pending approval prompt is re-rendered on the new screen.
      */
     toggleFullscreen(): void;
+    /** Whether the alt screen is currently active (fullscreen mode). */
+    isFullscreen(): boolean;
+    /**
+     * Enter or leave fullscreen (alt screen), reporting the change through
+     * {@link TuiAppEvents.onFullscreenChange} so the host can persist it.
+     * @param enabled - true renders the alt screen, false returns to the main screen.
+     */
+    setFullscreen(enabled: boolean): void;
     /**
      * Replace the transcript and rebuild the message components. Collapsible
      * entries (thinking, tool cards) render folded unless the Ctrl+O master

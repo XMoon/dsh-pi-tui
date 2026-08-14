@@ -621,6 +621,12 @@ export function apply(ctx: Context, config: Config): void {
           rmSync(file, { force: true })
         }
       },
+      // Persist the Ctrl+F toggle (the settings panel writes the same field
+      // itself); `tuiSettings` is declared later, so the closure reads it
+      // lazily at toggle time.
+      onFullscreenChange: (fullscreen) => {
+        void tuiSettings?.replace({ ...tuiSettings.get(), fullscreen: fullscreen ? 'on' : 'off' })
+      },
     })
     paintNow()
     setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${liveAgent.session.id}`)
@@ -640,9 +646,10 @@ export function apply(ctx: Context, config: Config): void {
       z.object({
         theme: z.string(),
         footer: z.string(),
+        fullscreen: z.string(),
         history: z.dict(z.array(z.string())),
       }),
-      { base: { theme: 'auto', footer: 'full', history: {} } },
+      { base: { theme: 'auto', footer: 'full', fullscreen: 'off', history: {} } },
     )
     const storedTheme = tuiSettings?.get().theme
     if (storedTheme === 'auto') {
@@ -659,6 +666,9 @@ export function apply(ctx: Context, config: Config): void {
     }
     const storedFooter = tuiSettings?.get().footer
     if (storedFooter === 'compact') app.setFooterPreset('compact')
+    // Fullscreen is a persisted preference like the theme and the footer:
+    // boot applies it, the settings panel and Ctrl+F both write through it.
+    if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
     const storedHistory = tuiSettings?.get().history[cwd]
     if (storedHistory !== undefined && storedHistory.length > 0) {
       app.seedInputHistory(storedHistory)
@@ -731,6 +741,13 @@ export function apply(ctx: Context, config: Config): void {
                 currentValue: app.getFooterPreset(),
                 values: ['full', 'compact'],
               },
+              {
+                id: 'fullscreen',
+                label: 'Fullscreen',
+                description: 'Alt-screen mode: off keeps the terminal scrollback',
+                currentValue: app.isFullscreen() ? 'on' : 'off',
+                values: ['off', 'on'],
+              },
               // ── read-only session facts ─────────────────────────────
               {
                 id: 'separator',
@@ -792,6 +809,12 @@ export function apply(ctx: Context, config: Config): void {
                 if (value === 'full' || value === 'compact') {
                   app.setFooterPreset(value)
                   void tuiSettings?.replace({ ...tuiSettings.get(), footer: value })
+                }
+              } else if (id === 'fullscreen') {
+                if (value === 'off' || value === 'on') {
+                  app.setFullscreen(value === 'on')
+                  // setFullscreen reports through onFullscreenChange, which
+                  // persists the same field (this branch is the panel write).
                 }
               }
             },
