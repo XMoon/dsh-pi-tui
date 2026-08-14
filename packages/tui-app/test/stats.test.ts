@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { computeStats, formatStats } from '../src/stats.ts'
+import { computeStats, formatStats, StatsFolder } from '../src/stats.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -60,6 +60,40 @@ test('reads the context window from request/context', () => {
     event('request/context', { provider: 'p', model: 'm', contextWindow: 1_000_000 }, 0),
   ])
   assert.equal(stats.contextWindow, 1_000_000)
+})
+
+test('StatsFolder matches computeStats and folds incrementally', () => {
+  const t = 1_700_000_000_000
+  const log = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 2, t + 1_100),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' there' } }, 3, t + 2_000),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 9_000, outputTokens: 832, cacheReadTokens: 1_000 } } }, 4, t + 3_000),
+    event('step/end', { turn: 0, step: 0 }, 5, t + 8_100),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6, t + 8_200),
+  ]
+  // One-shot fold: the reference result.
+  const oneShot = computeStats(log)
+  // Incremental fold: every suffix boundary must agree with the one-shot
+  // result for the events applied so far.
+  const folder = new StatsFolder()
+  for (let index = 0; index < log.length; index += 1) {
+    folder.apply([log[index]!])
+    const partial = computeStats(log.slice(0, index + 1))
+    const snapshot = folder.snapshot()
+    assert.deepEqual(
+      { ...snapshot, firstTokenMsAvg: Math.round(snapshot.firstTokenMsAvg * 1000) / 1000 },
+      { ...partial, firstTokenMsAvg: Math.round(partial.firstTokenMsAvg * 1000) / 1000 },
+      `mismatch after event ${index}`,
+    )
+  }
+  const final = folder.snapshot()
+  assert.deepEqual(
+    { ...final, firstTokenMsAvg: Math.round(final.firstTokenMsAvg * 1000) / 1000 },
+    { ...oneShot, firstTokenMsAvg: Math.round(oneShot.firstTokenMsAvg * 1000) / 1000 },
+    'final snapshot must match computeStats',
+  )
 })
 
 test('formats the stats line in pi abbreviation vocabulary', () => {

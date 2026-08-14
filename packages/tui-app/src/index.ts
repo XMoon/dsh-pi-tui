@@ -67,7 +67,7 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
-import { computeStats, formatStats } from './stats.ts'
+import { computeStats, formatStats, StatsFolder } from './stats.ts'
 import { Text, type SettingItem } from '@dsh-pi-tui/pi-tui'
 import { SettingsList } from '@dsh-pi-tui/pi-tui'
 import { color, resolveCustomTheme, settingsListTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
@@ -599,6 +599,11 @@ export function apply(ctx: Context, config: Config): void {
     // Incremental fold state for the live session's log; reset on switch.
     let folder = new TranscriptFolder()
     folder.apply(liveAgent.session.events)
+    // Incremental stats + goal badge: applied per event so the footer stays
+    // O(1) per refresh instead of re-scanning the whole log.
+    let statsFolder = new StatsFolder()
+    statsFolder.apply(liveAgent.session.events)
+    let goalText = foldGoal(liveAgent.session.events)
 
     /** Swap the live agent to a new handle, repainting for its session. */
     const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>): Promise<string | undefined> => {
@@ -614,6 +619,9 @@ export function apply(ctx: Context, config: Config): void {
       }
       folder = new TranscriptFolder()
       folder.apply(liveAgent.session.events)
+      statsFolder = new StatsFolder()
+      statsFolder.apply(liveAgent.session.events)
+      goalText = foldGoal(liveAgent.session.events)
       app.clearLocalMessages()
       repaint(app, folder)
       refreshStatus()
@@ -659,7 +667,7 @@ export function apply(ctx: Context, config: Config): void {
         : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
     }
     const refreshStatus = (): void => {
-      const stats = computeStats(liveAgent.session.events)
+      const stats = statsFolder.snapshot()
       let contextTokens: number | undefined
       const meter = ctx.get('tokenMeter')
       if (meter !== undefined) {
@@ -673,7 +681,7 @@ export function apply(ctx: Context, config: Config): void {
         model: modelLabel(),
         cwd: shortCwd(cwd),
         branch: gitBranch(cwd),
-        goal: foldGoal(liveAgent.session.events),
+        goal: goalText,
         turns: stats.turns,
         steps: stats.steps,
         statsLine: formatStats(stats),
@@ -1750,6 +1758,10 @@ export function apply(ctx: Context, config: Config): void {
         callArgs.delete(event.data.message.content[0]?.toolCallId ?? '' as CallId)
       }
       folder.apply([event])
+      statsFolder.apply([event])
+      // The goal badge folds incrementally: the newest goal/change event
+      // decides, so one event is enough (clear/completed hide the badge).
+      if (event.type === 'goal/change') goalText = foldGoal([event])
       schedulePaint()
       if (event.type === 'todo/write') app.setTodoSummary(event.data.todos)
       if (event.type === 'plan/mode') app.setPlanMode(event.data.active)
