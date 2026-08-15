@@ -95,6 +95,51 @@ test('askQuestions collects a single selection', async () => {
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['No'] }])
 })
 
+test('question dialog wraps long text, keeps descriptions on their own lines, and never ellipsizes', async () => {
+  const { vt, app } = startApp()
+  const longQuestion = 'AGENTS.md 硬规则「fire-and-forget 走 runDetached,禁止裸 void」与现状存在分歧,如何解决?这一句非常长,必须换行显示而不能被对话框截断。'
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: longQuestion,
+    options: [{ label: '方案 3:新增 runOwned', description: '新增 runOwned(label, task, { onResult, onCancel, onError }) 用于 result-consuming 主流程,这段描述同样很长需要换行' }],
+  }])
+  const view = await viewport(vt)
+  // The full question text must be visible (wrapped, never ellipsized).
+  assert.ok(view.includes('对话框截断'), `question text truncated:\n${view}`)
+  assert.ok(!view.includes('…'), `question dialog ellipsized content:\n${view}`)
+  // The description renders on its own wrapped line, not crammed after the label.
+  const lines = view.split('\n')
+  const labelIdx = lines.findIndex(line => line.includes('方案 3:新增 runOwned'))
+  assert.ok(labelIdx >= 0, `option label missing:\n${view}`)
+  assert.ok(lines[labelIdx + 1]?.includes('新增 runOwned(label'), `description not on its own line:\n${view}`)
+  assert.ok(!lines[labelIdx]!.includes('result-consuming 主流程'), `description crammed on the label row:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('question dialog tabs align with the box border and the hint fits the width', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }])
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  // The tab strip is the first content row of the overlay: the border column
+  // must be followed by the mark directly (the previous build's stray leading
+  // space inside the box made the box look misaligned). The overlay is
+  // centered, so strip the outer margin first.
+  const tabIdx = lines.findIndex(line => line.includes('Q1'))
+  assert.ok(tabIdx >= 0, `tab strip missing:\n${view}`)
+  const trimmedTab = lines[tabIdx]!.trimStart()
+  assert.ok(trimmedTab.startsWith('│ '), `tab row lost its border:\n${view}`)
+  // The frame adds exactly ONE padding cell; a second space means the tab
+  // strip content itself starts with a stray space (the old misalignment).
+  assert.ok(!trimmedTab.startsWith('│  '), `tab strip has a stray leading space:\n${view}`)
+  // The hint must not be ellipsized.
+  const hintIdx = lines.findIndex(line => line.includes('esc cancel'))
+  assert.ok(hintIdx >= 0 && !lines[hintIdx]!.includes('…'), `hint truncated:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
 test('askQuestions toggles multi-select options', async () => {
   const { vt, app } = startApp()
   const promise = app.askQuestions([{

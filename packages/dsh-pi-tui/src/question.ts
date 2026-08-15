@@ -12,7 +12,7 @@
 
 import { Input } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
-import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
 
 /** One question in a user-questions ask (dsh shape mirrored for testability). */
@@ -52,6 +52,38 @@ interface Draft {
 
 /** The "type your own answer" row shown below options (pi isOther parity). */
 const OTHER_ROW = '\u0000other'
+
+/** Max wrapped rows of a question's detail block (kimi MAX_BODY_LINES). */
+const MAX_DETAIL_LINES = 12
+/** Max visible option rows before the list windows around the cursor. */
+const MAX_VISIBLE_OPTIONS = 7
+
+/**
+ * Push `content` to `lines`, wrapping it to `width` with a hanging indent.
+ * The first physical line starts with `firstPrefix`; continuation lines get
+ * `continuationPrefix`. Content may carry its own ANSI styling (the wrapper
+ * splits styled runs correctly). Every emitted line is guaranteed ≤ width,
+ * so a wrapped dialog never hits the Frame's ellipsis truncation.
+ */
+function appendWrapped(
+  lines: string[],
+  firstPrefix: string,
+  continuationPrefix: string,
+  content: string,
+  width: number,
+): void {
+  const prefixWidth = Math.max(visibleWidth(firstPrefix), visibleWidth(continuationPrefix))
+  const contentWidth = Math.max(1, width - prefixWidth)
+  const wrapped = wrapTextWithAnsi(content, contentWidth)
+  if (wrapped.length === 0) {
+    lines.push(firstPrefix)
+    return
+  }
+  lines.push(`${firstPrefix}${wrapped[0] ?? ''}`)
+  for (let i = 1; i < wrapped.length; i++) {
+    lines.push(`${continuationPrefix}${wrapped[i] ?? ''}`)
+  }
+}
 
 /** The current question's tab label: `Q{n}` or Submit. */
 function tabLabel(index: number, total: number): string {
@@ -382,21 +414,27 @@ export class QuestionFlow implements Component, Focusable {
     const safeWidth = Math.max(1, width)
     const lines: string[] = []
     // Tab strip: Q1(✓) Q2(○) … Submit — answered marks, current highlighted.
+    // Tabs carry NO leading/trailing spaces of their own (the box border
+    // provides the padding), so every content row starts at the same column.
     const tabs = this.questions.map((_, index) => {
       const draft = this.drafts[index]
       const answered = draft !== undefined && (draft.selected.size > 0 || draft.custom !== '' || draft.skipped)
       const label = tabLabel(index, this.questions.length)
-      const mark = answered ? color.success('✓') : color.textDim('○')
-      const active = this.tab === index
-      return active ? color.textStrong(` ${mark} ${label} `) : color.textDim(` ${mark} ${label} `)
+      const mark = answered ? '✓' : '○'
+      return this.tab === index
+        ? color.textStrong(`${mark} ${label}`)
+        : color.textDim(`${mark} ${label}`)
     })
     const submitAnswered = this.drafts.every(draft => draft.selected.size > 0 || draft.custom !== '' || draft.skipped)
-    const submitTab = this.tab === this.questions.length
-    tabs.push(submitTab ? color.textStrong(` ${submitAnswered ? color.success('✓') : color.textDim('○')} Submit `) : color.textDim(` ${submitAnswered ? color.success('✓') : color.textDim('○')} Submit `))
-    lines.push(tabs.join(''))
+    const submitText = `${submitAnswered ? '✓' : '○'} Submit`
+    tabs.push(this.tab === this.questions.length
+      ? color.textStrong(submitText)
+      : color.textDim(submitText))
+    lines.push(tabs.join('  '))
+    lines.push('')
     if (this.tab >= this.questions.length) {
-      // Review page: every answer, then Submit/Cancel actions.
-      lines.push('')
+      // Review page: every answer, then Submit/Cancel actions. Question
+      // texts wrap with a hanging indent so long questions read in full.
       lines.push(color.textStrong('Review your answer before submit'))
       this.questions.forEach((question, index) => {
         const draft = this.drafts[index]
@@ -406,14 +444,14 @@ export class QuestionFlow implements Component, Focusable {
           : draft.custom !== '' && question.multiSelect !== true
             ? draft.custom
             : [...draft.selected].join(', ') + (draft.custom !== '' ? ` + ${draft.custom}` : '')
-        lines.push(`${color.textDim(`Q${index + 1}`)} ${question.question}`)
-        lines.push(`  ${value === '' ? color.textDim('(no answer)') : value}`)
+        appendWrapped(lines, `${color.textDim(`Q${index + 1}`)}  `, '       ', question.question, safeWidth)
+        appendWrapped(lines, `  `, '    ', value === '' ? color.textDim('(no answer)') : value, safeWidth)
       })
       lines.push('')
       const submit = this.submitIdx === 0 ? color.textStrong('Submit') : color.textDim('Submit')
       const cancel = this.submitIdx === 1 ? color.textStrong('Cancel') : color.textDim('Cancel')
-      lines.push(`${submit}   ${cancel}`)
-      lines.push(color.textDim('← → choose · b back · enter confirm · esc cancel'))
+      lines.push(`${this.submitIdx === 0 ? color.primary('→ ') : '  '}${submit}   ${cancel}`)
+      lines.push(color.textDim('← → choose · b back · ↵ confirm · esc cancel'))
       return lines
     }
     const question = this.questions[this.tab]
@@ -422,24 +460,41 @@ export class QuestionFlow implements Component, Focusable {
     if (question.header !== undefined && question.header !== '') {
       lines.push(color.textDim(question.header))
     }
-    lines.push(color.textStrong(question.question))
+    // The question body wraps with a `?` marker and hanging indent — the
+    // Frame must never ellipsize a question mid-sentence.
+    appendWrapped(lines, `${color.primary('?')}  `, '    ', color.textStrong(question.question), safeWidth)
     if (question.detail !== undefined && question.detail !== '') {
-      for (const line of question.detail.split('\n')) {
-        lines.push(color.textDim(truncateToWidth(line, safeWidth, '…')))
+      const detailLines = question.detail.split('\n')
+      const shown = detailLines.slice(0, MAX_DETAIL_LINES)
+      for (const line of shown) {
+        appendWrapped(lines, '   ', '   ', color.textDim(line), safeWidth)
+      }
+      if (detailLines.length > MAX_DETAIL_LINES) {
+        lines.push(color.textDim(`   ... ${detailLines.length - MAX_DETAIL_LINES} more lines`))
       }
     }
     const rows = this.rows()
     const multi = question.multiSelect === true
     const editingOther = this.editingOther && rows.some(row => row.key === OTHER_ROW)
     if (rows.length > 0 && !(rows.length === 1 && rows[0]?.key === OTHER_ROW)) {
-      rows.forEach((row, index) => {
+      lines.push('')
+      // Window the option list around the cursor (kimi maxVisibleOptions):
+      // a long option list scrolls instead of overflowing the dialog.
+      const visibleCount = Math.min(rows.length, MAX_VISIBLE_OPTIONS)
+      const half = Math.floor(MAX_VISIBLE_OPTIONS / 2)
+      const maxStart = Math.max(0, rows.length - visibleCount)
+      const start = Math.max(0, Math.min(this.cursor - half, maxStart))
+      const end = Math.min(rows.length, start + visibleCount)
+      for (let index = start; index < end; index++) {
+        const row = rows[index]
+        if (row === undefined) continue
         if (row.key === OTHER_ROW && this.editingOther) {
-          const prefix = color.primary('→')
-          const inputLines = this.otherInput.render(Math.max(1, safeWidth - visibleWidth(prefix) - 2))
+          const prefix = `${color.primary('→')} ${color.textDim(`[${index + 1}]`)} `
+          const inputLines = this.otherInput.render(Math.max(1, safeWidth - visibleWidth(prefix)))
           const inputLine = inputLines[0] ?? ''
           const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
-          lines.push(`${prefix} ${color.textDim(`[${index + 1}]`)} ${stripped}`)
-          return
+          lines.push(prefix + stripped)
+          continue
         }
         const selected = row.key === OTHER_ROW
           ? draft.custom !== ''
@@ -448,32 +503,49 @@ export class QuestionFlow implements Component, Focusable {
           ? selected ? color.success('[✓]') : color.textDim('[ ]')
           : selected ? color.success(`[${Number(row.key) + 1}]`) : color.textDim(`[${Number(row.key) + 1}]`)
         const pointer = index === this.cursor ? color.primary('→') : ' '
+        const prefix = `${pointer} ${marker} `
         const badge = row.recommended ? ` ${color.primary('[recommended]')}` : ''
-        const desc = row.description === undefined ? '' : color.textDim(` — ${row.description}`)
         const label = index === this.cursor ? color.textStrong(row.label) : row.label
-        lines.push(`${pointer} ${marker} ${label}${badge}${desc}`)
-      })
+        // Label and [recommended] badge share the row; the description gets
+        // its OWN wrapped dim lines so nothing is crammed or ellipsized.
+        appendWrapped(lines, prefix, ' '.repeat(visibleWidth(prefix)), `${label}${badge}`, safeWidth)
+        if (row.description !== undefined && row.description !== '') {
+          const descIndent = ' '.repeat(visibleWidth(prefix))
+          appendWrapped(lines, descIndent, descIndent, color.textDim(row.description), safeWidth)
+        }
+      }
+      if (rows.length > visibleCount) {
+        lines.push(color.textDim(`   showing ${start + 1}-${end} of ${rows.length}`))
+      }
     } else if (this.editingOther || (question.options?.length ?? 0) === 0) {
       // Optionless question: the real Input owns the line (placeholder hint).
       const inputLines = this.otherInput.render(Math.max(1, safeWidth - 2))
       const inputLine = inputLines[0] ?? ''
       const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
       lines.push(` ${stripped}`)
-      lines.push(color.textDim('type your answer, enter to confirm'))
     }
     if (draft.skipped) {
       lines.push(color.textDim('(skipped)'))
     }
     lines.push('')
+    // The hint composes from the parts that FIT: low-priority verbs drop out
+    // instead of the whole line being ellipsized by the frame.
+    const optionCount = Math.min(rows.length, 9)
     const hintParts = [
-      '↑↓ navigate',
-      '1-9 choose',
-      multi ? 'enter toggle' : 'enter confirm',
-      '←→ switch',
+      '↑↓ select',
+      optionCount > 0 ? `1-${optionCount} choose` : '',
+      multi ? '↵ toggle' : '↵ confirm',
+      this.questions.length > 1 ? '←→ switch' : '',
       's skip',
       'esc cancel',
-    ]
-    lines.push(color.textDim(hintParts.join(' · ')))
+    ].filter(part => part !== '')
+    let hint = ''
+    for (const part of hintParts) {
+      const next = hint === '' ? part : `${hint} · ${part}`
+      if (visibleWidth(next) > safeWidth) break
+      hint = next
+    }
+    lines.push(color.textDim(hint === '' ? 'esc cancel' : hint))
     return lines
   }
 }

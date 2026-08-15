@@ -11,7 +11,7 @@
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import type { ToolCallView, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
+import type { FileDiff, ToolCallView, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
 
 /** Figma row titles per variant (design literals, not translatable copy). */
 const VARIANT_TITLES = {
@@ -204,6 +204,50 @@ export interface ReadEnvelope {
   lines: { number: number; text: string }[]
   /** Total file lines, when the envelope footer reports them. */
   totalLines?: number
+}
+
+/**
+ * Folded-card call preview derived from raw args alone (no tool registry
+ * needed): bash/pwsh expose the command actually run (kimi ShellExecution
+ * parity — the header only names the action), edit/write expose their
+ * call-time old→new diff so a collapsed card already shows what changed.
+ * Nothing for every other tool: their folded row keeps the single-line
+ * header + result preview.
+ */
+export type CallPreview =
+  | { kind: 'bash'; command: string; workdir?: string }
+  | { kind: 'diff'; diffs: readonly FileDiff[] }
+  | undefined
+
+/** Derive the folded preview from a tool name and its raw args JSON. */
+export function parseCallPreview(name: string, argsRaw: string): CallPreview {
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const args = parsed as Record<string, unknown>
+  if (name === 'bash' || name === 'pwsh') {
+    const command = args.command
+    if (typeof command !== 'string' || command === '') return undefined
+    const workdir = args.workdir
+    return {
+      kind: 'bash',
+      command,
+      ...(typeof workdir === 'string' && workdir !== '' ? { workdir } : {}),
+    }
+  }
+  if (name === 'edit') {
+    const oldText = args.old_string
+    const newText = args.new_string
+    if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
+    const path = typeof args.file_path === 'string' && args.file_path !== '' ? args.file_path : args.path
+    return { kind: 'diff', diffs: [{ path: typeof path === 'string' ? path : '', oldText, newText }] }
+  }
+  if (name === 'write') {
+    const content = args.content
+    if (typeof content !== 'string' || content === '') return undefined
+    const path = typeof args.file_path === 'string' && args.file_path !== '' ? args.file_path : args.path
+    return { kind: 'diff', diffs: [{ path: typeof path === 'string' ? path : '', oldText: null, newText: content }] }
+  }
+  return undefined
 }
 
 /**

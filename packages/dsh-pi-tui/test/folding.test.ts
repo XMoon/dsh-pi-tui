@@ -41,6 +41,55 @@ test('thinking and tool entries render folded by default', async () => {
   assert.ok(!view.includes('more.txt'), `tool result leaked:\n${view}`)
 })
 
+test('folded bash cards show the actual command on its own row', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls -la","description":"List files"}', result: 'a.txt\nb.txt', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Bash List files [ok]'), `header missing:\n${view}`)
+  assert.ok(view.includes('$ ls -la'), `command row missing:\n${view}`)
+  assert.ok(view.includes('— a.txt b.txt'), `result preview row missing:\n${view}`)
+  // The command row must be a separate line from the header (2-3 row layout).
+  const lines = view.split('\n')
+  const head = lines.findIndex(line => line.includes('Bash List files'))
+  assert.ok(head >= 0, `header row not found:\n${view}`)
+  assert.ok(lines[head + 1]?.includes('$ ls -la'), `command must follow the header:\n${view}`)
+})
+
+test('folded bash cards cap multi-line commands with a more-lines marker', async () => {
+  const { vt, app } = startApp()
+  const command = ['pnpm build', 'pnpm test', 'pnpm typecheck', 'git commit'].join('\n')
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command }), result: 'ok', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('$ pnpm build'), `first command line missing:\n${view}`)
+  assert.ok(view.includes('pnpm typecheck'), `capped command lines missing:\n${view}`)
+  assert.ok(!view.includes('git commit'), `command overflowed the cap:\n${view}`)
+  assert.ok(view.includes('1 more command lines (ctrl+o to expand)'), `cap marker missing:\n${view}`)
+})
+
+test('folded edit and write cards render a few diff lines by default', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'edit', args: JSON.stringify({ file_path: 'src/a.ts', old_string: 'old line\nold two', new_string: 'new line' }), result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'write', args: JSON.stringify({ file_path: 'docs/plan.md', content: 'line one\nline two\nline three\nline four\nline five\nline six' }), result: '', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  // Edit: LCS diff with +/− rows and the relativized path header.
+  assert.ok(view.includes('Edit src/a.ts [ok]'), `edit header missing:\n${view}`)
+  assert.ok(view.includes('src/a.ts'), `diff path header missing:\n${view}`)
+  assert.ok(view.includes('+ new line'), `edit add row missing:\n${view}`)
+  assert.ok(view.includes('- old line'), `edit remove row missing:\n${view}`)
+  // Write: all-add diff capped at FOLDED_DIFF_LINES with a hidden-changes footer.
+  assert.ok(view.includes('Write docs/plan.md [ok]'), `write header missing:\n${view}`)
+  assert.ok(view.includes('+ line one'), `write add row missing:\n${view}`)
+  assert.ok(view.includes('+ line four'), `write diff rows beyond the cap missing:\n${view}`)
+  assert.ok(!view.includes('+ line six'), `write diff overflowed the cap:\n${view}`)
+  assert.ok(view.includes('more changes hidden (ctrl+o to expand)'), `write cap marker missing:\n${view}`)
+})
+
 test('ctrl+o expands the recent turns collapsible entries', async () => {
   const { vt, app } = startApp()
   app.setTranscript(transcript)

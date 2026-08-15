@@ -56,6 +56,7 @@ import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
   firstLine,
   latestLine,
+  parseCallPreview,
   parseReadEnvelopes,
   readFoldedPreview,
   relativizeToCwd,
@@ -76,6 +77,10 @@ export const EXPAND_RECENT_TURNS = 3
 export const RESULT_PREVIEW_LINES = 3
 /** Diff-body cap for default-view tool cards; mirrors kimi COMMAND_PREVIEW_LINES. */
 export const DIFF_PREVIEW_LINES = 10
+/** Folded bash-command preview lines (kimi parity: the command stays visible). */
+export const FOLDED_COMMAND_LINES = 3
+/** Folded diff preview rows (header + cap + footer; kimi COMMAND_PREVIEW_LINES scale). */
+export const FOLDED_DIFF_LINES = 4
 
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
@@ -1539,15 +1544,50 @@ export class TuiApp {
       // full; the default recent-turn view caps them (kimi parity).
       this.renderToolBody(card, message, this.expandedOverride.get(message) === true)
     } else {
-      // A read card's folded preview is the envelope summary (`— N lines`),
-      // never a dump of the raw `<path>/<content>` XML. Every other tool keeps
-      // the leading result lines, and the whole row truncates to one line.
+      // Folded cards render 2–3 rows instead of one cramped line: the header
+      // row, then the call preview (bash `$ command` / edit-write diff —
+      // kimi parity: the command and the change are visible without
+      // expanding), then the result preview. Read cards keep the envelope
+      // summary (`— N lines`), never a dump of the raw XML. Every row
+      // truncates to the terminal width, so a folded block never wraps.
+      const rows: string[] = []
+      const callPreview = parseCallPreview(message.name, message.args)
       const resultPreview = message.name === 'read'
         ? readFoldedPreview(message.result)
         : message.result === ''
           ? ''
           : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
-      card.addChild(new Text(truncateToWidth(`${head}${resultPreview}`, this.terminal.columns, '…'), 0, 0))
+      if (callPreview?.kind === 'bash' && callPreview.command !== '') {
+        rows.push(truncateToWidth(head, this.terminal.columns, '…'))
+        const commandLines = callPreview.command.split('\n')
+        const shown = commandLines.slice(0, FOLDED_COMMAND_LINES)
+        const prompt = color.shellMode('$ ')
+        const indent = '  '
+        const contentWidth = Math.max(1, this.terminal.columns - visibleWidth(indent) - visibleWidth(prompt))
+        rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(shown[0] ?? ''), contentWidth, '…')}`)
+        for (const line of shown.slice(1)) {
+          rows.push(`${indent}${' '.repeat(visibleWidth(prompt))}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
+        }
+        if (commandLines.length > FOLDED_COMMAND_LINES) {
+          rows.push(color.textDim(`${indent}… ${commandLines.length - FOLDED_COMMAND_LINES} more command lines (ctrl+o to expand)`))
+        }
+        // The result preview gets its own row so the command never shares a
+        // line with output (kimi ShellExecution layout).
+        if (resultPreview !== '') {
+          rows.push(color.textDim(`  ${resultPreview}`))
+        }
+      } else if (callPreview?.kind === 'diff' && callPreview.diffs.length > 0) {
+        rows.push(truncateToWidth(`${head}${resultPreview}`, this.terminal.columns, '…'))
+        for (const line of renderDiffView(callPreview.diffs, this.workspaceRoot, {
+          maxLines: FOLDED_DIFF_LINES,
+          expandHint: 'ctrl+o to expand',
+        })) {
+          rows.push(`  ${line}`)
+        }
+      } else {
+        rows.push(truncateToWidth(`${head}${resultPreview}`, this.terminal.columns, '…'))
+      }
+      card.addChild(new Text(rows.join('\n'), 0, 0))
     }
     return card
   }
