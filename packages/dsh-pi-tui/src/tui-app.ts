@@ -437,6 +437,30 @@ export interface TuiAppOptions {
  * overlay; input routing and rendering decisions live here so they are
  * testable without a real terminal.
  */
+/** One cached component for a transcript message (stage J render cache). */
+interface MessageComponentEntry {
+  component: Component
+  /** The fold boundary the component was built at (Ctrl+O / windowing). */
+  boundary: number
+  /** The theme revision at build time (colors are baked into the ANSI). */
+  themeRev: number
+  /** Whether the entry renders expanded (boundary + click override). */
+  expanded: boolean
+  /** The values the component was built from, for O(1) staleness checks:
+   * text-bearing kinds compare the CURRENT text object — an unchanged
+   * message keeps the same string instance, so the check is O(1) and
+   * streaming chunks (which create a new string) reliably miss. */
+  text?: string
+  running?: boolean
+  label?: string
+  summary?: string
+  status?: string
+  args?: string
+  result?: string
+  meta?: unknown
+  members?: unknown
+}
+
 export class TuiApp {
   private readonly terminal: Terminal
   private readonly tui: TuiMainScreen
@@ -1052,7 +1076,12 @@ export class TuiApp {
       ...this.localMessages,
     ]
     blocks.forEach((message, index) => {
-      const component = this.renderMessage(message, boundary)
+      // Persistent per-message components (stage J): unchanged messages
+      // reuse their component, so the fork's text-identity render caches
+      // actually hit — markdown is not re-parsed and heights are not
+      // recomputed for content that did not change. Only streaming/changed
+      // messages rebuild.
+      const component = this.componentForMessage(message, boundary)
       this.messagesView.addChild(component)
       const height = component.render(width).length + (index < blocks.length - 1 ? 1 : 0)
       rows.push({ message, height })
@@ -1137,6 +1166,9 @@ export class TuiApp {
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
     this.expandedOverride.clear()
+    // The per-message render cache is session-scoped too: old messages are
+    // unreachable after a switch, so drop their cached components.
+    this.messageComponents.clear()
   }
 
   /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
@@ -1218,6 +1250,90 @@ export class TuiApp {
   }
 
 
+
+  /** Theme revision for render-cache invalidation; bumped on every switch. */
+  private themeRevision = 0
+
+  /** Persistent components per transcript message (stage J cache). */
+  private readonly messageComponents = new Map<TranscriptMessage, MessageComponentEntry>()
+
+  /**
+   * Get (or rebuild) the component for one message at this fold boundary.
+   * Unchanged messages reuse their component instance, so the fork's
+   * text-identity render caches (Text/Markdown key on `text === cachedText`
+   * and width) hit on every frame: markdown is not re-parsed and heights
+   * are not recomputed for content that did not change. The cache is
+   * invalidated lazily per key: fold boundary, theme revision, expanded
+   * state, and the message's own content — plus wholesale on session
+   * switch (clearSessionOverrides).
+   */
+  private componentForMessage(message: TranscriptMessage, boundary: number): Component {
+    const expanded = (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool')
+      && (message.turn >= boundary || this.expandedOverride.get(message) === true)
+    const entry = this.messageComponents.get(message)
+    if (entry === undefined) {
+      const built: MessageComponentEntry = {
+        component: this.renderMessage(message, boundary),
+        boundary,
+        themeRev: this.themeRevision,
+        expanded,
+      }
+      this.captureComponentState(built, message)
+      this.messageComponents.set(message, built)
+      return built.component
+    }
+    if (entry.boundary !== boundary || entry.themeRev !== this.themeRevision
+      || entry.expanded !== expanded || this.componentStale(entry, message)) {
+      entry.component = this.renderMessage(message, boundary)
+      entry.boundary = boundary
+      entry.themeRev = this.themeRevision
+      entry.expanded = expanded
+      this.captureComponentState(entry, message)
+    }
+    return entry.component
+  }
+
+  /** Record the message values a component was built from. */
+  private captureComponentState(entry: MessageComponentEntry, message: TranscriptMessage): void {
+    switch (message.kind) {
+      case 'user':
+      case 'assistant':
+      case 'thinking':
+      case 'system':
+        entry.text = message.text
+        entry.running = message.kind === 'thinking' ? message.running : undefined
+        entry.label = message.kind === 'system' ? message.label : undefined
+        entry.summary = message.kind === 'system' ? message.summary : undefined
+        break
+      case 'tool':
+        entry.status = message.status
+        entry.args = message.args
+        entry.result = message.result
+        entry.meta = message.meta
+        entry.members = message.members
+        break
+      case 'summary':
+        break
+    }
+  }
+
+  /** Whether the message content changed since the component was built. */
+  private componentStale(entry: MessageComponentEntry, message: TranscriptMessage): boolean {
+    switch (message.kind) {
+      case 'user':
+      case 'assistant':
+        return entry.text !== message.text
+      case 'thinking':
+        return entry.text !== message.text || entry.running !== message.running
+      case 'system':
+        return entry.text !== message.text || entry.label !== message.label || entry.summary !== message.summary
+      case 'tool':
+        return entry.status !== message.status || entry.args !== message.args
+          || entry.result !== message.result || entry.meta !== message.meta || entry.members !== message.members
+      case 'summary':
+        return false
+    }
+  }
 
   /** Render one transcript message as a pi-tui component. */
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
@@ -1855,12 +1971,16 @@ export class TuiApp {
    * they pick up the new palette on their next render too.) */
   applyTheme(theme: 'dark' | 'light'): void {
     setTheme(theme)
+    // Rendered ANSI is baked into cached components: bump the revision so
+    // the per-message render cache rebuilds on the next paint.
+    this.themeRevision += 1
     this.repaintAllSurfaces()
   }
 
   /** Apply a resolved custom palette and repaint everything. */
   applyPalette(palette: ColorPalette): void {
     setTheme('custom', palette)
+    this.themeRevision += 1
     this.repaintAllSurfaces()
   }
 

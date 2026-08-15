@@ -395,6 +395,85 @@ test('consecutive read results group into one card', () => {
   assert.equal(last.args, '{"file":"c.ts"}', 'a single read keeps its args')
 })
 
+test('consecutive read grouping spans turn boundaries (incremental projection parity)', () => {
+  const readResult = (seq: number, callId: string, text: string): SessionEvent => event('tool/result', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`msg-${seq}`),
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: CallId(callId), content: [{ type: 'text', text }] }],
+      source: { kind: 'tool', callId: CallId(callId) },
+    },
+  }, seq)
+  // Two reads in DIFFERENT turns, applied incrementally.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    readResult(2, 'r1', 'aaa'),
+  ])
+  folder.apply([
+    event('turn/start', { turn: 1 }, 3),
+    event('tool/call', { turn: 1, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 4),
+    readResult(5, 'r2', 'bbb'),
+  ])
+  const tools = folder.messages().filter(message => message.kind === 'tool')
+  assert.equal(tools.length, 1, 'grouping ignores turn boundaries (same as the one-shot pass)')
+  assert.equal(tools[0]?.args, '2 files')
+  assert.ok((tools[0]?.result ?? '').includes('aaa') && (tools[0]?.result ?? '').includes('bbb'))
+})
+
+test('a failed read breaks the group; a read settling late re-groups into the run', () => {
+  const readResult = (seq: number, callId: string, text: string, isError = false): SessionEvent => event('tool/result', {
+    turn: 0,
+    step: 0,
+    ...isError ? { error: { name: 'read-failed', code: 'read-failed' } } : {},
+    message: {
+      id: MessageId(`msg-${seq}`),
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: CallId(callId), content: [{ type: 'text', text }] }],
+      source: { kind: 'tool', callId: CallId(callId) },
+    },
+  }, seq)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    readResult(2, 'r1', 'aaa'),
+    // r2 FAILS: the run breaks even though the card is named read.
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    readResult(4, 'r2', 'bbb', true),
+    // r3 is called but its result lands LATE (after the next turn started).
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r3'), name: 'read', arguments: '{"file":"c.ts"}' }, 5),
+    event('turn/start', { turn: 1 }, 6),
+  ])
+  const before = folder.messages().filter(message => message.kind === 'tool')
+  assert.equal(before.length, 3, 'running + failed reads stay separate')
+  assert.equal(before[0]?.status, 'ok')
+  assert.equal(before[1]?.status, 'error')
+  assert.equal(before[2]?.status, 'running')
+  // The late result settles r3; the failed r2 sits between it and r1, so
+  // r3 stays a singleton.
+  folder.apply([readResult(7, 'r3', 'ccc')])
+  const after = folder.messages().filter(message => message.kind === 'tool')
+  assert.equal(after.length, 3)
+  assert.equal(after[2]?.args, '{"file":"c.ts"}', 'a late-settled read after a failed read stays single')
+  // And a late result at the TAIL of a run merges into the preceding group.
+  const folder2 = new TranscriptFolder()
+  folder2.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    readResult(2, 'r1', 'aaa'),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    event('turn/start', { turn: 1 }, 4),
+  ])
+  folder2.apply([readResult(5, 'r2', 'bbb')])
+  const tail = folder2.messages().filter(message => message.kind === 'tool')
+  assert.equal(tail.length, 1, 'a late result merges the tail read into the group')
+  assert.equal(tail[0]?.args, '2 files')
+})
+
 test('subagent/descriptor folds into a delegation card', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),

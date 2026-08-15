@@ -219,7 +219,7 @@ export class TranscriptFolder {
   /** The thinking entry object per (turn, step), for in-place text updates. */
   private readonly thinkingEntries = new Map<string, Extract<TranscriptMessage, { kind: 'thinking' }>>()
   /** Tool calls awaiting their result, keyed by callId with their running card. */
-  private readonly pendingCalls = new Map<string, { name: string; args: string; turn: number; card: Extract<TranscriptMessage, { kind: 'tool' }> }>()
+  private readonly pendingCalls = new Map<string, { name: string; args: string; turn: number; card: Extract<TranscriptMessage, { kind: 'tool' }>; index: number }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
   /** Command names by commandId, from command/run events. */
@@ -230,6 +230,94 @@ export class TranscriptFolder {
   private readonly workflowMembers = new Map<string, WorkflowMemberView>()
   /** The turn most recently opened by turn/start. */
   private currentTurn = 0
+  /**
+   * Incremental consecutive-read grouping (stage J): `groupOf` maps an item
+   * index to its merged group card (only the FIRST member emits it in the
+   * output); `groupMembers` maps a group card to its member indices. The
+   * projection is maintained on append and on settle, so `messages()` never
+   * re-walks the history to group — only the output list is built.
+   */
+  private readonly groupOf = new Map<number, Extract<TranscriptMessage, { kind: 'tool' }>>()
+  private readonly groupMembers = new Map<Extract<TranscriptMessage, { kind: 'tool' }>, number[]>()
+
+  /** Whether an item is groupable as a consecutive read (settled ok). */
+  private static groupable(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
+    return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+  }
+
+  /**
+   * Rebuild the grouping of the groupable run containing `index` (bounded
+   * by non-groupable items). Called when an item BECOMES groupable (a read
+   * settles ok) or a groupable item is appended; the run is re-flowed into
+   * one merged card and any superseded group card is dropped.
+   */
+  private reflowGrouping(index: number): void {
+    const item = this.items[index]
+    if (item === undefined || !TranscriptFolder.groupable(item)) return
+    let start = index
+    while (start > 0 && TranscriptFolder.groupable(this.items[start - 1]!)) start -= 1
+    let end = index
+    while (end + 1 < this.items.length && TranscriptFolder.groupable(this.items[end + 1]!)) end += 1
+    // Detach the run's items from any existing groups (a settle can splice
+    // a previously-running item into the middle of the run).
+    for (let i = start; i <= end; i += 1) {
+      const group = this.groupOf.get(i)
+      if (group !== undefined) {
+        const members = this.groupMembers.get(group)
+        if (members !== undefined) {
+          const remaining = members.filter(member => member < start || member > end)
+          if (remaining.length === 0) this.groupMembers.delete(group)
+          else this.groupMembers.set(group, remaining)
+        }
+        this.groupOf.delete(i)
+      }
+    }
+    if (start === end) {
+      // A single groupable item: join the PRECEDING group when adjacent
+      // (append or settle at the tail of a run).
+      const prev = start > 0 ? this.items[start - 1] : undefined
+      if (prev !== undefined && TranscriptFolder.groupable(prev)) {
+        const prevGroup = this.groupOf.get(start - 1)
+        if (prevGroup !== undefined) {
+          const members = this.groupMembers.get(prevGroup)!
+          members.push(start)
+          this.groupOf.set(start, prevGroup)
+          prevGroup.args = `${members.length} files`
+          prevGroup.result = prevGroup.result === '' ? item.result : `${prevGroup.result}\n\n${item.result}`
+          prevGroup.turn = Math.max(prevGroup.turn, item.turn)
+          return
+        }
+        // The previous item is a singleton read: promote it to a group.
+        const group: Extract<TranscriptMessage, { kind: 'tool' }> = { ...prev }
+        this.groupOf.set(start - 1, group)
+        this.groupOf.set(start, group)
+        this.groupMembers.set(group, [start - 1, start])
+        group.args = '2 files'
+        group.result = group.result === '' ? item.result : `${group.result}\n\n${item.result}`
+        group.turn = Math.max(group.turn, item.turn)
+      }
+      return
+    }
+    // Rebuild the whole run as one group. (The index variables are mutable,
+    // so the type guard is re-applied to locals rather than the array
+    // accesses, which TS cannot keep narrowed.)
+    const first = this.items[start]!
+    if (!TranscriptFolder.groupable(first)) return
+    const group: Extract<TranscriptMessage, { kind: 'tool' }> = { ...first }
+    const members: number[] = []
+    for (let i = start; i <= end; i += 1) {
+      const member = this.items[i]!
+      if (!TranscriptFolder.groupable(member)) continue
+      this.groupOf.set(i, group)
+      members.push(i)
+      if (i > start) {
+        group.result = group.result === '' ? member.result : `${group.result}\n\n${member.result}`
+        group.turn = Math.max(group.turn, member.turn)
+      }
+    }
+    group.args = `${members.length} files`
+    this.groupMembers.set(group, members)
+  }
 
   /**
    * Apply appended events in log order. Safe to call repeatedly with new
@@ -243,11 +331,22 @@ export class TranscriptFolder {
   /**
    * The folded messages. Without options this is the full transcript; with
    * `maxTurns` older turns collapse into one summary entry (fresh array).
+   * The consecutive-read grouping is the maintained projection — no
+   * re-grouping pass runs here.
    * @param options - optional display window.
    * @returns the renderable message list.
    */
   messages(options?: FoldOptions): TranscriptMessage[] {
-    const grouped = groupConsecutiveReads(this.items)
+    const grouped: TranscriptMessage[] = []
+    for (let index = 0; index < this.items.length; index += 1) {
+      const group = this.groupOf.get(index)
+      if (group !== undefined) {
+        const members = this.groupMembers.get(group)
+        if (members !== undefined && members[0] === index) grouped.push(group)
+        continue
+      }
+      grouped.push(this.items[index]!)
+    }
     const maxTurns = options?.maxTurns
     if (maxTurns === undefined || maxTurns <= 0) return grouped
     return windowMessages(grouped, maxTurns, options?.endTurn)
@@ -348,13 +447,14 @@ export class TranscriptFolder {
           result: '',
           status: 'running',
         }
+        this.items.push(card)
         this.pendingCalls.set(key, {
           name: event.data.name,
           args: event.data.arguments,
           turn: this.currentTurn,
           card,
+          index: this.items.length - 1,
         })
-        this.items.push(card)
         break
       }
       case 'tool/result': {
@@ -378,19 +478,27 @@ export class TranscriptFolder {
           // Raw result data for the tool-owned presentation (presentResult).
           card.resultBlocks = block?.content
           card.meta = event.data.meta
+          // A settled read may now be groupable: reflow the run it belongs
+          // to (bounded by the nearest non-read cards).
+          this.reflowGrouping(pending.index)
         } else {
           // Unknown call (e.g. post-compaction): fall back to the last
           // running card with this name, or append a completed one.
-          const running = this.items.findLast(message => message.kind === 'tool' && message.name === name && message.status === 'running')
-          if (running !== undefined && running.kind === 'tool') {
-            running.status = status
-            running.result = text
-            running.args = ''
-            running.turn = turn
-            running.resultBlocks = block?.content
-            running.meta = event.data.meta
+          const runningIndex = this.items.findLastIndex(message => message.kind === 'tool' && message.name === name && message.status === 'running')
+          if (runningIndex !== -1) {
+            const running = this.items[runningIndex]!
+            if (running.kind === 'tool') {
+              running.status = status
+              running.result = text
+              running.args = ''
+              running.turn = turn
+              running.resultBlocks = block?.content
+              running.meta = event.data.meta
+              this.reflowGrouping(runningIndex)
+            }
           } else {
             this.items.push({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta })
+            this.reflowGrouping(this.items.length - 1)
           }
         }
         break
