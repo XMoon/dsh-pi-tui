@@ -52,6 +52,7 @@ import {
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
+import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
   firstLine,
   latestLine,
@@ -71,6 +72,8 @@ import { WorkingIndicator } from './working.ts'
 export const EXPAND_RECENT_TURNS = 3
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export const RESULT_PREVIEW_LINES = 3
+/** Diff-body cap for default-view tool cards; mirrors kimi COMMAND_PREVIEW_LINES. */
+export const DIFF_PREVIEW_LINES = 10
 
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
@@ -1244,7 +1247,9 @@ export class TuiApp {
     const head = `${color.textDim(`${emoji}  ${header.title}${summary}`)} ${pill}`
     if (message.turn >= boundary || this.expandedOverride.get(message) === true) {
       card.addChild(new Text(head, 0, 0))
-      this.renderToolBody(card, message)
+      // An explicitly expanded card (mouse click) renders diff bodies in
+      // full; the default recent-turn view caps them (kimi parity).
+      this.renderToolBody(card, message, this.expandedOverride.get(message) === true)
     } else {
       // A read card's folded preview is the envelope summary (`— N lines`),
       // never a dump of the raw `<path>/<content>` XML. Every other tool keeps
@@ -1264,13 +1269,21 @@ export class TuiApp {
    * the body follows the tool's own render intent (presentResult): a read
    * card shows numbered lines plus the relativized path and total line
    * count, a search card groups matches by file and marks truncation, a
-   * terminal card shows the output and exit status, and a diff card colors
-   * the hunks. Without a view the raw result text renders, diff-colored
-   * when it looks like one.
+   * terminal card shows the output and exit status, and a diff card shows
+   * the LCS-aligned, clustered diff (capped in the default view, full when
+   * the card was explicitly expanded). Without a view the raw result text
+   * renders, diff-colored when it looks like one; a diff-card call whose
+   * result carried no view reuses the call-time diff so the block never
+   * collapses (kimi parity).
    * @param card - the card container to fill.
    * @param message - the tool message.
+   * @param explicitlyExpanded - whether the user expanded this card by hand.
    */
-  private renderToolBody(card: Container, message: Extract<TranscriptMessage, { kind: 'tool' }>): void {
+  private renderToolBody(
+    card: Container,
+    message: Extract<TranscriptMessage, { kind: 'tool' }>,
+    explicitlyExpanded: boolean,
+  ): void {
     // Workflow run cards: the body is the run's member tree, grouped by phase
     // in arrival order (Web WorkflowRunPanel parity). Rows render even while
     // the run is still streaming (members land incrementally).
@@ -1301,12 +1314,21 @@ export class TuiApp {
       return
     }
     // Running: surface the pending call's salient raw input when the tool
-    // offered one (e.g. a background job id); otherwise the header alone.
+    // offered one (e.g. a background job id); edit/write calls render their
+    // call-time diff (old_string → new_string / the written content) right
+    // away instead of an empty body.
     if (message.status === 'running') {
       const callView = this.present?.call(message.name, message.args)
-      if (callView !== undefined && callView.card === 'generic' && callView.rawInput !== undefined) {
-        const raw = typeof callView.rawInput === 'string' ? callView.rawInput : JSON.stringify(callView.rawInput, null, 2)
-        card.addChild(new Text(color.textDim(raw), 0, 0))
+      if (callView !== undefined) {
+        if (callView.card === 'diff' && callView.diffs.length > 0) {
+          this.renderDiffBody(card, callView.diffs, explicitlyExpanded)
+          return
+        }
+        if (callView.card === 'generic' && callView.rawInput !== undefined) {
+          const raw = typeof callView.rawInput === 'string' ? callView.rawInput : JSON.stringify(callView.rawInput, null, 2)
+          card.addChild(new Text(color.textDim(raw), 0, 0))
+          return
+        }
       }
       return
     }
@@ -1362,13 +1384,21 @@ export class TuiApp {
           return
         }
         case 'diff': {
-          for (const line of renderDiffView(resultView.diffs, this.workspaceRoot)) {
-            card.addChild(new Text(line, 0, 0))
-          }
+          this.renderDiffBody(card, resultView.diffs, explicitlyExpanded)
           return
         }
         default:
           break
+      }
+    }
+    // No completed view (e.g. replay metadata absent): a diff-card call
+    // reuses its call-time diff, so the block shown while running stays put
+    // instead of collapsing to raw text (kimi parity).
+    if (resultView === undefined) {
+      const callView = this.present?.call(message.name, message.args)
+      if (callView !== undefined && callView.card === 'diff' && callView.diffs.length > 0) {
+        this.renderDiffBody(card, callView.diffs, explicitlyExpanded)
+        return
       }
     }
     // Generic fallback: the raw result text dimmed (diffs keep their own
@@ -1408,6 +1438,22 @@ export class TuiApp {
       }
     } else {
       card.addChild(new Text(color.textDim(message.result), 0, 0))
+    }
+  }
+
+  /**
+   * Fill a tool card with a diff body: LCS-aligned clustered lines, capped
+   * at {@link DIFF_PREVIEW_LINES} in the default recent-turn view and full
+   * when the card was explicitly expanded (kimi parity).
+   * @param card - the card container to fill.
+   * @param diffs - the diff hunks.
+   * @param explicitlyExpanded - explicit expansion disables the cap.
+   */
+  private renderDiffBody(card: Container, diffs: readonly FileDiff[], explicitlyExpanded: boolean): void {
+    for (const line of renderDiffView(diffs, this.workspaceRoot, {
+      maxLines: explicitlyExpanded ? undefined : DIFF_PREVIEW_LINES,
+    })) {
+      card.addChild(new Text(line, 0, 0))
     }
   }
 

@@ -388,3 +388,133 @@ test('an approval dialog stacked over the settings panel masks it cleanly', asyn
   assert.ok(dialog.includes('run a shell command'), `dialog content missing:\n${joined}`)
   assert.ok(!dialog.includes('follow up on the audit'), `settings panel bleeds through the approval dialog:\n${joined}`)
 })
+
+function diffCallArgs(): string {
+  return JSON.stringify({ file_path: 'src/foo.ts', old_string: 'a\nb\nc', new_string: 'a\nB\nc' })
+}
+
+function diffCallEvent(seq: number, callId: string): SessionEvent {
+  return {
+    type: 'tool/call',
+    seq,
+    time: 1_700_000_000_000 + seq,
+    data: { turn: 0, step: 0, callId: CallId(callId), name: 'edit', arguments: diffCallArgs() },
+  }
+}
+
+function diffResultEvent(seq: number, callId: string, text: string): SessionEvent {
+  return {
+    type: 'tool/result',
+    seq,
+    time: 1_700_000_000_000 + seq,
+    data: {
+      turn: 0,
+      step: 0,
+      message: createToolResultMessage({ callId: CallId(callId), content: [{ type: 'text', text }], isError: false }),
+    },
+  }
+}
+
+test('a running edit card renders its call-time diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'a\nb\nc', newText: 'a\nB\nc' }],
+        locations: [],
+      }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-1')])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('+1 -1 src/foo.ts'), `diff header missing:\n${view}`)
+  assert.ok(view.includes('- b'), `delete row missing:\n${view}`)
+  assert.ok(view.includes('+ B'), `add row missing:\n${view}`)
+  app.stop()
+})
+
+test('a completed diff card renders the applied result diffs', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'x\ny', newText: 'x\nY\nz' }],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-2'), diffResultEvent(1, 'call-diff-2', 'The file src/foo.ts has been updated successfully.')])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('+2 -1 src/foo.ts'), `applied diff header missing:\n${view}`)
+  assert.ok(view.includes('+ Y'), `applied add row missing:\n${view}`)
+  assert.ok(!view.includes('updated successfully'), `raw result text must not replace the diff:\n${view}`)
+  app.stop()
+})
+
+test('a completed diff card without a result view falls back to the call-time diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'a\nb\nc', newText: 'a\nB\nc' }],
+        locations: [],
+      }),
+      result: () => undefined, // no meta on replay: the tool attaches no view
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-3'), diffResultEvent(1, 'call-diff-3', 'The file src/foo.ts has been updated successfully.')])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('+1 -1 src/foo.ts'), `call diff header missing:\n${view}`)
+  assert.ok(!view.includes('updated successfully'), `raw result text must not replace the diff:\n${view}`)
+  app.stop()
+})
+
+test('a big diff card caps in the default view with an expand hint', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const oldLines = Array.from({ length: 30 }, (_, i) => `old ${i}`).join('\n')
+  const newLines = Array.from({ length: 30 }, (_, i) => `new ${i}`).join('\n')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Write src/big.ts',
+        diffs: [{ path: 'src/big.ts', oldText: null, newText: newLines }],
+        locations: [],
+      }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-4')])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('+30 src/big.ts'), `create header missing:\n${view}`)
+  assert.ok(view.includes('more changes hidden (click to expand)'), `cap footer missing:\n${view}`)
+  app.stop()
+})
