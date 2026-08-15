@@ -1,24 +1,32 @@
 /**
  * Tests for the session-log repair logic: duplicate-seq renumbering with
- * cross-reference remap, gap/unparsable truncation, healthy no-ops, and the
- * Zstandard frame walk/decompress round trip. Plain JS (.mjs) so it runs
- * under `node --test` without type stripping.
+ * cross-reference remap, gap/unparsable truncation, healthy no-ops, the
+ * Zstandard frame walk/decompress round trip, and torn-tail detection
+ * (frame matrix + --scan reporting). Plain JS (.mjs) so it runs under
+ * `node --test` without type stripping.
  * @module repair.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
+import { spawnSync } from 'node:child_process'
+import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 import { decodeStorageRecord } from '@deepseek-ai/dsh-session'
 import {
   compressLog,
   decompressFrames,
   encodeLog,
+  frameLineRanges,
   repairEvents,
   scanEvents,
+  scanFrameLayout,
   scanZstdFrames,
   scanZstdLayout,
 } from '../scripts/repair-core.mjs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const HEADER = '{"type":"session","version":0,"id":"session-test","createdAt":1,"cwd":"/work","delegationDepth":0,"agentPreset":"standard"}'
 
@@ -49,7 +57,7 @@ test('duplicate seq: renumbers from the collision and remaps references', () => 
   // Collision at index 3: the event's old seq 2 duplicates the pre-collision
   // event at index 2.
   events[1].data = { sourceEventSeqs: [0] } // pre-collision ref → unchanged
-  events[3].data = { sourceEventSeqs: [2] } // ref to pre-collision seq 2 → unchanged (ambiguous dup resolved to the pre-collision event)
+  events[3].data = { sourceEventSeqs: [2] } // ref to duplicated seq 2 → ambiguous; resolved as 'first' (pre-collision event)
   events[4].data = { message: { sourceEventSeqs: [3] }, messageSeqs: [4] } // post-collision refs → remapped
   const text = encodeLog(HEADER, events)
   const { issue } = scanEvents(text, decodeStorageRecord)
@@ -58,8 +66,10 @@ test('duplicate seq: renumbers from the collision and remaps references', () => 
   assert.equal(issue.index, 3)
   assert.equal(issue.got, 2)
 
-  const plan = repairEvents(events, issue)
+  const plan = repairEvents(events, issue, { duplicateReference: 'first' })
   assert.equal(plan.action, 'renumber')
+  assert.equal(plan.resolvedStrategy, 'first')
+  assert.equal(plan.ambiguous.length, 1)
   assert.equal(plan.delta, 1)
   assert.equal(plan.changed, 3) // indices 3..5
   // Every event's seq equals its index again.
@@ -182,4 +192,405 @@ test('scanZstdLayout flags a whole-log single frame as layout-damaged', () => {
 test('scanZstdLayout rejects an empty/header-less artifact', () => {
   assert.equal(scanZstdLayout(Buffer.alloc(0), zstdDecompressSync).ok, false)
   assert.equal(scanZstdLayout(zstdCompressSync(Buffer.alloc(0)), zstdDecompressSync).ok, false)
+})
+
+// --- torn-tail detection ---
+
+/** A checksummed zstd frame (like the harness writer and compressLog). */
+function frameOf(text) {
+  return zstdCompressSync(Buffer.from(text, 'utf8'), { params: { [constants.ZSTD_c_checksumFlag]: 1 } })
+}
+
+const TEXT = encodeLog(HEADER, buildEvents([0, 1, 2, 3]))
+
+/** A multi-frame artifact with the tail truncated mid-frame. */
+function tornArtifact(prefixText, tailText, cutBytes) {
+  const buffer = Buffer.concat([compressLog(prefixText, zstdCompressSync), frameOf(tailText)])
+  return buffer.subarray(0, buffer.length - cutBytes)
+}
+
+test('half a zstd magic is a torn tail with zero salvageable bytes', () => {
+  const buffer = Buffer.from([0x28, 0xb5])
+  const scan = scanFrameLayout(buffer, zstdDecompressSync)
+  assert.equal(scan.status, 'torn-tail')
+  assert.equal(scan.tornStart, 0)
+  assert.equal(scan.completeBytes, 0)
+  assert.equal(scan.totalBytes, 2)
+  // Never reported as healthy.
+  assert.equal(scanZstdLayout(buffer, zstdDecompressSync).ok, false)
+})
+
+test('complete magic with a truncated frame header is a torn tail', () => {
+  // Take a real frame and cut it inside the frame header (after the magic).
+  const full = compressLog(TEXT, zstdCompressSync)
+  const buffer = full.subarray(0, 6)
+  const scan = scanFrameLayout(buffer, zstdDecompressSync)
+  assert.equal(scan.status, 'torn-tail')
+  assert.equal(scan.tornStart, 0)
+  assert.equal(scan.completeBytes, 0)
+})
+
+test('a truncated data block and a truncated checksum are torn tails', () => {
+  const full = compressLog(TEXT, zstdCompressSync)
+  // Cut inside the first frame's data block.
+  const midBlock = full.subarray(0, full.length - 12)
+  assert.equal(scanFrameLayout(midBlock, zstdDecompressSync).status, 'torn-tail')
+  // Cut two bytes off the end: inside the 4-byte checksum.
+  const shortChecksum = full.subarray(0, full.length - 2)
+  const scan = scanFrameLayout(shortChecksum, zstdDecompressSync)
+  assert.equal(scan.status, 'torn-tail')
+  assert.ok(scan.issue.includes('torn tail'), scan.issue)
+})
+
+test('multi-frame log with the last frame truncated: complete prefix is preserved', () => {
+  const prefixText = encodeLog(HEADER, buildEvents([0, 1, 2]))
+  const torn = tornArtifact(prefixText, JSON.stringify(buildEvents([3])[0]), 7)
+  const scan = scanFrameLayout(torn, zstdDecompressSync)
+  assert.equal(scan.status, 'torn-tail')
+  assert.ok(scan.tornStart !== undefined && scan.tornStart < scan.totalBytes)
+  assert.equal(scan.completeBytes, scan.tornStart)
+  // The complete prefix decompresses to exactly the salvageable text.
+  assert.equal(decompressFrames(torn, zstdDecompressSync).text, prefixText)
+  // The salvageable prefix is a valid contiguous log.
+  assert.equal(scanEvents(decompressFrames(torn, zstdDecompressSync).text, decodeStorageRecord).issue, undefined)
+})
+
+test('garbage appended after a complete frame is a torn tail with a salvageable prefix', () => {
+  const garbage = Buffer.concat([compressLog(TEXT, zstdCompressSync), Buffer.from('this is not a zstd frame')])
+  const scan = scanFrameLayout(garbage, zstdDecompressSync)
+  assert.equal(scan.status, 'torn-tail')
+  assert.ok(scan.garbageStart !== undefined)
+  assert.equal(scan.completeBytes, scan.garbageStart)
+  assert.equal(decompressFrames(garbage, zstdDecompressSync).text, TEXT)
+  assert.match(scan.issue, /trailing garbage/)
+})
+
+test('a damaged first frame is a decode failure, not a torn tail', () => {
+  const single = frameOf(TEXT)
+  const bad = Buffer.from(single)
+  bad[bad.length - 10] ^= 0xff // corrupt a payload byte; the checksum catches it
+  const scan = scanFrameLayout(bad, zstdDecompressSync)
+  assert.equal(scan.status, 'decode-failure')
+  assert.ok(scan.issue.includes('failed validation'), scan.issue)
+})
+
+test('a complete frame not ending on a JSONL boundary is flagged', () => {
+  const rows = TEXT.trimEnd().split('\n')
+  const buffer = Buffer.concat([
+    frameOf(`${rows[0]}\n`),
+    frameOf(`${rows[1]}\n${rows[2]}`), // no trailing newline: mid-record boundary
+  ])
+  const scan = scanFrameLayout(buffer, zstdDecompressSync)
+  assert.equal(scan.status, 'invalid-jsonl-boundary')
+})
+
+// --- the repair CLI: torn-tail detection ---
+
+const REPAIR_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'repair-session.mjs')
+
+/** A minimal fake dsh install: a package.json named @deepseek-ai/dsh plus a
+ * symlinked @deepseek-ai/dsh-session, so `--dsh-dir` resolves the real
+ * storage decoder without touching the machine's dsh. */
+function makeDshStub() {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-stub-'))
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.0.0' }))
+  const modules = join(dir, 'node_modules', '@deepseek-ai')
+  mkdirSync(modules, { recursive: true })
+  const real = dirname(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-session')))
+  symlinkSync(real, join(modules, 'dsh-session'), 'dir')
+  return dir
+}
+
+/** A fake dsh home with one session artifact. */
+function makeFakeHome(artifactBytes) {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-home-'))
+  const dir = join(home, 'sessions', 'proj', 'sess-1')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'session.jsonl.zstd'), artifactBytes)
+  return home
+}
+
+function runCli(args) {
+  return spawnSync(process.execPath, [REPAIR_SCRIPT, ...args], { encoding: 'utf8' })
+}
+
+test('CLI --scan reports a torn tail with byte accounting, never healthy', () => {
+  const stub = makeDshStub()
+  const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
+  const home = makeFakeHome(torn)
+  const result = runCli(['--scan', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 1)
+  assert.match(result.stdout, /CORRUPT sess-1:/)
+  assert.match(result.stdout, /torn tail/)
+  assert.ok(result.stdout.includes(`of ${torn.length}`), `byte accounting missing: ${result.stdout}`)
+  // The --scan path must never report a torn tail as healthy.
+  assert.ok(!result.stdout.includes('no damaged sessions'))
+})
+
+test('CLI reports a torn tail for a single session without touching the file', () => {
+  const stub = makeDshStub()
+  const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
+  const home = makeFakeHome(torn)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const before = readFileSync(path)
+  const result = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 1)
+  assert.match(result.stdout, /torn tail/)
+  assert.match(result.stdout, /truncate the torn tail/)
+  assert.ok(result.stdout.includes('dry run'), result.stdout)
+  assert.deepEqual(readFileSync(path), before, 'dry run must not modify the file')
+  assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup in a dry run')
+})
+
+// --- the repair CLI: applying a torn-tail truncation ---
+
+/** Replicate the harness reader's readZstdPrefix + SessionLogScanner with
+ * the real decodeStorageRecord: first frame must be exactly one header line,
+ * every row decodes, and seqs stay contiguous. */
+function readLikeHarness(path) {
+  const buffer = readFileSync(path)
+  const { frames } = scanZstdFrames(buffer)
+  assert.ok(frames.length > 0, 'no frames')
+  const first = zstdDecompressSync(buffer.subarray(frames[0].start, frames[0].end)).toString('utf8')
+  assert.ok(first.endsWith('\n') && first.indexOf('\n') === first.length - 1, 'first frame is not exactly one header line')
+  const text = decompressFrames(buffer, zstdDecompressSync).text
+  const lines = text.split('\n')
+  const events = []
+  for (let index = 1; index < lines.length; index += 1) {
+    if (lines[index] === '') continue
+    for (const event of decodeStorageRecord(JSON.parse(lines[index]))) {
+      if (event.seq !== events.length) throw new Error(`corrupt session log: seq gap in committed region (expected ${events.length}, got ${event.seq})`)
+      events.push(event)
+    }
+  }
+  return { header: JSON.parse(lines[0]), events }
+}
+
+test('CLI dry run reports keep/discard bytes and unknown loss; writes nothing', () => {
+  const stub = makeDshStub()
+  const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
+  const home = makeFakeHome(torn)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const before = readFileSync(path)
+  const result = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 1)
+  assert.match(result.stdout, /keep \d+ of \d+ bytes/)
+  assert.match(result.stdout, /events lost in the torn tail: unknown/)
+  assert.match(result.stdout, /storage row\(s\)/)
+  assert.deepEqual(readFileSync(path), before, 'dry run must not modify the file')
+})
+
+test('CLI --yes truncates at the complete frame boundary, backs up first, writes 0600', () => {
+  const stub = makeDshStub()
+  const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
+  const home = makeFakeHome(torn)
+  const dir = join(home, 'sessions', 'proj', 'sess-1')
+  const path = join(dir, 'session.jsonl.zstd')
+  const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /backup: /)
+  assert.match(result.stdout, /verify: valid frame layout/)
+  // A backup of the original was created first (and is byte-identical).
+  const backups = readdirSync(dir).filter(name => name.startsWith('session.jsonl.zstd.bak-'))
+  assert.equal(backups.length, 1)
+  assert.equal(readFileSync(join(dir, backups[0])).length, torn.length)
+  // Output is strictly 0600.
+  assert.equal(statSync(path).mode & 0o777, 0o600)
+  // The repaired artifact is a healthy multi-frame log whose first frame is
+  // exactly the header line.
+  const buffer = readFileSync(path)
+  const layout = scanFrameLayout(buffer, zstdDecompressSync)
+  assert.equal(layout.status, 'healthy')
+  assert.ok(layout.frames.length >= 2, 'repaired log should be re-framed, not one blob')
+  const { frames } = scanZstdFrames(buffer)
+  assert.equal(zstdDecompressSync(buffer.subarray(frames[0].start, frames[0].end)).toString('utf8'), `${HEADER}\n`)
+  // The real reader semantics see a contiguous 4-event log (the torn 5th is gone).
+  const read = readLikeHarness(path)
+  assert.equal(read.header.id, 'session-test')
+  assert.equal(read.events.length, 4)
+  read.events.forEach((event, index) => assert.equal(event.seq, index))
+  // A second scan finds nothing to repair.
+  const rescan = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(rescan.status, 0)
+  assert.match(rescan.stdout, /nothing to repair/)
+})
+
+test('CLI refuses a torn tail with no salvageable prefix (damage at byte 0)', () => {
+  const stub = makeDshStub()
+  const home = makeFakeHome(Buffer.from([0x28, 0xb5]))
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /no salvageable prefix/)
+  assert.deepEqual(readFileSync(path), Buffer.from([0x28, 0xb5]), 'original left untouched')
+  assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
+})
+
+test('CLI repair result passes the real dsh reader on a duplicate-seq log', () => {
+  const stub = makeDshStub()
+  const events = buildEvents([0, 1, 2, 2, 3])
+  const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
+  const home = makeFakeHome(buffer)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /renumber/)
+  const read = readLikeHarness(path)
+  assert.equal(read.events.length, 5)
+  read.events.forEach((event, index) => assert.equal(event.seq, index))
+  assert.equal(existsSync(path), true)
+})
+
+// --- duplicate-seq reference ambiguity (stage C) ---
+
+test('ambiguous refs to a duplicated seq refuse by default with a full report', () => {
+  const events = buildEvents([0, 1, 2, 2, 3, 4])
+  events[4].data = { sourceEventSeqs: [2] } // 2 occurs at events 2 and 3
+  const text = encodeLog(HEADER, events)
+  const { issue } = scanEvents(text, decodeStorageRecord)
+  const plan = repairEvents(events, issue)
+  assert.equal(plan.action, 'refuse')
+  assert.match(plan.message, /refusing automatic repair/)
+  assert.equal(plan.ambiguous.length, 1)
+  assert.equal(plan.ambiguous[0].seq, 2)
+  assert.equal(plan.ambiguous[0].eventIndex, 4)
+  assert.deepEqual(plan.ambiguous[0].candidates, [2, 3])
+  // Refusal must not mutate anything: seqs stay as scanned.
+  assert.deepEqual(events.map(event => event.seq), [0, 1, 2, 2, 3, 4])
+  // The artifact is still reported damaged on a re-scan.
+  assert.ok(scanEvents(encodeLog(HEADER, events), decodeStorageRecord).issue !== undefined)
+})
+
+test('first strategy binds ambiguous refs to the first occurrence', () => {
+  const events = buildEvents([0, 1, 2, 2, 3, 4])
+  events[4].data = { sourceEventSeqs: [2] }
+  const { issue } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
+  const plan = repairEvents(events, issue, { duplicateReference: 'first' })
+  assert.equal(plan.action, 'renumber')
+  assert.equal(plan.resolvedStrategy, 'first')
+  assert.equal(plan.events[4].data.sourceEventSeqs[0], 2) // unchanged → first occurrence
+  plan.events.forEach((event, index) => assert.equal(event.seq, index))
+  assert.equal(scanEvents(encodeLog(HEADER, plan.events), decodeStorageRecord).issue, undefined)
+})
+
+test('last strategy binds ambiguous refs to the post-collision event', () => {
+  const events = buildEvents([0, 1, 2, 2, 3, 4])
+  events[4].data = { sourceEventSeqs: [2] }
+  const { issue } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
+  const plan = repairEvents(events, issue, { duplicateReference: 'last' })
+  assert.equal(plan.action, 'renumber')
+  assert.equal(plan.events[4].data.sourceEventSeqs[0], 3) // remapped → last occurrence
+})
+
+test('interleaved two-writer log: refs to any repeated seq are ambiguous', () => {
+  const build = () => {
+    const events = buildEvents([0, 1, 2, 0, 1, 2, 3])
+    events[6].data = { sourceEventSeqs: [0, 1, 2] }
+    return events
+  }
+  const { issue } = scanEvents(encodeLog(HEADER, build()), decodeStorageRecord)
+  assert.equal(issue.kind, 'duplicate')
+  const refused = repairEvents(build(), issue)
+  assert.equal(refused.action, 'refuse')
+  assert.equal(refused.ambiguous.length, 3)
+  assert.deepEqual(refused.ambiguous.map(entry => entry.seq), [0, 1, 2])
+  const first = repairEvents(build(), issue, { duplicateReference: 'first' })
+  assert.deepEqual(first.events[6].data.sourceEventSeqs, [0, 1, 2])
+  const last = repairEvents(build(), issue, { duplicateReference: 'last' })
+  assert.deepEqual(last.events[6].data.sourceEventSeqs, [3, 4, 5])
+  last.events.forEach((event, index) => assert.equal(event.seq, index))
+})
+
+test('the same duplicated seq referenced by several events is reported and resolved consistently', () => {
+  const build = () => {
+    const events = buildEvents([0, 1, 2, 2, 3])
+    events[3].data = { sourceEventSeqs: [1] } // unique ref → fine
+    events[4].data = { messageSeqs: [2] } // ambiguous ref
+    return events
+  }
+  const { issue } = scanEvents(encodeLog(HEADER, build()), decodeStorageRecord)
+  const refused = repairEvents(build(), issue)
+  assert.equal(refused.action, 'refuse')
+  assert.equal(refused.ambiguous.length, 1)
+  const first = repairEvents(build(), issue, { duplicateReference: 'first' })
+  assert.deepEqual(first.events[3].data.sourceEventSeqs, [1])
+  assert.deepEqual(first.events[4].data.messageSeqs, [2])
+})
+
+test('segment strategy binds to the occurrence in the same flush frame', () => {
+  const events = buildEvents([0, 1, 2, 2, 3])
+  events[4].data = { sourceEventSeqs: [2] }
+  const text = encodeLog(HEADER, events)
+  // Two flush frames: frame 0 = header + events 0..2, frame 1 = events 3..4.
+  const lines = text.trimEnd().split('\n')
+  const buffer = Buffer.concat([
+    zstdCompressSync(Buffer.from(`${lines.slice(0, 4).join('\n')}\n`, 'utf8')),
+    zstdCompressSync(Buffer.from(`${lines.slice(4).join('\n')}\n`, 'utf8')),
+  ])
+  const ranges = frameLineRanges(buffer, zstdDecompressSync)
+  const { issue, events: scanned } = scanEvents(text, decodeStorageRecord, ranges)
+  assert.equal(scanned[3].frame, 1, 'collision event should sit in frame 1')
+  assert.equal(scanned[4].frame, 1)
+  // Event 4 references seq 2: candidates are event 2 (frame 0) and event 3
+  // (frame 1, same frame as the referencer) → binds to event 3.
+  const plan = repairEvents(scanned, issue, { duplicateReference: 'segment' })
+  assert.equal(plan.action, 'renumber')
+  assert.equal(plan.events[4].data.sourceEventSeqs[0], 3)
+})
+
+test('segment strategy without frame info degrades to first', () => {
+  const events = buildEvents([0, 1, 2, 2, 3])
+  events[4].data = { sourceEventSeqs: [2] }
+  const { issue } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord) // no frames
+  const plan = repairEvents(events, issue, { duplicateReference: 'segment' })
+  assert.equal(plan.action, 'renumber')
+  assert.equal(plan.events[4].data.sourceEventSeqs[0], 2)
+})
+
+test('explicit strategies are stable and repeatable', () => {
+  const build = () => {
+    const events = buildEvents([0, 1, 2, 2, 3])
+    events[4].data = { sourceEventSeqs: [2] }
+    return events
+  }
+  const first = repairEvents(build(), scanEvents(encodeLog(HEADER, build()), decodeStorageRecord).issue, { duplicateReference: 'last' })
+  const second = repairEvents(build(), scanEvents(encodeLog(HEADER, build()), decodeStorageRecord).issue, { duplicateReference: 'last' })
+  assert.equal(encodeLog(HEADER, first.events), encodeLog(HEADER, second.events))
+})
+
+test('CLI refuses an ambiguous duplicate-seq log by default without writing', () => {
+  const stub = makeDshStub()
+  const events = buildEvents([0, 1, 2, 2, 3])
+  events[4].data = { sourceEventSeqs: [2] }
+  const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
+  const home = makeFakeHome(buffer)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const before = readFileSync(path)
+  const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 1)
+  assert.match(result.stdout, /refusing automatic repair/)
+  assert.match(result.stdout, /candidates: event 2 \(seq 2\), event 3 \(seq 2\)/)
+  assert.match(result.stdout, /no write was performed/)
+  assert.deepEqual(readFileSync(path), before, 'an ambiguous log must never be rewritten')
+  assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
+})
+
+test('CLI --duplicate-reference=first applies the strategy and prints the plan', () => {
+  const stub = makeDshStub()
+  const events = buildEvents([0, 1, 2, 2, 3])
+  events[4].data = { sourceEventSeqs: [2] }
+  const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
+  const home = makeFakeHome(buffer)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const result = runCli(['sess-1', '--yes', '--duplicate-reference', 'first', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /resolved as first/)
+  const read = readLikeHarness(path)
+  assert.equal(read.events.length, 5)
+  read.events.forEach((event, index) => assert.equal(event.seq, index))
+  // The repaired artifact's reference still points at the first occurrence (seq 2).
+  assert.deepEqual(read.events[4].data.sourceEventSeqs, [2])
+  const rescan = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(rescan.status, 0)
+  assert.match(rescan.stdout, /nothing to repair/)
 })

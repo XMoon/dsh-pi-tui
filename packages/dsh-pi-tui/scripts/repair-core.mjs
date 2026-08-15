@@ -49,11 +49,19 @@ const CHECKSUMMED_OPTIONS = {
 
 /**
  * Walk concatenated Zstandard frames and return each frame's byte range.
- * Vendored from `dsh-session-persistence-jsonl/lib/index.js`
+ * Adapted from `dsh-session-persistence-jsonl/lib/index.js`
  * (`scanZstdFrames`): parses the frame header (content-size flags) and block
  * headers to find frame boundaries without trusting content sizes.
+ *
+ * Divergence from the upstream walker: instead of throwing on an invalid
+ * frame, the walk STOPS and reports where the tail became unreadable —
+ * `tornStart` when a frame merely ran out of bytes (truncated tail),
+ * `garbageStart` when the bytes do not parse as a frame (e.g. random bytes
+ * appended after the last complete frame). The complete frames collected
+ * before the damage point are always a safe salvageable prefix, which is
+ * what the repair path truncates to.
  * @param buffer - the raw artifact bytes.
- * @returns `{ frames, tornStart }` — `tornStart` when the tail is truncated.
+ * @returns `{ frames, tornStart?, garbageStart? }`.
  */
 export function scanZstdFrames(buffer) {
   const frames = []
@@ -61,12 +69,12 @@ export function scanZstdFrames(buffer) {
   while (offset < buffer.length) {
     const start = offset
     if (buffer.length - offset < 4) return { frames, tornStart: start }
-    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) throw new Error(`corrupt Zstandard session log: invalid frame magic at byte ${offset}`)
+    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) return { frames, garbageStart: start }
     offset += 4
     if (offset === buffer.length) return { frames, tornStart: start }
     const descriptor = buffer.readUInt8(offset)
     offset += 1
-    if ((descriptor & 24) !== 0) throw new Error(`corrupt Zstandard session log: reserved frame-header bit at byte ${offset - 1}`)
+    if ((descriptor & 24) !== 0) return { frames, garbageStart: start }
     const contentSizeFlag = descriptor >>> 6
     const singleSegment = (descriptor & 32) !== 0
     const checksum = (descriptor & 4) !== 0
@@ -83,7 +91,7 @@ export function scanZstdFrames(buffer) {
       const lastBlock = (blockHeader & 1) !== 0
       const blockType = blockHeader >>> 1 & 3
       const blockSize = blockHeader >>> 3
-      if (blockType === 3) throw new Error(`corrupt Zstandard session log: reserved block type at byte ${offset - 3}`)
+      if (blockType === 3) return { frames, garbageStart: start }
       const payloadBytes = blockType === 1 ? 1 : blockSize
       if (buffer.length - offset < payloadBytes) return { frames, tornStart: start }
       offset += payloadBytes
@@ -96,6 +104,98 @@ export function scanZstdFrames(buffer) {
     frames.push({ start, end: offset })
   }
   return { frames }
+}
+
+/**
+ * Lay out the damage diagnosis for a damaged tail, with byte accounting.
+ * @param kind - `'torn'` (truncated mid-frame) or `'garbage'` (non-frame bytes).
+ * @param offset - byte offset where the damage starts.
+ * @param totalBytes - file size.
+ * @param completeBytes - bytes of the complete frames before the damage.
+ */
+function tailIssue(kind, offset, totalBytes, completeBytes) {
+  return kind === 'torn'
+    ? `corrupt Zstandard session log: torn tail — an incomplete frame starts at byte ${offset} of ${totalBytes}; ${completeBytes} complete byte(s) are salvageable`
+    : `corrupt Zstandard session log: trailing garbage — bytes that are not a valid frame start at byte ${offset} of ${totalBytes}; ${completeBytes} complete byte(s) are salvageable`
+}
+
+/**
+ * Full frame-layout diagnosis of an artifact. Unlike the old boolean
+ * `scanZstdLayout`, the status is explicit:
+ *
+ * - `healthy` — every frame is complete, the first frame decodes to exactly
+ *   one header line, and every complete frame ends on a JSONL record
+ *   boundary;
+ * - `torn-tail` — the tail is truncated or garbage; the complete prefix is
+ *   still laid out correctly (when there is any);
+ * - `invalid-first-frame` — the first frame does not decode to exactly one
+ *   header line (e.g. a whole-log single frame);
+ * - `invalid-jsonl-boundary` — a complete frame does not end on a JSONL
+ *   record boundary;
+ * - `decode-failure` — a complete frame cannot be decompressed;
+ * - `empty` — no frames and no damage (zero-length or header-less artifact).
+ *
+ * The result carries `tornStart`/`garbageStart` offsets plus
+ * `totalBytes`/`completeBytes` so `--scan` can report exactly what a repair
+ * would keep and drop.
+ * @param buffer - raw artifact bytes.
+ * @param zstdDecompressSync - `node:zlib` zstd decompressor (one frame per call).
+ */
+export function scanFrameLayout(buffer, zstdDecompressSync) {
+  const totalBytes = buffer.length
+  const { frames, tornStart, garbageStart } = scanZstdFrames(buffer)
+  const completeBytes = frames.length === 0 ? 0 : frames[frames.length - 1].end
+  const damage = tornStart ?? garbageStart
+  const damageKind = tornStart !== undefined ? 'torn' : garbageStart !== undefined ? 'garbage' : undefined
+  const withDamage = (status, issue) => ({ status, frames, tornStart, garbageStart, totalBytes, completeBytes, issue })
+
+  if (frames.length === 0) {
+    if (damage === undefined) return withDamage('empty', 'empty or header-less Zstandard session log')
+    return withDamage('torn-tail', tailIssue(damageKind, damage, totalBytes, completeBytes))
+  }
+  let plaintext
+  try {
+    plaintext = zstdDecompressSync(buffer.subarray(frames[0].start, frames[0].end))
+  } catch (error) {
+    return withDamage('decode-failure', `corrupt Zstandard session log: header frame failed validation (${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (plaintext.length === 0 || plaintext.indexOf(0x0A) !== plaintext.length - 1) {
+    return withDamage('invalid-first-frame', 'corrupt Zstandard session log: first frame is not exactly one header line')
+  }
+  // Every complete frame must end on a JSONL record boundary: the harness
+  // appends whole records per flush frame, so a frame ending mid-record
+  // means corruption the reader will trip over later.
+  for (let index = 1; index < frames.length; index += 1) {
+    let frameText
+    try {
+      frameText = zstdDecompressSync(buffer.subarray(frames[index].start, frames[index].end))
+    } catch (error) {
+      return withDamage('decode-failure', `corrupt Zstandard session log: frame ${index + 1} failed validation (${error instanceof Error ? error.message : String(error)})`)
+    }
+    if (frameText.length === 0 || frameText[frameText.length - 1] !== 0x0A) {
+      return withDamage('invalid-jsonl-boundary', `corrupt Zstandard session log: frame ${index + 1} does not end on a JSONL record boundary`)
+    }
+  }
+  if (damage !== undefined) return withDamage('torn-tail', tailIssue(damageKind, damage, totalBytes, completeBytes))
+  return { status: 'healthy', frames, totalBytes, completeBytes }
+}
+
+/**
+ * Validate the frame layout the dsh reader requires: the first frame must
+ * decompress to EXACTLY one newline-terminated header line (the harness's
+ * `assertZstdHeaderFrame`). The harness appends ONE zstd frame per flush
+ * batch, so a whole-log single-frame artifact is structurally valid zstd but
+ * rejected by dsh (`corrupt Zstandard session log: first frame is not
+ * exactly one header line`) — `session.list`, `load`, and `readFrom` all
+ * fail on it. A torn tail is NEVER reported as ok, even when the complete
+ * prefix is laid out correctly.
+ * @param buffer - raw artifact bytes.
+ * @param zstdDecompressSync - `node:zlib` zstd decompressor (one frame per call).
+ * @returns `{ ok: true }` or `{ ok: false, issue }`.
+ */
+export function scanZstdLayout(buffer, zstdDecompressSync) {
+  const scan = scanFrameLayout(buffer, zstdDecompressSync)
+  return scan.status === 'healthy' ? { ok: true } : { ok: false, issue: scan.issue }
 }
 
 /**
@@ -112,33 +212,6 @@ export function decompressFrames(buffer, zstdDecompressSync) {
     parts.push(zstdDecompressSync(buffer.subarray(frame.start, frame.end)))
   }
   return { text: Buffer.concat(parts).toString('utf8'), frames: frames.length }
-}
-
-/**
- * Validate the frame layout the dsh reader requires: the first frame must
- * decompress to EXACTLY one newline-terminated header line (the harness's
- * `assertZstdHeaderFrame`). The harness appends ONE zstd frame per flush
- * batch, so a whole-log single-frame artifact is structurally valid zstd but
- * rejected by dsh (`corrupt Zstandard session log: first frame is not
- * exactly one header line`) — `session.list`, `load`, and `readFrom` all
- * fail on it.
- * @param buffer - raw artifact bytes.
- * @param zstdDecompressSync - `node:zlib` zstd decompressor (one frame per call).
- * @returns `{ ok: true }` or `{ ok: false, issue }`.
- */
-export function scanZstdLayout(buffer, zstdDecompressSync) {
-  const { frames } = scanZstdFrames(buffer)
-  if (frames.length === 0) return { ok: false, issue: 'empty or header-less Zstandard session log' }
-  let plaintext
-  try {
-    plaintext = zstdDecompressSync(buffer.subarray(frames[0].start, frames[0].end))
-  } catch (error) {
-    return { ok: false, issue: `corrupt Zstandard session log: header frame failed validation (${error instanceof Error ? error.message : String(error)})` }
-  }
-  if (plaintext.length === 0 || plaintext.indexOf(0x0A) !== plaintext.length - 1) {
-    return { ok: false, issue: 'corrupt Zstandard session log: first frame is not exactly one header line' }
-  }
-  return { ok: true }
 }
 
 /**
@@ -185,13 +258,22 @@ export function compressLog(text, zstdCompressSync) {
  * the tail) and every row is examined; the FIRST issue is reported.
  * @param text - decompressed JSONL session text.
  * @param decodeStorageRecord - `@deepseek-ai/dsh-session` row decoder.
+ * @param frames - optional per-frame `{ startLine, endLine }` ranges (1-based,
+ * endLine exclusive) for writer-segment resolution; undefined disables.
  * @returns `{ header, events, issue }`.
  */
-export function scanEvents(text, decodeStorageRecord) {
+export function scanEvents(text, decodeStorageRecord, frames) {
   const lines = text.split('\n')
   const header = lines[0] ?? ''
   const events = []
   let issue
+  const frameOfLine = (line) => {
+    if (frames === undefined) return -1
+    for (let frame = 0; frame < frames.length; frame += 1) {
+      if (line >= frames[frame].startLine && line < frames[frame].endLine) return frame
+    }
+    return -1
+  }
   for (let lineIndex = 1; lineIndex < lines.length; lineIndex += 1) {
     const raw = lines[lineIndex]
     if (raw === '') continue
@@ -207,6 +289,7 @@ export function scanEvents(text, decodeStorageRecord) {
       }
       continue
     }
+    const frame = frameOfLine(lineIndex + 1)
     for (const event of decoded) {
       if (event.seq !== events.length) {
         issue ??= {
@@ -218,23 +301,50 @@ export function scanEvents(text, decodeStorageRecord) {
           message: `corrupt session log: seq gap in committed region at line ${lineIndex + 1} (expected ${events.length}, got ${event.seq})`,
         }
       }
+      // Non-enumerable tags: encodeLog must never serialize them into the
+      // repaired artifact. `frame` is the writer segment (flush frame) the
+      // row arrived in; -1 when frame info is unavailable.
+      Object.defineProperty(event, 'line', { value: lineIndex + 1, enumerable: false, configurable: true })
+      Object.defineProperty(event, 'frame', { value: frame, enumerable: false, configurable: true })
       events.push(event)
     }
   }
   return { header, events, issue }
 }
 
+/**
+ * Decompress each complete frame of an artifact separately and return the
+ * 1-based JSONL line range it covers (`endLine` exclusive). Together with
+ * {@link scanEvents} this attributes events to the flush frame (writer
+ * segment) they arrived in, which duplicate-seq reference resolution uses.
+ */
+export function frameLineRanges(buffer, zstdDecompressSync) {
+  const { frames } = scanZstdFrames(buffer)
+  const ranges = []
+  let line = 1
+  for (const frame of frames) {
+    const plain = zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString('utf8')
+    const startLine = line
+    line += plain.split('\n').length - 1
+    ranges.push({ startLine, endLine: line })
+  }
+  return ranges
+}
+
 /** Keys whose array values are seq references in event `data`. */
 const SEQ_REF_ARRAY_KEYS = new Set(['sourceEventSeqs', 'messageSeqs'])
 
 /**
- * Remap seq cross-references inside one event's `data` through the
- * old→new mapping. Only values `>= threshold` are remapped: everything
- * below the first collision is a pre-collision event whose seq is
- * unchanged. Returns the number of remapped references.
+ * Visit every seq cross-reference inside one event's `data`: the
+ * `sourceEventSeqs`/`messageSeqs` array values and the `sourceEventSeq`
+ * scalar, at any nesting depth.
+ * @param event - a session event.
+ * @param visit - `(container, key, index, value) => void`; `index` is the
+ * array position for array references and undefined for the scalar, so the
+ * caller can write the replacement precisely (never by value — a remapped
+ * reference could equal another reference's old value).
  */
-function remapReferences(event, threshold, map) {
-  let changed = 0
+function eachSeqRef(event, visit) {
   const walk = (node) => {
     if (node === null || typeof node !== 'object') return
     if (Array.isArray(node)) {
@@ -244,33 +354,96 @@ function remapReferences(event, threshold, map) {
     for (const key of Object.keys(node)) {
       const value = node[key]
       if (SEQ_REF_ARRAY_KEYS.has(key) && Array.isArray(value)) {
-        for (let i = 0; i < value.length; i += 1) {
-          const ref = value[i]
-          if (typeof ref === 'number' && ref >= threshold && map.has(ref)) {
-            value[i] = map.get(ref)
-            changed += 1
-          }
+        for (let index = 0; index < value.length; index += 1) {
+          if (typeof value[index] === 'number') visit(node, key, index, value[index])
         }
-      } else if (key === 'sourceEventSeq' && typeof value === 'number' && value >= threshold && map.has(value)) {
-        node[key] = map.get(value)
-        changed += 1
+      } else if (key === 'sourceEventSeq' && typeof value === 'number') {
+        visit(node, key, undefined, value)
       } else {
         walk(value)
       }
     }
   }
   walk(event.data)
+}
+
+/**
+ * Resolve one seq reference through the old→new map, honoring a duplicate
+ * strategy for values that occur more than once:
+ * - `first` — bind to the FIRST occurrence (the reference stays unchanged);
+ * - `last` — bind to the LAST occurrence (remapped through the map);
+ * - `segment` — bind to an occurrence in the same writer segment (flush
+ *   frame) as the referencing event when one exists, else fall back to
+ *   `first`; without frame info this degrades to `first`.
+ * @param value - the referenced (old) seq.
+ * @param strategy - the duplicate-reference strategy, or undefined.
+ * @param fromEvent - the referencing event (for the segment strategy).
+ * @param map - old→new mapping (last occurrence wins per value).
+ * @param occurrences - seq value → array of event indices.
+ * @param events - the scanned events (for occurrence frame lookup).
+ * @returns the new seq to write, or undefined to leave the reference as-is.
+ */
+function resolveReference(value, strategy, fromEvent, map, occurrences, events) {
+  if (strategy === 'last') return map.get(value)
+  if (strategy === 'segment' && fromEvent.frame >= 0) {
+    const candidates = occurrences.get(value) ?? []
+    const sameFrame = candidates.filter(index => events[index]?.frame === fromEvent.frame)
+    if (sameFrame.length > 0) return map.get(value)
+  }
+  // 'first' and the segment fallback: the first occurrence keeps its seq.
+  return undefined
+}
+
+/**
+ * Remap seq cross-references inside one event's `data` through the
+ * old→new mapping. Only values `>= threshold` are remapped: everything
+ * below the first collision is a pre-collision event whose seq is
+ * unchanged. Returns the number of remapped references.
+ */
+function remapReferences(event, threshold, map, occurrences, strategy, events) {
+  let changed = 0
+  eachSeqRef(event, (container, key, index, ref) => {
+    let next
+    if (strategy !== undefined && (occurrences.get(ref)?.length ?? 0) > 1) {
+      next = resolveReference(ref, strategy, event, map, occurrences, events)
+    } else if (ref >= threshold && map.has(ref)) {
+      next = map.get(ref)
+    }
+    if (next !== undefined && next !== ref) {
+      if (index === undefined) container[key] = next
+      else container[key][index] = next
+      changed += 1
+    }
+  })
   return changed
 }
+
+/** The duplicate-seq reference resolution strategies (CLI: --duplicate-reference). */
+export const DUPLICATE_REFERENCE_STRATEGIES = ['first', 'last', 'segment']
 
 /**
  * Repair the scanned log. Mutates the events array's `seq` fields and the
  * reference fields it remaps.
+ *
+ * Duplicate-seq semantics (stage C): a reference to a seq value that occurs
+ * MORE THAN ONCE in the log cannot be uniquely attributed — it may name the
+ * pre-collision event or one of the collision writer's events. When such
+ * ambiguous references exist, the default is to REFUSE (`action: 'refuse'`)
+ * with a full report ({@link AmbiguousReference} entries: conflict seq,
+ * referencing event, candidates, line/frame) so the user can pick a
+ * `duplicateReference` strategy. Only when every reference is uniquely
+ * resolvable does the repair renumber and remap automatically.
+ *
+ * The reference-mapping rule for unambiguous values: values below the
+ * collision index name pre-collision events (unchanged); values at or above
+ * it can only name post-collision events (renumbered through the map).
  * @param events - events from {@link scanEvents}.
  * @param issue - the first issue from {@link scanEvents}, if any.
- * @returns the action taken, the renumber delta, and counts.
+ * @param options - `{ duplicateReference?: 'first' | 'last' | 'segment' }`.
+ * @returns the action taken, the renumber delta, counts, and — for a
+ * refused ambiguous log — the ambiguity report.
  */
-export function repairEvents(events, issue) {
+export function repairEvents(events, issue, options = {}) {
   if (issue === undefined) {
     return { events, action: 'none', fromIndex: -1, delta: 0, changed: 0, refsChanged: 0 }
   }
@@ -286,10 +459,51 @@ export function repairEvents(events, issue) {
       message: issue.message,
     }
   }
+  // Occurrence table: which old seq values repeat, and where.
+  const occurrences = new Map()
+  events.forEach((event, index) => {
+    const list = occurrences.get(event.seq)
+    if (list === undefined) occurrences.set(event.seq, [index])
+    else list.push(index)
+  })
+  const duplicated = new Set()
+  for (const [value, indices] of occurrences) {
+    if (indices.length > 1) duplicated.add(value)
+  }
+  // Ambiguity analysis: references from events at/after the first collision
+  // to a duplicated value cannot be attributed. Pre-collision events can
+  // only reference pre-collision events (backward), and pre-collision seqs
+  // are all unique, so their references are never ambiguous.
+  const ambiguous = []
+  for (let index = issue.index; index < events.length; index += 1) {
+    const event = events[index]
+    eachSeqRef(event, (container, key, position, ref) => {
+      if (duplicated.has(ref)) {
+        ambiguous.push({
+          seq: ref,
+          key,
+          eventIndex: index,
+          line: event.line,
+          frame: event.frame,
+          candidates: occurrences.get(ref),
+        })
+      }
+    })
+  }
+  if (ambiguous.length > 0 && options.duplicateReference === undefined) {
+    return {
+      events,
+      action: 'refuse',
+      fromIndex: issue.index,
+      delta: issue.index - issue.got,
+      changed: 0,
+      refsChanged: 0,
+      ambiguous,
+      message: `${ambiguous.length} ambiguous seq reference(s) to duplicated value(s); refusing automatic repair (pass --duplicate-reference=first|last|segment)`,
+    }
+  }
   // Duplicate seq: renumber every event from the first collision onward so
-  // `seq === index` again. The old→new map resolves cross-references: values
-  // below the collision index name pre-collision events (unchanged); values
-  // at or above it can only name post-collision events (renumbered).
+  // `seq === index` again.
   const repaired = events
   const map = new Map()
   for (let index = issue.index; index < repaired.length; index += 1) {
@@ -298,8 +512,12 @@ export function repairEvents(events, issue) {
     event.seq = index
   }
   let refsChanged = 0
-  for (const event of repaired) {
-    refsChanged += remapReferences(event, issue.index, map)
+  for (let index = 0; index < repaired.length; index += 1) {
+    const event = repaired[index]
+    // The duplicate strategy only applies to post-collision events: a
+    // pre-collision reference points backward and can never mean a
+    // post-collision event, so it must never be remapped by a strategy.
+    refsChanged += remapReferences(event, issue.index, map, occurrences, index >= issue.index ? options.duplicateReference : undefined, events)
   }
   return {
     events: repaired,
@@ -308,6 +526,8 @@ export function repairEvents(events, issue) {
     delta: issue.index - issue.got,
     changed: repaired.length - issue.index,
     refsChanged,
+    ambiguous: ambiguous.length === 0 ? undefined : ambiguous,
+    resolvedStrategy: ambiguous.length === 0 ? undefined : options.duplicateReference,
     message: issue.message,
   }
 }
