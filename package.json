@@ -21,7 +21,9 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "pack:release": "pnpm --filter @xmoon76/dsh-pi-tui pack --pack-destination packages/dsh-pi-tui",
+    "smoke:pack": "pnpm --filter @xmoon76/dsh-pi-tui exec node scripts/tarball-smoke.mjs"
   },
   "devDependencies": {
     "tsx": "^4.23.12"

@@ -126,8 +126,12 @@
   },
   "scripts": {
     "build": "tsdown",
+    "build:package": "pnpm --dir ../pi-tui build && pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.ts test/*.test.mjs",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "smoke": "node scripts/tarball-smoke.mjs",
+    "prepack": "pnpm clean && pnpm --dir ../pi-tui clean && pnpm build:package && pnpm typecheck && pnpm test",
+    "postpack": "node scripts/tarball-smoke.mjs"
   }
 }

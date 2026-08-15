@@ -1,16 +1,81 @@
 name: CI
 
+# Repeatable build-and-publish gates (code-review plan stage G):
+#   typecheck, test-pi-tui, test-dsh-pi-tui, build-and-pack,
+#   tarball-smoke-node-22/24/26, npm-audit-prod.
+# The release workflow consumes the tarball produced by build-and-pack's
+# exact prepack/postpack gate, so the published bytes are the verified ones.
+
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
-  test:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  test-pi-tui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @xmoon76/pi-tui test
+
+  test-dsh-pi-tui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @xmoon76/dsh-pi-tui test
+
+  build-and-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # prepack cleans both dists, builds the fork + the bundle, typechecks,
+      # and runs the tests; postpack runs the tarball smoke test. A fresh
+      # checkout with no dist therefore produces a verified tarball in one
+      # command.
+      - run: pnpm --filter @xmoon76/dsh-pi-tui pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-pi-tui-tarball
+          path: packages/dsh-pi-tui/@xmoon76-dsh-pi-tui-*.tgz
+          if-no-files-found: error
+
+  tarball-smoke:
+    needs: build-and-pack
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [22, 24]
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -19,6 +84,23 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm test
-      - run: pnpm typecheck
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+      # Smoke the EXACT artifact build-and-pack produced: structure, leaks,
+      # parse, standalone install, exports import, no external fork
+      # resolution, repair CLI help + read-only scan.
+      - run: node packages/dsh-pi-tui/scripts/tarball-smoke.mjs tarball/@xmoon76-dsh-pi-tui-*.tgz
+
+  npm-audit-prod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --prod

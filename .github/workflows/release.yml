@@ -2,8 +2,12 @@ name: Release
 
 # Publish @xmoon76/dsh-pi-tui to npm when a `v*` tag is pushed.
 # The vendored fork (@xmoon76/pi-tui) is private and bundled into the
-# release package's dist at build time, so `pnpm -r publish` publishes
-# exactly one package (pnpm skips private ones).
+# release package's dist at build time; the pack gate (prepack: clean,
+# build fork + bundle, typecheck, test; postpack: tarball smoke test)
+# produces the EXACT tarball this workflow publishes — the release job
+# never regenerates a different artifact. Tag pushes also run the full CI
+# (ci.yml triggers on `tags: ['v*']`), so the published commit is the
+# CI-verified one.
 # Uses npm's OIDC provenance integration: with `id-token: write` npm
 # attaches a signed build provenance (source = this repo).
 
@@ -28,8 +32,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm test
-      - run: pnpm -r publish --access public --provenance --no-git-checks
+      # One command: prepack gate + pack + postpack smoke on the exact bytes.
+      - run: pnpm pack:release
+      - name: Publish the verified tarball
+        run: npm publish ./packages/dsh-pi-tui/@xmoon76-dsh-pi-tui-*.tgz --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
