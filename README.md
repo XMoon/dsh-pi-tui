@@ -114,9 +114,10 @@ so rendering and input routing are verified without a TTY or a model connection.
 - `/title [title]` — show or set the current session's title (titles appear
   in the `/sessions` picker).
 - `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
-- `/queue` — manage queued input while a turn runs: edit, delete, steer, or
-  insert messages in the agent's inbox (the queue pane above the editor shows
-  pending messages; `Alt+↑` pulls them all back into the editor).
+- `/queue` — per-item queue management: edit, delete, steer one, or insert a
+  message into the agent's inbox (the queue pane above the editor shows
+  pending messages; `Ctrl+S` steers them all at once, `Alt+↑` pulls them all
+  back into the editor).
 - `/preset`, `/model`, `/settings`, `/export`, `/fork`, `/subagents` — see
   `dsh --profile pi-tui`'s command autocomplete (`/` + Tab).
 
@@ -126,6 +127,9 @@ so rendering and input routing are verified without a TTY or a model connection.
   danger-full-access); the footer's mode slot badges every preset
   (`[workspace-write]` / `[read-only]` / `[custom]`, with `[yolo]` flagging
   the no-approval mode).
+- `Ctrl+S` — steer: with queued messages, sends the whole queue (plus the
+  draft, if any) into the running turn at once; otherwise sends the draft
+  alone. An idle agent starts a fresh turn with everything.
 - `Alt+↑` — dequeue: pull every queued message back into the editor draft.
 - `Ctrl+T` — toggle the full todo list; the dock above the editor always shows
   the goal, todo summary, background tasks, and queued input.

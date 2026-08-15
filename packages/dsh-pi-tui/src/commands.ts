@@ -650,12 +650,14 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     handler: async () => {
       const liveAgent = await requireAgent()
       const inbox = liveAgent.inbox
+      // Each row remembers which pending list it lives in, so "Insert
+      // before" can splice at the exact spot instead of prepending to the
+      // head of the queue.
       const queued = [
-        ...inbox.nextTurn.map((message, index) => ({ message, slot: `next ${index + 1}` })),
-        ...inbox.nextStep.map((message, index) => ({ message, slot: `steer ${index + 1}` })),
+        ...inbox.nextTurn.map((message, index) => ({ message, slot: `next ${index + 1}`, list: 'next-turn' as const })),
+        ...inbox.nextStep.map((message, index) => ({ message, slot: `steer ${index + 1}`, list: 'next-step' as const })),
       ]
       if (queued.length === 0) return { kind: 'success', text: 'no queued input' }
-      const running = liveAgent.status === 'running'
       // The pane covers the fine-grained verbs; the queue strip above the
       // editor handles the at-a-glance view and Alt+↑ pulls everything back.
       app.openSettings(
@@ -668,9 +670,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             [
               { id: 'edit', label: 'Edit', description: 'Rewrite this queued message', currentValue: '', values: ['✓'] },
               { id: 'delete', label: 'Delete', description: 'Remove it from the queue', currentValue: '', values: ['✓'] },
-              ...(running
-                ? [{ id: 'steer', label: 'Steer', description: 'Send it immediately into the running turn', currentValue: '', values: ['✓'] }]
-                : []),
+              { id: 'steer', label: 'Steer', description: 'Send it now: into the running turn, or start one when idle', currentValue: '', values: ['✓'] },
               { id: 'insert', label: 'Insert before', description: 'Queue a new message ahead of this one', currentValue: '', values: ['✓'] },
             ],
             6,
@@ -688,11 +688,15 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             inbox.remove(message.id)
             app.notify('queued message deleted')
           } else if (action === 'steer') {
+            // Mirrors Ctrl+S on a single message: a running turn takes the
+            // steer immediately; an idle agent starts a fresh turn with it.
+            inbox.remove(message.id)
             if (liveAgent.status === 'running') {
-              inbox.remove(message.id)
               liveAgent.steer(message)
-              app.notify('steering queued message')
+            } else {
+              liveAgent.followup(message)
             }
+            app.notify('steering queued message')
           } else if (action === 'edit' || action === 'insert') {
             // The free-text question flow collects the replacement/new text;
             // every mutation commits an inbox splice that refreshes the pane.
@@ -705,8 +709,16 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
                   inbox.replace(message.id, next)
                   app.notify('queued message updated')
                 } else {
-                  inbox.prepend('next-turn', next)
-                  app.notify('message inserted at the front')
+                  // Insert at the selected message's CURRENT position: the
+                  // queue may have shifted while the panel was open (a claim
+                  // or another splice), so re-locate instead of trusting the
+                  // snapshot index. A consumed message has nothing left to
+                  // insert before.
+                  const list = target.list === 'next-turn' ? inbox.nextTurn : inbox.nextStep
+                  const position = list.findIndex(item => item.id === message.id)
+                  if (position < 0) return
+                  inbox.splice(target.list, position, 0, [next])
+                  app.notify('message inserted before the selected one')
                 }
               })
               .catch(() => {

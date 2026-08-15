@@ -234,7 +234,11 @@ export interface TuiAppEvents {
   onExit: () => void
   /** Double-Esc: stop the current activity (turn, tool run). Optional. */
   onCancel?: () => void
-  /** Ctrl+S: steer the running turn with the current draft. Optional. */
+  /**
+   * Ctrl+S: steer with the current draft (possibly empty). The runner sends
+   * the whole queue when it has messages, with the draft riding along, and
+   * falls back to the draft alone otherwise. Optional.
+   */
   onSteer?: (text: string) => void
   /**
    * Ctrl+G: open the external editor with the current draft. The TUI stops
@@ -683,9 +687,11 @@ export class TuiApp {
     }
     if (matchesKey(data, 'ctrl+s')) {
       // Steer: send the draft into the running turn and clear the editor.
+      // An empty draft still fires the event — the runner steers every
+      // queued message when the queue is non-empty, and only ignores the
+      // key when there is nothing to send at all.
       if (this.overlayHost.hasOverlayEntries) return { consume: true }
       const draft = this.editor.getText()
-      if (draft.trim() === '') return { consume: true }
       this.editor.setText('')
       this.events.onSteer?.(draft)
       return { consume: true }
@@ -1541,7 +1547,7 @@ export class TuiApp {
       const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth(prefix)), '…')
       lines.push(prefix + truncated)
     }
-    const hint = 'alt+↑ to edit all · /queue for per-item actions'
+    const hint = 'ctrl+s to steer all · alt+↑ to edit all · /queue for per-item actions'
     lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, width - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
     this.requestRender()

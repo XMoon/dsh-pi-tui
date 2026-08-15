@@ -1012,27 +1012,62 @@ export function apply(ctx: Context, config: Config): void {
         liveAgent?.cancel({ kind: 'user' })
       },
       onSteer: (text) => {
-        // Ctrl+S: inject the draft into the running turn; an idle agent
-        // just starts a regular turn with it. Without a session the first
-        // steer creates one (same trigger as the first submit).
-        const message = createUserMessage({
-          content: [{ type: 'text', text }],
-          source: { kind: 'user' },
-        })
+        // Ctrl+S: send everything pending (kimi parity: the whole queue plus
+        // a non-empty draft rides along). With queued messages the entire
+        // queue is steered at once — the queue pane above the editor is the
+        // primary surface; without a queue it stays the classic single-draft
+        // steer. Nothing to send at all is a no-op BEFORE any session is
+        // created (deferred start). Every message goes through steer(): the
+        // next step boundary claims all next-step input together, so the
+        // batch arrives in one shot (an idle driver starts a turn with it).
+        if (liveAgent !== undefined) {
+          const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
+          if (queued.length === 0 && text.trim() === '') return
+        } else if (text.trim() === '') {
+          return
+        }
         void ensureSession().then(async () => {
+          if (liveAgent === undefined) return
           const verdict = await guardSend()
           if (verdict === 'blocked') {
             app.setEditorText(text)
             app.notify(GUARD_BLOCKED_NOTIFY)
             return
           }
-          if (verdict === 'forced') {
+          const forced = verdict === 'forced'
+          if (forced) {
             app.notify(GUARD_FORCED_NOTIFY)
           }
-          if (liveAgent?.status === 'running') {
-            liveAgent.steer(message)
+          const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
+          if (queued.length > 0) {
+            // Steer-all: drain the queue durably, then resubmit every message
+            // (plus the draft, if any) to the next-step boundary. The pane
+            // order (followups first, then steers) is preserved.
+            const draft = text.trim()
+            const messages = [
+              ...queued,
+              ...(draft === '' ? [] : [createUserMessage({
+                content: [{ type: 'text', text: draft }],
+                source: { kind: 'user' },
+              })]),
+            ]
+            liveAgent.inbox.clear()
+            for (const message of messages) liveAgent.steer(message)
+            if (!forced) {
+              app.notify(messages.length === 1 ? 'steering 1 message' : `steering ${messages.length} messages`)
+            }
           } else {
-            liveAgent?.followup(message)
+            // Classic single-draft steer: a running turn takes it now; an
+            // idle agent starts a regular turn with it.
+            const message = createUserMessage({
+              content: [{ type: 'text', text }],
+              source: { kind: 'user' },
+            })
+            if (liveAgent.status === 'running') {
+              liveAgent.steer(message)
+            } else {
+              liveAgent.followup(message)
+            }
           }
         }).catch(failSubmission(text))
       },

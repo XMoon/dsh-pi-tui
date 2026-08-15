@@ -90,6 +90,23 @@ test('ctrl+s steers the draft and clears the editor', async () => {
   assert.deepEqual(submitted, ['x'], 'steer must clear the editor')
 })
 
+test('ctrl+s with an empty draft still fires onSteer (the runner decides)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const steered: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSteer: (text) => steered.push(text),
+  })
+  app.start()
+  vt.sendInput('\x13') // ctrl+s with an empty editor
+  await viewport(vt)
+  // The queue pane is the primary steer surface: with queued messages and an
+  // empty draft, the runner steers the whole queue, so the event must fire.
+  assert.deepEqual(steered, [''], 'empty-draft ctrl+s must still fire onSteer')
+  assert.equal(app.getDraft(), '', 'editor must stay empty after ctrl+s')
+})
+
 test('ctrl+g opens the external editor and restores its content', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
