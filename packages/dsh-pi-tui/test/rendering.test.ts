@@ -160,6 +160,76 @@ test('esc cancels an askQuestions flow with a rejection', async () => {
   await assert.rejects(promise, /cancelled/)
 })
 
+test('concurrent askQuestions flows queue FIFO and each settles exactly once', async () => {
+  const { vt, app } = startApp()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }])
+  await viewport(vt)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('First?'), `the first flow is on screen:\n${view}`)
+  assert.ok(!view.includes('Second?'), 'the second flow must wait in the queue')
+  vt.sendInput('1') // choose A
+  await viewport(vt)
+  vt.sendInput('\r') // submit the first flow
+  await viewport(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Second?'), `the second flow must take the screen:\n${view}`)
+  vt.sendInput('1') // choose B
+  await viewport(vt)
+  vt.sendInput('\r') // submit the second flow
+  await viewport(vt)
+  assert.deepEqual(await first, [{ id: 'q1', selected: ['A'] }])
+  assert.deepEqual(await second, [{ id: 'q2', selected: ['B'] }])
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('First?') && !view.includes('Second?'), `ghost overlay after both settle:\n${view}`)
+})
+
+test('a queued askQuestions flow aborted while waiting rejects without ever showing', async () => {
+  const { vt, app } = startApp()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const controller = new AbortController()
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }], controller.signal)
+  await viewport(vt)
+  controller.abort() // cancelled while queued: never presented, promise settles
+  await assert.rejects(second, /cancelled/)
+  await viewport(vt)
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Second?'), 'the aborted flow must never be presented')
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\r')
+  assert.deepEqual(await first, [{ id: 'q1', selected: ['A'] }])
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Second?'), 'no ghost overlay after the first settles')
+})
+
+test('aborting the ACTIVE flow rejects it and shows the next queued flow', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }], controller.signal)
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }])
+  await viewport(vt)
+  controller.abort()
+  await assert.rejects(first, /cancelled/)
+  await viewport(vt)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Second?'), `the queued flow must take the screen after the active one aborts:\n${view}`)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\r')
+  assert.deepEqual(await second, [{ id: 'q2', selected: ['B'] }])
+})
+
+test('stop() cancels every pending askQuestions flow with a rejection', async () => {
+  const { vt, app } = startApp()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }])
+  await viewport(vt)
+  app.stop()
+  await assert.rejects(first, /cancelled/)
+  await assert.rejects(second, /cancelled/)
+})
+
 test('tool card headers show the design title and the args summary', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{

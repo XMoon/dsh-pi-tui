@@ -339,6 +339,8 @@ interface QuestionState {
   reject: (error: unknown) => void
   signal?: AbortSignal
   onAbort?: () => void
+  /** Latched by settle/cancel: every askQuestions promise settles exactly once. */
+  settled?: boolean
 }
 
 /** One picker row; `group` renders a workspace-style header before the group. */
@@ -473,8 +475,10 @@ export class TuiApp {
   private readonly approvalQueue: PendingApproval[] = []
   /** The prompt currently on screen, if any. */
   private activeApproval: PendingApproval | undefined
-  /** The active user-questions flow, if any (one at a time). */
+  /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
+  /** Flows waiting behind the active one (FIFO; shown on settle). */
+  private readonly questionQueue: QuestionState[] = []
   /** The folded transcript; re-rendered into the messages view on change. */
   private messages: readonly TranscriptMessage[] = []
   /** Local (non-session) cards — e.g. `!` shell runs — rendered after the transcript. */
@@ -660,6 +664,9 @@ export class TuiApp {
   stop(): void {
     this.clearNotify()
     this.working.dispose()
+    // Every pending question flow settles rejected: a stopped TUI must not
+    // leave askQuestions promises hanging forever.
+    this.cancelQuestionFlows()
     this.tui.stop()
     this.fullscreen?.stop()
     this.fullscreen = undefined
@@ -2149,13 +2156,59 @@ export class TuiApp {
         return
       }
       if (signal !== undefined) {
-        const onAbort = (): void => this.settleQuestions(state, undefined)
+        const onAbort = (): void => this.abortQuestion(state)
         state.onAbort = onAbort
         signal.addEventListener('abort', onAbort, { once: true })
       }
-      this.activeQuestions = state
-      state.handle = this.showOverlayOnHost(new Frame(state.flow), { width: 76, maxHeight: 26 })
+      // One flow on screen at a time; concurrent requests queue FIFO and
+      // show when the active one settles (an overwrite would orphan the
+      // first promise forever — its identity guard would refuse to settle).
+      if (this.activeQuestions === undefined) {
+        this.presentQuestion(state)
+      } else {
+        this.questionQueue.push(state)
+      }
     })
+  }
+
+  /** Mount one flow's overlay and make it the active one. */
+  private presentQuestion(state: QuestionState): void {
+    this.activeQuestions = state
+    state.handle = this.showOverlayOnHost(new Frame(state.flow), { width: 76, maxHeight: 26 })
+  }
+
+  /** Abort one flow (its signal fired). The ACTIVE flow settles rejected
+   * and the queue advances; a QUEUED flow is removed from the queue and
+   * rejected without ever being presented (the settle identity guard
+   * would otherwise drop it silently and leave its promise pending). */
+  private abortQuestion(state: QuestionState): void {
+    if (state.settled === true) return
+    if (this.activeQuestions === state) {
+      this.settleQuestions(state, undefined)
+      return
+    }
+    state.settled = true
+    if (state.onAbort !== undefined && state.signal !== undefined) {
+      state.signal.removeEventListener('abort', state.onAbort)
+    }
+    const index = this.questionQueue.indexOf(state)
+    if (index !== -1) this.questionQueue.splice(index, 1)
+    state.reject(new Error('question flow cancelled'))
+  }
+
+  /** Show the next queued flow, if any (called after the active one settles). */
+  private nextQuestion(): void {
+    const next = this.questionQueue.shift()
+    if (next === undefined) return
+    this.presentQuestion(next)
+  }
+
+  /** Cancel every pending flow: each promise rejects exactly once. */
+  private cancelQuestionFlows(): void {
+    for (const state of [...this.questionQueue]) this.abortQuestion(state)
+    if (this.activeQuestions !== undefined) {
+      this.settleQuestions(this.activeQuestions, undefined)
+    }
   }
 
   /** Route a key while a question flow is showing; every key is consumed. */
@@ -2169,7 +2222,8 @@ export class TuiApp {
 
   /** Resolve the question flow with its answers, or reject on cancel/abort. */
   private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
-    if (this.activeQuestions !== state) return
+    if (this.activeQuestions !== state || state.settled === true) return
+    state.settled = true
     this.activeQuestions = undefined
     state.handle?.hide()
     if (state.onAbort !== undefined && state.signal !== undefined) {
@@ -2178,9 +2232,11 @@ export class TuiApp {
     this.overlayHost.setFocus(this.editor)
     if (answers === undefined) {
       state.reject(new Error('question flow cancelled'))
-      return
+    } else {
+      state.resolve(answers)
     }
-    state.resolve(answers)
+    // A queued flow takes the screen next.
+    this.nextQuestion()
   }
 }
 
