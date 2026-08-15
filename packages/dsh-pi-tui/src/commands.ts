@@ -171,7 +171,9 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         // No session was ever created: nothing to flush, exit immediately.
         void runner.exit(0)
       } else {
-        void runner.sessions.flush(liveAgent.session).then(() => runner.exit(0))
+        // Exit even when the durable flush fails: a broken session log must
+        // not trap the user inside the TUI.
+        void runner.sessions.flush(liveAgent.session).then(() => runner.exit(0), () => runner.exit(0))
       }
       return { kind: 'success' }
     },

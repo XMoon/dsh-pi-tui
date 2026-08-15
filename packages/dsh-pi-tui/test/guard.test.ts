@@ -142,3 +142,44 @@ test('stat ENOENT (artifact not yet materialized) is ok', async () => {
   const outcome = await checkDivergence(persistence, session(1), stat, freshGuardState())
   assert.equal(outcome.kind, 'ok')
 })
+
+test('stat ENOENT after a previous observation reports removed and latches', async () => {
+  const persistence = fakePersistence({ locate: ARTIFACT, events: 0 })
+  const stat = fakeStat()
+  const state = freshGuardState()
+  // First check observes a real committed file (one full read).
+  const first = await checkDivergence(persistence, session(1), stat.stat, state)
+  assert.equal(first.kind, 'ok')
+  assert.equal(persistence.reads, 1)
+  // The log disappears externally: stat now throws ENOENT.
+  const missing = (() => {
+    const error = new Error('no such file') as NodeJS.ErrnoException
+    error.code = 'ENOENT'
+    throw error
+  }) as unknown as GuardStatLike
+  const second = await checkDivergence(persistence, session(1), missing, state)
+  assert.equal(second.kind, 'removed')
+  if (second.kind === 'removed') assert.notEqual(second.revision, '')
+  // Latches without another full read: still removed on the next check.
+  const third = await checkDivergence(persistence, session(1), missing, state)
+  assert.equal(third.kind, 'removed')
+  assert.equal(persistence.reads, 1)
+})
+
+test('removed recovers when the file reappears and reads clean', async () => {
+  const persistence = fakePersistence({ locate: ARTIFACT, events: 0 })
+  const stat = fakeStat()
+  const state = freshGuardState()
+  await checkDivergence(persistence, session(1), stat.stat, state)
+  const missing = (() => {
+    const error = new Error('no such file') as NodeJS.ErrnoException
+    error.code = 'ENOENT'
+    throw error
+  }) as unknown as GuardStatLike
+  const removed = await checkDivergence(persistence, session(1), missing, state)
+  assert.equal(removed.kind, 'removed')
+  // A new file with a different revision re-enters the normal read path.
+  stat.set(200, 2)
+  const recovered = await checkDivergence(persistence, session(1), stat.stat, state)
+  assert.equal(recovered.kind, 'ok')
+})
