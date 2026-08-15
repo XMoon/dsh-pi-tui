@@ -339,3 +339,52 @@ test('the pre-session welcome invites the first message and clears on facts', as
   assert.ok(view.includes('session session-1'), `welcome card missing:\n${view}`)
   assert.ok(!view.includes('type a message to start'), `invitation survived:\n${view}`)
 })
+
+test('overlay frame borders stay aligned when content is narrower than the panel', async () => {
+  const { vt, app } = startApp()
+  app.openPicker(
+    [
+      { value: 's1', label: 'short label one' },
+      { value: 's2', label: 'short label two' },
+    ],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  const lines = vt.getViewport().map(strip)
+  // Locate the picker box around its first row, not the welcome card's frame.
+  const pickerRow = lines.findIndex(line => line.includes('short label one'))
+  assert.ok(pickerRow >= 0, `picker row missing:\n${lines.join('\n')}`)
+  let top = pickerRow
+  while (top > 0 && !lines[top]!.includes('╭')) top -= 1
+  let bottom = pickerRow
+  while (bottom < lines.length - 1 && !lines[bottom]!.includes('╰')) bottom += 1
+  const box = lines.slice(top, bottom + 1)
+  assert.ok(box.length >= 4, `frame too small:\n${box.join('\n')}`)
+  const widths = new Set(box.map(line => line.length))
+  assert.equal(widths.size, 1, `frame rows must match the border width:\n${box.join('\n')}`)
+})
+
+test('an approval dialog stacked over the settings panel masks it cleanly', async () => {
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: '[next 1] follow up on the audit report', description: 'msg-1111', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  void app.showApprovalPrompt({ toolName: 'Bash', reason: 'run a shell command', danger: true })
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = vt.getViewport().map(strip)
+  const joined = lines.join('\n')
+  const titleRow = lines.findIndex(line => line.includes('Approve Bash?'))
+  assert.ok(titleRow >= 0, `approval title missing:\n${joined}`)
+  // The dialog masks the panel beneath it: the title row's sides are blank
+  // (the old compositor let the settings panel's `╭─────` border show there)
+  // and the dialog's rows show no settings content at all.
+  assert.ok(lines[titleRow]!.slice(0, 10).trim() === '', `settings panel bleeds beside the dialog title:\n${joined}`)
+  const dialog = lines.slice(titleRow - 3, titleRow + 11).join('\n')
+  assert.ok(dialog.includes('run a shell command'), `dialog content missing:\n${joined}`)
+  assert.ok(!dialog.includes('follow up on the audit'), `settings panel bleeds through the approval dialog:\n${joined}`)
+})

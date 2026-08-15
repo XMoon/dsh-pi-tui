@@ -122,10 +122,11 @@ export class Frame implements Component {
     for (const line of lines) {
       const vis = visibleWidth(line)
       // Row shape is `│ line pad │`: borders and one padding cell each side
-      // are fixed, so padding only tops the content up to `inner` — the row
-      // is then exactly frameWidth cells and the right border survives
-      // compositing.
-      const pad = Math.max(0, inner - vis)
+      // are fixed, so padding tops the content up to `contentWidth` — the row
+      // is then exactly frameWidth cells, matching the border, and the right
+      // border survives compositing. Padding to `inner` instead would stretch
+      // rows past the border whenever the content is narrower than the panel.
+      const pad = Math.max(0, contentWidth - vis)
       out.push(`${b('│')} ${line}${' '.repeat(pad)} ${b('│')}`)
     }
     out.push(b(`╰${'─'.repeat(frameWidth - 2)}╯`))

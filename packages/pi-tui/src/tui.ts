@@ -1111,7 +1111,7 @@ export abstract class TuiBase extends Container implements TUI {
 		const result = [...lines];
 
 		// Pre-render all visible overlays and calculate positions
-		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
+		const rendered: { overlayLines: string[]; row: number; col: number; w: number; mask: boolean }[] = [];
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
@@ -1134,7 +1134,7 @@ export abstract class TuiBase extends Container implements TUI {
 			// Get final row/col with actual overlay height
 			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
 
-			rendered.push({ overlayLines, row, col, w: width });
+			rendered.push({ overlayLines, row, col, w: width, mask: options?.nonCapturing !== true });
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
 
@@ -1150,11 +1150,20 @@ export abstract class TuiBase extends Container implements TUI {
 
 		const viewportStart = Math.max(0, workingHeight - termHeight);
 
-		// Composite each overlay
-		for (const { overlayLines, row, col, w } of rendered) {
+		// Composite each overlay. When overlays stack, a capturing overlay
+		// blanks its full row before drawing itself, so lower overlays'
+		// borders/content cannot bleed around it: line-by-line compositing
+		// would otherwise interleave two boxes of different widths into one
+		// garbled frame. Non-capturing overlays (e.g. a latency badge) never
+		// mask, and a lone overlay keeps the see-through look, so single
+		// dialogs still show the content behind them.
+		for (let o = 0; o < rendered.length; o++) {
+			const { overlayLines, row, col, w, mask } = rendered[o]!;
+			const stacked = o > 0;
 			for (let i = 0; i < overlayLines.length; i++) {
 				const idx = viewportStart + row + i;
 				if (idx >= 0 && idx < result.length) {
+					if (stacked && mask) result[idx] = "";
 					// Defensive: truncate overlay line to declared width before compositing
 					// (components should already respect width, but this ensures it)
 					const truncatedOverlayLine =
