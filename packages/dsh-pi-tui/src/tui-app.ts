@@ -591,7 +591,37 @@ export class TuiApp {
     this.tui.addChild(this.editor)
     this.tui.addChild(this.footer)
     this.tui.setFocus(this.editor)
-    this.tui.addInputListener((data) => this.handleInput(data))
+    // Input routes through routeInput (see its doc): the autocomplete
+    // repaint must follow every keystroke on whichever screen renders.
+    this.tui.addInputListener((data) => this.routeInput(data))
+  }
+
+  /**
+   * App-level input routing plus the autocomplete repaint. The editor's
+   * slash-command autocomplete resolves on a promise microtask AFTER the
+   * keystroke's own paint, and the editor's own render requests go to the
+   * MAIN screen — which is STOPPED while the alt screen renders (fullscreen),
+   * so its renderRequested flag is stuck true and every request is dropped:
+   * the fresh suggestion list would never paint (the visible frame always
+   * shows the previous query's results — typing /res keeps showing /reload
+   * first). Schedule a forced frame on the ACTIVE screen once the provider's
+   * continuation has applied the fresh list. Deliberately a dsh-side fix:
+   * the vendored fork stays pristine (see AGENTS.md decision 8).
+   * @param data - the raw input sequence.
+   */
+  private routeInput(data: string): TuiInputListenerResult {
+    const result = this.handleInput(data)
+    // Two hops: the first microtask is queued BEFORE the editor's
+    // autocomplete continuation, so the check must be deferred to a second
+    // microtask that runs after the fresh list has been applied (otherwise
+    // the very first keystroke, whose state is still null at check time,
+    // never paints).
+    queueMicrotask(() => {
+      queueMicrotask(() => {
+        if (this.editor.isShowingAutocomplete()) this.requestRender(true)
+      })
+    })
+    return result
   }
 
   /** Enter raw mode and start rendering. */
@@ -894,7 +924,7 @@ export class TuiApp {
         { component: this.footer, shrink: 0 },
       ])
       alt.setLayoutRoot(root)
-      alt.addInputListener((data) => this.handleInput(data))
+      alt.addInputListener((data) => this.routeInput(data))
       this.tui.stop()
       alt.start()
       // The alt screen starts with NO focused component: without this, every
@@ -1470,9 +1500,11 @@ export class TuiApp {
   }
 
   /** Request a render on the active screen. Public so in-place submenu
-   * components (async content swaps) can trigger the next frame. */
-  requestRender(): void {
-    ;(this.fullscreen ?? this.tui).requestRender()
+   * components (async content swaps) can trigger the next frame. `force`
+   * bypasses the render throttle (used to repaint the autocomplete list on
+   * the keystroke's own frame). */
+  requestRender(force = false): void {
+    ;(this.fullscreen ?? this.tui).requestRender(force)
   }
 
   /**

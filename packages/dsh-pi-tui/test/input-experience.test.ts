@@ -171,3 +171,35 @@ test('a settled card updates by identity, never the newest card', async () => {
     `cmd1 card must show its own settlement:\n${view}`,
   )
 })
+
+test('slash-command autocomplete paints the fresh list on the keystroke frame', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  // Fullscreen: the alt screen renders while the main screen (which the
+  // editor's own render requests target) is stopped — the exact condition
+  // under which the fresh list used to never paint.
+  app.setFullscreen(true)
+  app.setCommandCompletions([
+    { name: 'reload', description: 'Reload' },
+    { name: 'resume', description: 'Resume a session' },
+    { name: 'reset', description: 'Reset' },
+  ], '/ws')
+  await vt.waitForRender()
+  const type = async (char: string): Promise<string> => {
+    vt.sendInput(char)
+    // Inside the render throttle window (16ms): the keystroke's own frame
+    // must already show the CURRENT query's list. A stale /re list would
+    // keep /reload first after typing 's' until the throttled follow-up
+    // frame — the "one keystroke behind" lag fast typing exposed.
+    await new Promise(resolve => setTimeout(resolve, 8))
+    await vt.flush()
+    return vt.getViewport().join('\n')
+  }
+  await type('/')
+  await type('r')
+  const view = await type('s')
+  assert.ok(view.includes('resume'), `fresh /res list missing:\n${view}`)
+  assert.ok(!view.includes('reload'), `stale list still painted after /res:\n${view}`)
+  app.stop()
+})
