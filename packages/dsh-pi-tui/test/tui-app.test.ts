@@ -280,13 +280,13 @@ test('the dock strip shows todo and task lines only while non-empty; goal lives 
   // summary, tasks.
   app.setStatus({ goal: 'goal ● fix the build' })
   app.setTodoSummary([{ content: 'write tests', status: 'in_progress' }, { content: 'ship', status: 'pending' }])
-  app.setTasks([{ label: 'audit repo', status: 'running' }])
+  app.setTasks([{ id: 'bash-1', label: 'audit repo', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(!view.includes('⚑'), `goal must not render in the dock:\n${view}`)
   assert.ok(view.includes('goal ● fix the build'), `goal missing from the footer:\n${view}`)
   assert.ok(view.includes('☑  2 active · write tests'), `todo summary missing:\n${view}`)
-  assert.ok(view.includes('⏳  1 task · audit repo'), `task line missing:\n${view}`)
+  assert.ok(view.includes('⏳  bash-1 · audit repo'), `task line missing:\n${view}`)
   // Lines drop out as their data clears.
   app.setTasks([])
   app.setTodoSummary([])
@@ -316,6 +316,122 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(!view.includes('❯ follow up'), `cleared queue still rendered:\n${view}`)
+})
+
+test('job notices in the queue render with their own marker and drop the steer hints', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // Only a job-completion notice queued: no steerable content at all.
+  app.setQueueItems([{ id: 'j-1', text: 'bash-2 pnpm build finished: exit 0', mode: 'steer', notice: true }])
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('⏳ bash-2 pnpm build finished'), `notice row missing its marker:\n${view}`)
+  assert.ok(!view.includes('❯'), `a notice must not render as steerable input:\n${view}`)
+  assert.ok(!view.includes('ctrl+s to steer all'), `steer hints must not advertise for notices:\n${view}`)
+  assert.ok(view.includes('/tasks to view'), `jobs hint missing:\n${view}`)
+  // A notice alongside real user input keeps the steer verbs.
+  app.setQueueItems([
+    { id: 'j-1', text: 'bash-2 pnpm build finished: exit 0', mode: 'steer', notice: true },
+    { id: 'm-1', text: 'please also fix the lint', mode: 'followup' },
+  ])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('⏳ bash-2'), `notice row missing with mixed queue:\n${view}`)
+  assert.ok(view.includes('❯ please also fix the lint'), `user row missing:\n${view}`)
+  assert.ok(view.includes('ctrl+s to steer all'), `steer hint must survive a mixed queue:\n${view}`)
+  app.setQueueItems([])
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('⏳ bash-2'), `cleared notice survived:\n${view}`)
+})
+
+test('down and ctrl+j open the task browser only with active tasks and an empty editor', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let opened = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The real runner opens a picker (which renders); the test mimics that.
+    onOpenTasks: () => { opened += 1; app.requestRender() },
+  })
+  app.start()
+  const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+  await vt.waitForRender()
+  // No active tasks: ↓ and Ctrl+J are inert.
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  assert.equal(opened, 0, `no tasks means no browser`)
+  app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
+  // Empty editor + active tasks: both keys open the browser.
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  assert.equal(opened, 1, `down must open the task browser with an empty editor`)
+  vt.sendInput('\n') // ctrl+j is LF
+  await sleep(20)
+  assert.equal(opened, 2, `ctrl+j must open the task browser with an empty editor`)
+  // Non-empty draft: the keys keep their editing meaning (no browser).
+  app.setDraft('ls -la')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  assert.equal(opened, 2, `down must not open the browser while a draft is being edited`)
+  // Tasks cleared: the trigger disarms.
+  app.setTasks([])
+  app.setDraft('')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  assert.equal(opened, 2, `the trigger must disarm when no tasks are active`)
+  app.stop()
+})
+
+test('the footer badges active tasks and advertises the ↓ trigger on an empty editor', async () => {
+  const { vt, app } = startApp()
+  app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[1 task running · ↓ view]'), `footer task badge missing:\n${view}`)
+  app.setDraft('typed text')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[1 task running]'), `badge must stay with a draft:\n${view}`)
+  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while a draft is being edited:\n${view}`)
+  app.setTasks([])
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('task running'), `badge survived clearing:\n${view}`)
+})
+
+test('the output viewer refreshes on a timer, stops on s, and closes on esc', async () => {
+  const { vt, app } = startApp()
+  const stopped: string[] = []
+  let closed = 0
+  let tick = 0
+  const close = app.openOutputViewer({
+    title: 'bash 1 · pnpm build — running',
+    initial: 'first line',
+    refresh: () => `first line\ntick ${++tick}`,
+    onStop: () => { stopped.push('stop') },
+    onClose: () => { closed += 1 },
+    intervalMs: 10,
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('bash 1 · pnpm build'), `viewer title missing:\n${view}`)
+  assert.ok(view.includes('first line'), `viewer body missing:\n${view}`)
+  // The refresh timer swaps the body in place.
+  await new Promise(resolve => setTimeout(resolve, 40))
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(/tick \d+/.test(view), `refreshed body missing:\n${view}`)
+  // `s` fires the stop hook; Esc closes (idempotent).
+  vt.sendInput('s')
+  assert.deepEqual(stopped, ['stop'])
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(closed, 1, `esc must close the viewer once`)
+  close()
+  assert.equal(closed, 1, `the closer must be idempotent`)
+  app.stop()
 })
 
 test('alt+up with no overlay reaches the dequeue host', async () => {

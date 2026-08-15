@@ -60,6 +60,7 @@ import type {} from '@deepseek-ai/dsh-settings'
 // presets, session titles, and the workflow/retry folds (transcript.ts).
 import type {} from '@deepseek-ai/dsh-goal'
 import type {} from '@deepseek-ai/dsh-jobs'
+import type { JobId } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 // The sandbox/mode knob event merge (permission presets fold it too).
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
@@ -1320,6 +1321,13 @@ export function apply(ctx: Context, config: Config): void {
     }
     app = startProcessTui({
       onSubmit: (text) => {
+        // The subagent viewer is READ-ONLY: submitting while viewing would
+        // silently send to the PARENT session. Refuse with a notice instead.
+        if (viewing !== undefined) {
+          app.setEditorText(mergeDraft(app.getDraft(), text))
+          app.notify('viewing a subagent — Esc returns before submitting', 'info')
+          return
+        }
         // Persist the (newest-first) input history for the LIVE session's
         // cwd (the editor already recorded the line through TuiApp's submit
         // hook). A failed settings write is user-recoverable: notify instead
@@ -1385,6 +1393,13 @@ export function apply(ctx: Context, config: Config): void {
         liveAgent?.cancel({ kind: 'user' })
       },
       onSteer: (text) => {
+        // The subagent viewer is read-only: steering would send to the
+        // PARENT session. Refuse with a notice and restore the draft.
+        if (viewing !== undefined) {
+          if (text.trim() !== '') app.setEditorText(mergeDraft(app.getDraft(), text))
+          app.notify('viewing a subagent — Esc returns before steering', 'info')
+          return
+        }
         // Ctrl+S: send everything pending (kimi parity: the whole queue plus
         // a non-empty draft rides along). With queued messages the entire
         // queue is steered at once — the queue pane above the editor is the
@@ -1566,6 +1581,40 @@ export function apply(ctx: Context, config: Config): void {
         app.setDraft([queuedText, current].filter(part => part.trim() !== '').join('\n\n'))
         refreshQueue()
       },
+      // ↓ / Ctrl+J with an empty editor: the task browser over the live job
+      // registry (bash + subagent jobs). Enter opens the viewer (job output
+      // for bash, the child transcript for subagents).
+      onOpenTasks: () => {
+        if (jobs === undefined || liveAgent === undefined) return
+        let snapshots: ReturnType<NonNullable<typeof jobs>['list']>
+        try {
+          snapshots = jobs.list(liveAgent)
+        } catch {
+          return
+        }
+        if (snapshots.length === 0) return
+        const now = Date.now()
+        // Active jobs first (registration order), terminal jobs last (newest
+        // finish first) — kimi's tasks-browser ordering.
+        const terminal = (status: string): boolean => status !== 'running' && status !== 'stopping'
+        const ordered = [...snapshots].sort((a, b) => {
+          const aTerminal = terminal(a.status)
+          const bTerminal = terminal(b.status)
+          if (aTerminal !== bTerminal) return aTerminal ? 1 : -1
+          if (!aTerminal) return a.startedAt - b.startedAt
+          return (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt)
+        })
+        app.openPicker(
+          ordered.map(job => ({
+            value: job.id,
+            label: `${job.kind} · ${job.label}`,
+            description: `${job.status}${job.detail === undefined ? '' : ` — ${job.detail}`} · ${Math.max(0, Math.floor((now - job.startedAt) / 1000))}s`,
+          })),
+          (jobId) => openJobView(jobId),
+          () => {},
+          { header: `tasks (${snapshots.length})`, enableSearch: true, showHint: true },
+        )
+      },
     }, {
       present,
       workspaceRoot: cwd,
@@ -1612,16 +1661,20 @@ export function apply(ctx: Context, config: Config): void {
     // The TUI-owned slash commands are registered by registerCommands()
     // inside initLiveSession, exactly once after the first session exists.
     refreshStatus()
-    // The persistent dock's tasks line follows the background-job registry:
-    // every change refreshes the active-task snapshot (no polling).
+    // The persistent dock's task lines + the footer badge follow the
+    // background-job registry: every change refreshes the active-task
+    // snapshot (no polling). `refreshTasks` is hoisted so the task browser
+    // (openJobView, defined earlier in this closure) can refresh the badge
+    // after stop/close.
+    let refreshTasks: () => void = () => {}
     const jobs = ctx.get('jobs')
     if (jobs !== undefined) {
-      const refreshTasks = (): void => {
-        let tasks: { label: string; status: string }[] = []
+      refreshTasks = (): void => {
+        let tasks: { id: string; label: string; status: string; kind?: string }[] = []
         try {
           tasks = jobs.list(liveAgent)
             .filter(job => job.status === 'running' || job.status === 'stopping')
-            .map(job => ({ label: job.label, status: job.status }))
+            .map(job => ({ id: job.id, label: job.label, status: job.status, kind: job.kind }))
         } catch {
           // The registry read is best-effort; the dock line just stays stale.
         }
@@ -1629,6 +1682,80 @@ export function apply(ctx: Context, config: Config): void {
       }
       jobs.onJobsChanged(() => refreshTasks())
       refreshTasks()
+    }
+    /**
+     * Open one job from the task browser: a bash job shows the live output
+     * viewer (stream deltas appended on a timer, `s` stops); a subagent job
+     * opens the child's read-only transcript (its session owns the detail,
+     * matched to the job by label — newest child wins). `jobs` and
+     * `refreshTasks` are declared later in this closure; the browser only
+     * fires on user input, by which time both are initialized.
+     */
+    const openJobView = (jobId: string): void => {
+      if (jobs === undefined || liveAgent === undefined) return
+      const owner = liveAgent
+      let snapshot: ReturnType<NonNullable<typeof jobs>['get']>
+      try {
+        snapshot = jobs.get(jobId as JobId, owner)
+      } catch {
+        return
+      }
+      if (snapshot.kind === 'subagent') {
+        // An owned workflow: the view's outcome (or failure) lands in the
+        // notice — runOwned (AGENTS.md), never a bare void promise.
+        runOwned('subagent view from tasks', async () => {
+          const subagents = ctx.get('subagents')
+          if (subagents === undefined) throw new Error('subagent service unavailable')
+          const children = await subagents.listChildren(owner.session.id)
+          const match = [...children].reverse().find(child => child.kind === 'child' && child.label === snapshot.label)
+          if (match === undefined || match.kind !== 'child') {
+            throw new Error(`no transcript found for ${snapshot.label}`)
+          }
+          await enterView(match.id, match.label)
+        }, {
+          diag,
+          sessionId: () => owner.session.id,
+          onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
+        })
+        return
+      }
+      // bash jobs: the live output viewer. Stream jobs return the delta
+      // since the previous read; terminal jobs return idempotent final
+      // output, so appending is safe in both cases.
+      let output = ''
+      try {
+        output = jobs.read(jobId as JobId, owner).text
+      } catch {
+        // Unknown/foreign job: the viewer still opens on whatever we have.
+      }
+      app.openOutputViewer({
+        title: `${snapshot.kind} ${snapshot.id} · ${snapshot.label} — ${snapshot.status}`,
+        initial: output === '' ? '(no output yet — s to stop, esc to close)' : output,
+        refresh: () => {
+          if (jobs === undefined || liveAgent === undefined) return output
+          try {
+            const read = jobs.read(jobId as JobId, liveAgent)
+            if (read.text !== '') {
+              output = output === '' ? read.text : `${output}\n${read.text}`
+              const lines = output.split('\n')
+              if (lines.length > 400) output = lines.slice(-400).join('\n')
+            }
+          } catch {
+            // The job left the registry (or the session switched): freeze.
+          }
+          return output
+        },
+        onStop: () => {
+          if (liveAgent === undefined) return
+          try {
+            jobs.kill(jobId as JobId, liveAgent, 'stopped from the task browser')
+          } catch {
+            // Already finished: nothing to stop.
+          }
+          refreshTasks()
+        },
+        onClose: () => refreshTasks(),
+      })
     }
     // The queue pane mirrors the agent's durable inbox: next-turn followups
     // first, then next-step steers, in delivery order. The inbox is public on
@@ -1644,11 +1771,16 @@ export function apply(ctx: Context, config: Config): void {
           id: message.id,
           text: textOf(message.content),
           mode: 'followup' as const,
+          // Plugin notices (background-job completions, plan-mode toasts)
+          // are NOT steerable user input: the queue pane marks them and
+          // drops the steer hints (see QueueItem.notice).
+          notice: (message as { source?: { form?: string } }).source?.form === 'notice',
         })),
         ...liveAgent.inbox.nextStep.map(message => ({
           id: message.id,
           text: textOf(message.content),
           mode: 'steer' as const,
+          notice: (message as { source?: { form?: string } }).source?.form === 'notice',
         })),
       ]
       app.setQueueItems(queue)

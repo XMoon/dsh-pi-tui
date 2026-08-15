@@ -228,6 +228,34 @@ class Spacer implements Component {
   }
 }
 
+/** The live job-output viewer body: a title line + refreshable text panel. */
+class OutputViewerPanel implements Component {
+  private readonly title: Text
+  private readonly body: Text
+  /** Key routing installed by openOutputViewer (Esc closes, `s` stops). */
+  handleInput?: (data: string) => void
+
+  constructor(title: string, initial: string) {
+    this.title = new Text(title, 0, 0)
+    this.body = new Text(initial, 0, 0)
+  }
+
+  invalidate(): void {
+    this.title.invalidate()
+    this.body.invalidate()
+  }
+
+  /** Replace the output body (the caller refreshes it on a timer). */
+  setBody(text: string): void {
+    this.body.setText(text)
+    this.body.invalidate()
+  }
+
+  render(width: number): string[] {
+    return [...this.title.render(width), '', ...this.body.render(width)]
+  }
+}
+
 /** Pi-style context progress bar: `[███░░░░░░░░░] 25%`. */
 function contextBar(used: number, window: number): string {
   const ratio = Math.min(1, Math.max(0, used / window))
@@ -283,6 +311,12 @@ export interface TuiAppEventsBase {
    * refreshes the footer. Optional.
    */
   onCyclePermission?: () => void
+  /**
+   * ↓ / Ctrl+J with an EMPTY editor and active background tasks: open the
+   * task browser (running jobs/subagents). The host lists the jobs and
+   * mounts the picker/viewer. Optional.
+   */
+  onOpenTasks?: () => void
   /**
    * Alt+↑ with queued input and no overlay up: pull every queued message back
    * into the editor draft (pi's dequeue). The host clears the inbox and the
@@ -440,6 +474,9 @@ export interface QueueItem {
   text: string
   /** next-turn followup vs next-step steer. */
   mode: 'followup' | 'steer'
+  /** Plugin notice (e.g. a background-job completion): NOT steerable — it
+   * renders with its own marker and the hint drops the steer verbs. */
+  notice?: boolean
 }
 
 /** One queued prompt awaiting the user's y/n/esc decision. */
@@ -534,8 +571,8 @@ export class TuiApp {
    * background tasks (kimi chrome parity). Empty lines drop out entirely.
    */
   private readonly dock: Text
-  /** Active background tasks for the dock line (label + status). */
-  private dockTasks: readonly { label: string; status: string }[] = []
+  /** Active background tasks for the dock/footer lines (label + status). */
+  private dockTasks: readonly { id: string; label: string; status: string; kind?: string }[] = []
   /**
    * The queued-input pane below the todo panel (kimi QueuePane parity):
    * a border rule plus one `❯ text` row per pending message and a dim hint.
@@ -544,6 +581,9 @@ export class TuiApp {
   private readonly queuePane: Text
   /** The pending inbox messages (next-turn followups and next-step steers). */
   private queueItems: readonly QueueItem[] = []
+
+  /** Whether any background task is running/stopping. */
+  private tasksActive = false
 
   /** Whether the Ctrl+O expansion master switch is on. */
   isToolOutputExpanded(): boolean {
@@ -639,6 +679,12 @@ export class TuiApp {
       // from the previous submission must not outlive the next one).
       this.clearNotify()
       this.events.onSubmit(text)
+    }
+    this.editor.onChange = () => {
+      // The footer's task badge advertises the ↓ browser ONLY while the
+      // editor is empty; the editor mutates without going through
+      // setStatus, so keep the badge truthful while tasks are active.
+      if (this.tasksActive) this.renderFooter()
     }
     this.header = new Text('🐋  dsh-pi-tui', 0, 0)
     this.messagesView = new Container()
@@ -808,6 +854,15 @@ export class TuiApp {
       this.editor.setText('')
       this.events.onSteer?.(draft)
       return { consume: true }
+    }
+    if (matchesKey(data, 'down') || matchesKey(data, 'ctrl+j')) {
+      // Task browser: with active background tasks and an EMPTY editor, ↓ /
+      // Ctrl+J open the task list (nothing to move the cursor through). With
+      // text present the keys keep their editing meaning; overlays own them.
+      if (this.tasksActive && !this.overlayHost.hasOverlayEntries && this.editor.getText().trim() === '') {
+        this.events.onOpenTasks?.()
+        return { consume: true }
+      }
     }
     if (matchesKey(data, 'ctrl+g')) {
       // External editor; overlays own Ctrl+G while up (alt-screen search).
@@ -1891,12 +1946,20 @@ export class TuiApp {
   }
 
   /**
-   * Replace the active background-task list for the dock line.
-   * @param tasks - active jobs (label + lifecycle status), empty to hide.
+   * Replace the active background-task list for the dock lines and the
+   * footer badge. Non-empty sets arm the ↓/Ctrl+J task-browser trigger.
+   * @param tasks - active jobs (id + label + lifecycle status), empty to hide.
    */
-  setTasks(tasks: readonly { label: string; status: string }[]): void {
+  setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
+    this.tasksActive = tasks.length > 0
     this.renderDock()
+    this.renderFooter()
+  }
+
+  /** Whether background tasks are active (drives the ↓/Ctrl+J trigger). */
+  isTasksActive(): boolean {
+    return this.tasksActive
   }
 
   /**
@@ -1921,12 +1984,20 @@ export class TuiApp {
     const width = Math.max(1, this.terminal.columns)
     const lines = [color.border('─'.repeat(width))]
     for (const item of items) {
-      const prefix = `${color.accent('❯')} `
+      // Plugin notices (background-job completions etc.) are NOT steerable:
+      // they carry their own ⏳ marker so they never read as user input, and
+      // the hint below drops the steer/edit verbs when nothing else is queued.
+      const prefix = item.notice === true
+        ? `${color.textDim('⏳')} `
+        : `${color.accent('❯')} `
       const text = item.text.replace(/\s+/g, ' ').trim()
       const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth(prefix)), '…')
-      lines.push(prefix + truncated)
+      lines.push(prefix + (item.notice === true ? color.textDim(truncated) : truncated))
     }
-    const hint = 'ctrl+s to steer all · alt+↑ to edit all · /queue for per-item actions'
+    const hasSteerable = items.some(item => item.notice !== true)
+    const hint = hasSteerable
+      ? 'ctrl+s to steer all · alt+↑ to edit all · /queue for per-item actions'
+      : 'job notices deliver after the current task · /tasks to view'
     lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, width - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
     this.requestRender()
@@ -1970,9 +2041,17 @@ export class TuiApp {
       lines.push(color.textDim(`☑  ${summary}`))
     }
     if (this.dockTasks.length > 0) {
-      const first = this.dockTasks[0]
-      const label = first.label.length > 40 ? `${first.label.slice(0, 40)}…` : first.label
-      lines.push(color.textDim(`⏳  ${this.dockTasks.length} task${this.dockTasks.length === 1 ? '' : 's'} · ${label}`))
+      // One line per active task (id + label), capped at three with a
+      // more-tasks marker — the "at a glance" list; the footer badge carries
+      // the count and the ↓ trigger opens the full browser.
+      const shown = this.dockTasks.slice(0, 3)
+      for (const task of shown) {
+        const label = task.label.length > 40 ? `${task.label.slice(0, 40)}…` : task.label
+        lines.push(color.textDim(`⏳  ${task.id} · ${label}`))
+      }
+      if (this.dockTasks.length > 3) {
+        lines.push(color.textDim(`   … ${this.dockTasks.length - 3} more`))
+      }
     }
     this.dock.setText(lines.join('\n'))
     this.requestRender()
@@ -2015,6 +2094,9 @@ export class TuiApp {
       this.planMode ? color.warning('[plan]') : '',
       this.status.goal === undefined || this.status.goal === '' ? '' : color.primary(this.status.goal),
       this.status.model === '' ? '' : `[${this.status.model}]`,
+      this.tasksActive
+        ? color.primary(`[${this.dockTasks.length} task${this.dockTasks.length === 1 ? '' : 's'} running${this.editor.getText().trim() === '' ? ' · ↓ view' : ''}]`)
+        : '',
       this.status.cwd,
       this.status.branch === '' ? '' : this.status.branch,
       context,
@@ -2097,6 +2179,47 @@ export class TuiApp {
       onCancel()
     }, { enableSearch: true })
     handle = this.showOverlayOnHost(new Frame(settings), { width: 72, maxHeight: 28 })
+  }
+
+  /**
+   * Open the live job-output viewer: a titled text panel refreshed by a
+   * timer while open (the caller returns the accumulated output each tick;
+   * a terminal job's final read is idempotent). Esc closes, `s` fires
+   * onStop. Returns a closer (also invoked on Esc).
+   * @param options - title, initial body, refresh callback, stop/close hooks.
+   */
+  openOutputViewer(options: {
+    title: string
+    initial: string
+    refresh: () => string
+    onStop?: () => void
+    onClose?: () => void
+    intervalMs?: number
+  }): () => void {
+    const panel = new OutputViewerPanel(options.title, options.initial)
+    let closed = false
+    let timer: NodeJS.Timeout | undefined
+    const close = (): void => {
+      if (closed) return
+      closed = true
+      if (timer !== undefined) clearInterval(timer)
+      handle.hide()
+      options.onClose?.()
+    }
+    panel.handleInput = (data: string): void => {
+      if (matchesKey(data, 'escape')) {
+        close()
+      } else if (matchesKey(data, 's')) {
+        options.onStop?.()
+      }
+    }
+    const handle = this.showOverlayOnHost(new Frame(panel), { width: 88, maxHeight: 24 })
+    timer = setInterval(() => {
+      if (closed) return
+      panel.setBody(options.refresh())
+      this.requestRender()
+    }, options.intervalMs ?? 1000)
+    return close
   }
 
   /** Switch the active color theme and repaint everything. Every surface
