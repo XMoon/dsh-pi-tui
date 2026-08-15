@@ -899,7 +899,7 @@ export function apply(ctx: Context, config: Config): void {
       }
       viewing = { id: childId, folder: childFolder }
       repaint(app, childFolder)
-      app.notify(`viewing subagent ${label ?? childId} — Esc returns`)
+      app.notify(`viewing subagent ${label ?? childId} — Esc returns`, 'info')
     }
     /** Leave the subagent viewer (single Esc). Returns whether it exited. */
     const exitView = (): boolean => {
@@ -918,7 +918,7 @@ export function apply(ctx: Context, config: Config): void {
       ctx.logger.error(`tui-runner: session creation failed: ${message}`)
       diag.error('session creation failed', { error: message })
       app.setEditorText(draft)
-      app.notify(`could not start a session: ${message}`)
+      app.notify(`could not start a session: ${message}`, 'error')
     }
     /** The session-backed dispatch: create the session lazily (the first
      * user input is the deferred trigger), guard against cross-process
@@ -931,11 +931,11 @@ export function apply(ctx: Context, config: Config): void {
         const verdict = await guardSend()
         if (verdict === 'blocked') {
           app.setEditorText(text)
-          app.notify(GUARD_BLOCKED_NOTIFY)
+          app.notify(GUARD_BLOCKED_NOTIFY, 'error')
           return
         }
         if (verdict === 'forced') {
-          app.notify(GUARD_FORCED_NOTIFY)
+          app.notify(GUARD_FORCED_NOTIFY, 'error')
         }
         // A registered slash command dispatches without a model turn; anything
         // else is a follow-up prompt. The command lifecycle lands in the
@@ -961,7 +961,7 @@ export function apply(ctx: Context, config: Config): void {
             const message = error instanceof Error ? error.message : String(error)
             ctx.logger.error(`tui-runner: command execution failed: ${message}`)
             diag.error('command execution failed', { error: message })
-            app.notify(message)
+            app.notify(message, 'error')
           })
           return
         }
@@ -997,7 +997,7 @@ export function apply(ctx: Context, config: Config): void {
         const message = error instanceof Error ? error.message : String(error)
         ctx.logger.error(`tui-runner: local command failed: ${message}`)
         diag.error('local command failed', { error: message })
-        app.notify(message)
+        app.notify(message, 'error')
       })
     }
     app = startProcessTui({
@@ -1079,12 +1079,12 @@ export function apply(ctx: Context, config: Config): void {
           const verdict = await guardSend()
           if (verdict === 'blocked') {
             app.setEditorText(text)
-            app.notify(GUARD_BLOCKED_NOTIFY)
+            app.notify(GUARD_BLOCKED_NOTIFY, 'error')
             return
           }
           const forced = verdict === 'forced'
           if (forced) {
-            app.notify(GUARD_FORCED_NOTIFY)
+            app.notify(GUARD_FORCED_NOTIFY, 'error')
           }
           const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
           if (queued.length > 0) {
@@ -1102,7 +1102,7 @@ export function apply(ctx: Context, config: Config): void {
             liveAgent.inbox.clear()
             for (const message of messages) liveAgent.steer(message)
             if (!forced) {
-              app.notify(messages.length === 1 ? 'steering 1 message' : `steering ${messages.length} messages`)
+              app.notify(messages.length === 1 ? 'steering 1 message' : `steering ${messages.length} messages`, 'info')
             }
           } else {
             // Classic single-draft steer: a running turn takes it now; an
@@ -1365,7 +1365,7 @@ export function apply(ctx: Context, config: Config): void {
           await initLiveSession(liveAgent)
         }
         if (resumeFailure !== undefined) {
-          app.notify(resumeFailure)
+          app.notify(resumeFailure, 'error')
           resumeFailure = undefined
         }
       })().finally(() => { creating = undefined })
@@ -1416,7 +1416,7 @@ export function apply(ctx: Context, config: Config): void {
         const message = error instanceof Error ? error.message : String(error)
         ctx.logger.error(`tui-runner: command registration failed: ${message}`)
         diag.error('command registration failed', { error: message })
-        app.notify(`command registration failed: ${message}`)
+        app.notify(`command registration failed: ${message}`, 'error')
       }
     }
     /** Rebuild the agent-scoped per-skill commands after a session exists. */
@@ -1442,7 +1442,7 @@ export function apply(ctx: Context, config: Config): void {
     // path registers here so /exit /settings /help work before any message).
     registerCommands()
     if (resumeFailure !== undefined) {
-      app.notify(resumeFailure)
+      app.notify(resumeFailure, 'error')
       resumeFailure = undefined
     }
     ctx.on('session/event', (session, event) => {

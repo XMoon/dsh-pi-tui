@@ -524,9 +524,9 @@ export class TuiApp {
   /** Transient error line shown under the transcript; cleared by the next
    * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
   private notifyText = ''
-  /** Styling of the current notify line: errors are red with a ✗, info is
-   * dim with a ℹ. */
-  private notifyKind: 'error' | 'info' = 'error'
+  /** Styling of the current notify line: info (default) is dim with a ℹ,
+   * errors are red with a ✗. */
+  private notifyKind: 'error' | 'info' = 'info'
   /** The pending auto-clear for {@link notifyText}, while one is armed. */
   private notifyTimer: NodeJS.Timeout | undefined
   /** How long a notify line stays before it auto-clears, in ms. */
@@ -1141,10 +1141,10 @@ export class TuiApp {
    * `setTranscript` repaint or after {@link TuiApp.NOTIFY_DURATION_MS},
    * whichever comes first, so a one-off notice never lingers forever.
    * @param text - the notice text.
-   * @param kind - `'error'` renders red with a ✗ (default); `'info'` renders
-   * dim with a ℹ, so a successful action never reads as a failure.
+   * @param kind - `'info'` renders dim with a ℹ (default, the common case);
+   * `'error'` renders red with a ✗ — pass it explicitly for failures.
    */
-  notify(text: string, kind: 'error' | 'info' = 'error'): void {
+  notify(text: string, kind: 'error' | 'info' = 'info'): void {
     this.notifyText = text
     this.notifyKind = kind
     if (this.notifyTimer !== undefined) clearTimeout(this.notifyTimer)

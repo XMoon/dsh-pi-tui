@@ -311,7 +311,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
                 if (palette !== undefined) {
                   app.applyPalette(palette)
                 } else {
-                  app.notify(`theme ${value} not found`)
+                  app.notify(`theme ${value} not found`, 'error')
                   return
                 }
               }
@@ -374,7 +374,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       (id) => {
         if (id === currentId) return
         void runner.switchSession(id).then(error => {
-          if (error !== undefined) app.notify(error)
+          if (error !== undefined) app.notify(error, 'error')
         })
       },
       () => {},
@@ -435,7 +435,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           if (match !== undefined) {
             if (match.id === currentId) return { kind: 'error', text: 'already on this session' }
             void runner.switchSession(match.id).then(error => {
-              if (error !== undefined) app.notify(error)
+              if (error !== undefined) app.notify(error, 'error')
             })
             return { kind: 'success' }
           }
@@ -575,7 +575,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         app.setFooterPreset(doc.footer === 'compact' ? 'compact' : 'full')
         app.setFullscreen(doc.fullscreen === 'on')
       }
-      app.notify(`reloaded — ${skillCount} skills \u00b7 settings reapplied`)
+      app.notify(`reloaded — ${skillCount} skills \u00b7 settings reapplied`, 'info')
       return { kind: 'success' }
     },
   })
@@ -639,7 +639,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         setup: composition.setup,
       })
       const error = await runner.swapTo(next)
-      if (error !== undefined) app.notify(error)
+      if (error !== undefined) app.notify(error, 'error')
       return { kind: 'success', text: 'started a fresh session' }
     },
   })
@@ -686,7 +686,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           const message = target.message
           if (action === 'delete') {
             inbox.remove(message.id)
-            app.notify('queued message deleted')
+            app.notify('queued message deleted', 'info')
           } else if (action === 'steer') {
             // Mirrors Ctrl+S on a single message: a running turn takes the
             // steer immediately; an idle agent starts a fresh turn with it.
@@ -696,7 +696,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             } else {
               liveAgent.followup(message)
             }
-            app.notify('steering queued message')
+            app.notify('steering queued message', 'info')
           } else if (action === 'edit' || action === 'insert') {
             // The free-text question flow collects the replacement/new text;
             // every mutation commits an inbox splice that refreshes the pane.
@@ -707,7 +707,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
                 const next = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
                 if (action === 'edit') {
                   inbox.replace(message.id, next)
-                  app.notify('queued message updated')
+                  app.notify('queued message updated', 'info')
                 } else {
                   // Insert at the selected message's CURRENT position: the
                   // queue may have shifted while the panel was open (a claim
@@ -718,7 +718,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
                   const position = list.findIndex(item => item.id === message.id)
                   if (position < 0) return
                   inbox.splice(target.list, position, 0, [next])
-                  app.notify('message inserted before the selected one')
+                  app.notify('message inserted before the selected one', 'info')
                 }
               })
               .catch(() => {
@@ -892,7 +892,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             void runner.enterView(child.id, labelOf(child))
           } else if (action === 'interrupt') {
             subagents.interrupt(child.id, { kind: 'user', parentSessionId: liveAgent.session.id })
-            app.notify(`interrupting ${labelOf(child)}`)
+            app.notify(`interrupting ${labelOf(child)}`, 'info')
           }
         },
         () => {},
@@ -942,7 +942,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         (id) => {
           if (id === currentId) return
           void runner.switchSession(id).then(error => {
-            if (error !== undefined) app.notify(error)
+            if (error !== undefined) app.notify(error, 'error')
           })
         },
         () => {},
@@ -1038,7 +1038,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         seed,
       })
       const error = await runner.swapTo(next)
-      if (error !== undefined) app.notify(error)
+      if (error !== undefined) app.notify(error, 'error')
       return { kind: 'success', text: `forked as ${next.agent.session.id}` }
     },
   })

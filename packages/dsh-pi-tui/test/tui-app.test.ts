@@ -112,19 +112,20 @@ test('notify is transient: cleared by its auto-clear timeout', async () => {
   assert.ok(!vt.getViewport().join('\n').includes('transient note'), 'notify line survived its timeout')
 })
 
-test('notify info kind renders as a dim ℹ line, not a red error', async () => {
+test('notify defaults to info and errors opt in explicitly', async () => {
   const { vt, app } = startApp()
-  // Default kind stays the error style (red ✗).
-  app.notify('resume failed')
+  // The default kind is info (dim ℹ) — informational notices are the common
+  // case; failures pass 'error' explicitly (red ✗).
+  app.notify('steering 2 messages')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('✗ resume failed'), `error-style notify missing:\n${view}`)
-  // Info kind must not read as a failure.
-  app.notify('permission: workspace-write', 'info')
+  assert.ok(view.includes('ℹ steering 2 messages'), `default info notify missing:\n${view}`)
+  assert.ok(!view.includes('✗'), `default notify must not render as an error:\n${view}`)
+  // Explicit error kind keeps the red ✗ style.
+  app.notify('resume failed', 'error')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('ℹ permission: workspace-write'), `info-style notify missing:\n${view}`)
-  assert.ok(!view.includes('✗'), `info notify must not render as an error:\n${view}`)
+  assert.ok(view.includes('✗ resume failed'), `error-style notify missing:\n${view}`)
 })
 
 test('tool cards present through the real registry: read shows the relativized path', async () => {
