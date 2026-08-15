@@ -1062,11 +1062,42 @@ export class TuiApp {
     // the divergence guard's — flash for a frame. The notify expires via
     // its 8s auto-clear timer or an explicit clear (user submit, session
     // switch, stop).
+    // (The component cache is pruned inside rebuildMessages below.)
     this.rebuildMessages()
+  }
+
+  /**
+   * Drop cached message components that left the live transcript (window
+   * slides forward forever in a long session, so the cache must never grow
+   * to full-history size). The live set is the current transcript plus the
+   * local cards; entries outside it are disposed and removed. O(live +
+   * cache) per rebuild — the same order as rebuildMessages. Runs at the
+   * START of every rebuild, so local-card push/replace/clear paths prune
+   * too (a replaced running card must not linger in the cache).
+   */
+  private pruneMessageComponents(): void {
+    if (this.messageComponents.size === 0) return
+    const live = new Set<TranscriptMessage>(this.messages)
+    for (const message of this.localMessages) live.add(message)
+    for (const [message, entry] of this.messageComponents) {
+      if (live.has(message)) continue
+      this.messageComponents.delete(message)
+      const component = entry.component as { dispose?: () => void } | undefined
+      if (component?.dispose !== undefined) {
+        try {
+          component.dispose()
+        } catch {
+          // Best effort: a cached component's dispose must not break a paint.
+        }
+      }
+    }
   }
 
   /** Rebuild the message component tree from the current transcript state. */
   private rebuildMessages(): void {
+    // Every rebuild path (transcript updates AND local-card push/replace/
+    // clear) prunes the cache to the live set first.
+    this.pruneMessageComponents()
     this.messagesView.clear()
     this.messagesView.addChild(this.welcomeCard)
     const boundary = this.expandBoundary()

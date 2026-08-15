@@ -230,6 +230,55 @@ test('stop() cancels every pending askQuestions flow with a rejection', async ()
   await assert.rejects(second, /cancelled/)
 })
 
+test('the message component cache is pruned to the live transcript', () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const cache = (app as unknown as { messageComponents: Map<object, unknown> }).messageComponents
+  const messages: { kind: 'user'; turn: number; text: string }[] = []
+  for (let i = 0; i < 50; i += 1) {
+    messages.push({ kind: 'user', turn: i, text: `message ${i}` })
+  }
+  app.setTranscript(messages)
+  assert.ok(cache.size >= 50, 'the live messages are cached')
+  // The window slides forward in a long session: the cache must shrink to
+  // the live set instead of growing to full-history size.
+  app.setTranscript(messages.slice(45))
+  assert.equal(cache.size, 5, 'the cache must shrink to the live set')
+  // A completely fresh window disposes the previous entries.
+  app.setTranscript([{ kind: 'user', turn: 100, text: 'fresh' }])
+  assert.equal(cache.size, 1, 'entries from the previous window must be disposed')
+  app.stop()
+})
+
+test('local card push/replace/clear prune the component cache too', () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const cache = (app as unknown as { messageComponents: Map<object, unknown> }).messageComponents
+  const locals = (app as unknown as { localMessages: object[] }).localMessages
+  // 200 distinct cards, each running→settled: every replacement is a NEW
+  // object, so without pruning the cache would hold the replaced running
+  // card AND the settled one (400). The cache must track the LIVE locals.
+  for (let i = 0; i < 200; i += 1) {
+    const running = app.pushLocalMessage({
+      kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'bash',
+      args: `{"i":${i}}`, result: '', status: 'running',
+    })
+    app.updateLocalMessage(running, {
+      kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'bash',
+      args: `{"i":${i}}`, result: 'done', status: 'ok',
+    })
+  }
+  assert.equal(cache.size, 200, 'each settled card cached once; replaced running objects pruned')
+  assert.equal(cache.size, locals.length, 'the cache tracks the live local cards, never more')
+  // Clearing the locals empties their cache entries (a bare session
+  // transcript repaint is NOT required to trigger this).
+  app.clearLocalMessages()
+  assert.equal(cache.size, 0, 'clearLocalMessages must drop the local cache entries')
+  app.stop()
+})
+
 test('tool card headers show the design title and the args summary', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{
