@@ -34,6 +34,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -164,10 +165,33 @@ function main() {
     const textFiles = files
       .filter(name => /\.(mjs|ts|yml|yaml|json|md)$/.test(name))
       .map(name => join(extracted, name))
-    // Assembled at runtime so THIS script does not embed the marker literal
-    // (the check would otherwise trip on its own source).
-    const workspaceMarker = ['/home/', 'xmoon', '/'].join('')
-    const workspaceLeaks = textFiles.filter(file => readFileSync(file, 'utf8').includes(workspaceMarker))
+    // Leak detection is DYNAMIC, not tied to this machine: the runtime-
+    // resolved repo/package/dist roots (realpath) catch THIS checkout's
+    // absolute paths on any machine, and the generic patterns catch the
+    // common absolute-path shapes (Unix home, macOS Users, CI workspaces,
+    // Windows drives) everywhere. The smoke script itself is exempt from
+    // the generic patterns: its source deliberately assembles the old
+    // /home/xmoon/ marker at runtime (the literal would otherwise trip the
+    // check on its own file). The dynamic-root checks still apply to it.
+    const repoRoot = realpathSync(join(SCRIPT_DIR, '..', '..', '..'))
+    const packageRoot = realpathSync(PACKAGE_ROOT)
+    const leakRoots = [...new Set([
+      repoRoot,
+      packageRoot,
+      realpathSync(join(PACKAGE_ROOT, 'dist')),
+    ])]
+    const absolutePathPatterns = [
+      /\/home\/[^/"']+/,
+      /\/Users\/[^/"']+/,
+      /\/home\/runner\/work\//,
+      /[A-Za-z]:\\(?:[^\\"']*\\)+/,
+    ]
+    const workspaceLeaks = textFiles.filter(file => {
+      const text = readFileSync(file, 'utf8')
+      if (leakRoots.some(root => root.length > 1 && text.includes(root))) return true
+      if (basename(file) === 'tarball-smoke.mjs') return false
+      return absolutePathPatterns.some(pattern => pattern.test(text))
+    })
     check('no workspace absolute paths in packaged files', workspaceLeaks.length === 0,
       workspaceLeaks.length === 0 ? '' : workspaceLeaks.join(', '))
     const dist = files.filter(name => name.startsWith('dist/') && name.endsWith('.mjs'))

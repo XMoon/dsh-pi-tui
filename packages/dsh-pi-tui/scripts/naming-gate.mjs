@@ -9,7 +9,7 @@
  * @module naming-gate
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -86,7 +86,9 @@ check('no tarballs committed', tgz === '', tgz.split('\n').filter(Boolean).slice
 //    gate/upload/publish step fails at runtime. Guard the exact mistake the
 //    2026-08-15 pack-gate review found.
 for (const workflow of ['ci.yml', 'release.yml']) {
-  const text = readFileSync(join(ROOT, '.github', 'workflows', workflow), 'utf8')
+  const path = join(ROOT, '.github', 'workflows', workflow)
+  if (!existsSync(path)) continue // publishing lives inside ci.yml today
+  const text = readFileSync(path, 'utf8')
   check(`workflow ${workflow} uses unscoped tarball globs`,
     !text.includes('@xmoon76-dsh-pi-tui-*.tgz') && text.includes('xmoon76-dsh-pi-tui-*.tgz'))
 }

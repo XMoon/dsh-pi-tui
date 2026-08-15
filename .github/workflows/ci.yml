@@ -3,9 +3,11 @@ name: CI
 # Repeatable build-and-publish gates (code-review plan stage G):
 #   typecheck, test-pi-tui, test-dsh-pi-tui, build-and-pack,
 #   tarball-smoke-node-22/24/26, npm-audit-prod, naming-gate.
-# Tag pushes (v*) run the same matrix, so the commit behind a release tag is
-# the CI-verified one; release.yml independently re-runs the pack gate on its
-# own runner and publishes THAT exact tarball (no publish-time rebuild).
+# Tag pushes (v*) run the same matrix; the publish job only runs on tags
+# and `needs` EVERY gate — a failing check means no publish. Publish
+# downloads the artifact build-and-pack produced (the exact bytes the
+# Node 22/24/26 smoke verified) and pushes those bytes to npm with
+# provenance; it never rebuilds. The tag must match the package version.
 
 on:
   push:
@@ -121,3 +123,51 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --prod
+
+  # Publish @xmoon76/dsh-pi-tui to npm — ONLY on `v*` tag pushes and ONLY
+  # after every gate above succeeded (needs). The vendored fork
+  # (@xmoon76/pi-tui) is private and bundled into dist at build time, so
+  # this publishes exactly one package. It publishes the artifact
+  # build-and-pack produced — the exact bytes the Node 22/24/26 tarball
+  # smoke verified — with OIDC provenance, never a rebuild.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [typecheck, test-pi-tui, test-dsh-pi-tui, build-and-pack, tarball-smoke, naming-gate, npm-audit-prod]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm provenance (OIDC)
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+      # The release tag must name exactly the version being published.
+      - name: Verify the tag matches the package version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="$(node -e "console.log(JSON.parse(require('fs').readFileSync('packages/dsh-pi-tui/package.json', 'utf8')).version)")"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "tag $TAG does not match packages/dsh-pi-tui version v$VERSION" >&2
+            exit 1
+          fi
+      # Publish the EXACT CI-verified bytes; never rebuild, never repack.
+      # The glob must match exactly one tarball (build-and-pack packs into
+      # a clean checkout, so only one can exist).
+      - name: Publish the CI-verified tarball
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(ls tarball/xmoon76-dsh-pi-tui-*.tgz)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          npm publish "${TARBALLS[0]}" --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
