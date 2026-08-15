@@ -566,6 +566,9 @@ export class TuiApp {
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
       this.rememberInput(text)
+      // Fresh user input supersedes any transient notice (a stale error
+      // from the previous submission must not outlive the next one).
+      this.clearNotify()
       this.events.onSubmit(text)
     }
     this.header = new Text('🐋  dsh-pi-tui', 0, 0)
@@ -965,8 +968,12 @@ export class TuiApp {
    */
   setTranscript(messages: readonly TranscriptMessage[]): void {
     this.messages = messages
-    // A fresh transcript is a repaint: the transient notify line clears.
-    this.clearNotify()
+    // Repaints do NOT clear the transient notify line: an active session
+    // repaints every frame (streaming chunks, tool cards), and clearing on
+    // each repaint would make every notice — including error blocks like
+    // the divergence guard's — flash for a frame. The notify expires via
+    // its 8s auto-clear timer or an explicit clear (user submit, session
+    // switch, stop).
     this.rebuildMessages()
   }
 
@@ -1099,13 +1106,18 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
-  /** Clear the transient notify line and its pending auto-clear timer. */
-  private clearNotify(): void {
+  /** Clear the transient notify line and its pending auto-clear timer.
+   * Called on fresh user input and session switches; repaints alone never
+   * clear it (an active session would flash every notice away). Rebuilds
+   * the transcript when a notice was actually showing. */
+  clearNotify(): void {
+    if (this.notifyText === '' && this.notifyTimer === undefined) return
     this.notifyText = ''
     if (this.notifyTimer !== undefined) {
       clearTimeout(this.notifyTimer)
       this.notifyTimer = undefined
     }
+    this.rebuildMessages()
   }
 
   /**

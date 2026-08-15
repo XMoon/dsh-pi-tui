@@ -865,6 +865,7 @@ export function apply(ctx: Context, config: Config): void {
       if (viewing === undefined) return false
       viewing = undefined
       app.clearLocalMessages()
+      app.clearNotify() // the "viewing subagent — Esc returns" notice is stale now
       repaint(app, folder)
       refreshStatus()
       return true
@@ -1262,6 +1263,7 @@ export function apply(ctx: Context, config: Config): void {
       app.setWorking(workingFromLog(agent.session.events))
       app.setSessionTitle(foldSessionTitle(agent.session.events)?.title)
       app.clearLocalMessages()
+      app.clearNotify() // a notice from the previous session is stale here
       repaint(app, folder)
       refreshStatus()
       refreshQueue()

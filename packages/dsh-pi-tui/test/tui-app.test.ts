@@ -79,16 +79,24 @@ test('ctrl+d triggers the exit event (like /exit)', async () => {
   }
 })
 
-test('notify is transient: cleared by the next transcript repaint', async () => {
+test('notify survives repaints and clears on fresh user input', async () => {
   const { vt, app } = startApp()
   app.notify('resume failed')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('resume failed'), `notify line missing:\n${view}`)
+  // A repaint (e.g. a streaming frame in an active session) must not flash
+  // the notice away — that made every error block unreadable.
   app.setTranscript([])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('resume failed'), `notify line survived a repaint:\n${view}`)
+  assert.ok(view.includes('resume failed'), `repaint must not clear the notify:\n${view}`)
+  // Fresh user input supersedes the notice.
+  vt.sendInput('hello')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('resume failed'), `submit must clear the notify:\n${view}`)
 })
 
 test('notify is transient: cleared by its auto-clear timeout', async () => {
