@@ -47,6 +47,7 @@ function stubRunner(
     agents: {} as never,
     sessions: { flush: async () => {} },
     cwd: '/ws',
+    sessionCwd: () => '/ws',
     signal: new AbortController().signal,
     get sessionGeneration() { return state.generation },
     compose: async () => ({ setup: () => {} }),
@@ -103,6 +104,45 @@ function fakeServices() {
     skills,
   }
 }
+
+test('/settings working-directory row follows the live session cwd', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  let liveCwd = '/ws/alpha'
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'sessionCwd') return (): string => liveCwd
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const settingsDef = services.defs.find(def => def.name === 'settings')
+  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
+  ;(settingsDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  // The working-directory row sits at the end of the scrolling list.
+  for (let index = 0; index < 4; index += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('/ws/alpha'), `session cwd row missing:\n${view}`)
+  // A session switch to another workspace must reflect on the next open.
+  liveCwd = '/ws/beta'
+  vt.sendInput('\x1b') // close the settings overlay
+  await vt.waitForRender()
+  ;(settingsDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  for (let index = 0; index < 4; index += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('/ws/beta'), `updated session cwd missing:\n${view}`)
+  app.stop()
+})
 
 test('a stale skill refresh cannot register commands into a newer session', async () => {
   const ctx = new Context()

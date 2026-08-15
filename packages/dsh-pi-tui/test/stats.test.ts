@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId, type CallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats, formatStats, StatsFolder } from '../src/stats.ts'
 
@@ -27,13 +27,83 @@ test('computes turns, steps, LLM time, and first-token latency', () => {
     event('step/start', { turn: 0, step: 0 }, 1, t),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 2, t + 1_100),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' there' } }, 3, t + 2_000),
-    event('step/end', { turn: 0, step: 0 }, 4, t + 8_100),
-    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 8_200),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hi there' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 4, t + 8_000),
+    event('step/end', { turn: 0, step: 0 }, 5, t + 8_100),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6, t + 8_200),
   ])
   assert.equal(stats.turns, 1)
   assert.equal(stats.steps, 1)
-  assert.equal(stats.llmMs, 8_100)
+  // LLM wall time ends at assistant/message, never at step/end (Web parity).
+  assert.equal(stats.llmMs, 8_000)
   assert.equal(stats.firstTokenMsAvg, 1_100)
+})
+
+test('a step without an assistant message contributes no timing (Web parity)', () => {
+  const t = 1_700_000_000_000
+  const stats = computeStats([
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 1, t + 1_000),
+    // Cancelled/failed: step/end arrives, the message never does.
+    event('step/end', { turn: 0, step: 0 }, 2, t + 5_000),
+  ])
+  assert.equal(stats.steps, 1, 'steps count at step/end')
+  assert.equal(stats.turns, 1, 'turns count at step/end (unique)')
+  assert.equal(stats.llmMs, 0, 'no message means no wall time')
+  assert.equal(stats.firstTokenMsAvg, 0, 'no message means no TTFT')
+  assert.equal(stats.tokensPerSec, 0)
+})
+
+test('first-token semantics match the Web isTokenDelta: reasoning deltas start the decode window', () => {
+  const t = 1_700_000_000_000
+  // Step 0: reasoning delta arrives first, text delta later. The decode
+  // window must start at the FIRST reasoning token (4500 ms), not at the
+  // first visible text (4000 ms) — the old text-delta-only stamp made
+  // tok/s systematically high on reasoning models.
+  const log = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'let me think' } }, 1, t + 500),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'answer' } }, 2, t + 1_000),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 450, cacheReadTokens: 0 },
+    }, 3, t + 5_000),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 6_000),
+    // Step 1: tool-call delta only, then usage — also a token delta start.
+    event('step/start', { turn: 1, step: 0 }, 5, t + 7_000),
+    event('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'tool-call-delta', index: 0, id: 'tc-1' as CallId, name: 'bash', argumentsDelta: '{"command"' } }, 6, t + 7_100),
+    event('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('m-2'),
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: 'tc-1' as CallId, name: 'bash', arguments: '{"command":"ls"}' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 50, cacheReadTokens: 0 },
+    }, 7, t + 7_600),
+    event('step/end', { turn: 1, step: 0 }, 8, t + 8_000),
+  ]
+  const stats = computeStats(log)
+  // Step 0: 450 tokens / 4500 ms = 100 tok/s. Step 1: 50 / 500 ms = 100.
+  assert.equal(stats.tokensPerSec, 100, `decode window must start at the first reasoning delta:\n${JSON.stringify(stats)}`)
+  // TTFT averages both steps: 500 ms (step 0: start → first reasoning
+  // delta) and 100 ms (step 1: start → first tool-call delta).
+  assert.equal(stats.firstTokenMsAvg, 300)
+  assert.equal(stats.outputTokens, 500)
 })
 
 test('accumulates usage and computes cache hit rate', () => {

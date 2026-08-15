@@ -4,12 +4,23 @@
  * output tokens per second, cache hit rate, and token totals.
  * Pure and deterministic for headless tests.
  *
- * Accounting follows the Web's turn-metrics fold (StatsLine.tsx):
- * - usage is counted ONCE per step — the `assistant/message` usage wins over
- *   the streaming `usage` chunk (both carry the same assembler value; adding
- *   both would double the totals);
+ * Accounting follows the Web's sessionStats/tokenUsage projections:
+ * - the FIRST TOKEN is any non-empty token delta — text, reasoning, or a
+ *   tool-call delta (the Web's isTokenDelta). Stamping only text-delta made
+ *   the decode window start at the first VISIBLE token, which is much later
+ *   than the first model token on reasoning models — tok/s came out
+ *   systematically high and TTFB too. The whole step's timing (LLM wall,
+ *   TTFT, decode window) settles at assistant/message, exactly like the
+ *   projection; a step that never produced a message (cancelled/failed)
+ *   contributes no timing at all;
+ * - usage is counted ONCE per step at step/end — the assistant/message
+ *   usage replaces the streaming `usage` chunk (both carry the same
+ *   assembler value; adding both would double the totals), and a step with
+ *   only a usage chunk still counts (the projection's tokenUsage is
+ *   step-keyed, not message-gated);
+ * - turns/steps count at step/end (unique turns), like the projection;
  * - decode throughput samples only steps that carry BOTH a decode window
- *   (first text delta → assistant/message) and usage, so reasoning-only or
+ *   (first token delta → assistant/message) and usage, so reasoning-only or
  *   tool-only steps never inflate the rate;
  * - billed input = uncached + cache-read + cache-write (the Web's
  *   billedInputTokens), and the cache-hit share divides by that sum.
@@ -70,12 +81,42 @@ interface UsageLike {
   cacheWriteTokens?: number
 }
 
-/** One step's timing/usage accumulation, resolved at step/end. */
+/** One step's timing/usage accumulation, resolved at its boundaries. */
 interface StepTiming {
   start?: number
   firstDelta?: number
   completed?: number
   usage?: UsageLike
+}
+
+/**
+ * The Web's first-token predicate (dsh-llm `isTokenDelta`): any non-empty
+ * text or reasoning delta, or a tool-call delta carrying content. The TUI
+ * must stamp the SAME boundary or its decode window starts at the first
+ * visible token and tok/s inflates on reasoning models.
+ */
+function isTokenDelta(chunk: { type: string; text?: string; argumentsDelta?: string; name?: unknown }): boolean {
+  switch (chunk.type) {
+    case 'text-delta':
+    case 'reasoning-delta':
+      return chunk.text !== undefined && chunk.text !== ''
+    case 'tool-call-delta':
+      return (chunk.argumentsDelta ?? '') !== '' || chunk.name !== undefined
+    default:
+      return false
+  }
+}
+
+/** Timing/throughput accumulators shared by the fold and the folder. */
+interface Throughput {
+  /** Decode windows (ms) of steps sampled for tok/s. */
+  outputMs: number[]
+  /** Output tokens over the same sampled steps. */
+  decodeTokens: number
+  /** Summed TTFT over first-token steps. */
+  firstTokenTotal: number
+  /** Steps carrying a recorded first token. */
+  firstTokenCount: number
 }
 
 /**
@@ -86,42 +127,36 @@ interface StepTiming {
 export function computeStats(events: readonly SessionEvent[]): SessionStats {
   const stats: SessionStats = { ...EMPTY }
   const perStep = new Map<string, StepTiming>()
-  const outputMs: number[] = []
-  let decodeTokens = 0
-  let firstTokenTotal = 0
-  let firstTokenCount = 0
+  const throughput: Throughput = { outputMs: [], decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
+  let lastTurn: number | undefined
 
   for (const event of events) {
     switch (event.type) {
-      case 'turn/end':
-        stats.turns += 1
-        break
       case 'step/start':
-        stats.steps += 1
         perStep.set(stepKey(event.data.turn, event.data.step), { start: event.time })
         break
       case 'step/end': {
-        const timing = perStep.get(stepKey(event.data.turn, event.data.step))
-        if (timing === undefined) break
-        settleStep(stats, timing, event.time, outputMs, (ms) => { decodeTokens += ms })
-        perStep.delete(stepKey(event.data.turn, event.data.step))
+        // The projection counts turns/steps here (unique turns) and discards
+        // steps that never produced an assistant message; usage is still
+        // counted once per step (the projection's tokenUsage is step-keyed).
+        if (lastTurn !== event.data.turn) {
+          stats.turns += 1
+          lastTurn = event.data.turn
+        }
+        stats.steps += 1
+        const key = stepKey(event.data.turn, event.data.step)
+        const timing = perStep.get(key)
+        if (timing !== undefined) {
+          if (timing.usage !== undefined) addUsage(stats, timing.usage)
+          perStep.delete(key)
+        }
         break
       }
       case 'assistant/chunk': {
         const { chunk } = event.data
-        if (chunk.type === 'text-delta') {
-          const timing = perStep.get(stepKey(event.data.turn, event.data.step))
-          if (timing !== undefined && timing.firstDelta === undefined) {
-            timing.firstDelta = event.time
-            const start = timing.start
-            if (start !== undefined) {
-              firstTokenTotal += event.time - start
-              firstTokenCount += 1
-            }
-          }
-        } else if (chunk.type === 'usage') {
+        if (chunk.type === 'usage') {
           // Streaming usage is provisional: assistant/message carries the same
-          // value and overwrites it at settle, so it is counted exactly once.
+          // value and replaces it at settle, so it is counted exactly once.
           const key = stepKey(event.data.turn, event.data.step)
           const timing = perStep.get(key)
           if (timing !== undefined) {
@@ -130,16 +165,26 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
             // A usage chunk without a step boundary (replay edge): count once.
             addUsage(stats, chunk.usage)
           }
+        } else if (isTokenDelta(chunk)) {
+          // The FIRST token delta of the step stamps the decode-window start
+          // (Web firstTokenTime). Reasoning and tool-call deltas count too.
+          const timing = perStep.get(stepKey(event.data.turn, event.data.step))
+          if (timing !== undefined && timing.firstDelta === undefined) {
+            timing.firstDelta = event.time
+          }
         }
         break
       }
       case 'assistant/message': {
-        const timing = perStep.get(stepKey(event.data.turn, event.data.step))
+        const key = stepKey(event.data.turn, event.data.step)
+        const timing = perStep.get(key)
         if (timing !== undefined) {
-          // The message time is the step's decode end (the Web's
-          // completedTime); the message usage is the authoritative one.
+          // The message time is the step's decode end and its usage is the
+          // authoritative one; the whole step settles HERE (projection
+          // semantics) — step/end only counts turns/steps and the usage.
           timing.completed = event.time
           if (event.data.usage !== undefined) timing.usage = event.data.usage
+          settleStep(stats, timing, throughput)
         } else if (event.data.usage !== undefined) {
           // A message without a step boundary (replay edge): count once.
           addUsage(stats, event.data.usage)
@@ -155,37 +200,34 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
     }
   }
 
-  if (firstTokenCount > 0) stats.firstTokenMsAvg = firstTokenTotal / firstTokenCount
-  const streamMs = outputMs.reduce((sum, ms) => sum + ms, 0)
-  if (streamMs > 0) stats.tokensPerSec = Math.round((decodeTokens * 1000) / streamMs)
+  if (throughput.firstTokenCount > 0) stats.firstTokenMsAvg = throughput.firstTokenTotal / throughput.firstTokenCount
+  const streamMs = throughput.outputMs.reduce((sum, ms) => sum + ms, 0)
+  if (streamMs > 0) stats.tokensPerSec = Math.round((throughput.decodeTokens * 1000) / streamMs)
   const billedInput = stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens
   if (billedInput > 0) stats.cacheHitPct = (stats.cacheReadTokens * 100) / billedInput
   return stats
 }
 
-/** Settle one step at its end boundary: wall time, decode window, usage. */
-function settleStep(
-  stats: SessionStats,
-  timing: StepTiming,
-  endTime: number,
-  outputMs: number[],
-  addDecodeTokens: (tokens: number) => void,
-): void {
-  // Decode end prefers the assistant/message time (Web completedTime); a step
-  // with no message event falls back to its step/end time.
-  const completed = timing.completed ?? endTime
+/** Settle one step's TIMING at its assistant/message boundary. A step with
+ * no message (cancelled/failed) never reaches here — the projection counts
+ * no timing for it. Usage is NOT settled here; step/end adds it once. */
+function settleStep(stats: SessionStats, timing: StepTiming, throughput: Throughput): void {
+  const completed = timing.completed
+  if (completed === undefined) return
   const start = timing.start
   if (start !== undefined) stats.llmMs += Math.max(0, completed - start)
-  const usage = timing.usage
-  if (usage !== undefined) {
-    addUsage(stats, usage)
+  const first = timing.firstDelta
+  if (first !== undefined) {
+    // TTFT: step/start → first token (the projection's ttftMs).
+    throughput.firstTokenTotal += Math.max(0, first - (start ?? completed))
+    throughput.firstTokenCount += 1
     // Sampled throughput: the decode window enters the denominator only when
-    // the step also reported usage, and vice versa (Web turn-metrics sampled
+    // the step also reported usage, and vice versa (projection sampled
     // semantics) — a reasoning-only or usage-less step skews neither side.
-    const first = timing.firstDelta
-    if (first !== undefined) {
-      outputMs.push(Math.max(0, completed - first))
-      addDecodeTokens(usage.outputTokens)
+    const usage = timing.usage
+    if (usage !== undefined) {
+      throughput.outputMs.push(Math.max(0, completed - first))
+      throughput.decodeTokens += usage.outputTokens
     }
   }
 }
@@ -207,10 +249,8 @@ function addUsage(stats: SessionStats, usage: UsageLike): void {
 export class StatsFolder {
   private readonly stats: SessionStats = { ...EMPTY }
   private readonly perStep = new Map<string, StepTiming>()
-  private readonly outputMs: number[] = []
-  private decodeTokens = 0
-  private firstTokenTotal = 0
-  private firstTokenCount = 0
+  private readonly throughput: Throughput = { outputMs: [], decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
+  private lastTurn: number | undefined
 
   /**
    * Apply appended events in log order (a full log on resume, suffixes after).
@@ -223,9 +263,9 @@ export class StatsFolder {
   /** The derived stats as of the last applied event. */
   snapshot(): SessionStats {
     const derived: SessionStats = { ...this.stats }
-    if (this.firstTokenCount > 0) derived.firstTokenMsAvg = this.firstTokenTotal / this.firstTokenCount
-    const streamMs = this.outputMs.reduce((sum, ms) => sum + ms, 0)
-    if (streamMs > 0) derived.tokensPerSec = Math.round((this.decodeTokens * 1000) / streamMs)
+    if (this.throughput.firstTokenCount > 0) derived.firstTokenMsAvg = this.throughput.firstTokenTotal / this.throughput.firstTokenCount
+    const streamMs = this.throughput.outputMs.reduce((sum, ms) => sum + ms, 0)
+    if (streamMs > 0) derived.tokensPerSec = Math.round((this.throughput.decodeTokens * 1000) / streamMs)
     const billedInput = derived.inputTokens + derived.cacheReadTokens + derived.cacheWriteTokens
     if (billedInput > 0) derived.cacheHitPct = (derived.cacheReadTokens * 100) / billedInput
     return derived
@@ -233,41 +273,37 @@ export class StatsFolder {
 
   private applyEvent(event: SessionEvent): void {
     switch (event.type) {
-      case 'turn/end':
-        this.stats.turns += 1
-        break
       case 'step/start':
-        this.stats.steps += 1
         this.perStep.set(stepKey(event.data.turn, event.data.step), { start: event.time })
         break
       case 'step/end': {
+        if (this.lastTurn !== event.data.turn) {
+          this.stats.turns += 1
+          this.lastTurn = event.data.turn
+        }
+        this.stats.steps += 1
         const key = stepKey(event.data.turn, event.data.step)
         const timing = this.perStep.get(key)
-        if (timing === undefined) break
-        settleStep(this.stats, timing, event.time, this.outputMs, (tokens) => { this.decodeTokens += tokens })
-        this.perStep.delete(key)
+        if (timing !== undefined) {
+          if (timing.usage !== undefined) addUsage(this.stats, timing.usage)
+          this.perStep.delete(key)
+        }
         break
       }
       case 'assistant/chunk': {
         const { chunk } = event.data
-        if (chunk.type === 'text-delta') {
-          const key = stepKey(event.data.turn, event.data.step)
-          const timing = this.perStep.get(key)
-          if (timing !== undefined && timing.firstDelta === undefined) {
-            timing.firstDelta = event.time
-            const start = timing.start
-            if (start !== undefined) {
-              this.firstTokenTotal += event.time - start
-              this.firstTokenCount += 1
-            }
-          }
-        } else if (chunk.type === 'usage') {
+        if (chunk.type === 'usage') {
           const key = stepKey(event.data.turn, event.data.step)
           const timing = this.perStep.get(key)
           if (timing !== undefined) {
             if (timing.usage === undefined) timing.usage = chunk.usage
           } else {
             addUsage(this.stats, chunk.usage)
+          }
+        } else if (isTokenDelta(chunk)) {
+          const timing = this.perStep.get(stepKey(event.data.turn, event.data.step))
+          if (timing !== undefined && timing.firstDelta === undefined) {
+            timing.firstDelta = event.time
           }
         }
         break
@@ -278,6 +314,7 @@ export class StatsFolder {
         if (timing !== undefined) {
           timing.completed = event.time
           if (event.data.usage !== undefined) timing.usage = event.data.usage
+          settleStep(this.stats, timing, this.throughput)
         } else if (event.data.usage !== undefined) {
           addUsage(this.stats, event.data.usage)
         }

@@ -107,6 +107,13 @@ export interface TuiCommandRunner {
    * Command handlers must NEVER stop the app, flush or exit themselves. */
   requestExit(): void
   cwd: string
+  /**
+   * The live session's workspace (its header cwd), falling back to the
+   * process cwd before any session exists. The editor autocomplete, the
+   * footer/welcome cwd, and the per-directory input history follow THIS,
+   * so switching sessions moves the whole surface with the session.
+   */
+  sessionCwd(): string
   signal: AbortSignal
   /** The runner's monotonic session generation; bumped on every session
    * swap. Late async work must re-check it before committing state. */
@@ -201,7 +208,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         description: command.description,
         argumentHint: command.input?.hint,
       })),
-      cwd,
+      runner.sessionCwd(),
     )
   }
   refreshCompletions()
@@ -334,8 +341,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           {
             id: 'cwd',
             label: color.textDim('Working directory'),
-            description: color.textDim('Where this session runs'),
-            currentValue: color.textDim(cwd),
+            description: color.textDim('The live session workspace (follows session switches)'),
+            currentValue: color.textDim(runner.sessionCwd()),
           },
         ],
         (id, value) => {

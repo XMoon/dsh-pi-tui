@@ -712,7 +712,7 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       app.setWelcomeCard({
-        cwd,
+        cwd: sessionCwd(),
         sessionId: liveAgent.session.id,
         model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
         version: packageVersion(),
@@ -773,6 +773,14 @@ export function apply(ctx: Context, config: Config): void {
     // Footer state: model label, cwd, git branch, turn/step counters, and
     // the stats line (LLM timing, tokens, context pressure).
     const cwd = process.cwd()
+    /**
+     * The LIVE session's workspace: each session carries its own header cwd
+     * (fixed at creation, e.g. a session birthed by the web in another
+     * directory). The footer/welcome/completions follow THIS cwd so a
+     * session switch updates the whole surface; `cwd` (the process cwd)
+     * stays for launch-relative concerns (`!` shell, /export paths).
+     */
+    const sessionCwd = (): string => liveAgent?.session.header.cwd ?? cwd
     /** The footer model label: the live selection (with effort) when one exists. */
     const modelLabel = (): string => {
       const selection = selected.current
@@ -799,10 +807,11 @@ export function apply(ctx: Context, config: Config): void {
       // rides the effective preset (derived from the sandbox+approval knob
       // folds).
       const permission = ctx.get('permissionPresets')
+      const liveCwd = sessionCwd()
       app.setStatus({
         model: modelLabel(),
-        cwd: shortCwd(cwd),
-        branch: gitBranch(cwd),
+        cwd: shortCwd(liveCwd),
+        branch: gitBranch(liveCwd),
         goal: goalText,
         turns: stats.turns,
         steps: stats.steps,
@@ -1311,14 +1320,15 @@ export function apply(ctx: Context, config: Config): void {
     }
     app = startProcessTui({
       onSubmit: (text) => {
-        // Persist the (newest-first) input history for this cwd; the editor
-        // already recorded the line through TuiApp's submit hook. A failed
-        // settings write is user-recoverable: notify instead of dropping it.
+        // Persist the (newest-first) input history for the LIVE session's
+        // cwd (the editor already recorded the line through TuiApp's submit
+        // hook). A failed settings write is user-recoverable: notify instead
+        // of dropping it.
         const history = app.getInputHistory()
         if (history.length > 0) {
           const settings = tuiSettings
           if (settings !== undefined) {
-            runDetached('settings history write', () => settings.replace({ ...settings.get(), history: { ...settings.get().history, [cwd]: history } }), {
+            runDetached('settings history write', () => settings.replace({ ...settings.get(), history: { ...settings.get().history, [sessionCwd()]: history } }), {
               diag,
               notify: (message) => app.notify(message, 'error'),
               recoverable: () => true,
@@ -1594,7 +1604,7 @@ export function apply(ctx: Context, config: Config): void {
     // (new installs default to 'on' — alt screen by default): boot applies
     // it, the settings panel and Ctrl+F both write through it.
     if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
-    const storedHistory = tuiSettings?.get().history[cwd]
+    const storedHistory = tuiSettings?.get().history[sessionCwd()]
     if (storedHistory !== undefined && storedHistory.length > 0) {
       app.seedInputHistory(storedHistory)
     }
@@ -1666,7 +1676,7 @@ export function apply(ctx: Context, config: Config): void {
       repaint(app, folder)
       refreshStatus()
       refreshQueue()
-      setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${agent.session.id}`)
+      setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())} · ${agent.session.id}`)
       updateWelcomeCard()
       registerCommands()
       // The per-skill slash commands are agent-scoped: they appear once the
@@ -1744,6 +1754,11 @@ export function apply(ctx: Context, config: Config): void {
       agents: agents as unknown as TuiCommandRunner['agents'],
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       cwd,
+      /** The live session's workspace cwd (header), falling back to the
+       * process cwd before any session exists; the footer/welcome/
+       * completions/history follow it so a session switch updates the
+       * whole surface. */
+      sessionCwd,
       signal,
       get sessionGeneration() { return sessionGeneration },
       compose,
@@ -1794,7 +1809,7 @@ export function apply(ctx: Context, config: Config): void {
     } else {
       app.setWelcomeIdle(true)
       refreshStatus()
-      setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)}`)
+      setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())}`)
     }
     // Command registration is sessionless: it must run on BOTH startup
     // surfaces (resume path registers inside initLiveSession; the deferred
