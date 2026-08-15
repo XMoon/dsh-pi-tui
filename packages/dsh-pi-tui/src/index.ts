@@ -211,6 +211,7 @@ const DANGER_PATTERNS: readonly RegExp[] = [
 /** Divergence-guard notices (user-facing, English like the rest of the TUI). */
 const GUARD_BLOCKED_NOTIFY = 'This session may be open in another dsh process (TUI/web); send blocked. Press Enter again to force (may corrupt the session log)'
 const GUARD_FORCED_NOTIFY = 'Forced send — the session may be written by another process; the log may be damaged'
+const GUARD_REMOVED_NOTIFY = 'This session\'s log was removed externally — it can no longer be persisted. Press Enter again to continue without persistence (restart to recover)'
 
 /**
  * Whether a shell command matches a destructive pattern. `rm` is treated
@@ -569,7 +570,7 @@ export function apply(ctx: Context, config: Config): void {
      * 'forced' when the user overrode a still-bad state, and 'unavailable'
      * when the deployment cannot guard (proceed).
      */
-    const guardSend = async (): Promise<'ok' | 'blocked' | 'forced' | 'unavailable'> => {
+    const guardSend = async (): Promise<'ok' | 'blocked' | 'blocked-removed' | 'forced' | 'unavailable'> => {
       if (liveAgent === undefined) return 'ok'
       const session: GuardSessionLike = {
         id: liveAgent.session.id,
@@ -601,6 +602,13 @@ export function apply(ctx: Context, config: Config): void {
             return 'forced'
           }
           return 'blocked'
+        case 'removed':
+          diag.warn('guard removed', { session: session.id, revision: outcome.revision })
+          if (guardForced) {
+            guardForced = false
+            return 'forced'
+          }
+          return 'blocked-removed'
         case 'unavailable':
           guardForced = false
           return 'ok'
@@ -934,6 +942,11 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(GUARD_BLOCKED_NOTIFY, 'error')
           return
         }
+        if (verdict === 'blocked-removed') {
+          app.setEditorText(text)
+          app.notify(GUARD_REMOVED_NOTIFY, 'error')
+          return
+        }
         if (verdict === 'forced') {
           app.notify(GUARD_FORCED_NOTIFY, 'error')
         }
@@ -1080,6 +1093,11 @@ export function apply(ctx: Context, config: Config): void {
           if (verdict === 'blocked') {
             app.setEditorText(text)
             app.notify(GUARD_BLOCKED_NOTIFY, 'error')
+            return
+          }
+          if (verdict === 'blocked-removed') {
+            app.setEditorText(text)
+            app.notify(GUARD_REMOVED_NOTIFY, 'error')
             return
           }
           const forced = verdict === 'forced'
@@ -1503,7 +1521,19 @@ export function apply(ctx: Context, config: Config): void {
         app.setWorking(false)
         paintNow()
         refreshStatus()
-        void sessions.flush(liveAgent!.session)
+        const finished = liveAgent!.session
+        void sessions.flush(finished).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error)
+          const removed = (error as NodeJS.ErrnoException).code === 'ENOENT'
+          diag.error('flush failed', { session: finished.id, error: message, removed })
+          // A failed durable write must never kill the process: the live
+          // session keeps working in memory and the next turn-end retries.
+          // When the log was removed externally the retry cannot succeed
+          // until restart, so the notice says so instead of a bare error.
+          app.notify(removed
+            ? 'session persistence failed: the session log was removed externally — this session can no longer be persisted (restart to recover)'
+            : `session persistence failed: ${message}`, 'error')
+        })
       } else if (event.type === 'step/start') {
         refreshStatus()
       }

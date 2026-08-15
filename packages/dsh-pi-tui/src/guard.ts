@@ -65,6 +65,8 @@ export type GuardOutcome =
   | { kind: 'ok'; revision: string; fileEvents?: number }
   /** The file has more committed events than this process's memory. */
   | { kind: 'diverged'; revision: string; fileEvents: number; memoryEvents: number }
+  /** The file was observed earlier in this process but has since disappeared. */
+  | { kind: 'removed'; revision: string }
   /** The committed prefix cannot be read (corrupt or mid-write). */
   | { kind: 'unreadable'; revision: string; error: string }
   /** The guard cannot run for this deployment/session; do not block. */
@@ -97,11 +99,19 @@ export async function checkDivergence(
   try {
     current = stat(artifact.path)
   } catch (error) {
-    // A missing artifact is a fresh session (lazy materialization): nothing
-    // external can have written it. Anything else is unreadable.
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // A missing artifact is a fresh session (lazy materialization): nothing
+      // external can have written it. But when this process already observed
+      // a committed file earlier, disappearance means the log was removed
+      // externally — the next append would ENOENT and could take down the
+      // process, so block before the write instead.
+      if (state.revision !== '') {
+        state.diverged = true
+        return { kind: 'removed', revision: state.revision }
+      }
       return { kind: 'ok', revision: state.revision }
     }
+    // Anything else is unreadable.
     state.diverged = true
     return { kind: 'unreadable', revision: state.revision, error: error instanceof Error ? error.message : String(error) }
   }
