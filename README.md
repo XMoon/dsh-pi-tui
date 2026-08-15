@@ -145,6 +145,12 @@ registry package for real use.
 - `Alt+↑` — dequeue: pull every queued message back into the editor draft.
 - `Ctrl+T` — toggle the full todo list; the dock above the editor always shows
   the goal, todo summary, background tasks, and queued input.
+- `@` — file/folder mentions in the editor: `@` + Tab completes files from the
+  whole workspace (fd-backed when `fd` is on PATH, with a built-in recursive
+  fallback otherwise). The literal `@path` is submitted and the model reads
+  the file itself. With background tasks running, an empty editor's `↓` or
+  `Ctrl+J` opens the task browser (Enter views a job's output or a subagent's
+  transcript, `s` stops).
 
 ## Session lifecycle
 

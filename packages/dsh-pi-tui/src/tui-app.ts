@@ -16,7 +16,6 @@
 
 import {
   Box,
-  CombinedAutocompleteProvider,
   Container,
   Editor,
   Markdown,
@@ -68,6 +67,7 @@ import {
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
 import { QuestionFlow } from './question.ts'
+import { MentionProvider } from './mentions.ts'
 import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
@@ -2110,9 +2110,13 @@ export class TuiApp {
     this.requestRender()
   }
 
-  /** Install slash-command + file-path autocompletion on the editor. */
-  setCommandCompletions(commands: readonly SlashCommand[], cwd: string): void {
-    this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([...commands], cwd))
+  /**
+   * Install slash-command + file-path autocompletion on the editor, plus
+   * `@`-file mentions (fd-backed when `fdPath` is provided; a bounded
+   * recursive fallback otherwise — see mentions.ts).
+   */
+  setCommandCompletions(commands: readonly SlashCommand[], cwd: string, fdPath: string | null = null): void {
+    this.editor.setAutocompleteProvider(new MentionProvider([...commands], cwd, fdPath))
   }
 
   /**

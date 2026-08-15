@@ -27,6 +27,7 @@ import type { Diag } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { color, loadCustomTheme, settingsListTheme } from './theme.ts'
+import { resolveFdPath } from './mentions.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
@@ -146,6 +147,9 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   const { ctx, app } = runner
   const cwd = runner.cwd
   const signal = runner.signal
+  // `@`-file mentions use fd when it is on PATH (whole-tree fuzzy search);
+  // without it the MentionProvider falls back to a bounded recursive scan.
+  const fdPath = resolveFdPath()
   const commands = ctx.get('commands')
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
@@ -209,6 +213,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         argumentHint: command.input?.hint,
       })),
       runner.sessionCwd(),
+      fdPath,
     )
   }
   refreshCompletions()
