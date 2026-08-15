@@ -12,7 +12,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { closeSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
+import { readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -79,7 +79,7 @@ import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
 import { runDetached, isCancellation } from './detached.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
-import { createBoundedOutput, formatBytes, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES } from './bounded-output.ts'
+import { createBoundedOutput, createFileCapture, formatBytes, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
 import {
   checkDivergence,
@@ -958,65 +958,69 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       const child = spawn(command, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: true })
-      // Bounded capture: the card keeps only the TAIL (byte- and
-      // line-capped); the FULL output is streamed to a 0600 temp file so a
-      // truncated run still leaves the complete transcript available. The
-      // temp files are removed at TUI exit (cleanup below).
+      // Bounded capture: the card keeps only the TAIL (byte- and line-
+      // capped, unterminated output included); the FULL output is streamed
+      // to a 0600 temp file (disk-capped) so a truncated run still leaves
+      // the complete transcript available. Untruncated runs delete the file
+      // on close; the files that remain are removed at TUI exit (cleanup).
       const bounded = createBoundedOutput()
       const fullPath = join(tmpdir(), `dsh-pi-tui-shell-${process.pid}-${randomUUID()}.log`)
-      let fullFd: number | undefined
-      try {
-        fullFd = openSync(fullPath, 'w', 0o600)
-      } catch {
-        // Temp-file capture is best-effort; the bounded tail still works.
-        fullFd = undefined
-      }
-      if (fullFd !== undefined) shellTempFiles.add(fullPath)
+      const full = createFileCapture(fullPath, SHELL_OUTPUT_DISK_CAP_BYTES)
+      if (full.active) shellTempFiles.add(fullPath)
       const onData = (chunk: Buffer): void => {
         bounded.append(chunk.toString())
-        if (fullFd !== undefined) {
-          try {
-            writeSync(fullFd, chunk)
-          } catch {
-            // A failed temp write must not take the run down.
-          }
-        }
+        full.append(chunk)
       }
       child.stdout.on('data', onData)
       child.stderr.on('data', onData)
       localSignal.addEventListener('abort', () => child.kill(), { once: true })
-      const closeFull = (): void => {
-        if (fullFd !== undefined) {
-          try {
-            closeSync(fullFd)
-          } catch {
-            // Best effort.
-          }
-          fullFd = undefined
-        }
-      }
       child.on('error', (error) => {
         releaseController()
-        closeFull()
+        // A spawn failure leaves nothing worth keeping: drop the capture.
+        full.dispose()
+        shellTempFiles.delete(fullPath)
         settle(`failed: ${error.message}`, 'error')
       })
       child.on('close', (code, childSignal) => {
         releaseController()
-        closeFull()
         if (localSignal.aborted) {
+          // The run was cancelled: the partial capture is noise, delete it.
+          full.dispose()
+          shellTempFiles.delete(fullPath)
           settle('aborted', 'error')
           return
         }
-        const output = bounded.tail.trim()
-        const lines: string[] = []
-        if (output !== '') lines.push(output)
         if (bounded.truncated) {
+          // Keep the full-output file for a truncated run — but only when
+          // the capture is actually alive (creation/write failures are
+          // never advertised, and a disk-capped file says so).
+          if (full.exists) {
+            full.close()
+          } else {
+            full.dispose()
+            shellTempFiles.delete(fullPath)
+          }
+          const output = bounded.tail.trim()
+          const lines: string[] = []
+          if (output !== '') lines.push(output)
           lines.push(`… output truncated: kept the last ${formatBytes(SHELL_OUTPUT_CAP_BYTES)} / ${SHELL_OUTPUT_CAP_LINES} lines of ${formatBytes(bounded.totalBytes)} (${bounded.totalLines} lines)`)
-          lines.push(`full output: ${fullPath}`)
+          if (full.exists) {
+            lines.push(full.truncated
+              ? `full output (disk capture truncated at ${formatBytes(SHELL_OUTPUT_DISK_CAP_BYTES)}): ${fullPath}`
+              : `full output: ${fullPath}`)
+          }
+          const exit = code !== null ? `exit ${code}` : `signal ${childSignal ?? '?'}`
+          lines.push(`[${exit}]`)
+          settle(lines.join('\n'), code === 0 ? 'ok' : 'error')
+        } else {
+          // Untruncated output: no reason to keep a user-invisible temp
+          // file around until TUI exit.
+          full.dispose()
+          shellTempFiles.delete(fullPath)
+          const output = bounded.tail.trim()
+          const exit = code !== null ? `exit ${code}` : `signal ${childSignal ?? '?'}`
+          settle(output === '' ? exit : `${output}\n[${exit}]`, code === 0 ? 'ok' : 'error')
         }
-        const exit = code !== null ? `exit ${code}` : `signal ${childSignal ?? '?'}`
-        lines.push(`[${exit}]`)
-        settle(lines.join('\n'), code === 0 ? 'ok' : 'error')
       })
     }
     // Coalesced repaint: streaming events fold into the folder immediately

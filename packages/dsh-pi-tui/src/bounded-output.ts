@@ -1,15 +1,22 @@
 /**
  * Bounded accumulation of local-shell output: the UI card only ever holds
  * the TAIL of the stream (byte- and line-capped), so a runaway `yes` or
- * `find /` cannot grow memory without bound. Totals are tracked separately
- * so the card can state exactly how much was received and dropped.
+ * `find /` cannot grow memory without bound — including a stream that never
+ * emits a newline (the unterminated tail is capped and UTF-8-safe too).
+ * Totals are tracked separately so the card can state exactly how much was
+ * received and dropped. A companion {@link createFileCapture} bounds the
+ * full-output disk capture the same way, so /tmp cannot be filled either.
  * @module @xmoon76/dsh-pi-tui/bounded-output
  */
+
+import { closeSync, openSync, rmSync, writeSync } from 'node:fs'
 
 /** Default byte cap for the retained tail (~256 KiB of UTF-8). */
 export const SHELL_OUTPUT_CAP_BYTES = 256 * 1024
 /** Default line cap for the retained tail. */
 export const SHELL_OUTPUT_CAP_LINES = 4000
+/** Default hard cap for the full-output disk capture (~8 MiB). */
+export const SHELL_OUTPUT_DISK_CAP_BYTES = 8 * 1024 * 1024
 
 export interface BoundedOutput {
   /** The retained tail text (line- and byte-capped). */
@@ -24,12 +31,28 @@ export interface BoundedOutput {
   append(chunk: string): void
 }
 
+/** The last `maxBytes` of `text` cut at a UTF-8 character boundary. */
+export function utf8Tail(text: string, maxBytes: number): string {
+  const buffer = Buffer.from(text, 'utf8')
+  if (buffer.length <= maxBytes) return text
+  // Slice the tail and skip leading continuation bytes (10xxxxxx), so a
+  // multi-byte character cut in half is dropped whole, never mangled.
+  const sliced = buffer.subarray(buffer.length - maxBytes)
+  let start = 0
+  while (start < sliced.length && (sliced[start]! & 0xc0) === 0x80) start += 1
+  return sliced.subarray(start).toString('utf8')
+}
+
 /**
  * Create a bounded output accumulator. Capping is line-granular: whole
  * lines are dropped from the front once the retained tail exceeds the byte
  * or line cap, so a single gigantic line can still exceed the byte cap
- * (splitting it would corrupt the tail's meaning). `totalBytes` counts the
- * UTF-8 bytes of EVERY chunk, including dropped content.
+ * (splitting it would corrupt the tail's meaning). The unterminated tail
+ * (`pendingPartial`) is bounded the same way: when it alone exceeds the
+ * byte cap, every completed line is dropped and the visible tail becomes
+ * the UTF-8-safe suffix of the partial — a newline arriving later can never
+ * re-introduce the discarded prefix. `totalBytes` counts the UTF-8 bytes of
+ * EVERY chunk, including dropped content.
  */
 export function createBoundedOutput(
   capBytes: number = SHELL_OUTPUT_CAP_BYTES,
@@ -41,16 +64,23 @@ export function createBoundedOutput(
   let truncated = false
   /** A line whose terminating newline has not arrived yet (spans chunks). */
   let pendingPartial: string | undefined
-  // Incremental byte count of the retained tail: recomputing it from
-  // `tailLines` on every append is O(n) per chunk (O(n²) over a stream),
-  // and the cap check runs once per dropped line.
+  // Incremental byte counts (recomputing from the strings per append would
+  // be O(n) per chunk — O(n²) over a stream). The counts include the '\n'
+  // SEPARATORS of the visible tail (`tailLines.join('\n')`), so the byte
+  // cap is a hard limit on the actual UTF-8 size of `tail`, not just on
+  // the line payloads.
   let tailBytesCount = 0
+  let partialBytesCount = 0
   const pushTailLine = (line: string): void => {
     tailLines.push(line)
-    tailBytesCount += Buffer.byteLength(line, 'utf8')
+    // The separator before this line exists once a second line is present.
+    tailBytesCount += Buffer.byteLength(line, 'utf8') + (tailLines.length > 1 ? 1 : 0)
   }
   const shiftTailLine = (): void => {
-    tailBytesCount -= Buffer.byteLength(tailLines.shift()!, 'utf8')
+    const line = tailLines.shift()!
+    // Dropping the first line also drops its following separator when
+    // another line remains.
+    tailBytesCount -= Buffer.byteLength(line, 'utf8') + (tailLines.length >= 1 ? 1 : 0)
   }
   return {
     get tail() {
@@ -78,6 +108,7 @@ export function createBoundedOutput(
         if (pendingPartial !== undefined) {
           pushTailLine(pendingPartial + parts[index]!)
           pendingPartial = undefined
+          partialBytesCount = 0
         } else {
           pushTailLine(parts[index]!)
         }
@@ -91,13 +122,136 @@ export function createBoundedOutput(
           pushTailLine(pendingPartial)
           totalLines += 1
           pendingPartial = undefined
+          partialBytesCount = 0
         }
       } else {
         pendingPartial = pendingPartial === undefined ? last : pendingPartial + last
+        partialBytesCount += Buffer.byteLength(last, 'utf8')
+        // An unterminated stream must stay bounded too: once the partial
+        // alone exceeds the byte cap, the visible tail is its UTF-8-safe
+        // suffix and every older completed line is dropped (the partial is
+        // newer than all of them). A newline later never brings the
+        // discarded prefix back.
+        if (partialBytesCount > capBytes) {
+          tailLines.length = 0
+          tailBytesCount = 0
+          pendingPartial = utf8Tail(pendingPartial, capBytes)
+          partialBytesCount = Buffer.byteLength(pendingPartial, 'utf8')
+          truncated = true
+        }
       }
-      while ((tailLines.length > capLines || tailBytesCount > capBytes) && tailLines.length > 0) {
+      while ((tailLines.length > capLines || tailBytesCount + partialBytesCount + (pendingPartial !== undefined ? 1 : 0) > capBytes) && tailLines.length > 0) {
         shiftTailLine()
         truncated = true
+      }
+    },
+  }
+}
+
+/**
+ * A bounded full-output disk capture: writes every chunk to a 0600 temp
+ * file until `capBytes` are written, then stops (never fills /tmp). Write
+ * failures deactivate the capture and remove the file, so a broken capture
+ * is never advertised. {@link close} closes the fd and keeps the file;
+ * {@link dispose} deletes the file; both are idempotent.
+ */
+export interface FileCapture {
+  /** The temp file path (may not exist when creation failed). */
+  readonly path: string
+  /** Whether the capture is live (file open, cap not reached). */
+  readonly active: boolean
+  /** Whether the file is present on disk (closed and capped files keep it). */
+  readonly exists: boolean
+  /** Whether the disk cap was reached (file holds the first capBytes). */
+  readonly truncated: boolean
+  /** Append raw bytes; no-op when inactive. */
+  append(chunk: Buffer): void
+  /** Close the file (keeps it). */
+  close(): void
+  /** Close and delete the file; idempotent. */
+  dispose(): void
+}
+
+/**
+ * Create the bounded full-output capture. On open failure the capture is
+ * inactive and nothing exists (append/close/dispose are safe no-ops) —
+ * callers must check {@link FileCapture.exists} before advertising the path.
+ * @param path - the temp file path.
+ * @param capBytes - hard disk cap; 0 or negative disables the cap.
+ */
+export function createFileCapture(path: string, capBytes: number = SHELL_OUTPUT_DISK_CAP_BYTES): FileCapture {
+  let fd: number | undefined
+  let active = false
+  let fileExists = false
+  let truncated = false
+  let written = 0
+  try {
+    fd = openSync(path, 'w', 0o600)
+    active = true
+    fileExists = true
+  } catch {
+    fd = undefined
+  }
+  const closeFd = (): void => {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {
+        // Best effort.
+      }
+      fd = undefined
+    }
+  }
+  return {
+    path,
+    get active() {
+      return active
+    },
+    get exists() {
+      return fileExists
+    },
+    get truncated() {
+      return truncated
+    },
+    append(chunk: Buffer): void {
+      if (fd === undefined || !active) return
+      try {
+        if (capBytes > 0 && written + chunk.length > capBytes) {
+          const remaining = capBytes - written
+          if (remaining > 0) writeSync(fd, chunk.subarray(0, remaining))
+          written = capBytes
+          truncated = true
+          closeFd()
+          active = false
+          return
+        }
+        writeSync(fd, chunk)
+        written += chunk.length
+      } catch {
+        // A failed write must not take the run down: drop the capture and
+        // remove the (possibly partial) file so it is never advertised.
+        active = false
+        fileExists = false
+        closeFd()
+        try {
+          rmSync(path, { force: true })
+        } catch {
+          // Best effort.
+        }
+      }
+    },
+    close(): void {
+      active = false
+      closeFd()
+    },
+    dispose(): void {
+      active = false
+      fileExists = false
+      closeFd()
+      try {
+        rmSync(path, { force: true })
+      } catch {
+        // Best effort.
       }
     },
   }
