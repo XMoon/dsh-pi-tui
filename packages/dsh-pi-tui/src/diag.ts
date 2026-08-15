@@ -20,6 +20,7 @@
 import { closeSync, mkdirSync, openSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { safeErrorMessage } from './error-boundary.ts'
 
 /** Diagnostic severity, ascending. */
 export type DiagLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -69,9 +70,12 @@ function formatField(value: unknown): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) return String(value)
   try {
-    return JSON.stringify(value)
+    return JSON.stringify(value) ?? String(value)
   } catch {
-    return String(value)
+    // The JSON path failed (e.g. a circular object); the fallback must
+    // never throw either (a hostile toString/toPrimitive yields a fixed
+    // placeholder) — "writes are best-effort and never throw" holds.
+    return safeErrorMessage(value)
   }
 }
 

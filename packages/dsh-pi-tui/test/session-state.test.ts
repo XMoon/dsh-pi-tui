@@ -238,7 +238,8 @@ test('a failed model selection save rolls the selection back and notifies withou
   }
 })
 
-test('a late FAILED save never rolls back a newer successful selection (latest-wins)', async () => {  const ctx = new Context()
+test('a late FAILED save never rolls back a newer successful selection (latest-wins)', async () => {
+  const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()

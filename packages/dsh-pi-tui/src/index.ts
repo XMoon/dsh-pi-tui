@@ -11,11 +11,11 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { StringDecoder } from 'node:string_decoder'
 import { spawn } from 'node:child_process'
 import { readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -78,7 +78,8 @@ import { startProcessTui, type TuiApp } from './tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
-import { runDetached, isCancellation } from './detached.ts'
+import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
+import { safeErrorMessage } from './error-boundary.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
@@ -482,7 +483,7 @@ export function apply(ctx: Context, config: Config): void {
   // shell) or generation checks (guard tokens, menu latches).
   const lifecycleController = new AbortController()
 
-  void (async () => {
+  void (async () => { // allowlist: startup lifecycle root — see AGENTS.md
     // Loader siblings mount concurrently. Await the complete application before
     // creating an Agent so its scoped tools and adapters are not half-composed.
     await ctx.get('loader')?.await()
@@ -530,7 +531,7 @@ export function apply(ctx: Context, config: Config): void {
       try {
         return { composition: await compose(launchPreset) }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: launch preset unavailable: ${message}`)
         diag.warn('preset unavailable', { preset: launchPreset ?? 'default', error: message })
         return {
@@ -573,13 +574,13 @@ export function apply(ctx: Context, config: Config): void {
               diag.warn('preset ignored on resume', { session: sessionId, preset: launchPreset })
             }
           } catch (error) {
-            const message = `--preset ${launchPreset} not applied on resume: ${error instanceof Error ? error.message : String(error)}`
+            const message = `--preset ${launchPreset} not applied on resume: ${safeErrorMessage(error)}`
             ctx.logger.warn(`tui-runner: ${message}`)
             diag.warn('preset not applied on resume', { session: sessionId, preset: launchPreset, error: message })
           }
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
         diag.error('resume failed', { session: sessionId, error: message })
         resumeFailure = `session ${sessionId} could not be resumed; started a fresh session`
@@ -731,7 +732,7 @@ export function apply(ctx: Context, config: Config): void {
         liveAgent = next.agent
         await liveAgent.whenIdle()
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = safeErrorMessage(error)
         diag.error('swap failed', { from, error: message })
         return `swap failed: ${message}`
       }
@@ -762,7 +763,7 @@ export function apply(ctx: Context, config: Config): void {
         })
         return swapTo(next)
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
         diag.error('switch failed', { session: sessionId, error: message })
         return `switch failed: ${message}`
@@ -939,29 +940,38 @@ export function apply(ctx: Context, config: Config): void {
         // The dsh shell capability (sandbox policy + DSH env) when the
         // composition provides it; completion-based like the spawn fallback.
         const spec = shell.resolve({ command, workdir: cwd, signal: localSignal })
-        void shell.run(spec).then((result) => {
-          releaseController()
-          if (localSignal.aborted) {
+        // An owned workflow: the RESULT settles the UI card, so the settle
+        // logic stays in onResult and the cancellation/failure semantics
+        // stay per-task (runOwned — AGENTS.md); the classification
+        // diagnostics (cancellation → debug, failure → error) are recorded
+        // by runOwned itself. The dsh shell may reject an abort with a
+        // plain Error, so the task-local classifier routes it to onCancel
+        // instead of a false ERROR line. Never a bare void.
+        runOwned('local shell', () => shell.run(spec), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          isCancellation: () => localSignal.aborted,
+          onResult: (result) => {
+            releaseController()
+            if (localSignal.aborted) {
+              settle('aborted', 'error')
+              return
+            }
+            const output = [result.stdout.text.trim(), result.stderr.text.trim()].filter(Boolean).join('\n')
+            const exit = result.exitCode !== null ? `exit ${result.exitCode}` : `signal ${result.signal ?? '?'}`
+            settle(output === '' ? exit : `${output}\n[${exit}]`, result.exitCode === 0 ? 'ok' : 'error')
+          },
+          onCancel: () => {
+            // An abort-triggered rejection is a cancellation: settle the
+            // card as aborted like the resolved path does.
+            releaseController()
             settle('aborted', 'error')
-            return
-          }
-          const output = [result.stdout.text.trim(), result.stderr.text.trim()].filter(Boolean).join('\n')
-          const exit = result.exitCode !== null ? `exit ${result.exitCode}` : `signal ${result.signal ?? '?'}`
-          settle(output === '' ? exit : `${output}\n[${exit}]`, result.exitCode === 0 ? 'ok' : 'error')
-        }).catch((error: unknown) => {
-          releaseController()
-          // An abort-triggered rejection is a cancellation, not a failure:
-          // settle the card as aborted like the resolved path does.
-          if (isCancellation(error) || localSignal.aborted) {
-            settle('aborted', 'error')
-            return
-          }
-          const message = error instanceof Error ? error.message : String(error)
-          // The shell-capability path settles the card like the spawn
-          // fallback; the failure also lands in diagnostics with the live
-          // session id (the card itself is user-visible).
-          diag.error('local shell failed', { session: liveAgent?.session.id, error: message })
-          settle(`failed: ${message}`, 'error')
+          },
+          onError: (error) => {
+            releaseController()
+            const message = safeErrorMessage(error)
+            settle(`failed: ${message}`, 'error')
+          },
         })
         return
       }
@@ -1136,27 +1146,31 @@ export function apply(ctx: Context, config: Config): void {
       return true
     }
     /** Error sink for a failed session creation: restore the draft and
-     * surface the reason instead of silently dropping the submission. */
+     * surface the reason instead of silently dropping the submission. The
+     * classification diagnostics are owned by runOwned (label + session +
+     * error); this sink only restores the editor and notifies the user.
+     * (Cancellation never reaches here: runOwned routes it to onCancel.) */
     const failSubmission = (draft: string) => (error: unknown): void => {
-      // Lifecycle abort while creating/guarding is a cancellation, not a
-      // session failure: debug-only, no error notice, no draft restore.
-      if (isCancellation(error)) {
-        diag.debug('session submission cancelled', { session: liveAgent?.session.id })
-        return
-      }
-      const message = error instanceof Error ? error.message : String(error)
-      ctx.logger.error(`tui-runner: session creation failed: ${message}`)
-      diag.error('session creation failed', { error: message, session: liveAgent?.session.id })
-      // The draft was not sent; restore it without overwriting anything
-      // the user typed while the session was being created.
+      // Correctness side effect FIRST: restore the draft (the editor was
+      // cleared before submit) — the error text is best-effort afterwards,
+      // so a hostile value can never prevent the user's input from coming
+      // back. (The classification diagnostics are owned by runOwned.)
       app.setEditorText(mergeDraft(app.getDraft(), draft))
+      const message = safeErrorMessage(error)
+      try {
+        ctx.logger.error(`tui-runner: session creation failed: ${message}`)
+      } catch {
+        // The cordis logger must not block the notice.
+      }
       app.notify(`could not start a session: ${message}`, 'error')
     }
     /** The session-backed dispatch: create the session lazily (the first
      * user input is the deferred trigger), guard against cross-process
      * divergence, then execute a registered slash command or follow up. */
     const dispatchViaSession = (text: string): void => {
-      void ensureSession().then(async () => {
+      // An owned workflow: the chain's outcome drives the editor draft, the
+      // notices and the queue — runOwned (AGENTS.md), never a bare void.
+      runOwned('submit', () => ensureSession().then(async () => {
         const agent = liveAgent
         if (agent === undefined) return
         // The guard checks THIS agent's session; capture the identity so
@@ -1193,56 +1207,66 @@ export function apply(ctx: Context, config: Config): void {
         if (verdict.kind === 'forced') {
           app.notify(GUARD_FORCED_NOTIFY, 'error')
         }
-        // A registered slash command dispatches without a model turn; anything
-        // else is a follow-up prompt. The command lifecycle lands in the
-        // session log (command/run + command/done) and re-folds into the
-        // transcript through the session/event listener below.
+        // From here on the CAPTURED agent is used — never the mutable
+        // liveAgent: the guard verified THIS agent's session, and writing
+        // through a re-read closure variable could target a session the
+        // guard never saw (a switch between the check and the write).
         const commands = ctx.get('commands')
         if (commands !== undefined) {
           // Bare `/plan` toggles: when plan mode is already active it exits
           // instead of re-entering (the official command needs `/plan off`).
           const parsed = parseCommand(text)
           const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
-            && foldPlanMode(liveAgent?.session.events ?? [])
+            && foldPlanMode(agent.session.events ?? [])
             ? '/plan off'
             : text
-          void commands.execute(agent as Agent, toggled, signal).then((execution) => {
-            // The fallback follow-up still targets the CAPTURED agent; if
-            // the session moved on while the command ran, restore the draft
-            // instead of posting into a session the user has left.
-            if (execution === undefined) {
-              if (sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
-                agent.followup(createUserMessage({
-                  content: [{ type: 'text', text }],
-                  source: { kind: 'user' },
-                }))
-              } else {
-                const merged = mergeDraft(app.getDraft(), text)
-                app.setEditorText(merged)
-                app.notify(merged === text
-                  ? 'the session changed while sending — try again'
-                  : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+          // The command execution is itself an owned workflow: its outcome
+          // decides between the fallback follow-up and a draft restore.
+          runOwned('command execution', () => commands.execute(agent as Agent, toggled, signal), {
+            diag,
+            sessionId: () => agent.session.id,
+            onResult: (execution) => {
+              // The fallback follow-up still targets the CAPTURED agent; if
+              // the session moved on while the command ran, restore the
+              // draft instead of posting into a session the user has left.
+              if (execution === undefined) {
+                if (sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+                  agent.followup(createUserMessage({
+                    content: [{ type: 'text', text }],
+                    source: { kind: 'user' },
+                  }))
+                } else {
+                  const merged = mergeDraft(app.getDraft(), text)
+                  app.setEditorText(merged)
+                  app.notify(merged === text
+                    ? 'the session changed while sending — try again'
+                    : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+                }
               }
-            }
-          }).catch((error: unknown) => {
-            // Cancellation (lifecycle abort) is debug-only — the unified
-            // classification, never a user error.
-            if (isCancellation(error)) {
-              diag.debug('command execution cancelled', { session: agent.session.id })
-              return
-            }
-            const message = error instanceof Error ? error.message : String(error)
-            ctx.logger.error(`tui-runner: command execution failed: ${message}`)
-            diag.error('command execution failed', { error: message, session: agent.session.id })
-            app.notify(message, 'error')
+            },
+            onError: (error) => {
+              const message = safeErrorMessage(error)
+              try {
+                ctx.logger.error(`tui-runner: command execution failed: ${message}`)
+              } catch {
+                // The cordis logger must not block the user notice.
+              }
+              app.notify(message, 'error')
+            },
           })
           return
         }
-        liveAgent?.followup(createUserMessage({
+        // No commands service: plain follow-up on the CAPTURED agent (see
+        // the note above — never a re-read closure variable).
+        agent.followup(createUserMessage({
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
         }))
-      }).catch(failSubmission(text))
+      }), {
+        diag,
+        sessionId: () => liveAgent?.session.id,
+        onError: failSubmission(text),
+      })
     }
     /**
      * Run a sessionless slash command locally — no session, no log, no
@@ -1264,13 +1288,25 @@ export function apply(ctx: Context, config: Config): void {
         rawInput: parsed.rawInput,
         signal,
       } as CommandInvocation
-      Promise.resolve(definition.handler(invocation)).then(result => {
-        if (result !== undefined && result.kind === 'error') app.notify(result.text)
-      }).catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error)
-        ctx.logger.error(`tui-runner: local command failed: ${message}`)
-        diag.error('local command failed', { error: message })
-        app.notify(message, 'error')
+      // An owned workflow: the result decides the notify, the failure lands
+      // in diagnostics — runOwned (AGENTS.md), never a bare void. The
+      // handler may be a SYNC implementation, so the factory must run inside
+      // runOwned (a sync throw would otherwise escape before the entry).
+      runOwned('local command', () => definition.handler(invocation), {
+        diag,
+        sessionId: () => liveAgent?.session.id,
+        onResult: (result) => {
+          if (result !== undefined && result.kind === 'error') app.notify(result.text)
+        },
+        onError: (error) => {
+          const message = safeErrorMessage(error)
+          try {
+            ctx.logger.error(`tui-runner: local command failed: ${message}`)
+          } catch {
+            // The cordis logger must not block the user notice.
+          }
+          app.notify(message, 'error')
+        },
       })
     }
     app = startProcessTui({
@@ -1282,7 +1318,7 @@ export function apply(ctx: Context, config: Config): void {
         if (history.length > 0) {
           const settings = tuiSettings
           if (settings !== undefined) {
-            runDetached('settings history write', settings.replace({ ...settings.get(), history: { ...settings.get().history, [cwd]: history } }), {
+            runDetached('settings history write', () => settings.replace({ ...settings.get(), history: { ...settings.get().history, [cwd]: history } }), {
               diag,
               notify: (message) => app.notify(message, 'error'),
               recoverable: () => true,
@@ -1295,7 +1331,14 @@ export function apply(ctx: Context, config: Config): void {
         // the session first (the FIRST user message is the deferred trigger).
         if (text.startsWith('!')) {
           if (text.startsWith('!!')) {
-            void ensureSession().then(() => runLocalShell(text)).catch(failSubmission(text))
+            // An owned workflow: the session creation failure restores the
+            // draft (failSubmission) — runOwned (AGENTS.md), never a bare
+            // void.
+            runOwned('contextual shell', () => ensureSession().then(() => runLocalShell(text)), {
+              diag,
+              sessionId: () => liveAgent?.session.id,
+              onError: failSubmission(text),
+            })
           } else {
             runLocalShell(text)
           }
@@ -1311,6 +1354,11 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         dispatchViaSession(text)
+      },
+      // The owned-task entry for UI-layer one-shot flows (the external
+      // editor): runOwned with the runner's diag pre-attached.
+      runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
+        runOwned(label, task, { ...options, diag, sessionId: () => liveAgent?.session.id })
       },
       onExit: () => {
         // Ctrl+C / Ctrl+D route through the SAME exit orchestration as
@@ -1341,7 +1389,9 @@ export function apply(ctx: Context, config: Config): void {
         } else if (text.trim() === '') {
           return
         }
-        void ensureSession().then(async () => {
+        // An owned workflow: the send's outcome drives the draft restore and
+        // the notices — runOwned (AGENTS.md), never a bare void.
+        runOwned('steer', () => ensureSession().then(async () => {
           if (liveAgent === undefined) return
           // The whole send (snapshot → guard → re-validate → confirm-and-
           // send) lives in steer.ts so the races are testable: a queue
@@ -1371,7 +1421,7 @@ export function apply(ctx: Context, config: Config): void {
               source: { kind: 'user' },
             }),
             blockedNotice: (reason) => reason === 'removed'
-              ? GUARD_REMOVED_NOTIFY('submit')
+              ? GUARD_REMOVED_NOTIFY('save')
               : reason === 'tail-mismatch'
                 ? GUARD_TAIL_MISMATCH_NOTIFY('save')
                 : GUARD_BLOCKED_NOTIFY('save'),
@@ -1379,7 +1429,11 @@ export function apply(ctx: Context, config: Config): void {
             staleNotice: () => 'the queue or session changed while sending — try again',
             mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
           }, text)
-        }).catch(failSubmission(text))
+        }), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onError: failSubmission(text),
+        })
       },
       openExternalEditor: async (draft) => {
         // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
@@ -1428,7 +1482,7 @@ export function apply(ctx: Context, config: Config): void {
       onFullscreenChange: (fullscreen) => {
         const settings = tuiSettings
         if (settings !== undefined) {
-          runDetached('settings fullscreen write', settings.replace({ ...settings.get(), fullscreen: fullscreen ? 'on' : 'off' }), {
+          runDetached('settings fullscreen write', () => settings.replace({ ...settings.get(), fullscreen: fullscreen ? 'on' : 'off' }), {
             diag,
             notify: (message) => app.notify(message, 'error'),
             recoverable: () => true,
@@ -1524,7 +1578,7 @@ export function apply(ctx: Context, config: Config): void {
       // Follow the terminal: query once at boot, then track scheme reports.
       // The boot query is detached: a terminal that never answers (or a
       // failure) must not crash the runner.
-      runDetached('theme autodetect', app.autoDetectTheme(), { diag })
+      runDetached('theme autodetect', () => app.autoDetectTheme(), { diag })
       app.onTerminalThemeChange((theme) => {
         if (tuiSettings?.get().theme === 'auto') app.applyTheme(theme)
       })
@@ -1646,7 +1700,7 @@ export function apply(ctx: Context, config: Config): void {
           // A preset that resolves but fails to MOUNT (e.g. a row waiting for
           // a host service) rejects inside the agent-factory setup. Surface it
           // and fall back to the default rather than killing the TUI.
-          const message = error instanceof Error ? error.message : String(error)
+          const message = safeErrorMessage(error)
           ctx.logger.warn(`tui-runner: failed to start with preset "${launchPreset ?? 'default'}": ${message}`)
           diag.warn('preset mount failed', { preset: launchPreset ?? 'default', error: message })
           resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${message}`
@@ -1715,7 +1769,7 @@ export function apply(ctx: Context, config: Config): void {
         // silently): reset the flag for a later retry and surface the
         // failure visibly instead of swallowing it.
         commandsRegistered = false
-        const message = error instanceof Error ? error.message : String(error)
+        const message = safeErrorMessage(error)
         ctx.logger.error(`tui-runner: command registration failed: ${message}`)
         diag.error('command registration failed', { error: message })
         app.notify(`command registration failed: ${message}`, 'error')
@@ -1723,11 +1777,13 @@ export function apply(ctx: Context, config: Config): void {
     }
     /** Rebuild the agent-scoped per-skill commands after a session exists. */
     const refreshSkillCommands = (): void => {
-      if (refreshSkills === undefined) return
-      void refreshSkills().catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(`tui-runner: skill command refresh failed: ${message}`)
-        diag.warn('skill command refresh failed', { error: message })
+      const refresh = refreshSkills
+      if (refresh === undefined) return
+      // Unified fire-and-forget entry: task label + live session id in the
+      // diagnostics, cancellations debug-only (the runner is tearing down).
+      runDetached('skill command refresh', () => refresh(), {
+        diag,
+        sessionId: () => liveAgent?.session.id,
       })
     }
     // The startup surface: a resumed session initializes everything; the
@@ -1822,7 +1878,7 @@ export function apply(ctx: Context, config: Config): void {
         // actionable hint — the session keeps working in memory, but
         // persistence cannot resume until restart.
         const flushed = liveAgent.session
-        runDetached('turn flush', sessions.flush(flushed), {
+        runDetached('turn flush', () => sessions.flush(flushed), {
           diag,
           sessionId: () => flushed.id,
           notify: (message) => app.notify(
@@ -1893,13 +1949,37 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
   })().catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error)
-    ctx.logger.error(`tui-runner: ${message}`)
-    diag.error('fatal', { error: message })
+    // Terminal-total final catch of the startup lifecycle root: error
+    // observation, logging, abort, dispose and exit are each individually
+    // protected, so a hostile rejection or a throwing dependency can never
+    // skip the teardown or leak a rejection from this discarded chain.
+    const message = safeErrorMessage(error)
+    try {
+      ctx.logger.error(`tui-runner: ${message}`)
+    } catch {
+      // The cordis logger must not block the teardown.
+    }
+    try {
+      diag.error('fatal', { error: message })
+    } catch {
+      // A throwing diagnostics channel must not block the teardown.
+    }
     // Startup failure: cancel every in-flight lifecycle load, then tear
     // down. (The runner-internal cleanup() never ran — the body threw.)
-    lifecycleController.abort()
-    diag.dispose()
-    exit(1)
+    try {
+      lifecycleController.abort()
+    } catch {
+      // The abort must not block dispose/exit.
+    }
+    try {
+      diag.dispose()
+    } catch {
+      // The dispose must not block the process exit.
+    }
+    try {
+      exit(1)
+    } catch {
+      // The last step; there is no lower sink.
+    }
   })
 }

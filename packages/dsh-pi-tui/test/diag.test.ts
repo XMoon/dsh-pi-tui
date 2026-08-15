@@ -73,3 +73,23 @@ test('file sink appends to the configured path and applies the file level', () =
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a hostile field value never throws: circular + hostile toString both degrade', () => {
+  const { lines, sink } = collector()
+  const diag = createDiag({ fileLevel: 'debug', stderrLevel: 'off', sinks: [sink] })
+  const circular: Record<string, unknown> = {}
+  circular.self = circular
+  // JSON.stringify fails on the cycle; the fallback must not throw either
+  // (a hostile toString would previously escape the never-throw contract).
+  diag.error('probe', { circular })
+  assert.ok(lines.length >= 1, 'the line is still written')
+  assert.match(lines[0]!, /ERROR probe/)
+  // A hostile value that breaks BOTH paths: JSON.stringify fails on the
+  // cycle AND String() throws (hostile toString) — the write must not
+  // throw and the line carries the fixed placeholder.
+  const hostile: Record<string, unknown> = {}
+  hostile.self = hostile
+  hostile.toString = () => { throw new Error('diag fallback exploded') }
+  assert.doesNotThrow(() => diag.error('probe', { hostile }))
+  assert.match(lines[1]!, /hostile=<unprintable error>/)
+})

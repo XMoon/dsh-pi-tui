@@ -13,6 +13,8 @@ import test from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { ModelSubmenu } from '../src/model-menu.ts'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
+import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
+import { createDiag } from '../src/diag.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A promise the test resolves/rejects manually, to stage late completions. */
@@ -45,11 +47,22 @@ function fakeLlm(shape: FakeLlm): {
 async function openModelFlow(
   llm: { listModels: (...args: never[]) => Promise<readonly { id: string }[]>; resolveModelInfo: (...args: never[]) => Promise<unknown> },
   applied: ModelSelection[],
-): Promise<{ vt: VirtualTerminal; app: TuiApp }> {
+): Promise<{ vt: VirtualTerminal; app: TuiApp; lines: string[] }> {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   const current = { provider: 'p', model: 'm0' } as ModelSelection
+  // The real owned-task entry, with a capture diag (the runner wires
+  // runOwned with its own diag in production).
+  const lines: string[] = []
+  const diag = createDiag({
+    filePath: undefined,
+    stderrLevel: 'off',
+    sinks: [{ write: (line: string) => { lines.push(line) } }],
+  })
+  const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void => {
+    runOwned(label, task, { ...options, diag })
+  }
   app.openSettings(
     [{
       id: 'p',
@@ -61,6 +74,7 @@ async function openModelFlow(
         apply: (next) => applied.push(next),
         requestRender: () => app.requestRender(),
         done,
+        runOwned: owned,
       }),
     }],
     () => {},
@@ -68,7 +82,7 @@ async function openModelFlow(
   )
   await vt.waitForRender()
   vt.sendInput('\r') // Enter: open the provider's model submenu
-  return { vt, app }
+  return { vt, app, lines }
 }
 
 async function viewport(vt: VirtualTerminal): Promise<string> {
@@ -179,7 +193,7 @@ test('effort info resolving after Esc never applies the model', async () => {
 test('effort info rejecting after Esc never applies and never shows a stale error', async () => {
   const applied: ModelSelection[] = []
   const info = deferred<never>()
-  const { vt } = await openModelFlow({
+  const { vt, lines } = await openModelFlow({
     listModels: async () => [{ id: 'm1' }],
     resolveModelInfo: async () => info.promise,
   }, applied)
@@ -194,6 +208,10 @@ test('effort info rejecting after Esc never applies and never shows a stale erro
   const view = await viewport(vt)
   assert.ok(!view.includes('unavailable'), `no stale error after cancel:\n${view}`)
   assert.ok(view.includes('m1'), `back on the model list:\n${view}`)
+  // The disposed classifier routes the late rejection to a CANCELLATION:
+  // debug diagnostics only — a normal Esc must never be an ERROR line.
+  assert.ok(lines.some(line => /DEBUG model info/.test(line) && line.includes('cancelled=true')), lines.join(' | '))
+  assert.ok(!lines.some(line => line.includes('ERROR')), `no error diagnostics for a user cancel:\n${lines.join('\n')}`)
 })
 
 test('a late effort info from an earlier selection cannot override a later one', async () => {
@@ -246,7 +264,7 @@ test('a model list resolving after the menu closed triggers no repaint or apply'
 test('effort info reject while the menu is current shows the error in place, applies nothing', async () => {
   const applied: ModelSelection[] = []
   const info = deferred<never>()
-  const { vt } = await openModelFlow({
+  const { vt, lines } = await openModelFlow({
     listModels: async () => [{ id: 'm1' }],
     resolveModelInfo: async () => info.promise,
   }, applied)
@@ -258,6 +276,8 @@ test('effort info reject while the menu is current shows the error in place, app
   assert.deepEqual(applied, [], 'an info error is not a model selection')
   const view = await viewport(vt)
   assert.ok(view.includes('model info unavailable'), `error must render in the current menu:\n${view}`)
+  // A CURRENT menu's provider failure is a real failure: ERROR diagnostics.
+  assert.ok(lines.some(line => /ERROR model info/.test(line) && line.includes('error=provider exploded')), lines.join(' | '))
   // Esc from the error still walks back cleanly.
   vt.sendInput('\x1b')
   await vt.waitForRender()

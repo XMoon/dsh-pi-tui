@@ -22,6 +22,7 @@
 import { SettingsList, Text, matchesKey, type Component } from '@xmoon76/pi-tui'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
+import type { OwnedTaskOptions } from './detached.ts'
 import { settingsListTheme } from './theme.ts'
 
 /** The model-service surface `/model` needs, read off the live context. */
@@ -41,8 +42,14 @@ interface SubmenuDeps extends ModelMenuServices {
   requestRender(): void
   /** Close this submenu level (Esc, or after an applied selection). */
   done(selected?: string): void
-  /** Debug diagnostics for late rejections after the menu closed (optional). */
-  logDebug?(message: string, fields?: Record<string, unknown>): void
+  /** The owned-task entry (runOwned shape, diag pre-wired by the runner):
+   * the async loads route through it instead of a bare `void promise`
+   * (AGENTS.md hard rule). */
+  runOwned<T>(
+    label: string,
+    task: () => T | Promise<T>,
+    options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>,
+  ): void
 }
 
 /**
@@ -86,7 +93,6 @@ class EffortSubmenu implements Component {
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
   private readonly abort = new AbortController()
-  private readonly logDebug: (message: string, fields?: Record<string, unknown>) => void
 
   constructor(providerId: string, modelId: string, currentEffort: string | undefined, deps: SubmenuDeps) {
     // Every close path funnels through done(); wrapping it lets the submenu
@@ -106,55 +112,56 @@ class EffortSubmenu implements Component {
         : { provider: providerId, model: modelId, reasoningEffort: ReasoningEffortId(effortId) })
       close(effortId)
     }
-    this.logDebug = deps.logDebug ?? (() => {})
     this.inner = new EscDismiss(new Text('Loading model info…', 0, 0), () => close())
     this.requestRender = deps.requestRender
-    void deps.resolveModelInfo(providerId, modelId).then(info => {
-      if (this.disposed) return
-      const efforts = info.reasoning?.efforts
-      if (efforts === undefined || efforts.length === 0) {
-        // No effort choice: apply the model directly and return to the list.
-        applyAndClose(undefined)
-        return
-      }
-      this.inner = new SettingsList(
-        [
-          {
-            id: '__default',
-            label: 'Default',
-            description: 'Provider default reasoning effort',
-            currentValue: currentEffort === undefined ? '← current' : '',
-            values: ['✓'],
-          },
-          ...efforts.map(effort => ({
-            id: effort.id,
-            label: effort.name,
-            description: effort.description,
-            currentValue: currentEffort === effort.id ? '← current' : '',
-            values: ['✓'],
-          })),
-        ],
-        6,
-        settingsListTheme(),
-        (effortId) => applyAndClose(effortId),
-        () => close(),
-        {},
-      )
-      this.requestRender()
-    }).catch((error: unknown) => {
-      // A rejection after the user cancelled is noise, not a user error.
-      if (this.disposed) {
-        this.logDebug('model info rejected after menu close', {
-          provider: providerId,
-          model: modelId,
-          error: error instanceof Error ? error.message : String(error),
-        })
-        return
-      }
-      // Show the failure in the CURRENT menu; never apply the model on an
-      // info error (an error is not "no effort options").
-      this.inner = new EscDismiss(new Text('model info unavailable', 0, 0), () => close())
-      this.requestRender()
+    // An owned workflow routed through the injected entry (never a bare
+    // `void promise` — AGENTS.md): the result swaps the effort list in, a
+    // failure shows 'unavailable' in the CURRENT menu (an info error is not
+    // "no effort options"); a rejection landing after the menu closed is a
+    // cancellation (disposed classifier → debug, no stale UI), not a
+    // failure. Diagnostics are recorded by runOwned itself.
+    deps.runOwned('model info', () => deps.resolveModelInfo(providerId, modelId), {
+      isCancellation: () => this.disposed,
+      onResult: (info) => {
+        if (this.disposed) return
+        const efforts = info.reasoning?.efforts
+        if (efforts === undefined || efforts.length === 0) {
+          // No effort choice: apply the model directly and return to the list.
+          applyAndClose(undefined)
+          return
+        }
+        this.inner = new SettingsList(
+          [
+            {
+              id: '__default',
+              label: 'Default',
+              description: 'Provider default reasoning effort',
+              currentValue: currentEffort === undefined ? '← current' : '',
+              values: ['✓'],
+            },
+            ...efforts.map(effort => ({
+              id: effort.id,
+              label: effort.name,
+              description: effort.description,
+              currentValue: currentEffort === effort.id ? '← current' : '',
+              values: ['✓'],
+            })),
+          ],
+          6,
+          settingsListTheme(),
+          (effortId) => applyAndClose(effortId),
+          () => close(),
+          {},
+        )
+        this.requestRender()
+      },
+      onError: () => {
+        // Only a CURRENT menu shows the failure (a rejection after the
+        // menu closed was already classified as a cancellation by the
+        // disposed classifier and logged debug-only).
+        this.inner = new EscDismiss(new Text('model info unavailable', 0, 0), () => close())
+        this.requestRender()
+      },
     })
   }
 
@@ -182,7 +189,6 @@ export class ModelSubmenu implements Component {
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
   private readonly abort = new AbortController()
-  private readonly logDebug: (message: string, fields?: Record<string, unknown>) => void
 
   constructor(providerId: string, currentModel: string, currentEffort: string | undefined, deps: SubmenuDeps) {
     const close = (selected?: string): void => {
@@ -191,37 +197,39 @@ export class ModelSubmenu implements Component {
       this.abort.abort()
       deps.done(selected)
     }
-    this.logDebug = deps.logDebug ?? (() => {})
     this.inner = new EscDismiss(new Text('Loading models…', 0, 0), () => close())
     this.requestRender = deps.requestRender
-    void deps.listModels(providerId).then(list => {
-      if (this.disposed) return
-      this.inner = new SettingsList(
-        list.map(model => ({
-          id: model.id,
-          label: model.id,
-          description: model.id === currentModel ? '← current' : undefined,
-          currentValue: model.id === currentModel ? '← current' : '',
-          submenu: (value, done) => new EffortSubmenu(providerId, model.id, currentEffort, { ...deps, done }),
-        })),
-        6,
-        settingsListTheme(),
-        () => {},
-        () => close(),
-        { enableSearch: true },
-      )
-      this.requestRender()
-    }).catch((error: unknown) => {
-      // A rejection after the user cancelled is noise, not a user error.
-      if (this.disposed) {
-        this.logDebug('model list rejected after menu close', {
-          provider: providerId,
-          error: error instanceof Error ? error.message : String(error),
-        })
-        return
-      }
-      this.inner = new EscDismiss(new Text('models unavailable', 0, 0), () => close())
-      this.requestRender()
+    // An owned workflow routed through the injected entry (never a bare
+    // `void promise` — AGENTS.md); a rejection landing after the menu
+    // closed is a cancellation (disposed classifier → debug), diagnostics
+    // are recorded by runOwned itself.
+    deps.runOwned('model list', () => deps.listModels(providerId), {
+      isCancellation: () => this.disposed,
+      onResult: (list) => {
+        if (this.disposed) return
+        this.inner = new SettingsList(
+          list.map(model => ({
+            id: model.id,
+            label: model.id,
+            description: model.id === currentModel ? '← current' : undefined,
+            currentValue: model.id === currentModel ? '← current' : '',
+            submenu: (value, done) => new EffortSubmenu(providerId, model.id, currentEffort, { ...deps, done }),
+          })),
+          6,
+          settingsListTheme(),
+          () => {},
+          () => close(),
+          { enableSearch: true },
+        )
+        this.requestRender()
+      },
+      onError: () => {
+        // Only a CURRENT menu shows the failure (a rejection after the
+        // menu closed was already classified as a cancellation by the
+        // disposed classifier and logged debug-only).
+        this.inner = new EscDismiss(new Text('models unavailable', 0, 0), () => close())
+        this.requestRender()
+      },
     })
   }
 

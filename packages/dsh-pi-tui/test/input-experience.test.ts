@@ -7,10 +7,19 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { TuiApp, type TuiAppEvents } from '../src/tui-app.ts'
+import { TuiApp, type TuiAppEvents, type TuiAppEventsBase } from '../src/tui-app.ts'
+import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
+import { createDiag } from '../src/diag.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
-function startApp(overrides: Partial<TuiAppEvents> = {}): { vt: VirtualTerminal; app: TuiApp; submitted: string[] } {
+/** The owned-task entry the runner wires in production; tests use the real
+ * runOwned with a silent capture diag. */
+const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void => {
+  runOwned(label, task, { ...options, diag })
+}
+
+function startApp(overrides: Partial<TuiAppEventsBase> = {}): { vt: VirtualTerminal; app: TuiApp; submitted: string[] } {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, {
@@ -114,6 +123,7 @@ test('ctrl+g opens the external editor and restores its content', async () => {
     onSubmit: (text) => submitted.push(text),
     onExit: () => {},
     openExternalEditor: async (draft) => `edited: ${draft}`,
+    runOwned: owned,
   })
   app.start()
   vt.sendInput('draft')
@@ -132,6 +142,7 @@ test('an external editor saving the draft unchanged does not touch the editor', 
     onSubmit: (text) => submitted.push(text),
     onExit: () => {},
     openExternalEditor: async (draft) => draft, // the editor "saved" without changes
+    runOwned: owned,
   })
   app.start()
   vt.sendInput('draft text')
@@ -154,6 +165,7 @@ test('an external editor launch failure is caught: no unhandled rejection, app r
     openExternalEditor: async () => {
       throw new Error('editor not found')
     },
+    runOwned: owned,
   })
   const unhandled: unknown[] = []
   const onUnhandled = (reason: unknown): void => {
@@ -177,6 +189,140 @@ test('an external editor launch failure is caught: no unhandled rejection, app r
     process.off('unhandledRejection', onUnhandled)
     app.stop()
   }
+})
+
+test('openExternalEditor without runOwned is rejected at construction (bound contract)', () => {
+  const vt = new VirtualTerminal(80, 24)
+  // The type union already forbids this at compile time; the cast proves
+  // the RUNTIME check catches a violation (plain JS hosts, casts).
+  assert.throws(() => new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async (draft: string) => draft,
+  } as unknown as TuiAppEvents), /openExternalEditor requires runOwned/)
+})
+
+test('ctrl+g without an editor hook is a documented no-op, never a crash', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  vt.sendInput('draft text')
+  await viewport(vt)
+  vt.sendInput('\x07') // ctrl+g: no editor configured
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(app.getDraft(), 'draft text', 'the draft must be untouched')
+  // The key was consumed but nothing launched; the app stays live.
+  vt.sendInput(' more')
+  await viewport(vt)
+  assert.ok(app.getDraft().includes('more'), 'input must keep flowing after the no-op')
+  app.stop()
+})
+
+test('two ctrl+g in one input batch start the external editor only once (single-flight)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let calls = 0
+  let release!: (text: string) => void
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async () => {
+      calls += 1
+      await new Promise<string>(resolve => { release = resolve })
+      return 'edited'
+    },
+    runOwned: owned,
+  })
+  app.start()
+  vt.sendInput('draft')
+  await viewport(vt)
+  // Both keys land while the first launch is still pending: the second must
+  // be consumed without starting another editor (one terminal ownership).
+  vt.sendInput('\x07')
+  vt.sendInput('\x07')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(calls, 1, 'a pending launch must be single-flight')
+  assert.equal(release !== undefined, true, 'the first launch must be in flight')
+  // The latch releases when the launch settles: a later Ctrl+G launches again.
+  release('edited')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  vt.sendInput('\x07')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(calls, 2, 'the latch must release after a successful launch')
+  app.stop()
+})
+
+test('the editor single-flight latch releases after a failed launch', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let calls = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async () => {
+      calls += 1
+      throw new Error('editor vanished')
+    },
+    runOwned: owned,
+  })
+  app.start()
+  vt.sendInput('\x07')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(calls, 1)
+  // Failure is a terminal outcome: the latch must be free again.
+  vt.sendInput('\x07')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(calls, 2, 'the latch must release after a failed launch')
+  app.stop()
+})
+
+test('the editor latch releases even when the TUI restart (start) throws', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let calls = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async () => {
+      calls += 1
+      return 'edited'
+    },
+    runOwned: owned,
+  })
+  app.start()
+  const originalStart = app.start.bind(app)
+  // The first launch's restart throws: the failure lands in diagnostics
+  // (the runOwned error path in production), but the latch MUST still
+  // clear — otherwise the editor capability dies silently for the rest of
+  // the session. Direct calls are used because after a failed restart the
+  // TUI is stopped, so keyboard input no longer reaches the app.
+  app.start = () => { throw new Error('restart failed') }
+  await app.launchExternalEditor().catch(() => {})
+  assert.equal(calls, 1, 'the editor round-trip ran')
+  app.start = originalStart
+  await app.launchExternalEditor()
+  assert.equal(calls, 2, 'the latch must release even when restart threw')
+  app.stop()
+})
+
+test('the editor latch releases even when the TUI stop throws', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let calls = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async () => {
+      calls += 1
+      return 'edited'
+    },
+    runOwned: owned,
+  })
+  app.start()
+  const originalStop = app.stop.bind(app)
+  app.stop = () => { throw new Error('stop failed') }
+  await app.launchExternalEditor().catch(() => {})
+  assert.equal(calls, 0, 'the editor never opened (stop threw first)')
+  app.stop = originalStop
+  await app.launchExternalEditor()
+  assert.equal(calls, 1, 'the latch must release even when stop threw')
+  app.stop()
 })
 
 test('app.stop is idempotent: repeated calls neither throw nor double-teardown', async () => {

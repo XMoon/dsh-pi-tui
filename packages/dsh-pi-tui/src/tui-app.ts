@@ -67,6 +67,8 @@ import { TranscriptSearchComponent } from './search.ts'
 import { QuestionFlow } from './question.ts'
 import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
+import { cancellationError, type OwnedTaskOptions } from './detached.ts'
+import { safeErrorMessage } from './error-boundary.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
@@ -230,8 +232,18 @@ function contextBar(used: number, window: number): string {
   return `${color.primary(`[${bar}]`)} ${pct}%`
 }
 
-/** Callbacks the application surface reports to its host (the dsh bundle). */
-export interface TuiAppEvents {
+/** The owned-task entry hosts wire to `runOwned` (diag pre-attached):
+ * UI-layer one-shot flows route their async work through it instead of a
+ * bare `void promise` (AGENTS.md hard rule). */
+export type OwnedRunner = <T>(
+  label: string,
+  task: () => T | Promise<T>,
+  options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>,
+) => void
+
+/** Base callbacks every TuiApp host must provide; the external-editor
+ * pair is bound on top of this (see {@link TuiAppEvents}). */
+export interface TuiAppEventsBase {
   /** The user submitted a line in the editor. */
   onSubmit: (text: string) => void
   /** The user asked to quit (Ctrl+C in the TUI's own raw mode). */
@@ -244,12 +256,6 @@ export interface TuiAppEvents {
    * falls back to the draft alone otherwise. Optional.
    */
   onSteer?: (text: string) => void
-  /**
-   * Ctrl+G: open the external editor with the current draft. The TUI stops
-   * before the call and restarts after it resolves; return the new text.
-   * Optional.
-   */
-  openExternalEditor?: (draft: string) => Promise<string>
   /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
   /** The transcript-search query changed (Ctrl+Shift+F opens the search). Optional. */
@@ -279,6 +285,26 @@ export interface TuiAppEvents {
    */
   onDequeue?: () => void
 }
+
+/**
+ * The application-surface events. The external-editor capability is a
+ * BOUND pair declared only in the union: wiring `openExternalEditor`
+ * REQUIRES `runOwned` — the Ctrl+G flow routes through the owned entry
+ * (AGENTS.md), so a host cannot legally wire an editor hook without the
+ * runner. Enforced at the type level (union) AND at construction time
+ * (runtime check); without the editor hook neither field is needed and
+ * Ctrl+G is a no-op.
+ */
+export type TuiAppEvents = TuiAppEventsBase & (
+  | {
+      /** Ctrl+G: open the external editor with the current draft. The TUI
+       * stops before the call and restarts after it resolves; return the
+       * new text. */
+      openExternalEditor: (draft: string) => Promise<string>
+      runOwned: OwnedRunner
+    }
+  | { openExternalEditor?: undefined; runOwned?: OwnedRunner }
+)
 
 /** What an approval prompt shows; mirrors the approval/request payload. */
 export interface ApprovalPromptRequest {
@@ -578,10 +604,21 @@ export class TuiApp {
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
   /** Rendered row heights per transcript message, for mouse hit-testing. */
   private messageRows: ReadonlyArray<{ message: TranscriptMessage; height: number }> = []
+  /** ONE external-editor ownership at a time: set synchronously at launch,
+   * cleared in the launch's `finally` (success, failure or cancellation). */
+  private externalEditorInFlight = false
   /** The live session's auto-generated title, shown in the header when set. */
   private sessionTitleText = ''
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
+    // The external-editor capability is a BOUND pair: the Ctrl+G flow
+    // routes through the owned-task entry, so an editor hook without the
+    // runner would silently swallow the key. The type union already
+    // forbids it at compile time; this catches runtime violations (plain
+    // JS hosts, casts) loudly instead of failing silently.
+    if (events.openExternalEditor !== undefined && events.runOwned === undefined) {
+      throw new Error('openExternalEditor requires runOwned (the owned-task entry — AGENTS.md)')
+    }
     this.terminal = terminal
     this.events = events
     this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS
@@ -769,13 +806,22 @@ export class TuiApp {
     }
     if (matchesKey(data, 'ctrl+g')) {
       // External editor; overlays own Ctrl+G while up (alt-screen search).
-      // The rejection is caught here (not a bare void): a spawn failure
-      // would otherwise surface as an unhandled rejection while the TUI
-      // restarts underneath the user.
+      // An owned workflow routed through the host's runOwned (diag attached
+      // by the runner): a spawn failure lands in diagnostics and notifies
+      // here — never a bare `void somePromise()` (AGENTS.md). The editor
+      // hook and runOwned are a BOUND pair (type union + constructor
+      // check): without the editor hook Ctrl+G is a documented no-op.
+      // Single-flight: while one launch is pending (the latch inside
+      // launchExternalEditor is set synchronously), further Ctrl+G presses
+      // are consumed without starting another editor.
       if (this.overlayHost.hasOverlayEntries) return { consume: true }
-      void this.launchExternalEditor().catch((error: unknown) => {
-        this.notify(`external editor failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
-      })
+      if (this.events.openExternalEditor !== undefined && !this.externalEditorInFlight) {
+        this.events.runOwned('external editor', () => this.launchExternalEditor(), {
+          onError: (error: unknown) => {
+            this.notify(`external editor failed: ${safeErrorMessage(error)}`, 'error')
+          },
+        })
+      }
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+c')) {
@@ -836,19 +882,32 @@ export class TuiApp {
    * Launch the external editor with the current draft. The TUI stops first
    * (raw mode released) and restarts after the editor returns; a fullscreen
    * mode is not restored (the editor session ends in regular mode).
+   *
+   * SINGLE-FLIGHT: only ONE editor ownership exists at a time. The latch is
+   * set synchronously at entry and cleared in the OUTERMOST `finally`, so
+   * no stage — draft read, stop, the editor round-trip, draft apply, start —
+   * can throw and leave the latch stuck: every terminal outcome (success,
+   * failure, cancellation, a restart failure) releases it, and a repeated
+   * Ctrl+G in the same input batch, a macro, or a direct caller can never
+   * start a second editor while one is pending.
    */
   async launchExternalEditor(): Promise<void> {
     const open = this.events.openExternalEditor
-    if (open === undefined) return
-    const draft = this.editor.getText()
-    this.stop()
+    if (open === undefined || this.externalEditorInFlight) return
+    this.externalEditorInFlight = true
     try {
-      const next = await open(draft)
-      // No redundant editor update when the editor saved the draft
-      // unchanged (an update would bump history/undo and repaint).
-      if (next !== '' && next !== draft) this.editor.setText(next)
+      const draft = this.editor.getText()
+      this.stop()
+      try {
+        const next = await open(draft)
+        // No redundant editor update when the editor saved the draft
+        // unchanged (an update would bump history/undo and repaint).
+        if (next !== '' && next !== draft) this.editor.setText(next)
+      } finally {
+        this.start()
+      }
     } finally {
-      this.start()
+      this.externalEditorInFlight = false
     }
   }
 
@@ -2183,7 +2242,7 @@ export class TuiApp {
         signal,
       }
       if (signal?.aborted === true) {
-        reject(new Error('question flow aborted'))
+        reject(cancellationError('question flow aborted'))
         return
       }
       if (signal !== undefined) {
@@ -2224,7 +2283,7 @@ export class TuiApp {
     }
     const index = this.questionQueue.indexOf(state)
     if (index !== -1) this.questionQueue.splice(index, 1)
-    state.reject(new Error('question flow cancelled'))
+    state.reject(cancellationError('question flow cancelled'))
   }
 
   /** Show the next queued flow, if any (called after the active one settles). */
@@ -2262,7 +2321,7 @@ export class TuiApp {
     }
     this.overlayHost.setFocus(this.editor)
     if (answers === undefined) {
-      state.reject(new Error('question flow cancelled'))
+      state.reject(cancellationError('question flow cancelled'))
     } else {
       state.resolve(answers)
     }

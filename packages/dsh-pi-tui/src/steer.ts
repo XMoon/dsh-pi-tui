@@ -72,24 +72,27 @@ export interface SteerDeps {
 /**
  * Merge a draft back after an aborted send so NOTHING is lost.
  *
- * NO text-level dedup: every restore corresponds to exactly ONE operation
- * (steerAll/submit hit exactly one terminal branch and return), so a
- * "repeated restore" cannot happen — and two INDEPENDENT operations may
- * legitimately carry the SAME text. Text equality therefore never means
- * "already restored"; each failed operation preserves its submission.
+ * NO text-level dedup — including the `current === submitted` case. Every
+ * restore corresponds to exactly ONE operation (steerAll/submit hit exactly
+ * one terminal branch and return, so no operation ever restores twice), and
+ * two INDEPENDENT operations may legitimately carry the SAME text: A and B
+ * submit `same` on an empty editor, both fail, A restores `same` first, B
+ * restores second — an equality shortcut would collapse B into A and the
+ * user silently loses one unsent submission. Text equality therefore never
+ * means "already restored"; each failed operation preserves its submission,
+ * even when the editor already holds an identical-looking string (that
+ * string is either an independent operation's restore or the user's own
+ * re-typed input — text cannot tell, so nothing is deduped).
  * - nothing was submitted: the editor stays exactly as it is;
  * - editor strictly empty: the submitted (unsent) text comes back;
- * - editor already holds exactly the submitted text (e.g. the user re-typed
- *   it): nothing to add — the content is already present;
- * - otherwise: the user's newer text stays on top and the unsent submission
- *   is preserved visibly beneath it (it was never delivered, so silently
+ * - otherwise: the existing text stays on top and the unsent submission is
+ *   preserved visibly beneath it (it was never delivered, so silently
  *   dropping it would lose the input). A whitespace-only editor is real
  *   input and is never swallowed.
  */
 export function mergeDraft(current: string, submitted: string): string {
   if (submitted === '') return current
   if (current === '') return submitted
-  if (current === submitted) return current
   return current + '\n\n' + submitted
 }
 

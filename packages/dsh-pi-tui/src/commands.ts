@@ -24,7 +24,8 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { TuiApp } from './tui-app.ts'
 import type { Diag } from './diag.ts'
-import { isCancellation, runDetached } from './detached.ts'
+import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
+import { safeErrorMessage } from './error-boundary.ts'
 import { color, loadCustomTheme, settingsListTheme } from './theme.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
@@ -145,8 +146,10 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
 
   // Fire-and-forget with the runner's diag: cancellations debug-only,
   // recoverable (persistence) failures notify + warn, everything else
-  // warns — never a bare `void somePromise()` (AGENTS.md hard rule).
-  const detach = (label: string, task: Promise<unknown>, options: { notify?: boolean } = {}): void => {
+  // warns — never a bare `void somePromise()` (AGENTS.md hard rule). The
+  // task is a FACTORY (runDetached runs it), so a synchronous throw from
+  // the service call is classified like a rejection, not an escape.
+  const detach = (label: string, task: () => unknown | Promise<unknown>, options: { notify?: boolean } = {}): void => {
     runDetached(label, task, {
       diag: runner.diag,
       // Diagnostics name the live session at settle time, never the payload.
@@ -157,20 +160,20 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   }
   /** Switch sessions with full rejection handling (the runner resolves an
    * error STRING for user-facing failures, but an unexpected rejection must
-   * not become an unhandled rejection either). */
+   * not become an unhandled rejection either). An owned workflow: the
+   * outcome drives the notify — runOwned (AGENTS.md); the classification
+   * diagnostics are recorded by runOwned itself. */
   const switchSession = (id: string): void => {
-    void runner.switchSession(id).then(error => {
-      if (error !== undefined) app.notify(error, 'error')
-    }).catch((error: unknown) => {
-      // Cancellation (TUI quit / lifecycle abort) is debug-only, never a
-      // user error — the unified classification.
-      if (isCancellation(error)) {
-        runner.diag.debug('session switch cancelled', { session: id })
-        return
-      }
-      const message = error instanceof Error ? error.message : String(error)
-      runner.diag.error('session switch failed', { session: id, error: message })
-      app.notify(`session switch failed: ${message}`, 'error')
+    runOwned('session switch', () => runner.switchSession(id), {
+      diag: runner.diag,
+      sessionId: () => id,
+      onResult: (error) => {
+        if (error !== undefined) app.notify(error, 'error')
+      },
+      onError: (error: unknown) => {
+        const message = safeErrorMessage(error)
+        app.notify(`session switch failed: ${message}`, 'error')
+      },
     })
   }
 
@@ -346,12 +349,12 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           } else if (id === 'default-permission') {
             const settings = ctx.get('settings')
             if (settings !== undefined && permissionNames.includes(value)) {
-              detach('permission default write', settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }]) as Promise<unknown>, { notify: true })
+              detach('permission default write', () => settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }]) as Promise<unknown>, { notify: true })
             }
           } else if (id === 'theme') {
             if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)) {
               if (value === 'auto') {
-                detach('theme autodetect', app.autoDetectTheme())
+                detach('theme autodetect', () => app.autoDetectTheme())
               } else if (value === 'dark' || value === 'light') {
                 app.applyTheme(value)
               } else {
@@ -367,7 +370,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
               // persisted input history must ride along.
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings theme write', settings.replace({ ...settings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` }) as Promise<unknown>, { notify: true })
+                detach('settings theme write', () => settings.replace({ ...settings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` }) as Promise<unknown>, { notify: true })
               }
             }
           } else if (id === 'expand') {
@@ -379,7 +382,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
               app.setFooterPreset(value)
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings footer write', settings.replace({ ...settings.get(), footer: value }) as Promise<unknown>, { notify: true })
+                detach('settings footer write', () => settings.replace({ ...settings.get(), footer: value }) as Promise<unknown>, { notify: true })
               }
             }
           } else if (id === 'fullscreen') {
@@ -445,7 +448,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     // session switch mid-load does not mislabel. Cancellations (TUI quit,
     // the abort signal) are debug-level through the unified entry; a real
     // batch failure lands in diagnostics instead of being swallowed.
-    detach('session titles', loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
+    detach('session titles', () => loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
       .then(titles => {
         if (titles.size === 0) return
         picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, runner.liveAgent?.session.id ?? '')))
@@ -571,7 +574,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   // Initial catalog load: fire-and-forget through the unified entry — a
   // failure must land in diagnostics, never be silently swallowed or leak
   // as an unhandled rejection (/reload still awaits the same function).
-  detach('skill catalog refresh', registerSkillCommands())
+  detach('skill catalog refresh', () => registerSkillCommands())
 
   commands.register({
     name: 'skill',
@@ -596,7 +599,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           values: ['✓'],
         })),
         (id) => {
-          detach('skill load', loadSkill(liveAgent, id).then(result => {
+          detach('skill load', () => loadSkill(liveAgent, id).then(result => {
             if (result.kind === 'error') app.notify(result.text)
           }), { notify: true })
         },
@@ -625,7 +628,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       if (settings !== undefined) {
         const doc = settings.get()
         if (doc.theme === 'auto') {
-          detach('theme autodetect', app.autoDetectTheme())
+          detach('theme autodetect', () => app.autoDetectTheme())
         } else if (doc.theme === 'dark' || doc.theme === 'light') {
           app.applyTheme(doc.theme)
         } else if (doc.theme.startsWith('custom:')) {
@@ -659,7 +662,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         // order completion must not regress the persistent state either;
         // the UI at least never lies about what is current).
         const previous = selected.current
-        runDetached('model selection save', defaultModel.saveSelection(next), {
+        runDetached('model selection save', () => defaultModel.saveSelection(next), {
           diag: runner.diag,
           notify: (message) => {
             if (selected.current === next) {
@@ -689,9 +692,11 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             apply,
             requestRender: () => app.requestRender(),
             done,
-            // Late model-list/info rejections after the menu closed are
-            // diagnostics, not user errors: the shared runner channel.
-            logDebug: (message, fields) => runner.diag.debug(message, fields),
+            // The owned-task entry for the menu loads: runOwned with the
+            // runner's diag pre-attached (AGENTS.md — never a bare void).
+            runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
+              runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.liveAgent?.session.id })
+            },
           }),
         })),
         () => {},
@@ -779,9 +784,17 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             app.notify('steering queued message', 'info')
           } else if (action === 'edit' || action === 'insert') {
             // The free-text question flow collects the replacement/new text;
-            // every mutation commits an inbox splice that refreshes the pane.
-            void app.askQuestions([{ id: 'q', question: action === 'edit' ? 'Edit queued message:' : 'New message to insert:' }])
-              .then(answers => {
+            // every mutation commits an inbox splice that refreshes the
+            // pane. An owned workflow: the answers drive the splice —
+            // runOwned (AGENTS.md), never a bare void. The question flow
+            // rejects with a cancellation-shaped error on Esc/abort (so the
+            // user cancel is debug-only through runOwned) and with a real
+            // error otherwise (default error diagnostics — no silent
+            // swallowing); either way the queue stays untouched.
+            runOwned('queued message edit', () => app.askQuestions([{ id: 'q', question: action === 'edit' ? 'Edit queued message:' : 'New message to insert:' }]), {
+              diag: runner.diag,
+              sessionId: () => runner.liveAgent?.session.id,
+              onResult: (answers) => {
                 const text = answers[0]?.custom?.trim() ?? ''
                 if (text === '') return
                 const next = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
@@ -800,10 +813,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
                   inbox.splice(target.list, position, 0, [next])
                   app.notify('message inserted before the selected one', 'info')
                 }
-              })
-              .catch(() => {
-                // The user cancelled the edit; the queue stays untouched.
-              })
+              },
+            })
           }
         },
         () => {},
@@ -906,7 +917,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           runner.updateWelcomeCard()
           return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
         } catch (error) {
-          return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+          return { kind: 'error', text: safeErrorMessage(error) }
         }
       }
       const roster = await presets.list()
@@ -969,7 +980,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           const child = children.find(candidate => candidate.id === childId)
           if (child === undefined) return
           if (action === 'view') {
-            detach('subagent view', runner.enterView(child.id, labelOf(child)), { notify: true })
+            detach('subagent view', () => runner.enterView(child.id, labelOf(child)), { notify: true })
           } else if (action === 'interrupt') {
             subagents.interrupt(child.id, { kind: 'user', parentSessionId: liveAgent.session.id })
             app.notify(`interrupting ${labelOf(child)}`, 'info')
@@ -1092,7 +1103,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         writeFileSync(target, raw.content)
         return { kind: 'success', text: `exported ${raw.filename} to ${target}` }
       } catch (error) {
-        return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+        return { kind: 'error', text: safeErrorMessage(error) }
       }
     },
   })

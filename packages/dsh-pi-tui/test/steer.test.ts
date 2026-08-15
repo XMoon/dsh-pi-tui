@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mergeDraft, sessionUnchanged, steerAll, type SteerAgentLike, type SteerDeps, type SteerGuard } from '../src/steer.ts'
 
-type GuardVerdict = { kind: 'ok' | 'forced' } | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' }
+type GuardVerdict = { kind: 'ok' | 'forced' } | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed' }
 
 /** A deferred guard the test resolves manually, to stage in-flight races. */
 function deferredGuard(): {
@@ -73,6 +73,29 @@ function makeDeps(options: {
     staleNotice: () => 'changed while sending',
     mergedNotice: () => 'draft merged',
   }
+}
+
+/** Runner-shaped deps: the EXACT restore wiring index.ts uses — mergeDraft
+ * over the live editor string; verbatim only when the merged result IS the
+ * draft (that is what decides whether the notice may promise a force).
+ * `restored` records every restore call, to prove each operation restores
+ * exactly once. */
+function editorRestoreDeps(options: {
+  agent: () => SteerAgentLike | undefined
+  generation?: () => number
+  guard: Promise<GuardVerdict>
+  editor: () => string
+  setEditor: (text: string) => void
+  restored?: string[]
+}): SteerDeps {
+  const deps = makeDeps({ agent: options.agent, generation: options.generation, guard: options.guard })
+  deps.restoreDraft = (draft) => {
+    options.restored?.push(draft)
+    const merged = mergeDraft(options.editor(), draft)
+    options.setEditor(merged)
+    return merged === draft
+  }
+  return deps
 }
 
 test('a queue splice while the guard is in flight aborts stale, restores the draft, loses nothing', async () => {
@@ -197,8 +220,11 @@ test('sessionUnchanged requires the same agent object and generation', () => {
 test('mergeDraft preserves BOTH texts when the editor changed mid-send', () => {
   // Editor strictly empty: the submitted (unsent) draft comes back.
   assert.equal(mergeDraft('', 'old submitted'), 'old submitted')
-  // Editor already holds the same text: unchanged.
-  assert.equal(mergeDraft('old submitted', 'old submitted'), 'old submitted')
+  // Editor already holds the same text: it is still APPENDED. Text equality
+  // is never an identity — the identical string could be an independent
+  // operation's restore or the user's re-typed input (the review's minimal
+  // counterexample), so it must never short-circuit.
+  assert.equal(mergeDraft('old submitted', 'old submitted'), 'old submitted\n\nold submitted')
   // The user typed something new while the guard ran: the newer text
   // stays on top AND the unsent submission is preserved beneath it —
   // nothing may vanish silently.
@@ -224,7 +250,7 @@ test('a MERGED draft gets the merged notice, never a force promise', async () =>
   assert.ok(!notices.some(note => note.includes('blocked-diverged')), 'the force-promise notice must not be shown for a merged draft')
 })
 
-test('mergeDraft handles empty submissions, whitespace input, and repeated restores', () => {
+test('mergeDraft handles empty submissions and whitespace input', () => {
   // Nothing was submitted (queue-only Ctrl+S with an empty draft): no change.
   assert.equal(mergeDraft('new draft', ''), 'new draft')
   assert.equal(mergeDraft('', ''), '')
@@ -243,7 +269,131 @@ test('two INDEPENDENT operations with the SAME text both survive (no text-level 
   assert.ok(afterB.includes('new draft'), afterB)
   assert.equal(afterB.match(/same/g)?.length, 2, `both submissions must survive:\n${afterB}`)
   // Different-text operations behave the same (already covered above).
-  // The content-already-present case still short-circuits: re-typing the
-  // exact submitted text is not a merge.
-  assert.equal(mergeDraft('same', 'same'), 'same')
+  // The content-already-present case is the MINIMAL counterexample, not a
+  // shortcut: the editor holding exactly the submitted text is appended,
+  // because it may be an INDEPENDENT restore of the same text — text
+  // equality never means "already restored".
+  assert.equal(mergeDraft('same', 'same'), 'same\n\nsame')
+})
+
+test('mergeDraft on an EMPTY editor: sequential same-text restores keep BOTH copies', () => {
+  // The review's minimal counterexample, pure-function level: A and B both
+  // submit `same` on an EMPTY editor, both fail; A restores first, then B.
+  // The equality shortcut used to collapse B into A (one copy lost).
+  const afterA = mergeDraft('', 'same')
+  assert.equal(afterA, 'same')
+  const afterB = mergeDraft(afterA, 'same')
+  assert.equal(afterB.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${afterB}`)
+  // The restore order is symmetric (merge appends, so the reverse order
+  // produces the same result).
+  const reverse = mergeDraft(mergeDraft('', 'same'), 'same')
+  assert.equal(reverse, afterB)
+})
+
+test('mergeDraft keeps the user\'s NEW third draft AND both same-text submissions', () => {
+  // Two independent same-text operations fail while the user typed a THIRD,
+  // different draft in the editor: all three contents must survive — the
+  // user's newest text leads, both unsent submissions are preserved below.
+  const afterFirst = mergeDraft('third draft', 'same')
+  const afterSecond = mergeDraft(afterFirst, 'same')
+  assert.ok(afterSecond.startsWith('third draft'), afterSecond)
+  assert.equal(afterSecond.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${afterSecond}`)
+})
+
+test('two INDEPENDENT same-text operations on an EMPTY editor: both BLOCKED restores keep both copies', async () => {
+  // The review's minimal counterexample at the orchestration level: A and B
+  // both submit `same` via Ctrl+S (the editor was cleared before each
+  // onSteer fired, tui-app.ts), both guards block, A restores first, B
+  // second. Each operation hits exactly one terminal branch and restores
+  // EXACTLY once — the second restore must append, never dedup.
+  const agent = fakeAgent(['a'])
+  const guardA = deferredGuard()
+  const guardB = deferredGuard()
+  let editor = ''
+  const restored: string[] = []
+  const depsA = editorRestoreDeps({ agent: () => agent, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored })
+  const depsB = editorRestoreDeps({ agent: () => agent, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored })
+  const pendingA = steerAll(depsA, 'same')
+  const pendingB = steerAll(depsB, 'same')
+  guardA.resolve({ kind: 'blocked', reason: 'diverged' })
+  guardB.resolve({ kind: 'blocked', reason: 'tail-mismatch' })
+  assert.equal(await pendingA, 'blocked')
+  assert.equal(await pendingB, 'blocked')
+  assert.deepEqual(restored, ['same', 'same'], 'each failed operation restores exactly once')
+  assert.equal(editor.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${editor}`)
+})
+
+test('two INDEPENDENT same-text operations plus a THIRD draft typed mid-flight: all three survive', async () => {
+  // While both guards are in flight the user types a third, different draft.
+  // The restores merge into it — nothing the user typed may be overwritten
+  // and neither unsent submission may be dropped.
+  const agent = fakeAgent(['a'])
+  const guardA = deferredGuard()
+  const guardB = deferredGuard()
+  let editor = ''
+  const restored: string[] = []
+  const pendingA = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
+  const pendingB = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
+  editor = 'third draft' // the user keeps typing while both guards read the file
+  guardA.resolve({ kind: 'blocked', reason: 'diverged' })
+  guardB.resolve({ kind: 'blocked', reason: 'diverged' })
+  assert.equal(await pendingA, 'blocked')
+  assert.equal(await pendingB, 'blocked')
+  assert.equal(editor.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${editor}`)
+  assert.ok(editor.startsWith('third draft'), `the user's newest text leads:\n${editor}`)
+})
+
+test('two INDEPENDENT same-text operations aborted STALE (queue spliced mid-flight): both copies survive', async () => {
+  // Both guards pass but the queue changed while they read the file, so
+  // BOTH sends abort stale — and BOTH restore their own submission.
+  const agent = fakeAgent(['a'])
+  const guardA = deferredGuard()
+  const guardB = deferredGuard()
+  let editor = ''
+  const restored: string[] = []
+  const pendingA = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
+  const pendingB = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
+  agent.state.nextTurn = [...agent.state.nextTurn, { id: 'b' }] // splice while both guards run
+  guardA.resolve({ kind: 'ok' })
+  guardB.resolve({ kind: 'ok' })
+  assert.equal(await pendingA, 'stale')
+  assert.equal(await pendingB, 'stale')
+  assert.deepEqual(restored, ['same', 'same'], 'each stale send restores exactly once')
+  assert.equal(editor.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${editor}`)
+})
+
+test('same-text operations across a SESSION SWITCH (one stale, one blocked): both copies survive', async () => {
+  // A's send is in flight when the user switches sessions (A aborts stale);
+  // B is submitted against the NEW session and blocks. Both restores merge
+  // into the same editor — text equality must not collapse them.
+  let current: FakeAgent | undefined = fakeAgent(['a'])
+  const guardA = deferredGuard()
+  const guardB = deferredGuard()
+  let editor = ''
+  const restored: string[] = []
+  const pendingA = steerAll(editorRestoreDeps({ agent: () => current as SteerAgentLike, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
+  current = fakeAgent(['z']) // session switch while A's guard reads the file
+  const pendingB = steerAll(editorRestoreDeps({ agent: () => current as SteerAgentLike, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
+  guardA.resolve({ kind: 'ok' }) // re-validation fails → stale
+  guardB.resolve({ kind: 'blocked', reason: 'removed' })
+  assert.equal(await pendingA, 'stale')
+  assert.equal(await pendingB, 'blocked')
+  assert.deepEqual(restored, ['same', 'same'], 'each failed operation restores exactly once')
+  assert.equal(editor.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${editor}`)
+})
+
+test('two INDEPENDENT different-text operations failing in sequence: both survive', async () => {
+  const agent = fakeAgent(['a'])
+  const guardA = deferredGuard()
+  const guardB = deferredGuard()
+  let editor = ''
+  const restored: string[] = []
+  const pendingA = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'alpha')
+  const pendingB = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'beta')
+  guardA.resolve({ kind: 'blocked', reason: 'diverged' })
+  guardB.resolve({ kind: 'blocked', reason: 'tail-mismatch' })
+  assert.equal(await pendingA, 'blocked')
+  assert.equal(await pendingB, 'blocked')
+  assert.deepEqual(restored, ['alpha', 'beta'], 'each failed operation restores exactly once')
+  assert.ok(editor.includes('alpha') && editor.includes('beta'), `both submissions must survive:\n${editor}`)
 })
