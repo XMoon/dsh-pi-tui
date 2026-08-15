@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { sessionUnchanged, steerAll, type SteerAgentLike, type SteerDeps, type SteerGuard } from '../src/steer.ts'
+import { mergeDraft, sessionUnchanged, steerAll, type SteerAgentLike, type SteerDeps, type SteerGuard } from '../src/steer.ts'
 
 type GuardVerdict = { kind: 'ok' | 'forced' } | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' }
 
@@ -66,11 +66,12 @@ function makeDeps(options: {
     currentGeneration: options.generation ?? (() => 1),
     guard: { run: async () => options.guard },
     notify: (message, kind) => options.notices?.push(`${kind}: ${message}`),
-    restoreDraft: (text) => options.restored?.push(text),
+    restoreDraft: (text) => { options.restored?.push(text); return true },
     createDraft: (text) => ({ id: `draft:${text}`, text }),
     blockedNotice: (reason) => `blocked-${reason}`,
     forcedNotice: () => 'forced',
     staleNotice: () => 'changed while sending',
+    mergedNotice: () => 'draft merged',
   }
 }
 
@@ -191,4 +192,58 @@ test('sessionUnchanged requires the same agent object and generation', () => {
   assert.equal(sessionUnchanged({ agent: a, generation: 1 }, a, 2), false, 'generation bump')
   assert.equal(sessionUnchanged({ agent: a, generation: 1 }, { id: 'b' }, 1), false, 'agent switch')
   assert.equal(sessionUnchanged({ agent: a, generation: 1 }, undefined, 1), false, 'agent gone')
+})
+
+test('mergeDraft preserves BOTH texts when the editor changed mid-send', () => {
+  // Editor strictly empty: the submitted (unsent) draft comes back.
+  assert.equal(mergeDraft('', 'old submitted'), 'old submitted')
+  // Editor already holds the same text: unchanged.
+  assert.equal(mergeDraft('old submitted', 'old submitted'), 'old submitted')
+  // The user typed something new while the guard ran: the newer text
+  // stays on top AND the unsent submission is preserved beneath it —
+  // nothing may vanish silently.
+  const merged = mergeDraft('new draft typed while guard runs', 'old submitted')
+  assert.ok(merged.includes('new draft typed while guard runs'), merged)
+  assert.ok(merged.includes('old submitted'), `the unsent submission must survive:\n${merged}`)
+  assert.equal(merged.indexOf('new draft typed while guard runs'), 0, 'the newer text leads')
+})
+
+test('a MERGED draft gets the merged notice, never a force promise', async () => {
+  const agent = fakeAgent(['a'])
+  const guard = deferredGuard()
+  const notices: string[] = []
+  // The restore returns FALSE: the draft was merged with newer input, so
+  // the token fingerprint no longer matches — the next press cannot force.
+  const deps = makeDeps({ agent: () => agent, guard: guard.promise, notices })
+  const original = deps.restoreDraft
+  deps.restoreDraft = () => { original('x'); return false }
+  const pending = steerAll(deps, 'draft')
+  guard.resolve({ kind: 'blocked', reason: 'diverged' })
+  assert.equal(await pending, 'blocked')
+  assert.ok(notices.some(note => note.includes('draft merged')), notices.join(' | '))
+  assert.ok(!notices.some(note => note.includes('blocked-diverged')), 'the force-promise notice must not be shown for a merged draft')
+})
+
+test('mergeDraft handles empty submissions, whitespace input, and repeated restores', () => {
+  // Nothing was submitted (queue-only Ctrl+S with an empty draft): no change.
+  assert.equal(mergeDraft('new draft', ''), 'new draft')
+  assert.equal(mergeDraft('', ''), '')
+  // Strict empty check: whitespace-only editor is real input, never swallowed.
+  assert.ok(mergeDraft('   ', 'old unsent').includes('old unsent'), mergeDraft('   ', 'old unsent'))
+  assert.ok(mergeDraft('   ', 'old unsent').startsWith('   '), 'whitespace input must lead')
+})
+
+test('two INDEPENDENT operations with the SAME text both survive (no text-level dedup)', () => {
+  // The review's repro: operation A submits 'same' and fails; the editor
+  // clears, the user submits 'same' AGAIN (independent operation B) which
+  // also fails; meanwhile the user typed 'new draft'. Both unsent
+  // submissions are real user input — text equality must NOT dedup them.
+  const afterA = mergeDraft('new draft', 'same')
+  const afterB = mergeDraft(afterA, 'same')
+  assert.ok(afterB.includes('new draft'), afterB)
+  assert.equal(afterB.match(/same/g)?.length, 2, `both submissions must survive:\n${afterB}`)
+  // Different-text operations behave the same (already covered above).
+  // The content-already-present case still short-circuits: re-typing the
+  // exact submitted text is not a merge.
+  assert.equal(mergeDraft('same', 'same'), 'same')
 })

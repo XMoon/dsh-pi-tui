@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process'
 import { readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -79,8 +80,8 @@ import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
 import { runDetached, isCancellation } from './detached.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
-import { steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
-import { createBoundedOutput, createFileCapture, formatBytes, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
+import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
+import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
 import {
   checkDivergence,
@@ -230,7 +231,8 @@ const GUARD_BLOCKED_NOTIFY = (action: GuardAction): string =>
 const GUARD_TAIL_MISMATCH_NOTIFY = (action: GuardAction): string =>
   `This session file was rewritten by another process (same event count, different content); send blocked. Press ${action === 'submit' ? 'Enter' : 'Ctrl+S'} again to force (may corrupt the session log)`
 const GUARD_FORCED_NOTIFY = 'Forced send — the session may be written by another process; the log may be damaged'
-const GUARD_REMOVED_NOTIFY = 'This session\'s log was removed externally — it can no longer be persisted. Press Enter again to continue without persistence (restart to recover)'
+const GUARD_REMOVED_NOTIFY = (action: GuardAction): string =>
+  `This session's log was removed externally — it can no longer be persisted. Press ${action === 'submit' ? 'Enter' : 'Ctrl+S'} again to continue without persistence (restart to recover)`
 
 /** Hard cap for the /exit session flush: a hung provider must not trap the
  * user; after this the TUI exits and warns that the tail may be lost. */
@@ -954,7 +956,12 @@ export function apply(ctx: Context, config: Config): void {
             settle('aborted', 'error')
             return
           }
-          settle(`failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+          const message = error instanceof Error ? error.message : String(error)
+          // The shell-capability path settles the card like the spawn
+          // fallback; the failure also lands in diagnostics with the live
+          // session id (the card itself is user-visible).
+          diag.error('local shell failed', { session: liveAgent?.session.id, error: message })
+          settle(`failed: ${message}`, 'error')
         })
         return
       }
@@ -968,12 +975,21 @@ export function apply(ctx: Context, config: Config): void {
       const fullPath = join(tmpdir(), `dsh-pi-tui-shell-${process.pid}-${randomUUID()}.log`)
       const full = createFileCapture(fullPath, SHELL_OUTPUT_DISK_CAP_BYTES)
       if (full.active) shellTempFiles.add(fullPath)
-      const onData = (chunk: Buffer): void => {
-        bounded.append(chunk.toString())
+      // ONE StringDecoder PER stream: stdout and stderr are independent
+      // byte streams, so a character split across them would interleave
+      // and corrupt — each stream's decoder buffers only its own partial
+      // sequences and decodes across that stream's chunk boundaries.
+      const stdoutDecoder = new StringDecoder('utf8')
+      const stderrDecoder = new StringDecoder('utf8')
+      const onData = (decoder: StringDecoder, chunk: Buffer): void => {
+        // The wire byte count rides along: an incomplete multi-byte
+        // sequence buffered by the decoder produces no text yet, but its
+        // bytes are real and must count toward the totals.
+        bounded.append(decoder.write(chunk), chunk.length)
         full.append(chunk)
       }
-      child.stdout.on('data', onData)
-      child.stderr.on('data', onData)
+      child.stdout.on('data', (chunk) => onData(stdoutDecoder, chunk))
+      child.stderr.on('data', (chunk) => onData(stderrDecoder, chunk))
       localSignal.addEventListener('abort', () => child.kill(), { once: true })
       child.on('error', (error) => {
         releaseController()
@@ -984,6 +1000,14 @@ export function apply(ctx: Context, config: Config): void {
       })
       child.on('close', (code, childSignal) => {
         releaseController()
+        // Flush each decoder's remaining partial sequence. An incomplete
+        // trailing multi-byte character surfaces as U+FFFD from end() — it
+        // is shown as-is (the bytes were real); its wire bytes were already
+        // counted by append's wireBytes, so pass 0 to avoid double counting.
+        for (const decoder of [stdoutDecoder, stderrDecoder]) {
+          const tail = decoder.end()
+          if (tail !== '') bounded.append(tail, 0)
+        }
         if (localSignal.aborted) {
           // The run was cancelled: the partial capture is noise, delete it.
           full.dispose()
@@ -1004,7 +1028,7 @@ export function apply(ctx: Context, config: Config): void {
           const output = bounded.tail.trim()
           const lines: string[] = []
           if (output !== '') lines.push(output)
-          lines.push(`… output truncated: kept the last ${formatBytes(SHELL_OUTPUT_CAP_BYTES)} / ${SHELL_OUTPUT_CAP_LINES} lines of ${formatBytes(bounded.totalBytes)} (${bounded.totalLines} lines)`)
+          lines.push(formatTruncation(bounded))
           if (full.exists) {
             lines.push(full.truncated
               ? `full output (disk capture truncated at ${formatBytes(SHELL_OUTPUT_DISK_CAP_BYTES)}): ${fullPath}`
@@ -1114,10 +1138,18 @@ export function apply(ctx: Context, config: Config): void {
     /** Error sink for a failed session creation: restore the draft and
      * surface the reason instead of silently dropping the submission. */
     const failSubmission = (draft: string) => (error: unknown): void => {
+      // Lifecycle abort while creating/guarding is a cancellation, not a
+      // session failure: debug-only, no error notice, no draft restore.
+      if (isCancellation(error)) {
+        diag.debug('session submission cancelled', { session: liveAgent?.session.id })
+        return
+      }
       const message = error instanceof Error ? error.message : String(error)
       ctx.logger.error(`tui-runner: session creation failed: ${message}`)
-      diag.error('session creation failed', { error: message })
-      app.setEditorText(draft)
+      diag.error('session creation failed', { error: message, session: liveAgent?.session.id })
+      // The draft was not sent; restore it without overwriting anything
+      // the user typed while the session was being created.
+      app.setEditorText(mergeDraft(app.getDraft(), draft))
       app.notify(`could not start a session: ${message}`, 'error')
     }
     /** The session-backed dispatch: create the session lazily (the first
@@ -1136,20 +1168,26 @@ export function apply(ctx: Context, config: Config): void {
         // forces through (the user's explicit override, logged and warned).
         const verdict = await guardSend('submit', text)
         if (verdict.kind === 'blocked') {
-          app.setEditorText(text)
-          app.notify(verdict.reason === 'removed'
-            ? GUARD_REMOVED_NOTIFY
-            : verdict.reason === 'tail-mismatch'
-              ? GUARD_TAIL_MISMATCH_NOTIFY('submit')
-              : GUARD_BLOCKED_NOTIFY('submit'), 'error')
+          const merged = mergeDraft(app.getDraft(), text)
+          app.setEditorText(merged)
+          app.notify(merged === text
+            ? (verdict.reason === 'removed'
+              ? GUARD_REMOVED_NOTIFY('submit')
+              : verdict.reason === 'tail-mismatch'
+                ? GUARD_TAIL_MISMATCH_NOTIFY('submit')
+                : GUARD_BLOCKED_NOTIFY('submit'))
+            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
           return
         }
         // TOCTOU re-validation: the session must be the exact one the
         // guard checked, or the submission is aborted for a retry against
         // the new session (which needs its own guard).
         if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
-          app.setEditorText(text)
-          app.notify('the session changed while sending — try again', 'error')
+          const merged = mergeDraft(app.getDraft(), text)
+          app.setEditorText(merged)
+          app.notify(merged === text
+            ? 'the session changed while sending — try again'
+            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
           return
         }
         if (verdict.kind === 'forced') {
@@ -1168,17 +1206,34 @@ export function apply(ctx: Context, config: Config): void {
             && foldPlanMode(liveAgent?.session.events ?? [])
             ? '/plan off'
             : text
-          void commands.execute(liveAgent as Agent, toggled, signal).then((execution) => {
-            if (execution === undefined && liveAgent !== undefined) {
-              liveAgent.followup(createUserMessage({
-                content: [{ type: 'text', text }],
-                source: { kind: 'user' },
-              }))
+          void commands.execute(agent as Agent, toggled, signal).then((execution) => {
+            // The fallback follow-up still targets the CAPTURED agent; if
+            // the session moved on while the command ran, restore the draft
+            // instead of posting into a session the user has left.
+            if (execution === undefined) {
+              if (sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+                agent.followup(createUserMessage({
+                  content: [{ type: 'text', text }],
+                  source: { kind: 'user' },
+                }))
+              } else {
+                const merged = mergeDraft(app.getDraft(), text)
+                app.setEditorText(merged)
+                app.notify(merged === text
+                  ? 'the session changed while sending — try again'
+                  : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+              }
             }
           }).catch((error: unknown) => {
+            // Cancellation (lifecycle abort) is debug-only — the unified
+            // classification, never a user error.
+            if (isCancellation(error)) {
+              diag.debug('command execution cancelled', { session: agent.session.id })
+              return
+            }
             const message = error instanceof Error ? error.message : String(error)
             ctx.logger.error(`tui-runner: command execution failed: ${message}`)
-            diag.error('command execution failed', { error: message })
+            diag.error('command execution failed', { error: message, session: agent.session.id })
             app.notify(message, 'error')
           })
           return
@@ -1306,18 +1361,23 @@ export function apply(ctx: Context, config: Config): void {
               },
             },
             notify: (message, kind) => app.notify(message, kind),
-            restoreDraft: (draft) => app.setEditorText(draft),
+            restoreDraft: (draft) => {
+              const merged = mergeDraft(app.getDraft(), draft)
+              app.setEditorText(merged)
+              return merged === draft
+            },
             createDraft: (draft) => createUserMessage({
               content: [{ type: 'text', text: draft }],
               source: { kind: 'user' },
             }),
             blockedNotice: (reason) => reason === 'removed'
-              ? GUARD_REMOVED_NOTIFY
+              ? GUARD_REMOVED_NOTIFY('submit')
               : reason === 'tail-mismatch'
                 ? GUARD_TAIL_MISMATCH_NOTIFY('save')
                 : GUARD_BLOCKED_NOTIFY('save'),
             forcedNotice: () => GUARD_FORCED_NOTIFY,
             staleNotice: () => 'the queue or session changed while sending — try again',
+            mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
           }, text)
         }).catch(failSubmission(text))
       },

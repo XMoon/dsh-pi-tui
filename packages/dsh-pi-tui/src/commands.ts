@@ -24,7 +24,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { TuiApp } from './tui-app.ts'
 import type { Diag } from './diag.ts'
-import { runDetached } from './detached.ts'
+import { isCancellation, runDetached } from './detached.ts'
 import { color, loadCustomTheme, settingsListTheme } from './theme.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
@@ -149,6 +149,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   const detach = (label: string, task: Promise<unknown>, options: { notify?: boolean } = {}): void => {
     runDetached(label, task, {
       diag: runner.diag,
+      // Diagnostics name the live session at settle time, never the payload.
+      sessionId: () => runner.liveAgent?.session.id,
       notify: options.notify === true ? (message) => app.notify(message, 'error') : undefined,
       recoverable: options.notify === true ? () => true : undefined,
     })
@@ -160,6 +162,12 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     void runner.switchSession(id).then(error => {
       if (error !== undefined) app.notify(error, 'error')
     }).catch((error: unknown) => {
+      // Cancellation (TUI quit / lifecycle abort) is debug-only, never a
+      // user error — the unified classification.
+      if (isCancellation(error)) {
+        runner.diag.debug('session switch cancelled', { session: id })
+        return
+      }
       const message = error instanceof Error ? error.message : String(error)
       runner.diag.error('session switch failed', { session: id, error: message })
       app.notify(`session switch failed: ${message}`, 'error')

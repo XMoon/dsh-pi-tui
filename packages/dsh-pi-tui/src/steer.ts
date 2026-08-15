@@ -49,8 +49,13 @@ export interface SteerDeps {
   currentGeneration(): number
   guard: SteerGuard
   notify(message: string, kind: 'info' | 'error'): void
-  /** Restore the draft after a block (the editor keeps the text). */
-  restoreDraft(text: string): void
+  /**
+   * Restore the draft after a block (the editor keeps the text). Returns
+   * true when the draft came back VERBATIM (a second identical submit can
+   * force); false when it was MERGED with newer input — then the notice
+   * must not promise that the next press forces.
+   */
+  restoreDraft(text: string): boolean
   /** Build the draft message (runner-side creation, keeps this module dsh-free). */
   createDraft(text: string): unknown
   /** The block notice text for a divergence kind. */
@@ -59,6 +64,33 @@ export interface SteerDeps {
   forcedNotice(): string
   /** The stale-state (retry) notice text. */
   staleNotice(): string
+  /** The notice when the draft had to be MERGED with newer input: the
+   * submission changed, so no force promise can be made. */
+  mergedNotice(): string
+}
+
+/**
+ * Merge a draft back after an aborted send so NOTHING is lost.
+ *
+ * NO text-level dedup: every restore corresponds to exactly ONE operation
+ * (steerAll/submit hit exactly one terminal branch and return), so a
+ * "repeated restore" cannot happen — and two INDEPENDENT operations may
+ * legitimately carry the SAME text. Text equality therefore never means
+ * "already restored"; each failed operation preserves its submission.
+ * - nothing was submitted: the editor stays exactly as it is;
+ * - editor strictly empty: the submitted (unsent) text comes back;
+ * - editor already holds exactly the submitted text (e.g. the user re-typed
+ *   it): nothing to add — the content is already present;
+ * - otherwise: the user's newer text stays on top and the unsent submission
+ *   is preserved visibly beneath it (it was never delivered, so silently
+ *   dropping it would lose the input). A whitespace-only editor is real
+ *   input and is never swallowed.
+ */
+export function mergeDraft(current: string, submitted: string): string {
+  if (submitted === '') return current
+  if (current === '') return submitted
+  if (current === submitted) return current
+  return current + '\n\n' + submitted
 }
 
 /**
@@ -90,8 +122,10 @@ export async function steerAll(deps: SteerDeps, text: string): Promise<SteerOutc
   const snapshot = [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
   const verdict = await deps.guard.run(savePayloadIdentity(snapshot, text))
   if (verdict.kind === 'blocked') {
-    deps.restoreDraft(text)
-    deps.notify(deps.blockedNotice(verdict.reason), 'error')
+    const verbatim = deps.restoreDraft(text)
+    // A merged draft is no longer the token's fingerprint: the next press
+    // would NOT force. Say so instead of promising a force.
+    deps.notify(verbatim ? deps.blockedNotice(verdict.reason) : deps.mergedNotice(), 'error')
     return 'blocked'
   }
   // Re-validate AFTER the guard: the agent object, the session generation
@@ -100,16 +134,16 @@ export async function steerAll(deps: SteerDeps, text: string): Promise<SteerOutc
   // fired, so the user must not lose their text.
   const now = deps.currentAgent()
   if (now === undefined || !sessionUnchanged({ agent, generation }, now, deps.currentGeneration())) {
-    deps.restoreDraft(text)
-    deps.notify(deps.staleNotice(), 'error')
+    const verbatim = deps.restoreDraft(text)
+    deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
     return 'stale'
   }
   const current = [...now.inbox.nextTurn, ...now.inbox.nextStep]
   const unchanged = current.length === snapshot.length
     && current.every((message, index) => message.id === snapshot[index]!.id)
   if (!unchanged) {
-    deps.restoreDraft(text)
-    deps.notify(deps.staleNotice(), 'error')
+    const verbatim = deps.restoreDraft(text)
+    deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
     return 'stale'
   }
   const forced = verdict.kind === 'forced'

@@ -333,11 +333,21 @@ test('parseArgs errors clearly on missing flag values', () => {
   assert.throws(() => parseArgs(['--dsh-home']), /requires a value/)
 })
 
+test('parseArgs accepts both the space and = forms of --duplicate-reference', () => {
+  assert.equal(parseArgs(['--duplicate-reference', 'segment']).flags.duplicateReference, 'segment')
+  assert.equal(parseArgs(['--duplicate-reference=segment']).flags.duplicateReference, 'segment')
+  assert.equal(parseArgs(['--duplicate-reference=first', 'sess-1']).positional[0], 'sess-1')
+  assert.throws(() => parseArgs(['--duplicate-reference=typo']), /must be one of/)
+})
+
 test('parseArgs rejects a non-enum duplicate-reference value (a typo must not silently degrade to first)', () => {
   assert.throws(() => parseArgs(['--duplicate-reference', 'frist']), /must be one of first\|last\|segment/)
   assert.throws(() => parseArgs(['--duplicate-reference', 'FIRST']), /must be one of/)
   // A flag swallowed as the value must be rejected, not consumed.
   assert.throws(() => parseArgs(['--duplicate-reference', '--scan']), /got a flag/)
+  // --dsh-dir/--dsh-home must not swallow following flags either.
+  assert.throws(() => parseArgs(['--dsh-dir', '--yes']), /got a flag/)
+  assert.throws(() => parseArgs(['--dsh-home', '--scan']), /got a flag/)
 })
 
 test('repairEvents defensively rejects a non-enum strategy', () => {
@@ -749,7 +759,7 @@ test('CLI refuses an ambiguous duplicate-seq log by default without writing', ()
   assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
 })
 
-test('CLI --duplicate-reference=first applies the strategy and prints the plan', () => {
+test('CLI --duplicate-reference first applies the strategy and prints the plan', () => {
   const stub = makeDshStub()
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
@@ -767,6 +777,19 @@ test('CLI --duplicate-reference=first applies the strategy and prints the plan',
   const rescan = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(rescan.status, 0)
   assert.match(rescan.stdout, /nothing to repair/)
+})
+
+test('CLI accepts the README = form (--duplicate-reference=first)', () => {
+  const stub = makeDshStub()
+  const events = buildEvents([0, 1, 2, 2, 3])
+  events[4].data = { sourceEventSeqs: [2] }
+  const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
+  const home = makeFakeHome(buffer)
+  const result = runCli(['sess-1', '--yes', '--duplicate-reference=first', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /resolved as first/)
+  const read = readLikeHarness(join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd'))
+  assert.equal(read.events.length, 5)
 })
 
 test('CLI --duplicate-reference=segment refuses a same-frame conflict and reports it', () => {

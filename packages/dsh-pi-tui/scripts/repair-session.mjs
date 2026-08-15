@@ -317,12 +317,23 @@ export function parseArgs(args) {
         throw new Error(`--duplicate-reference must be one of ${DUPLICATE_REFERENCE_STRATEGIES.join('|')}, got "${value}"`)
       }
       flags.duplicateReference = value
+    } else if (arg.startsWith('--duplicate-reference=')) {
+      // The README's = form: --duplicate-reference=first.
+      const value = arg.slice('--duplicate-reference='.length)
+      if (!DUPLICATE_REFERENCE_STRATEGIES.includes(value)) {
+        throw new Error(`--duplicate-reference must be one of ${DUPLICATE_REFERENCE_STRATEGIES.join('|')}, got "${value}"`)
+      }
+      flags.duplicateReference = value
     } else if (arg === '--dsh-dir') {
       if (i + 1 >= args.length) throw new Error('--dsh-dir requires a value')
-      flags.dshDir = args[++i]
+      const value = args[++i]
+      if (value.startsWith('--')) throw new Error(`--dsh-dir requires a value, got a flag: ${value}`)
+      flags.dshDir = value
     } else if (arg === '--dsh-home') {
       if (i + 1 >= args.length) throw new Error('--dsh-home requires a value')
-      flags.dshHome = args[++i]
+      const value = args[++i]
+      if (value.startsWith('--')) throw new Error(`--dsh-home requires a value, got a flag: ${value}`)
+      flags.dshHome = value
     } else if (arg === '--help' || arg === '-h') {
       flags.help = true
     } else {

@@ -3,9 +3,12 @@
  * the TAIL of the stream (byte- and line-capped), so a runaway `yes` or
  * `find /` cannot grow memory without bound — including a stream that never
  * emits a newline (the unterminated tail is capped and UTF-8-safe too).
- * Totals are tracked separately so the card can state exactly how much was
- * received and dropped. A companion {@link createFileCapture} bounds the
- * full-output disk capture the same way, so /tmp cannot be filled either.
+ * Two totals are tracked separately and must not be conflated: the WIRE
+ * bytes actually received (raw, before decoding — the decoder may buffer
+ * incomplete multi-byte sequences) and the DISPLAY bytes of the decoded
+ * text. The cap is a DISPLAY cap; the truncation report states each in its
+ * own unit. A companion {@link createFileCapture} bounds the full-output
+ * disk capture the same way, so /tmp cannot be filled either.
  * @module @xmoon76/dsh-pi-tui/bounded-output
  */
 
@@ -21,14 +24,23 @@ export const SHELL_OUTPUT_DISK_CAP_BYTES = 8 * 1024 * 1024
 export interface BoundedOutput {
   /** The retained tail text (line- and byte-capped). */
   readonly tail: string
-  /** Total bytes received (UTF-8), before any cap. */
+  /** Total WIRE bytes received (raw, before decoding), before any cap. */
+  readonly totalWireBytes: number
+  /** Total DISPLAY bytes of the decoded text received, before any cap. */
   readonly totalBytes: number
   /** Total lines received. */
   readonly totalLines: number
   /** Whether any content was dropped to enforce the caps. */
   readonly truncated: boolean
-  /** Append a chunk; drops whole leading lines once a cap is exceeded. */
-  append(chunk: string): void
+  /**
+   * Append a chunk; drops whole leading lines once a cap is exceeded.
+   * `wireBytes` (when given) is the RAW byte count this text decodes
+   * from — totals then match the wire even when the decoder buffers an
+   * incomplete multi-byte sequence (pass 0 when the bytes were already
+   * accounted by an earlier call). `totalWireBytes` accumulates the raw
+   * side; `totalBytes` accumulates the decoded text only.
+   */
+  append(chunk: string, wireBytes?: number): void
 }
 
 /** The last `maxBytes` of `text` cut at a UTF-8 character boundary. */
@@ -59,6 +71,7 @@ export function createBoundedOutput(
   capLines: number = SHELL_OUTPUT_CAP_LINES,
 ): BoundedOutput {
   const tailLines: string[] = []
+  let totalWireBytes = 0
   let totalBytes = 0
   let totalLines = 0
   let truncated = false
@@ -88,6 +101,9 @@ export function createBoundedOutput(
       // of the visible tail even though it is not counted as a line yet.
       return pendingPartial === undefined ? tailLines.join('\n') : [...tailLines, pendingPartial].join('\n')
     },
+    get totalWireBytes() {
+      return totalWireBytes
+    },
     get totalBytes() {
       return totalBytes
     },
@@ -97,8 +113,14 @@ export function createBoundedOutput(
     get truncated() {
       return truncated
     },
-    append(chunk: string): void {
-      if (chunk === '') return
+    append(chunk: string, wireBytes?: number): void {
+      if (chunk === '') {
+        // Empty decoded text (the decoder buffered an incomplete sequence):
+        // the wire bytes still count toward the WIRE totals.
+        if (wireBytes !== undefined && wireBytes > 0) totalWireBytes += wireBytes
+        return
+      }
+      totalWireBytes += wireBytes ?? Buffer.byteLength(chunk, 'utf8')
       totalBytes += Buffer.byteLength(chunk, 'utf8')
       const parts = chunk.split('\n')
       // Every part except the last is a newline-terminated line; the last
@@ -255,6 +277,23 @@ export function createFileCapture(path: string, capBytes: number = SHELL_OUTPUT_
       }
     },
   }
+}
+
+/**
+ * The truncation report line. Reports ACTUAL retained values (measured
+ * from the tail), never the configured caps, and states each total in its
+ * own unit: retained display bytes / retained lines, decoded display total,
+ * and wire-received total.
+ */
+export function formatTruncation(bounded: {
+  tail: string
+  totalBytes: number
+  totalWireBytes: number
+  totalLines: number
+}): string {
+  const retainedDisplay = Buffer.byteLength(bounded.tail, 'utf8')
+  const retainedLines = bounded.tail === '' ? 0 : bounded.tail.split('\n').length
+  return `… output truncated: retained ${formatBytes(retainedDisplay)} display / ${retainedLines} lines; decoded ${formatBytes(bounded.totalBytes)} display from ${formatBytes(bounded.totalWireBytes)} received (${bounded.totalLines} lines total)`
 }
 
 /** Human-readable byte count (e.g. `256.0 KiB`, `12.3 MiB`). */

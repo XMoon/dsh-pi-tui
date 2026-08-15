@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { StringDecoder } from 'node:string_decoder'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,6 +16,7 @@ import {
   createBoundedOutput,
   createFileCapture,
   formatBytes,
+  formatTruncation,
   utf8Tail,
   SHELL_OUTPUT_CAP_BYTES,
   SHELL_OUTPUT_CAP_LINES,
@@ -237,6 +239,69 @@ test('an unterminated tail with completed lines stays within the cap including t
   assert.ok(Buffer.byteLength(out.tail, 'utf8') <= 8, `tail: ${JSON.stringify(out.tail)}`)
 })
 
+test('multi-byte characters split across Buffer chunks decode intact (StringDecoder)', () => {
+  // The runner decodes stdout/stderr through a StringDecoder: a UTF-8
+  // character split across two chunks must not become a replacement
+  // character. Feed a 3-byte CJK char and a 4-byte emoji one byte at a time.
+  const decoder = new StringDecoder('utf8')
+  const out = createBoundedOutput()
+  for (const char of ['测', '🐋']) {
+    const bytes = Buffer.from(char, 'utf8')
+    for (let i = 0; i < bytes.length; i += 1) {
+      const text = decoder.write(bytes.subarray(i, i + 1))
+      out.append(text, 1) // one wire byte per feed, like the runner's onData
+    }
+  }
+  const tail = decoder.end()
+  if (tail !== '') out.append(tail, 0)
+  assert.ok(out.tail.includes('测'), `CJK char must survive split chunks: ${JSON.stringify(out.tail)}`)
+  assert.ok(out.tail.includes('🐋'), `emoji must survive split chunks: ${JSON.stringify(out.tail)}`)
+  assert.ok(!out.tail.includes('\uFFFD'), `no replacement characters:\n${JSON.stringify(out.tail)}`)
+  assert.equal(out.totalWireBytes, 7, 'wire totals count the raw bytes')
+  assert.equal(out.totalBytes, 7, 'display totals count the decoded text')
+  assert.equal(Buffer.byteLength(out.tail, 'utf8'), 7, 'displayed bytes match the decoded content')
+})
+
+test('an incomplete trailing sequence is VISIBLE and its wire bytes count', () => {
+  // stdout ends mid-character: one raw byte 0xe6 (the first byte of 测).
+  // The decoder buffers it; end() surfaces U+FFFD. The byte must not be
+  // silently dropped from the display NOR from the totals.
+  const decoder = new StringDecoder('utf8')
+  const out = createBoundedOutput()
+  const partial = Buffer.from([0xe6])
+  out.append(decoder.write(partial), partial.length) // no text yet, 1 wire byte
+  const tail = decoder.end()
+  if (tail !== '') out.append(tail, 0) // U+FFFD shown; bytes already counted
+  assert.ok(out.tail.includes('\uFFFD'), `the incomplete sequence is visible, not silently dropped: ${JSON.stringify(out.tail)}`)
+  assert.equal(out.totalWireBytes, 1, 'wire totals count the raw byte')
+  assert.equal(out.totalBytes, Buffer.byteLength(out.tail, 'utf8'), 'display totals count the decoded text')
+})
+
+test('stdout and stderr use SEPARATE decoders: interleaved streams stay intact', () => {
+  // The runner decodes each stream through its OWN StringDecoder. A CJK
+  // character split across stdout chunks, with an interleaved stderr
+  // write in between, must not corrupt either stream (a shared decoder
+  // would merge the streams' partial sequences).
+  const stdoutDecoder = new StringDecoder('utf8')
+  const stderrDecoder = new StringDecoder('utf8')
+  const out = createBoundedOutput()
+  const cjk = Buffer.from('测', 'utf8') // 3 bytes
+  // stdout: first byte of 测 → stderr: ASCII 'ERR' → stdout: remaining bytes.
+  out.append(stdoutDecoder.write(cjk.subarray(0, 1)), 1)
+  out.append(stderrDecoder.write(Buffer.from('ERR')), 3)
+  out.append(stdoutDecoder.write(cjk.subarray(1, 3)), 2)
+  const tailOut = stdoutDecoder.end()
+  const tailErr = stderrDecoder.end()
+  if (tailOut !== '') out.append(tailOut, 0)
+  if (tailErr !== '') out.append(tailErr, 0)
+  assert.ok(out.tail.includes('测'), `CJK char must survive interleaving: ${JSON.stringify(out.tail)}`)
+  assert.ok(out.tail.includes('ERR'), `stderr must survive interleaving: ${JSON.stringify(out.tail)}`)
+  assert.ok(!out.tail.includes('\uFFFD'), `no replacement characters:\n${JSON.stringify(out.tail)}`)
+  assert.equal(out.totalWireBytes, 6, 'wire totals count the raw bytes (3-byte CJK + 3 ASCII)')
+  assert.equal(out.totalBytes, 6, 'display totals count the decoded text')
+  assert.equal(Buffer.byteLength(out.tail, 'utf8'), 6, 'displayed bytes match')
+})
+
 // --- the bounded full-output file capture ---
 
 test('file capture writes everything up to the cap, then stops and flags truncation', () => {
@@ -291,4 +356,37 @@ test('file capture open failure yields an inactive capture that is safe to call'
   capture.close() // no-op
   capture.dispose() // no-op, no throw
   assert.equal(existsSync(capture.path), false)
+})
+
+test('wire and display totals stay independent under invalid bytes (no contradictory report)', () => {
+  // The review's scenario: 100k raw invalid bytes decode to 3-byte U+FFFD
+  // each — the DISPLAY cap applies to the decoded text while the WIRE
+  // total counts the raw input. The two must never be conflated.
+  const decoder = new StringDecoder('utf8')
+  const out = createBoundedOutput(256 * 1024, 4000) // display cap 256 KiB
+  // 200k invalid lead bytes decode to ~100k U+FFFD (3 display bytes each),
+  // so the DISPLAY (≈300 KiB) exceeds the cap while the WIRE total counts
+  // the 200k raw bytes — the two must never be conflated. A single batch
+  // write (StringDecoder handles it internally) keeps this millisecond-fast.
+  const bytes = Buffer.alloc(200_000, 0xe6)
+  const text = decoder.write(bytes)
+  out.append(text, bytes.length)
+  const tail = decoder.end()
+  if (tail !== '') out.append(tail, 0)
+  assert.equal(out.totalWireBytes, 200_000, 'wire totals count every raw byte')
+  assert.ok(out.truncated, 'the display cap still applies')
+  assert.ok(Buffer.byteLength(out.tail, 'utf8') <= 256 * 1024, 'the retained DISPLAY stays within the display cap')
+  assert.notEqual(out.totalWireBytes, out.totalBytes, 'wire and display totals diverge under invalid bytes')
+})
+
+test('the truncation line reports ACTUAL retained values, never the caps', () => {
+  // Line cap 3 with 5000 lines: retained is 3 lines / ~37 bytes, NOT the
+  // configured 4000 lines / byte cap.
+  const out = createBoundedOutput(1024 * 1024, 3)
+  for (let i = 0; i < 5000; i += 1) out.append(`line ${i}\n`)
+  const line = formatTruncation(out)
+  assert.ok(line.includes('/ 3 lines'), `actual retained lines:\n${line}`)
+  assert.ok(!line.includes('1.0 MiB'), 'the byte cap must never be reported as retained')
+  assert.ok(line.includes('5000 lines total'), `wire total:\n${line}`)
+  assert.ok(line.includes('retained'), line)
 })
