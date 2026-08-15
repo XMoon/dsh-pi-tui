@@ -79,6 +79,7 @@ import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
 import { runDetached, isCancellation } from './detached.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
+import { steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
 import {
@@ -87,6 +88,7 @@ import {
   forceTokenAllows,
   freshGuardState,
   mintForceToken,
+  savePayloadIdentity,
   type GuardAction,
   type GuardForceToken,
   type GuardPersistenceLike,
@@ -1124,6 +1126,12 @@ export function apply(ctx: Context, config: Config): void {
      * divergence, then execute a registered slash command or follow up. */
     const dispatchViaSession = (text: string): void => {
       void ensureSession().then(async () => {
+        const agent = liveAgent
+        if (agent === undefined) return
+        // The guard checks THIS agent's session; capture the identity so
+        // the write below can never target a session the guard did not see
+        // (a session switch while the file read is in flight).
+        const generation = sessionGeneration
         // Divergence guard: another dsh process may be writing this session.
         // Blocked submissions restore the draft so a second identical Enter
         // forces through (the user's explicit override, logged and warned).
@@ -1135,6 +1143,14 @@ export function apply(ctx: Context, config: Config): void {
             : verdict.reason === 'tail-mismatch'
               ? GUARD_TAIL_MISMATCH_NOTIFY('submit')
               : GUARD_BLOCKED_NOTIFY('submit'), 'error')
+          return
+        }
+        // TOCTOU re-validation: the session must be the exact one the
+        // guard checked, or the submission is aborted for a retry against
+        // the new session (which needs its own guard).
+        if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+          app.setEditorText(text)
+          app.notify('the session changed while sending — try again', 'error')
           return
         }
         if (verdict.kind === 'forced') {
@@ -1273,51 +1289,37 @@ export function apply(ctx: Context, config: Config): void {
         }
         void ensureSession().then(async () => {
           if (liveAgent === undefined) return
-          const verdict = await guardSend('save', text)
-          if (verdict.kind === 'blocked') {
-            app.setEditorText(text)
-            app.notify(verdict.reason === 'removed'
-              ? GUARD_REMOVED_NOTIFY
-              : verdict.reason === 'tail-mismatch'
-                ? GUARD_TAIL_MISMATCH_NOTIFY('save')
-                : GUARD_BLOCKED_NOTIFY('save'), 'error')
-            return
-          }
-          const forced = verdict.kind === 'forced'
-          if (forced) {
-            app.notify(GUARD_FORCED_NOTIFY, 'error')
-          }
-          const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
-          if (queued.length > 0) {
-            // Steer-all: drain the queue durably, then resubmit every message
-            // (plus the draft, if any) to the next-step boundary. The pane
-            // order (followups first, then steers) is preserved.
-            const draft = text.trim()
-            const messages = [
-              ...queued,
-              ...(draft === '' ? [] : [createUserMessage({
-                content: [{ type: 'text', text: draft }],
-                source: { kind: 'user' },
-              })]),
-            ]
-            liveAgent.inbox.clear()
-            for (const message of messages) liveAgent.steer(message)
-            if (!forced) {
-              app.notify(messages.length === 1 ? 'steering 1 message' : `steering ${messages.length} messages`, 'info')
-            }
-          } else {
-            // Classic single-draft steer: a running turn takes it now; an
-            // idle agent starts a regular turn with it.
-            const message = createUserMessage({
-              content: [{ type: 'text', text }],
+          // The whole send (snapshot → guard → re-validate → confirm-and-
+          // send) lives in steer.ts so the races are testable: a queue
+          // splice or session switch while the guard reads the file aborts
+          // with a retry notice instead of losing messages or writing to a
+          // session the guard never checked.
+          await steerAll({
+            currentAgent: () => liveAgent as unknown as SteerAgentLike,
+            currentGeneration: () => sessionGeneration,
+            guard: {
+              run: async (identity) => {
+                const verdict = await guardSend('save', identity)
+                if (verdict.kind === 'blocked') {
+                  return { kind: 'blocked', reason: verdict.reason }
+                }
+                return { kind: verdict.kind === 'forced' ? 'forced' : 'ok' }
+              },
+            },
+            notify: (message, kind) => app.notify(message, kind),
+            restoreDraft: (draft) => app.setEditorText(draft),
+            createDraft: (draft) => createUserMessage({
+              content: [{ type: 'text', text: draft }],
               source: { kind: 'user' },
-            })
-            if (liveAgent.status === 'running') {
-              liveAgent.steer(message)
-            } else {
-              liveAgent.followup(message)
-            }
-          }
+            }),
+            blockedNotice: (reason) => reason === 'removed'
+              ? GUARD_REMOVED_NOTIFY
+              : reason === 'tail-mismatch'
+                ? GUARD_TAIL_MISMATCH_NOTIFY('save')
+                : GUARD_BLOCKED_NOTIFY('save'),
+            forcedNotice: () => GUARD_FORCED_NOTIFY,
+            staleNotice: () => 'the queue or session changed while sending — try again',
+          }, text)
         }).catch(failSubmission(text))
       },
       openExternalEditor: async (draft) => {
@@ -1733,8 +1735,13 @@ export function apply(ctx: Context, config: Config): void {
       // an agent/inbox/spliced event. The upstream Inbox commits the event
       // BEFORE its live projection mutates (synchronous observers see the
       // pre-splice lists), so the pane must read the inbox on the next
-      // microtask — after the splice has actually landed.
-      if (event.type === 'agent/inbox/spliced') queueMicrotask(refreshQueue)
+      // microtask — after the splice has actually landed. A splice also
+      // invalidates any pending save force token: the token binds the queue
+      // payload at block time, and a changed queue must re-block.
+      if (event.type === 'agent/inbox/spliced') {
+        guardToken = undefined
+        queueMicrotask(refreshQueue)
+      }
       // Persist each completed turn so a crash loses at most the live turn.
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.

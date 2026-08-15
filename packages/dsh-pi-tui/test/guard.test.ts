@@ -13,6 +13,7 @@ import {
   forceTokenAllows,
   freshGuardState,
   mintForceToken,
+  savePayloadIdentity,
   type GuardAction,
   type GuardForceToken,
   type GuardPersistenceLike,
@@ -353,4 +354,35 @@ test('draft fingerprints are stable, differ per draft, and do not contain the dr
   assert.notEqual(draftFingerprint('hello world'), a)
   assert.ok(!a.includes('hello'))
   assert.match(a, /^[0-9a-f]{16}$/)
+})
+
+test('savePayloadIdentity covers queue order and draft, never the message content', () => {
+  const m = (id: string): { id: string } => ({ id })
+  assert.equal(savePayloadIdentity([], 'hi'), '|hi')
+  assert.equal(savePayloadIdentity([m('a')], 'hi'), 'a|hi')
+  assert.equal(savePayloadIdentity([m('a'), m('b')], 'hi'), 'a,b|hi')
+  // Any queue change — add, remove, reorder — changes the identity.
+  assert.notEqual(savePayloadIdentity([m('a')], 'hi'), savePayloadIdentity([m('a'), m('c')], 'hi'))
+  assert.notEqual(savePayloadIdentity([m('a'), m('b')], 'hi'), savePayloadIdentity([m('b'), m('a')], 'hi'))
+  // A changed draft changes the identity too.
+  assert.notEqual(savePayloadIdentity([m('a')], 'hi'), savePayloadIdentity([m('a')], 'bye'))
+  // Only message IDs participate — the message body never feeds the
+  // identity, so nothing sensitive reaches the fingerprint.
+  assert.equal(savePayloadIdentity([m('id-only')], ''), 'id-only|')
+  assert.equal(savePayloadIdentity([{ id: 'x' }, { id: 'y' }], 'draft'), 'x,y|draft')
+})
+
+test('a changed queue payload invalidates the save token (fingerprint mismatch)', () => {
+  const payload = (queued: readonly { id: string }[], draft: string): string =>
+    draftFingerprint(savePayloadIdentity(queued, draft))
+  const base = { sessionId: 'session-s', revision: 'r1', action: 'save' as GuardAction }
+  const token = mintForceToken({ ...base, draftFingerprint: payload([{ id: 'a' }, { id: 'b' }], 'hi') })
+  // The identical payload still forces (second identical Ctrl+S).
+  assert.equal(forceTokenAllows(token, { ...base, draftFingerprint: payload([{ id: 'a' }, { id: 'b' }], 'hi') }), true)
+  // A queue splice between the block and the retry invalidates the token:
+  // the second Ctrl+S would steer a DIFFERENT payload — it must re-block.
+  assert.equal(forceTokenAllows(token, { ...base, draftFingerprint: payload([{ id: 'a' }, { id: 'b' }, { id: 'c' }], 'hi') }), false, 'an added queued message must invalidate the token')
+  assert.equal(forceTokenAllows(token, { ...base, draftFingerprint: payload([{ id: 'a' }], 'hi') }), false, 'a removed queued message must invalidate the token')
+  assert.equal(forceTokenAllows(token, { ...base, draftFingerprint: payload([{ id: 'b' }, { id: 'a' }], 'hi') }), false, 'a reordered queue must invalidate the token')
+  assert.equal(forceTokenAllows(token, { ...base, draftFingerprint: payload([{ id: 'a' }, { id: 'b' }], 'bye') }), false, 'an edited draft must invalidate the token')
 })

@@ -125,6 +125,19 @@ export function draftFingerprint(draft: string): string {
 }
 
 /**
+ * The Ctrl+S effective-payload identity: the queued message ids in delivery
+ * order (next-turn followups first, then next-step steers) plus the draft.
+ * The save force token must bind THIS — a blocked save followed by a local
+ * queue splice (add/remove/replace/move) changes the identity, so the
+ * retry can never force a DIFFERENT payload through an old token. The
+ * identity never includes message content (ids only), so nothing sensitive
+ * feeds the fingerprint.
+ */
+export function savePayloadIdentity(queued: readonly { id: string }[], draft: string): string {
+  return `${queued.map(message => message.id).join(',')}|${draft}`
+}
+
+/**
  * Whether a candidate second operation may consume the token: same session,
  * same observed file revision, same action, same draft fingerprint. Any
  * difference (edited draft, Ctrl+S vs Enter swap, session switch, file
