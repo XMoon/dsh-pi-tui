@@ -301,7 +301,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           {
             id: 'fullscreen',
             label: 'Fullscreen',
-            description: 'Alt-screen mode: off keeps the terminal scrollback',
+            description: 'Alt-screen mode: on keeps the terminal clean (default); off keeps the scrollback',
             currentValue: app.isFullscreen() ? 'on' : 'off',
             values: ['off', 'on'],
           },

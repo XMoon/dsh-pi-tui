@@ -106,6 +106,15 @@ node --expose-gc packages/dsh-pi-tui/scripts/bench.mts   # performance baseline 
 Tests drive the UI through `@xterm/headless` (see `packages/dsh-pi-tui/test/virtual-terminal.ts`),
 so rendering and input routing are verified without a TTY or a model connection.
 
+### Development history (dogfooding)
+
+This project started development on the browser surface (`dsh --profile web`) and
+switched to building itself with itself: since the 2026-08 batch, all fixes and
+features are developed inside this TUI (`dsh --profile pi-tui-dev`, a `link:`
+dependency on this repo — see the repo AGENTS.md), the same way this README and
+the codebase are maintained. The `pi-tui` profile stays on the published
+registry package for real use.
+
 ## Slash commands (selection)
 
 - `/sessions [query]` — open the session picker: search-as-you-type over

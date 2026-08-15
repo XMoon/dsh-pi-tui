@@ -1571,7 +1571,7 @@ export function apply(ctx: Context, config: Config): void {
         fullscreen: z.string(),
         history: z.dict(z.array(z.string())),
       }),
-      { base: { theme: 'auto', footer: 'full', fullscreen: 'off', history: {} } },
+      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', history: {} } },
     )
     const storedTheme = tuiSettings?.get().theme
     if (storedTheme === 'auto') {
@@ -1590,8 +1590,9 @@ export function apply(ctx: Context, config: Config): void {
     }
     const storedFooter = tuiSettings?.get().footer
     if (storedFooter === 'compact') app.setFooterPreset('compact')
-    // Fullscreen is a persisted preference like the theme and the footer:
-    // boot applies it, the settings panel and Ctrl+F both write through it.
+    // Fullscreen is a persisted preference like the theme and the footer
+    // (new installs default to 'on' — alt screen by default): boot applies
+    // it, the settings panel and Ctrl+F both write through it.
     if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
     const storedHistory = tuiSettings?.get().history[cwd]
     if (storedHistory !== undefined && storedHistory.length > 0) {

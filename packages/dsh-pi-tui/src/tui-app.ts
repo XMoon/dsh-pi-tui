@@ -1907,18 +1907,16 @@ export class TuiApp {
   }
 
   /**
-   * Rebuild the persistent dock strip above the todo panel: goal, todo
-   * summary, and background tasks — one truncated line each, only while
-   * non-empty (kimi chrome parity). The dock is the "at a glance" surface
-   * under the transcript; the full todo list stays on Ctrl+T. The
-   * permission preset badges in the footer only, so the mode has exactly
-   * one home (no dock/footer duplication).
+   * Rebuild the persistent dock strip above the todo panel: todo summary and
+   * background tasks — one truncated line each, only while non-empty (kimi
+   * chrome parity). The dock is the "at a glance" surface under the
+   * transcript; the full todo list stays on Ctrl+T. The goal badge lives in
+   * the FOOTER ONLY (its one home — the dock previously duplicated it above
+   * the editor), and the permission preset badges in the footer only too, so
+   * every fact has exactly one home.
    */
   private renderDock(): void {
     const lines: string[] = []
-    if (this.status.goal !== undefined && this.status.goal !== '') {
-      lines.push(color.text(`⚑  ${this.status.goal}`))
-    }
     if (this.todoItems.length > 0) {
       const active = this.todoItems.filter(todo => todo.status !== 'completed')
       const done = this.todoItems.length - active.length

@@ -271,18 +271,20 @@ test('shift+tab with no overlay cycles the permission through the host', async (
   app.stop()
 })
 
-test('the dock strip shows goal, todo, and task lines only while non-empty', async () => {
+test('the dock strip shows todo and task lines only while non-empty; goal lives in the footer only', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(!view.includes('☑'), `empty dock must not render a todo line:\n${view}`)
-  // Everything present: goal, todo summary, tasks.
+  // Everything present: goal (footer only — no dock duplication), todo
+  // summary, tasks.
   app.setStatus({ goal: 'goal ● fix the build' })
   app.setTodoSummary([{ content: 'write tests', status: 'in_progress' }, { content: 'ship', status: 'pending' }])
   app.setTasks([{ label: 'audit repo', status: 'running' }])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('⚑  goal ● fix the build'), `goal line missing:\n${view}`)
+  assert.ok(!view.includes('⚑'), `goal must not render in the dock:\n${view}`)
+  assert.ok(view.includes('goal ● fix the build'), `goal missing from the footer:\n${view}`)
   assert.ok(view.includes('☑  2 active · write tests'), `todo summary missing:\n${view}`)
   assert.ok(view.includes('⏳  1 task · audit repo'), `task line missing:\n${view}`)
   // Lines drop out as their data clears.
