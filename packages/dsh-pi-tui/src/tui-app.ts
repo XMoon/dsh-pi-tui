@@ -504,6 +504,9 @@ export class TuiApp {
   private searchComponent: TranscriptSearchComponent | undefined
   /** Overlay handles currently mounted on the active screen, for mode switches. */
   private readonly overlayHandles = new Set<OverlayHandle>()
+  /** Capturing overlays hidden beneath a newer one (modal stacking), keyed by
+   * the newer overlay's handle; restored when it hides. */
+  private readonly overlayDependents = new Map<OverlayHandle, Set<OverlayHandle>>()
   /** Footer state. */
   private status: StatusData = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
   /** Header text (todo summary), kept for theme-swap repaints. */
@@ -760,6 +763,11 @@ export class TuiApp {
   /**
    * Show an overlay on the active screen and track its handle, so a
    * fullscreen toggle can hide every mounted overlay on the old screen.
+   * Capturing overlays stack modally: every other capturing overlay is
+   * hidden beneath the new one and restored when it hides — the fork's
+   * compositor interleaves stacked boxes line by line (two different-width
+   * dialogs would garble into one frame), and modal hiding is done here so
+   * the vendored fork stays pristine.
    * @param component - the overlay content.
    * @param options - overlay sizing/positioning.
    * @returns the handle; hide() also forgets the handle.
@@ -767,9 +775,21 @@ export class TuiApp {
   private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
     const handle = this.overlayHost.showOverlay(component, options)
     this.overlayHandles.add(handle)
+    if (options?.nonCapturing !== true) {
+      const hidden = new Set<OverlayHandle>()
+      for (const other of this.overlayHandles) {
+        if (other !== handle && !other.isHidden()) {
+          other.setHidden(true)
+          hidden.add(other)
+        }
+      }
+      if (hidden.size > 0) this.overlayDependents.set(handle, hidden)
+    }
     return {
       ...handle,
       hide: () => {
+        this.overlayDependents.get(handle)?.forEach(other => other.setHidden(false))
+        this.overlayDependents.delete(handle)
         this.overlayHandles.delete(handle)
         handle.hide()
       },
