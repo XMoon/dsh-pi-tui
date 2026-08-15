@@ -24,6 +24,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { TuiApp } from './tui-app.ts'
 import type { Diag } from './diag.ts'
+import { runDetached } from './detached.ts'
 import { color, loadCustomTheme, settingsListTheme } from './theme.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
@@ -141,6 +142,29 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
+
+  // Fire-and-forget with the runner's diag: cancellations debug-only,
+  // recoverable (persistence) failures notify + warn, everything else
+  // warns — never a bare `void somePromise()` (AGENTS.md hard rule).
+  const detach = (label: string, task: Promise<unknown>, options: { notify?: boolean } = {}): void => {
+    runDetached(label, task, {
+      diag: runner.diag,
+      notify: options.notify === true ? (message) => app.notify(message, 'error') : undefined,
+      recoverable: options.notify === true ? () => true : undefined,
+    })
+  }
+  /** Switch sessions with full rejection handling (the runner resolves an
+   * error STRING for user-facing failures, but an unexpected rejection must
+   * not become an unhandled rejection either). */
+  const switchSession = (id: string): void => {
+    void runner.switchSession(id).then(error => {
+      if (error !== undefined) app.notify(error, 'error')
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      runner.diag.error('session switch failed', { session: id, error: message })
+      app.notify(`session switch failed: ${message}`, 'error')
+    })
+  }
 
   /**
    * Resolve the live agent for a session-backed command, creating the first
@@ -314,12 +338,12 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           } else if (id === 'default-permission') {
             const settings = ctx.get('settings')
             if (settings !== undefined && permissionNames.includes(value)) {
-              void settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }])
+              detach('permission default write', settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }]) as Promise<unknown>, { notify: true })
             }
           } else if (id === 'theme') {
             if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)) {
               if (value === 'auto') {
-                void app.autoDetectTheme()
+                detach('theme autodetect', app.autoDetectTheme())
               } else if (value === 'dark' || value === 'light') {
                 app.applyTheme(value)
               } else {
@@ -333,7 +357,10 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
               }
               // Spread the current doc: a replace is wholesale, so the
               // persisted input history must ride along.
-              void tuiSettings?.replace({ ...tuiSettings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` })
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings theme write', settings.replace({ ...settings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` }) as Promise<unknown>, { notify: true })
+              }
             }
           } else if (id === 'expand') {
             app.setToolOutputExpanded(value === 'expanded')
@@ -342,7 +369,10 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           } else if (id === 'footer') {
             if (value === 'full' || value === 'compact') {
               app.setFooterPreset(value)
-              void tuiSettings?.replace({ ...tuiSettings.get(), footer: value })
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings footer write', settings.replace({ ...settings.get(), footer: value }) as Promise<unknown>, { notify: true })
+              }
             }
           } else if (id === 'fullscreen') {
             if (value === 'off' || value === 'on') {
@@ -389,9 +419,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       shown.map(row => sessionPickerItem(row, currentId ?? '')),
       (id) => {
         if (id === currentId) return
-        void runner.switchSession(id).then(error => {
-          if (error !== undefined) app.notify(error, 'error')
-        })
+        switchSession(id)
       },
       () => {},
       {
@@ -406,16 +434,14 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     )
     // Enrich rows with titles as they load; the active search query is
     // re-applied by the picker, and the current marker is re-read so a
-    // session switch mid-load does not mislabel.
-    void loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
+    // session switch mid-load does not mislabel. Cancellations (TUI quit,
+    // the abort signal) are debug-level through the unified entry; a real
+    // batch failure lands in diagnostics instead of being swallowed.
+    detach('session titles', loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
       .then(titles => {
         if (titles.size === 0) return
         picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, runner.liveAgent?.session.id ?? '')))
-      })
-      .catch(() => {
-        // Cancellation (TUI quit) or an unexpected batch failure only
-        // loses the titles, never the picker.
-      })
+      }))
     return { kind: 'success' }
   }
 
@@ -450,9 +476,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           const match = findSessionMatch(rows, raw)
           if (match !== undefined) {
             if (match.id === currentId) return { kind: 'error', text: 'already on this session' }
-            void runner.switchSession(match.id).then(error => {
-              if (error !== undefined) app.notify(error, 'error')
-            })
+            switchSession(match.id)
             return { kind: 'success' }
           }
         }
@@ -536,9 +560,10 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     refreshCompletions()
     return catalog.length
   }
-  void registerSkillCommands().catch(() => {
-    // The catalog is best-effort; /skill still reports real failures.
-  })
+  // Initial catalog load: fire-and-forget through the unified entry — a
+  // failure must land in diagnostics, never be silently swallowed or leak
+  // as an unhandled rejection (/reload still awaits the same function).
+  detach('skill catalog refresh', registerSkillCommands())
 
   commands.register({
     name: 'skill',
@@ -563,7 +588,9 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           values: ['✓'],
         })),
         (id) => {
-          void loadSkill(liveAgent, id).then(result => { if (result.kind === 'error') app.notify(result.text) })
+          detach('skill load', loadSkill(liveAgent, id).then(result => {
+            if (result.kind === 'error') app.notify(result.text)
+          }), { notify: true })
         },
         () => {},
       )
@@ -590,7 +617,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       if (settings !== undefined) {
         const doc = settings.get()
         if (doc.theme === 'auto') {
-          void app.autoDetectTheme()
+          detach('theme autodetect', app.autoDetectTheme())
         } else if (doc.theme === 'dark' || doc.theme === 'light') {
           app.applyTheme(doc.theme)
         } else if (doc.theme.startsWith('custom:')) {
@@ -617,7 +644,18 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       const current = defaultModel.currentSelection()
       /** Commit a selection (model, optional effort) and refresh the footer. */
       const apply = (next: ModelSelection): void => {
-        void defaultModel.saveSelection(next)
+        // Persist first, reflect on success only: a failed save must not
+        // leave a selection on screen that was never recorded (roll back).
+        const previous = selected.current
+        runDetached('model selection save', defaultModel.saveSelection(next), {
+          diag: runner.diag,
+          notify: (message) => {
+            selected.current = previous
+            runner.refreshStatus()
+            app.notify(message, 'error')
+          },
+          recoverable: () => true,
+        })
         selected.current = next
         runner.refreshStatus()
       }
@@ -917,7 +955,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           const child = children.find(candidate => candidate.id === childId)
           if (child === undefined) return
           if (action === 'view') {
-            void runner.enterView(child.id, labelOf(child))
+            detach('subagent view', runner.enterView(child.id, labelOf(child)), { notify: true })
           } else if (action === 'interrupt') {
             subagents.interrupt(child.id, { kind: 'user', parentSessionId: liveAgent.session.id })
             app.notify(`interrupting ${labelOf(child)}`, 'info')
@@ -969,9 +1007,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         })),
         (id) => {
           if (id === currentId) return
-          void runner.switchSession(id).then(error => {
-            if (error !== undefined) app.notify(error, 'error')
-          })
+          switchSession(id)
         },
         () => {},
       )

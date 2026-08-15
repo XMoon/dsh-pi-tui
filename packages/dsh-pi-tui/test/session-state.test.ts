@@ -30,11 +30,16 @@ function fakeAgent(sessionId: string): Agent {
 
 /** A stub runner with a MUTABLE generation and live agent (the test plays
  * the session switch by mutating state). */
-function stubRunner(ctx: Context, app: TuiApp, state: { agent: Agent | undefined; generation: number }): TuiCommandRunner {
+function stubRunner(
+  ctx: Context,
+  app: TuiApp,
+  state: { agent: Agent | undefined; generation: number },
+  diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
+): TuiCommandRunner {
   return {
     ctx,
     app,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    diag,
     get liveAgent() { return state.agent },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -176,6 +181,89 @@ test('/exit and /quit route through the runner requestExit, never their own tear
   app.stop()
 })
 
+test('a failed model selection save rolls the selection back and notifies without an unhandled rejection', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  // The runner's selection is a MUTABLE object the /model apply() updates.
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', {
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'm1' }),
+    // The persistence write FAILS: the UI must roll back, not fake success.
+    saveSelection: async () => { throw new Error('quota exceeded') },
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    registerTuiCommands(proxy as unknown as typeof runner)
+    const modelDef = services.defs.find(entry => entry.name === 'model')
+    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+    await (modelDef!.handler as () => Promise<unknown>)()
+    await vt.waitForRender()
+    vt.sendInput('\r') // Enter: open the provider's model submenu
+    await new Promise(resolve => setTimeout(resolve, 30)) // model list loads
+    await vt.waitForRender()
+    vt.sendInput('\r') // Enter: select the first model → apply → save rejects
+    await new Promise(resolve => setTimeout(resolve, 30))
+    await vt.waitForRender()
+    assert.deepEqual(unhandled, [], 'the save rejection must not leak as an unhandled rejection')
+    assert.equal(selection.current.model, 'old-model',
+      'a failed save must roll the selection back to the previous value')
+    const view = vt.getViewport().join('\n')
+    assert.ok(view.includes('model selection save'), `rollback notice missing:\n${view}`)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    app.stop()
+  }
+})
+
+test('a failing initial skill catalog refresh lands in diagnostics, never silently swallowed', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  services.skills.list = async () => { throw new Error('catalog down') }
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  const lines: string[] = []
+  const diag = createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: (line: string) => { lines.push(line) } }] })
+  try {
+    const state = { agent: fakeAgent('session-a'), generation: 1 }
+    registerTuiCommands(stubRunner(ctx, app, state, diag))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.deepEqual(unhandled, [], 'the catalog failure must not leak as an unhandled rejection')
+    assert.ok(lines.some(line => /WARN skill catalog refresh/.test(line) && /catalog down/.test(line)),
+      `diag must record the failure:\n${lines.join('\n')}`)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    app.stop()
+  }
+})
 test('clearSessionOverrides drops per-message expansion toggles', () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
