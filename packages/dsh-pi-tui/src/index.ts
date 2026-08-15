@@ -512,6 +512,15 @@ export function apply(ctx: Context, config: Config): void {
       cwd: process.cwd(),
       session: sessionId ?? '(deferred)',
       preset: launchPreset ?? 'default',
+      // Host capability check (plan stage K): the services the TUI surface
+      // consumes. Each one degrades locally when absent (divergence guard →
+      // unavailable, presets → default composition, commands → plain
+      // messages, shell → spawn fallback), so this line is diagnostic, not
+      // a mount gate — the TUI never fails to mount without explanation.
+      services: [
+        'sessionPersistence', 'agents', 'commands', 'tools', 'shell', 'llm',
+        'settings', 'skills', 'userQuestions', 'approval', 'permissionPresets',
+      ].filter(name => ctx.get(name as never) !== undefined).join(','),
     })
     /** Resolve the launch composition, falling back to the default on an unknown id. */
     const launchComposition = async (): Promise<{ composition: AgentComposition; failure?: string }> => {

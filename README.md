@@ -16,11 +16,13 @@ Run `dsh --profile pi-tui` for a terminal UI instead of the browser GUI (`dsh --
 ## Layout
 
 ```
-packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork (kimi-code commit b6144f9, v0.84.2),
-                    rescoped to @xmoon76/pi-tui. The five local fixes from the fork
-                    (CJK wrap guard, width clamps, overwide truncation, negative-width
-                    guards, per-frame processed-line reuse) are preserved; native/
-                    prebuilds are deliberately not vendored (graceful fallback).
+packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork, rescoped to @xmoon76/pi-tui.
+                    The exact upstream version and commit live in ONE place:
+                    packages/pi-tui/package.json `repository.note` (kept in
+                    sync on every re-vendor). The local divergence fixes and
+                    their guarding tests are listed in packages/pi-tui/AGENTS.md;
+                    native/ prebuilds are deliberately not vendored (graceful
+                    fallback).
 packages/dsh-pi-tui/   The dsh bundle: @xmoon76/dsh-pi-tui (the only published
                     package). cordis.patch.yml inserts the startup row
                     (dsh --profile pi-tui flags) and the runner row (TUI glue).
@@ -95,9 +97,10 @@ dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
 
 ```sh
 pnpm install
-pnpm build        # pi-tui tsdown (dist/) + tui-app tsc (lib/)
-pnpm test         # pi-tui's own suite (node --test) + tui-app headless tests
+pnpm build        # pi-tui tsdown (dist/) + dsh-pi-tui tsdown (dist/, bundles pi-tui)
+pnpm test         # pi-tui's own suite (node --test) + dsh-pi-tui headless tests
 pnpm typecheck
+node --expose-gc packages/dsh-pi-tui/scripts/bench.mts   # performance baseline (optional)
 ```
 
 Tests drive the UI through `@xterm/headless` (see `packages/dsh-pi-tui/test/virtual-terminal.ts`),
@@ -143,12 +146,39 @@ runs without needing a session.
 
 ## Verified in the P0 spike
 
-- Vendored pi-tui: 960/960 tests pass under Node 26 (`node --test`).
+- Vendored pi-tui: the fork's own suite passes under `node --test` (run it as
+  the sync gate after every re-vendor; the count is deliberately not copied here —
+  `packages/pi-tui/package.json` is the single source of version facts).
 - `TuiApp` renders, accepts editor input, and handles Ctrl+C on a headless xterm.
 - The whole import chain (pi-tui, tui-app, `@deepseek-ai/dsh-cmdline`, commander)
   loads under the tsx ESM hook — the dsh source-launch contract.
 - Native modifier-key addons are optional: on Linux the loader returns `undefined`
   without attempting a load, and the non-TTY stdin path is guarded.
+
+## Safety & operational notes
+
+- **One surface per session.** dsh has no cross-process session coordination:
+  a session open in TWO dsh processes (TUI + web, or two TUIs) can corrupt its
+  log. The TUI detects the other writer and blocks the send; the SAME action
+  pressed again (Enter for a submit, Ctrl+S for a steer, unchanged draft)
+  forces through — an edited draft, a swapped key, a new file revision, or a
+  session switch invalidates the force. Never run two surfaces on one session.
+- **Session repair.** `node_modules/@xmoon76/dsh-pi-tui/scripts/repair-session.mjs`
+  repairs corrupted logs (`--scan` lists damage read-only; `--yes` applies with
+  a mandatory backup). A torn (truncated) tail is truncated at the last
+  complete frame and reported with exact byte accounting; references to a
+  duplicated seq are never auto-resolved — the repair refuses and asks for
+  `--duplicate-reference=first|last|segment`. Repaired logs are re-verified
+  with the dsh reader's own layout checks before the backup is considered
+  redundant.
+- **Exit.** `/exit` flushes the session with a 10s hard timeout: a hung
+  provider cannot trap the TUI. If the flush fails or times out, the terminal
+  prints a warning (the tail may not be persisted) and the process still exits.
+- **Performance.** `scripts/bench.mts` (non-default) measures ingest,
+  projection, cold/warm rebuilds, streaming frames, theme switches, and heap;
+  the saved baseline lives in `docs/perf-baseline.md`. Unchanged transcript
+  messages reuse their rendered components, so the warm per-frame rebuild
+  does not grow with history.
 
 ## License
 

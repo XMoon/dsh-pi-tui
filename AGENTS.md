@@ -18,11 +18,15 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
 ## Repository layout
 
 ```
-packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork — kimi-code commit
-                    b6144f94ea6b22455a4e750d1750d220987e7bc2 (v0.84.2).
-                    Source of record for the five local fixes: its own
-                    AGENTS.md (kept from the fork). native/ prebuilds are
-                    NOT vendored; loading degrades gracefully without them.
+packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork. The vendored version
+                    and upstream commit live in ONE place —
+                    packages/pi-tui/package.json `repository.note` (see
+                    that field, never a copy in this file or README). Its
+                    own AGENTS.md (kept from the fork) is the source of
+                    record for the local divergence fixes and their
+                    guarding tests; re-verify every entry on each
+                    re-vendor. native/ prebuilds are NOT vendored; loading
+                    degrades gracefully without them.
 packages/dsh-pi-tui/   The dsh bundle (the only published package). cordis.patch.yml
                     inserts the startup row (parses `dsh --profile pi-tui` flags)
                     and the runner row (starts the TUI). src/tui-app.ts is the
@@ -30,7 +34,9 @@ packages/dsh-pi-tui/   The dsh bundle (the only published package). cordis.patch
                     palette; demo.ts a standalone interactive demo. Builds with
                     tsdown into dist/, bundling @xmoon76/pi-tui (deps.onlyBundle)
                     so the tarball is self-contained; dist/ is gitignored —
-                    build before install.
+                    build before install. The tarball is verified by
+                    scripts/tarball-smoke.mjs (prepack builds+verifies,
+                    postpack smokes the exact bytes; root `pnpm pack:release`).
 ```
 
 ## Key decisions (do not silently reverse)
@@ -99,7 +105,7 @@ and input routing are verified without a TTY or a model connection.
 ## Reusable flow (from the initial build, worth repeating for the next capability)
 
 1. **Read both sides before designing**: the dsh bundle shape (`packages/bundle/web-app`: startup.ts commander row + index.ts glue + `cordis.patch.yml` with `dsh.bundle.patch`), and the library's real API (check `src/index.ts` exports, not the README).
-2. **Vendor**: `rsync -a --exclude native --exclude CHANGELOG.md --exclude node_modules` from the fork; rescope the package name; keep LICENSE + the fork's AGENTS.md; record the upstream commit in `repository.note`; run the fork's own test suite unchanged (960 tests) as the sync gate.
+2. **Vendor**: `rsync -a --exclude native --exclude CHANGELOG.md --exclude node_modules` from the fork; rescope the package name; keep LICENSE + the fork's AGENTS.md; record the upstream commit in `repository.note` (the single source of truth — do not copy the version/commit into root docs); run the fork's own test suite unchanged as the sync gate.
 3. **Bundle skeleton**: package with `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`; patch inserts a `*-startup` row (commander via `@deepseek-ai/dsh-cmdline`'s `parseCmdline`, provides a service) and a runner row injecting that service; exports `./startup` and `./cordis.patch.yml`.
 4. **Testable core**: inject the terminal (`Terminal` interface) so tests drive a `VirtualTerminal`; keep the process entry (`ProcessTerminal`) as a thin wrapper.
 5. **Verification matrix** (all passed in the P0 spike): fork's own tests; headless render/input/exit; the full import chain under the tsx ESM hook (dsh source-launch contract, incl. `@deepseek-ai/dsh-cmdline` + commander); non-TTY stdin guard (`setRawMode` existence check); native graceful fallback.
@@ -119,9 +125,9 @@ and input routing are verified without a TTY or a model connection.
 ## Cross-process safety (2026-08 batch)
 
 - **dsh has no cross-process session coordination**: two dsh processes (TUI + web, or two TUIs) holding one session can mint the same `seq` (each numbers from its own in-memory log length) and corrupt the log at the `session/end-seed` resume marker. This is an upstream limitation — the TUI cannot fix it, only detect and warn (README documents the "one surface per session" rule).
-- **`src/guard.ts`** — divergence guard: before each session-writing submission, `locate()` + `fs.stat` gate (cheap) then `readFrom(id, 0)` (full committed read) compares the file's committed event count against the live `session.events.length`; file ahead of memory ⇒ external writer ⇒ block (second Enter forces). Guard state is per-session and resets on switch. `readFrom` throws on a corrupt committed prefix — that is the unreadable case.
-- **`src/diag.ts`** — `ctx.logger` is invisible in this process (no exporter), so the TUI's own diagnostics go to stderr + `$DSH_HOME/logs/pi-tui-<pid>.log` (env `DSH_PI_TUI_LOG` / `DSH_PI_TUI_LOG_LEVEL`, default `info`). Keep new lifecycle logging in diag, not just ctx.logger.
-- **`scripts/repair-session.mjs`** — standalone repair for corrupted logs (duplicate seq ⇒ renumber from the first collision with old→new reference remap; gap/unparsable ⇒ truncate; wrong frame layout ⇒ re-frame). Resolves `decodeStorageRecord` from the dsh install; `--scan` lists damaged sessions read-only; `--yes` applies with a mandatory backup first. The frame walker (`scanZstdFrames` in `repair-core.mjs`) is vendored from `dsh-session-persistence-jsonl` — dsh appends ONE zstd frame per flush, and `node:zlib`'s `zstdDecompressSync` only decodes the FIRST frame of a concatenated set, so frame-slicing is mandatory (verified against the 11079-frame ab79200b log).
+- **`src/guard.ts`** — divergence guard: before each session-writing submission, `locate()` + `fs.stat` gate (cheap) then `readFrom(id, 0)` (full committed read) compares the file's committed event count against the live `session.events.length`; file ahead of memory ⇒ external writer ⇒ block. The second identical operation forces through a ONE-TIME token binding session, observed file revision, action (`submit` vs `save`) and a draft fingerprint — an edited draft, a swapped key, a new revision or a session switch invalidates it. A same-count but different-tail rewrite (same `seq`/`type`/content-hash comparison) reports `tail-mismatch` and blocks too. Guard state is per-session and resets on switch. `readFrom` throws on a corrupt committed prefix — that is the unreadable case.
+- **`src/diag.ts`** — `ctx.logger` is invisible in this process (no exporter), so the TUI's own diagnostics go to stderr + `$DSH_HOME/logs/pi-tui-<pid>.log` (env `DSH_PI_TUI_LOG` / `DSH_PI_TUI_LOG_LEVEL`, default `info`). Keep new lifecycle logging in diag, not just ctx.logger. Fire-and-forget tasks go through `src/detached.ts`'s `runDetached` (rejections captured, cancellations debug-only, recoverable failures notify) — never a bare `void somePromise()`.
+- **`scripts/repair-session.mjs`** — standalone repair for corrupted logs (duplicate seq ⇒ renumber from the first collision with old→new reference remap; gap/unparsable ⇒ truncate; wrong frame layout ⇒ re-frame; torn tail ⇒ truncate at the last COMPLETE frame boundary with byte accounting). Resolves `decodeStorageRecord` from the dsh install; `--scan` lists damaged sessions read-only; `--yes` applies with a mandatory fsynced backup first and a post-write full verify. References to a seq that occurs MORE THAN ONCE are ambiguous: the repair REFUSES by default and requires `--duplicate-reference=first|last|segment` — never silently guess. The frame walker (`scanZstdFrames` in `repair-core.mjs`) is adapted from `dsh-session-persistence-jsonl` — dsh appends ONE zstd frame per flush, and `node:zlib`'s `zstdDecompressSync` only decodes the FIRST frame of a concatenated set, so frame-slicing is mandatory (verified against the 11079-frame ab79200b log). The walker never throws on a bad tail: it reports `tornStart`/`garbageStart` so a torn log is NEVER reported healthy.
 - **Repaired logs must preserve the dsh frame layout**: the first frame has to decode to EXACTLY the header line, and each frame holds complete JSONL records. `compressLog` (repair-core.mjs) writes the header line alone in frame one, then the remaining lines in ~16 KiB plaintext chunks (checksummed like the harness writer). NEVER compress a repaired log as one whole-log frame: it decompresses fine but every dsh reader (`session.list`, `load`, `readFrom`) rejects it with `corrupt Zstandard session log: first frame is not exactly one header line` — this exact bug broke the web's session list when the 2026-08-15 repair rewrote three logs as single frames. `scanZstdLayout` is the layout gate used by both `--scan` and post-write verify. Repaired files are written 0600, same as the harness (`writeFileSync` must pass `{ mode: 0o600 }`, not the umask default).
 - **Storage rows vs events**: file rows are the storage format; packed `*-chunks` rows (`seq0` + `dt`) expand via `decodeStorageRecord` into individual events with real `seq`. Any code that counts "events in the file" must expand rows first (guard's `readFrom` does; naive line-counting does not).
 

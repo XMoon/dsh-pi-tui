@@ -93,6 +93,20 @@ jobs:
       # resolution, repair CLI help + read-only scan.
       - run: node packages/dsh-pi-tui/scripts/tarball-smoke.mjs tarball/@xmoon76-dsh-pi-tui-*.tgz
 
+  naming-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Naming decisions are hard rules (AGENTS.md): package names, private
+      # flags, onlyBundle, patch row ids, startup service, committed dist.
+      - run: node packages/dsh-pi-tui/scripts/naming-gate.mjs
+
   npm-audit-prod:
     runs-on: ubuntu-latest
     steps:
