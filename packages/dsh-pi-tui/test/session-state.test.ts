@@ -52,6 +52,7 @@ function stubRunner(ctx: Context, app: TuiApp, state: { agent: Agent | undefined
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
     enterView: async () => {},
+    requestExit: () => {},
     exit: () => {},
   }
 }
@@ -60,11 +61,13 @@ function stubRunner(ctx: Context, app: TuiApp, state: { agent: Agent | undefined
  * service whose catalog is controllable per agent. */
 function fakeServices() {
   const registered: string[] = []
+  const defs: { name: string; handler?: unknown }[] = []
   const disposers = new Map<string, () => void>()
   const catalogs = new Map<object, { promise: Promise<readonly { name: string; description: string }[]>; resolve: (v: readonly { name: string; description: string }[]) => void }>()
   const commands = {
-    register: (def: { name: string }): (() => void) => {
+    register: (def: { name: string; handler?: unknown }): (() => void) => {
       registered.push(def.name)
+      defs.push(def)
       const disposer = (): void => {
         const index = registered.indexOf(def.name)
         if (index !== -1) registered.splice(index, 1)
@@ -89,6 +92,7 @@ function fakeServices() {
   }
   return {
     registered,
+    defs,
     catalogs,
     commands: { ...commands, dispose: (name: string) => disposers.get(name)?.() },
     skills,
@@ -123,6 +127,52 @@ test('a stale skill refresh cannot register commands into a newer session', asyn
   await refreshA
   assert.ok(!services.registered.includes('skill-a'), 'a stale refresh must not register old-session commands')
   assert.ok(services.registered.includes('skill-b'), 'the new session\'s commands survive the stale refresh')
+  app.stop()
+})
+
+test('/quit is a registered alias of /exit sharing its handler', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  registerTuiCommands(stubRunner(ctx, app, state))
+  const exitDef = services.defs.find(def => def.name === 'exit')
+  const quitDef = services.defs.find(def => def.name === 'quit')
+  assert.ok(exitDef !== undefined, '/exit must be registered')
+  assert.ok(quitDef !== undefined, '/quit must be registered')
+  assert.equal(quitDef!.handler, exitDef!.handler, '/quit must share the /exit handler')
+  app.stop()
+})
+
+test('/exit and /quit route through the runner requestExit, never their own teardown', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  // The handler must call the ONE exit orchestration — a handler that
+  // stops the app, flushes or exits itself would diverge from Ctrl+C/Ctrl+D
+  // (no timeout, no catch) and could hang a stopped UI forever.
+  const requested: string[] = []
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'requestExit') return (): void => { requested.push('exit') }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  for (const name of ['exit', 'quit']) {
+    const def = services.defs.find(entry => entry.name === name)
+    assert.ok(def?.handler !== undefined, `${name} handler missing`)
+    ;(def!.handler as () => unknown)()
+  }
+  assert.deepEqual(requested, ['exit', 'exit'], 'both /exit and /quit must call runner.requestExit')
   app.stop()
 })
 

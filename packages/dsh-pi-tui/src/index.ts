@@ -78,7 +78,7 @@ import { registerTuiCommands, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
 import { runDetached, isCancellation } from './detached.ts'
-import { flushWithTimeout, type FlushOutcome } from './exit.ts'
+import { createExitController, type ExitSessionLike } from './exit.ts'
 import { createBoundedOutput, formatBytes, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
 import {
@@ -841,6 +841,8 @@ export function apply(ctx: Context, config: Config): void {
     const cleanup = (): void => {
       if (cleanedUp) return
       cleanedUp = true
+      // A pending force token is stale once the process tears down.
+      guardToken = undefined
       lifecycleController.abort()
       localShellController?.abort()
       for (const file of shellTempFiles) {
@@ -854,6 +856,25 @@ export function apply(ctx: Context, config: Config): void {
       app?.stop()
       diag.dispose()
     }
+    // The ONE exit orchestration, shared by every exit entry (Ctrl+C, Ctrl+D,
+    // /exit, /quit): flush with a hard timeout → record → idempotent cleanup
+    // → warn on a failed/timed-out flush → resume hint → process exit. A
+    // later request while one is in flight is a no-op (createExitController
+    // latches), so a command plus a key can never double-flush or double-exit.
+    const { requestExit } = createExitController({
+      session: () => liveAgent?.session as ExitSessionLike | undefined,
+      flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]),
+      timeoutMs: EXIT_FLUSH_TIMEOUT_MS,
+      diag,
+      cleanup,
+      warn: (message) => process.stderr.write(`\n${color.textDim('Warning:')} ${message}\n`),
+      hint: (message) => process.stdout.write(`\n${message}\n`),
+      resumeHint: () => {
+        const resume = resumeCommand(runningProfile(), liveAgent?.session.id ?? '')
+        return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
+      },
+      exit,
+    })
     // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
     // the row; the reloaded row starts its own instance in the same process).
     ctx.effect(function* () {
@@ -1218,44 +1239,10 @@ export function apply(ctx: Context, config: Config): void {
         dispatchViaSession(text)
       },
       onExit: () => {
-        void (async () => {
-          // Exit order: invalidate the guard token → flush with a HARD
-          // timeout → record → idempotent cleanup (abort lifecycle, stop
-          // TUI, close diag) → print any warning and the resume hint →
-          // process exit. The flush never blocks the exit forever: a hung
-          // provider must not trap the user.
-          guardToken = undefined
-          let flushOutcome: FlushOutcome | undefined
-          const exitSession = liveAgent
-          if (exitSession !== undefined) {
-            flushOutcome = await flushWithTimeout(() => sessions.flush(exitSession.session), EXIT_FLUSH_TIMEOUT_MS)
-            diag.info('flush', {
-              session: exitSession.session.id,
-              outcome: flushOutcome.kind,
-              tookMs: flushOutcome.tookMs,
-              events: exitSession.session.events.length,
-              ...flushOutcome.kind === 'failed' ? { error: flushOutcome.error } : {},
-            })
-          }
-          diag.info('exit', { code: 0, flush: flushOutcome?.kind })
-          cleanup()
-          // A failed or timed-out flush is surfaced HERE, after the terminal
-          // restores, where the user can actually read it — a notify would
-          // flash and vanish with the UI. The process still exits.
-          if (flushOutcome !== undefined && flushOutcome.kind !== 'ok') {
-            const reason = flushOutcome.kind === 'timed-out'
-              ? 'timed out'
-              : `failed (${flushOutcome.error})`
-            process.stderr.write(`\n${color.textDim('Warning:')} session flush ${reason} — the latest events may not be persisted\n`)
-          }
-          // pi parity: after the terminal restores, print how to re-enter
-          // this session (skipped when the deferred start never made one).
-          const resume = resumeCommand(runningProfile(), liveAgent?.session.id ?? '')
-          if (resume !== undefined) {
-            process.stdout.write(`\n${color.textDim('To resume this session:')} ${resume}\n`)
-          }
-          exit(0)
-        })()
+        // Ctrl+C / Ctrl+D route through the SAME exit orchestration as
+        // /exit and /quit (createExitController above): flush with a hard
+        // timeout, idempotent cleanup, warning, resume hint, process exit.
+        requestExit()
       },
       onCancel: () => {
         // Double-Esc: abort a running `!` shell command, then the live turn.
@@ -1647,6 +1634,7 @@ export function apply(ctx: Context, config: Config): void {
       refreshStatus,
       updateWelcomeCard,
       enterView,
+      requestExit,
       exit,
     }
     const registerCommands = (): void => {

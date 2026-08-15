@@ -100,6 +100,10 @@ export interface TuiCommandRunner {
   readonly agents: AgentsLike
   /** The sessions service, for the /exit flush. */
   readonly sessions: { flush(session: Session): Promise<unknown> }
+  /** The ONE exit orchestration (flush with a hard timeout, cleanup, warn,
+   * resume hint, process exit) — shared by Ctrl+C/Ctrl+D, /exit and /quit.
+   * Command handlers must NEVER stop the app, flush or exit themselves. */
+  requestExit(): void
   cwd: string
   signal: AbortSignal
   /** The runner's monotonic session generation; bumped on every session
@@ -167,22 +171,26 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   }
   refreshCompletions()
 
+  // Shared by /exit and its /quit alias. The exit orchestration lives in
+  // the runner (createExitController): flush with a hard timeout, idempotent
+  // cleanup, warning, resume hint, process exit. Handlers never stop the app
+  // or flush themselves — that kept /exit diverging from Ctrl+C/Ctrl+D (no
+  // timeout, no catch, no warning) and could hang a stopped UI forever.
+  const exitHandler = (): { kind: 'success' } => {
+    runner.requestExit()
+    return { kind: 'success' }
+  }
+
   commands.register({
     name: 'exit',
     description: 'Quit the terminal UI (flush and exit)',
-    handler: () => {
-      const liveAgent = runner.liveAgent
-      app.stop()
-      if (liveAgent === undefined) {
-        // No session was ever created: nothing to flush, exit immediately.
-        void runner.exit(0)
-      } else {
-        // Exit even when the durable flush fails: a broken session log must
-        // not trap the user inside the TUI.
-        void runner.sessions.flush(liveAgent.session).then(() => runner.exit(0), () => runner.exit(0))
-      }
-      return { kind: 'success' }
-    },
+    handler: exitHandler,
+  })
+
+  commands.register({
+    name: 'quit',
+    description: 'Quit the terminal UI (flush and exit) — alias of /exit',
+    handler: exitHandler,
   })
 
   commands.register({

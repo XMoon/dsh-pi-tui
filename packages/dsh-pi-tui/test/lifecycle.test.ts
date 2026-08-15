@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { flushWithTimeout } from '../src/exit.ts'
+import { createExitController, flushWithTimeout, type ExitSessionLike } from '../src/exit.ts'
 import { isCancellation, runDetached } from '../src/detached.ts'
 import { createDiag, type Diag } from '../src/diag.ts'
 
@@ -127,4 +127,125 @@ test('isCancellation recognizes AbortError name and ABORT_ERR code', () => {
   assert.equal(isCancellation(coded), true)
   assert.equal(isCancellation(new Error('disk full')), false)
   assert.equal(isCancellation('plain string'), false)
+})
+
+// --- createExitController: the ONE exit orchestration (Ctrl+C/D, /exit, /quit) ---
+
+const SESSION: ExitSessionLike = { id: 'session-exit', events: { length: 7 } }
+
+/** A controller harness recording every side effect; `exit` resolves the
+ * returned promise so tests await the orchestration's completion. */
+function exitHarness(options: {
+  session?: () => ExitSessionLike | undefined
+  flush?: () => Promise<unknown>
+  timeoutMs?: number
+  resumeHint?: () => string | undefined
+} = {}) {
+  const { diag, lines } = captureDiag()
+  const calls = {
+    flush: 0,
+    cleanup: 0,
+    warns: [] as string[],
+    hints: [] as string[],
+    exits: [] as number[],
+  }
+  let resolveExit!: (code: number) => void
+  const exitDone = new Promise<number>(resolve => { resolveExit = resolve })
+  const flushImpl = options.flush ?? (async () => {})
+  const { requestExit } = createExitController({
+    session: options.session ?? (() => SESSION),
+    flush: async () => { calls.flush += 1; await flushImpl() },
+    timeoutMs: options.timeoutMs ?? 1000,
+    diag,
+    cleanup: () => { calls.cleanup += 1 },
+    warn: (message) => { calls.warns.push(message) },
+    hint: (message) => { calls.hints.push(message) },
+    resumeHint: options.resumeHint ?? (() => `dsh --profile pi-tui --session ${SESSION.id}`),
+    exit: (code) => { calls.exits.push(code); resolveExit(code) },
+  })
+  return { requestExit, calls, exitDone, lines }
+}
+
+test('exit without a session flushes nothing and exits once', async () => {
+  const { requestExit, calls, exitDone } = exitHarness({ session: () => undefined })
+  requestExit()
+  assert.equal(await exitDone, 0)
+  assert.equal(calls.flush, 0, 'no session: nothing to flush')
+  assert.equal(calls.cleanup, 1)
+  assert.deepEqual(calls.warns, [], 'a clean no-session exit must not warn')
+})
+
+test('exit flushes, cleans up, hints, and exits once on a resolving flush', async () => {
+  const { requestExit, calls, exitDone, lines } = exitHarness()
+  requestExit()
+  assert.equal(await exitDone, 0)
+  assert.equal(calls.flush, 1)
+  assert.equal(calls.cleanup, 1)
+  assert.deepEqual(calls.exits, [0])
+  assert.deepEqual(calls.hints, ['dsh --profile pi-tui --session session-exit'])
+  assert.match(lines.join('\n'), /outcome=ok/)
+})
+
+test('a rejecting flush still exits, warns, and never leaks an unhandled rejection', async () => {
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const { requestExit, calls, exitDone } = exitHarness({
+      flush: async () => { throw new Error('disk full') },
+    })
+    requestExit()
+    assert.equal(await exitDone, 0)
+    assert.equal(calls.cleanup, 1)
+    assert.deepEqual(calls.warns, ['session flush failed (disk full) — the latest events may not be persisted'])
+    assert.deepEqual(unhandled, [], 'the exit path must capture the flush rejection')
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+})
+
+test('a hung flush exits after the hard timeout', async () => {
+  const started = Date.now()
+  const { requestExit, calls, exitDone } = exitHarness({
+    flush: () => new Promise<never>(() => {}),
+    timeoutMs: 40,
+  })
+  requestExit()
+  assert.equal(await exitDone, 0)
+  assert.ok(Date.now() - started >= 35, 'must wait for the hard timeout')
+  assert.equal(calls.cleanup, 1)
+  assert.match(calls.warns[0] ?? '', /timed out/)
+})
+
+test('exit is idempotent: later requests while in flight or after are no-ops', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const { requestExit, calls, exitDone } = exitHarness({ flush: () => gate })
+  requestExit()
+  requestExit() // in-flight: must be a no-op
+  release()
+  assert.equal(await exitDone, 0)
+  requestExit() // after completion: must be a no-op
+  assert.equal(calls.flush, 1, 'a second request must not flush again')
+  assert.equal(calls.cleanup, 1, 'a second request must not clean up again')
+  assert.deepEqual(calls.exits, [0], 'a second request must not exit again')
+})
+
+test('a late flush resolving after the timeout cannot re-run cleanup or exit', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const { requestExit, calls, exitDone } = exitHarness({ flush: () => gate, timeoutMs: 30 })
+  requestExit()
+  assert.equal(await exitDone, 0)
+  release() // the flush settles late
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(calls.cleanup, 1)
+  assert.deepEqual(calls.exits, [0])
+})
+
+test('exit without a resume hint prints none', async () => {
+  const { requestExit, calls, exitDone } = exitHarness({ resumeHint: () => undefined })
+  requestExit()
+  assert.equal(await exitDone, 0)
+  assert.deepEqual(calls.hints, [])
 })

@@ -171,9 +171,10 @@ runs without needing a session.
   `--duplicate-reference=first|last|segment`. Repaired logs are re-verified
   with the dsh reader's own layout checks before the backup is considered
   redundant.
-- **Exit.** `/exit` flushes the session with a 10s hard timeout: a hung
-  provider cannot trap the TUI. If the flush fails or times out, the terminal
-  prints a warning (the tail may not be persisted) and the process still exits.
+- **Exit.** `/exit` (alias `/quit`) flushes the session with a 10s hard
+  timeout: a hung provider cannot trap the TUI. If the flush fails or times
+  out, the terminal prints a warning (the tail may not be persisted) and the
+  process still exits.
 - **Performance.** `scripts/bench.mts` (non-default) measures ingest,
   projection, cold/warm rebuilds, streaming frames, theme switches, and heap;
   the saved baseline lives in `docs/perf-baseline.md`. Unchanged transcript
