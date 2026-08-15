@@ -9,8 +9,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import { parseReadEnvelopes, toolPresenterFrom } from '../src/present.ts'
-import { color, currentPalette, darkColors } from '../src/theme.ts'
+import { color, currentPalette, darkColors, setTheme } from '../src/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { WorkingIndicator } from '../src/working.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
@@ -375,6 +376,39 @@ test('working indicator shows on the row directly above the editor while active'
   app.setWorking(false)
   const idle = await viewport(vt)
   assert.ok(!idle.includes('Working'), `working row survived:\n${idle}`)
+})
+
+test('WorkingIndicator stays active across timer restarts; refresh repaints live palettes', () => {
+  const renders: string[] = []
+  const capture = (): void => { renders.push(indicator.render(80).join('')) }
+  const indicator = new WorkingIndicator(capture, { frames: ['🐋'], intervalMs: 1000 })
+  // start() → restartAnimation() must NOT clear the active flag (the old
+  // code called stop() from restartAnimation, so refresh() never repainted
+  // and a single-frame indicator kept the stale palette forever).
+  indicator.start()
+  const afterStart = renders.length
+  indicator.refresh()
+  assert.ok(renders.length > afterStart, 'refresh() must repaint an ACTIVE indicator immediately')
+  // An active indicator follows a live theme switch on the next refresh.
+  setTheme('dark')
+  indicator.refresh()
+  const dark = renders[renders.length - 1]!
+  setTheme('light')
+  indicator.refresh()
+  const light = renders[renders.length - 1]!
+  assert.notEqual(dark, light, 'the active indicator must repaint with the live palette')
+  // Repeated start is idempotent: no throw, single timer (dispose clean).
+  indicator.start()
+  indicator.start()
+  indicator.dispose()
+  // A stopped indicator never repaints.
+  indicator.start()
+  indicator.stop()
+  const afterStop = renders.length
+  indicator.refresh()
+  assert.equal(renders.length, afterStop, 'refresh() must not repaint a STOPPED indicator')
+  // Restore the global theme (setTheme is module state).
+  setTheme('dark')
 })
 
 test('working indicator alternates between the whale emojis', async () => {

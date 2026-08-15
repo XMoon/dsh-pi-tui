@@ -46,20 +46,19 @@ export class WorkingIndicator extends Text {
     this.message = options.message ?? 'Working'
   }
 
-  /** Show the indicator and start alternating frames. */
+  /** Show the indicator and start alternating frames. Idempotent: a second
+   * start while already active repaints but does not reset the timer. */
   start(): void {
+    const wasActive = this.active
     this.active = true
     this.updateDisplay()
-    this.restartAnimation()
+    if (!wasActive) this.restartAnimation()
   }
 
   /** Stop the animation; the text stays until the caller clears it. */
   stop(): void {
     this.active = false
-    if (this.intervalId !== undefined) {
-      clearInterval(this.intervalId)
-      this.intervalId = undefined
-    }
+    this.clearTimer()
   }
 
   /** Re-render the current frame with the LIVE palette (theme switches). */
@@ -72,8 +71,17 @@ export class WorkingIndicator extends Text {
     this.stop()
   }
 
+  /** Clear the interval WITHOUT touching the active state (restart keeps
+   * the indicator live while swapping timers). */
+  private clearTimer(): void {
+    if (this.intervalId !== undefined) {
+      clearInterval(this.intervalId)
+      this.intervalId = undefined
+    }
+  }
+
   private restartAnimation(): void {
-    this.stop()
+    this.clearTimer()
     if (this.frames.length <= 1) return
     this.intervalId = setInterval(() => {
       this.currentFrame = (this.currentFrame + 1) % this.frames.length
