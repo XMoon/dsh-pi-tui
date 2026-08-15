@@ -682,7 +682,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
               { id: 'insert', label: 'Insert before', description: 'Queue a new message ahead of this one', currentValue: '', values: ['✓'] },
             ],
             6,
-            settingsListTheme,
+            settingsListTheme(),
             (action) => done(action),
             () => done(),
             {},
@@ -886,7 +886,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
               { id: 'interrupt', label: 'Interrupt', description: 'Cancel the child agent', currentValue: '', values: ['✓'] },
             ],
             6,
-            settingsListTheme,
+            settingsListTheme(),
             // The action is the row ID; the cycled value is a checkmark.
             (id) => done(id),
             () => done(),

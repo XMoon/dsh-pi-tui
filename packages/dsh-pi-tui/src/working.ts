@@ -4,10 +4,15 @@
  * whale emojis alternate before a dim Working label, mirroring pi's
  * WorkingStatusIndicator placement. A Text subclass whose idle text renders
  * zero rows, so the row disappears entirely when idle.
+ *
+ * The repaint target is INJECTED as a callback, never a concrete screen:
+ * the main screen stops rendering while the alt screen (fullscreen) is
+ * active, so a captured `TuiMainScreen` would freeze the animation at the
+ * first frame. The callback routes to whichever screen is active.
  * @module @xmoon76/dsh-pi-tui/working
  */
 
-import { Text, type TuiMainScreen } from '@xmoon76/pi-tui'
+import { Text } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
 
 export interface WorkingIndicatorOptions {
@@ -25,16 +30,17 @@ export interface WorkingIndicatorOptions {
  * idle instance renders nothing at all.
  */
 export class WorkingIndicator extends Text {
-  private readonly ui: TuiMainScreen
+  private readonly requestRender: () => void
   private readonly frames: string[]
   private readonly intervalMs: number
   private readonly message: string
   private currentFrame = 0
   private intervalId: NodeJS.Timeout | undefined
+  private active = false
 
-  constructor(ui: TuiMainScreen, options: WorkingIndicatorOptions = {}) {
+  constructor(requestRender: () => void, options: WorkingIndicatorOptions = {}) {
     super('', 0, 0)
-    this.ui = ui
+    this.requestRender = requestRender
     this.frames = options.frames ?? ['🐋', '🐳']
     this.intervalMs = options.intervalMs ?? 500
     this.message = options.message ?? 'Working'
@@ -42,16 +48,23 @@ export class WorkingIndicator extends Text {
 
   /** Show the indicator and start alternating frames. */
   start(): void {
+    this.active = true
     this.updateDisplay()
     this.restartAnimation()
   }
 
   /** Stop the animation; the text stays until the caller clears it. */
   stop(): void {
+    this.active = false
     if (this.intervalId !== undefined) {
       clearInterval(this.intervalId)
       this.intervalId = undefined
     }
+  }
+
+  /** Re-render the current frame with the LIVE palette (theme switches). */
+  refresh(): void {
+    if (this.active) this.updateDisplay()
   }
 
   /** Stop the animation and release the timer (containers call this on removal). */
@@ -72,6 +85,6 @@ export class WorkingIndicator extends Text {
     const frame = this.frames[this.currentFrame] ?? ''
     const indicator = frame === '' ? '' : frame + '  '
     this.setText(indicator + color.textDim(this.message))
-    this.ui.requestRender()
+    this.requestRender()
   }
 }

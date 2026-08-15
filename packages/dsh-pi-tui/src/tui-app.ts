@@ -509,10 +509,6 @@ export class TuiApp {
   private readonly overlayDependents = new Map<OverlayHandle, Set<OverlayHandle>>()
   /** Footer state. */
   private status: StatusData = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
-  /** Header text (todo summary), kept for theme-swap repaints. */
-  private headerText = '🐋  dsh-pi-tui'
-  /** Footer text, kept for theme-swap repaints. */
-  private footerText = ''
   /** Plan-mode badge state; appended to the header and footer when active. */
   private planMode = false
   /** The editor's normal border style, restored when plan mode ends. */
@@ -579,7 +575,11 @@ export class TuiApp {
     this.dock = new Text('', 0, 0)
     this.todoPanel = new Text('', 0, 0)
     this.queuePane = new Text('', 0, 0)
-    this.working = new WorkingIndicator(this.tui, options.workingIntervalMs === undefined
+    // The busy indicator repaints through a callback, not a captured screen:
+    // the MAIN screen stops rendering while the alt screen (fullscreen) is
+    // active, so a captured TuiMainScreen would freeze the animation at the
+    // first frame. app.requestRender routes to the ACTIVE screen.
+    this.working = new WorkingIndicator(() => this.requestRender(), options.workingIntervalMs === undefined
       ? {}
       : { intervalMs: options.workingIntervalMs })
     this.footer = new Text('', 0, 0)
@@ -1606,12 +1606,14 @@ export class TuiApp {
     return this.hideThinking
   }
 
-  /** Rebuild the header from base + session title + todo summary + plan badge. */
+  /** Rebuild the header from base + session title + todo summary + plan badge.
+   * Colours are applied AT RENDER TIME from the live palette — the semantic
+   * state (plan mode, title, todo text) is stored separately, so a theme
+   * switch only has to re-run this. */
   private renderHeader(): void {
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
     const title = this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    this.headerText = `🐋  dsh-pi-tui${title}${this.todoText}${badge}`
-    this.header.setText(this.headerText)
+    this.header.setText(`🐋  dsh-pi-tui${title}${this.todoText}${badge}`)
     this.requestRender()
   }
 
@@ -1761,8 +1763,7 @@ export class TuiApp {
     ].filter(part => part !== '')
     // Line 2: the stats line only; context pressure is the bar on line 1.
     const line2 = this.footerPreset === 'compact' ? '' : this.status.statsLine
-    this.footerText = [dim(line1.join('  ')), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n')
-    this.footer.setText(this.footerText)
+    this.footer.setText([dim(line1.join('  ')), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n'))
     this.requestRender()
   }
 
@@ -1829,30 +1830,41 @@ export class TuiApp {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
     // so the cancel callback closes the handle captured after mounting.
     let handle: OverlayHandle | undefined
-    const settings = new SettingsList(items, 6, settingsListTheme, onChange, () => {
+    // The settings theme is constructed PER OPEN: its cursor is a rendered
+    // ANSI string, so a module-level constant would freeze the cursor
+    // colour at import time and never follow a live theme switch.
+    const settings = new SettingsList(items, 6, settingsListTheme(), onChange, () => {
       handle?.hide()
       onCancel()
     }, { enableSearch: true })
     handle = this.showOverlayOnHost(new Frame(settings), { width: 72, maxHeight: 28 })
   }
 
-  /** Switch the active color theme and repaint everything. */
+  /** Switch the active color theme and repaint everything. Every surface
+   * re-renders from its semantic state with the NEW palette: header,
+   * footer, dock, todo panel, queue pane, busy indicator, messages, and
+   * the editor. (Overlays like settings construct their theme per open, so
+   * they pick up the new palette on their next render too.) */
   applyTheme(theme: 'dark' | 'light'): void {
     setTheme(theme)
-    // Rebuild messages (fresh component instances) and refresh text caches.
-    this.rebuildMessages()
-    this.header.setText(this.headerText)
-    this.footer.setText(this.footerText)
-    this.editor.invalidate()
-    this.requestRender()
+    this.repaintAllSurfaces()
   }
 
   /** Apply a resolved custom palette and repaint everything. */
   applyPalette(palette: ColorPalette): void {
     setTheme('custom', palette)
+    this.repaintAllSurfaces()
+  }
+
+  /** Re-render every palette-dependent surface from its semantic state. */
+  private repaintAllSurfaces(): void {
     this.rebuildMessages()
-    this.header.setText(this.headerText)
-    this.footer.setText(this.footerText)
+    this.renderHeader()
+    this.renderFooter()
+    this.renderDock()
+    this.renderTodoPanel()
+    this.renderQueuePane()
+    this.working.refresh()
     this.editor.invalidate()
     this.requestRender()
   }

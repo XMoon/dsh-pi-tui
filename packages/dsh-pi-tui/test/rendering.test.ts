@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import { parseReadEnvelopes, toolPresenterFrom } from '../src/present.ts'
-import { color, currentPalette } from '../src/theme.ts'
+import { color, currentPalette, darkColors } from '../src/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -293,6 +293,85 @@ test('working indicator shows above the editor in fullscreen too', async () => {
   app.setWorking(false)
   app.setFullscreen(false)
 })
+test('live theme switch recolors every surface while the content stays identical', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setStatus({ model: 'p/m', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: 'llm 1s' })
+  app.setPlanMode(true)
+  app.setTodoSummary([{ content: 'fix the theme', status: 'in_progress' }])
+  app.setTasks([{ label: 'review', status: 'running' }])
+  app.setQueueItems([{ id: 'q1', text: 'hello', mode: 'followup' }])
+  app.setWorking(true)
+  await vt.waitForRender()
+  // Locate the header row (contains the plan badge).
+  const findRow = (needle: string): number => {
+    const lines = vt.getViewport()
+    const index = lines.findIndex(line => line.includes(needle))
+    assert.ok(index !== -1, `row with ${needle} missing`)
+    return index
+  }
+  const headerRow = findRow('[plan]')
+  const badgeCol = (): number => vt.getViewport()[headerRow]!.indexOf('[plan]')
+  // Dark palette: the plan badge renders with the dark warning token.
+  assert.equal(vt.getCellFgRgb(headerRow, badgeCol()), 0xe8a838, 'dark plan badge must be #E8A838')
+  app.applyTheme('light')
+  await vt.waitForRender()
+  assert.equal(vt.getCellFgRgb(headerRow, badgeCol()), 0x92660a, 'light plan badge must be #92660A')
+  // Content is unchanged by the switch.
+  const before = vt.getViewport().join('\n')
+  app.applyTheme('dark')
+  await vt.waitForRender()
+  assert.equal(vt.getViewport().join('\n'), before, 'theme switch must not change content')
+  // A custom palette applies too; unset tokens keep the base.
+  app.applyPalette({ ...darkColors, primary: '#123456' })
+  await vt.waitForRender()
+  assert.equal(vt.getCellFgRgb(headerRow, badgeCol()), 0xe8a838, 'unset tokens keep the base palette')
+  app.applyTheme('dark')
+  app.setWorking(false)
+  app.stop()
+})
+
+test('working indicator keeps animating in fullscreen and after leaving it, with a single timer', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
+  app.start()
+  app.setWorking(true)
+  await vt.waitForRender()
+  // Sample several ticks WHILE the alt screen renders: the repaint callback
+  // must route to the active screen or the animation would freeze on the
+  // first frame (the main screen is stopped in fullscreen).
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const seenFullscreen = new Set<string>()
+  for (let i = 0; i < 30 && seenFullscreen.size < 2; i += 1) {
+    const line = vt.getViewport().join('\n').split('\n').find(candidate => candidate.includes('Working'))
+    if (line !== undefined) {
+      if (line.includes('🐋')) seenFullscreen.add('🐋')
+      if (line.includes('🐳')) seenFullscreen.add('🐳')
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(seenFullscreen.has('🐋') && seenFullscreen.has('🐳'),
+    `both whale emojis must appear in fullscreen, saw: ${[...seenFullscreen].join(', ')}`)
+  // Leaving fullscreen: the animation continues (no duplicated timer stall).
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  const seenAfter = new Set<string>()
+  for (let i = 0; i < 30 && seenAfter.size < 2; i += 1) {
+    const line = vt.getViewport().join('\n').split('\n').find(candidate => candidate.includes('Working'))
+    if (line !== undefined) {
+      if (line.includes('🐋')) seenAfter.add('🐋')
+      if (line.includes('🐳')) seenAfter.add('🐳')
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(seenAfter.has('🐋') && seenAfter.has('🐳'),
+    `animation must resume after leaving fullscreen, saw: ${[...seenAfter].join(', ')}`)
+  app.setWorking(false)
+  app.stop()
+})
+
 
 test('search cards group matches by file and mark truncation', async () => {
   const vt = new VirtualTerminal(100, 24)

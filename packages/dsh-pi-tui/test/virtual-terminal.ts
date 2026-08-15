@@ -165,6 +165,20 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Get the truecolor foreground (0xRRGGBB) of one viewport cell, or
+	 * undefined when the cell has no RGB foreground (default/palette) — used
+	 * by theme tests to observe which palette a surface rendered with.
+	 */
+	getCellFgRgb(row: number, col: number): number | undefined {
+		const buffer = this.xterm.buffer.active;
+		const line = buffer.getLine(buffer.viewportY + row);
+		if (line === undefined) return undefined;
+		const cell = line.getCell(col);
+		if (cell === undefined || !cell.isFgRGB()) return undefined;
+		return cell.getFgColor();
+	}
+
+	/**
 	 * Get the entire scroll buffer
 	 */
 	getScrollBuffer(): string[] {

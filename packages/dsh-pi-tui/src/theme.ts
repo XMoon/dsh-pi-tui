@@ -129,12 +129,49 @@ export function customThemeNames(): string[] {
   }
 }
 
+/** Hex colour format: `#rgb`, `#rrggbb`, or `#rrggbbaa`. */
+const COLOR_FORMAT = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?$/
+
+/** The token names a custom theme may override. */
+const PALETTE_KEYS: readonly (keyof ColorPalette)[] = [
+  'primary', 'accent', 'text', 'textStrong', 'textDim', 'textMuted', 'border',
+  'success', 'warning', 'error', 'roleUser', 'shellMode',
+]
+
+/**
+ * Runtime schema validation for a custom theme file: the keys must be a
+ * known token subset, every value a hex colour, and `base` one of the
+ * built-in families. An invalid file resolves to undefined (callers fall
+ * back and notify once), never a half-parsed palette.
+ * @param value - the parsed JSON value.
+ * @returns the validated theme file, or undefined.
+ */
+export function validateCustomTheme(value: unknown): CustomThemeFile | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const file = value as Record<string, unknown>
+  if (typeof file.name !== 'string' || file.name.trim() === '') return undefined
+  if (file.base !== undefined && file.base !== 'dark' && file.base !== 'light') return undefined
+  const colors = file.colors
+  if (colors !== undefined) {
+    if (typeof colors !== 'object' || colors === null || Array.isArray(colors)) return undefined
+    for (const [key, token] of Object.entries(colors)) {
+      if (!PALETTE_KEYS.includes(key as keyof ColorPalette)) return undefined
+      if (typeof token !== 'string' || !COLOR_FORMAT.test(token)) return undefined
+    }
+  }
+  return {
+    name: file.name,
+    ...file.base === undefined ? {} : { base: file.base },
+    ...colors === undefined ? {} : { colors: colors as Partial<ColorPalette> },
+  }
+}
+
 /** Load and resolve one custom theme file, or undefined when missing/broken. */
 export function loadCustomTheme(name: string): ColorPalette | undefined {
   try {
     const raw = readFileSync(join(customThemesDir(), `${name}.json`), 'utf8')
-    const file = JSON.parse(raw) as CustomThemeFile
-    return resolveCustomTheme(file)
+    const file = validateCustomTheme(JSON.parse(raw))
+    return file === undefined ? undefined : resolveCustomTheme(file)
   } catch {
     return undefined
   }
@@ -184,13 +221,20 @@ export const selectListTheme: SelectListTheme = {
   groupHeader: (text: string) => chalk.bold.hex(currentPalette.textMuted)(text),
 }
 
-/** SettingsList palette from the semantic tokens. */
-export const settingsListTheme: SettingsListTheme = {
-  label: (text: string, selected: boolean) => selected ? chalk.bold.hex(currentPalette.textStrong)(text) : color.text(text),
-  value: (text: string, selected: boolean) => selected ? color.primary(text) : color.textDim(text),
-  description: (text: string) => color.textDim(text),
-  cursor: color.primary('›'),
-  hint: (text: string) => color.textMuted(text),
+/**
+ * SettingsList palette from the semantic tokens. A FUNCTION, not a
+ * module-level constant: `cursor` is a pre-rendered ANSI string, so a
+ * constant would freeze the cursor colour at module load and never follow
+ * a live theme switch. Call it fresh for every overlay/settings open.
+ */
+export function settingsListTheme(): SettingsListTheme {
+  return {
+    label: (text: string, selected: boolean) => selected ? chalk.bold.hex(currentPalette.textStrong)(text) : color.text(text),
+    value: (text: string, selected: boolean) => selected ? color.primary(text) : color.textDim(text),
+    description: (text: string) => color.textDim(text),
+    cursor: color.primary('›'),
+    hint: (text: string) => color.textMuted(text),
+  }
 }
 
 /** Editor palette: focused border uses the brand token. */
