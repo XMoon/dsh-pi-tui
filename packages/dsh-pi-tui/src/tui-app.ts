@@ -1087,6 +1087,14 @@ export class TuiApp {
   }
 
   /**
+   * Replace the editor draft. The runner restores a submission that the
+   * divergence guard blocked, so the user's text survives for a retry.
+   */
+  setEditorText(text: string): void {
+    this.editor.setText(text)
+  }
+
+  /**
    * Set the session head rendered above the transcript: the session identity,
    * model, version, preset, and cwd, wrapped to the terminal width with a
    * full-width rule beneath. Replaces any previous head.

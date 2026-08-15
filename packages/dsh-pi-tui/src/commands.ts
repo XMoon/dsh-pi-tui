@@ -82,8 +82,13 @@ export interface AgentsLike {
 export interface TuiCommandRunner {
   ctx: Context
   app: TuiApp
-  /** The live agent handle; re-read on every access (swaps on switch). */
-  readonly liveAgent: Agent
+  /** The live agent handle; re-read on every access (swaps on switch).
+   * `undefined` until the first user message creates the session (deferred
+   * start) — sessionless commands must degrade, session commands call
+   * {@link ensureSession} first. */
+  readonly liveAgent: Agent | undefined
+  /** Create the first session lazily when none exists (deferred start). */
+  ensureSession(): Promise<void>
   /** The process-wide mutable model selection (footer + /model). */
   readonly selected: ModelSelectionRef
   /** The TUI settings document, when the settings service is present. */
@@ -111,21 +116,42 @@ export interface TuiCommandRunner {
 /**
  * Register the TUI-owned slash commands on the commands service. The
  * completion list is refreshed after every registration so TUI-owned
- * commands appear in the editor's tab list.
+ * commands appear in the editor's tab list. Registration is sessionless:
+ * the commands service's global layer needs no agent, so the whole surface
+ * is available before the first session exists (deferred start).
  * @param runner - the live runner surface.
+ * @returns a hook that rebuilds the per-skill slash commands (a no-op until
+ *   the first session exists, since the skill catalog scope is the agent).
  */
-export function registerTuiCommands(runner: TuiCommandRunner): void {
+export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills(): Promise<number> } {
   const { ctx, app } = runner
   const cwd = runner.cwd
   const signal = runner.signal
   const commands = ctx.get('commands')
-  if (commands === undefined) return
+  // The commands service is part of the base layer; its absence means the
+  // TUI commands cannot be registered at all — the caller surfaces this.
+  if (commands === undefined) throw new Error('commands service unavailable')
+
+  /**
+   * Resolve the live agent for a session-backed command, creating the first
+   * session lazily when the deferred start has not run yet. Throws when the
+   * creation failed — the executor surfaces the error to the user.
+   */
+  const requireAgent = async (): Promise<Agent> => {
+    await runner.ensureSession()
+    const agent = runner.liveAgent
+    if (agent === undefined) throw new Error('session could not be created')
+    return agent
+  }
 
   // Refresh completions after every registration below so TUI-owned
-  // commands (/exit /settings /skill /model) appear in the tab list.
+  // commands (/exit /settings /skill /model) appear in the tab list. The
+  // agent may be undefined before the first session exists: in-process
+  // `commands.list(undefined)` safely returns the global layer only (the
+  // remote RPC path's lookup guard does not apply in-process).
   const refreshCompletions = (): void => {
     app.setCommandCompletions(
-      commands.list(runner.liveAgent).map(command => ({
+      commands.list(runner.liveAgent as unknown as Agent).map(command => ({
         name: command.name,
         description: command.description,
         argumentHint: command.input?.hint,
@@ -141,7 +167,12 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     handler: () => {
       const liveAgent = runner.liveAgent
       app.stop()
-      void runner.sessions.flush(liveAgent.session).then(() => runner.exit(0))
+      if (liveAgent === undefined) {
+        // No session was ever created: nothing to flush, exit immediately.
+        void runner.exit(0)
+      } else {
+        void runner.sessions.flush(liveAgent.session).then(() => runner.exit(0))
+      }
       return { kind: 'success' }
     },
   })
@@ -169,15 +200,18 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
           // The namespace is absent until the presets service registers it.
         }
       }
+      // Before the first session (deferred start) the session-scoped rows —
+      // approval policy and the read-only session facts — do not exist yet;
+      // everything process-wide stays available.
       app.openSettings(
         [
-          {
+          ...liveAgent === undefined ? [] : [{
             id: 'approval',
             label: 'Approval policy (this session)',
             description: 'How tool approvals are handled in this session',
             currentValue: effectiveApprovalPolicy(liveAgent.session.events) ?? 'ask',
             values: ['ask', 'never'],
-          },
+          }],
           ...permissionNames.length > 0 ? [{
             id: 'default-permission',
             label: 'Default permission',
@@ -226,24 +260,26 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
             label: color.border('─'.repeat(34)),
             currentValue: '',
           },
-          {
-            id: 'session',
-            label: color.textDim('Session'),
-            description: color.textDim(liveAgent.session.id),
-            currentValue: color.textDim(displaySessionId(liveAgent.session.id)),
-          },
-          {
-            id: 'model',
-            label: color.textDim('Model'),
-            description: color.textDim('Provider and model routing this session'),
-            currentValue: color.textDim(`${liveAgent.options.provider}/${liveAgent.options.model}`),
-          },
-          {
-            id: 'preset',
-            label: color.textDim('Agent preset'),
-            description: color.textDim('Composition this session runs on (see /preset)'),
-            currentValue: color.textDim(runner.currentPreset() ?? 'none'),
-          },
+          ...liveAgent === undefined ? [] : [
+            {
+              id: 'session',
+              label: color.textDim('Session'),
+              description: color.textDim(liveAgent.session.id),
+              currentValue: color.textDim(displaySessionId(liveAgent.session.id)),
+            },
+            {
+              id: 'model',
+              label: color.textDim('Model'),
+              description: color.textDim('Provider and model routing this session'),
+              currentValue: color.textDim(`${liveAgent.options.provider}/${liveAgent.options.model}`),
+            },
+            {
+              id: 'preset',
+              label: color.textDim('Agent preset'),
+              description: color.textDim('Composition this session runs on (see /preset)'),
+              currentValue: color.textDim(runner.currentPreset() ?? 'none'),
+            },
+          ],
           {
             id: 'cwd',
             label: color.textDim('Working directory'),
@@ -253,7 +289,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
         ],
         (id, value) => {
           if (id === 'approval') {
-            if (value === 'ask' || value === 'never') {
+            if ((value === 'ask' || value === 'never') && liveAgent !== undefined) {
               ctx.get('approval')?.setPolicy(liveAgent, value)
               // The footer's permission badge derives from the knob folds;
               // reflect the change immediately.
@@ -310,7 +346,10 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
   // open the picker, and enrich rows with titles in the background. The
   // header parameter lets the resume alias present itself under its own name.
   const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
-    const liveAgent = runner.liveAgent
+    // The current marker is the live session's id; before the first session
+    // (deferred start) no row is marked current, and the picker can still
+    // browse and switch to a persisted session without creating one.
+    const currentId = runner.liveAgent?.session.id
     const persistence = ctx.get('sessionPersistence')
     if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
     // Live-preferred listing (sessionQuery) marks sessions currently
@@ -323,7 +362,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
       rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
     } else {
       rows = (await persistence.list()).map(header =>
-        headerToPickerRow(header, header.id === liveAgent.session.id))
+        headerToPickerRow(header, header.id === currentId))
     }
     rows.sort((a, b) => b.createdAt - a.createdAt)
     if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
@@ -331,9 +370,9 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     // background below. The cap keeps the title read bounded.
     const shown = rows.slice(0, MAX_PICKER_SESSIONS)
     const picker = app.openPicker(
-      shown.map(row => sessionPickerItem(row, liveAgent.session.id)),
+      shown.map(row => sessionPickerItem(row, currentId ?? '')),
       (id) => {
-        if (id === liveAgent.session.id) return
+        if (id === currentId) return
         void runner.switchSession(id).then(error => {
           if (error !== undefined) app.notify(error)
         })
@@ -355,7 +394,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     void loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
       .then(titles => {
         if (titles.size === 0) return
-        picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, liveAgent.session.id)))
+        picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, runner.liveAgent?.session.id ?? '')))
       })
       .catch(() => {
         // Cancellation (TUI quit) or an unexpected batch failure only
@@ -380,7 +419,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
       if (raw !== '') {
         // Direct resume: exact id, a session- prefixed prefix, or the short
         // id prefix. Falls back to the picker when nothing matches.
-        const liveAgent = runner.liveAgent
+        const currentId = runner.liveAgent?.session.id
         const persistence = ctx.get('sessionPersistence')
         if (persistence !== undefined) {
           const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
@@ -389,12 +428,12 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
             rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
           } else {
             rows = (await persistence.list()).map(header =>
-              headerToPickerRow(header, header.id === liveAgent.session.id))
+              headerToPickerRow(header, header.id === currentId))
           }
           rows.sort((a, b) => b.createdAt - a.createdAt)
           const match = findSessionMatch(rows, raw)
           if (match !== undefined) {
-            if (match.id === liveAgent.session.id) return { kind: 'error', text: 'already on this session' }
+            if (match.id === currentId) return { kind: 'error', text: 'already on this session' }
             void runner.switchSession(match.id).then(error => {
               if (error !== undefined) app.notify(error)
             })
@@ -411,24 +450,22 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
   // else the host registry. The scope passed to lookups is the AGENT itself,
   // exactly like the host apiproxy's presenterScopeFor — an agent context
   // object does not identity-match the preset's standing mount.
-  const skillService = (): { list: (options: { cwd?: string; scope?: object }) => Promise<readonly { name: string; description: string }[]>; get: (name: string, options: { cwd?: string; scope?: object }) => Promise<{ name: string; content?: string; description: string } | undefined> } | undefined => {
-    const liveAgent = runner.liveAgent
+  const skillService = (agent: Agent): { list: (options: { cwd?: string; scope?: object }) => Promise<readonly { name: string; description: string }[]>; get: (name: string, options: { cwd?: string; scope?: object }) => Promise<{ name: string; content?: string; description: string } | undefined> } | undefined => {
     const presets = ctx.get('agentPresets')
-    return presets?.serviceFor(liveAgent, 'skills') ?? ctx.get('skills')
+    return presets?.serviceFor(agent, 'skills') ?? ctx.get('skills')
   }
 
   /** The workspace the live session runs in; fallback to the TUI's cwd. */
-  const sessionCwd = (): string => runner.liveAgent.session.header.cwd ?? cwd
+  const sessionCwd = (agent: Agent): string => agent.session.header.cwd ?? cwd
 
   // Load one skill into the live session; shared by /skill and the
   // per-skill slash commands.
-  const loadSkill = async (name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
-    const liveAgent = runner.liveAgent
-    const skills = skillService()
+  const loadSkill = async (agent: Agent, name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+    const skills = skillService(agent)
     if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
-    const skill = await skills.get(name, { cwd: sessionCwd(), scope: liveAgent })
+    const skill = await skills.get(name, { cwd: sessionCwd(agent), scope: agent })
     if (skill === undefined) return { kind: 'error', text: 'unknown skill "' + name + '"' }
-    liveAgent.inject(createUserMessage({
+    agent.inject(createUserMessage({
       content: [{ type: 'text', text: 'Skill loaded by the user: **' + skill.name + '**\n\n' + (skill.content ?? skill.description) }],
       source: { kind: 'plugin', plugin: 'tui-skill' },
     }))
@@ -438,16 +475,21 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
   // Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
   // catalog skill is directly selectable from the editor autocomplete and
   // injects on Enter. The description carries a [skill] tag so skill rows
-  // stand apart from built-in commands. Refreshed by /reload and at boot.
+  // stand apart from built-in commands. Refreshed by /reload and whenever a
+  // session becomes live (the catalog scope is the agent, so the commands
+  // only exist once a session does).
   const skillDisposers = new Map<string, () => void>()
   const registerSkillCommands = async (): Promise<number> => {
     for (const dispose of skillDisposers.values()) dispose()
     skillDisposers.clear()
     const liveAgent = runner.liveAgent
-    const skills = skillService()
+    // No session yet (deferred start): the agent-scoped catalog is
+    // unavailable, so the per-skill commands wait for the first session.
+    if (liveAgent === undefined) return 0
+    const skills = skillService(liveAgent)
     if (skills === undefined) return 0
     const taken = new Set(commands.list(liveAgent).map(command => command.name))
-    const catalog = await skills.list({ cwd: sessionCwd(), scope: liveAgent })
+    const catalog = await skills.list({ cwd: sessionCwd(liveAgent), scope: liveAgent })
     for (const skill of catalog) {
       // A colliding name (a built-in or another plugin's command) skips the
       // slash command; the catalog picker still lists the skill.
@@ -456,7 +498,10 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
         const dispose = commands.register({
           name: skill.name,
           description: '[skill] ' + skill.description,
-          handler: async () => loadSkill(skill.name),
+          handler: async () => {
+            const agent = await requireAgent()
+            return loadSkill(agent, skill.name)
+          },
         })
         skillDisposers.set(skill.name, dispose)
       } catch {
@@ -475,13 +520,13 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     description: 'Load a skill into the session context',
     input: { hint: '<name>' },
     handler: async (invocation) => {
-      const liveAgent = runner.liveAgent
-      const skills = skillService()
+      const liveAgent = await requireAgent()
+      const skills = skillService(liveAgent)
       if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
       const name = invocation.rawInput.trim()
-      if (name !== '') return loadSkill(name)
+      if (name !== '') return loadSkill(liveAgent, name)
       // No argument: pick from the catalog.
-      const catalog = await skills.list({ cwd: sessionCwd(), scope: liveAgent })
+      const catalog = await skills.list({ cwd: sessionCwd(liveAgent), scope: liveAgent })
       if (catalog.length === 0) return { kind: 'error', text: 'no skills available' }
       // SettingsList rows: Enter cycles the value, which fires onChange.
       app.openSettings(
@@ -493,7 +538,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
           values: ['✓'],
         })),
         (id) => {
-          void loadSkill(id).then(result => { if (result.kind === 'error') app.notify(result.text) })
+          void loadSkill(liveAgent, id).then(result => { if (result.kind === 'error') app.notify(result.text) })
         },
         () => {},
       )
@@ -586,7 +631,11 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
       const next = await runner.agents.create({
         sessionId: SessionId(`session-${randomUUID()}`),
         meta: metaOf(cwd, presetId),
-        agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
+        // Before the first session the process-wide selection stands in.
+        agentOptions: {
+          provider: liveAgent?.options.provider ?? runner.selected.current?.provider,
+          model: liveAgent?.options.model ?? runner.selected.current?.model,
+        },
         setup: composition.setup,
       })
       const error = await runner.swapTo(next)
@@ -599,7 +648,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     name: 'queue',
     description: 'Manage queued input: edit, delete, steer, or insert',
     handler: async () => {
-      const liveAgent = runner.liveAgent
+      const liveAgent = await requireAgent()
       const inbox = liveAgent.inbox
       const queued = [
         ...inbox.nextTurn.map((message, index) => ({ message, slot: `next ${index + 1}` })),
@@ -674,8 +723,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
   commands.register({
     name: 'tasks',
     description: 'List background jobs for this session',
-    handler: () => {
-      const liveAgent = runner.liveAgent
+    handler: async () => {
+      const liveAgent = await requireAgent()
       const jobs = ctx.get('jobs')
       if (jobs === undefined) return { kind: 'error', text: 'jobs service unavailable' }
       const snapshots = jobs.list(liveAgent)
@@ -705,9 +754,10 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     name: 'yolo',
     description: 'Switch to danger-full-access (alias of /permission danger-full-access)',
     handler: async () => {
+      const liveAgent = await requireAgent()
       const commands = ctx.get('commands')
       if (commands === undefined) return { kind: 'error', text: 'commands service unavailable' }
-      const execution = await commands.execute(runner.liveAgent, '/permission danger-full-access', signal)
+      const execution = await commands.execute(liveAgent, '/permission danger-full-access', signal)
       if (execution === undefined) {
         return { kind: 'error', text: '/permission unavailable (permission presets not composed)' }
       }
@@ -722,7 +772,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     description: 'Show or switch the session agent preset',
     input: { hint: '[status|<id>|default [<id>]]' },
     handler: async (invocation) => {
-      const liveAgent = runner.liveAgent
+      const liveAgent = await requireAgent()
       const presets = ctx.get('agentPresets')
       if (presets === undefined) {
         return { kind: 'error', text: 'agent presets unavailable in this deployment' }
@@ -792,7 +842,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     name: 'subagents',
     description: 'List child agents; view a transcript or interrupt one',
     handler: async () => {
-      const liveAgent = runner.liveAgent
+      const liveAgent = await requireAgent()
       const subagents = ctx.get('subagents')
       if (subagents === undefined) return { kind: 'error', text: 'subagent service unavailable' }
       const children = (await subagents.listChildren(liveAgent.session.id))
@@ -844,7 +894,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     description: 'Search persisted sessions for text and switch to a hit',
     input: { hint: '<query>' },
     handler: async (invocation) => {
-      const liveAgent = runner.liveAgent
+      const currentId = runner.liveAgent?.session.id
       const persistence = ctx.get('sessionPersistence')
       if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
       const query = invocation.rawInput.trim()
@@ -878,7 +928,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
           description: `${Math.max(0, Math.floor((now - hit.createdAt) / 60000))}m ago · …${hit.snippet}…`,
         })),
         (id) => {
-          if (id === liveAgent.session.id) return
+          if (id === currentId) return
           void runner.switchSession(id).then(error => {
             if (error !== undefined) app.notify(error)
           })
@@ -893,8 +943,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     name: 'title',
     description: 'Set or show the session title',
     input: { hint: '<title>' },
-    handler: (invocation) => {
-      const liveAgent = runner.liveAgent
+    handler: async (invocation) => {
+      const liveAgent = await requireAgent()
       const titles = ctx.get('sessionTitle')
       if (titles === undefined) return { kind: 'error', text: 'session title service unavailable' }
       const name = invocation.rawInput.trim()
@@ -910,8 +960,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
   commands.register({
     name: 'copy',
     description: 'Copy the last assistant message (OSC 52 clipboard)',
-    handler: () => {
-      const liveAgent = runner.liveAgent
+    handler: async () => {
+      const liveAgent = await requireAgent()
       const last = liveAgent.session.events.findLast((event): event is SessionEvent<'assistant/message'> =>
         event.type === 'assistant/message')
       if (last === undefined) return { kind: 'error', text: 'no assistant message yet' }
@@ -931,7 +981,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     description: 'Export this session log (JSONL by default, `md` for a readable transcript)',
     input: { hint: '[md|<path>]' },
     handler: async (invocation) => {
-      const liveAgent = runner.liveAgent
+      const liveAgent = await requireAgent()
       const persistence = ctx.get('sessionPersistence')
       if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
       const arg = invocation.rawInput.trim()
@@ -962,16 +1012,16 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
     description: 'Fork this session at the last completed turn',
     handler: async () => {
       const liveAgent = runner.liveAgent
-      const seed = forkSeed(liveAgent.session.events)
+      const seed = liveAgent === undefined ? undefined : forkSeed(liveAgent.session.events)
       if (seed === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
       // The child inherits the parent's recorded preset (official fork
       // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
-      const composition = await runner.compose(resolveSessionPreset(liveAgent.session))
+      const composition = await runner.compose(resolveSessionPreset(liveAgent!.session))
       const presetId = composition.agentPreset
       const next = await runner.agents.create({
         sessionId: SessionId(`session-${randomUUID()}`),
-        meta: { ...metaOf(cwd, presetId), parentSession: liveAgent.session.id, seedLength: seed.length },
-        agentOptions: { provider: liveAgent.options.provider, model: liveAgent.options.model },
+        meta: { ...metaOf(cwd, presetId), parentSession: liveAgent!.session.id, seedLength: seed.length },
+        agentOptions: { provider: liveAgent!.options.provider, model: liveAgent!.options.model },
         setup: composition.setup,
         seed,
       })
@@ -984,8 +1034,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
   commands.register({
     name: 'status',
     description: 'Show session stats and identity',
-    handler: () => {
-      const liveAgent = runner.liveAgent
+    handler: async () => {
+      const liveAgent = await requireAgent()
       const stats = computeStats(liveAgent.session.events)
       let contextTokens: number | undefined
       const meter = ctx.get('tokenMeter')
@@ -1071,7 +1121,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
         { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
         { id: 'k-bang', label: '! cmd', description: 'Run a shell command locally; !! sends it to the model', currentValue: '' },
         { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
-        ...commands.list(runner.liveAgent).map(command => ({
+        ...commands.list(runner.liveAgent as unknown as Agent).map(command => ({
           id: `cmd-${command.name}`,
           label: `/${command.name}`,
           description: command.description,
@@ -1085,4 +1135,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
 
   // All TUI commands are registered now; include them in completion.
   refreshCompletions()
+  // The per-skill commands live on the agent-scoped catalog, so they can
+  // only be built once a session exists; the runner calls this again after
+  // the first session is created (see initLiveSession).
+  return { refreshSkills: () => registerSkillCommands() }
 }

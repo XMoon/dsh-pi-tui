@@ -55,16 +55,41 @@ node --import tsx/esm packages/dsh-pi-tui/demo.ts   # standalone demo in a real 
 
 ### Installing into the local dsh profile (dev loop)
 
+Two profiles exist. **Never touch `pi-tui`** — it is the real-use profile and
+installs the published upstream package from the npm registry:
+
 ```sh
-# only the bundle is installed into the profile — its dist/ is self-contained
-# (pi-tui is bundled in). pnpm `file:` installs land as store copies, NOT
-# symlinks — for a live dev loop replace with a manual symlink (pnpm re-add
-# overwrites it):
-dsh plugin --profile pi-tui -- add "@xmoon76/dsh-pi-tui@file:.../packages/dsh-pi-tui"
-ln -sfn <repo>/packages/dsh-pi-tui ~/.dsh/profiles/pi-tui/node_modules/@xmoon76/dsh-pi-tui
-# run against the real dsh install:
-dsh --profile pi-tui [--session <id>]
+dsh plugin --profile pi-tui -- add "@xmoon76/dsh-pi-tui"   # registry install (0.1.x)
+dsh --profile pi-tui [--session <id>]                      # real use
 ```
+
+Development runs in the **`pi-tui-dev`** profile, whose `package.json`
+declares a `link:` dependency to this repo (a live symlink, so a `pnpm build`
+is picked up immediately — no re-install, no store copies):
+
+```sh
+# one-time setup (idempotent): create/repoint the dev profile at the repo
+mkdir -p ~/.dsh/profiles/pi-tui-dev
+cat > ~/.dsh/profiles/pi-tui-dev/package.json <<'EOF'
+{
+  "name": "dsh-profile-pi-tui-dev",
+  "private": true,
+  "dependencies": { "@xmoon76/dsh-pi-tui": "link:/home/xmoon/project/me/dsh-pi-tui/packages/dsh-pi-tui" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@xmoon76/dsh-pi-tui"] } }
+}
+EOF
+cd ~/.dsh/profiles/pi-tui-dev && pnpm install
+# dev loop: rebuild the bundle, then run the dev profile
+pnpm build
+dsh --profile pi-tui-dev [--session <id>]
+```
+
+Restoring a messed-up `pi-tui` profile: reinstall the registry package from
+the lockfile (`cd ~/.dsh/profiles/pi-tui && pnpm install --frozen-lockfile`).
+The profile's `pnpm-workspace.yaml` excludes `@xmoon76/dsh-pi-tui@0.1.x` from
+the minimum-release-age policy; if the supply-chain check still rejects the
+version, append it to `minimumReleaseAgeExclude` or pass
+`--config.minimum-release-age=0`.
 
 Headless UI tests drive `@xterm/headless` through `packages/dsh-pi-tui/test/virtual-terminal.ts`
 (copied from the fork's `test/virtual-terminal.ts`, import path changed) — rendering
@@ -89,6 +114,15 @@ and input routing are verified without a TTY or a model connection.
 - **`imports` `#/*` alias** in the fork's package.json: fine for its internal `src` imports under tsx/Node 24+, but any future `dist` build must bundle (tsdown) rather than tsc-emit, or the alias must go.
 - **tmux `send-keys` looks like a paste to the editor**: `send-keys 'text' Enter` delivers the whole batch in a few ms; the editor's `PasteBurst` heuristic (≥8 plain chars within 8ms, Enter suppressed for 120ms) then turns Enter into a newline, so submissions silently "don't work". This is upstream design (protects against non-bracketed-paste terminals), NOT a regression — real keyboards type slower than 8ms/char. When driving the TUI from tmux, type with a pause: `send-keys 'text'`, sleep ≥0.3s, then `send-keys Enter`. (Learned while real-testing the 2026-08 fix batch.)
 - **`setFullscreen` must refocus the editor**: a fresh `TuiAltScreen` starts with no focused component — after Ctrl+F the app-level listener still handles shortcuts but text and Enter are dropped, making the transcript look frozen. `TuiApp.setFullscreen` sets focus on the alt screen when entering and restores it on the way back; keep that when touching fullscreen (guarded by the "editor input routes to the alt screen" headless test).
+
+## Cross-process safety (2026-08 batch)
+
+- **dsh has no cross-process session coordination**: two dsh processes (TUI + web, or two TUIs) holding one session can mint the same `seq` (each numbers from its own in-memory log length) and corrupt the log at the `session/end-seed` resume marker. This is an upstream limitation — the TUI cannot fix it, only detect and warn (README documents the "one surface per session" rule).
+- **`src/guard.ts`** — divergence guard: before each session-writing submission, `locate()` + `fs.stat` gate (cheap) then `readFrom(id, 0)` (full committed read) compares the file's committed event count against the live `session.events.length`; file ahead of memory ⇒ external writer ⇒ block (second Enter forces). Guard state is per-session and resets on switch. `readFrom` throws on a corrupt committed prefix — that is the unreadable case.
+- **`src/diag.ts`** — `ctx.logger` is invisible in this process (no exporter), so the TUI's own diagnostics go to stderr + `$DSH_HOME/logs/pi-tui-<pid>.log` (env `DSH_PI_TUI_LOG` / `DSH_PI_TUI_LOG_LEVEL`, default `info`). Keep new lifecycle logging in diag, not just ctx.logger.
+- **`scripts/repair-session.mjs`** — standalone repair for corrupted logs (duplicate seq ⇒ renumber from the first collision with old→new reference remap; gap/unparsable ⇒ truncate; wrong frame layout ⇒ re-frame). Resolves `decodeStorageRecord` from the dsh install; `--scan` lists damaged sessions read-only; `--yes` applies with a mandatory backup first. The frame walker (`scanZstdFrames` in `repair-core.mjs`) is vendored from `dsh-session-persistence-jsonl` — dsh appends ONE zstd frame per flush, and `node:zlib`'s `zstdDecompressSync` only decodes the FIRST frame of a concatenated set, so frame-slicing is mandatory (verified against the 11079-frame ab79200b log).
+- **Repaired logs must preserve the dsh frame layout**: the first frame has to decode to EXACTLY the header line, and each frame holds complete JSONL records. `compressLog` (repair-core.mjs) writes the header line alone in frame one, then the remaining lines in ~16 KiB plaintext chunks (checksummed like the harness writer). NEVER compress a repaired log as one whole-log frame: it decompresses fine but every dsh reader (`session.list`, `load`, `readFrom`) rejects it with `corrupt Zstandard session log: first frame is not exactly one header line` — this exact bug broke the web's session list when the 2026-08-15 repair rewrote three logs as single frames. `scanZstdLayout` is the layout gate used by both `--scan` and post-write verify. Repaired files are written 0600, same as the harness (`writeFileSync` must pass `{ mode: 0o600 }`, not the umask default).
+- **Storage rows vs events**: file rows are the storage format; packed `*-chunks` rows (`seq0` + `dt`) expand via `decodeStorageRecord` into individual events with real `seq`. Any code that counts "events in the file" must expand rows first (guard's `readFrom` does; naive line-counting does not).
 
 ## Docs
 

@@ -39,6 +39,7 @@
   "files": [
     "dist",
     "config",
+    "scripts",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -126,7 +127,7 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test test/*.test.ts test/*.test.mjs",
     "clean": "rm -rf dist"
   }
 }

@@ -12,7 +12,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -41,6 +41,7 @@ import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 // The commands service merge: ctx.commands typing for execute()/register().
 import { parseCommand } from '@deepseek-ai/dsh-commands'
+import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-commands'
 // The skill registry merge for the /skill command.
 import type {} from '@deepseek-ai/dsh-skill'
@@ -75,6 +76,8 @@ import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type Cus
 import { startProcessTui, type TuiApp } from './tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
+import { diagFromEnv, type Diag } from './diag.ts'
+import { checkDivergence, freshGuardState, type GuardPersistenceLike, type GuardSessionLike, type GuardState } from './guard.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -103,6 +106,18 @@ interface AppExit {
 const WINDOW_TURNS = 15
 /** Coalesced repaint interval for streaming events, in ms. */
 const REPAINT_FLUSH_MS = 50
+
+/**
+ * Slash commands that need no session: before the first user message
+ * (deferred start) they run locally without creating one. Everything else
+ * dispatches through `commands.execute`, which creates the session lazily
+ * (the command line IS the first user input). Commands in this set must
+ * tolerate `liveAgent === undefined` in their handlers.
+ */
+const SESSIONLESS_COMMANDS = new Set([
+  'exit', 'settings', 'help', 'login', 'logout', 'model', 'reload',
+  'sessions', 'resume', 'search', 'new', 'fork',
+])
 
 /**
  * The installed dsh version (e.g. `0.1.0-rc.6`), resolved from the launcher's
@@ -181,22 +196,6 @@ function shortCwd(cwd: string): string {
   return parts.slice(-2).join('/') || cwd
 }
 
-/**
- * Write raw bytes to a file descriptor, bypassing the cordis-wrapped
- * `process.stderr` (whose `writeSync` is missing). Startup diagnostics go to
- * fd 2 so they never corrupt the TUI frame on stdout.
- * @param fd - the file descriptor (2 for stderr).
- * @param text - the bytes to write.
- */
-function writeFd2(fd: number, text: string): void {
-  try {
-    writeFileSync(fd, text)
-  } catch {
-    // Diagnostics are best-effort: a closed descriptor must not take the
-    // fallback path down.
-  }
-}
-
 /** Shell commands the approval dialog flags as dangerous (kimi-inspired). */
 const DANGER_PATTERNS: readonly RegExp[] = [
   /\bmkfs(\.\w+)?\b/,
@@ -208,6 +207,10 @@ const DANGER_PATTERNS: readonly RegExp[] = [
   />+\s*\/dev\/sd/,
   /\bcurl\b[^\n|]*\|\s*(ba)?sh\b/,
 ]
+
+/** Divergence-guard notices (user-facing, English like the rest of the TUI). */
+const GUARD_BLOCKED_NOTIFY = 'This session may be open in another dsh process (TUI/web); send blocked. Press Enter again to force (may corrupt the session log)'
+const GUARD_FORCED_NOTIFY = 'Forced send — the session may be written by another process; the log may be damaged'
 
 /**
  * Whether a shell command matches a destructive pattern. `rm` is treated
@@ -403,6 +406,10 @@ export function apply(ctx: Context, config: Config): void {
   }
   const startup = ctx.get(TUI_STARTUP_SERVICE)
   if (startup === undefined) return
+  // Process diagnostics: stderr + a log file under $DSH_HOME/logs. The cordis
+  // logger has no exporter in this process, so it is NOT the troubleshooting
+  // channel — diag is (see diag.ts).
+  const diag: Diag = diagFromEnv(process.env)
   // The patch row carries a static config; the real session id comes from the
   // startup service (no `!!js` expression, so loader hot-reloads cannot race
   // the service's availability while evaluating the row).
@@ -434,6 +441,14 @@ export function apply(ctx: Context, config: Config): void {
     // resumed BLANK session may still be re-composed onto it; a resumed
     // started session keeps its recorded preset (warned, never overridden).
     const launchPreset = startup.presetId ?? (process.env.DSH_PI_TUI_PRESET?.trim() || undefined)
+    diag.info('boot', {
+      pid: process.pid,
+      dsh: dshVersion() ?? 'unknown',
+      bundle: packageVersion(),
+      cwd: process.cwd(),
+      session: sessionId ?? '(deferred)',
+      preset: launchPreset ?? 'default',
+    })
     /** Resolve the launch composition, falling back to the default on an unknown id. */
     const launchComposition = async (): Promise<{ composition: AgentComposition; failure?: string }> => {
       try {
@@ -441,6 +456,7 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         ctx.logger.warn(`tui-runner: launch preset unavailable: ${message}`)
+        diag.warn('preset unavailable', { preset: launchPreset ?? 'default', error: message })
         return {
           composition: await compose(),
           failure: `preset "${launchPreset}" unavailable; started with the default`,
@@ -465,25 +481,31 @@ export function apply(ctx: Context, config: Config): void {
           agentOptions,
           setup: composition.setup,
         })
+        diag.info('resume ok', {
+          session: sessionId,
+          seq: handle.agent.session.events.length,
+          preset: recorded ?? 'default',
+        })
         // A launch-time preset may still apply while the session is blank;
         // the blank check lives inside recomposeBlank (shared with /preset).
         if (launchPreset !== undefined && launchPreset !== recorded) {
           try {
             const outcome = await recomposeBlank(ctx, handle.agent, launchPreset)
             if (outcome.kind === 'locked') {
-              ctx.logger.warn(
-                `tui-runner: session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`,
-              )
+              const message = `session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
+              ctx.logger.warn(`tui-runner: ${message}`)
+              diag.warn('preset ignored on resume', { session: sessionId, preset: launchPreset })
             }
           } catch (error) {
-            ctx.logger.warn(
-              `tui-runner: --preset ${launchPreset} not applied on resume: ${error instanceof Error ? error.message : String(error)}`,
-            )
+            const message = `--preset ${launchPreset} not applied on resume: ${error instanceof Error ? error.message : String(error)}`
+            ctx.logger.warn(`tui-runner: ${message}`)
+            diag.warn('preset not applied on resume', { session: sessionId, preset: launchPreset, error: message })
           }
         }
       } catch (error) {
-        ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}`)
-        writeFd2(2, `[tui] resume ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}\n`)
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
+        diag.error('resume failed', { session: sessionId, error: message })
         resumeFailure = `session ${sessionId} could not be resumed; started a fresh session`
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
@@ -502,6 +524,53 @@ export function apply(ctx: Context, config: Config): void {
     let liveHandle = handle
     let liveAgent = handle?.agent
     if (liveAgent !== undefined) await liveAgent.whenIdle()
+    // Cross-process divergence guard state for the live session; reset on
+    // every session switch (the cursor is per-session).
+    let guardState: GuardState = freshGuardState()
+    let guardForced = false
+    /**
+     * Run the divergence guard before a session-writing submission. Returns
+     * 'ok' to proceed, 'blocked' to refuse (the caller restores the draft),
+     * 'forced' when the user overrode a still-bad state, and 'unavailable'
+     * when the deployment cannot guard (proceed).
+     */
+    const guardSend = async (): Promise<'ok' | 'blocked' | 'forced' | 'unavailable'> => {
+      if (liveAgent === undefined) return 'ok'
+      const session: GuardSessionLike = {
+        id: liveAgent.session.id,
+        header: liveAgent.session.header,
+        events: liveAgent.session.events,
+      }
+      const persistence = ctx.get('sessionPersistence') as GuardPersistenceLike | undefined
+      const outcome = await checkDivergence(persistence, session, (path) => statSync(path), guardState)
+      switch (outcome.kind) {
+        case 'ok':
+          guardForced = false
+          diag.debug('guard ok', { session: session.id, fileEvents: outcome.fileEvents ?? 0, memoryEvents: session.events.length })
+          return 'ok'
+        case 'diverged':
+          diag.warn('guard diverged', {
+            session: session.id,
+            fileEvents: outcome.fileEvents,
+            memoryEvents: outcome.memoryEvents,
+          })
+          if (guardForced) {
+            guardForced = false
+            return 'forced'
+          }
+          return 'blocked'
+        case 'unreadable':
+          diag.error('guard unreadable', { session: session.id, error: outcome.error })
+          if (guardForced) {
+            guardForced = false
+            return 'forced'
+          }
+          return 'blocked'
+        case 'unavailable':
+          guardForced = false
+          return 'ok'
+      }
+    }
     /** The preset the live agent runs on, when the deployment composes one. */
     const currentPreset = (): string | undefined => {
       if (liveAgent === undefined) return undefined
@@ -512,6 +581,7 @@ export function apply(ctx: Context, config: Config): void {
     ctx.effect(function* () {
       yield () => {
         app?.stop()
+        diag.dispose()
       }
     })
     // Incremental fold state for the live session's log; reset on switch. The
@@ -543,6 +613,7 @@ export function apply(ctx: Context, config: Config): void {
 
     /** Swap the live agent to a new handle, repainting for its session. */
     const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>): Promise<string | undefined> => {
+      const from = liveAgent?.session.id
       try {
         if (liveAgent !== undefined) {
           await sessions.flush(liveAgent.session)
@@ -552,10 +623,14 @@ export function apply(ctx: Context, config: Config): void {
         liveAgent = next.agent
         await liveAgent.whenIdle()
       } catch (error) {
-        process.stderr.write(`[tui] swap failed: ${error instanceof Error ? error.message : String(error)}\n`)
-        return `swap failed: ${error instanceof Error ? error.message : String(error)}`
+        const message = error instanceof Error ? error.message : String(error)
+        diag.error('swap failed', { from, error: message })
+        return `swap failed: ${message}`
       }
+      guardState = freshGuardState()
+      guardForced = false
       await initLiveSession(next.agent)
+      diag.info('switch ok', { from: from ?? '(none)', to: next.agent.session.id, seq: next.agent.session.events.length })
       return undefined
     }
 
@@ -576,8 +651,10 @@ export function apply(ctx: Context, config: Config): void {
         })
         return swapTo(next)
       } catch (error) {
-        ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}`)
-        return `switch failed: ${error instanceof Error ? error.message : String(error)}`
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
+        diag.error('switch failed', { session: sessionId, error: message })
+        return `switch failed: ${message}`
       }
     }
 
@@ -791,6 +868,95 @@ export function apply(ctx: Context, config: Config): void {
       refreshStatus()
       return true
     }
+    /** Error sink for a failed session creation: restore the draft and
+     * surface the reason instead of silently dropping the submission. */
+    const failSubmission = (draft: string) => (error: unknown): void => {
+      const message = error instanceof Error ? error.message : String(error)
+      ctx.logger.error(`tui-runner: session creation failed: ${message}`)
+      diag.error('session creation failed', { error: message })
+      app.setEditorText(draft)
+      app.notify(`could not start a session: ${message}`)
+    }
+    /** The session-backed dispatch: create the session lazily (the first
+     * user input is the deferred trigger), guard against cross-process
+     * divergence, then execute a registered slash command or follow up. */
+    const dispatchViaSession = (text: string): void => {
+      void ensureSession().then(async () => {
+        // Divergence guard: another dsh process may be writing this session.
+        // Blocked submissions restore the draft so a second Enter forces
+        // through (the user's explicit override, logged and warned).
+        const verdict = await guardSend()
+        if (verdict === 'blocked') {
+          app.setEditorText(text)
+          app.notify(GUARD_BLOCKED_NOTIFY)
+          return
+        }
+        if (verdict === 'forced') {
+          app.notify(GUARD_FORCED_NOTIFY)
+        }
+        // A registered slash command dispatches without a model turn; anything
+        // else is a follow-up prompt. The command lifecycle lands in the
+        // session log (command/run + command/done) and re-folds into the
+        // transcript through the session/event listener below.
+        const commands = ctx.get('commands')
+        if (commands !== undefined) {
+          // Bare `/plan` toggles: when plan mode is already active it exits
+          // instead of re-entering (the official command needs `/plan off`).
+          const parsed = parseCommand(text)
+          const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
+            && foldPlanMode(liveAgent?.session.events ?? [])
+            ? '/plan off'
+            : text
+          void commands.execute(liveAgent as Agent, toggled, signal).then((execution) => {
+            if (execution === undefined && liveAgent !== undefined) {
+              liveAgent.followup(createUserMessage({
+                content: [{ type: 'text', text }],
+                source: { kind: 'user' },
+              }))
+            }
+          }).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error)
+            ctx.logger.error(`tui-runner: command execution failed: ${message}`)
+            diag.error('command execution failed', { error: message })
+            app.notify(message)
+          })
+          return
+        }
+        liveAgent?.followup(createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: 'user' },
+        }))
+      }).catch(failSubmission(text))
+    }
+    /**
+     * Run a sessionless slash command locally — no session, no log, no
+     * persistence. The handler comes from the commands service's global
+     * layer (in-process lookup with no agent is safe: it reads the global
+     * layer only). A sessionless command that failed to register falls back
+     * to the session dispatch, which reports unknown commands as messages.
+     */
+    const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string): void => {
+      const commands = ctx.get('commands')
+      const definition = commands?.find(undefined as unknown as Agent, parsed.name)
+      if (commands === undefined || definition === undefined) {
+        dispatchViaSession(text)
+        return
+      }
+      const invocation = {
+        commandId: `cmd-local-${randomUUID()}`,
+        agent: undefined as unknown as Agent,
+        rawInput: parsed.rawInput,
+        signal,
+      } as CommandInvocation
+      Promise.resolve(definition.handler(invocation)).then(result => {
+        if (result !== undefined && result.kind === 'error') app.notify(result.text)
+      }).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.logger.error(`tui-runner: local command failed: ${message}`)
+        diag.error('local command failed', { error: message })
+        app.notify(message)
+      })
+    }
     app = startProcessTui({
       onSubmit: (text) => {
         // Persist the (newest-first) input history for this cwd; the editor
@@ -805,48 +971,36 @@ export function apply(ctx: Context, config: Config): void {
         // the session first (the FIRST user message is the deferred trigger).
         if (text.startsWith('!')) {
           if (text.startsWith('!!')) {
-            void ensureSession().then(() => runLocalShell(text))
+            void ensureSession().then(() => runLocalShell(text)).catch(failSubmission(text))
           } else {
             runLocalShell(text)
           }
           return
         }
-        void ensureSession().then(() => {
-          // A registered slash command dispatches without a model turn; anything
-          // else is a follow-up prompt. The command lifecycle lands in the
-          // session log (command/run + command/done) and re-folds into the
-          // transcript through the session/event listener below.
-          const commands = ctx.get('commands')
-          if (commands !== undefined) {
-            // Bare `/plan` toggles: when plan mode is already active it exits
-            // instead of re-entering (the official command needs `/plan off`).
-            const parsed = parseCommand(text)
-            const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
-              && foldPlanMode(liveAgent?.session.events ?? [])
-              ? '/plan off'
-              : text
-            void commands.execute(liveAgent as Agent, toggled, signal).then((execution) => {
-              if (execution === undefined && liveAgent !== undefined) {
-                liveAgent.followup(createUserMessage({
-                  content: [{ type: 'text', text }],
-                  source: { kind: 'user' },
-                }))
-              }
-            }).catch((error: unknown) => {
-              ctx.logger.error(`tui-runner: command execution failed: ${error instanceof Error ? error.message : String(error)}`)
-              app.notify(error instanceof Error ? error.message : String(error))
-            })
-            return
-          }
-          liveAgent?.followup(createUserMessage({
-            content: [{ type: 'text', text }],
-            source: { kind: 'user' },
-          }))
-        })
+        // A sessionless slash command runs locally BEFORE any session exists:
+        // typing /exit, /settings, /help, ... must not create one (deferred
+        // start). Everything else — session-backed commands, core commands
+        // like /plan, and plain prompts — creates the session lazily.
+        const parsed = parseCommand(text)
+        if (parsed !== undefined && liveAgent === undefined && SESSIONLESS_COMMANDS.has(parsed.name)) {
+          runLocalCommand(parsed, text)
+          return
+        }
+        dispatchViaSession(text)
       },
       onExit: () => {
         void (async () => {
-          if (liveAgent !== undefined) await sessions.flush(liveAgent.session)
+          if (liveAgent !== undefined) {
+            const started = Date.now()
+            try {
+              await sessions.flush(liveAgent.session)
+              diag.info('flush ok', { session: liveAgent.session.id, events: liveAgent.session.events.length, tookMs: Date.now() - started })
+            } catch (error) {
+              diag.error('flush failed', { session: liveAgent.session.id, error: error instanceof Error ? error.message : String(error) })
+            }
+          }
+          diag.info('exit', { code: 0 })
+          diag.dispose()
           app.stop()
           exit(0)
         })()
@@ -864,13 +1018,22 @@ export function apply(ctx: Context, config: Config): void {
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
         })
-        void ensureSession().then(() => {
+        void ensureSession().then(async () => {
+          const verdict = await guardSend()
+          if (verdict === 'blocked') {
+            app.setEditorText(text)
+            app.notify(GUARD_BLOCKED_NOTIFY)
+            return
+          }
+          if (verdict === 'forced') {
+            app.notify(GUARD_FORCED_NOTIFY)
+          }
           if (liveAgent?.status === 'running') {
             liveAgent.steer(message)
           } else {
             liveAgent?.followup(message)
           }
-        })
+        }).catch(failSubmission(text))
       },
       openExternalEditor: async (draft) => {
         const editor = process.env.VISUAL ?? process.env.EDITOR ?? 'vi'
@@ -1043,36 +1206,14 @@ export function apply(ctx: Context, config: Config): void {
       app.setQueueItems(queue)
     }
     refreshQueue()
-    // The TUI-owned slash commands are registered exactly once, after the
-    // first session exists (the runner surface re-reads the live agent on
-    // every access, so a session swap mid-flight is always reflected).
-    let commandsRegistered = false
-    const registerCommands = (): void => {
-      if (commandsRegistered) return
-      commandsRegistered = true
-      if (ctx.get('commands') !== undefined) {
-        registerTuiCommands({
-          ctx,
-          app,
-          get liveAgent() { return liveAgent as Agent },
-          get selected() { return selected },
-          get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
-          agents: agents as unknown as TuiCommandRunner['agents'],
-          sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
-          cwd,
-          signal,
-          compose,
-          switchSession,
-          swapTo: (next) => swapTo(next as Awaited<ReturnType<typeof agents.resume>>),
-          currentPreset,
-          recomposeBlank: (id) => recomposeBlank(ctx, liveAgent as Agent, id),
-          refreshStatus,
-          updateWelcomeCard,
-          enterView,
-          exit,
-        })
-      }
-    }
+    // The TUI-owned slash commands are registered as soon as the runner
+    // surface exists — the commands service's GLOBAL layer needs no agent,
+    // so the whole command surface (and the editor's tab completion) is
+    // available before the first session (deferred start). Session-backed
+    // handlers call runner.ensureSession() themselves; the runner surface
+    // re-reads the live agent on every access, so a session swap
+    // mid-flight is always reflected. Defined after ensureSession below
+    // (the runner object closes over it).
     /** Rebuild every live-session surface after resume, create, or swap. */
     const initLiveSession = async (agent: Agent): Promise<void> => {
       folder = new TranscriptFolder()
@@ -1089,6 +1230,9 @@ export function apply(ctx: Context, config: Config): void {
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)} · ${agent.session.id}`)
       updateWelcomeCard()
       registerCommands()
+      // The per-skill slash commands are agent-scoped: they appear once the
+      // first session exists and refresh on every session switch.
+      refreshSkillCommands()
     }
     /**
      * Create the first session lazily — the FIRST user message triggers it
@@ -1117,10 +1261,10 @@ export function apply(ctx: Context, config: Config): void {
           // A preset that resolves but fails to MOUNT (e.g. a row waiting for
           // a host service) rejects inside the agent-factory setup. Surface it
           // and fall back to the default rather than killing the TUI.
-          ctx.logger.warn(
-            `tui-runner: failed to start with preset "${launchPreset ?? 'default'}": ${error instanceof Error ? error.message : String(error)}`,
-          )
-          resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${error instanceof Error ? error.message : String(error)}`
+          const message = error instanceof Error ? error.message : String(error)
+          ctx.logger.warn(`tui-runner: failed to start with preset "${launchPreset ?? 'default'}": ${message}`)
+          diag.warn('preset mount failed', { preset: launchPreset ?? 'default', error: message })
+          resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${message}`
           const fallback = await compose()
           const created = await agents.create({
             sessionId: SessionId(`session-${randomUUID()}`),
@@ -1140,6 +1284,63 @@ export function apply(ctx: Context, config: Config): void {
       })().finally(() => { creating = undefined })
       return creating
     }
+    // The TUI-owned slash commands live on the commands service's global
+    // layer, which needs no agent — register them up front so the whole
+    // surface (including Tab completion) works before the first session
+    // exists. Session-backed handlers call runner.ensureSession() first;
+    // `refreshSkills` rebuilds the agent-scoped per-skill commands once a
+    // session becomes live.
+    let commandsRegistered = false
+    let refreshSkills: (() => Promise<number>) | undefined
+    const runner: TuiCommandRunner = {
+      ctx,
+      app,
+      get liveAgent() { return liveAgent },
+      ensureSession,
+      get selected() { return selected },
+      get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
+      agents: agents as unknown as TuiCommandRunner['agents'],
+      sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
+      cwd,
+      signal,
+      compose,
+      switchSession,
+      swapTo: (next) => swapTo(next as Awaited<ReturnType<typeof agents.resume>>),
+      currentPreset,
+      recomposeBlank: (id) => recomposeBlank(ctx, liveAgent as Agent, id),
+      refreshStatus,
+      updateWelcomeCard,
+      enterView,
+      exit,
+    }
+    const registerCommands = (): void => {
+      if (commandsRegistered) return
+      const commands = ctx.get('commands')
+      if (commands === undefined) return
+      commandsRegistered = true
+      try {
+        refreshSkills = registerTuiCommands(runner).refreshSkills
+      } catch (error) {
+        // A failed registration must not lock the surface forever (a locked
+        // flag would leave every later command resolving to a plain message
+        // silently): reset the flag for a later retry and surface the
+        // failure visibly instead of swallowing it.
+        commandsRegistered = false
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.logger.error(`tui-runner: command registration failed: ${message}`)
+        diag.error('command registration failed', { error: message })
+        app.notify(`command registration failed: ${message}`)
+      }
+    }
+    /** Rebuild the agent-scoped per-skill commands after a session exists. */
+    const refreshSkillCommands = (): void => {
+      if (refreshSkills === undefined) return
+      void refreshSkills().catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(`tui-runner: skill command refresh failed: ${message}`)
+        diag.warn('skill command refresh failed', { error: message })
+      })
+    }
     // The startup surface: a resumed session initializes everything; the
     // deferred path shows the pre-session invitation until the first message.
     if (liveAgent !== undefined) {
@@ -1149,6 +1350,10 @@ export function apply(ctx: Context, config: Config): void {
       refreshStatus()
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(cwd)}`)
     }
+    // Command registration is sessionless: it must run on BOTH startup
+    // surfaces (resume path registers inside initLiveSession; the deferred
+    // path registers here so /exit /settings /help work before any message).
+    registerCommands()
     if (resumeFailure !== undefined) {
       app.notify(resumeFailure)
       resumeFailure = undefined
@@ -1267,7 +1472,10 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
   })().catch((error: unknown) => {
-    ctx.logger.error(`tui-runner: ${error instanceof Error ? error.message : String(error)}`)
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.logger.error(`tui-runner: ${message}`)
+    diag.error('fatal', { error: message })
+    diag.dispose()
     exit(1)
   })
 }
