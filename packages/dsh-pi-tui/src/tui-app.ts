@@ -738,8 +738,13 @@ export class TuiApp {
     }
     if (matchesKey(data, 'ctrl+g')) {
       // External editor; overlays own Ctrl+G while up (alt-screen search).
+      // The rejection is caught here (not a bare void): a spawn failure
+      // would otherwise surface as an unhandled rejection while the TUI
+      // restarts underneath the user.
       if (this.overlayHost.hasOverlayEntries) return { consume: true }
-      void this.launchExternalEditor()
+      void this.launchExternalEditor().catch((error: unknown) => {
+        this.notify(`external editor failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      })
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+c')) {

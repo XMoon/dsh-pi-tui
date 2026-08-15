@@ -125,6 +125,56 @@ test('ctrl+g opens the external editor and restores its content', async () => {
   assert.deepEqual(submitted, ['edited: draft'], 'external editor content must replace the draft')
 })
 
+test('an external editor launch failure is caught: no unhandled rejection, app restarts', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async () => {
+      throw new Error('editor not found')
+    },
+  })
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason)
+  }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    app.start()
+    vt.sendInput('draft')
+    vt.sendInput('\x07') // ctrl+g → the editor promise rejects
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.deepEqual(unhandled, [], 'a failed external editor must not leak an unhandled rejection')
+    // The TUI restarted (finally) and the failure is visible as a notice.
+    const view = await viewport(vt)
+    assert.ok(view.includes('external editor failed: editor not found'), `notice missing:\n${view}`)
+    // The app still accepts input after the failure.
+    vt.sendInput('more')
+    await viewport(vt)
+    assert.ok(app.getDraft().includes('more'), `editor must stay live after a failed launch:\n${app.getDraft()}`)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    app.stop()
+  }
+})
+
+test('app.stop is idempotent: repeated calls neither throw nor double-teardown', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  vt.sendInput('hello')
+  await viewport(vt)
+  app.stop()
+  app.stop() // the runner cleanup path may run twice (exit + effect dispose)
+  app.stop()
+  // After stop, rendering has halted: the viewport no longer advances.
+  const frozen = await viewport(vt)
+  vt.sendInput('world')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const still = await viewport(vt)
+  assert.deepEqual(still, frozen, 'no rendering after stop')
+})
+
 test('local shell cards render, settle in place, and clear', async () => {
   const { vt, app } = startApp()
   app.pushLocalMessage({

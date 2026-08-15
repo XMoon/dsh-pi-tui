@@ -77,6 +77,8 @@ import { startProcessTui, type TuiApp } from './tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
+import { runDetached, isCancellation } from './detached.ts'
+import { flushWithTimeout, type FlushOutcome } from './exit.ts'
 import {
   checkDivergence,
   draftFingerprint,
@@ -226,6 +228,10 @@ const GUARD_TAIL_MISMATCH_NOTIFY = (action: GuardAction): string =>
   `This session file was rewritten by another process (same event count, different content); send blocked. Press ${action === 'submit' ? 'Enter' : 'Ctrl+S'} again to force (may corrupt the session log)`
 const GUARD_FORCED_NOTIFY = 'Forced send — the session may be written by another process; the log may be damaged'
 const GUARD_REMOVED_NOTIFY = 'This session\'s log was removed externally — it can no longer be persisted. Press Enter again to continue without persistence (restart to recover)'
+
+/** Hard cap for the /exit session flush: a hung provider must not trap the
+ * user; after this the TUI exits and warns that the tail may be lost. */
+const EXIT_FLUSH_TIMEOUT_MS = 10_000
 
 /**
  * Whether a shell command matches a destructive pattern. `rm` is treated
@@ -464,6 +470,12 @@ export function apply(ctx: Context, config: Config): void {
   // startup service (no `!!js` expression, so loader hot-reloads cannot race
   // the service's availability while evaluating the row).
   const sessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
+  // Lifecycle cancellation: ONE controller owned by the runner fiber. It is
+  // aborted by user exit, by the ctx.effect cleanup (loader hot-reload
+  // unloads the row), and by startup failure. Every long-running load shares
+  // its signal; per-action cancellation rides child controllers (the local
+  // shell) or generation checks (guard tokens, menu latches).
+  const lifecycleController = new AbortController()
 
   void (async () => {
     // Loader siblings mount concurrently. Await the complete application before
@@ -666,14 +678,6 @@ export function apply(ctx: Context, config: Config): void {
       if (liveAgent === undefined) return undefined
       return ctx.get('agentPresets')?.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session)
     }
-    // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
-    // the row; the reloaded row starts its own instance in the same process).
-    ctx.effect(function* () {
-      yield () => {
-        app?.stop()
-        diag.dispose()
-      }
-    })
     // Incremental fold state for the live session's log; reset on switch. The
     // folder/stats/goal stay empty until a session exists (deferred start).
     let folder = new TranscriptFolder()
@@ -810,10 +814,28 @@ export function apply(ctx: Context, config: Config): void {
       if (liveAgent === undefined) return undefined
       return tools?.get(name, liveAgent)
     })
-    // Aborts an in-flight command execution when the TUI quits.
-    const signal = new AbortController().signal
+    // Stable signal snapshot of the runner-owned lifecycle controller.
+    const signal = lifecycleController.signal
     // Abort handle for the currently running `!` shell command.
     let localShellController: AbortController | undefined
+    // Idempotent teardown: abort lifecycle loads, stop the TUI, close diag.
+    // Shared by /exit, the effect cleanup, and the startup-failure path.
+    let cleanedUp = false
+    const cleanup = (): void => {
+      if (cleanedUp) return
+      cleanedUp = true
+      lifecycleController.abort()
+      localShellController?.abort()
+      app?.stop()
+      diag.dispose()
+    }
+    // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
+    // the row; the reloaded row starts its own instance in the same process).
+    ctx.effect(function* () {
+      yield () => {
+        cleanup()
+      }
+    })
 
     /** Run a `!` command locally; the output renders as a local card. */
     const runLocalShell = (text: string): void => {
@@ -873,6 +895,12 @@ export function apply(ctx: Context, config: Config): void {
           settle(output === '' ? exit : `${output}\n[${exit}]`, result.exitCode === 0 ? 'ok' : 'error')
         }).catch((error: unknown) => {
           releaseController()
+          // An abort-triggered rejection is a cancellation, not a failure:
+          // settle the card as aborted like the resolved path does.
+          if (isCancellation(error) || localSignal.aborted) {
+            settle('aborted', 'error')
+            return
+          }
           settle(`failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
         })
         return
@@ -1062,10 +1090,18 @@ export function apply(ctx: Context, config: Config): void {
     app = startProcessTui({
       onSubmit: (text) => {
         // Persist the (newest-first) input history for this cwd; the editor
-        // already recorded the line through TuiApp's submit hook.
+        // already recorded the line through TuiApp's submit hook. A failed
+        // settings write is user-recoverable: notify instead of dropping it.
         const history = app.getInputHistory()
         if (history.length > 0) {
-          void tuiSettings?.replace({ ...tuiSettings.get(), history: { ...tuiSettings.get().history, [cwd]: history } })
+          const settings = tuiSettings
+          if (settings !== undefined) {
+            runDetached('settings history write', settings.replace({ ...settings.get(), history: { ...settings.get().history, [cwd]: history } }), {
+              diag,
+              notify: (message) => app.notify(message, 'error'),
+              recoverable: () => true,
+            })
+          }
         }
         // `!` commands run locally through the shell (or into context for
         // `!!`) without a model turn; everything else dispatches as before.
@@ -1092,19 +1128,35 @@ export function apply(ctx: Context, config: Config): void {
       },
       onExit: () => {
         void (async () => {
+          // Exit order: invalidate the guard token → flush with a HARD
+          // timeout → record → idempotent cleanup (abort lifecycle, stop
+          // TUI, close diag) → print any warning and the resume hint →
+          // process exit. The flush never blocks the exit forever: a hung
+          // provider must not trap the user.
           guardToken = undefined
-          if (liveAgent !== undefined) {
-            const started = Date.now()
-            try {
-              await sessions.flush(liveAgent.session)
-              diag.info('flush ok', { session: liveAgent.session.id, events: liveAgent.session.events.length, tookMs: Date.now() - started })
-            } catch (error) {
-              diag.error('flush failed', { session: liveAgent.session.id, error: error instanceof Error ? error.message : String(error) })
-            }
+          let flushOutcome: FlushOutcome | undefined
+          const exitSession = liveAgent
+          if (exitSession !== undefined) {
+            flushOutcome = await flushWithTimeout(() => sessions.flush(exitSession.session), EXIT_FLUSH_TIMEOUT_MS)
+            diag.info('flush', {
+              session: exitSession.session.id,
+              outcome: flushOutcome.kind,
+              tookMs: flushOutcome.tookMs,
+              events: exitSession.session.events.length,
+              ...flushOutcome.kind === 'failed' ? { error: flushOutcome.error } : {},
+            })
           }
-          diag.info('exit', { code: 0 })
-          diag.dispose()
-          app.stop()
+          diag.info('exit', { code: 0, flush: flushOutcome?.kind })
+          cleanup()
+          // A failed or timed-out flush is surfaced HERE, after the terminal
+          // restores, where the user can actually read it — a notify would
+          // flash and vanish with the UI. The process still exits.
+          if (flushOutcome !== undefined && flushOutcome.kind !== 'ok') {
+            const reason = flushOutcome.kind === 'timed-out'
+              ? 'timed out'
+              : `failed (${flushOutcome.error})`
+            process.stderr.write(`\n${color.textDim('Warning:')} session flush ${reason} — the latest events may not be persisted\n`)
+          }
           // pi parity: after the terminal restores, print how to re-enter
           // this session (skipped when the deferred start never made one).
           const resume = resumeCommand(runningProfile(), liveAgent?.session.id ?? '')
@@ -1203,9 +1255,16 @@ export function apply(ctx: Context, config: Config): void {
       },
       // Persist the Ctrl+F toggle (the settings panel writes the same field
       // itself); `tuiSettings` is declared later, so the closure reads it
-      // lazily at toggle time.
+      // lazily at toggle time. A failed write is user-recoverable.
       onFullscreenChange: (fullscreen) => {
-        void tuiSettings?.replace({ ...tuiSettings.get(), fullscreen: fullscreen ? 'on' : 'off' })
+        const settings = tuiSettings
+        if (settings !== undefined) {
+          runDetached('settings fullscreen write', settings.replace({ ...settings.get(), fullscreen: fullscreen ? 'on' : 'off' }), {
+            diag,
+            notify: (message) => app.notify(message, 'error'),
+            recoverable: () => true,
+          })
+        }
       },
       // Transcript search (Ctrl+Shift+F): matches run over the FULL folded
       // transcript; each jump re-windows the view so the matched turn is
@@ -1294,7 +1353,9 @@ export function apply(ctx: Context, config: Config): void {
     const storedTheme = tuiSettings?.get().theme
     if (storedTheme === 'auto') {
       // Follow the terminal: query once at boot, then track scheme reports.
-      void app.autoDetectTheme()
+      // The boot query is detached: a terminal that never answers (or a
+      // failure) must not crash the runner.
+      runDetached('theme autodetect', app.autoDetectTheme(), { diag })
       app.onTerminalThemeChange((theme) => {
         if (tuiSettings?.get().theme === 'auto') app.applyTheme(theme)
       })
@@ -1576,18 +1637,21 @@ export function apply(ctx: Context, config: Config): void {
         app.setWorking(false)
         paintNow()
         refreshStatus()
-        const finished = liveAgent!.session
-        void sessions.flush(finished).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error)
-          const removed = (error as NodeJS.ErrnoException).code === 'ENOENT'
-          diag.error('flush failed', { session: finished.id, error: message, removed })
-          // A failed durable write must never kill the process: the live
-          // session keeps working in memory and the next turn-end retries.
-          // When the log was removed externally the retry cannot succeed
-          // until restart, so the notice says so instead of a bare error.
-          app.notify(removed
-            ? 'session persistence failed: the session log was removed externally — this session can no longer be persisted (restart to recover)'
-            : `session persistence failed: ${message}`, 'error')
+        // Persist each completed turn so a crash loses at most the live
+        // turn. Detached: a flush rejection must never surface as an
+        // unhandled rejection in the event firehose. An ENOENT flush (the
+        // log was removed externally) is user-recoverable: notify with the
+        // actionable hint — the session keeps working in memory, but
+        // persistence cannot resume until restart.
+        const flushed = liveAgent.session
+        runDetached('turn flush', sessions.flush(flushed), {
+          diag,
+          sessionId: () => flushed.id,
+          notify: (message) => app.notify(
+            `session persistence failed: ${message} — the session log was removed externally; this session can no longer be persisted (restart to recover)`,
+            'error',
+          ),
+          recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
         })
       } else if (event.type === 'step/start') {
         refreshStatus()
@@ -1654,6 +1718,9 @@ export function apply(ctx: Context, config: Config): void {
     const message = error instanceof Error ? error.message : String(error)
     ctx.logger.error(`tui-runner: ${message}`)
     diag.error('fatal', { error: message })
+    // Startup failure: cancel every in-flight lifecycle load, then tear
+    // down. (The runner-internal cleanup() never ran — the body threw.)
+    lifecycleController.abort()
     diag.dispose()
     exit(1)
   })
