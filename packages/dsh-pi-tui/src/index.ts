@@ -1449,6 +1449,7 @@ export function apply(ctx: Context, config: Config): void {
     const runner: TuiCommandRunner = {
       ctx,
       app,
+      diag,
       get liveAgent() { return liveAgent },
       ensureSession,
       get selected() { return selected },

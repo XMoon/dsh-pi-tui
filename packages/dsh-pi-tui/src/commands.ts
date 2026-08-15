@@ -23,6 +23,7 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { TuiApp } from './tui-app.ts'
+import type { Diag } from './diag.ts'
 import { color, loadCustomTheme, settingsListTheme } from './theme.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
@@ -82,6 +83,8 @@ export interface AgentsLike {
 export interface TuiCommandRunner {
   ctx: Context
   app: TuiApp
+  /** The runner's diagnostics channel (stderr + $DSH_HOME/logs). */
+  diag: Diag
   /** The live agent handle; re-read on every access (swaps on switch).
    * `undefined` until the first user message creates the session (deferred
    * start) — sessionless commands must degrade, session commands call
@@ -614,6 +617,9 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             apply,
             requestRender: () => app.requestRender(),
             done,
+            // Late model-list/info rejections after the menu closed are
+            // diagnostics, not user errors: the shared runner channel.
+            logDebug: (message, fields) => runner.diag.debug(message, fields),
           }),
         })),
         () => {},

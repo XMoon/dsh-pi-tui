@@ -1,8 +1,10 @@
 /**
  * Headless tests for the /model in-place submenu flow: loading → model
- * list → effort list, with immediate apply and Esc walking back one level.
- * No second overlay is mounted at any point (the ghost-overlay trap the
- * nested-openSettings pattern fell into).
+ * list → effort list, with immediate apply and Esc walking back one level,
+ * plus async-cancellation races (a resolve/reject landing after Esc must
+ * never apply a model or repaint a closed menu). No second overlay is
+ * mounted at any point (the ghost-overlay trap the nested-openSettings
+ * pattern fell into).
  * @module @xmoon76/dsh-pi-tui/model-menu.test
  */
 
@@ -12,6 +14,17 @@ import { TuiApp } from '../src/tui-app.ts'
 import { ModelSubmenu } from '../src/model-menu.ts'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** A promise the test resolves/rejects manually, to stage late completions. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 interface FakeLlm {
   models: readonly { id: string }[]
@@ -30,7 +43,7 @@ function fakeLlm(shape: FakeLlm): {
 
 /** Drive the flow: open the settings list, Enter into the provider submenu. */
 async function openModelFlow(
-  llm: ReturnType<typeof fakeLlm>,
+  llm: { listModels: (...args: never[]) => Promise<readonly { id: string }[]>; resolveModelInfo: (...args: never[]) => Promise<unknown> },
   applied: ModelSelection[],
 ): Promise<{ vt: VirtualTerminal; app: TuiApp }> {
   const vt = new VirtualTerminal(80, 24)
@@ -43,8 +56,8 @@ async function openModelFlow(
       label: 'provider',
       currentValue: current.model,
       submenu: (value, done) => new ModelSubmenu('p', current.model, undefined, {
-        listModels: llm.listModels,
-        resolveModelInfo: llm.resolveModelInfo,
+        listModels: llm.listModels as never,
+        resolveModelInfo: llm.resolveModelInfo as never,
         apply: (next) => applied.push(next),
         requestRender: () => app.requestRender(),
         done,
@@ -63,17 +76,22 @@ async function viewport(vt: VirtualTerminal): Promise<string> {
   return vt.getViewport().join('\n')
 }
 
+/** Let queued promise continuations and paints settle. */
+async function settle(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 30))
+}
+
 test('model submenu loads the model list in place and applies on selection', async () => {
   const applied: ModelSelection[] = []
   const { vt } = await openModelFlow(
     fakeLlm({ models: [{ id: 'm1' }, { id: 'm2' }], efforts: undefined }),
     applied,
   )
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await settle()
   let view = await viewport(vt)
   assert.ok(view.includes('m1') && view.includes('m2'), `model list missing:\n${view}`)
   vt.sendInput('\r') // select the first model (no effort route)
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await settle()
   await vt.waitForRender()
   assert.deepEqual(applied, [{ provider: 'p', model: 'm1' }], 'model selection must apply')
   view = await viewport(vt)
@@ -89,16 +107,16 @@ test('model with reasoning efforts offers the effort list and applies effort', a
     }),
     applied,
   )
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await settle()
   let view = await viewport(vt)
   assert.ok(view.includes('m1'), `model list missing:\n${view}`)
   vt.sendInput('\r') // m1 has efforts → effort list opens
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await settle()
   view = await viewport(vt)
   assert.ok(view.includes('High') && view.includes('Low'), `effort list missing:\n${view}`)
   vt.sendInput('\x1b[B') // down from 'Default' to 'High'
   vt.sendInput('\r') // select High
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await settle()
   await vt.waitForRender()
   assert.deepEqual(
     applied,
@@ -116,9 +134,9 @@ test('esc walks back one level from the effort list, never a ghost panel', async
     }),
     applied,
   )
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await settle()
   vt.sendInput('\r') // m1 → effort list
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await settle()
   let view = await viewport(vt)
   assert.ok(view.includes('High'), `effort list missing:\n${view}`)
   vt.sendInput('\x1b') // esc: back to the model list
@@ -134,4 +152,115 @@ test('esc walks back one level from the effort list, never a ghost panel', async
   view = await viewport(vt)
   assert.ok(!view.includes('provider'), `overlay still mounted after third esc:\n${view}`)
   assert.deepEqual(applied, [], 'nothing applied while just navigating')
+})
+
+// --- async cancellation races: late completions after Esc must not act ---
+
+test('effort info resolving after Esc never applies the model', async () => {
+  const applied: ModelSelection[] = []
+  const info = deferred<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>()
+  const { vt } = await openModelFlow({
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => info.promise,
+  }, applied)
+  await settle()
+  vt.sendInput('\r') // m1 → effort menu (still loading)
+  await settle()
+  vt.sendInput('\x1b') // esc: cancel the effort selection
+  await vt.waitForRender()
+  info.resolve({ reasoning: { efforts: [{ id: 'high', name: 'High' }] } })
+  await settle()
+  assert.deepEqual(applied, [], 'a late resolve after Esc must not apply the model')
+  const view = await viewport(vt)
+  assert.ok(view.includes('m1'), `back on the model list:\n${view}`)
+  assert.ok(!view.includes('High'), `effort list must not appear after cancel:\n${view}`)
+})
+
+test('effort info rejecting after Esc never applies and never shows a stale error', async () => {
+  const applied: ModelSelection[] = []
+  const info = deferred<never>()
+  const { vt } = await openModelFlow({
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => info.promise,
+  }, applied)
+  await settle()
+  vt.sendInput('\r') // m1 → effort menu (still loading)
+  await settle()
+  vt.sendInput('\x1b') // esc: cancel
+  await vt.waitForRender()
+  info.reject(new Error('provider exploded'))
+  await settle()
+  assert.deepEqual(applied, [], 'a late reject after Esc must not apply the model')
+  const view = await viewport(vt)
+  assert.ok(!view.includes('unavailable'), `no stale error after cancel:\n${view}`)
+  assert.ok(view.includes('m1'), `back on the model list:\n${view}`)
+})
+
+test('a late effort info from an earlier selection cannot override a later one', async () => {
+  const applied: ModelSelection[] = []
+  const infoA = deferred<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>()
+  const infoB = deferred<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>()
+  const { vt } = await openModelFlow({
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async (_provider: string, modelId: string) => modelId === 'm1' ? infoA.promise : infoB.promise,
+  }, applied)
+  await settle()
+  vt.sendInput('\r') // m1 → effort loading
+  await settle()
+  vt.sendInput('\x1b') // esc: abandon m1
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // down to m2
+  vt.sendInput('\r') // m2 → effort loading
+  await settle()
+  // m2 settles first: no efforts → apply m2 immediately.
+  infoB.resolve({})
+  await settle()
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm2' }], 'the current selection applies')
+  // m1's info lands late: it must NOT override m2.
+  infoA.resolve({ reasoning: { efforts: [{ id: 'high', name: 'High' }] } })
+  await settle()
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm2' }], 'a late A must not override B')
+})
+
+test('a model list resolving after the menu closed triggers no repaint or apply', async () => {
+  const applied: ModelSelection[] = []
+  const list = deferred<readonly { id: string }[]>()
+  const { vt } = await openModelFlow({
+    listModels: async () => list.promise,
+    resolveModelInfo: async () => ({}),
+  }, applied)
+  await settle()
+  // Esc from the loading model submenu → provider list; Esc again → overlay closed.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  list.resolve([{ id: 'm1' }, { id: 'm2' }])
+  await settle()
+  assert.deepEqual(applied, [], 'a late list must not apply anything')
+  const view = await viewport(vt)
+  assert.ok(!view.includes('m1') && !view.includes('m2'), `stale model list painted after close:\n${view}`)
+  assert.ok(!view.includes('Loading models'), `stale loading text painted after close:\n${view}`)
+})
+
+test('effort info reject while the menu is current shows the error in place, applies nothing', async () => {
+  const applied: ModelSelection[] = []
+  const info = deferred<never>()
+  const { vt } = await openModelFlow({
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => info.promise,
+  }, applied)
+  await settle()
+  vt.sendInput('\r') // m1 → effort menu (still loading)
+  await settle()
+  info.reject(new Error('provider exploded'))
+  await settle()
+  assert.deepEqual(applied, [], 'an info error is not a model selection')
+  const view = await viewport(vt)
+  assert.ok(view.includes('model info unavailable'), `error must render in the current menu:\n${view}`)
+  // Esc from the error still walks back cleanly.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  assert.ok(after.includes('m1') && !after.includes('unavailable'), `esc from the error back to the list:\n${after}`)
 })
