@@ -41,7 +41,17 @@ export function createBoundedOutput(
   let truncated = false
   /** A line whose terminating newline has not arrived yet (spans chunks). */
   let pendingPartial: string | undefined
-  const tailBytes = (): number => tailLines.reduce((sum, line) => sum + Buffer.byteLength(line, 'utf8'), 0)
+  // Incremental byte count of the retained tail: recomputing it from
+  // `tailLines` on every append is O(n) per chunk (O(n²) over a stream),
+  // and the cap check runs once per dropped line.
+  let tailBytesCount = 0
+  const pushTailLine = (line: string): void => {
+    tailLines.push(line)
+    tailBytesCount += Buffer.byteLength(line, 'utf8')
+  }
+  const shiftTailLine = (): void => {
+    tailBytesCount -= Buffer.byteLength(tailLines.shift()!, 'utf8')
+  }
   return {
     get tail() {
       // The pending partial (a line whose newline has not arrived) is part
@@ -66,10 +76,10 @@ export function createBoundedOutput(
       // line that may continue across chunks.
       for (let index = 0; index < parts.length - 1; index += 1) {
         if (pendingPartial !== undefined) {
-          tailLines.push(pendingPartial + parts[index]!)
+          pushTailLine(pendingPartial + parts[index]!)
           pendingPartial = undefined
         } else {
-          tailLines.push(parts[index]!)
+          pushTailLine(parts[index]!)
         }
         totalLines += 1
       }
@@ -78,15 +88,15 @@ export function createBoundedOutput(
         // A bare trailing newline completes a pending partial as its own
         // line; otherwise the trailing '' is just the end-of-line marker.
         if (pendingPartial !== undefined) {
-          tailLines.push(pendingPartial)
+          pushTailLine(pendingPartial)
           totalLines += 1
           pendingPartial = undefined
         }
       } else {
         pendingPartial = pendingPartial === undefined ? last : pendingPartial + last
       }
-      while ((tailLines.length > capLines || tailBytes() > capBytes) && tailLines.length > 0) {
-        tailLines.shift()
+      while ((tailLines.length > capLines || tailBytesCount > capBytes) && tailLines.length > 0) {
+        shiftTailLine()
         truncated = true
       }
     },

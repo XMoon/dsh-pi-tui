@@ -80,6 +80,17 @@ for (const pkg of ['pi-tui', 'dsh-pi-tui']) {
 const tgz = spawnSync('git', ['ls-files', '*.tgz'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim()
 check('no tarballs committed', tgz === '', tgz.split('\n').filter(Boolean).slice(0, 3).join(', '))
 
+// 7. Release workflows reference the UN-scoped tarball filename: npm/pnpm
+//    strip the `@` scope from tgz names (xmoon76-dsh-pi-tui-<v>.tgz), so an
+//    `@xmoon76-dsh-pi-tui-*.tgz` glob in a workflow matches nothing and the
+//    gate/upload/publish step fails at runtime. Guard the exact mistake the
+//    2026-08-15 pack-gate review found.
+for (const workflow of ['ci.yml', 'release.yml']) {
+  const text = readFileSync(join(ROOT, '.github', 'workflows', workflow), 'utf8')
+  check(`workflow ${workflow} uses unscoped tarball globs`,
+    !text.includes('@xmoon76-dsh-pi-tui-*.tgz') && text.includes('xmoon76-dsh-pi-tui-*.tgz'))
+}
+
 for (const line of checks) console.log(line)
 if (failures.length > 0) {
   console.error(`\nnaming-gate FAILED (${failures.length}):`)

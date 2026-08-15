@@ -18,8 +18,9 @@
  *      sessions reports the damaged one and touches nothing.
  *
  * Usage: node scripts/tarball-smoke.mjs [path-to-tgz]
- * The tarball path defaults to the newest `@xmoon76-dsh-pi-tui-*.tgz` in
- * the current directory (the `pnpm pack` / `npm pack` output location).
+ * The tarball path defaults to the newest `xmoon76-dsh-pi-tui-*.tgz` in
+ * the current directory (the `pnpm pack` / `npm pack` output location;
+ * npm/pnpm strip the `@` scope from tarball filenames).
  *
  * Env: TARBALL_SMOKE_SKIP_INSTALL=1 skips the npm install step (offline
  * dev runs); TARBALL_SMOKE_KEEP=1 keeps the temp dirs for inspection.
@@ -69,11 +70,19 @@ function resolveTarball(explicit) {
     if (!existsSync(explicit)) throw new Error(`tarball not found: ${explicit}`)
     return explicit
   }
+  // npm/pnpm strip the `@` scope from tarball filenames, so the glob is
+  // `xmoon76-dsh-pi-tui-*.tgz` even though the package is @xmoon76/dsh-pi-tui.
   const candidates = [process.cwd(), join(process.cwd(), '..')]
-    .flatMap(dir => readdirSync(dir).map(name => join(dir, name)))
-    .filter(path => /@xmoon76-dsh-pi-tui-.*\.tgz$/.test(path))
+    .flatMap(dir => {
+      try {
+        return readdirSync(dir).map(name => join(dir, name))
+      } catch {
+        return []
+      }
+    })
+    .filter(path => /xmoon76-dsh-pi-tui-.*\.tgz$/.test(path))
     .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)
-  if (candidates.length === 0) throw new Error('no @xmoon76-dsh-pi-tui-*.tgz in the current directory or its parent; pass the tarball path')
+  if (candidates.length === 0) throw new Error(`no xmoon76-dsh-pi-tui-*.tgz in the current directory (${process.cwd()}) or its parent (${join(process.cwd(), '..')}); pass the tarball path`)
   return candidates[0]
 }
 

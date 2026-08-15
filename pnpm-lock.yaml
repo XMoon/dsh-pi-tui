@@ -118,7 +118,7 @@ importers:
         specifier: ^22.0.0
         version: 22.20.1
       '@xmoon76/pi-tui':
-        specifier: workspace:^0.84.2
+        specifier: workspace:^0.84.3
         version: link:../pi-tui
       '@xterm/headless':
         specifier: 5.5.0

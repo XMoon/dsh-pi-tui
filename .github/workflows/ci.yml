@@ -2,9 +2,10 @@ name: CI
 
 # Repeatable build-and-publish gates (code-review plan stage G):
 #   typecheck, test-pi-tui, test-dsh-pi-tui, build-and-pack,
-#   tarball-smoke-node-22/24/26, npm-audit-prod.
-# The release workflow consumes the tarball produced by build-and-pack's
-# exact prepack/postpack gate, so the published bytes are the verified ones.
+#   tarball-smoke-node-22/24/26, npm-audit-prod, naming-gate.
+# Tag pushes (v*) run the same matrix, so the commit behind a release tag is
+# the CI-verified one; release.yml independently re-runs the pack gate on its
+# own runner and publishes THAT exact tarball (no publish-time rebuild).
 
 on:
   push:
@@ -67,7 +68,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dsh-pi-tui-tarball
-          path: packages/dsh-pi-tui/@xmoon76-dsh-pi-tui-*.tgz
+          # npm/pnpm strip the `@` scope from tarball filenames, so the
+          # packed file is xmoon76-dsh-pi-tui-<version>.tgz.
+          path: packages/dsh-pi-tui/xmoon76-dsh-pi-tui-*.tgz
           if-no-files-found: error
 
   tarball-smoke:
@@ -91,7 +94,7 @@ jobs:
       # Smoke the EXACT artifact build-and-pack produced: structure, leaks,
       # parse, standalone install, exports import, no external fork
       # resolution, repair CLI help + read-only scan.
-      - run: node packages/dsh-pi-tui/scripts/tarball-smoke.mjs tarball/@xmoon76-dsh-pi-tui-*.tgz
+      - run: node packages/dsh-pi-tui/scripts/tarball-smoke.mjs tarball/xmoon76-dsh-pi-tui-*.tgz
 
   naming-gate:
     runs-on: ubuntu-latest

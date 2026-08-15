@@ -35,6 +35,9 @@ jobs:
       # One command: prepack gate + pack + postpack smoke on the exact bytes.
       - run: pnpm pack:release
       - name: Publish the verified tarball
-        run: npm publish ./packages/dsh-pi-tui/@xmoon76-dsh-pi-tui-*.tgz --provenance --access public
+        # npm/pnpm strip the `@` scope from tarball filenames, so the packed
+        # file is xmoon76-dsh-pi-tui-<version>.tgz (pack:release removes any
+        # older tarball first, so this glob matches exactly one file).
+        run: npm publish ./packages/dsh-pi-tui/xmoon76-dsh-pi-tui-*.tgz --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

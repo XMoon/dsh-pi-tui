@@ -3,6 +3,7 @@ dist/
 packages/pi-tui/dist/
 packages/dsh-pi-tui/dist/
 *.log
+*.tgz
 .DS_Store
 temp/
 .agents/
