@@ -286,22 +286,22 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('❯ follow up on the audit'), `followup row missing:\n${view}`)
   assert.ok(view.includes('❯ steer a correction'), `steer row missing:\n${view}`)
-  assert.ok(view.includes('ctrl+q to edit all'), `hint row missing:\n${view}`)
+  assert.ok(view.includes('alt+↑ to edit all'), `hint row missing:\n${view}`)
   app.setQueueItems([])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(!view.includes('❯ follow up'), `cleared queue still rendered:\n${view}`)
 })
 
-test('ctrl+q with no overlay reaches the dequeue host', async () => {
+test('alt+up with no overlay reaches the dequeue host', async () => {
   const vt = new VirtualTerminal(80, 24)
   let dequeued = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onDequeue: () => { dequeued += 1 } })
   app.start()
   await vt.waitForRender()
-  vt.sendInput('\x11') // ctrl+q
+  vt.sendInput('\x1b[1;3A') // alt+up
   await vt.waitForRender()
-  assert.equal(dequeued, 1, `ctrl+q must reach the host`)
+  assert.equal(dequeued, 1, `alt+up must reach the host`)
   app.stop()
 })
 

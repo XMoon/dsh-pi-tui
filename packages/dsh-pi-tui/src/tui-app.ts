@@ -265,9 +265,9 @@ export interface TuiAppEvents {
    */
   onCyclePermission?: () => void
   /**
-   * Ctrl+Q with queued input and no overlay up: pull every queued message
-   * back into the editor draft (pi's dequeue). The host clears the inbox and
-   * the draft lands via {@link TuiApp.setDraft}. Optional.
+   * Alt+↑ with queued input and no overlay up: pull every queued message back
+   * into the editor draft (pi's dequeue). The host clears the inbox and the
+   * draft lands via {@link TuiApp.setDraft}. Optional.
    */
   onDequeue?: () => void
 }
@@ -641,8 +641,9 @@ export class TuiApp {
       this.events.onCyclePermission?.()
       return { consume: true }
     }
-    if (matchesKey(data, 'ctrl+q')) {
-      // Dequeue: pull queued input back into the editor; overlays keep it.
+    if (matchesKey(data, 'alt+up')) {
+      // Dequeue (Alt+↑): pull queued input back into the editor; overlays
+      // keep the key for themselves.
       if (this.overlayHost.hasOverlayEntries) return undefined
       this.events.onDequeue?.()
       return { consume: true }
@@ -1520,14 +1521,14 @@ export class TuiApp {
       const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth(prefix)), '…')
       lines.push(prefix + truncated)
     }
-    const hint = 'ctrl+q to edit all · /queue for per-item actions'
+    const hint = 'alt+↑ to edit all · /queue for per-item actions'
     lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, width - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
     this.requestRender()
   }
 
   /**
-   * Replace the editor draft wholesale (the Ctrl+Q dequeue path pulls every
+   * Replace the editor draft wholesale (the Alt+↑ dequeue path pulls every
    * queued message back into the editor for editing).
    */
   setDraft(text: string): void {
@@ -1535,7 +1536,7 @@ export class TuiApp {
     this.requestRender()
   }
 
-  /** The editor's current draft text (the Ctrl+Q dequeue merge reads it). */
+  /** The editor's current draft text (the Alt+↑ dequeue merge reads it). */
   getDraft(): string {
     return this.editor.getText()
   }

@@ -608,7 +608,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): void {
       if (queued.length === 0) return { kind: 'success', text: 'no queued input' }
       const running = liveAgent.status === 'running'
       // The pane covers the fine-grained verbs; the queue strip above the
-      // editor handles the at-a-glance view and Ctrl+Q pulls everything back.
+      // editor handles the at-a-glance view and Alt+↑ pulls everything back.
       app.openSettings(
         queued.map(({ message, slot }) => ({
           id: message.id,

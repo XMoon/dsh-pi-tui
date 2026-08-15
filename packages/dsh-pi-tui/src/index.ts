@@ -945,7 +945,7 @@ export function apply(ctx: Context, config: Config): void {
           : `permission: ${next}`)
         refreshStatus()
       },
-      // Ctrl+Q: pull every queued message back into the editor draft (pi's
+      // Alt+↑: pull every queued message back into the editor draft (pi's
       // dequeue). The inbox is cleared durably and the current draft rides
       // along below the pulled-back queue; submitting re-queues the result.
       onDequeue: () => {

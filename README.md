@@ -116,7 +116,7 @@ so rendering and input routing are verified without a TTY or a model connection.
 - `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
 - `/queue` — manage queued input while a turn runs: edit, delete, steer, or
   insert messages in the agent's inbox (the queue pane above the editor shows
-  pending messages; `Ctrl+Q` pulls them all back into the editor).
+  pending messages; `Alt+↑` pulls them all back into the editor).
 - `/preset`, `/model`, `/settings`, `/export`, `/fork`, `/subagents` — see
   `dsh --profile pi-tui`'s command autocomplete (`/` + Tab).
 
@@ -124,7 +124,7 @@ so rendering and input routing are verified without a TTY or a model connection.
 
 - `Shift+Tab` — cycle the permission preset (read-only → workspace-write →
   danger-full-access); the footer's `[yolo]` badge flags the no-approval mode.
-- `Ctrl+Q` — dequeue: pull every queued message back into the editor draft.
+- `Alt+↑` — dequeue: pull every queued message back into the editor draft.
 - `Ctrl+T` — toggle the full todo list; the dock above the editor always shows
   the permission, goal, todo summary, background tasks, and queued input.
 
