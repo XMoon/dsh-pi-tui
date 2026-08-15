@@ -88,7 +88,6 @@ import {
   forceTokenAllows,
   freshGuardState,
   mintForceToken,
-  savePayloadIdentity,
   type GuardAction,
   type GuardForceToken,
   type GuardPersistenceLike,

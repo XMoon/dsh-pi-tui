@@ -238,6 +238,84 @@ test('a failed model selection save rolls the selection back and notifies withou
   }
 })
 
+test('a late FAILED save never rolls back a newer successful selection (latest-wins)', async () => {  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', {
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  // Saves are gated manually: save(m1) hangs, save(m2) succeeds, then
+  // save(m1) FAILS LATE — the rollback must not overwrite m2.
+  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'm1' }),
+    saveSelection: (next: { model: string }) => {
+      const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
+      const promise = new Promise<unknown>((res, rej) => {
+        gate.resolve = res
+        gate.reject = rej
+      })
+      gates.set(next.model, gate)
+      return promise
+    },
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  try {
+    const modelDef = services.defs.find(entry => entry.name === 'model')
+    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+    await (modelDef!.handler as () => Promise<unknown>)()
+    await vt.waitForRender()
+    // Select m1: its save hangs (deferred).
+    vt.sendInput('\r')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const saveM1 = gates.get('m1')
+    assert.ok(saveM1 !== undefined, 'save(m1) must have started')
+    // Back on the provider list: re-enter and select m2 while m1 is pending.
+    vt.sendInput('\r')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    await vt.waitForRender()
+    vt.sendInput('\x1b[B') // ↓ to m2
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const saveM2 = gates.get('m2')
+    assert.ok(saveM2 !== undefined, 'save(m2) must have started')
+    // m2 succeeds first, then m1 FAILS LATE.
+    saveM2.resolve(undefined)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(selection.current.model, 'm2', 'the successful selection stands')
+    saveM1.reject(new Error('quota exceeded'))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(selection.current.model, 'm2',
+      'a late failed save must NOT roll back the newer successful selection')
+    const view = vt.getViewport().join('\n')
+    assert.ok(view.includes('model selection save'), `failure notice missing:\n${view}`)
+  } finally {
+    app.stop()
+  }
+})
+
 test('a failing initial skill catalog refresh lands in diagnostics, never silently swallowed', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
@@ -264,6 +342,7 @@ test('a failing initial skill catalog refresh lands in diagnostics, never silent
     app.stop()
   }
 })
+
 test('clearSessionOverrides drops per-message expansion toggles', () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })

@@ -644,14 +644,20 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       const current = defaultModel.currentSelection()
       /** Commit a selection (model, optional effort) and refresh the footer. */
       const apply = (next: ModelSelection): void => {
-        // Persist first, reflect on success only: a failed save must not
-        // leave a selection on screen that was never recorded (roll back).
+        // Persist and reflect with LATEST-WINS semantics: saves run
+        // concurrently, so a failure must only roll back when the current
+        // selection is still the one THIS save was for — an older failed
+        // save must never overwrite a newer successful selection (out-of-
+        // order completion must not regress the persistent state either;
+        // the UI at least never lies about what is current).
         const previous = selected.current
         runDetached('model selection save', defaultModel.saveSelection(next), {
           diag: runner.diag,
           notify: (message) => {
-            selected.current = previous
-            runner.refreshStatus()
+            if (selected.current === next) {
+              selected.current = previous
+              runner.refreshStatus()
+            }
             app.notify(message, 'error')
           },
           recoverable: () => true,
