@@ -104,6 +104,21 @@ test('notify is transient: cleared by its auto-clear timeout', async () => {
   assert.ok(!vt.getViewport().join('\n').includes('transient note'), 'notify line survived its timeout')
 })
 
+test('notify info kind renders as a dim ℹ line, not a red error', async () => {
+  const { vt, app } = startApp()
+  // Default kind stays the error style (red ✗).
+  app.notify('resume failed')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('✗ resume failed'), `error-style notify missing:\n${view}`)
+  // Info kind must not read as a failure.
+  app.notify('permission: workspace-write', 'info')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('ℹ permission: workspace-write'), `info-style notify missing:\n${view}`)
+  assert.ok(!view.includes('✗'), `info notify must not render as an error:\n${view}`)
+})
+
 test('tool cards present through the real registry: read shows the relativized path', async () => {
   // A real workspace with a real file under a src/ subdirectory.
   const dir = await mkdtemp(join(tmpdir(), 'dsh-pi-tui-read-'))
@@ -212,7 +227,7 @@ test('tool cards present through the real registry: read shows the relativized p
 })
 
 
-test('footer mode slot badges non-default permission presets', async () => {
+test('footer mode slot badges every permission preset', async () => {
   const { vt, app } = startApp()
   app.setStatus({ model: 'm', cwd: 'c', permission: 'danger-full-access' })
   await vt.waitForRender()
@@ -226,11 +241,12 @@ test('footer mode slot badges non-default permission presets', async () => {
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('[custom]'), `custom badge missing:\n${view}`)
-  // The default preset shows nothing, so the footer stays calm.
+  // The default preset badges too, so the effective write scope is always
+  // visible in the footer (the dock no longer carries a perm line).
   app.setStatus({ permission: 'workspace-write' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('[workspace-write]'), `default preset must not badge:\n${view}`)
+  assert.ok(view.includes('[workspace-write]'), `workspace-write badge missing:\n${view}`)
   assert.ok(!view.includes('[yolo]'), `stale badge:\n${view}`)
 })
 
@@ -246,29 +262,26 @@ test('shift+tab with no overlay cycles the permission through the host', async (
   app.stop()
 })
 
-test('the dock strip shows permission, goal, todo, and task lines only while non-empty', async () => {
+test('the dock strip shows goal, todo, and task lines only while non-empty', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('perm:'), `empty dock must not render a permission line:\n${view}`)
   assert.ok(!view.includes('☑'), `empty dock must not render a todo line:\n${view}`)
-  // Everything present: permission, goal, todo summary, tasks.
-  app.setStatus({ permission: 'danger-full-access', goal: 'goal ● fix the build' })
+  // Everything present: goal, todo summary, tasks.
+  app.setStatus({ goal: 'goal ● fix the build' })
   app.setTodoSummary([{ content: 'write tests', status: 'in_progress' }, { content: 'ship', status: 'pending' }])
   app.setTasks([{ label: 'audit repo', status: 'running' }])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('perm: full access'), `permission line missing:\n${view}`)
   assert.ok(view.includes('⚑  goal ● fix the build'), `goal line missing:\n${view}`)
   assert.ok(view.includes('☑  2 active · write tests'), `todo summary missing:\n${view}`)
   assert.ok(view.includes('⏳  1 task · audit repo'), `task line missing:\n${view}`)
   // Lines drop out as their data clears.
   app.setTasks([])
   app.setTodoSummary([])
-  app.setStatus({ permission: undefined, goal: undefined })
+  app.setStatus({ goal: undefined })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('perm:'), `cleared permission line survived:\n${view}`)
   assert.ok(!view.includes('☑'), `cleared todo line survived:\n${view}`)
   assert.ok(!view.includes('⏳'), `cleared task line survived:\n${view}`)
 })

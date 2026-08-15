@@ -683,8 +683,9 @@ export function apply(ctx: Context, config: Config): void {
           // Measurement is best-effort; the footer falls back to no context.
         }
       }
-      // The footer's [yolo]/[read-only]/[custom] mode badge rides the
-      // effective preset (derived from the sandbox+approval knob folds).
+      // The footer's [yolo]/[workspace-write]/[read-only]/[custom] mode badge
+      // rides the effective preset (derived from the sandbox+approval knob
+      // folds).
       const permission = ctx.get('permissionPresets')
       app.setStatus({
         model: modelLabel(),
@@ -1090,8 +1091,9 @@ export function apply(ctx: Context, config: Config): void {
       // Shift+Tab: cycle the permission preset through the composed table
       // (read-only → workspace-write → danger-full-access). The switch goes
       // through the official service (sandbox + approval + preset log in one
-      // call, no transcript card), with a red warning on the no-approval
-      // preset and an immediate footer refresh.
+      // call, no transcript card), with a red warning only on the no-approval
+      // preset (plain switches notify in the dim info style) and an immediate
+      // footer refresh.
       onCyclePermission: () => {
         if (liveAgent === undefined) return
         const permission = ctx.get('permissionPresets')
@@ -1105,7 +1107,8 @@ export function apply(ctx: Context, config: Config): void {
         permission.set(liveAgent.session, next)
         app.notify(next === 'danger-full-access'
           ? `⚠ ${next} — no approvals`
-          : `permission: ${next}`)
+          : `permission: ${next}`,
+        next === 'danger-full-access' ? 'error' : 'info')
         refreshStatus()
       },
       // Alt+↑: pull every queued message back into the editor draft (pi's
@@ -1384,14 +1387,21 @@ export function apply(ctx: Context, config: Config): void {
       // The goal badge folds incrementally: the newest goal/change event
       // decides, so one event is enough (clear/completed hide the badge).
       if (event.type === 'goal/change') goalText = foldGoal([event])
-      schedulePaint()
+      // Permission knob events (preset/policy/mode) carry no transcript
+      // content, so they must not schedule a repaint: the repaint would call
+      // setTranscript and wipe an in-flight notify (e.g. the
+      // "permission: …" notice) ~REPAINT_FLUSH_MS after the switch, making
+      // it flash. The footer badge refresh below repaints the status line
+      // instead, and the next real session event repaints the transcript.
+      const isKnob = event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode'
+      if (!isKnob) schedulePaint()
       if (event.type === 'todo/write') app.setTodoSummary(event.data.todos)
       if (event.type === 'plan/mode') app.setPlanMode(event.data.active)
       if (event.type === 'session/title') app.setSessionTitle(foldSessionTitle([event])?.title)
       // A permission switch (command, Shift+Tab, settings panel) lands as
       // knob events between turns: refresh the footer mode badge right away
       // instead of waiting for the next step/turn boundary.
-      if (event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode') {
+      if (isKnob) {
         refreshStatus()
       }
       // Every durable inbox mutation (followup, steer, /queue edits) commits

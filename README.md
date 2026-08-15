@@ -123,10 +123,12 @@ so rendering and input routing are verified without a TTY or a model connection.
 ## Keybindings (selection)
 
 - `Shift+Tab` — cycle the permission preset (read-only → workspace-write →
-  danger-full-access); the footer's `[yolo]` badge flags the no-approval mode.
+  danger-full-access); the footer's mode slot badges every preset
+  (`[workspace-write]` / `[read-only]` / `[custom]`, with `[yolo]` flagging
+  the no-approval mode).
 - `Alt+↑` — dequeue: pull every queued message back into the editor draft.
 - `Ctrl+T` — toggle the full todo list; the dock above the editor always shows
-  the permission, goal, todo summary, background tasks, and queued input.
+  the goal, todo summary, background tasks, and queued input.
 
 ## Session lifecycle
 

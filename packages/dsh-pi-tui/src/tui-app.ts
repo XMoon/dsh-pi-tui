@@ -513,6 +513,9 @@ export class TuiApp {
   /** Transient error line shown under the transcript; cleared by the next
    * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
   private notifyText = ''
+  /** Styling of the current notify line: errors are red with a ✗, info is
+   * dim with a ℹ. */
+  private notifyKind: 'error' | 'info' = 'error'
   /** The pending auto-clear for {@link notifyText}, while one is armed. */
   private notifyTimer: NodeJS.Timeout | undefined
   /** How long a notify line stays before it auto-clears, in ms. */
@@ -982,7 +985,12 @@ export class TuiApp {
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
     })
     if (this.notifyText !== '') {
-      this.messagesView.addChild(new Text(color.error(`✗ ${this.notifyText}`), 0, 0))
+      // Errors flash red with a ✗; informational notices render dim with a ℹ
+      // so a successful action never reads as a failure.
+      const line = this.notifyKind === 'info'
+        ? color.textDim(`ℹ ${this.notifyText}`)
+        : color.error(`✗ ${this.notifyText}`)
+      this.messagesView.addChild(new Text(line, 0, 0))
     }
     this.messageRows = rows
     this.renderTodoPanel()
@@ -1062,12 +1070,16 @@ export class TuiApp {
   }
 
   /**
-   * Show a transient error line under the transcript. Cleared by the next
+   * Show a transient line under the transcript. Cleared by the next
    * `setTranscript` repaint or after {@link TuiApp.NOTIFY_DURATION_MS},
    * whichever comes first, so a one-off notice never lingers forever.
+   * @param text - the notice text.
+   * @param kind - `'error'` renders red with a ✗ (default); `'info'` renders
+   * dim with a ℹ, so a successful action never reads as a failure.
    */
-  notify(text: string): void {
+  notify(text: string, kind: 'error' | 'info' = 'error'): void {
     this.notifyText = text
+    this.notifyKind = kind
     if (this.notifyTimer !== undefined) clearTimeout(this.notifyTimer)
     this.notifyTimer = setTimeout(() => {
       this.notifyTimer = undefined
@@ -1550,29 +1562,15 @@ export class TuiApp {
   }
 
   /**
-   * Rebuild the persistent dock strip above the todo panel: permission,
-   * goal, todo summary, and background tasks — one truncated line each, only
-   * while non-empty (kimi chrome parity). The dock is the "at a glance"
-   * surface under the transcript; the full todo list stays on Ctrl+T.
+   * Rebuild the persistent dock strip above the todo panel: goal, todo
+   * summary, and background tasks — one truncated line each, only while
+   * non-empty (kimi chrome parity). The dock is the "at a glance" surface
+   * under the transcript; the full todo list stays on Ctrl+T. The
+   * permission preset badges in the footer only, so the mode has exactly
+   * one home (no dock/footer duplication).
    */
   private renderDock(): void {
     const lines: string[] = []
-    const permission = this.status.permission
-    if (permission !== undefined && permission !== '') {
-      const label = permission === 'danger-full-access'
-        ? 'full access'
-        : permission === 'workspace-write'
-          ? 'workspace write'
-          : permission
-      const styled = permission === 'danger-full-access'
-        ? color.error(`perm: ${label}`)
-        : permission === 'custom'
-          ? color.warning(`perm: ${label}`)
-          : permission === 'read-only'
-            ? color.textMuted(`perm: ${label}`)
-            : color.text(`perm: ${label}`)
-      lines.push(styled)
-    }
     if (this.status.goal !== undefined && this.status.goal !== '') {
       lines.push(color.text(`⚑  ${this.status.goal}`))
     }
@@ -1618,15 +1616,17 @@ export class TuiApp {
       ? contextBar(this.status.contextTokens, this.status.contextWindow)
       : ''
     // The mode slot (kimi parity): [yolo] flags the no-approval preset, and
-    // non-default presets badge too; the default workspace-write shows
-    // nothing so the footer stays calm in the common case.
+    // every other preset badges too — including the default workspace-write —
+    // so the effective write scope is always visible in the footer.
     const permissionBadge = this.status.permission === 'danger-full-access'
       ? color.warning('[yolo]')
       : this.status.permission === 'read-only'
         ? color.textMuted('[read-only]')
-        : this.status.permission === 'custom'
-          ? color.warning('[custom]')
-          : ''
+        : this.status.permission === 'workspace-write'
+          ? color.text('[workspace-write]')
+          : this.status.permission === 'custom'
+            ? color.warning('[custom]')
+            : ''
     const line1 = [
       permissionBadge,
       this.planMode ? color.warning('[plan]') : '',
