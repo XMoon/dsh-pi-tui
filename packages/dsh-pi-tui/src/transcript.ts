@@ -240,6 +240,46 @@ export class TranscriptFolder {
   private readonly groupOf = new Map<number, Extract<TranscriptMessage, { kind: 'tool' }>>()
   private readonly groupMembers = new Map<Extract<TranscriptMessage, { kind: 'tool' }>, number[]>()
 
+  /**
+   * Turn index for the display window (stage J): the first item index of
+   * every distinct turn, in log order. The window projection derives its
+   * start and its summary counts from this + `groupedToolCount`, so
+   * `messages({maxTurns})` never rescans the pre-window history. Turn
+   * values are expected to be monotonic in log order; a non-monotonic log
+   * (corrupt data) disables the fast path and falls back to the full scan.
+   */
+  private readonly turnStarts: number[] = []
+  /** The grouped tool-card count (what `messages()` emits), maintained
+   * incrementally for the window summary ("N tool calls" of the collapsed
+   * history). */
+  private groupedToolCount = 0
+  /** Merged read groups whose members span MORE THAN ONE turn: their output
+   * card carries only the max turn, so the raw-item turn index over-counts
+   * the window summary. While any exist, the window path defers to the full
+   * scan (correctness first; cross-turn read runs are rare). */
+  private crossTurnGroups = 0
+  private turnsMonotonic = true
+
+  /** Append one folded message, maintaining the window projections. */
+  private appendItem(message: TranscriptMessage): void {
+    this.items.push(message)
+    const turn = 'turn' in message ? message.turn : undefined
+    if (turn !== undefined) {
+      if (this.turnStarts.length === 0) {
+        this.turnStarts.push(this.items.length - 1)
+      } else {
+        const lastMessage = this.items[this.turnStarts[this.turnStarts.length - 1]!]!
+        const lastTurn = 'turn' in lastMessage ? lastMessage.turn : undefined
+        if (lastTurn === undefined || turn > lastTurn) {
+          this.turnStarts.push(this.items.length - 1)
+        } else if (turn < lastTurn) {
+          this.turnsMonotonic = false
+        }
+      }
+    }
+    if (message.kind === 'tool') this.groupedToolCount += 1
+  }
+
   /** Whether an item is groupable as a consecutive read (settled ok). */
   private static groupable(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
     return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
@@ -266,8 +306,16 @@ export class TranscriptFolder {
         const members = this.groupMembers.get(group)
         if (members !== undefined) {
           const remaining = members.filter(member => member < start || member > end)
-          if (remaining.length === 0) this.groupMembers.delete(group)
-          else this.groupMembers.set(group, remaining)
+          if (remaining.length === 0) {
+            // The whole group lives inside the run: its output card becomes
+            // `members.length` independent read cards, then the rebuild
+            // merges them into one card again — keep the counters in sync.
+            this.groupMembers.delete(group)
+            this.groupedToolCount += members.length - 1
+            if (this.crossTurn(members)) this.crossTurnGroups -= 1
+          } else {
+            this.groupMembers.set(group, remaining)
+          }
         }
         this.groupOf.delete(i)
       }
@@ -280,11 +328,15 @@ export class TranscriptFolder {
         const prevGroup = this.groupOf.get(start - 1)
         if (prevGroup !== undefined) {
           const members = this.groupMembers.get(prevGroup)!
+          const wasCross = this.crossTurn(members)
           members.push(start)
           this.groupOf.set(start, prevGroup)
           prevGroup.args = `${members.length} files`
           prevGroup.result = prevGroup.result === '' ? item.result : `${prevGroup.result}\n\n${item.result}`
           prevGroup.turn = Math.max(prevGroup.turn, item.turn)
+          // Joining a same-turn group with a different-turn read makes it
+          // cross-turn (the emitted card now spans two turns).
+          if (!wasCross && this.crossTurn(members)) this.crossTurnGroups += 1
           return
         }
         // The previous item is a singleton read: promote it to a group.
@@ -295,6 +347,7 @@ export class TranscriptFolder {
         group.args = '2 files'
         group.result = group.result === '' ? item.result : `${group.result}\n\n${item.result}`
         group.turn = Math.max(group.turn, item.turn)
+        if (prev.turn !== item.turn) this.crossTurnGroups += 1
       }
       return
     }
@@ -305,11 +358,13 @@ export class TranscriptFolder {
     if (!TranscriptFolder.groupable(first)) return
     const group: Extract<TranscriptMessage, { kind: 'tool' }> = { ...first }
     const members: number[] = []
+    const memberTurns = new Set<number>()
     for (let i = start; i <= end; i += 1) {
       const member = this.items[i]!
       if (!TranscriptFolder.groupable(member)) continue
       this.groupOf.set(i, group)
       members.push(i)
+      memberTurns.add(member.turn)
       if (i > start) {
         group.result = group.result === '' ? member.result : `${group.result}\n\n${member.result}`
         group.turn = Math.max(group.turn, member.turn)
@@ -317,6 +372,21 @@ export class TranscriptFolder {
     }
     group.args = `${members.length} files`
     this.groupMembers.set(group, members)
+    // The whole run collapsed into one output card.
+    this.groupedToolCount -= members.length - 1
+    if (memberTurns.size > 1) this.crossTurnGroups += 1
+  }
+
+  /** Whether the members at these indices span more than one turn. */
+  private crossTurn(members: readonly number[]): boolean {
+    if (members.length <= 1) return false
+    const first = this.items[members[0]!]!
+    const turn = 'turn' in first ? first.turn : undefined
+    for (let i = 1; i < members.length; i += 1) {
+      const member = this.items[members[i]!]!
+      if (('turn' in member ? member.turn : undefined) !== turn) return true
+    }
+    return false
   }
 
   /**
@@ -328,15 +398,8 @@ export class TranscriptFolder {
     for (const event of events) this.applyEvent(event)
   }
 
-  /**
-   * The folded messages. Without options this is the full transcript; with
-   * `maxTurns` older turns collapse into one summary entry (fresh array).
-   * The consecutive-read grouping is the maintained projection — no
-   * re-grouping pass runs here.
-   * @param options - optional display window.
-   * @returns the renderable message list.
-   */
-  messages(options?: FoldOptions): TranscriptMessage[] {
+  /** Build the grouped output list (the full projection). */
+  private groupedMessages(): TranscriptMessage[] {
     const grouped: TranscriptMessage[] = []
     for (let index = 0; index < this.items.length; index += 1) {
       const group = this.groupOf.get(index)
@@ -347,9 +410,64 @@ export class TranscriptFolder {
       }
       grouped.push(this.items[index]!)
     }
+    return grouped
+  }
+
+  /**
+   * The windowed projection: only the LAST `maxTurns` turns are walked —
+   * the window start comes from the maintained turn index, and the summary
+   * counts come from the incremental projections (turn count, item count,
+   * grouped tool cards), so the per-frame cost no longer grows with the
+   * pre-window history. A merged read group whose first member sits BEFORE
+   * the window (its output card spans the boundary) falls back to the full
+   * scan — the group's turn is the max of its members, so the full-scan
+   * windowing semantics must decide its fate. Anchored windows (search
+   * jumps) always use the full scan.
+   */
+  private windowedMessages(maxTurns: number): TranscriptMessage[] {
+    const totalTurns = this.turnStarts.length
+    if (!this.turnsMonotonic || totalTurns <= maxTurns || this.crossTurnGroups > 0) {
+      return windowMessages(this.groupedMessages(), maxTurns)
+    }
+    const windowStart = this.turnStarts[totalTurns - maxTurns]!
+    const kept: TranscriptMessage[] = []
+    let windowTools = 0
+    for (let index = windowStart; index < this.items.length; index += 1) {
+      const group = this.groupOf.get(index)
+      if (group !== undefined) {
+        const members = this.groupMembers.get(group)
+        if (members !== undefined && members[0] === index) {
+          kept.push(group)
+          if (group.kind === 'tool') windowTools += 1
+        } else if (members !== undefined && members[0]! < windowStart) {
+          // A merged group whose output point predates the window: the
+          // full-scan path may keep or collapse it by its (max) turn, so
+          // the incremental path must defer to the full scan for parity.
+          return windowMessages(this.groupedMessages(), maxTurns)
+        }
+        continue
+      }
+      const message = this.items[index]!
+      kept.push(message)
+      if (message.kind === 'tool') windowTools += 1
+    }
+    const oldTurns = totalTurns - maxTurns
+    const oldTools = this.groupedToolCount - windowTools
+    const turnsText = `${oldTurns} earlier turn${oldTurns === 1 ? '' : 's'}`
+    const toolsText = `${oldTools} tool call${oldTools === 1 ? '' : 's'}`
+    kept.unshift({ kind: 'summary', text: `… ${turnsText} · ${toolsText} — window ${maxTurns} turns` })
+    return kept
+  }
+
+  messages(options?: FoldOptions): TranscriptMessage[] {
     const maxTurns = options?.maxTurns
-    if (maxTurns === undefined || maxTurns <= 0) return grouped
-    return windowMessages(grouped, maxTurns, options?.endTurn)
+    if (maxTurns === undefined || maxTurns <= 0) return this.groupedMessages()
+    // Anchored windows (transcript search) jump into history: the full scan
+    // is fine there — this is never the per-frame path.
+    if (options?.endTurn !== undefined) {
+      return windowMessages(this.groupedMessages(), maxTurns, options.endTurn)
+    }
+    return this.windowedMessages(maxTurns)
   }
 
   /** The thinking entry object for one (turn, step), created on first reasoning. */
@@ -359,7 +477,7 @@ export class TranscriptFolder {
     if (entry === undefined) {
       entry = { kind: 'thinking', turn, text: '', running: true }
       this.thinkingEntries.set(key, entry)
-      this.items.push(entry)
+      this.appendItem(entry)
     }
     return entry
   }
@@ -371,7 +489,7 @@ export class TranscriptFolder {
     if (entry === undefined) {
       entry = { kind: 'assistant', turn, text: '' }
       this.assistantEntries.set(key, entry)
-      this.items.push(entry)
+      this.appendItem(entry)
     }
     return entry
   }
@@ -389,14 +507,14 @@ export class TranscriptFolder {
         // context (system reminders, skill content) folds into a collapsible
         // system entry.
         if (event.data.source.kind === 'user') {
-          this.items.push({ kind: 'user', turn: this.currentTurn, text })
+          this.appendItem({ kind: 'user', turn: this.currentTurn, text })
         } else {
           // Injected context: name the producer the way the Web row does
           // (contextProvenance), plus a notice form's one-line account.
           const provenance = contextProvenance(event.data.source)
           const summary = contextSummary(event.data.source)
           const emoji = contextEmoji(event.data.source)
-          this.items.push({
+          this.appendItem({
             kind: 'system',
             turn: this.currentTurn,
             text,
@@ -429,7 +547,7 @@ export class TranscriptFolder {
         } else if (text !== '') {
           const created: TranscriptMessage = { kind: 'assistant', turn: event.data.turn, text }
           this.assistantEntries.set(key, created)
-          this.items.push(created)
+          this.appendItem(created)
         }
         // The step is complete: its thinking entry stops streaming.
         const thinking = this.thinkingEntries.get(key)
@@ -447,7 +565,7 @@ export class TranscriptFolder {
           result: '',
           status: 'running',
         }
-        this.items.push(card)
+        this.appendItem(card)
         this.pendingCalls.set(key, {
           name: event.data.name,
           args: event.data.arguments,
@@ -497,7 +615,7 @@ export class TranscriptFolder {
               this.reflowGrouping(runningIndex)
             }
           } else {
-            this.items.push({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta })
+            this.appendItem({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta })
             this.reflowGrouping(this.items.length - 1)
           }
         }
@@ -509,11 +627,11 @@ export class TranscriptFolder {
         for (const entry of this.thinkingEntries.values()) entry.running = false
         if (event.data.reason.kind === 'error') {
           const error = event.data.reason.error
-          this.items.push({ kind: 'tool', turn: this.currentTurn, name: 'error', args: '', result: `${error.code}: ${error.message}`, status: 'error' })
+          this.appendItem({ kind: 'tool', turn: this.currentTurn, name: 'error', args: '', result: `${error.code}: ${error.message}`, status: 'error' })
         } else if (event.data.reason.kind === 'aborted') {
-          this.items.push({ kind: 'tool', turn: this.currentTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
+          this.appendItem({ kind: 'tool', turn: this.currentTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
         } else if (event.data.reason.kind === 'max-tokens') {
-          this.items.push({ kind: 'system', turn: this.currentTurn, text: 'max tokens reached — output truncated' })
+          this.appendItem({ kind: 'system', turn: this.currentTurn, text: 'max tokens reached — output truncated' })
         }
         break
       }
@@ -528,7 +646,7 @@ export class TranscriptFolder {
           members: [],
         }
         this.workflowRuns.set(event.data.runId, card)
-        this.items.push(card)
+        this.appendItem(card)
         break
       }
       case 'tool-workflow/agent-start': {
@@ -573,7 +691,7 @@ export class TranscriptFolder {
         const label = maxRetries === undefined
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`
           : `llm retry ${retry + 1}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
-        this.items.push({ kind: 'system', turn: this.currentTurn, text: `${label} — ${failure.code}: ${failure.message}` })
+        this.appendItem({ kind: 'system', turn: this.currentTurn, text: `${label} — ${failure.code}: ${failure.message}` })
         break
       }
       case 'command/run': {
@@ -590,7 +708,7 @@ export class TranscriptFolder {
           : event.data.text === undefined || event.data.text === ''
             ? ''
             : ` — ${event.data.text}`
-        this.items.push({ kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok' })
+        this.appendItem({ kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok' })
         break
       }
       case 'subagent/descriptor': {
@@ -602,7 +720,7 @@ export class TranscriptFolder {
           provider !== undefined ? `provider: ${provider}` : '',
           model !== undefined ? `model: ${model}` : '',
         ].filter(part => part !== '').join(' · ')
-        this.items.push({
+        this.appendItem({
           kind: 'tool',
           turn: this.currentTurn,
           name: 'subagent',

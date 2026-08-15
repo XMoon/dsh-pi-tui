@@ -10,7 +10,7 @@ import test from 'node:test'
 import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldTranscript, TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -310,6 +310,164 @@ test('windows older turns into one summary entry', () => {
   for (const message of windowed.slice(1)) {
     assert.ok('turn' in message && message.turn >= 1, `window kept an old turn: ${JSON.stringify(message)}`)
   }
+})
+
+test('the window projection reads incremental counts: deep history never rescanned', () => {
+  // 600 turns × (user + assistant) = 1200 items. The window path must
+  // produce the same summary numbers the full-scan path produced, derived
+  // from the maintained turn index rather than a history walk.
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 600; turn += 1) {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('user/message', {
+      id: MessageId(`msg-${turn}-u`), role: 'user',
+      content: [{ type: 'text', text: `q${turn}` }],
+      source: { kind: 'user' },
+    }, seq++))
+    events.push(event('assistant/message', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`msg-${turn}-a`), role: 'assistant',
+        content: [{ type: 'text', text: `a${turn}` }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, seq++))
+  }
+  folder.apply(events)
+  const windowed = folder.messages({ maxTurns: 5 })
+  const summary = windowed[0]
+  assert.ok(summary !== undefined && summary.kind === 'summary')
+  assert.ok(summary.text.includes('595 earlier turns'), `summary text:\n${summary.text}`)
+  assert.ok(summary.text.includes('0 tool calls'), `summary text:\n${summary.text}`)
+  assert.equal(windowed.length, 11, '5 turns × 2 items + summary')
+  // The whole transcript is still available (full path unchanged).
+  assert.equal(folder.messages().length, 1200)
+})
+
+test('a cross-turn read group keeps the fast window consistent with the full scan', () => {
+  // turn 1: read ok; turn 2: read ok (merges with turn 1's read into one
+  // card with turn 2); turn 3: plain user message. The fast window's
+  // turn index counts the RAW items (3 turns) while the grouped output
+  // only has turns {2, 3} — the summaries must still agree.
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 1 }, 0),
+    event('tool/call', { turn: 1, step: 0, callId: CallId('call-1'), name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('msg-1'), role: 'user', content: [{ type: 'tool-result', toolCallId: CallId('call-1'), content: [{ type: 'text', text: 'a' }] }], source: { kind: 'tool', callId: CallId('call-1') } },
+    }, 2),
+    event('turn/start', { turn: 2 }, 3),
+    event('tool/call', { turn: 2, step: 0, callId: CallId('call-2'), name: 'read', arguments: '{}' }, 4),
+    event('tool/result', {
+      turn: 2, step: 0,
+      message: { id: MessageId('msg-2'), role: 'user', content: [{ type: 'tool-result', toolCallId: CallId('call-2'), content: [{ type: 'text', text: 'b' }] }], source: { kind: 'tool', callId: CallId('call-2') } },
+    }, 5),
+    event('turn/start', { turn: 3 }, 6),
+    event('user/message', {
+      id: MessageId('msg-3'), role: 'user',
+      content: [{ type: 'text', text: 'q3' }],
+      source: { kind: 'user' },
+    }, 7),
+  ]
+  folder.apply(events)
+  const fast = folder.messages({ maxTurns: 1 })
+  const full = windowMessages(folder.messages(), 1)
+  assert.equal(JSON.stringify(fast), JSON.stringify(full),
+    `the fast window must match the full scan:\n${JSON.stringify(fast)}\nvs\n${JSON.stringify(full)}`)
+  const summary = fast[0]
+  assert.ok(summary !== undefined && summary.kind === 'summary')
+  assert.ok(summary.text.includes('1 earlier turn'), `summary text:\n${summary.text}`)
+})
+
+test('the fast window matches the full scan across mixed grouping shapes', () => {
+  // A deterministic mixed log: cross-turn read runs, same-turn read runs,
+  // user-separated reads, tools, and streaming text. The fast window must
+  // agree with windowMessages(folder.messages(), n) for every window size.
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  const user = (turn: number, text: string): void => {
+    events.push(event('user/message', { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }, seq++))
+  }
+  const read = (turn: number): void => {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('tool/call', { turn, step: 0, callId: CallId(`call-${seq}`), name: 'read', arguments: '{}' }, seq++))
+    events.push(event('tool/result', {
+      turn, step: 0,
+      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: CallId(`call-${seq}`), content: [{ type: 'text', text: 'file' }] }], source: { kind: 'tool', callId: CallId(`call-${seq}`) } },
+    }, seq++))
+  }
+  const tool = (turn: number): void => {
+    events.push(event('tool/call', { turn, step: 0, callId: CallId(`call-${seq}`), name: 'bash', arguments: '{}' }, seq++))
+    events.push(event('tool/result', {
+      turn, step: 0,
+      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: CallId(`call-${seq}`), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: CallId(`call-${seq}`) } },
+    }, seq++))
+  }
+  // turn 0: user + read; turn 1: read (cross-turn merge with turn 0)
+  user(0, 'q0')
+  read(0)
+  read(1)
+  // turn 2: user + two same-turn reads (merged within one turn)
+  user(2, 'q2')
+  read(2)
+  read(2)
+  // turn 3: user + bash tool (not groupable)
+  user(3, 'q3')
+  tool(3)
+  // turn 4: read; turn 5: read (cross-turn merge), then a user
+  read(4)
+  read(5)
+  user(5, 'q5')
+  folder.apply(events)
+  for (let maxTurns = 1; maxTurns <= 6; maxTurns += 1) {
+    const fast = folder.messages({ maxTurns })
+    const full = windowMessages(folder.messages(), maxTurns)
+    assert.equal(JSON.stringify(fast), JSON.stringify(full),
+      `fast window must match the full scan at maxTurns=${maxTurns}:\n${JSON.stringify(fast)}\nvs\n${JSON.stringify(full)}`)
+  }
+})
+
+test('the window summary counts grouped read cards from the incremental projection', () => {
+  // 10 turns, each with a settled read (user messages break the read runs,
+  // so every read stays its own card). The window (turns 8-9) holds no
+  // tools: the summary must report 8 earlier turns and 8 tool calls from
+  // the incremental projections, matching the full-scan path.
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 10; turn += 1) {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('user/message', {
+      id: MessageId(`msg-${turn}-u`), role: 'user',
+      content: [{ type: 'text', text: `q${turn}` }],
+      source: { kind: 'user' },
+    }, seq++))
+    events.push(event('tool/call', { turn, step: 0, callId: CallId(`call-${turn}`), name: 'read', arguments: '{}' }, seq++))
+    events.push(event('tool/result', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`msg-${turn}`), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId(`call-${turn}`), content: [{ type: 'text', text: 'file' }] }],
+        source: { kind: 'tool', callId: CallId(`call-${turn}`) },
+      },
+    }, seq++))
+  }
+  folder.apply(events)
+  const windowed = folder.messages({ maxTurns: 2 })
+  const summary = windowed[0]
+  assert.ok(summary !== undefined && summary.kind === 'summary')
+  assert.ok(summary.text.includes('8 earlier turns'), `summary text:\n${summary.text}`)
+  assert.ok(summary.text.includes('8 tool calls'), `summary text:\n${summary.text}`)
+  // Parity with the full-scan window path (no turn index involved).
+  const full = foldTranscript(events, { maxTurns: 2 })
+  const fullSummary = full[0]
+  assert.ok(fullSummary !== undefined && fullSummary.kind === 'summary')
+  assert.equal(summary.text, fullSummary.text, 'incremental and full-scan summaries must match')
+  assert.deepEqual(kinds(windowed), kinds(full), 'the windowed output must match the full scan')
 })
 
 test('window keeps everything when the log fits', () => {
