@@ -41,7 +41,7 @@ import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
-import { compressLog, decompressFrames, encodeLog, frameLineRanges, repairEvents, scanEvents, scanFrameLayout } from './repair-core.mjs'
+import { compressLog, decompressFrames, DUPLICATE_REFERENCE_STRATEGIES, encodeLog, frameLineRanges, repairEvents, scanEvents, scanFrameLayout } from './repair-core.mjs'
 
 const USAGE = `usage:
   node repair-session.mjs <session-id> [--yes] [--duplicate-reference first|last|segment] [--dsh-dir <path>] [--dsh-home <path>]
@@ -287,20 +287,49 @@ function scanAll(home, decodeStorageRecord) {
   return damaged
 }
 
-const args = process.argv.slice(2)
-const flags = { scan: false, yes: false, duplicateReference: undefined, dshDir: undefined }
-const positional = []
-for (let i = 0; i < args.length; i += 1) {
-  const arg = args[i]
-  if (arg === '--scan') flags.scan = true
-  else if (arg === '--yes') flags.yes = true
-  else if (arg === '--duplicate-reference') flags.duplicateReference = args[++i]
-  else if (arg === '--dsh-dir') flags.dshDir = args[++i]
-  else if (arg === '--dsh-home') process.env.DSH_HOME = args[++i]
-  else if (arg === '--help' || arg === '-h') {
-    console.log(USAGE)
-    process.exit(0)
-  } else positional.push(arg)
+/**
+ * Parse CLI arguments with NO side effects (no console output, no
+ * process.exit, no env mutation), so the module is safe to import: the
+ * caller decides what to do with the parsed result. Missing flag values
+ * throw a clear error instead of silently consuming the next token.
+ * @param args - the argument vector (e.g. `process.argv.slice(2)`).
+ * @returns the flags plus the positional ids.
+ */
+export function parseArgs(args) {
+  const flags = {
+    scan: false,
+    yes: false,
+    duplicateReference: undefined,
+    dshDir: undefined,
+    dshHome: undefined,
+    help: false,
+  }
+  const positional = []
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]
+    if (arg === '--scan') flags.scan = true
+    else if (arg === '--yes') flags.yes = true
+    else if (arg === '--duplicate-reference') {
+      if (i + 1 >= args.length) throw new Error('--duplicate-reference requires a value (first|last|segment)')
+      const value = args[++i]
+      if (value.startsWith('--')) throw new Error(`--duplicate-reference requires a value (first|last|segment), got a flag: ${value}`)
+      if (!DUPLICATE_REFERENCE_STRATEGIES.includes(value)) {
+        throw new Error(`--duplicate-reference must be one of ${DUPLICATE_REFERENCE_STRATEGIES.join('|')}, got "${value}"`)
+      }
+      flags.duplicateReference = value
+    } else if (arg === '--dsh-dir') {
+      if (i + 1 >= args.length) throw new Error('--dsh-dir requires a value')
+      flags.dshDir = args[++i]
+    } else if (arg === '--dsh-home') {
+      if (i + 1 >= args.length) throw new Error('--dsh-home requires a value')
+      flags.dshHome = args[++i]
+    } else if (arg === '--help' || arg === '-h') {
+      flags.help = true
+    } else {
+      positional.push(arg)
+    }
+  }
+  return { flags, positional }
 }
 
 /** Print the ambiguity report for a refused duplicate-seq repair. */
@@ -317,7 +346,13 @@ function printAmbiguity(id, plan, events) {
   console.log('  rewrites cross-references to the other writer\'s event — review the candidates before choosing.')
 }
 
-function main() {
+function main(args) {
+  const { flags, positional } = parseArgs(args)
+  if (flags.help) {
+    console.log(USAGE)
+    process.exit(0)
+  }
+  if (flags.dshHome !== undefined) process.env.DSH_HOME = flags.dshHome
   const home = dshHome()
   const sessionsRoot = join(home, 'sessions')
   if (!existsSync(sessionsRoot)) {
@@ -418,7 +453,7 @@ function main() {
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
   try {
-    main()
+    main(process.argv.slice(2))
   } catch (error) {
     console.error(`repair-session: ${error instanceof Error ? error.message : String(error)}`)
     process.exit(1)

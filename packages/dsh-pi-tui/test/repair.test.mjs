@@ -23,7 +23,7 @@ import {
   scanZstdFrames,
   scanZstdLayout,
 } from '../scripts/repair-core.mjs'
-import { writeArtifact, verifyArtifactFile } from '../scripts/repair-session.mjs'
+import { writeArtifact, verifyArtifactFile, parseArgs } from '../scripts/repair-session.mjs'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -314,6 +314,65 @@ function makeFakeHome(artifactBytes) {
 function runCli(args) {
   return spawnSync(process.execPath, [REPAIR_SCRIPT, ...args], { encoding: 'utf8' })
 }
+
+test('parseArgs parses flags and positional ids without side effects', () => {
+  const { flags, positional } = parseArgs(['--yes', '--duplicate-reference', 'segment', 'sess-1', '--scan'])
+  assert.equal(flags.yes, true)
+  assert.equal(flags.scan, true)
+  assert.equal(flags.duplicateReference, 'segment')
+  assert.deepEqual(positional, ['sess-1'])
+  assert.equal(flags.help, false)
+  assert.equal(parseArgs(['--help']).flags.help, true)
+  assert.equal(parseArgs(['-h', 'sess-1']).flags.help, true)
+  assert.equal(parseArgs(['--dsh-home', '/x']).flags.dshHome, '/x')
+})
+
+test('parseArgs errors clearly on missing flag values', () => {
+  assert.throws(() => parseArgs(['--duplicate-reference']), /requires a value/)
+  assert.throws(() => parseArgs(['--dsh-dir']), /requires a value/)
+  assert.throws(() => parseArgs(['--dsh-home']), /requires a value/)
+})
+
+test('parseArgs rejects a non-enum duplicate-reference value (a typo must not silently degrade to first)', () => {
+  assert.throws(() => parseArgs(['--duplicate-reference', 'frist']), /must be one of first\|last\|segment/)
+  assert.throws(() => parseArgs(['--duplicate-reference', 'FIRST']), /must be one of/)
+  // A flag swallowed as the value must be rejected, not consumed.
+  assert.throws(() => parseArgs(['--duplicate-reference', '--scan']), /got a flag/)
+})
+
+test('repairEvents defensively rejects a non-enum strategy', () => {
+  const events = buildEvents([0, 1, 2, 2, 3])
+  events[4].data = { sourceEventSeqs: [2] }
+  const { issue } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
+  assert.throws(
+    () => repairEvents(events, issue, { duplicateReference: 'typo' }),
+    /unknown duplicate-reference strategy/,
+  )
+})
+
+test('importing repair-session with hostile argv has no side effects', () => {
+  // The host argv carries --help (which used to print usage + exit) and
+  // --dsh-home (which used to mutate process.env) — a plain import must
+  // neither print, nor exit, nor touch the environment.
+  const probe = [
+    "import('" + REPAIR_SCRIPT + "')",
+    ".then(m => { console.log('alive'); console.log('parseArgs=' + (m.parseArgs ? 'exported' : 'missing')); console.log('env=' + String(process.env.DSH_HOME)) })",
+    ".catch(e => { console.error(e); process.exit(9) })",
+  ].join('')
+  // `--` separates node's own options from the HOST argv the import sees.
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe, '--', '--help', '--dsh-home', '/mutated'], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /alive/, 'the importing process must stay alive')
+  assert.match(result.stdout, /parseArgs=exported/)
+  assert.ok(!result.stdout.includes('usage:'), 'import must not print the CLI usage')
+  assert.ok(!result.stdout.includes('/mutated'), 'import must not mutate DSH_HOME')
+})
+
+test('CLI --help still prints usage and exits 0', () => {
+  const result = runCli(['--help', '--dsh-dir', 'ignored'])
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /usage:/)
+})
 
 test('CLI --scan reports a torn tail with byte accounting, never healthy', () => {
   const stub = makeDshStub()

@@ -474,6 +474,12 @@ export const DUPLICATE_REFERENCE_STRATEGIES = ['first', 'last', 'segment']
  * refused ambiguous log — the ambiguity report.
  */
 export function repairEvents(events, issue, options = {}) {
+  // Defensive: a non-enum strategy (a caller bypassing the CLI check) must
+  // never silently degrade to `first` — that would rewrite ambiguous
+  // references without the user's explicit choice.
+  if (options.duplicateReference !== undefined && !DUPLICATE_REFERENCE_STRATEGIES.includes(options.duplicateReference)) {
+    throw new Error(`unknown duplicate-reference strategy "${options.duplicateReference}" (first|last|segment)`)
+  }
   if (issue === undefined) {
     return { events, action: 'none', fromIndex: -1, delta: 0, changed: 0, refsChanged: 0 }
   }
