@@ -705,14 +705,20 @@ export function apply(ctx: Context, config: Config): void {
     let app: TuiApp
     // Tool-card presentation bridge: the Web's render intents resolved from
     // the LIVE tool registry as the agent sees it (scoped lookup), so the
-    // rendered card matches the definition that actually executed. The
-    // registry is read through ctx.get: property access (ctx.tools) trips
-    // cordis's inject guard, and an absent registry must degrade to generic
-    // cards rather than fail the render.
+    // rendered card matches the definition that actually executed. The scope
+    // must be the AGENT OBJECT — the agent's scope layer is keyed by it
+    // (createScope(loopCtx, this)), exactly like the host apiproxy's
+    // ctx.tools.get(name, ctx.agents.get(session.id)). Passing the agent's
+    // CONTEXT instead misses the agent layer entirely: presentCall/
+    // presentResult would return no views and every card would fall back to
+    // raw text (read still works via its envelope fallback, edit loses its
+    // diff). The registry is read through ctx.get: property access
+    // (ctx.tools) trips cordis's inject guard, and an absent registry must
+    // degrade to generic cards rather than fail the render.
     const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined
     const present = toolPresenterFrom(name => {
       if (liveAgent === undefined) return undefined
-      return tools?.get(name, liveAgent.ctx)
+      return tools?.get(name, liveAgent)
     })
     // Aborts an in-flight command execution when the TUI quits.
     const signal = new AbortController().signal
