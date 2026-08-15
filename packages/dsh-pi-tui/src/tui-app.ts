@@ -1131,6 +1131,12 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
+  /** Drop all per-message expansion overrides (session-scoped state: a
+   * session switch must not leak the old session's click toggles). */
+  clearSessionOverrides(): void {
+    this.expandedOverride.clear()
+  }
+
   /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
   setPlanMode(active: boolean): void {
     this.planMode = active

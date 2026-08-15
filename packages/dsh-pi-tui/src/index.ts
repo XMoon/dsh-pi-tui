@@ -723,6 +723,9 @@ export function apply(ctx: Context, config: Config): void {
       }
       guardState = freshGuardState()
       guardToken = undefined
+      // A new session owns the surface: bump the generation so late async
+      // work from the old session cannot commit, and clear old-session state.
+      bumpSessionGeneration()
       await initLiveSession(next.agent)
       diag.info('switch ok', { from: from ?? '(none)', to: next.agent.session.id, seq: next.agent.session.events.length })
       return undefined
@@ -953,6 +956,25 @@ export function apply(ctx: Context, config: Config): void {
     // Transcript-search state (see the onSearch* events below).
     let searchMatches: TranscriptMessage[] = []
     let searchCurrent = -1
+    // Monotonic session generation: bumped on EVERY session swap (switch,
+    // resume, deferred creation). Late async work (the skill command
+    // catalog refresh, model-menu info, title folds) captures the
+    // generation it was issued for and refuses to commit state once a newer
+    // session owns the surface. Bumping also tears down old-session-only
+    // state: tool-call preview args, search results, and per-message
+    // expansion overrides. Pending question/approval dialogs settle through
+    // their own abort signals — the disposed agent aborts them — so they
+    // need no explicit teardown here.
+    let sessionGeneration = 0
+    const bumpSessionGeneration = (): number => {
+      sessionGeneration += 1
+      callArgs.clear()
+      searchMatches = []
+      searchCurrent = -1
+      app.setSearchResult(0, 0)
+      app.clearSessionOverrides()
+      return sessionGeneration
+    }
     const jumpToSearchMatch = (): void => {
       const match = searchMatches[searchCurrent]
       if (match === undefined) return
@@ -1471,6 +1493,7 @@ export function apply(ctx: Context, config: Config): void {
           liveHandle = created
           liveAgent = created.agent
           await liveAgent.whenIdle()
+          bumpSessionGeneration()
           await initLiveSession(liveAgent)
         } catch (error) {
           // A preset that resolves but fails to MOUNT (e.g. a row waiting for
@@ -1490,6 +1513,7 @@ export function apply(ctx: Context, config: Config): void {
           liveHandle = created
           liveAgent = created.agent
           await liveAgent.whenIdle()
+          bumpSessionGeneration()
           await initLiveSession(liveAgent)
         }
         if (resumeFailure !== undefined) {
@@ -1519,6 +1543,7 @@ export function apply(ctx: Context, config: Config): void {
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       cwd,
       signal,
+      get sessionGeneration() { return sessionGeneration },
       compose,
       switchSession,
       swapTo: (next) => swapTo(next as Awaited<ReturnType<typeof agents.resume>>),

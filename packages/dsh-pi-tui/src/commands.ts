@@ -102,6 +102,9 @@ export interface TuiCommandRunner {
   readonly sessions: { flush(session: Session): Promise<unknown> }
   cwd: string
   signal: AbortSignal
+  /** The runner's monotonic session generation; bumped on every session
+   * swap. Late async work must re-check it before committing state. */
+  readonly sessionGeneration: number
   compose(presetId?: string): Promise<{ agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }>
   switchSession(sessionId: string): Promise<string | undefined>
   swapTo(next: AgentHandle): Promise<string | undefined>
@@ -485,6 +488,11 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   // only exist once a session does).
   const skillDisposers = new Map<string, () => void>()
   const registerSkillCommands = async (): Promise<number> => {
+    // The catalog fetch is async: capture the session generation so a
+    // refresh issued for an OLD session (superseded by a switch while the
+    // catalog was loading) cannot register commands into — or refresh the
+    // completions of — the NEW session's surface.
+    const generation = runner.sessionGeneration
     for (const dispose of skillDisposers.values()) dispose()
     skillDisposers.clear()
     const liveAgent = runner.liveAgent
@@ -495,6 +503,10 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     if (skills === undefined) return 0
     const taken = new Set(commands.list(liveAgent).map(command => command.name))
     const catalog = await skills.list({ cwd: sessionCwd(liveAgent), scope: liveAgent })
+    // A newer session owns the surface now: this refresh's registrations
+    // would clobber or duplicate the newer catalog — drop them silently
+    // (the newer session's own refresh is in flight or already applied).
+    if (generation !== runner.sessionGeneration) return 0
     for (const skill of catalog) {
       // A colliding name (a built-in or another plugin's command) skips the
       // slash command; the catalog picker still lists the skill.
