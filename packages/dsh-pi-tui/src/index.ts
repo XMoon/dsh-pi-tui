@@ -77,7 +77,18 @@ import { startProcessTui, type TuiApp } from './tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
-import { checkDivergence, freshGuardState, type GuardPersistenceLike, type GuardSessionLike, type GuardState } from './guard.ts'
+import {
+  checkDivergence,
+  draftFingerprint,
+  forceTokenAllows,
+  freshGuardState,
+  mintForceToken,
+  type GuardAction,
+  type GuardForceToken,
+  type GuardPersistenceLike,
+  type GuardSessionLike,
+  type GuardState,
+} from './guard.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -209,7 +220,10 @@ const DANGER_PATTERNS: readonly RegExp[] = [
 ]
 
 /** Divergence-guard notices (user-facing, English like the rest of the TUI). */
-const GUARD_BLOCKED_NOTIFY = 'This session may be open in another dsh process (TUI/web); send blocked. Press Enter again to force (may corrupt the session log)'
+const GUARD_BLOCKED_NOTIFY = (action: GuardAction): string =>
+  `This session may be open in another dsh process (TUI/web); send blocked. Press ${action === 'submit' ? 'Enter' : 'Ctrl+S'} again to force (may corrupt the session log)`
+const GUARD_TAIL_MISMATCH_NOTIFY = (action: GuardAction): string =>
+  `This session file was rewritten by another process (same event count, different content); send blocked. Press ${action === 'submit' ? 'Enter' : 'Ctrl+S'} again to force (may corrupt the session log)`
 const GUARD_FORCED_NOTIFY = 'Forced send — the session may be written by another process; the log may be damaged'
 const GUARD_REMOVED_NOTIFY = 'This session\'s log was removed externally — it can no longer be persisted. Press Enter again to continue without persistence (restart to recover)'
 
@@ -563,15 +577,29 @@ export function apply(ctx: Context, config: Config): void {
     // Cross-process divergence guard state for the live session; reset on
     // every session switch (the cursor is per-session).
     let guardState: GuardState = freshGuardState()
-    let guardForced = false
+    // One-time force-override token (replaces the never-reliable boolean):
+    // a blocked submission mints it binding session/revision/action/draft;
+    // the second identical operation consumes it and forces through. Cleared
+    // by every event that could invalidate it: a clean guard read (new file
+    // revision), session switch, turn boundaries, cancel, and TUI exit.
+    let guardToken: GuardForceToken | undefined
+    /** The guard verdict for one submission: proceed (ok/unavailable), force
+     * through (forced), or refuse with the specific divergence kind. */
+    type GuardVerdict =
+      | { kind: 'ok' }
+      | { kind: 'forced' }
+      | { kind: 'unavailable' }
+      | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed' }
     /**
      * Run the divergence guard before a session-writing submission. Returns
      * 'ok' to proceed, 'blocked' to refuse (the caller restores the draft),
      * 'forced' when the user overrode a still-bad state, and 'unavailable'
-     * when the deployment cannot guard (proceed).
+     * when the deployment cannot guard (proceed). `action` distinguishes
+     * Enter submit from Ctrl+S save; `draft` feeds the fingerprint so an
+     * edited draft can never ride an old token.
      */
-    const guardSend = async (): Promise<'ok' | 'blocked' | 'blocked-removed' | 'forced' | 'unavailable'> => {
-      if (liveAgent === undefined) return 'ok'
+    const guardSend = async (action: GuardAction, draft: string): Promise<GuardVerdict> => {
+      if (liveAgent === undefined) return { kind: 'ok' }
       const session: GuardSessionLike = {
         id: liveAgent.session.id,
         header: liveAgent.session.header,
@@ -579,39 +607,58 @@ export function apply(ctx: Context, config: Config): void {
       }
       const persistence = ctx.get('sessionPersistence') as GuardPersistenceLike | undefined
       const outcome = await checkDivergence(persistence, session, (path) => statSync(path), guardState)
+      const candidate = {
+        sessionId: session.id,
+        revision: outcome.revision,
+        action,
+        draftFingerprint: draftFingerprint(draft),
+      }
+      const forceOrBlock = (reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed'): GuardVerdict => {
+        const token = guardToken
+        if (forceTokenAllows(token, candidate)) {
+          const fromRevision = token.revision
+          guardToken = undefined
+          diag.info('guard forced', { session: session.id, action, fromRevision, toRevision: outcome.revision })
+          return { kind: 'forced' }
+        }
+        guardToken = mintForceToken(candidate)
+        return { kind: 'blocked', reason }
+      }
       switch (outcome.kind) {
         case 'ok':
-          guardForced = false
+          // A clean read observed a (possibly new) file revision: any older
+          // token is stale by construction.
+          guardToken = undefined
           diag.debug('guard ok', { session: session.id, fileEvents: outcome.fileEvents ?? 0, memoryEvents: session.events.length })
-          return 'ok'
+          return { kind: 'ok' }
         case 'diverged':
           diag.warn('guard diverged', {
             session: session.id,
             fileEvents: outcome.fileEvents,
             memoryEvents: outcome.memoryEvents,
           })
-          if (guardForced) {
-            guardForced = false
-            return 'forced'
-          }
-          return 'blocked'
+          return forceOrBlock('diverged')
+        case 'tail-mismatch':
+          diag.warn('guard tail mismatch', {
+            session: session.id,
+            fileEvents: outcome.fileEvents,
+            memoryEvents: outcome.memoryEvents,
+            fileTail: outcome.fileTail,
+            memoryTail: outcome.memoryTail,
+          })
+          return forceOrBlock('tail-mismatch')
+        case 'removed':
+          // The log was deleted externally while this process held it: the
+          // next append would ENOENT. Block with a dedicated notice; the
+          // second identical Enter can still force (may lose persistence).
+          diag.warn('guard removed', { session: session.id, revision: outcome.revision })
+          return forceOrBlock('removed')
         case 'unreadable':
           diag.error('guard unreadable', { session: session.id, error: outcome.error })
-          if (guardForced) {
-            guardForced = false
-            return 'forced'
-          }
-          return 'blocked'
-        case 'removed':
-          diag.warn('guard removed', { session: session.id, revision: outcome.revision })
-          if (guardForced) {
-            guardForced = false
-            return 'forced'
-          }
-          return 'blocked-removed'
+          return forceOrBlock('unreadable')
         case 'unavailable':
-          guardForced = false
-          return 'ok'
+          guardToken = undefined
+          return { kind: 'unavailable' }
       }
     }
     /** The preset the live agent runs on, when the deployment composes one. */
@@ -671,7 +718,7 @@ export function apply(ctx: Context, config: Config): void {
         return `swap failed: ${message}`
       }
       guardState = freshGuardState()
-      guardForced = false
+      guardToken = undefined
       await initLiveSession(next.agent)
       diag.info('switch ok', { from: from ?? '(none)', to: next.agent.session.id, seq: next.agent.session.events.length })
       return undefined
@@ -934,20 +981,19 @@ export function apply(ctx: Context, config: Config): void {
     const dispatchViaSession = (text: string): void => {
       void ensureSession().then(async () => {
         // Divergence guard: another dsh process may be writing this session.
-        // Blocked submissions restore the draft so a second Enter forces
-        // through (the user's explicit override, logged and warned).
-        const verdict = await guardSend()
-        if (verdict === 'blocked') {
+        // Blocked submissions restore the draft so a second identical Enter
+        // forces through (the user's explicit override, logged and warned).
+        const verdict = await guardSend('submit', text)
+        if (verdict.kind === 'blocked') {
           app.setEditorText(text)
-          app.notify(GUARD_BLOCKED_NOTIFY, 'error')
+          app.notify(verdict.reason === 'removed'
+            ? GUARD_REMOVED_NOTIFY
+            : verdict.reason === 'tail-mismatch'
+              ? GUARD_TAIL_MISMATCH_NOTIFY('submit')
+              : GUARD_BLOCKED_NOTIFY('submit'), 'error')
           return
         }
-        if (verdict === 'blocked-removed') {
-          app.setEditorText(text)
-          app.notify(GUARD_REMOVED_NOTIFY, 'error')
-          return
-        }
-        if (verdict === 'forced') {
+        if (verdict.kind === 'forced') {
           app.notify(GUARD_FORCED_NOTIFY, 'error')
         }
         // A registered slash command dispatches without a model turn; anything
@@ -1046,6 +1092,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       onExit: () => {
         void (async () => {
+          guardToken = undefined
           if (liveAgent !== undefined) {
             const started = Date.now()
             try {
@@ -1069,6 +1116,9 @@ export function apply(ctx: Context, config: Config): void {
       },
       onCancel: () => {
         // Double-Esc: abort a running `!` shell command, then the live turn.
+        // The cancel also invalidates any pending force token (the guard
+        // state may change while the turn is being torn down).
+        guardToken = undefined
         localShellController?.abort()
         liveAgent?.cancel({ kind: 'user' })
       },
@@ -1089,18 +1139,17 @@ export function apply(ctx: Context, config: Config): void {
         }
         void ensureSession().then(async () => {
           if (liveAgent === undefined) return
-          const verdict = await guardSend()
-          if (verdict === 'blocked') {
+          const verdict = await guardSend('save', text)
+          if (verdict.kind === 'blocked') {
             app.setEditorText(text)
-            app.notify(GUARD_BLOCKED_NOTIFY, 'error')
+            app.notify(verdict.reason === 'removed'
+              ? GUARD_REMOVED_NOTIFY
+              : verdict.reason === 'tail-mismatch'
+                ? GUARD_TAIL_MISMATCH_NOTIFY('save')
+                : GUARD_BLOCKED_NOTIFY('save'), 'error')
             return
           }
-          if (verdict === 'blocked-removed') {
-            app.setEditorText(text)
-            app.notify(GUARD_REMOVED_NOTIFY, 'error')
-            return
-          }
-          const forced = verdict === 'forced'
+          const forced = verdict.kind === 'forced'
           if (forced) {
             app.notify(GUARD_FORCED_NOTIFY, 'error')
           }
@@ -1516,8 +1565,13 @@ export function apply(ctx: Context, config: Config): void {
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.
       if (event.type === 'turn/start') {
+        // Turn boundaries invalidate any pending force token: the guard
+        // state must reflect the file at the NEXT submission, not the one
+        // blocked before the turn ran.
+        guardToken = undefined
         app.setWorking(true)
       } else if (event.type === 'turn/end') {
+        guardToken = undefined
         app.setWorking(false)
         paintNow()
         refreshStatus()

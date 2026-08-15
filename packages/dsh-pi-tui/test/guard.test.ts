@@ -1,20 +1,40 @@
 /**
  * Headless tests for the cross-process divergence guard: stat gating,
- * divergence latching, unreadable logs, and unavailable deployments.
+ * divergence latching, unreadable logs, unavailable deployments, tail
+ * identity comparison, and the one-time force token.
  * @module @xmoon76/dsh-pi-tui/guard.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { checkDivergence, freshGuardState, type GuardPersistenceLike, type GuardSessionLike, type GuardStatLike } from '../src/guard.ts'
+import {
+  checkDivergence,
+  draftFingerprint,
+  forceTokenAllows,
+  freshGuardState,
+  mintForceToken,
+  type GuardAction,
+  type GuardForceToken,
+  type GuardPersistenceLike,
+  type GuardSessionLike,
+  type GuardStatLike,
+} from '../src/guard.ts'
 
-/** A fake persistence with a controllable readFrom and read counter. */
+/** A fake persistence with a controllable readFrom and read counter. The
+ * committed log holds `events` well-formed events; `tail` replaces the last
+ * one (a same-count rewrite by another writer). */
 function fakePersistence(options: {
   locate?: { kind: string; path: string } | undefined
   events?: number
+  tail?: unknown
   throwRead?: Error | undefined
-}): GuardPersistenceLike & { reads: number; events: number } {
-  const state = { reads: 0, events: options.events ?? 0 }
+}): GuardPersistenceLike & { reads: number; events: number; tail: unknown } {
+  const state = { reads: 0, events: options.events ?? 0, tail: options.tail }
+  const build = (): unknown[] => {
+    const log: unknown[] = Array.from({ length: state.events }, (_, i) => ({ seq: i, type: 'user/message', time: 0, data: { text: `event-${i}` } }))
+    if (state.tail !== undefined && log.length > 0) log[log.length - 1] = state.tail
+    return log
+  }
   return {
     get reads() {
       return state.reads
@@ -25,11 +45,17 @@ function fakePersistence(options: {
     set events(value) {
       state.events = value
     },
+    get tail() {
+      return state.tail
+    },
+    set tail(value) {
+      state.tail = value
+    },
     locate: () => options.locate,
     readFrom: async () => {
       state.reads += 1
       if (options.throwRead !== undefined) throw options.throwRead
-      return { events: Array.from({ length: state.events }, (_, i) => ({ seq: i })) }
+      return { events: build() }
     },
   }
 }
@@ -55,6 +81,15 @@ function fakeStat(): { stat: GuardStatLike; set: (size: number, mtimeMs: number)
 
 function session(memoryEvents: number): GuardSessionLike {
   return { id: 'session-test', header: { cwd: '/work' }, events: Array.from({ length: memoryEvents }) }
+}
+
+/** A session whose memory events mirror the fake file's well-formed shape. */
+function sessionWithEvents(count: number): GuardSessionLike {
+  return {
+    id: 'session-test',
+    header: { cwd: '/work' },
+    events: Array.from({ length: count }, (_, i) => ({ seq: i, type: 'user/message', time: 0, data: { text: `event-${i}` } })),
+  }
 }
 
 const ARTIFACT = { kind: 'jsonl', path: '/s/session.jsonl.zstd' }
@@ -182,4 +217,140 @@ test('removed recovers when the file reappears and reads clean', async () => {
   stat.set(200, 2)
   const recovered = await checkDivergence(persistence, session(1), stat.stat, state)
   assert.equal(recovered.kind, 'ok')
+})
+
+// --- tail identity comparison (same count, different tail) ---
+
+const OTHER_TAIL = { seq: 4, type: 'user/message', time: 0, data: { text: 'written-by-another-process' } }
+
+test('same event count but a different tail reports tail-mismatch', async () => {
+  const persistence = fakePersistence({ locate: ARTIFACT, events: 5, tail: OTHER_TAIL })
+  const stat = fakeStat()
+  const state = freshGuardState()
+  const first = await checkDivergence(persistence, sessionWithEvents(5), stat.stat, state)
+  assert.equal(first.kind, 'tail-mismatch')
+  if (first.kind === 'tail-mismatch') {
+    assert.equal(first.fileEvents, 5)
+    assert.equal(first.memoryEvents, 5)
+    assert.ok(first.fileTail.startsWith('4:user/message:'), `fileTail shape: ${first.fileTail}`)
+    assert.ok(first.memoryTail.startsWith('4:user/message:'), `memoryTail shape: ${first.memoryTail}`)
+    assert.notEqual(first.fileTail, first.memoryTail)
+    // The tail identities must not leak the event content.
+    assert.ok(!first.fileTail.includes('another-process'), `fileTail leaked content: ${first.fileTail}`)
+    assert.ok(!first.memoryTail.includes('event-4'), `memoryTail leaked content: ${first.memoryTail}`)
+  }
+  // Latched: unchanged file keeps reporting tail-mismatch without a re-read.
+  const second = await checkDivergence(persistence, sessionWithEvents(5), stat.stat, state)
+  assert.equal(second.kind, 'tail-mismatch')
+  assert.equal(persistence.reads, 1)
+  // The external rewrite is undone: the file's tail matches memory again.
+  persistence.tail = undefined
+  stat.set(200, 2)
+  assert.equal((await checkDivergence(persistence, sessionWithEvents(5), stat.stat, state)).kind, 'ok')
+})
+
+test('same count and matching tail stays ok', async () => {
+  const persistence = fakePersistence({ locate: ARTIFACT, events: 5 })
+  const stat = fakeStat()
+  const outcome = await checkDivergence(persistence, sessionWithEvents(5), stat.stat, freshGuardState())
+  assert.equal(outcome.kind, 'ok')
+})
+
+test('own write-behind (file behind memory) with matching prefix tail stays ok', async () => {
+  const persistence = fakePersistence({ locate: ARTIFACT, events: 3 })
+  const stat = fakeStat()
+  const outcome = await checkDivergence(persistence, sessionWithEvents(5), stat.stat, freshGuardState())
+  assert.equal(outcome.kind, 'ok')
+})
+
+test('file behind memory with a DIFFERENT prefix tail reports tail-mismatch', async () => {
+  const persistence = fakePersistence({ locate: ARTIFACT, events: 3, tail: OTHER_TAIL })
+  const stat = fakeStat()
+  const outcome = await checkDivergence(persistence, sessionWithEvents(5), stat.stat, freshGuardState())
+  assert.equal(outcome.kind, 'tail-mismatch')
+})
+
+// --- one-time force token ---
+
+function makeToken(overrides: Partial<{ sessionId: string; revision: string; action: GuardAction; draft: string }> = {}): GuardForceToken {
+  return mintForceToken({
+    sessionId: overrides.sessionId ?? 'session-test',
+    revision: overrides.revision ?? '100:1',
+    action: overrides.action ?? 'submit',
+    draftFingerprint: draftFingerprint(overrides.draft ?? 'hello'),
+  })
+}
+
+function candidate(overrides: Partial<{ sessionId: string; revision: string; action: GuardAction; draft: string }> = {}): {
+  sessionId: string
+  revision: string
+  action: GuardAction
+  draftFingerprint: string
+} {
+  return {
+    sessionId: overrides.sessionId ?? 'session-test',
+    revision: overrides.revision ?? '100:1',
+    action: overrides.action ?? 'submit',
+    draftFingerprint: draftFingerprint(overrides.draft ?? 'hello'),
+  }
+}
+
+/** The runner's force-or-block loop, exactly as index.ts composes it. */
+function runGuardFlow(): { send: (action: GuardAction, draft: string) => 'blocked' | 'forced' } {
+  let token: GuardForceToken | undefined
+  return {
+    send: (action, draft) => {
+      const c = candidate({ action, draft })
+      if (forceTokenAllows(token, c)) {
+        token = undefined
+        return 'forced'
+      }
+      token = mintForceToken(c)
+      return 'blocked'
+    },
+  }
+}
+
+test('blocked → identical second action forces → token consumed (third blocks again)', () => {
+  const flow = runGuardFlow()
+  assert.equal(flow.send('submit', 'hello'), 'blocked')
+  assert.equal(flow.send('submit', 'hello'), 'forced')
+  // The token was consumed: no free pass for a third identical send.
+  assert.equal(flow.send('submit', 'hello'), 'blocked')
+  assert.equal(flow.send('submit', 'hello'), 'forced')
+})
+
+test('a submit token cannot force a Ctrl+S save, and vice versa', () => {
+  assert.equal(forceTokenAllows(makeToken({ action: 'submit' }), candidate({ action: 'save' })), false)
+  assert.equal(forceTokenAllows(makeToken({ action: 'save' }), candidate({ action: 'submit' })), false)
+  assert.equal(forceTokenAllows(makeToken({ action: 'save' }), candidate({ action: 'save' })), true)
+})
+
+test('an edited draft invalidates the token (fingerprint mismatch)', () => {
+  const token = makeToken({ draft: 'hello' })
+  assert.equal(forceTokenAllows(token, candidate({ draft: 'hello' })), true)
+  assert.equal(forceTokenAllows(token, candidate({ draft: 'hello world' })), false)
+})
+
+test('a changed file revision invalidates the token', () => {
+  const token = makeToken({ revision: '100:1' })
+  assert.equal(forceTokenAllows(token, candidate({ revision: '100:1' })), true)
+  assert.equal(forceTokenAllows(token, candidate({ revision: '120:2' })), false)
+})
+
+test('a different session invalidates the token', () => {
+  const token = makeToken({ sessionId: 'session-a' })
+  assert.equal(forceTokenAllows(token, candidate({ sessionId: 'session-b' })), false)
+})
+
+test('an undefined token never forces', () => {
+  assert.equal(forceTokenAllows(undefined, candidate()), false)
+})
+
+test('draft fingerprints are stable, differ per draft, and do not contain the draft', () => {
+  const a = draftFingerprint('hello')
+  assert.equal(draftFingerprint('hello'), a)
+  assert.notEqual(draftFingerprint('hello world'), a)
+  assert.ok(!a.includes('hello'))
+  assert.match(a, /^[0-9a-f]{16}$/)
 })

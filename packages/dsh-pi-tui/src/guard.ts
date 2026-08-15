@@ -18,8 +18,18 @@
  * The guard is deliberately narrow and structural (like `sessions.ts`): it
  * declares only the `sessionPersistence` methods it uses, so it never drags
  * the dsh type graph into the bundle.
+ *
+ * Force override: a blocked submission mints a ONE-TIME token binding the
+ * session, the file revision observed at block time, the write action
+ * (`submit` Enter vs `save` Ctrl+S) and a fingerprint of the draft. A second
+ * operation only bypasses the guard when every binding still matches; the
+ * token is consumed by the force and by every event that could invalidate it
+ * (new revision observed, session switch, turn boundaries, editor edits —
+ * the latter through the fingerprint, which changes with the draft).
  * @module @xmoon76/dsh-pi-tui/guard
  */
+
+import { createHash } from 'node:crypto'
 
 /** The live-session surface the guard compares against the file. */
 export interface GuardSessionLike {
@@ -46,18 +56,22 @@ export interface GuardStatLike {
  * the last check; `diverged` latches the bad state so an unchanged file keeps
  * blocking until it changes again and reads clean; `fileEvents` remembers the
  * last observed committed count for stable reporting; `error` latches an
- * unreadable-log diagnosis.
+ * unreadable-log diagnosis. `tailMismatch` latches the same-count/different-
+ * tail divergence kind, with the last observed tail identities for reporting.
  */
 export interface GuardState {
   revision: string
   diverged: boolean
+  tailMismatch: boolean
   fileEvents: number
+  fileTail: string
+  memoryTail: string
   error: string | undefined
 }
 
 /** Fresh guard state: forces one real read on the first check. */
 export function freshGuardState(): GuardState {
-  return { revision: '', diverged: false, fileEvents: 0, error: undefined }
+  return { revision: '', diverged: false, tailMismatch: false, fileEvents: 0, fileTail: '', memoryTail: '', error: undefined }
 }
 
 export type GuardOutcome =
@@ -65,12 +79,102 @@ export type GuardOutcome =
   | { kind: 'ok'; revision: string; fileEvents?: number }
   /** The file has more committed events than this process's memory. */
   | { kind: 'diverged'; revision: string; fileEvents: number; memoryEvents: number }
+  /**
+   * The file has the same or fewer committed events than memory, but its
+   * tail event does not match the memory event at the same index — the log
+   * was rewritten by another writer (count alone cannot see this).
+   */
+  | {
+      kind: 'tail-mismatch'
+      revision: string
+      fileEvents: number
+      memoryEvents: number
+      fileTail: string
+      memoryTail: string
+    }
   /** The file was observed earlier in this process but has since disappeared. */
   | { kind: 'removed'; revision: string }
   /** The committed prefix cannot be read (corrupt or mid-write). */
   | { kind: 'unreadable'; revision: string; error: string }
   /** The guard cannot run for this deployment/session; do not block. */
   | { kind: 'unavailable'; revision: string; reason: 'no-persistence' | 'no-artifact' }
+
+/** The two guardable write actions: Enter submit and Ctrl+S save/steer. */
+export type GuardAction = 'submit' | 'save'
+
+/**
+ * One-time force-override token. Minted when a submission is blocked; a
+ * later operation may force only when session id, file revision, action and
+ * draft fingerprint ALL match, and the token is consumed by the force.
+ */
+export interface GuardForceToken {
+  sessionId: string
+  revision: string
+  action: GuardAction
+  draftFingerprint: string
+}
+
+/**
+ * Lightweight stable fingerprint of a draft, for in-process consistency
+ * checks only (never persisted, never logged, never compared across
+ * processes). sha256 truncated to 16 hex chars is plenty for a collision
+ * between two different drafts of the same user in the same process.
+ */
+export function draftFingerprint(draft: string): string {
+  return createHash('sha256').update(draft, 'utf8').digest('hex').slice(0, 16)
+}
+
+/**
+ * Whether a candidate second operation may consume the token: same session,
+ * same observed file revision, same action, same draft fingerprint. Any
+ * difference (edited draft, Ctrl+S vs Enter swap, session switch, file
+ * changed again) invalidates the token.
+ */
+export function forceTokenAllows(
+  token: GuardForceToken | undefined,
+  candidate: {
+    sessionId: string
+    revision: string
+    action: GuardAction
+    draftFingerprint: string
+  },
+): token is GuardForceToken {
+  return token !== undefined
+    && token.sessionId === candidate.sessionId
+    && token.revision === candidate.revision
+    && token.action === candidate.action
+    && token.draftFingerprint === candidate.draftFingerprint
+}
+
+/** Mint a fresh one-time force token for a blocked submission. */
+export function mintForceToken(params: {
+  sessionId: string
+  revision: string
+  action: GuardAction
+  draftFingerprint: string
+}): GuardForceToken {
+  return { ...params }
+}
+
+/**
+ * A stable, content-free identity for one event's tail position:
+ * `seq:type:hash-of-data`. The hash is one-way and only ever used for
+ * equality comparison, so no prompt/API-key content escapes into
+ * diagnostics. Returns undefined when the event is not a well-formed
+ * session event (then the caller skips the tail check).
+ */
+function tailIdentity(event: unknown): string | undefined {
+  if (typeof event !== 'object' || event === null) return undefined
+  const candidate = event as { seq?: unknown; type?: unknown; data?: unknown }
+  if (typeof candidate.seq !== 'number' || typeof candidate.type !== 'string') return undefined
+  let summary = '?'
+  try {
+    summary = createHash('sha256').update(JSON.stringify(candidate.data ?? null)).digest('hex').slice(0, 12)
+  } catch {
+    // Unserializable data: the seq:type prefix still identifies the position.
+  }
+  return `${candidate.seq}:${candidate.type}:${summary}`
+}
 
 function statRevision(stat: { size: number; mtimeMs: number }): string {
   return `${stat.size}:${stat.mtimeMs}`
@@ -113,6 +217,7 @@ export async function checkDivergence(
     }
     // Anything else is unreadable.
     state.diverged = true
+    state.tailMismatch = false
     return { kind: 'unreadable', revision: state.revision, error: error instanceof Error ? error.message : String(error) }
   }
   const revision = statRevision(current)
@@ -120,18 +225,40 @@ export async function checkDivergence(
   // File untouched since the last consistent check: nothing new to learn.
   if (revision === state.revision) {
     if (!state.diverged) return { kind: 'ok', revision }
-    return state.error !== undefined
-      ? { kind: 'unreadable', revision, error: state.error }
-      : { kind: 'diverged', revision, fileEvents: state.fileEvents, memoryEvents: session.events.length }
+    if (state.error !== undefined) {
+      return { kind: 'unreadable', revision, error: state.error }
+    }
+    if (state.tailMismatch) {
+      return {
+        kind: 'tail-mismatch',
+        revision,
+        fileEvents: state.fileEvents,
+        memoryEvents: session.events.length,
+        fileTail: state.fileTail,
+        memoryTail: state.memoryTail,
+      }
+    }
+    return { kind: 'diverged', revision, fileEvents: state.fileEvents, memoryEvents: session.events.length }
   }
 
   let fileEvents: number
+  let fileTail: string | undefined
+  let memoryTail: string | undefined
   try {
     const stored = await persistence.readFrom(session.id, 0)
     fileEvents = stored.events.length
+    // Tail identity comparison (only meaningful when both sides have the
+    // event at the same index): same count but a different tail means the
+    // file was rewritten by another writer — the next append would mint the
+    // same seq as theirs and corrupt the log, exactly like a count lead.
+    if (fileEvents >= 1) fileTail = tailIdentity(stored.events[fileEvents - 1])
+    if (fileEvents >= 1 && session.events.length >= fileEvents) {
+      memoryTail = tailIdentity(session.events[fileEvents - 1])
+    }
   } catch (error) {
     state.revision = revision
     state.diverged = true
+    state.tailMismatch = false
     state.fileEvents = -1
     state.error = error instanceof Error ? error.message : String(error)
     return { kind: 'unreadable', revision, error: state.error }
@@ -143,8 +270,17 @@ export async function checkDivergence(
   state.error = undefined
   if (fileEvents > memoryEvents) {
     state.diverged = true
+    state.tailMismatch = false
     return { kind: 'diverged', revision, fileEvents, memoryEvents }
   }
+  if (fileTail !== undefined && memoryTail !== undefined && fileTail !== memoryTail) {
+    state.diverged = true
+    state.tailMismatch = true
+    state.fileTail = fileTail
+    state.memoryTail = memoryTail
+    return { kind: 'tail-mismatch', revision, fileEvents, memoryEvents, fileTail, memoryTail }
+  }
   state.diverged = false
+  state.tailMismatch = false
   return { kind: 'ok', revision, fileEvents }
 }
