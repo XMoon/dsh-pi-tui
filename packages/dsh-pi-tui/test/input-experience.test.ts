@@ -125,6 +125,27 @@ test('ctrl+g opens the external editor and restores its content', async () => {
   assert.deepEqual(submitted, ['edited: draft'], 'external editor content must replace the draft')
 })
 
+test('an external editor saving the draft unchanged does not touch the editor', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    openExternalEditor: async (draft) => draft, // the editor "saved" without changes
+  })
+  app.start()
+  vt.sendInput('draft text')
+  await viewport(vt)
+  vt.sendInput('\x07') // ctrl+g → editor round-trip returns the identical draft
+  await new Promise(resolve => setTimeout(resolve, 30))
+  // The draft is untouched and no update/repaint churn was triggered.
+  assert.equal(app.getDraft(), 'draft text', 'an unchanged save must not rewrite the draft')
+  vt.sendInput('\r')
+  await viewport(vt)
+  assert.deepEqual(submitted, ['draft text'], 'the untouched draft still submits normally')
+  app.stop()
+})
+
 test('an external editor launch failure is caught: no unhandled rejection, app restarts', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, {

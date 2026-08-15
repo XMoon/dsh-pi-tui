@@ -12,7 +12,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -79,6 +79,8 @@ import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
 import { runDetached, isCancellation } from './detached.ts'
 import { flushWithTimeout, type FlushOutcome } from './exit.ts'
+import { createBoundedOutput, formatBytes, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES } from './bounded-output.ts'
+import { parseShellWords } from './shell-words.ts'
 import {
   checkDivergence,
   draftFingerprint,
@@ -821,6 +823,9 @@ export function apply(ctx: Context, config: Config): void {
     const signal = lifecycleController.signal
     // Abort handle for the currently running `!` shell command.
     let localShellController: AbortController | undefined
+    // 0600 temp files holding FULL local-shell output (for truncated runs);
+    // removed at TUI exit (default), never on their own.
+    const shellTempFiles = new Set<string>()
     // Idempotent teardown: abort lifecycle loads, stop the TUI, close diag.
     // Shared by /exit, the effect cleanup, and the startup-failure path.
     let cleanedUp = false
@@ -829,6 +834,14 @@ export function apply(ctx: Context, config: Config): void {
       cleanedUp = true
       lifecycleController.abort()
       localShellController?.abort()
+      for (const file of shellTempFiles) {
+        try {
+          rmSync(file, { force: true })
+        } catch {
+          // Best effort.
+        }
+      }
+      shellTempFiles.clear()
       app?.stop()
       diag.dispose()
     }
@@ -872,7 +885,13 @@ export function apply(ctx: Context, config: Config): void {
       const releaseController = (): void => {
         if (localShellController?.signal === localSignal) localShellController = undefined
       }
+      // A settled latch: `error` and `close` can both fire (a spawn failure
+      // usually closes with a non-zero code), and the card must settle
+      // EXACTLY once — the first event wins.
+      let settled = false
       const settle = (result: string, status: 'ok' | 'error'): void => {
+        if (settled) return
+        settled = true
         app.updateLocalMessage(card, {
           kind: 'tool',
           turn: Number.POSITIVE_INFINITY,
@@ -909,24 +928,65 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       const child = spawn(command, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: true })
-      let stdout = ''
-      let stderr = ''
-      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      // Bounded capture: the card keeps only the TAIL (byte- and
+      // line-capped); the FULL output is streamed to a 0600 temp file so a
+      // truncated run still leaves the complete transcript available. The
+      // temp files are removed at TUI exit (cleanup below).
+      const bounded = createBoundedOutput()
+      const fullPath = join(tmpdir(), `dsh-pi-tui-shell-${process.pid}-${randomUUID()}.log`)
+      let fullFd: number | undefined
+      try {
+        fullFd = openSync(fullPath, 'w', 0o600)
+      } catch {
+        // Temp-file capture is best-effort; the bounded tail still works.
+        fullFd = undefined
+      }
+      if (fullFd !== undefined) shellTempFiles.add(fullPath)
+      const onData = (chunk: Buffer): void => {
+        bounded.append(chunk.toString())
+        if (fullFd !== undefined) {
+          try {
+            writeSync(fullFd, chunk)
+          } catch {
+            // A failed temp write must not take the run down.
+          }
+        }
+      }
+      child.stdout.on('data', onData)
+      child.stderr.on('data', onData)
       localSignal.addEventListener('abort', () => child.kill(), { once: true })
+      const closeFull = (): void => {
+        if (fullFd !== undefined) {
+          try {
+            closeSync(fullFd)
+          } catch {
+            // Best effort.
+          }
+          fullFd = undefined
+        }
+      }
       child.on('error', (error) => {
         releaseController()
+        closeFull()
         settle(`failed: ${error.message}`, 'error')
       })
       child.on('close', (code, childSignal) => {
         releaseController()
+        closeFull()
         if (localSignal.aborted) {
           settle('aborted', 'error')
           return
         }
-        const output = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n')
+        const output = bounded.tail.trim()
+        const lines: string[] = []
+        if (output !== '') lines.push(output)
+        if (bounded.truncated) {
+          lines.push(`… output truncated: kept the last ${formatBytes(SHELL_OUTPUT_CAP_BYTES)} / ${SHELL_OUTPUT_CAP_LINES} lines of ${formatBytes(bounded.totalBytes)} (${bounded.totalLines} lines)`)
+          lines.push(`full output: ${fullPath}`)
+        }
         const exit = code !== null ? `exit ${code}` : `signal ${childSignal ?? '?'}`
-        settle(output === '' ? exit : `${output}\n[${exit}]`, code === 0 ? 'ok' : 'error')
+        lines.push(`[${exit}]`)
+        settle(lines.join('\n'), code === 0 ? 'ok' : 'error')
       })
     }
     // Coalesced repaint: streaming events fold into the folder immediately
@@ -1261,17 +1321,43 @@ export function apply(ctx: Context, config: Config): void {
         }).catch(failSubmission(text))
       },
       openExternalEditor: async (draft) => {
-        const editor = process.env.VISUAL ?? process.env.EDITOR ?? 'vi'
+        // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
+        // parse with a real shell-word parser, never a plain split.
+        const words = parseShellWords(process.env.VISUAL ?? process.env.EDITOR ?? 'vi')
+        const [editor, ...editorArgs] = words
+        if (editor === undefined) throw new Error('empty editor command')
         const file = join(tmpdir(), `dsh-pi-tui-${process.pid}-${randomUUID()}.md`)
-        writeFileSync(file, draft)
+        writeFileSync(file, draft, { mode: 0o600 })
         try {
           await new Promise<void>((resolve, reject) => {
-            const child = spawn(editor, [file], { stdio: 'inherit' })
-            child.on('error', reject)
-            child.on('close', () => resolve())
+            const child = spawn(editor, [...editorArgs, file], { stdio: 'inherit' })
+            // A settled latch: `error` and `close` can both fire; the first
+            // outcome wins, exactly like the local-shell cards.
+            let settled = false
+            const finish = (error?: Error): void => {
+              if (settled) return
+              settled = true
+              if (error !== undefined) reject(error)
+              else resolve()
+            }
+            child.on('error', (error) => finish(error))
+            child.on('close', (code, childSignal) => {
+              // Only a successful editor run may produce the draft: a
+              // non-zero exit or a signal kill means the file is whatever
+              // the editor left behind, not a deliberate edit.
+              if (code === 0) {
+                finish()
+              } else if (childSignal !== null) {
+                finish(new Error(`${editor} was killed by signal ${childSignal}`))
+              } else {
+                finish(new Error(`${editor} exited with code ${code}`))
+              }
+            })
           })
+          // Read ONLY after the editor finished successfully (close, code 0).
           return readFileSync(file, 'utf8')
         } finally {
+          // Cleanup runs on EVERY path, including a failed read.
           rmSync(file, { force: true })
         }
       },

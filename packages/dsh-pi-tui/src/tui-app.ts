@@ -813,7 +813,9 @@ export class TuiApp {
     this.stop()
     try {
       const next = await open(draft)
-      if (next !== '') this.editor.setText(next)
+      // No redundant editor update when the editor saved the draft
+      // unchanged (an update would bump history/undo and repaint).
+      if (next !== '' && next !== draft) this.editor.setText(next)
     } finally {
       this.start()
     }
