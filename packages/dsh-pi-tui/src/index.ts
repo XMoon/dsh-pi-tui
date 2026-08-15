@@ -231,6 +231,41 @@ export function dangerCommand(command: string): boolean {
 }
 
 /**
+ * The dsh profile this process was launched with (the `--profile` flag),
+ * so the exit-time resume hint names the profile the TUI actually runs
+ * under. Falls back to `pi-tui` when the flag is absent (the TUI bundle
+ * cannot load without a profile, so this is defensive only).
+ * @param argv - the process argument vector.
+ * @param fallback - the default profile.
+ */
+export function runningProfile(argv: readonly string[] = process.argv, fallback = 'pi-tui'): string {
+  // Scan backwards: like commander, the LAST occurrence wins.
+  for (let i = argv.length - 1; i >= 0; i--) {
+    const arg = argv[i]!
+    if (arg.startsWith('--profile=')) return arg.slice('--profile='.length)
+    if (arg === '--profile' && i + 1 < argv.length && argv[i + 1] !== undefined && argv[i + 1] !== '') {
+      return argv[i + 1]!
+    }
+  }
+  return fallback
+}
+
+/**
+ * The interactive-quit resume hint (pi parity): `dsh --profile <p>
+ * --session <id>`, printed after the terminal restores so the user can
+ * re-enter the session later. Returns undefined when there is no session
+ * to resume (deferred start never created one).
+ * @param profile - the running profile ({@link runningProfile}).
+ * @param sessionId - the live session id.
+ * @returns the resume command line, or undefined without a session.
+ */
+export function resumeCommand(profile: string, sessionId: string): string | undefined {
+  const id = sessionId.trim()
+  if (id === '') return undefined
+  return `dsh --profile ${profile} --session ${id}`
+}
+
+/**
  * The active goal badge text from the session log, or undefined. The latest
  * `goal/change` wins; a clear or completed goal hides the badge.
  * @param events - the session log.
@@ -1010,6 +1045,12 @@ export function apply(ctx: Context, config: Config): void {
           diag.info('exit', { code: 0 })
           diag.dispose()
           app.stop()
+          // pi parity: after the terminal restores, print how to re-enter
+          // this session (skipped when the deferred start never made one).
+          const resume = resumeCommand(runningProfile(), liveAgent?.session.id ?? '')
+          if (resume !== undefined) {
+            process.stdout.write(`\n${color.textDim('To resume this session:')} ${resume}\n`)
+          }
           exit(0)
         })()
       },
