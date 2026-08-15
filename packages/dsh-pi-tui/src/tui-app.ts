@@ -44,11 +44,13 @@ import {
 } from '@xmoon76/pi-tui'
 import {
   detectThemeFromBackground,
+  detectThemeFromColorFgBg,
   editorTheme,
   markdownTheme,
   selectListTheme,
   settingsListTheme,
   setTheme,
+  themeOptOut,
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
@@ -2256,13 +2258,21 @@ export class TuiApp {
   }
 
   /**
-   * Query the terminal background (OSC 11) and apply the matching palette.
-   * A terminal that never answers leaves the current theme untouched.
+   * Query the terminal background (OSC 11) and apply the matching palette,
+   * with the kimi detection chain: colour-opt-out environments (NO_COLOR /
+   * FORCE_COLOR=0 / CI) stay dark without querying; a terminal that never
+   * answers falls back to COLORFGBG (VT100/xterm convention); a terminal
+   * with neither leaves the current theme untouched.
    */
   async autoDetectTheme(): Promise<void> {
+    if (themeOptOut()) return
     const rgb = await this.tui.queryTerminalBackgroundColor({ timeoutMs: 800 })
-    if (rgb === undefined) return
-    this.applyTheme(detectThemeFromBackground(rgb))
+    if (rgb !== undefined) {
+      this.applyTheme(detectThemeFromBackground(rgb))
+      return
+    }
+    const fromEnv = detectThemeFromColorFgBg()
+    if (fromEnv !== undefined) this.applyTheme(fromEnv)
   }
 
   /**

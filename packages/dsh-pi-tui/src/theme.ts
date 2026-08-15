@@ -33,12 +33,26 @@ export interface ColorPalette {
   textMuted: string
   /** Borders: panes, editor border. */
   border: string
+  /** Focus / attention border (approval panel). */
+  borderFocus: string
   /** Success: ✓ marks, completed states. */
   success: string
   /** Warning. */
   warning: string
   /** Error. */
   error: string
+  /** Diff: added lines. */
+  diffAdded: string
+  /** Diff: removed lines. */
+  diffRemoved: string
+  /** Diff: added lines — intra-line changed words (bold). */
+  diffAddedStrong: string
+  /** Diff: removed lines — intra-line changed words (bold). */
+  diffRemovedStrong: string
+  /** Diff: line-number gutter. */
+  diffGutter: string
+  /** Diff: meta / hunk headers. */
+  diffMeta: string
   /** User-message role colour. */
   roleUser: string
   /** Shell-mode accent (reserved for `!` shell mode). */
@@ -54,9 +68,16 @@ export const darkColors: ColorPalette = {
   textDim: '#888888',
   textMuted: '#6B6B6B',
   border: '#5A5A5A',
+  borderFocus: '#E8A838',
   success: '#4EC87E',
   warning: '#E8A838',
   error: '#E85454',
+  diffAdded: '#4EC87E',
+  diffRemoved: '#E85454',
+  diffAddedStrong: '#7AD99B',
+  diffRemovedStrong: '#F08585',
+  diffGutter: '#6B6B6B',
+  diffMeta: '#888888',
   roleUser: '#FFCB6B',
   shellMode: '#BD93F9',
 }
@@ -70,9 +91,16 @@ export const lightColors: ColorPalette = {
   textDim: '#454545',
   textMuted: '#5F5F5F',
   border: '#737373',
+  borderFocus: '#92660A',
   success: '#0E7A38',
   warning: '#92660A',
   error: '#B91C1C',
+  diffAdded: '#0E7A38',
+  diffRemoved: '#B91C1C',
+  diffAddedStrong: '#0E7A38',
+  diffRemovedStrong: '#B91C1C',
+  diffGutter: '#737373',
+  diffMeta: '#5F5F5F',
   roleUser: '#9A4A00',
   shellMode: '#7C3AED',
 }
@@ -135,7 +163,10 @@ const COLOR_FORMAT = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?$/
 /** The token names a custom theme may override. */
 const PALETTE_KEYS: readonly (keyof ColorPalette)[] = [
   'primary', 'accent', 'text', 'textStrong', 'textDim', 'textMuted', 'border',
-  'success', 'warning', 'error', 'roleUser', 'shellMode',
+  'borderFocus', 'success', 'warning', 'error',
+  'diffAdded', 'diffRemoved', 'diffAddedStrong', 'diffRemovedStrong',
+  'diffGutter', 'diffMeta',
+  'roleUser', 'shellMode',
 ]
 
 /**
@@ -188,6 +219,37 @@ export function detectThemeFromBackground(rgb: { r: number; g: number; b: number
   return luminance >= 0.5 ? 'light' : 'dark'
 }
 
+/**
+ * Parse the COLORFGBG env var (VT100/xterm convention: `fg;bg`, sometimes
+ * `fg;default;bg`) into a palette family. The LAST token is the background
+ * ANSI 16-color index; 0–6 and 8 are dark, everything else (7, 9–15) light
+ * (kimi's parseColorFgBg rule).
+ * @param value - the raw COLORFGBG value; defaults to the environment.
+ * @returns the palette family, or undefined when unset/unparsable.
+ */
+export function detectThemeFromColorFgBg(value: string | undefined = process.env.COLORFGBG): 'dark' | 'light' | undefined {
+  if (value === undefined || value === '') return undefined
+  const bgRaw = value.split(';').at(-1)
+  if (bgRaw === undefined) return undefined
+  const bg = Number.parseInt(bgRaw, 10)
+  if (!Number.isInteger(bg)) return undefined
+  const darkBackgrounds = new Set([0, 1, 2, 3, 4, 5, 6, 8])
+  return darkBackgrounds.has(bg) ? 'dark' : 'light'
+}
+
+/**
+ * Whether the environment opts out of colour (NO_COLOR, FORCE_COLOR=0, CI):
+ * auto-detection then stays on the dark palette without querying the
+ * terminal (kimi detect.ts parity).
+ */
+export function themeOptOut(): boolean {
+  const env = process.env
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== '') return true
+  if (env.FORCE_COLOR === '0') return true
+  if (env.CI !== undefined && env.CI !== '' && env.CI !== '0') return true
+  return false
+}
+
 const chalk = new Chalk({ level: 3 })
 const hex = (token: string): InstanceType<typeof Chalk> => chalk.hex(currentPalette[token as keyof ColorPalette] ?? currentPalette.text)
 
@@ -200,9 +262,16 @@ export const color = {
   textDim: (text: string) => hex('textDim')(text),
   textMuted: (text: string) => hex('textMuted')(text),
   border: (text: string) => hex('border')(text),
+  borderFocus: (text: string) => hex('borderFocus')(text),
   success: (text: string) => hex('success')(text),
   warning: (text: string) => hex('warning')(text),
   error: (text: string) => hex('error')(text),
+  diffAdded: (text: string) => hex('diffAdded')(text),
+  diffRemoved: (text: string) => hex('diffRemoved')(text),
+  diffAddedStrong: (text: string) => chalk.bold.hex(currentPalette.diffAddedStrong)(text),
+  diffRemovedStrong: (text: string) => chalk.bold.hex(currentPalette.diffRemovedStrong)(text),
+  diffGutter: (text: string) => hex('diffGutter')(text),
+  diffMeta: (text: string) => hex('diffMeta')(text),
   roleUser: (text: string) => hex('roleUser')(text),
   shellMode: (text: string) => hex('shellMode')(text),
   /** Plain italics (kimi thinking parity). */

@@ -29,13 +29,13 @@ export function isDiffResult(name: string, result: string): boolean {
  * @returns the colorized line (unchanged when not diff content).
  */
 export function renderDiffLine(line: string): string {
-  if (line.startsWith('+') && !line.startsWith('+++')) return color.success(line)
-  if (line.startsWith('-') && !line.startsWith('---')) return color.error(line)
+  if (line.startsWith('+') && !line.startsWith('+++')) return color.diffAdded(line)
+  if (line.startsWith('-') && !line.startsWith('---')) return color.diffRemoved(line)
   if (
     line.startsWith('@@') || line.startsWith('diff ') || line.startsWith('index ')
     || line.startsWith('---') || line.startsWith('+++')
   ) {
-    return color.textDim(line)
+    return color.diffMeta(line)
   }
   return line
 }
@@ -173,9 +173,9 @@ function buildDiffClusters(diffLines: readonly DiffLine[], contextLines: number)
 
 /** One diff body row: dim line-number gutter plus the colored/plain code. */
 function formatDiffRow(line: DiffLine): string {
-  const gutter = color.textDim(`${String(line.lineNum).padStart(4)} `)
-  if (line.kind === 'add') return gutter + color.success(`+ ${line.code}`)
-  if (line.kind === 'delete') return gutter + color.error(`- ${line.code}`)
+  const gutter = color.diffGutter(`${String(line.lineNum).padStart(4)} `)
+  if (line.kind === 'add') return gutter + color.diffAdded(`+ ${line.code}`)
+  if (line.kind === 'delete') return gutter + color.diffRemoved(`- ${line.code}`)
   return gutter + `  ${line.code}`
 }
 
@@ -220,8 +220,8 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
     const { clusters, changedCount, addedCount, removedCount } = buildDiffClusters(diffLines, contextLines)
 
     let header = ''
-    if (addedCount > 0) header += color.success(`+${addedCount} `)
-    if (removedCount > 0) header += color.error(`-${removedCount} `)
+    if (addedCount > 0) header += color.diffAdded(`+${addedCount} `)
+    if (removedCount > 0) header += color.diffRemoved(`-${removedCount} `)
     header += relativizeToCwd(hunk.path, cwd)
     out.push(header)
     if (clusters.length === 0) continue
@@ -242,7 +242,7 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
             truncated = true
             break
           }
-          out.push(color.textMuted(`     … ${gap} unchanged line${gap > 1 ? 's' : ''} …`))
+          out.push(color.diffMeta(`     … ${gap} unchanged line${gap > 1 ? 's' : ''} …`))
           body++
         }
       }
@@ -266,7 +266,7 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
       const hidden = changedCount - shownChanges
       if (hidden > 0) {
         const hint = options.expandHint ?? 'click to expand'
-        out.push(color.textMuted(
+        out.push(color.diffMeta(
           `     … ${hidden} more change${hidden > 1 ? 's' : ''} hidden (${hint})`,
         ))
       }
