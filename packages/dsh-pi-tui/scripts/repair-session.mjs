@@ -33,9 +33,11 @@
  * the owning package), then `$DSH_HOME`/`DSH_DIR`.
  */
 
-import { copyFileSync, existsSync, openSync, fsyncSync, closeSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { copyFileSync, existsSync, openSync, fsyncSync, closeSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
@@ -150,10 +152,28 @@ function readArtifact(path, compression) {
 }
 
 /**
- * Write one artifact back: backup first (durable — fsynced before the
- * original is touched), then atomic tmp+rename (0600 like the harness).
+ * Validate one artifact FILE with the same checks the reader performs:
+ * frame layout (healthy) and event contiguity. Returns the issue message,
+ * or undefined when the file is fully readable.
  */
-function writeArtifact(path, compression, text) {
+function verifyArtifactFile(path, compression, decodeStorageRecord) {
+  const { text, layout } = readArtifact(path, compression)
+  if (layout.status !== 'healthy') return layout.issue
+  const { issue } = scanEvents(text, decodeStorageRecord)
+  return issue?.message
+}
+
+/**
+ * Write one artifact back SAFELY: durable fsynced backup first, then a
+ * UNIQUE tmp file (0600, fsynced), VERIFIED with the reader's own checks
+ * BEFORE it becomes the active file, then an atomic rename over the target
+ * (with a best-effort parent-dir fsync). Any failure — backup, tmp write,
+ * verification, rename — deletes the tmp and leaves the original target
+ * untouched: a verification failure can never damage the active log, and
+ * the CLI's post-rename verify is no longer the only gate.
+ * @returns the backup path.
+ */
+function writeArtifact(path, compression, text, decodeStorageRecord) {
   const backup = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
   try {
     copyFileSync(path, backup)
@@ -168,15 +188,45 @@ function writeArtifact(path, compression, text) {
   } catch (error) {
     throw new Error(`backup failed (${error instanceof Error ? error.message : String(error)}); refusing to write`)
   }
-  const tmp = `${path}.repair-tmp-${process.pid}`
+  // A random suffix keeps concurrent repairs and stale PIDs from colliding.
+  const tmp = `${path}.repair-tmp-${process.pid}-${randomUUID()}`
   const bytes = compression === 'none' ? Buffer.from(text, 'utf8') : compressLog(text, zstdCompressSync)
+  let fd
   try {
-    writeFileSync(tmp, bytes, { mode: 0o600 })
+    fd = openSync(tmp, 'w', 0o600)
+    writeFileSync(fd, bytes)
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = undefined
+    // VERIFY THE TMP BEFORE IT BECOMES THE ACTIVE FILE: the original
+    // target stays in place when the bytes are not readable.
+    const verifyIssue = verifyArtifactFile(tmp, compression, decodeStorageRecord)
+    if (verifyIssue !== undefined) {
+      throw new Error(`verification failed before replace: ${verifyIssue}`)
+    }
     renameSync(tmp, path)
-  } catch (error) {
+    // Persist the rename itself (best effort: some platforms cannot fsync
+    // directories, and the tmp+rename is already atomic without it).
     try {
-      // Restore the backup so a failed write never leaves a half file.
-      copyFileSync(backup, path)
+      const dirFd = openSync(dirname(path), 'r')
+      try {
+        fsyncSync(dirFd)
+      } finally {
+        closeSync(dirFd)
+      }
+    } catch {
+      // Best effort.
+    }
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {
+        // Best effort.
+      }
+    }
+    try {
+      rmSync(tmp, { force: true })
     } catch {
       // Best effort.
     }
@@ -258,11 +308,12 @@ function printAmbiguity(id, plan, events) {
   console.log(`session ${id}: ${plan.message}`)
   for (const entry of plan.ambiguous) {
     const frame = entry.frame >= 0 ? `, frame ${entry.frame}` : ''
-    console.log(`  seq ${entry.seq} referenced via ${entry.key} by event ${entry.eventIndex} (line ${entry.line}${frame})`)
+    const conflict = entry.sameFrameConflict === true ? ' (same-frame conflict)' : ''
+    console.log(`  seq ${entry.seq} referenced via ${entry.key} by event ${entry.eventIndex} (line ${entry.line}${frame})${conflict}`)
     console.log(`    candidates: ${entry.candidates.map(index => `event ${index} (seq ${events[index].seq})`).join(', ')}`)
   }
   console.log('  strategies (--duplicate-reference): first = bind to the first occurrence; last = bind to the last;')
-  console.log('  segment = bind to an occurrence in the same flush frame, else first. Risk: a wrong binding')
+  console.log('  segment = bind to the UNIQUE occurrence in the same flush frame, else first. Risk: a wrong binding')
   console.log('  rewrites cross-references to the other writer\'s event — review the candidates before choosing.')
 }
 
@@ -349,11 +400,12 @@ function main() {
   }
 
   const output = encodeLog(header, plan === undefined ? events : plan.events)
-  const backup = writeArtifact(artifact.path, artifact.compression, output)
+  const backup = writeArtifact(artifact.path, artifact.compression, output, decodeStorageRecord)
   console.log(`  backup: ${backup}`)
   console.log(`  wrote: ${artifact.path}`)
 
-  // Verify with the same checks the reader performs: frame layout AND event contiguity.
+  // Final confirmation on the ACTIVE path (the tmp was already verified
+  // before the rename; this re-checks the same bytes in place).
   const verifyArtifact = readArtifact(artifact.path, artifact.compression)
   const verifyEvents = scanEvents(verifyArtifact.text, decodeStorageRecord)
   if (verifyArtifact.layout.status !== 'healthy' || verifyEvents.issue !== undefined) {
@@ -363,9 +415,14 @@ function main() {
   console.log(`  verify: valid frame layout, contiguous, ${verifyEvents.events.length} event(s)`)
 }
 
-try {
-  main()
-} catch (error) {
-  console.error(`repair-session: ${error instanceof Error ? error.message : String(error)}`)
-  process.exit(1)
+const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+if (isMain) {
+  try {
+    main()
+  } catch (error) {
+    console.error(`repair-session: ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  }
 }
+
+export { writeArtifact, verifyArtifactFile }

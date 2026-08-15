@@ -23,6 +23,7 @@ import {
   scanZstdFrames,
   scanZstdLayout,
 } from '../scripts/repair-core.mjs'
+import { writeArtifact, verifyArtifactFile } from '../scripts/repair-session.mjs'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -426,6 +427,59 @@ test('CLI refuses a torn tail with no salvageable prefix (damage at byte 0)', ()
   assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
 })
 
+test('writeArtifact verifies the tmp BEFORE the replace: a failing verify leaves the target untouched', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+  const path = join(dir, 'session.jsonl')
+  const original = `${HEADER}\n`
+  writeFileSync(path, original)
+  const before = readFileSync(path)
+  // The row parses as JSON but the row DECODER throws: scanEvents reports
+  // the row as unparsable, verification fails, and the repair must refuse
+  // to touch the active file.
+  const badDecoder = () => { throw new Error('boom') }
+  assert.throws(
+    () => writeArtifact(path, 'none', `${HEADER}\n{"type":"user/message","seq":0,"time":1,"data":{}}\n`, badDecoder),
+    /verification failed before replace/,
+  )
+  assert.deepEqual(readFileSync(path), before, 'the target must be untouched when verification fails')
+  const leftovers = readdirSync(dir).filter(name => name.includes('repair-tmp'))
+  assert.deepEqual(leftovers, [], 'the tmp file must be removed on failure')
+})
+
+test('writeArtifact replaces atomically on success: 0600 target, backup kept, no tmp leftovers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+  const path = join(dir, 'session.jsonl')
+  writeFileSync(path, 'old content\n')
+  const good = `${HEADER}\n{"type":"user/message","seq":0,"time":1,"data":{}}\n`
+  const backup = writeArtifact(path, 'none', good, () => [])
+  assert.equal(readFileSync(path, 'utf8'), good, 'the target holds the repaired bytes')
+  assert.equal(statSync(path).mode & 0o777, 0o600, 'the target stays 0600')
+  assert.equal(existsSync(backup), true, 'the durable backup exists')
+  assert.equal(existsSync(path + '.bak'), false, 'backup has a timestamp suffix')
+  const leftovers = readdirSync(dir).filter(name => name.includes('repair-tmp'))
+  assert.deepEqual(leftovers, [], 'no tmp leftovers on success')
+  // The tmp bytes were verified before the rename: the same file passes
+  // verifyArtifactFile after the fact.
+  assert.equal(verifyArtifactFile(path, 'none', () => []), undefined)
+})
+
+test('writeArtifact verifies the zstd layout of the tmp before the replace', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+  const path = join(dir, 'session.jsonl.zstd')
+  const original = compressLog(encodeLog(HEADER, buildEvents([0, 1])), zstdCompressSync)
+  writeFileSync(path, original)
+  const before = readFileSync(path)
+  // A "repaired" text that is valid JSONL but must be re-framed correctly:
+  // writeArtifact compresses and the tmp verification must pass only for a
+  // healthy dsh layout.
+  const good = encodeLog(HEADER, buildEvents([0, 1]))
+  const backup = writeArtifact(path, 'zstd', good, decodeStorageRecord)
+  assert.equal(existsSync(backup), true)
+  const layout = scanFrameLayout(readFileSync(path), zstdDecompressSync)
+  assert.equal(layout.status, 'healthy', 'the replaced artifact must be a healthy multi-frame log')
+  assert.equal(verifyArtifactFile(path, 'zstd', decodeStorageRecord), undefined)
+})
+
 test('CLI repair result passes the real dsh reader on a duplicate-seq log', () => {
   const stub = makeDshStub()
   const events = buildEvents([0, 1, 2, 2, 3])
@@ -547,6 +601,67 @@ test('segment strategy without frame info degrades to first', () => {
   assert.equal(plan.events[4].data.sourceEventSeqs[0], 2)
 })
 
+/** Build a multi-frame artifact: frame 0 holds the header line plus the
+ * first `frameRows` array; every further array is one flush frame's JSONL
+ * rows (events, header-excluded), so tests can stage any writer-segment
+ * layout. The arrays must cover ALL event rows in order. */
+function artifactWithFrames(events, frameRows) {
+  const lines = [HEADER, ...events.map(event => JSON.stringify(event))]
+  const buffer = Buffer.concat([
+    zstdCompressSync(Buffer.from(`${[lines[0], ...frameRows[0]].join('\n')}\n`, 'utf8')),
+    ...frameRows.slice(1).map(rows => zstdCompressSync(Buffer.from(`${rows.join('\n')}\n`, 'utf8'))),
+  ])
+  const ranges = frameLineRanges(buffer, zstdDecompressSync)
+  const { issue, events: scanned } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord, ranges)
+  return { buffer, issue, events: scanned }
+}
+
+test('segment with a seq repeated across three frames resolves to the same-frame occurrence, never the global last', () => {
+  // Three occurrences of seq 2: event 2 (frame 0), event 3 (frame 1),
+  // event 4 (frame 2). Event 3 (frame 1) references seq 2 — the UNIQUE
+  // same-frame candidate is event 3 itself, but the old→new map's last
+  // value for seq 2 is event 4's renumbered index. The strategy must bind
+  // to the same-frame occurrence (3), not the global last (4).
+  const events = buildEvents([0, 1, 2, 2, 2])
+  events[3].data = { sourceEventSeqs: [2] }
+  const rows = events.map(event => JSON.stringify(event))
+  const { issue, events: scanned } = artifactWithFrames(events, [
+    rows.slice(0, 3), // frame 0: header + events 0..2
+    rows.slice(3, 4), // frame 1: event 3
+    rows.slice(4, 5), // frame 2: event 4
+  ])
+  assert.equal(scanned[2].frame, 0)
+  assert.equal(scanned[3].frame, 1, 'the referencing occurrence sits in frame 1')
+  assert.equal(scanned[4].frame, 2, 'the later occurrence sits in frame 2')
+  const plan = repairEvents(scanned, issue, { duplicateReference: 'segment' })
+  assert.equal(plan.action, 'renumber')
+  assert.equal(plan.events[3].data.sourceEventSeqs[0], 3,
+    'segment must bind to the same-frame occurrence (3), not the global last (4)')
+})
+
+test('segment refuses when two occurrences share the referencing frame', () => {
+  // Two occurrences of seq 2 inside ONE flush frame (frame 1) with the
+  // referencer: a same-frame binding cannot be unique, so the repair must
+  // REFUSE instead of guessing the last occurrence like the old map.get
+  // path did.
+  const events = buildEvents([0, 1, 2, 2, 2])
+  events[4].data = { sourceEventSeqs: [2] }
+  const rows = events.map(event => JSON.stringify(event))
+  const { issue, events: scanned } = artifactWithFrames(events, [
+    rows.slice(0, 3),       // frame 0: header + events 0..2
+    rows.slice(3, 5),       // frame 1: events 3..4 (two occurrences + referencer)
+  ])
+  assert.equal(scanned[3].frame, 1)
+  assert.equal(scanned[4].frame, 1, 'both collisions sit in frame 1 with the referencer')
+  const plan = repairEvents(scanned, issue, { duplicateReference: 'segment' })
+  assert.equal(plan.action, 'refuse', 'a non-unique same-frame binding must refuse')
+  assert.equal(plan.refsChanged, 0)
+  assert.ok(plan.ambiguous.length >= 1, 'the report must name the conflict')
+  assert.equal(plan.ambiguous[0].sameFrameConflict, true)
+  assert.ok(plan.message.includes('segment binding must be unique'), plan.message)
+  assert.equal(plan.events[4].data.sourceEventSeqs[0], 2, 'the reference must stay untouched on refusal')
+})
+
 test('explicit strategies are stable and repeatable', () => {
   const build = () => {
     const events = buildEvents([0, 1, 2, 2, 3])
@@ -593,4 +708,25 @@ test('CLI --duplicate-reference=first applies the strategy and prints the plan',
   const rescan = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(rescan.status, 0)
   assert.match(rescan.stdout, /nothing to repair/)
+})
+
+test('CLI --duplicate-reference=segment refuses a same-frame conflict and reports it', () => {
+  // compressLog produces ONE content frame: every event shares the writer
+  // segment, so both occurrences of seq 2 sit in the referencing event's
+  // frame — the segment binding cannot be unique and the CLI must refuse
+  // with the same-frame conflict report, never guess.
+  const stub = makeDshStub()
+  const events = buildEvents([0, 1, 2, 2, 3])
+  events[4].data = { sourceEventSeqs: [2] }
+  const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
+  const home = makeFakeHome(buffer)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const before = readFileSync(path)
+  const result = runCli(['sess-1', '--yes', '--duplicate-reference', 'segment', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.match(result.stdout, /segment binding must be unique/)
+  assert.match(result.stdout, /same-frame conflict/)
+  assert.match(result.stdout, /no write was performed/)
+  assert.deepEqual(readFileSync(path), before, 'a same-frame conflict must never be rewritten')
+  assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
 })

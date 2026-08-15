@@ -372,40 +372,70 @@ function eachSeqRef(event, visit) {
  * strategy for values that occur more than once:
  * - `first` — bind to the FIRST occurrence (the reference stays unchanged);
  * - `last` — bind to the LAST occurrence (remapped through the map);
- * - `segment` — bind to an occurrence in the same writer segment (flush
- *   frame) as the referencing event when one exists, else fall back to
- *   `first`; without frame info this degrades to `first`.
+ * - `segment` — bind to the UNIQUE occurrence in the same writer segment
+ *   (flush frame) as the referencing event. A single same-frame candidate
+ *   resolves to that occurrence's index (after renumbering `seq === index`),
+ *   NEVER to the global last occurrence (`map`), which may live in a
+ *   different frame when the seq repeats three or more times across frames.
+ *   Multiple same-frame candidates are ambiguous — the caller refuses.
+ *   No same-frame candidate falls back to `first` (documented); without
+ *   frame metadata the strategy degrades to `first`.
  * @param value - the referenced (old) seq.
  * @param strategy - the duplicate-reference strategy, or undefined.
  * @param fromEvent - the referencing event (for the segment strategy).
  * @param map - old→new mapping (last occurrence wins per value).
  * @param occurrences - seq value → array of event indices.
  * @param events - the scanned events (for occurrence frame lookup).
- * @returns the new seq to write, or undefined to leave the reference as-is.
+ * @returns `{ kind: 'resolved', seq }` — write this seq;
+ *          `{ kind: 'keep' }` — leave the reference unchanged (first);
+ *          `{ kind: 'ambiguous', candidates }` — same-frame binding not
+ *          unique (only possible under `segment`).
  */
 function resolveReference(value, strategy, fromEvent, map, occurrences, events) {
-  if (strategy === 'last') return map.get(value)
+  if (strategy === 'last') return { kind: 'resolved', seq: map.get(value) }
   if (strategy === 'segment' && fromEvent.frame >= 0) {
     const candidates = occurrences.get(value) ?? []
     const sameFrame = candidates.filter(index => events[index]?.frame === fromEvent.frame)
-    if (sameFrame.length > 0) return map.get(value)
+    if (sameFrame.length === 1) {
+      // The occurrence index IS the new seq after renumbering.
+      return { kind: 'resolved', seq: sameFrame[0] }
+    }
+    if (sameFrame.length > 1) return { kind: 'ambiguous', candidates: sameFrame }
+    // No same-frame occurrence: fall back to first (documented).
+    return { kind: 'keep' }
   }
   // 'first' and the segment fallback: the first occurrence keeps its seq.
-  return undefined
+  return { kind: 'keep' }
 }
 
 /**
  * Remap seq cross-references inside one event's `data` through the
  * old→new mapping. Only values `>= threshold` are remapped: everything
  * below the first collision is a pre-collision event whose seq is
- * unchanged. Returns the number of remapped references.
+ * unchanged. Returns the number of remapped references and — for the
+ * `segment` strategy — the first same-frame-ambiguous reference, if any
+ * (pre-checked by repairEvents, so this is defensive).
  */
-function remapReferences(event, threshold, map, occurrences, strategy, events) {
+function remapReferences(event, eventIndex, threshold, map, occurrences, strategy, events) {
   let changed = 0
+  let ambiguous = undefined
   eachSeqRef(event, (container, key, index, ref) => {
     let next
     if (strategy !== undefined && (occurrences.get(ref)?.length ?? 0) > 1) {
-      next = resolveReference(ref, strategy, event, map, occurrences, events)
+      const outcome = resolveReference(ref, strategy, event, map, occurrences, events)
+      if (outcome.kind === 'ambiguous') {
+        ambiguous ??= {
+          seq: ref,
+          key,
+          eventIndex,
+          line: event.line,
+          frame: event.frame,
+          candidates: outcome.candidates,
+          sameFrameConflict: true,
+        }
+        return
+      }
+      next = outcome.kind === 'resolved' ? outcome.seq : undefined
     } else if (ref >= threshold && map.has(ref)) {
       next = map.get(ref)
     }
@@ -415,7 +445,7 @@ function remapReferences(event, threshold, map, occurrences, strategy, events) {
       changed += 1
     }
   })
-  return changed
+  return { changed, ambiguous }
 }
 
 /** The duplicate-seq reference resolution strategies (CLI: --duplicate-reference). */
@@ -490,7 +520,34 @@ export function repairEvents(events, issue, options = {}) {
       }
     })
   }
-  if (ambiguous.length > 0 && options.duplicateReference === undefined) {
+  // The `segment` strategy adds a stricter rule: the same-frame binding must
+  // be UNIQUE. A seq that repeats three or more times can place several
+  // occurrences in the referencing event's own frame — those references are
+  // ambiguous even with a strategy, and the repair refuses rather than
+  // picking one silently.
+  if (options.duplicateReference === 'segment') {
+    for (let index = issue.index; index < events.length; index += 1) {
+      const event = events[index]
+      if (!(event.frame >= 0)) continue
+      eachSeqRef(event, (container, key, position, ref) => {
+        if (!duplicated.has(ref)) return
+        const sameFrame = (occurrences.get(ref) ?? []).filter(candidate => events[candidate]?.frame === event.frame)
+        if (sameFrame.length > 1) {
+          ambiguous.push({
+            seq: ref,
+            key,
+            eventIndex: index,
+            line: event.line,
+            frame: event.frame,
+            candidates: sameFrame,
+            sameFrameConflict: true,
+          })
+        }
+      })
+    }
+  }
+  const frameConflicts = ambiguous.filter(entry => entry.sameFrameConflict === true)
+  if (options.duplicateReference === undefined && ambiguous.length > 0) {
     return {
       events,
       action: 'refuse',
@@ -500,6 +557,18 @@ export function repairEvents(events, issue, options = {}) {
       refsChanged: 0,
       ambiguous,
       message: `${ambiguous.length} ambiguous seq reference(s) to duplicated value(s); refusing automatic repair (pass --duplicate-reference=first|last|segment)`,
+    }
+  }
+  if (options.duplicateReference === 'segment' && frameConflicts.length > 0) {
+    return {
+      events,
+      action: 'refuse',
+      fromIndex: issue.index,
+      delta: issue.index - issue.got,
+      changed: 0,
+      refsChanged: 0,
+      ambiguous: frameConflicts,
+      message: `${frameConflicts.length} ambiguous seq reference(s): multiple candidate occurrences in the referencing event's frame; refusing (a segment binding must be unique)`,
     }
   }
   // Duplicate seq: renumber every event from the first collision onward so
@@ -517,7 +586,26 @@ export function repairEvents(events, issue, options = {}) {
     // The duplicate strategy only applies to post-collision events: a
     // pre-collision reference points backward and can never mean a
     // post-collision event, so it must never be remapped by a strategy.
-    refsChanged += remapReferences(event, issue.index, map, occurrences, index >= issue.index ? options.duplicateReference : undefined, events)
+    const remapped = remapReferences(event, index, issue.index, map, occurrences, index >= issue.index ? options.duplicateReference : undefined, events)
+    refsChanged += remapped.changed
+    if (remapped.ambiguous !== undefined) {
+      // Defensive: the pre-check above should have caught every same-frame
+      // conflict already; if one slips through, refuse rather than write.
+      ambiguous.push(remapped.ambiguous)
+    }
+  }
+  if (ambiguous.some(entry => entry.sameFrameConflict === true)) {
+    const frameConflicts = ambiguous.filter(entry => entry.sameFrameConflict === true)
+    return {
+      events: repaired,
+      action: 'refuse',
+      fromIndex: issue.index,
+      delta: issue.index - issue.got,
+      changed: 0,
+      refsChanged: 0,
+      ambiguous: frameConflicts,
+      message: `${frameConflicts.length} ambiguous seq reference(s): multiple candidate occurrences in the referencing event's frame; refusing (a segment binding must be unique)`,
+    }
   }
   return {
     events: repaired,
