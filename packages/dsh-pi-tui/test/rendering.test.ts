@@ -498,7 +498,7 @@ test('live theme switch recolors every surface while the content stays identical
   app.setStatus({ model: 'p/m', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: 'llm 1s' })
   app.setPlanMode(true)
   app.setTodoSummary([{ content: 'fix the theme', status: 'in_progress' }])
-  app.setTasks([{ label: 'review', status: 'running' }])
+  app.setTasks([{ id: 'bash-1', label: 'review', status: 'running', kind: 'bash' }])
   app.setQueueItems([{ id: 'q1', text: 'hello', mode: 'followup' }])
   app.setWorking(true)
   await vt.waitForRender()
