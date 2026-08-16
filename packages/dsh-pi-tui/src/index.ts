@@ -85,6 +85,7 @@ import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
+import { formatShellSubmitText, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
 import {
@@ -976,20 +977,22 @@ export function apply(ctx: Context, config: Config): void {
       }
     })
 
-    /** Run a `!` command locally; the output renders as a local card. */
+    /**
+     * Run a `!` shell command. `!` (context mode) runs the command and then
+     * submits the completed command+output to the session as an ordinary
+     * guarded user message (kimi parity: the model sees both on the next
+     * turn; the result wakes a turn but is never steered into a running
+     * one); `!!` (local mode) runs purely off-session — the card is the
+     * only record (pi's excluded-from-context escape hatch).
+     */
     const runLocalShell = (text: string): void => {
-      // `!!` includes the command in the model context; `!` stays local.
-      const includeInContext = text.startsWith('!!')
-      const command = text.replace(/^!+/, '').trim()
+      const includeInContext = shellModeOf(text) === 'context'
+      const command = shellCommandOf(text)
       if (command === '') return
-      if (includeInContext) {
-        if (liveAgent === undefined) return
-        liveAgent.followup(createUserMessage({
-          content: [{ type: 'text', text: command }],
-          source: { kind: 'user' },
-        }))
-        return
-      }
+      // The generation the run STARTED under: a session switch while the
+      // command runs must not post the output into the new session (the
+      // switch already cleared the card; the notify explains what happened).
+      const generationAtRun = sessionGeneration
       localShellController?.abort()
       localShellController = new AbortController()
       const localSignal = localShellController.signal
@@ -1008,6 +1011,62 @@ export function apply(ctx: Context, config: Config): void {
       const releaseController = (): void => {
         if (localShellController?.signal === localSignal) localShellController = undefined
       }
+      /**
+       * Submit the completed run to the session (context mode only): guard
+       * → re-validate → followup. Blocked keeps the card (the output stays
+       * visible; the identical `!` re-run forces through its one-time guard
+       * token); accepted clears the settled card — the transcript's user
+       * row becomes the record. An owned workflow: the outcome drives the
+       * notify and the card — runOwned (AGENTS.md), never a bare void.
+       */
+      const submitResult = (result: string): void => {
+        // A session switch while the command ran: the output must not be
+        // posted into a session the user has left (the switch already
+        // cleared the card; the notify explains what happened). The
+        // guard-window switch (between the guard read and the followup) is
+        // caught by submitShellResult's own re-validation.
+        if (sessionGeneration !== generationAtRun) {
+          app.notify('the session changed while the command ran — the output was not submitted', 'error')
+          return
+        }
+        const submitted = formatShellSubmitText(command, result)
+        runOwned('shell submit', () => submitShellResult({
+          currentAgent: () => liveAgent as unknown as ShellSubmitAgentLike | undefined,
+          currentGeneration: () => sessionGeneration,
+          guard: {
+            run: async (identity) => {
+              const verdict = await guardSend('submit', identity)
+              if (verdict.kind === 'blocked') {
+                return { kind: 'blocked', reason: verdict.reason }
+              }
+              return { kind: verdict.kind === 'forced' ? 'forced' : 'ok' }
+            },
+          },
+          notify: (message, kind) => app.notify(message, kind),
+          blockedNotice: (reason) => reason === 'removed'
+            ? `This session's log was removed externally — the command output was not submitted (it stays on the card). Run the same ! command again to force`
+            : reason === 'tail-mismatch'
+              ? 'This session file was rewritten by another process (same event count, different content) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)'
+              : reason === 'unreadable'
+                ? "This session's log could not be read (locked or corrupt) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)"
+                : 'This session may be open in another dsh process (TUI/web) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)',
+          forcedNotice: () => GUARD_FORCED_NOTIFY,
+          staleNotice: () => 'the session changed while the submission was being checked — the output was not submitted',
+          createMessage: (text) => createUserMessage({
+            content: [{ type: 'text', text }],
+            source: { kind: 'user' },
+          }),
+          onSubmitted: () => app.clearSettledLocalMessages(),
+        }, submitted), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onError: (error) => {
+            // The submission failed before the guard ran: keep the card
+            // (the output is not lost) and surface the reason.
+            app.notify(`shell submit failed: ${safeErrorMessage(error)}`, 'error')
+          },
+        })
+      }
       // A settled latch: `error` and `close` can both fire (a spawn failure
       // usually closes with a non-zero code), and the card must settle
       // EXACTLY once — the first event wins.
@@ -1023,6 +1082,9 @@ export function apply(ctx: Context, config: Config): void {
           result,
           status,
         })
+        // Context mode submits every settled outcome except an abort (the
+        // run was cancelled; the partial output is noise).
+        if (includeInContext && !localSignal.aborted) submitResult(result)
       }
       const shell = ctx.get('shell')
       if (shell !== undefined) {
@@ -1424,6 +1486,9 @@ export function apply(ctx: Context, config: Config): void {
         app.notify('viewing a subagent — Esc returns before steering', 'info')
         return
       }
+      // Same dismissal rule as submissions: settled local cards are a live
+      // view, not a record (completed `!`/`!!` runs).
+      app.clearSettledLocalMessages()
       // Ctrl+S: send everything pending (kimi parity: the whole queue plus
       // a non-empty draft rides along). With queued messages the entire
       // queue is steered at once — the queue pane above the editor is the
@@ -1503,6 +1568,11 @@ export function apply(ctx: Context, config: Config): void {
         app.notify('viewing a subagent — Esc returns before submitting', 'info')
         return
       }
+      // A fresh submission dismisses settled local cards (completed `!`/`!!`
+      // runs): the card is a live view, not a record — the transcript row
+      // (context runs) or the next input takes over. Running cards survive
+      // so a live stream is never dismissed by a concurrent submit.
+      app.clearSettledLocalMessages()
       // Persist the (newest-first) input history for the LIVE session's
       // cwd (the editor already recorded the line through TuiApp's submit
       // hook). A failed settings write is user-recoverable: notify instead
@@ -1518,12 +1588,15 @@ export function apply(ctx: Context, config: Config): void {
           })
         }
       }
-      // `!` commands run locally through the shell (or into context for
-      // `!!`) without a model turn; everything else dispatches as before.
-      // A local `!` needs no session at all; every other submission creates
-      // the session first (the FIRST user message is the deferred trigger).
+      // `!` runs the command and submits the completed command+output to
+      // the session (kimi parity); `!!` runs purely locally with no session
+      // write (pi's excluded-from-context escape hatch). A local `!!` needs
+      // no session at all; the contextual `!` creates the session first
+      // (the FIRST user message is the deferred trigger).
       if (text.startsWith('!')) {
         if (text.startsWith('!!')) {
+          runLocalShell(text)
+        } else if (shellCommandOf(text) !== '') {
           // An owned workflow: the session creation failure restores the
           // draft (failSubmission) — runOwned (AGENTS.md), never a bare
           // void.
@@ -1532,8 +1605,6 @@ export function apply(ctx: Context, config: Config): void {
             sessionId: () => liveAgent?.session.id,
             onError: failSubmission(text),
           })
-        } else {
-          runLocalShell(text)
         }
         return
       }

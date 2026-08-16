@@ -17,7 +17,7 @@ fields.
 | Diagnostics | `src/diag.ts` | file/stderr sinks |
 | Model menu | `src/model-menu.ts` | per-open disposed latch + AbortController |
 | Commands | `src/commands.ts` | command registry, skill disposers (generation-checked) |
-| The runner | `src/index.ts` (`apply`) | everything else: lifecycle controller + cleanup, session generation, guard token, callArgs, search state, local shell, external editor, event firehose |
+| The runner | `src/index.ts` (`apply`) | everything else: lifecycle controller + cleanup, session generation, guard token, callArgs, search state, local shell (`!` submits its command+output to the session via `shell-context.ts`; `!!` stays local), external editor, event firehose |
 
 ## Target controllers (extraction order, one responsibility per commit)
 
@@ -32,7 +32,8 @@ fields.
    guard wiring, event subscription. Depends on `guard.ts` (already pure) and
    the generation accessor (already on `TuiCommandRunner`).
 3. **InputDispatcher** — editor submit, shortcuts (Ctrl+S/Alt+↑/Esc), local
-   shell routing. Depends on `bounded-output.ts` / `shell-words.ts` (already
+   shell routing (`!` context vs `!!` local lives in `shell-context.ts`,
+   already pure). Depends on `bounded-output.ts` / `shell-words.ts` (already
    pure) and `TuiApp`'s event hooks.
 4. **OverlayController** — settings/model/question/approval/search mutual
    exclusion and stacking. `TuiApp` currently owns overlay handles; the
