@@ -209,6 +209,69 @@ test('a forced guard skips the info notice and still sends', async () => {
   assert.ok(!notices.some(note => note.includes('steering')), 'no info notice when forced')
 })
 
+test('onlyDraft steers the draft alone: explicitly queued messages stay queued', async () => {
+  // Busy-Enter steer (web busyEnter parity): Enter steers the DRAFT only —
+  // a message the user queued explicitly (Ctrl+Enter or a notice) must not
+  // be swept into the turn, because already-steered input cannot be pulled
+  // back.
+  const agent = fakeAgent(['queued'])
+  agent.status = 'running'
+  const outcome = await steerAll(
+    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
+    'draft text',
+    { onlyDraft: true },
+  )
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(agent.steered.map(m => m.text), ['draft text'], 'the draft must be steered')
+  assert.deepEqual(agent.state.nextTurn.map(m => m.id), ['queued'], 'the queued message must stay queued')
+  assert.deepEqual(agent.followed, [], 'no followup')
+})
+
+test('onlyDraft while idle falls back to a followup', async () => {
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  const outcome = await steerAll(
+    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
+    'draft text',
+    { onlyDraft: true },
+  )
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(agent.followed.map(m => m.text), ['draft text'], 'an idle agent takes a followup')
+  assert.deepEqual(agent.steered, [], 'nothing steered')
+})
+
+test('onlyDraft survives queue splices during the guard (the queue is irrelevant)', async () => {
+  const agent = fakeAgent(['a'])
+  agent.status = 'running'
+  const guard = deferredGuard()
+  const pending = steerAll(
+    makeDeps({ agent: () => agent, guard: guard.promise }),
+    'draft',
+    { onlyDraft: true },
+  )
+  // A queue splice while the guard reads the file: onlyDraft must NOT abort
+  // stale — it never claimed the queue, so the queue changing is fine.
+  agent.state.nextTurn = [...agent.state.nextTurn, { id: 'b' }]
+  guard.resolve({ kind: 'ok' })
+  assert.equal(await pending, 'ok')
+  assert.deepEqual(agent.steered.map(m => m.text), ['draft'], 'the draft is steered')
+  assert.deepEqual(agent.state.nextTurn.map(m => m.id), ['a', 'b'], 'the queue is untouched')
+})
+
+test('onlyDraft with a forced guard still reports the force', async () => {
+  const agent = fakeAgent([])
+  agent.status = 'running'
+  const notices: string[] = []
+  const outcome = await steerAll(
+    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'forced' }), notices }),
+    'draft',
+    { onlyDraft: true },
+  )
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(agent.steered.map(m => m.text), ['draft'])
+  assert.ok(notices.some(note => note === 'error: forced'), notices.join(' | '))
+})
+
 test('sessionUnchanged requires the same agent object and generation', () => {
   const a = { id: 'a' }
   assert.equal(sessionUnchanged({ agent: a, generation: 1 }, a, 1), true)

@@ -10,9 +10,9 @@ import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import { parseReadEnvelopes, toolPresenterFrom } from '../src/present.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, BulletedComponent } from '../src/tui-app.ts'
 import { WorkingIndicator } from '../src/working.ts'
-import type { Terminal } from '@xmoon76/pi-tui'
+import { Text, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 // CI/tooling environments export NO_COLOR, FORCE_COLOR=0 and CI=true, which
@@ -858,9 +858,112 @@ test('terminal cards show the output and the exit code', async () => {
   }])
   const view = await viewport(vt)
   assert.ok(view.includes('Bash echo hi [ok]'), `terminal header missing:\n${view}`)
+  // The command row survives expansion (kimi ShellExecution parity): the
+  // expanded body leads with `$ cmd` ABOVE the output.
+  const commandAt = view.indexOf('$ echo hi')
+  assert.ok(commandAt >= 0, `command row missing in the expanded card:\n${view}`)
+  assert.ok(view.indexOf('hello') > commandAt, `command must render above the output:\n${view}`)
   assert.ok(view.includes('hello'), `output line missing:\n${view}`)
   assert.ok(view.includes('world'), `output line missing:\n${view}`)
   assert.ok(view.includes('[exit 0]'), `exit pill missing:\n${view}`)
+  app.stop()
+})
+
+test('expanded bash cards keep the command row without a presenter', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"ls -la /tmp && echo done"}',
+    result: 'file1\nfile2\ndone', status: 'ok', resultBlocks: [],
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('$ ls -la /tmp && echo done'), `folded command preview missing:\n${view}`)
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"ls -la /tmp && echo done"}',
+    result: 'file1\nfile2\ndone', status: 'ok', resultBlocks: [],
+  }])
+  view = await viewport(vt)
+  const commandAt = view.indexOf('$ ls -la /tmp && echo done')
+  assert.ok(commandAt >= 0, `expanded card lost the command:\n${view}`)
+  assert.ok(view.indexOf('file1') > commandAt, `command must render above the output:\n${view}`)
+  assert.ok(view.includes('file2') && view.includes('done'), `output missing:\n${view}`)
+})
+
+test('running bash cards surface the command row when expanded', async () => {
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"pnpm test"}',
+    result: '', status: 'running', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('$ pnpm test'), `running card lost the command:\n${view}`)
+})
+
+test('running bash cards use the presenter command and never double-render it', async () => {
+  // The presenter path (callView.card === 'terminal') takes the command
+  // from the tool's own presentCall title; the command row must render
+  // exactly ONCE (the branch returns before the args-derived fallback).
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'terminal', title: 'echo hi' }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"echo hi"}',
+    result: '', status: 'running', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  const matches = view.match(/\$ echo hi/g) ?? []
+  assert.equal(matches.length, 1, `command row must render exactly once:\n${view}`)
+  app.stop()
+})
+
+test('pwsh cards render the command under a PS> prompt', async () => {
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'pwsh',
+    args: '{"command":"Get-ChildItem"}',
+    result: 'file1', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('PS> Get-ChildItem'), `pwsh prompt missing:\n${view}`)
+  assert.ok(!view.includes('$ Get-ChildItem'), `bash prompt leaked into a pwsh card:\n${view}`)
+  assert.ok(view.includes('file1'), `output missing:\n${view}`)
+})
+
+test('generic presenter cards keep the command row above the raw input', async () => {
+  // A presenter returning 'generic' with rawInput for a bash call must
+  // still lead with the `$ command` row (a no-op for non-terminal tools).
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'generic', title: 'Sleep 5 seconds', rawInput: { command: 'sleep 5' } }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"sleep 5"}',
+    result: '', status: 'running', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  const commandAt = view.indexOf('$ sleep 5')
+  assert.ok(commandAt >= 0, `command row missing:\n${view}`)
+  // The presenter rawInput renders pretty-printed (JSON.stringify(…, null, 2)).
+  const rawAt = view.indexOf('"command": "sleep 5"')
+  assert.ok(rawAt > commandAt, `command must render above the raw input:\n${view}`)
   app.stop()
 })
 
@@ -1153,6 +1256,53 @@ test('assistant and user messages align continuation lines under the bullet', as
   assert.ok(paraTwo > assistant, `assistant continuation missing:\n${view}`)
   assert.ok(!lines[paraTwo]!.includes('🐋'), `continuation must not repeat the bullet:\n${view}`)
   assert.ok(lines[paraTwo]!.startsWith('    '), `continuation must indent under the bullet:\n${view}`)
+})
+
+test('BulletedComponent keeps a live child with reference-stable output', () => {
+  const child = new Text('hello world', 0, 0)
+  const bullet = new BulletedComponent(child, '❯ ')
+  const first = bullet.render(40)
+  assert.equal(first[0]!.trimEnd(), '❯ hello world', `first line must lead with the bullet:\n${first}`)
+  // Same width: the SAME array reference comes back (the fork's per-frame
+  // processed-line reuse keys on reference identity — a rebuilt array every
+  // frame would degrade divergence 5 for every assistant/user line).
+  assert.equal(bullet.render(40), first, 'same-width renders must reuse the same array')
+  // A narrower width re-renders the live child: wrapped continuation lines
+  // indent under the bullet instead of repeating it.
+  const narrow = bullet.render(10)
+  assert.notEqual(narrow, first, 'a width change must rebuild the output')
+  assert.ok(narrow[0]!.startsWith('❯ '), `first line must keep the bullet:\n${narrow}`)
+  assert.ok(narrow.slice(1).every(line => line.startsWith('  ')), `continuation must indent:\n${narrow}`)
+})
+
+test('assistant markdown tables reflow on terminal resize', async () => {
+  const { vt, app } = startApp(80)
+  const table = [
+    '| name | description |',
+    '| --- | --- |',
+    '| alpha | a fairly long description that should wrap when the window is narrow |',
+    '| beta | another longish description with bold and **inline code** tokens |',
+    '| gamma | short |',
+  ].join('\n')
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: table }])
+  let view = await viewport(vt)
+  let top = view.split('\n').find(line => line.includes('┌'))
+  assert.ok(top !== undefined, `table missing at 80:\n${view}`)
+  assert.ok(top.includes('┐'), `border split across rows at 80:\n${view}`)
+  const wide = top.length
+
+  vt.resize(120, 24)
+  view = await viewport(vt)
+  top = view.split('\n').find(line => line.includes('┌'))
+  assert.ok(top !== undefined && top.includes('┐'), `border broken after widening:\n${view}`)
+  assert.ok(top.length > wide, `table must reflow wider after resize (was ${wide}, now ${top.length}):\n${view}`)
+
+  vt.resize(60, 24)
+  view = await viewport(vt)
+  top = view.split('\n').find(line => line.includes('┌'))
+  assert.ok(top !== undefined && top.includes('┐'), `border must not split into plain text after narrowing:\n${view}`)
+  assert.ok(top.length < wide, `table must reflow narrower after resize:\n${view}`)
+  assert.ok(top.length <= 60, `table must fit the terminal (${top.length} > 60):\n${view}`)
 })
 
 test('workflow runs expand into a phase-grouped member tree', async () => {

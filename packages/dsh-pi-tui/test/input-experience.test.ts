@@ -116,6 +116,51 @@ test('ctrl+s with an empty draft still fires onSteer (the runner decides)', asyn
   assert.equal(app.getDraft(), '', 'editor must stay empty after ctrl+s')
 })
 
+test('ctrl+enter fires the queue-submit chord and clears the editor', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const queued: string[] = []
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    onQueueSubmit: (text) => queued.push(text),
+  })
+  app.start()
+  vt.sendInput('queue me')
+  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
+  await viewport(vt)
+  assert.deepEqual(queued, ['queue me'], 'the chord must submit the draft in queue mode')
+  assert.deepEqual(submitted, [], 'the chord must not fire the plain submit')
+  // The editor was cleared: a follow-up Enter carries only the new text.
+  vt.sendInput('x')
+  vt.sendInput('\r')
+  await viewport(vt)
+  assert.deepEqual(submitted, ['x'], 'the chord must clear the editor')
+})
+
+test('ctrl+enter without a wired chord falls through (no draft loss)', async () => {
+  const { vt, app } = startApp()
+  vt.sendInput('keep me')
+  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter with no onQueueSubmit wired
+  const view = await viewport(vt)
+  assert.ok(view.includes('keep me'), `draft must survive without a wired chord:\n${view}`)
+  void app
+})
+
+test('ctrl+enter on an empty draft does not fire the chord (no session-creating submit)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const queued: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onQueueSubmit: (text) => queued.push(text),
+  })
+  app.start()
+  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter with an empty editor
+  await viewport(vt)
+  assert.deepEqual(queued, [], 'an empty chord must not submit an empty followup')
+})
+
 test('ctrl+g opens the external editor and restores its content', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []

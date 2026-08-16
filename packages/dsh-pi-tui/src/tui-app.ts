@@ -230,6 +230,95 @@ class Spacer implements Component {
   }
 }
 
+/**
+ * Bullet + continuation-indent wrapper that keeps its child LIVE, so a
+ * terminal resize re-renders the child at the new width instead of
+ * re-wrapping a frozen render (the 5a76526 regression: assistant/user
+ * messages were flattened to a static Text at build time, so markdown
+ * tables could never reflow and border lines wrapped as plain text on
+ * narrow windows). The bullet leads the FIRST line; wrapped continuation
+ * lines indent under it (kimi prefix+indent parity).
+ *
+ * The prefixed output keeps a REFERENCE-STABLE cache: when the child
+ * returns the same array instance (its own text+width cache hit) at the
+ * same width, the wrapper returns the same prefixed array — so the fork's
+ * per-frame processed-line reuse (fork AGENTS.md divergence 5) keeps
+ * hitting on steady frames instead of re-normalizing every line.
+ */
+export class BulletedComponent implements Component {
+  private readonly child: Component
+  private readonly prefix: string
+  private readonly prefixWidth: number
+  private readonly indent: string
+  private lastChild: string[] | undefined
+  private lastWidth = -1
+  private cached: string[] | undefined
+
+  constructor(child: Component, prefix: string) {
+    this.child = child
+    this.prefix = prefix
+    this.prefixWidth = visibleWidth(prefix)
+    this.indent = ' '.repeat(this.prefixWidth)
+  }
+
+  invalidate(): void {
+    this.child.invalidate?.()
+  }
+
+  dispose(): void {
+    this.child.dispose?.()
+  }
+
+  render(width: number): string[] {
+    const inner = Math.max(1, width - this.prefixWidth)
+    const child = this.child.render(inner)
+    if (child === this.lastChild && width === this.lastWidth && this.cached !== undefined) {
+      return this.cached
+    }
+    this.lastChild = child
+    this.lastWidth = width
+    this.cached = child.map((line, index) => (index === 0 ? this.prefix : this.indent) + line)
+    return this.cached
+  }
+}
+
+/**
+ * Longest prefix of `text` whose WRAPPED height fits `budget` rows at
+ * `width`, with an ellipsis marking a cut — the approval dialog's height
+ * budget must count wrapped rows, not raw lines, because a single long
+ * line can wrap across many display rows. Wrapped height is monotonic in
+ * the prefix length, so a binary search bounds the wrap calls. The
+ * ellipsis reserves its own row when truncating (a full last row would
+ * otherwise push it onto a new row and overflow the budget).
+ * @param text - the candidate text ('' yields '').
+ * @param width - the wrap width.
+ * @param budget - the row budget; 0 or negative yields '…' for non-empty.
+ * @returns the fitted text and whether it was truncated.
+ */
+export function capWrappedToHeight(text: string, width: number, budget: number): { text: string; truncated: boolean } {
+  if (text === '') return { text: '', truncated: false }
+  // No row budgeted: nothing can render — the caller skips the child
+  // (a single '…' row would overflow the budget it was promised).
+  if (budget <= 0) return { text: '', truncated: true }
+  const fits = (candidate: string, rows: number): boolean => wrapTextWithAnsi(candidate, width).length <= rows
+  if (fits(text, budget)) return { text, truncated: false }
+  // A single row: width-crop the text so the leading part stays readable
+  // (a bare '…' row would lose everything).
+  if (budget === 1) return { text: truncateToWidth(text, width, '…'), truncated: true }
+  // More rows: the longest prefix fitting `budget - 1` rows, with the
+  // ellipsis appended to the cut (it joins the last row when it has room,
+  // or wraps to the reserved final row — never overflows the budget).
+  const target = budget - 1
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2)
+    if (fits(text.slice(0, mid), target)) low = mid
+    else high = mid - 1
+  }
+  return { text: `${text.slice(0, low)}…`, truncated: true }
+}
+
 /** The live job-output viewer body: a title line + refreshable text panel. */
 class OutputViewerPanel implements Component {
   private readonly title: Text
@@ -291,6 +380,13 @@ export interface TuiAppEventsBase {
    * falls back to the draft alone otherwise. Optional.
    */
   onSteer?: (text: string) => void
+  /**
+   * The busy-Enter opposite chord (Ctrl+Enter): submit the draft in the
+   * QUEUE delivery mode regardless of the busyEnter preference (web
+   * busyEnter parity — the accelerated chord uses the other behavior).
+   * Optional.
+   */
+  onQueueSubmit?: (text: string) => void
   /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
   /** The transcript-search query changed (Ctrl+Shift+F opens the search). Optional. */
@@ -846,6 +942,27 @@ export class TuiApp {
       // keep the key for themselves.
       if (this.overlayHost.hasOverlayEntries) return undefined
       this.events.onDequeue?.()
+      return { consume: true }
+    }
+    if (matchesKey(data, 'ctrl+enter')) {
+      // The busy-Enter opposite chord (web busyEnter parity): Ctrl+Enter
+      // forces the QUEUE delivery mode while the agent is busy, regardless
+      // of the busyEnter preference (plain Enter then steers when the
+      // preference is 'steer'). Overlays keep the key for themselves; the
+      // editor never sees the chord — the submit mirrors a plain Enter
+      // (history + notify clear + draft clear). Without a wired
+      // onQueueSubmit the key falls through to the editor instead of
+      // dropping the draft; an EMPTY draft falls through too — plain Enter
+      // on an empty editor does not submit, and an empty chord would
+      // otherwise dispatch a session-creating empty followup.
+      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.events.onQueueSubmit === undefined) return undefined
+      const text = this.editor.getText()
+      if (text.trim() === '') return undefined
+      this.rememberInput(text)
+      this.clearNotify()
+      this.editor.setText('')
+      this.events.onQueueSubmit(text)
       return { consume: true }
     }
     if (matchesKey(data, 'escape')) {
@@ -1604,20 +1721,15 @@ export class TuiApp {
       // Terminal-prompt style: the user's line reads like a shell command.
       // The ❯ leads the FIRST line; wrapped continuation lines indent under
       // it (kimi prefix+indent parity), so multi-line input stays aligned.
-      const prefix = `${color.roleUser('❯')} `
-      const indent = ' '.repeat(visibleWidth(prefix))
-      const lines = new Text(message.text, 0, 0).render(Math.max(1, this.terminal.columns - visibleWidth(prefix)))
-      return new Text(lines.map((line, index) => (index === 0 ? prefix : indent) + line).join('\n'), 0, 0)
+      return new BulletedComponent(new Text(message.text, 0, 0), `${color.roleUser('❯')} `)
     }
     if (message.kind === 'assistant') {
       // The whale bullet leads the FIRST markdown line; wrapped continuation
       // lines indent under it (kimi prefix+indent parity), so the bullet
-      // never floats alone on its own row.
-      const prefix = `${color.primary('🐋')}  `
-      const indent = ' '.repeat(visibleWidth(prefix))
-      const lines = new Markdown(message.text, 0, 0, markdownTheme)
-        .render(Math.max(1, this.terminal.columns - visibleWidth(prefix)))
-      return new Text(lines.map((line, index) => (index === 0 ? prefix : indent) + line).join('\n'), 0, 0)
+      // never floats alone on its own row. The markdown stays a LIVE child:
+      // a terminal resize re-renders it at the new width, so tables reflow
+      // instead of re-wrapping a frozen render (the 5a76526 regression).
+      return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), `${color.primary('🐋')}  `)
     }
     if (message.kind === 'thinking') {
       const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
@@ -1754,6 +1866,37 @@ export class TuiApp {
   }
 
   /**
+   * The expanded card's terminal-command row: `$ cmd` (bash) or `PS> cmd`
+   * (pwsh) in the shell prompt token, dimmed (kimi ShellExecution parity —
+   * the folded card shows the command; the expanded body must not drop
+   * it). Multi-line commands render every line under the prompt. No-op for
+   * an empty command.
+   * @param card - the card container to fill.
+   * @param command - the command text.
+   * @param prompt - the shell prompt token (`$ ` or `PS> `).
+   */
+  private addTerminalCommandRow(card: Container, command: string, prompt: string): void {
+    if (command === '') return
+    const styledPrompt = color.shellMode(prompt)
+    const lines = command.split('\n')
+    for (const [index, line] of lines.entries()) {
+      const prefix = index === 0 ? styledPrompt : ' '.repeat(visibleWidth(styledPrompt))
+      card.addChild(new Text(`${prefix}${color.textDim(line)}`, 0, 0))
+    }
+  }
+
+  /** The bash/pwsh command from the raw args ('' when not a terminal call). */
+  private terminalCommand(name: string, argsRaw: string): string {
+    const call = parseCallPreview(name, argsRaw)
+    return call?.kind === 'bash' ? call.command : ''
+  }
+
+  /** The shell prompt token for a terminal tool (pwsh renders `PS> `). */
+  private shellPrompt(name: string): string {
+    return name === 'pwsh' ? 'PS> ' : '$ '
+  }
+
+  /**
    * Render one expanded tool card's body. When the runner wired a presenter,
    * the body follows the tool's own render intent (presentResult): a read
    * card shows numbered lines plus the relativized path and total line
@@ -1813,12 +1956,26 @@ export class TuiApp {
           this.renderDiffBody(card, callView.diffs, explicitlyExpanded)
           return
         }
+        // A terminal call (bash/pwsh) shows its command row right away (the
+        // tool's own presentCall carries it as the card title), so an
+        // expanding card never loses the command while it runs.
+        if (callView.card === 'terminal') {
+          this.addTerminalCommandRow(card, callView.title, this.shellPrompt(message.name))
+          return
+        }
         if (callView.card === 'generic' && callView.rawInput !== undefined) {
+          // Keep the command row above the presenter's raw input (a no-op
+          // for non-terminal tools, so generic cards are unchanged).
+          this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
           const raw = typeof callView.rawInput === 'string' ? callView.rawInput : JSON.stringify(callView.rawInput, null, 2)
           card.addChild(new Text(color.textDim(raw), 0, 0))
           return
         }
       }
+      // No presenter view (or no presenter-specific case): bash/pwsh still
+      // surface the command from the raw args (the folded card's preview
+      // source), so the expanded card keeps the command row in every wiring.
+      this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
       return
     }
     if (message.result === '' && (message.resultBlocks?.length ?? 0) === 0) return
@@ -1859,6 +2016,10 @@ export class TuiApp {
           return
         }
         case 'terminal': {
+          // The result view carries output + exit only; the command comes
+          // from the raw args (kimi ShellExecution parity: the command row
+          // stays visible when the card expands).
+          this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
           if (resultView.output !== undefined && resultView.output !== '') {
             for (const line of resultView.output.split('\n')) {
               card.addChild(new Text(color.textDim(line), 0, 0))
@@ -1926,6 +2087,9 @@ export class TuiApp {
         card.addChild(new Text(line, 0, 0))
       }
     } else {
+      // Bash/pwsh keep the `$ command` row above the raw output even
+      // without a presenter (the folded card's preview source).
+      this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
       card.addChild(new Text(color.textDim(message.result), 0, 0))
     }
   }
@@ -2562,21 +2726,56 @@ export class TuiApp {
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
   private renderApprovalDialog(pending: PendingApproval): void {
+    // Full terminal width (kimi dialog parity): a fixed 60-wide box on a
+    // narrow terminal left base-content slivers glued to the border (the
+    // "stray characters" report). The Box pads every row to the width, so
+    // the frame spans the whole terminal and the base stays covered.
+    const width = this.terminal.columns
+    const maxHeight = Math.max(8, Math.min(16, this.terminal.rows - 2))
+    const contentWidth = Math.max(1, width - 8)
+    // Height budget in WRAPPED rows: the dialog must NEVER lose the key
+    // hints or the bottom border to the maxHeight slice. The title and the
+    // danger banner are width-cropped so each is exactly ONE display row;
+    // the hints row wraps naturally and its WRAPPED height is counted
+    // (shrunk when the terminal is too small for it). Fixed chrome = 1
+    // title + danger + 1 blank spacer + hint rows + 2 Box paddingY
+    // (Box(1,1)) + 2 Frame borders — keep in sync with the geometry below.
+    const titleShown = truncateToWidth(`Approve ${pending.request.toolName}?`, contentWidth, '…')
+    const dangerShown = pending.request.danger === true
+      ? truncateToWidth('⚠ DANGEROUS COMMAND — confirm carefully', contentWidth, '…')
+      : ''
+    const HINTS = '[y] allow once   [n] reject   [esc/ctrl+c] cancel'
+    const hintBudget = Math.max(0, maxHeight - (1 + (dangerShown === '' ? 0 : 1) + 1 + 2 + 2))
+    const hintShown = capWrappedToHeight(HINTS, contentWidth, hintBudget).text
+    const hintWrapped = hintShown === '' ? 0 : wrapTextWithAnsi(hintShown, contentWidth).length
+    const chrome = 1 + (dangerShown === '' ? 0 : 1) + 1 + hintWrapped + 2 + 2
+    // The reason and the argument preview share what the chrome leaves:
+    // BOTH capped by their wrapped height, because a single long line can
+    // wrap across many display rows (a raw-line count under-budgets).
+    const reasonBudget = Math.max(0, maxHeight - chrome)
+    const reasonRaw = pending.request.reason ?? ''
+    const reasonShown = capWrappedToHeight(reasonRaw, contentWidth, reasonBudget).text
+    const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
+    const previewBudget = Math.max(0, maxHeight - chrome - reasonWrapped)
     const dialog = new Box(1, 1)
-    dialog.addChild(new Text(`Approve ${pending.request.toolName}?`))
-    if (pending.request.danger === true) {
-      dialog.addChild(new Text(color.error('⚠ DANGEROUS COMMAND — confirm carefully')))
+    dialog.addChild(new Text(titleShown, 1, 0))
+    if (dangerShown !== '') {
+      dialog.addChild(new Text(color.error(dangerShown), 1, 0))
     }
-    if (pending.request.arguments !== undefined && pending.request.arguments !== '') {
-      const preview = pending.request.arguments.split('\n').slice(0, 6).join('\n')
-      dialog.addChild(new Text(color.textDim(preview.length > 240 ? `${preview.slice(0, 240)}…` : preview)))
+    if (pending.request.arguments !== undefined && pending.request.arguments !== '' && previewBudget > 0) {
+      const sixLines = pending.request.arguments.split('\n').slice(0, 6).join('\n')
+      const capped = sixLines.length > 240 ? `${sixLines.slice(0, 240)}…` : sixLines
+      const previewShown = capWrappedToHeight(capped, contentWidth, previewBudget).text
+      if (previewShown !== '') {
+        dialog.addChild(new Text(color.textDim(previewShown), 1, 0))
+      }
     }
-    if (pending.request.reason !== undefined && pending.request.reason !== '') {
-      dialog.addChild(new Text(pending.request.reason))
+    if (reasonShown !== '') {
+      dialog.addChild(new Text(reasonShown, 1, 0))
     }
-    dialog.addChild(new Text(''))
-    dialog.addChild(new Text('[y] allow once   [n] reject   [esc/ctrl+c] cancel'))
-    pending.handle = this.showOverlayOnHost(new Frame(dialog), { width: 60, maxHeight: 16 })
+    dialog.addChild(new Text(' ', 1, 0))
+    dialog.addChild(new Text(hintShown, 1, 0))
+    pending.handle = this.showOverlayOnHost(new Frame(dialog), { width, maxHeight })
   }
 
   /** Route a key while a prompt is showing; every key is consumed. */
