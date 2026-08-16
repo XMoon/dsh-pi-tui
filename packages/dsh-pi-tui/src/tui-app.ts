@@ -1222,6 +1222,21 @@ export class TuiApp {
   }
 
   /**
+   * Drop SETTLED local cards (completed `!`/`!!` shell runs); running cards
+   * survive so a live stream is never dismissed by a concurrent submit.
+   * Local cards are a live view, not a record: context runs clear on submit
+   * success (the transcript's user row takes over), local-only runs on the
+   * next user submission (dispatchUserInput / steerNow).
+   */
+  clearSettledLocalMessages(): void {
+    const running = this.localMessages.filter(message => message.kind === 'tool' && message.status === 'running')
+    if (running.length === this.localMessages.length) return
+    this.localMessages.length = 0
+    this.localMessages.push(...running)
+    this.rebuildMessages()
+  }
+
+  /**
    * Toggle between regular (terminal scrollback) and fullscreen (alt screen).
    * Overlays live on the active screen, so the switch hides every mounted
    * overlay; a pending approval prompt is re-rendered on the new screen.

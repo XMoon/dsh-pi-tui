@@ -434,6 +434,35 @@ test('a settled card updates by identity, never the newest card', async () => {
   )
 })
 
+test('clearSettledLocalMessages drops settled cards and keeps running ones', async () => {
+  const { vt, app } = startApp()
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'done1', result: '[exit 0]', status: 'ok',
+  })
+  const running = app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'live2', result: '', status: 'running',
+  })
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'failed3', result: 'failed: boom', status: 'error',
+  })
+  app.clearSettledLocalMessages()
+  let view = await viewport(vt)
+  assert.ok(!view.includes('done1'), `settled ok card must clear:\n${view}`)
+  assert.ok(!view.includes('failed3'), `settled error card must clear:\n${view}`)
+  assert.ok(view.includes('live2'), `running card must survive:\n${view}`)
+  // The running card later settles; the next dismissal takes it too.
+  app.updateLocalMessage(running, {
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'live2', result: '[exit 0]', status: 'ok',
+  })
+  app.clearSettledLocalMessages()
+  view = await viewport(vt)
+  assert.ok(!view.includes('live2'), `newly settled card must clear on the next dismissal:\n${view}`)
+})
+
 test('slash-command autocomplete paints the fresh list on the keystroke frame', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })

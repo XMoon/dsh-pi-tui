@@ -188,8 +188,8 @@ a preset. All other flags are the dsh runner's own (`--session <id>`, …).
 ## Session lifecycle
 
 Opening the TUI with no `--session` creates **no session at all**: the first
-user message (text, slash command, `Ctrl+S` steer, or `!!` shell) starts it
-lazily. `--session <id>` still resumes immediately, and a local `!` command
+user message (text, slash command, `Ctrl+S` steer, or `!` shell) starts it
+lazily. `--session <id>` still resumes immediately, and a local `!!` command
 runs without needing a session.
 
 ## Verified in the P0 spike

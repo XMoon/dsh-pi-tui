@@ -23,8 +23,10 @@ FACTORY that is invoked SYNCHRONOUSLY before the helper returns:
   consumer: settings writes, theme autodetect, skill refresh.
 - `runOwned(label, () => task, { isCancellation?, onResult, onCancel, onError })`
   — result-consuming main flows: submit/steer dispatch, command execution,
-  local commands, local-shell card settle, session switch, question flows,
-  model-menu loads, external editor.
+  local commands, local-shell card settle, the `!` shell-context submit
+  (guard → re-validate → followup; a block keeps the card, an unexpected
+  error notifies), session switch, question flows, model-menu loads,
+  external editor.
 
 Why a synchronous factory: ownership actions (e.g. Ctrl+G's `stop()`) take
 effect immediately, and a synchronous throw is converted to a rejection and
