@@ -518,6 +518,30 @@ test('an approval dialog stacked over the settings panel hides it modally and re
   assert.ok(!view.includes('Approve Bash?'), `dialog survived approval:\n${view}`)
 })
 
+test('openSettings returns a closer so action-style lists can dismiss themselves', async () => {
+  const { vt, app } = startApp()
+  const close = app.openSettings(
+    [{ id: 'view', label: 'View transcript', description: 'Watch read-only', currentValue: '', values: ['✓'] }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('View transcript'), `settings list missing:\n${view}`)
+  // The action fires and the list dismisses itself — without the closer the
+  // list would stay mounted as a ghost overlay eating every later key (the
+  // /subagents trap, observed live in tmux).
+  close()
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('View transcript'), `settings overlay survived its closer:\n${view}`)
+  // Esc on the empty surface must NOT reopen or revive the closed list.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('View transcript'), `closed overlay revived:\n${view}`)
+  app.stop()
+})
+
 function diffCallArgs(): string {
   return JSON.stringify({ file_path: 'src/foo.ts', old_string: 'a\nb\nc', new_string: 'a\nB\nc' })
 }

@@ -2168,12 +2168,16 @@ export class TuiApp {
 
   /**
    * Open the settings overlay as a SettingsList. The runner supplies the
-   * items and reacts to changes/cancellation.
+   * items and reacts to changes/cancellation. Returns a CLOSER so an
+   * action-style list (e.g. /subagents' View transcript / Interrupt) can
+   * dismiss itself after the action — without it the list stays mounted as
+   * a ghost overlay that eats every later key (the /subagents trap).
    * @param items - setting rows.
    * @param onChange - called with (id, newValue) on confirm.
    * @param onCancel - called when the user closes without applying.
+   * @returns a function that closes the overlay.
    */
-  openSettings(items: SettingItem[], onChange: (id: string, value: string) => void, onCancel: () => void): void {
+  openSettings(items: SettingItem[], onChange: (id: string, value: string) => void, onCancel: () => void): () => void {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
     // so the cancel callback closes the handle captured after mounting.
     let handle: OverlayHandle | undefined
@@ -2185,6 +2189,7 @@ export class TuiApp {
       onCancel()
     }, { enableSearch: true })
     handle = this.showOverlayOnHost(new Frame(settings), { width: 72, maxHeight: 28 })
+    return () => handle?.hide()
   }
 
   /**

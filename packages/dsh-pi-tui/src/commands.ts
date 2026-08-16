@@ -964,7 +964,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         .filter(child => child.kind === 'child')
       if (children.length === 0) return { kind: 'success', text: 'no subagents for this session' }
       const labelOf = (child: (typeof children)[number]): string => child.label ?? child.id
-      app.openSettings(
+      const closeSubagents = app.openSettings(
         children.map(child => ({
           id: child.id,
           label: labelOf(child),
@@ -991,6 +991,9 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         (childId, action) => {
           const child = children.find(candidate => candidate.id === childId)
           if (child === undefined) return
+          // Action-style row: dismiss the list AFTER the action so it never
+          // stays mounted as a ghost overlay eating every later key.
+          closeSubagents()
           if (action === 'view') {
             detach('subagent view', () => runner.enterView(child.id, labelOf(child)), { notify: true })
           } else if (action === 'interrupt') {
