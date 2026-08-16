@@ -15,6 +15,20 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
 | Plugin row ids | `tui-startup`, `tui-app` | internal Loader ids, fine as-is |
 | Startup service | `tuiStartup` (`TUI_STARTUP_SERVICE`) | |
 
+## Working rules (user-enforced)
+
+- **Never push to a remote (and never force-push) without the user's explicit
+  confirmation** — commit locally only unless told otherwise.
+- **English only** for every user-facing string, comment, commit message and
+  doc — including preset description YAML and the context-injection label
+  (both crept in as Chinese once); scan `src/` and `config/` for CJK before
+  committing. i18n is deferred.
+- **No near-synonym command names.** `/session` was renamed to `/status`
+  after colliding with `/sessions`; before adding a command, check the
+  existing set and the official dsh command set for confusion risk.
+- **Reference, don't copy.** pi/kimi-code are appearance references; behavior
+  is implemented in dsh-pi-tui itself.
+
 ## Repository layout
 
 ```
@@ -48,7 +62,7 @@ packages/dsh-pi-tui/   The dsh bundle (the only published package). cordis.patch
 4. **Source exports, built artifacts.** Both packages build with tsdown (`dist/`); dsh-pi-tui bundles the vendored pi-tui fork (`deps.onlyBundle: ['@xmoon76/pi-tui']`, the kimi-code pattern) so the published tarball is self-contained. `exports` point at built files; neither `dist/` is committed — build before installing into a profile. Node 26 refuses type-stripping inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `.ts`-exporting package cannot load from a profile's node_modules.
 5. **No native prebuilds.** darwin/win32 modifier-key addons are optional; the loader returns `undefined` on other platforms without attempting a load. Revisit only if modifier detection matters on macOS/Windows.
 6. **`chalk` is a runtime dependency** of `dsh-pi-tui` (theme.ts lives in `src`, unlike pi-tui's tests-only chalk).
-7. **Single-package release model.** `@xmoon76/pi-tui` is `private: true` and never published (same as `@moonshot-ai/pi-tui` in kimi-code); `@xmoon76/dsh-pi-tui` is the only registry package and carries the fork inside its dist. Its `dependencies` therefore list pi-tui's runtime deps (`marked`, `get-east-asian-width`) directly, and `@xmoon76/pi-tui` lives in `devDependencies` (build-time only).
+7. **Single-package release model.** `@xmoon76/pi-tui` is `private: true` and never published (same as `@moonshot-ai/pi-tui` in kimi-code); `@xmoon76/dsh-pi-tui` is the only registry package and carries the fork inside its dist. Its `dependencies` therefore list pi-tui's runtime deps (`marked`, `get-east-asian-width`) directly, and `@xmoon76/pi-tui` lives in `devDependencies` (build-time only). **Every `@deepseek-ai/*` import is a `peerDependency`, never a `dependency`**: in-box packages resolve from the dsh installation itself, and a duplicate copy in the profile's `node_modules` crashes on the FIRST tool call (`Cannot read properties of undefined (reading prepare)`). After (re)installing the bundle into a profile, verify `node_modules` contains NO `@deepseek-ai` entry. Same rule for dsh context services: type them structurally (`ctx.sessionQuery`), do not add package dependencies for them.
 8. **Fix in dsh-pi-tui first; keep the fork pristine.** Anything achievable on the consumer side must be implemented in `packages/dsh-pi-tui` — every fork change is a divergence that must be re-verified on every upstream sync (the fork's AGENTS.md lists them with guarding tests). Only touch `packages/pi-tui` when the fix is impossible from the consumer. Example: the slash-command autocomplete lag (the fresh list never painted in fullscreen because the editor's render requests target the stopped main screen) is fixed by `TuiApp.routeInput` forcing a repaint of the ACTIVE screen — no fork change needed.
 
 ## Development
@@ -95,9 +109,11 @@ dsh --profile pi-tui-dev [--session <id>]
 Restoring a messed-up `pi-tui` profile: reinstall the registry package from
 the lockfile (`cd ~/.dsh/profiles/pi-tui && pnpm install --frozen-lockfile`).
 The profile's `pnpm-workspace.yaml` excludes `@xmoon76/dsh-pi-tui@0.1.x` from
-the minimum-release-age policy; if the supply-chain check still rejects the
-version, append it to `minimumReleaseAgeExclude` or pass
-`--config.minimum-release-age=0`.
+the minimum-release-age policy. Note: `minimumReleaseAgeExclude` only affects
+pnpm's RESOLUTION path — the frozen-lockfile verification path ignores it, so
+if the supply-chain check still rejects the version pass
+`--config.minimum-release-age=0` (or cleanly remove + `dsh plugin` re-add)
+instead of debugging the exclude list.
 
 Headless UI tests drive `@xterm/headless` through `packages/dsh-pi-tui/test/virtual-terminal.ts`
 (copied from the fork's `test/virtual-terminal.ts`, import path changed) — rendering
@@ -122,6 +138,31 @@ and input routing are verified without a TTY or a model connection.
 - **`imports` `#/*` alias** in the fork's package.json: fine for its internal `src` imports under tsx/Node 24+, but any future `dist` build must bundle (tsdown) rather than tsc-emit, or the alias must go.
 - **tmux `send-keys` looks like a paste to the editor**: `send-keys 'text' Enter` delivers the whole batch in a few ms; the editor's `PasteBurst` heuristic (≥8 plain chars within 8ms, Enter suppressed for 120ms) then turns Enter into a newline, so submissions silently "don't work". This is upstream design (protects against non-bracketed-paste terminals), NOT a regression — real keyboards type slower than 8ms/char. When driving the TUI from tmux, type with a pause: `send-keys 'text'`, sleep ≥0.3s, then `send-keys Enter` (full recipe: `docs/tmux-testing.md`).
 - **`setFullscreen` must refocus the editor**: a fresh `TuiAltScreen` starts with no focused component — after Ctrl+F the app-level listener still handles shortcuts but text and Enter are dropped, making the transcript look frozen. `TuiApp.setFullscreen` sets focus on the alt screen when entering and restores it on the way back; keep that when touching fullscreen (guarded by the "editor input routes to the alt screen" headless test).
+- **Cordis service access: property read without `inject` throws.** In a Cordis context, `ctx.tools` property access throws `cannot get property "tools" without inject` at runtime when the service is not in the component's `inject` list. For services that are optional or not injected, read them with `ctx.get('name')` (e.g. `ctx.get('tools')`, `ctx.get('agentPresets')`), never bare property access.
+- **dsh services are scoped by the live agent OBJECT, not `ctx`.** The tool registry and the skill catalog are keyed by the agent object: `ctx.get('tools')?.get(name, liveAgent)` and `skills.list({ cwd, scope: liveAgent })`. Passing `ctx` as scope (or omitting scope and passing only `cwd`) silently returns `undefined`/empty — the `/skill` list and edit-diff cards both broke exactly this way once.
+- **pi-tui render quirks to respect from the consumer side**: (1) an emptied pane does NOT clear its previously painted rows — `setQueueItems([])`/`setText('')` leaves old content on screen, so rebuild or hide the component instead of just repainting text; (2) the fork schedules its immediate render via `process.nextTick`, which runs BEFORE promise microtasks, so an asynchronously-resolved list paints one frame late.
+- **Terminal queries (OSC 11 theme) must go through the ACTIVE screen**: in
+  fullscreen, an OSC 11 background-color query written to the stopped main
+  screen is swallowed by the alt screen and times out (800ms), so theme
+  autodetect never lands. Same class as the routeInput fix: route queries
+  through the active screen and keep the reply listener registered on both.
+- **Esc after a submenu/panel return gets consumed**: entering a read-only
+  viewer (e.g. a subagent transcript) from a SettingsList row and pressing
+  Esc once can leave the viewer "sticky" — the panel's submenu machinery eats
+  the first Esc before the app's `onSingleEscape` fires. Give read-only
+  viewers a dedicated exit path and a headless test for the
+  Esc-after-panel sequence; do not rely on the app-level single-Esc handler.
+- **Fullscreen toggling can leave a stale dialog frame**: after Ctrl+F (or
+  a settings toggle) exits fullscreen, the main viewport may keep showing a
+  dialog frame even though the overlay stack is empty — toggling fullscreen
+  must stop the alt screen and re-start the main TUI (clean repaint), not
+  just migrate overlay handles.
+- **Headless test timing: never assert on a fixed `setTimeout`.** In
+  async/race tests, flush the microtask/event queue with an explicit
+  `settle()`/deferred helper instead of
+  `await new Promise(r => setTimeout(r, 30))` — the fixed delay makes the
+  test timing-sensitive and flakes across runs.
+- **Validate serializers against the real consumer's layout rules, not a self round-trip.** A `compressLog` test that asserted "round-trips as one frame" passed while every real dsh reader rejected the output. The round-trip only proves self-consistency; the layout gate is the consumer's own checks.
 
 ## Correctness contracts (full detail in docs/)
 

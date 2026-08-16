@@ -89,3 +89,16 @@ same line. `test/rules.test.ts` statically detects COMMON SINGLE-LINE
 is deliberately NOT a substitute for review or a type-aware lint
 (`@typescript-eslint/no-floating-promises`) — new hand-written `void` chains
 in the detected forms fail the suite.
+
+## Operation identity: text equality is NOT operation identity
+
+Draft restore deduplication once compared `current === submitted` text and
+`endsWith` suffixes to make "restore the same draft twice" idempotent. That
+text-level dedup silently dropped one of TWO INDEPENDENT operations that
+happen to carry the same text: two separate Ctrl+S submits of the same
+string that both fail/stale must both restore their drafts, because each
+corresponds to exactly one user operation. Content-based dedup is only safe
+for idempotence of the SAME operation retried — identify operations by
+submission/operation identity (draft fingerprint + observed revision), never
+by text equality. Test with a second identical draft plus a third different
+draft typed mid-failure.

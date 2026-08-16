@@ -142,11 +142,15 @@ installed with Option B's `link:` specifier
   message into the agent's inbox (the queue pane above the editor shows
   pending messages; `Ctrl+S` steers them all at once, `Alt+↑` pulls them all
   back into the editor).
+- `/status` — show the current session's stats and identity (turn counts,
+  token usage, workspace, installed dsh version).
 - `/preset`, `/model`, `/settings`, `/export`, `/fork`, `/subagents` — see
   `dsh --profile pi-tui`'s command autocomplete (`/` + Tab).
 
 ## Keybindings (selection)
 
+- `Ctrl+F` — toggle transcript search (the `/search <query>` overlay; a
+  second press closes it).
 - `Shift+Tab` — cycle the permission preset (read-only → workspace-write →
   danger-full-access); the footer's mode slot badges every preset
   (`[workspace-write]` / `[read-only]` / `[custom]`, with `[yolo]` flagging
@@ -172,6 +176,14 @@ installed with Option B's `link:` specifier
     id, so the transcript is reached via `/subagents` (`s` stops a job).
   The footer badge shows `[N tasks running · M agents · ↓ view]` while any
   background work is live.
+
+## Launch options
+
+The TUI's startup row adds `--preset <id>` — the agent preset a fresh
+session starts on (falls back to `$DSH_PI_TUI_PRESET`, then the saved
+settings default). It exists because `/preset` only applies to a blank (not
+yet created) session, so launch-time selection is the other half of choosing
+a preset. All other flags are the dsh runner's own (`--session <id>`, …).
 
 ## Session lifecycle
 

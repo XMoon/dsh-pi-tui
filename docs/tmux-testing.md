@@ -112,7 +112,10 @@ TUI side — that branch is covered headless.
    `0`. Quote the env value (`COLORFGBG='15;0' dsh …`) and mind nested quotes
    in scripts (wrap the whole thing in double quotes).
 3. **`NO_COLOR=1` skips theme detection**: this machine's shell exports it;
-   use `env -u NO_COLOR` when demoing the detection chain.
+   use `env -u NO_COLOR` when demoing the detection chain. The same env
+   poison applies to HEADLESS theme tests — they must explicitly reset
+   `process.env.NO_COLOR = ''` (or run with `CI=true`, which also forces
+   non-interactive pnpm) or the theme branch silently never executes.
 4. **Panels repaint as input is processed**: capturing right after changing a
    setting shows the old value; wait ≥1.5s.
 5. **Model behavior is uncontrollable**: sandbox approval popups and
@@ -138,6 +141,24 @@ TUI side — that branch is covered headless.
    while cleaning up "leftovers"). Only clean the script's own tmux session
    (`tmux kill-session -t <name>`); the script's traps own its resources,
    process-level cleanup is the user's job.
+9. **Raw PTYs answer no terminal queries**: driving the full TUI in a bare
+   PTY (not tmux, no terminal emulator in front) leaves OSC 11 (background
+   color) and DA (capability) queries unanswered, so theme autodetect
+   times out (800ms) and never fires, and capability-dependent paths never
+   run. Use tmux or `packages/dsh-pi-tui/demo.ts` for real-terminal runs —
+   both answer the queries.
+10. **A crash can leave a DA2 reply in the pty**: if the TUI dies before
+    answering its own `\x1b[>c` DA2 query, the terminal's `\x1b[>1;2;4c`
+    response can remain in the pty and render as garbage shell input on the
+    next command. After a crash, start the next run in a FRESH
+    session/window, not the same pane.
+11. **Before debugging a rendered symptom, check `~/.dsh/settings.yaml` for
+    leftover TUI settings**: values toggled during an earlier test matrix
+    persist across launches and silently change appearance/behavior — hit
+    for real with `footer: compact` (hides the stats line) and
+    `fullscreen: on` (freezes the TUI under a pipe/tee with no interactive
+    TTY). Reset them (`theme: auto`, `defaultPreset: workspace-write`,
+    fullscreen off) before re-testing in a different launch environment.
 
 ## Scripts
 

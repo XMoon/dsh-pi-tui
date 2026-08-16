@@ -21,12 +21,21 @@ node repair-session.mjs --scan [--dsh-dir <path>] [--dsh-home <path>]
 
 ## Damage classes and their repairs
 
+Diagnosis replays the event-log invariants (`seq` strictly increasing;
+turn/step nesting) over the EXPANDED records (`decodeStorageRecord` — see
+"Rows vs events" below) to pinpoint the first unreadable event instead of
+guessing at a byte offset.
+
 | Damage | Repair |
 |---|---|
 | duplicate `seq` | renumber from the first collision, with an old→new reference remap |
 | gap / unparsable | truncate |
 | wrong frame layout | re-frame |
 | torn tail | truncate at the last COMPLETE frame boundary, with byte accounting |
+| damage at byte 0 | REFUSE — no salvageable prefix, nothing to repair |
+
+When a torn tail loses events whose count cannot be enumerated, the report
+says `unknown` for the loss — never pretend it is 0.
 
 ### References to duplicated seqs — never guess
 
@@ -56,8 +65,19 @@ rewrote three logs as single frames. The correct layout:
 
 `compressLog` writes the header line alone in frame one, then the remaining
 lines in ~16 KiB plaintext chunks (checksummed like the harness writer).
+The chunk size is a deliberate middle ground: one frame per LINE would also
+be valid for the readers, but the per-frame zstd overhead balloons a
+repaired log ~10x (a 12 MB log became 118 MB that way once).
 `scanZstdLayout` is the layout gate used by both `--scan` and the post-write
 verify.
+
+### Validate against the consumer's layout rules, not a self round-trip
+
+A `compressLog` test that asserted "round-trips as one frame" passed while
+every real dsh reader rejected the output — the round-trip only proves
+self-consistency. Any serializer test must assert the consumer's own
+invariants (first frame = exactly the header line; frames end on JSONL
+record boundaries), i.e. run the same layout gate the readers run.
 
 ## File mode (trap)
 

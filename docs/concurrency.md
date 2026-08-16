@@ -10,6 +10,12 @@ marker. The TUI cannot prevent the corruption, so it detects it and blocks
 the write; the README documents the human rule ("one surface per session"),
 `src/guard.ts` enforces it as far as the TUI can.
 
+Why not file locking? Because dsh's persistence `open(path, "a")` → write →
+**close** on every flush, so NO process ever holds the session file open —
+an fd-based lock or `lsof` check has nothing to detect. Comparing committed
+event counts against the live log is the only reliable external-writer
+signal.
+
 ## How the guard works (the decision)
 
 Before each session-writing submission the guard runs a two-step check:
