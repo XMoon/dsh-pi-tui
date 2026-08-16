@@ -65,6 +65,7 @@ function stubRunner(
     switchSession: async () => undefined,
     swapTo: async () => undefined,
     currentPreset: () => undefined,
+    pendingPreset: undefined,
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},
     updateWelcomeCard: () => {},

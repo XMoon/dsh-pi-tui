@@ -1,7 +1,8 @@
 /**
  * Headless tests for the P6 preset wiring: `composeAgent` (roster-absent and
- * roster-present composition), `recordedPreset` (log-first resolution), and
- * `recomposeBlank` (blank-only swap shared by /preset and --preset).
+ * roster-present composition), `recordedPreset` (log-first resolution),
+ * `recomposeBlank` (blank-only swap shared by /preset and --preset), and
+ * `presetDisplayText` (the English display copy for the shipped presets).
  * @module @xmoon76/dsh-pi-tui/preset.test
  */
 
@@ -9,6 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { composeAgent, recordedPreset, recomposeBlank } from '../src/index.ts'
+import { presetDisplayText } from '../src/commands.ts'
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
@@ -190,4 +192,26 @@ test('recomposeBlank propagates an unknown-preset rejection', async () => {
     recomposeBlank(ctx, { ctx: agentCtx(), session }, 'nope'),
     /not found/,
   )
+})
+
+test('presetDisplayText maps the four shipped presets to fixed English copy', () => {
+  // The effective roster root ships Chinese metadata (the dsh install's own
+  // config/agent-presets); the id mapping must win over the file language.
+  assert.deepEqual(presetDisplayText({ id: 'standard', trust: 'system', name: '标准模式', description: '中文描述' }), {
+    name: 'Standard mode',
+    description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
+  })
+  assert.equal(presetDisplayText({ id: 'code', trust: 'system' }).name, 'Code mode')
+  assert.equal(presetDisplayText({ id: 'minimal', trust: 'system' }).name, 'Minimal mode')
+  assert.equal(presetDisplayText({ id: 'cordis', trust: 'system' }).name, 'Creator mode')
+})
+
+test('presetDisplayText renders file metadata for everything else', () => {
+  assert.deepEqual(
+    presetDisplayText({ id: 'custom', trust: 'user', name: 'My Preset', description: 'mine' }),
+    { name: 'My Preset', description: 'mine' },
+  )
+  // A user-authored preset may shadow a shipped id: trust decides.
+  assert.deepEqual(presetDisplayText({ id: 'standard', trust: 'user', name: 'User Standard' }), { name: 'User Standard' })
+  assert.deepEqual(presetDisplayText({ id: 'custom', trust: 'system' }), { name: 'custom' })
 })

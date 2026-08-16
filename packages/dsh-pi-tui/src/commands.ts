@@ -65,6 +65,51 @@ function metaOf(cwd: string, presetId: string | undefined): Record<string, unkno
   return presetId === undefined ? { cwd } : { cwd, agentPreset: presetId }
 }
 
+/**
+ * Display copy for the four shipped agent presets, fixed in English — the
+ * web surface's `BUILT_IN_PRESET_KEYS` mapping (`dsh-client-ui-agent-preset`),
+ * TUI-side. The EFFECTIVE roster root is the dsh install's own
+ * `config/agent-presets`: the dsh CLI's profile composition replaces this
+ * bundle's shipped root with that one at boot (the `composeProfile`
+ * agent-presets overlay), and its preset.yml language is not ours to
+ * control. Mapping the known ids keeps the picker English regardless of
+ * what the files say; everything else renders file metadata.
+ */
+const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description: string }>> = {
+  standard: {
+    name: 'Standard mode',
+    description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
+  },
+  code: {
+    name: 'Code mode',
+    description: 'All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program.',
+  },
+  minimal: {
+    name: 'Minimal mode',
+    description: 'Two-tool coding agent with persistent bash and str_replace_editor.',
+  },
+  cordis: {
+    name: 'Creator mode',
+    description: 'Built for creating custom agent presets, with all Standard mode capabilities plus runtime inspection, plugin experiments, and preset-authoring guidance.',
+  },
+}
+
+/** Resolve one roster row's display copy: fixed English for a shipped
+ * (system-trust) preset id, otherwise the preset's file metadata. */
+export function presetDisplayText(preset: {
+  id: string
+  trust: string
+  name?: string
+  description?: string
+}): { name: string; description?: string } {
+  const builtIn = preset.trust === 'system' ? BUILT_IN_PRESET_COPY[preset.id] : undefined
+  if (builtIn !== undefined) return { name: builtIn.name, description: builtIn.description }
+  return {
+    name: preset.name ?? preset.id,
+    ...preset.description === undefined ? {} : { description: preset.description },
+  }
+}
+
 /** The TUI settings document surface (theme/footer/fullscreen/history). */
 export interface TuiSettingsLike {
   get(): { theme: string; footer: string; fullscreen: string; history: Record<string, string[]> }
@@ -125,6 +170,9 @@ export interface TuiCommandRunner {
   swapTo(next: AgentHandle): Promise<string | undefined>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
+  /** The preset chosen with /preset while no session exists yet; the next
+   * session composes on it (run-local, ahead of launchPreset/default). */
+  pendingPreset: string | undefined
   /** Re-compose a still-blank session onto another preset (see recomposeBlank). */
   recomposeBlank(presetId: string): Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshStatus(): void
@@ -757,7 +805,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     description: 'Start a fresh session in this workspace',
     handler: async () => {
       const liveAgent = runner.liveAgent
-      const composition = await runner.compose()
+      const composition = await runner.compose(runner.pendingPreset)
       const presetId = composition.agentPreset
       const next = await runner.agents.create({
         sessionId: SessionId(`session-${randomUUID()}`),
@@ -920,17 +968,27 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
 
   // `/preset` IS TUI-owned: the base composes no roster and registers no
   // preset command, so this cannot collide (P5.7 lesson, positive case).
+  //
+  // Sessionless by design (deferred start): typing /preset before any
+  // session exists used to CREATE one (dispatchViaSession calls
+  // ensureSession() for anything outside SESSIONLESS_COMMANDS), and the
+  // roster's rows were inert — SettingsList only fires onChange for rows
+  // with values or a submenu, and /preset rows had neither, so the switch
+  // the picker promised was impossible. The handler reads
+  // runner.liveAgent optionally and never creates a session itself.
   commands.register({
     name: 'preset',
     description: 'Show or switch the session agent preset',
     input: { hint: '[status|<id>|default [<id>]]' },
     handler: async (invocation) => {
-      const liveAgent = await requireAgent()
       const presets = ctx.get('agentPresets')
       if (presets === undefined) {
         return { kind: 'error', text: 'agent presets unavailable in this deployment' }
       }
-      const current = presets.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session)
+      const liveAgent = runner.liveAgent
+      const current = liveAgent === undefined
+        ? undefined
+        : presets.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session)
       const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/)
       const verb = matched?.[1] ?? ''
       const rest = matched?.[2]?.trim() ?? ''
@@ -948,23 +1006,57 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
         await settings.mutate(ns, [{ op: 'set', path: ['default'], value: rest }])
         return { kind: 'success', text: `default preset set: ${rest}` }
       }
-      if (verb !== '') {
-        // Selecting swaps the composition; only a blank session (no turn
-        // has run yet) may do so — a started conversation's history was
-        // produced under its preset's tools. Same rule as the official
-        // `agentPreset.select` RPC and the launch-time --preset path.
+      // Selecting swaps the composition; only a blank session (no turn
+      // has run yet) may do so — a started conversation's history was
+      // produced under its preset's tools. Same rule as the official
+      // `agentPreset.select` RPC and the launch-time --preset path. With
+      // no session at all the choice lands on the run-local pending
+      // preset the next session composes on (nothing is created here).
+      const applyPresetSelection = async (id: string):
+        Promise<{ kind: 'pending'; preset: string } | { kind: 'switched'; preset: string } | { kind: 'locked'; sessionId: string }> => {
+        if (liveAgent === undefined) {
+          const resolved = await presets.resolve(id)
+          runner.pendingPreset = resolved.id
+          return { kind: 'pending', preset: resolved.id }
+        }
+        const outcome = await runner.recomposeBlank(id)
+        if (outcome.kind === 'locked') return { kind: 'locked', sessionId: liveAgent.session.id }
+        refreshCompletions()
+        // A still-blank session's welcome card shows the preset: repaint it
+        // so the switch is visible before any conversation starts.
+        runner.updateWelcomeCard()
+        return { kind: 'switched', preset: outcome.preset }
+      }
+      const pickPreset = async (id: string): Promise<void> => {
+        let outcome: Awaited<ReturnType<typeof applyPresetSelection>>
         try {
-          const outcome = await runner.recomposeBlank(verb)
-          if (outcome.kind === 'locked') {
-            return {
-              kind: 'error',
-              text: `session "${liveAgent.session.id}" has already started; its agent preset is fixed`,
-            }
+          outcome = await applyPresetSelection(id)
+        } catch (error) {
+          app.notify(safeErrorMessage(error), 'error')
+          return
+        }
+        if (outcome.kind === 'pending') {
+          app.notify(`new sessions will start on preset ${outcome.preset}`, 'info')
+        } else if (outcome.kind === 'switched') {
+          app.notify(`session preset switched to ${outcome.preset}`, 'info')
+        } else {
+          app.notify(
+            `session "${outcome.sessionId}" has already started; its agent preset is fixed — preset switching is only available in a new session`,
+            'error',
+          )
+        }
+      }
+      if (verb !== '') {
+        try {
+          const outcome = await applyPresetSelection(verb)
+          if (outcome.kind === 'pending') {
+            return { kind: 'success', text: `new sessions will start on preset ${outcome.preset}` }
           }
-          refreshCompletions()
-          // A still-blank session's welcome card shows the preset: repaint it
-          // so the switch is visible before any conversation starts.
-          runner.updateWelcomeCard()
+          if (outcome.kind === 'locked') {
+            const message = `session "${outcome.sessionId}" has already started; its agent preset is fixed — preset switching is only available in a new session`
+            app.notify(message, 'error')
+            return { kind: 'error', text: message }
+          }
           return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
         } catch (error) {
           return { kind: 'error', text: safeErrorMessage(error) }
@@ -972,19 +1064,39 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       }
       const roster = await presets.list()
       if (roster.length === 0) return { kind: 'success', text: 'no agent presets configured' }
-      app.openSettings(
-        roster.map(preset => ({
-          id: preset.id,
-          label: preset.name === undefined ? preset.id : `${preset.name} (${preset.id})`,
-          description: [
-            preset.trust === 'system' ? 'system' : 'user',
-            preset.id === presets.defaultId ? 'default' : undefined,
-            preset.id === current ? '← current' : undefined,
-            preset.broken,
-          ].filter(Boolean).join(' · '),
-          currentValue: '',
-        })),
-        () => {},
+      // A started conversation's history was produced under its preset's
+      // tools: offer no selectable roster — say why instead (the typed
+      // /preset <id> path above refuses the same way).
+      if (liveAgent !== undefined && liveAgent.session.events.some(event => event.type === 'turn/start')) {
+        const message = `preset switching is only available in a new session — session "${liveAgent.session.id}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
+        app.notify(message, 'error')
+        return { kind: 'error', text: message }
+      }
+      const close = app.openSettings(
+        roster.map(preset => {
+          const display = presetDisplayText(preset)
+          return {
+            id: preset.id,
+            label: `${display.name} (${preset.id})`,
+            description: [
+              display.description,
+              preset.trust === 'system' ? 'system' : 'user',
+              preset.id === presets.defaultId ? 'default' : undefined,
+              preset.id === current ? '← current' : undefined,
+              preset.broken,
+            ].filter(Boolean).join(' · '),
+            currentValue: '',
+            // The values entry makes SettingsList.activateItem fire
+            // onChange on Enter/Space (rows without values or a submenu
+            // are inert) — one key confirms the switch while the selected
+            // row's description still renders in full below the list.
+            values: [preset.id],
+          }
+        }),
+        (id) => {
+          close()
+          detach('preset pick', () => pickPreset(id))
+        },
         () => {},
       )
       return { kind: 'success' }

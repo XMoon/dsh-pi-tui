@@ -134,10 +134,13 @@ const REPAINT_FLUSH_MS = 50
  * dispatches through `commands.execute`, which creates the session lazily
  * (the command line IS the first user input). Commands in this set must
  * tolerate `liveAgent === undefined` in their handlers.
+ *
+ * Exported for the headless suite: the gate is exactly where a sessionless
+ * command silently starts creating sessions again.
  */
-const SESSIONLESS_COMMANDS = new Set([
+export const SESSIONLESS_COMMANDS = new Set([
   'exit', 'settings', 'help', 'login', 'logout', 'model', 'reload',
-  'sessions', 'resume', 'search', 'new', 'fork',
+  'sessions', 'resume', 'search', 'new', 'fork', 'preset',
 ])
 
 /**
@@ -539,6 +542,13 @@ export function apply(ctx: Context, config: Config): void {
     // resumed BLANK session may still be re-composed onto it; a resumed
     // started session keeps its recorded preset (warned, never overridden).
     const launchPreset = startup.presetId ?? (process.env.DSH_PI_TUI_PRESET?.trim() || undefined)
+    // Run-local preset override chosen with /preset before any session
+    // exists (deferred start): the next session composes on it, ahead of
+    // launchPreset and the saved default — the web's "applies to sessions
+    // you start from now on" model scoped to this process. It stays until
+    // changed or the TUI exits; sessions that already exist ignore it
+    // (their composition is fixed).
+    let pendingPreset: string | undefined
     diag.info('boot', {
       pid: process.pid,
       dsh: dshVersion() ?? 'unknown',
@@ -559,7 +569,7 @@ export function apply(ctx: Context, config: Config): void {
     /** Resolve the launch composition, falling back to the default on an unknown id. */
     const launchComposition = async (): Promise<{ composition: AgentComposition; failure?: string }> => {
       try {
-        return { composition: await compose(launchPreset) }
+        return { composition: await compose(pendingPreset ?? launchPreset) }
       } catch (error) {
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: launch preset unavailable: ${message}`)
@@ -2040,6 +2050,8 @@ export function apply(ctx: Context, config: Config): void {
       signal,
       get sessionGeneration() { return sessionGeneration },
       compose,
+      get pendingPreset() { return pendingPreset },
+      set pendingPreset(id: string | undefined) { pendingPreset = id },
       switchSession,
       swapTo: (next) => swapTo(next as Awaited<ReturnType<typeof agents.resume>>),
       currentPreset,
