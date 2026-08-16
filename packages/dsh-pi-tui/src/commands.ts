@@ -17,7 +17,9 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
+import type { CommandInvocation, CommandResult, CommandDescriptor } from '@deepseek-ai/dsh-commands'
+import type { SkillDefinition, SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
+import { isUserInvocable } from '@deepseek-ai/dsh-skill'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -42,6 +44,15 @@ import {
   type SessionQueryLike,
 } from './sessions.ts'
 import { customThemeNames } from './theme.ts'
+import {
+  commandSummaryOf,
+  listGlobalCommands,
+  readSurfaceCatalog,
+  type HumanSkillSummary,
+  type SurfaceCatalogContext,
+  type SurfaceCatalogSnapshot,
+  type SurfaceCommandSummary,
+} from './surface-catalog.ts'
 
 /** A balanced completed-turn prefix for forking: the log up to (and including)
  * the last `turn/end`. Undefined when no turn has completed yet.
@@ -125,6 +136,9 @@ export interface AgentsLike {
     agentOptions: { provider?: string; model?: string }
     setup: (agentCtx: Context) => Promise<void> | void
     seed?: readonly SessionEvent[]
+    // Creation-only cancellation (upstream CreateAgentOptions.signal); the
+    // handle detaches from it on publication.
+    signal?: AbortSignal
   }): Promise<AgentHandle>
 }
 
@@ -194,11 +208,21 @@ export interface TuiCommandRunner {
  * commands appear in the editor's tab list. Registration is sessionless:
  * the commands service's global layer needs no agent, so the whole surface
  * is available before the first session exists (deferred start).
+ *
+ * When an `initialSnapshot` was prefetched (startup probe or resumed
+ * agent), it installs SYNCHRONOUSLY at the end of registration — direct
+ * skill wrappers plus the effective completion merge — so the first input
+ * is served by the complete catalog with zero async I/O in between.
  * @param runner - the live runner surface.
- * @returns a hook that rebuilds the per-skill slash commands (a no-op until
- *   the first session exists, since the skill catalog scope is the agent).
+ * @param initialSnapshot - optional prefetched catalog installed synchronously.
+ * @returns `refreshSkills` (the async live-catalog refresh; a no-op until
+ *   the first session exists, since the skill catalog scope is the agent)
+ *   and `wasAdvertised` (the claim test for the submit dispatch).
  */
-export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills(): Promise<number> } {
+export function registerTuiCommands(
+  runner: TuiCommandRunner,
+  initialSnapshot?: SurfaceCatalogSnapshot,
+): { refreshSkills(): Promise<number>; wasAdvertised(name: string): boolean } {
   const { ctx, app } = runner
   const cwd = runner.cwd
   const signal = runner.signal
@@ -255,14 +279,22 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     return agent
   }
 
-  // Refresh completions after every registration below so TUI-owned
-  // commands (/exit /settings /skill /model) appear in the tab list. The
-  // agent may be undefined before the first session exists: in-process
-  // `commands.list(undefined)` safely returns the global layer only (the
-  // remote RPC path's lookup guard does not apply in-process).
-  const refreshCompletions = (): void => {
+  // ── completion surface + advertised command claims ─────────────────────
+  // The completion list doubles as the ADVERTISED set: every name shown to
+  // the user is a claim that submitting `/name` will resolve to a real
+  // command. The dispatch captures the claim BEFORE any session creation
+  // (wasAdvertised below); a probed command that the real session then
+  // lacks must be consumed with an explicit error, never sent to the model.
+  /** The advertised names of the currently installed completion list. */
+  let claims = new Set<string>()
+  /**
+   * Install one completion list (sorted, claims refreshed). The single
+   * synchronous seam every catalog commit funnels through.
+   */
+  const installCompletions = (entries: readonly SurfaceCommandSummary[]): void => {
+    const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
     app.setCommandCompletions(
-      commands.list(runner.liveAgent as unknown as Agent).map(command => ({
+      sorted.map(command => ({
         name: command.name,
         description: command.description,
         argumentHint: command.input?.hint,
@@ -270,6 +302,36 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       runner.sessionCwd(),
       fdPath,
     )
+    claims = new Set(sorted.map(command => command.name))
+  }
+  /** The saved probed scoped overrides (see installSurfaceSnapshot). */
+  let savedScopedCommands: readonly SurfaceCommandSummary[] = []
+  /**
+   * The sessionless completion view: the CURRENT global layer (fresh read —
+   * TUI built-ins, global plugins and installed skill wrappers all flow in)
+   * overlaid with the saved scoped overrides from the latest snapshot.
+   */
+  const mergeGlobalAndSavedScoped = (): readonly SurfaceCommandSummary[] => {
+    const byName = new Map<string, SurfaceCommandSummary>()
+    for (const descriptor of listGlobalCommands(commands)) {
+      byName.set(descriptor.name, commandSummaryOf(descriptor))
+    }
+    for (const scoped of savedScopedCommands) byName.set(scoped.name, scoped)
+    return [...byName.values()]
+  }
+  /**
+   * Refresh completions from the registry: the LIVE agent's effective view
+   * when one exists (global + its scoped shadows), else the global layer
+   * overlaid with the saved scoped overrides (sessionless merge). The agent
+   * may be undefined before the first session exists: in-process
+   * `commands.list(undefined)` safely returns the global layer only (the
+   * remote RPC path's lookup guard does not apply in-process).
+   */
+  const refreshCompletions = (): void => {
+    const liveAgent = runner.liveAgent
+    installCompletions(liveAgent === undefined
+      ? mergeGlobalAndSavedScoped()
+      : commands.list(liveAgent).map(commandSummaryOf))
   }
   refreshCompletions()
 
@@ -600,7 +662,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   // else the host registry. The scope passed to lookups is the AGENT itself,
   // exactly like the host apiproxy's presenterScopeFor — an agent context
   // object does not identity-match the preset's standing mount.
-  const skillService = (agent: Agent): { list: (options: { cwd?: string; scope?: object }) => Promise<readonly { name: string; description: string }[]>; get: (name: string, options: { cwd?: string; scope?: object }) => Promise<{ name: string; content?: string; description: string } | undefined> } | undefined => {
+  const skillService = (agent: Agent): { list: (options: SkillViewOptions) => Promise<readonly SkillSummary[]>; get: (name: string, options: SkillViewOptions) => Promise<SkillDefinition | undefined> } | undefined => {
     const presets = ctx.get('agentPresets')
     return presets?.serviceFor(agent, 'skills') ?? ctx.get('skills')
   }
@@ -608,13 +670,20 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   /** The workspace the live session runs in; fallback to the TUI's cwd. */
   const sessionCwd = (agent: Agent): string => agent.session.header.cwd ?? cwd
 
-  // Load one skill into the live session; shared by /skill and the
-  // per-skill slash commands.
+  /**
+   * The execution boundary for loading one skill into the live session;
+   * shared by /skill and the per-skill slash commands. The skill is fetched
+   * from the CURRENT agent's service and its invocation policy is RE-CHECKED
+   * here — a summary that passed the probe's filter is never execution
+   * authorization. A model-only skill is refused with an explicit error and
+   * never injected.
+   */
   const loadSkill = async (agent: Agent, name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
     const skills = skillService(agent)
     if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
     const skill = await skills.get(name, { cwd: sessionCwd(agent), scope: agent })
     if (skill === undefined) return { kind: 'error', text: 'unknown skill "' + name + '"' }
+    if (!isUserInvocable(skill)) return { kind: 'error', text: `skill "${name}" is not invocable by the user` }
     agent.inject(createUserMessage({
       content: [{ type: 'text', text: 'Skill loaded by the user: **' + skill.name + '**\n\n' + (skill.content ?? skill.description) }],
       source: { kind: 'plugin', plugin: 'tui-skill' },
@@ -623,57 +692,99 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
   }
 
   // Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
-  // catalog skill is directly selectable from the editor autocomplete and
-  // injects on Enter. The description carries a [skill] tag so skill rows
-  // stand apart from built-in commands. Refreshed by /reload and whenever a
-  // session becomes live (the catalog scope is the agent, so the commands
-  // only exist once a session does).
+  // human-invocable catalog skill is directly selectable from the editor
+  // autocomplete and injects on Enter. The description carries a [skill] tag
+  // so skill rows stand apart from built-in commands.
   const skillDisposers = new Map<string, () => void>()
-  const registerSkillCommands = async (): Promise<number> => {
-    // The catalog fetch is async: capture the session generation so a
-    // refresh issued for an OLD session (superseded by a switch while the
-    // catalog was loading) cannot register commands into — or refresh the
-    // completions of — the NEW session's surface.
-    const generation = runner.sessionGeneration
+  /**
+   * Synchronously replace every direct skill wrapper from a snapshot. Pure
+   * install: no catalog fetch, no await — the callers (the initial snapshot
+   * commit, the live refresh, the coordinator) provide the data. The target
+   * set is computed FIRST (current global/effective view minus the wrappers
+   * this surface owns, plus the snapshot's scoped overrides), then the old
+   * wrappers are disposed and the new ones registered in one synchronous
+   * commit.
+   * @param skills - the human-invocable summaries to install.
+   * @param scopedNames - the snapshot's scoped command names: a preset-scoped
+   *   command must block a same-name wrapper even though the global view
+   *   cannot see it yet (sessionless install).
+   * @returns the number of wrappers installed.
+   */
+  const replaceSkillCommands = (skills: readonly HumanSkillSummary[], scopedNames: ReadonlySet<string>): number => {
+    // Own wrapper names are excluded from the collision baseline: they are
+    // about to be replaced, not external collisions.
+    const owned = new Set(skillDisposers.keys())
+    const taken = new Set<string>()
+    const view = commands.list(runner.liveAgent as unknown as Agent)
+    for (const command of view) if (!owned.has(command.name)) taken.add(command.name)
+    for (const name of scopedNames) taken.add(name)
     for (const dispose of skillDisposers.values()) dispose()
     skillDisposers.clear()
-    const liveAgent = runner.liveAgent
-    // No session yet (deferred start): the agent-scoped catalog is
-    // unavailable, so the per-skill commands wait for the first session.
-    if (liveAgent === undefined) return 0
-    const skills = skillService(liveAgent)
-    if (skills === undefined) return 0
-    const taken = new Set(commands.list(liveAgent).map(command => command.name))
-    const catalog = await skills.list({ cwd: sessionCwd(liveAgent), scope: liveAgent })
-    // A newer session owns the surface now: this refresh's registrations
-    // would clobber or duplicate the newer catalog — drop them silently
-    // (the newer session's own refresh is in flight or already applied).
-    if (generation !== runner.sessionGeneration) return 0
-    for (const skill of catalog) {
-      // A colliding name (a built-in or another plugin's command) skips the
-      // slash command; the catalog picker still lists the skill.
+    let count = 0
+    for (const skill of skills) {
+      // A colliding name (a built-in, a scoped command or another plugin's
+      // command) skips the slash command; the catalog picker still lists it.
       if (taken.has(skill.name)) continue
       try {
         const dispose = commands.register({
           name: skill.name,
           description: '[skill] ' + skill.description,
+          // The handler captures ONLY the skill name; execution re-fetches
+          // from the current live agent and re-checks the policy.
           handler: async () => {
             const agent = await requireAgent()
             return loadSkill(agent, skill.name)
           },
         })
         skillDisposers.set(skill.name, dispose)
+        count += 1
       } catch {
         // Registration raced with another plugin; the picker still works.
       }
     }
-    refreshCompletions()
-    return catalog.length
+    return count
   }
-  // Initial catalog load: fire-and-forget through the unified entry — a
-  // failure must land in diagnostics, never be silently swallowed or leak
-  // as an unhandled rejection (/reload still awaits the same function).
-  detach('skill catalog refresh', () => registerSkillCommands())
+  /**
+   * Install one whole snapshot on the surface in ONE synchronous commit:
+   * replace the direct skill wrappers, save the scoped overrides, and merge
+   * the completions (fresh global view + saved overrides). No await between
+   * the pieces, so a first input can never observe a half-installed catalog.
+   */
+  const installSurfaceSnapshot = (snapshot: SurfaceCatalogSnapshot): void => {
+    const scopedNames = new Set(snapshot.scopedCommands.map(command => command.name))
+    replaceSkillCommands(snapshot.skills, scopedNames)
+    savedScopedCommands = snapshot.scopedCommands
+    installCompletions(mergeGlobalAndSavedScoped())
+  }
+  /**
+   * Rebuild the per-skill commands from the LIVE agent's catalog (the async
+   * refresh; /reload and the session-live path await it). The catalog fetch
+   * captures the session generation so a refresh issued for an OLD session
+   * (superseded by a switch while the catalog was loading) cannot install
+   * into the NEW session's surface.
+   */
+  const refreshSkillCommands = async (): Promise<number> => {
+    const generation = runner.sessionGeneration
+    const liveAgent = runner.liveAgent
+    // No session yet (deferred start): the agent-scoped catalog is
+    // unavailable; the prefetched snapshot covers the sessionless surface.
+    if (liveAgent === undefined) return 0
+    const snapshot = await readSurfaceCatalog(liveAgent, signal, runner.ctx as unknown as SurfaceCatalogContext)
+    // A newer session owns the surface now: drop this refresh's install
+    // silently (the newer session's own refresh is in flight or applied).
+    if (generation !== runner.sessionGeneration) return 0
+    // Provider issues are partial failures: the surviving providers still
+    // install, the failed field degrades, and the issue lands in diagnostics
+    // (never a silent empty catalog, never a swallowed error).
+    for (const issue of snapshot.issues) {
+      runner.diag.warn('skill catalog issue', { provider: issue.provider, error: issue.message })
+    }
+    installSurfaceSnapshot(snapshot)
+    return snapshot.skills.length
+  }
+  /** Whether one command name is advertised by the CURRENT completion list
+   * (the claim captured at submit time, before any session creation). */
+  const wasAdvertised = (name: string): boolean => claims.has(name)
 
   commands.register({
     name: 'skill',
@@ -685,8 +796,11 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
       const name = invocation.rawInput.trim()
       if (name !== '') return loadSkill(liveAgent, name)
-      // No argument: pick from the catalog.
-      const catalog = await skills.list({ cwd: sessionCwd(liveAgent), scope: liveAgent })
+      // No argument: pick from the catalog. Only human-invocable skills are
+      // offered — the same policy every other human entry enforces (the
+      // explicit-name path re-checks it in loadSkill).
+      const catalog = (await skills.list({ cwd: sessionCwd(liveAgent), scope: liveAgent }))
+        .filter(skill => isUserInvocable(skill))
       if (catalog.length === 0) return { kind: 'error', text: 'no skills available' }
       // SettingsList rows: Enter cycles the value, which fires onChange.
       app.openSettings(
@@ -717,7 +831,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       // 1. Rebuild the per-skill slash commands from the live catalog.
       let skillCount = 0
       try {
-        skillCount = await registerSkillCommands()
+        skillCount = await refreshSkillCommands()
       } catch {
         // The catalog read is best-effort; the settings pass still runs.
       }
@@ -1442,10 +1556,20 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     },
   })
 
-  // All TUI commands are registered now; include them in completion.
-  refreshCompletions()
-  // The per-skill commands live on the agent-scoped catalog, so they can
-  // only be built once a session exists; the runner calls this again after
-  // the first session is created (see initLiveSession).
-  return { refreshSkills: () => registerSkillCommands() }
+  // All TUI commands are registered now. The initial snapshot (when one was
+  // prefetched before the TUI mounted) installs SYNCHRONOUSLY here: no
+  // detached refresh, no await — the first input can never beat it. Without
+  // a snapshot the plain global completion refresh runs as before, and the
+  // per-skill commands wait for a live session (initLiveSession's refresh)
+  // or /reload.
+  if (initialSnapshot !== undefined) {
+    installSurfaceSnapshot(initialSnapshot)
+  } else {
+    refreshCompletions()
+  }
+  return {
+    refreshSkills: () => refreshSkillCommands(),
+    /** The claim test for the dispatch: is /name advertised right now? */
+    wasAdvertised,
+  }
 }

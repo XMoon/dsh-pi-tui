@@ -185,6 +185,24 @@ export function shouldSteerOnEnter(
 }
 
 /**
+ * The advertised-claim miss decision (pure, exported for the headless
+ * suite): a slash input whose name was advertised by the completion list at
+ * submit time but that the REAL session's catalog lacks is CONSUMED with an
+ * explicit error — never sent to the model as a plain user message. An
+ * unadvertised miss keeps the existing plain-input fallback (the user may
+ * deliberately send slash text to the model).
+ * @param execution - the settled `commands.execute` outcome.
+ * @param wasAdvertised - the claim captured BEFORE session creation.
+ * @returns whether the miss must be consumed as an advertised miss.
+ */
+export function shouldConsumeAdvertisedMiss(
+  execution: { readonly result: unknown } | undefined,
+  wasAdvertised: boolean,
+): boolean {
+  return execution === undefined && wasAdvertised
+}
+
+/**
  * Read an explicit child-session reference from a future/extended job record.
  * Current dsh JobSnapshot records do not expose one, so this normally returns
  * undefined. Crucially, label, registration order and timestamps are never
@@ -1323,6 +1341,14 @@ export function apply(ctx: Context, config: Config): void {
      * user input is the deferred trigger), guard against cross-process
      * divergence, then execute a registered slash command or follow up. */
     const dispatchViaSession = (text: string): void => {
+      // Capture the advertised claim BEFORE any session creation: the
+      // boolean must reflect the completion generation at submit time, never
+      // a re-query after ensureSession (a refresh may have already revoked
+      // the claim). A probed command the real session then lacks is consumed
+      // with an explicit error below — it must never fall through to the
+      // model as a plain user message.
+      const parsedAtSubmit = parseCommand(text)
+      const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
       runOwned('submit', () => ensureSession().then(async () => {
@@ -1381,6 +1407,16 @@ export function apply(ctx: Context, config: Config): void {
             diag,
             sessionId: () => agent.session.id,
             onResult: (execution) => {
+              // A command the surface advertised (e.g. from the startup
+              // probe) but the real session's catalog lacks: consume the
+              // slash input with an explicit error — never a plain model
+              // message, never an automatic draft restore (the refreshed
+              // completions already revoked the claim, and a mechanical
+              // retry could ride the unadvertised fallback).
+              if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
+                app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
+                return
+              }
               // The fallback follow-up still targets the CAPTURED agent; if
               // the session moved on while the command ran, restore the
               // draft instead of posting into a session the user has left.
@@ -2199,6 +2235,10 @@ export function apply(ctx: Context, config: Config): void {
     // session becomes live.
     let commandsRegistered = false
     let refreshSkills: (() => Promise<number>) | undefined
+    /** The claim test installed by registerTuiCommands: is a slash name
+     * advertised by the CURRENT completion list? The dispatch captures it
+     * BEFORE any session creation (see dispatchViaSession). */
+    let wasAdvertisedClaim: ((name: string) => boolean) | undefined
     const runner: TuiCommandRunner = {
       ctx,
       app,
@@ -2237,7 +2277,9 @@ export function apply(ctx: Context, config: Config): void {
       if (commands === undefined) return
       commandsRegistered = true
       try {
-        refreshSkills = registerTuiCommands(runner).refreshSkills
+        const installed = registerTuiCommands(runner)
+        refreshSkills = installed.refreshSkills
+        wasAdvertisedClaim = installed.wasAdvertised
       } catch (error) {
         // A failed registration must not lock the surface forever (a locked
         // flag would leave every later command resolving to a plain message

@@ -12,6 +12,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { TuiApp } from '../src/tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
+import { runDetached } from '../src/detached.ts'
 import { currentPalette, darkColors, lightColors } from '../src/theme.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -77,12 +78,14 @@ function stubRunner(
 }
 
 /** A fake commands service recording registrations, and a fake skills
- * service whose catalog is controllable per agent. */
+ * service whose catalog is controllable per agent. Catalog entries carry
+ * the official invocation policy so the user-invocation filter can run. */
+type FakeSkillEntry = { name: string; description: string; invocation: { modelInvocable: boolean; userInvocable: boolean } }
 function fakeServices() {
   const registered: string[] = []
   const defs: { name: string; handler?: unknown }[] = []
   const disposers = new Map<string, () => void>()
-  const catalogs = new Map<object, { promise: Promise<readonly { name: string; description: string }[]>; resolve: (v: readonly { name: string; description: string }[]) => void }>()
+  const catalogs = new Map<object, { promise: Promise<readonly FakeSkillEntry[]>; resolve: (v: readonly FakeSkillEntry[]) => void }>()
   const commands = {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
       registered.push(def.name)
@@ -99,11 +102,11 @@ function fakeServices() {
     execute: async () => undefined,
   }
   const skills = {
-    list: (options: { scope?: object }): Promise<readonly { name: string; description: string }[]> => {
+    list: (options: { scope?: object }): Promise<readonly FakeSkillEntry[]> => {
       const scope = options.scope ?? {}
       const existing = catalogs.get(scope)
       if (existing !== undefined) return existing.promise
-      const gate = deferred<readonly { name: string; description: string }[]>()
+      const gate = deferred<readonly FakeSkillEntry[]>()
       catalogs.set(scope, gate)
       return gate.promise
     },
@@ -209,12 +212,12 @@ test('a stale skill refresh cannot register commands into a newer session', asyn
   state.generation = 2
   const refreshB = refreshSkills()
   // B's catalog arrives: its commands register.
-  services.catalogs.get(state.agent)?.resolve([{ name: 'skill-b', description: 'b' }])
+  services.catalogs.get(state.agent)?.resolve([{ name: 'skill-b', description: 'b', invocation: { modelInvocable: true, userInvocable: true } }])
   await refreshB
   assert.ok(services.registered.includes('skill-b'), 'the current session\'s commands must register')
   // A's catalog lands LATE: the generation check must drop it entirely.
   for (const [scope, gate] of services.catalogs) {
-    if (scope !== state.agent) gate.resolve([{ name: 'skill-a', description: 'a' }])
+    if (scope !== state.agent) gate.resolve([{ name: 'skill-a', description: 'a', invocation: { modelInvocable: true, userInvocable: true } }])
   }
   await refreshA
   assert.ok(!services.registered.includes('skill-a'), 'a stale refresh must not register old-session commands')
@@ -404,7 +407,7 @@ test('a late FAILED save never rolls back a newer successful selection (latest-w
   }
 })
 
-test('a failing initial skill catalog refresh lands in diagnostics, never silently swallowed', async () => {
+test('a failing skill catalog refresh lands in diagnostics, never silently swallowed', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -420,10 +423,14 @@ test('a failing initial skill catalog refresh lands in diagnostics, never silent
   const diag = createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: (line: string) => { lines.push(line) } }] })
   try {
     const state = { agent: fakeAgent('session-a'), generation: 1 }
-    registerTuiCommands(stubRunner(ctx, app, state, diag))
+    const { refreshSkills } = registerTuiCommands(stubRunner(ctx, app, state, diag))
+    // The runner's unified fire-and-forget entry (index.ts wraps the hook
+    // the same way): a failure must land in diagnostics, never leak as an
+    // unhandled rejection.
+    runDetached('skill command refresh', () => refreshSkills(), { diag })
     await new Promise(resolve => setTimeout(resolve, 30))
     assert.deepEqual(unhandled, [], 'the catalog failure must not leak as an unhandled rejection')
-    assert.ok(lines.some(line => /WARN skill catalog refresh/.test(line) && /catalog down/.test(line)),
+    assert.ok(lines.some(line => /WARN skill catalog issue/.test(line) && /catalog down/.test(line)),
       `diag must record the failure:\n${lines.join('\n')}`)
   } finally {
     process.off('unhandledRejection', onUnhandled)
