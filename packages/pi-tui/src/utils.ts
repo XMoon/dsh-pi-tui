@@ -736,14 +736,38 @@ class AnsiCodeTracker {
 
 	/**
 	 * Get reset codes for attributes that need to be turned off at line end.
-	 * Underline must be closed to prevent bleeding into padding.
-	 * Active OSC 8 hyperlinks must be closed and re-opened on the next line.
-	 * Returns empty string if no attributes need closing.
+	 * Every non-background attribute is closed (bold, dim, italic, underline,
+	 * blink, inverse, hidden, strikethrough, foreground) so content appended
+	 * after a wrapped line — cell padding, table borders — cannot inherit the
+	 * style. The background is deliberately LEFT OPEN: padding must keep the
+	 * cell's background. Active OSC 8 hyperlinks are closed and re-opened on
+	 * the next line. Returns empty string if no attributes need closing.
 	 */
 	getLineEndReset(): string {
 		let result = "";
+		if (this.bold || this.dim) {
+			result += "\x1b[22m"; // Bold/dim off
+		}
+		if (this.italic) {
+			result += "\x1b[23m"; // Italic off
+		}
 		if (this.underline) {
-			result += "\x1b[24m"; // Underline off only
+			result += "\x1b[24m"; // Underline off
+		}
+		if (this.blink) {
+			result += "\x1b[25m"; // Blink off
+		}
+		if (this.inverse) {
+			result += "\x1b[27m"; // Inverse off
+		}
+		if (this.hidden) {
+			result += "\x1b[28m"; // Hidden off
+		}
+		if (this.strikethrough) {
+			result += "\x1b[29m"; // Strikethrough off
+		}
+		if (this.fgColor) {
+			result += "\x1b[39m"; // Default foreground (background preserved for padding)
 		}
 		if (this.activeHyperlink) {
 			result += formatOsc8Close(this.activeHyperlink.terminator); // Re-opened at line start via getActiveCodes()
@@ -953,7 +977,13 @@ function wrapSingleLine(line: string, width: number): string[] {
 	}
 
 	if (currentLine) {
-		// No reset at end of final line - let caller handle it
+		// Close non-background attributes at the end of the final line too, so
+		// every emitted physical line is self-contained: content appended after
+		// the wrap (cell padding, table borders) cannot inherit the color.
+		const lineEndReset = tracker.getLineEndReset();
+		if (lineEndReset) {
+			currentLine += lineEndReset;
+		}
 		wrapped.push(currentLine);
 	}
 

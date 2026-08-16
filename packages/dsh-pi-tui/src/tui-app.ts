@@ -985,6 +985,10 @@ export class TuiApp {
 
   /**
    * Seed the editor's recall history from persisted entries (newest first).
+   * The persistence mirror is filled with the SAME semantics as the editor
+   * (only consecutive duplicates collapse, 100-entry cap), so the mirror
+   * always equals what ↑/↓ can recall — non-consecutive repeats like
+   * `['a', 'b', 'a']` are legal history and must survive the round-trip.
    * @param entries - persisted entries, most recent first.
    */
   seedInputHistory(entries: readonly string[]): void {
@@ -995,6 +999,31 @@ export class TuiApp {
       const trimmed = entry.trim()
       if (trimmed !== '') this.editor.addToHistory(trimmed)
     }
+    // Mirror: push newest→oldest, collapsing only CONSECUTIVE duplicates
+    // (the editor's rule), capped at the same 100 entries as the editor.
+    let last: string | undefined
+    for (const entry of entries) {
+      const trimmed = entry.trim()
+      if (trimmed === '' || trimmed === last) continue
+      last = trimmed
+      this.inputHistory.push(trimmed)
+    }
+    if (this.inputHistory.length > TuiApp.INPUT_HISTORY_LIMIT) {
+      this.inputHistory.length = TuiApp.INPUT_HISTORY_LIMIT
+    }
+  }
+
+  /**
+   * REPLACE the whole recall history (editor + persistence mirror) with the
+   * entries of the CURRENT workspace. Session switches must not recall the
+   * previous workspace's inputs nor pollute the new workspace's persisted
+   * history, so the host resets on every session change.
+   * @param entries - the new workspace's persisted entries, newest first.
+   */
+  resetInputHistory(entries: readonly string[]): void {
+    this.editor.clearHistory()
+    this.inputHistory.length = 0
+    this.seedInputHistory(entries)
   }
 
   /** The current input history (newest first) for persistence. */

@@ -139,6 +139,33 @@ const SESSIONLESS_COMMANDS = new Set([
 ])
 
 /**
+ * Read an explicit child-session reference from a future/extended job record.
+ * Current dsh JobSnapshot records do not expose one, so this normally returns
+ * undefined. Crucially, label, registration order and timestamps are never
+ * accepted as identity signals.
+ */
+export function subagentJobTranscriptId(snapshot: unknown): string | undefined {
+  if (typeof snapshot !== 'object' || snapshot === null) return undefined
+  const childSessionId = (snapshot as { readonly childSessionId?: unknown }).childSessionId
+  return typeof childSessionId === 'string' && childSessionId.trim() !== '' ? childSessionId : undefined
+}
+
+/** Viewer body for a subagent job with no uniquely matched child. */
+export function subagentJobViewHint(status: string, detail: string | undefined): string {
+  const tail = status === 'running' || status === 'stopping'
+    ? ' — running in the background; its transcript updates live in /subagents'
+    : ` — this subagent finished${detail === undefined ? '' : ` (${detail})`}`
+  return [
+    `status: ${status}${tail}`,
+    '',
+    'The job record does not carry the child session id, so this job cannot',
+    'be matched to its child from the task browser (a same-label foreground',
+    'run would be indistinguishable). Open /subagents and pick the child by',
+    'its label to read the transcript.',
+  ].join('\n')
+}
+
+/**
  * The installed dsh version (e.g. `0.1.0-rc.6`), resolved from the launcher's
  * real path: `process.argv[1]` is the `dsh` bin, whose realpath walks up to
  * the `@deepseek-ai/dsh/package.json` that owns it. The version the welcome
@@ -1568,14 +1595,21 @@ export function apply(ctx: Context, config: Config): void {
         next === 'danger-full-access' ? 'error' : 'info')
         refreshStatus()
       },
-      // Alt+↑: pull every queued message back into the editor draft (pi's
-      // dequeue). The inbox is cleared durably and the current draft rides
-      // along below the pulled-back queue; submitting re-queues the result.
+      // Alt+↑: pull every QUEUED USER message back into the editor draft
+      // (pi's dequeue). Plugin notices (job completions etc.) are NOT
+      // steerable user input: they stay in the inbox — pulling one back and
+      // resubmitting it as plain text would drop its provenance and turn a
+      // background notification into an editable user message. The current
+      // draft rides along below the pulled-back queue.
       onDequeue: () => {
         if (liveAgent === undefined) return
+        const isNotice = (message: { source?: { form?: string } }): boolean => message.source?.form === 'notice'
         const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
+          .filter(message => !isNotice(message as { source?: { form?: string } }))
         if (queued.length === 0) return
-        liveAgent.inbox.clear()
+        // Remove exactly the pulled-back messages (durable splice), keeping
+        // any notices queued behind them.
+        for (const message of queued) liveAgent.inbox.remove(message.id)
         const queuedText = queued.map(message => textOf(message.content)).join('\n\n')
         const current = app.getDraft()
         app.setDraft([queuedText, current].filter(part => part.trim() !== '').join('\n\n'))
@@ -1653,10 +1687,9 @@ export function apply(ctx: Context, config: Config): void {
     // (new installs default to 'on' — alt screen by default): boot applies
     // it, the settings panel and Ctrl+F both write through it.
     if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
-    const storedHistory = tuiSettings?.get().history[sessionCwd()]
-    if (storedHistory !== undefined && storedHistory.length > 0) {
-      app.seedInputHistory(storedHistory)
-    }
+    // Input history is loaded PER SESSION by initLiveSession (keyed on the
+    // live session's cwd), never once at boot: a session switch to another
+    // workspace must replace the recall history, not keep the old one.
 
     // The TUI-owned slash commands are registered by registerCommands()
     // inside initLiveSession, exactly once after the first session exists.
@@ -1684,12 +1717,16 @@ export function apply(ctx: Context, config: Config): void {
       refreshTasks()
     }
     /**
-     * Open one job from the task browser: a bash job shows the live output
-     * viewer (stream deltas appended on a timer, `s` stops); a subagent job
-     * opens the child's read-only transcript (its session owns the detail,
-     * matched to the job by label — newest child wins). `jobs` and
-     * `refreshTasks` are declared later in this closure; the browser only
-     * fires on user input, by which time both are initialized.
+     * Open one job from the task browser: a bash job shows a STATUS viewer
+     * (never the output — the job's single read cursor belongs to the agent's
+     * job_output; consuming it from the UI would leave the model an
+     * incomplete result and could swallow the completion notice); a subagent
+     * job shows the status viewer with a /subagents hint. The job record
+     * carries no child session id, so label/order/time heuristics cannot
+     * distinguish a background child from a same-label foreground one-shot;
+     * the task browser therefore never opens a transcript by guess.
+     * `jobs` and `refreshTasks` are declared later in this closure; the
+     * browser only fires on user input, by which time both are initialized.
      */
     const openJobView = (jobId: string): void => {
       if (jobs === undefined || liveAgent === undefined) return
@@ -1701,52 +1738,58 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       if (snapshot.kind === 'subagent') {
-        // An owned workflow: the view's outcome (or failure) lands in the
-        // notice — runOwned (AGENTS.md), never a bare void promise.
-        runOwned('subagent view from tasks', async () => {
-          const subagents = ctx.get('subagents')
-          if (subagents === undefined) throw new Error('subagent service unavailable')
-          const children = await subagents.listChildren(owner.session.id)
-          const match = [...children].reverse().find(child => child.kind === 'child' && child.label === snapshot.label)
-          if (match === undefined || match.kind !== 'child') {
-            throw new Error(`no transcript found for ${snapshot.label}`)
-          }
-          await enterView(match.id, match.label)
-        }, {
-          diag,
-          sessionId: () => owner.session.id,
-          onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
-        })
+        const childSessionId = subagentJobTranscriptId(snapshot)
+        if (childSessionId !== undefined) {
+          runOwned('subagent view from tasks', () => enterView(childSessionId as SessionId, snapshot.label), {
+            diag,
+            sessionId: () => owner.session.id,
+            onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
+          })
+          return
+        }
+        // Current JobSnapshot has no stable child id. Use the reliable status
+        // fallback and let /subagents (which owns child identities) perform
+        // transcript selection; never substitute label/order/time matching.
+        openJobStatusViewer(jobId, `subagent ${snapshot.id} · ${snapshot.label}`, snapshot)
         return
       }
-      // bash jobs: the live output viewer. Stream jobs return the delta
-      // since the previous read; terminal jobs return idempotent final
-      // output, so appending is safe in both cases.
-      let output = ''
-      try {
-        output = jobs.read(jobId as JobId, owner).text
-      } catch {
-        // Unknown/foreign job: the viewer still opens on whatever we have.
-      }
+      openJobStatusViewer(jobId, `${snapshot.kind} ${snapshot.id} · ${snapshot.label}`, snapshot)
+    }
+    /**
+     * Status-only viewer for one job (never touches the read cursor). The
+     * subagent variant appends the /subagents hint because a transcript
+     * cannot always be matched; the bash variant is pure status.
+     */
+    const openJobStatusViewer = (
+      jobId: string,
+      title: string,
+      snapshot: {
+        readonly kind?: string
+        readonly id: string
+        readonly label: string
+        readonly status: string
+        readonly detail?: string
+      },
+    ): void => {
       app.openOutputViewer({
-        title: `${snapshot.kind} ${snapshot.id} · ${snapshot.label} — ${snapshot.status}`,
-        initial: output === '' ? '(no output yet — s to stop, esc to close)' : output,
+        title,
+        initial: snapshot.kind === 'subagent'
+          ? subagentJobViewHint(snapshot.status, snapshot.detail)
+          : jobStatusHint(snapshot.status, snapshot.detail),
         refresh: () => {
-          if (jobs === undefined || liveAgent === undefined) return output
+          if (jobs === undefined || liveAgent === undefined) return ''
           try {
-            const read = jobs.read(jobId as JobId, liveAgent)
-            if (read.text !== '') {
-              output = output === '' ? read.text : `${output}\n${read.text}`
-              const lines = output.split('\n')
-              if (lines.length > 400) output = lines.slice(-400).join('\n')
-            }
+            const current = jobs.get(jobId as JobId, liveAgent)
+            return current.kind === 'subagent'
+              ? subagentJobViewHint(current.status, current.detail)
+              : jobStatusHint(current.status, current.detail)
           } catch {
             // The job left the registry (or the session switched): freeze.
+            return ''
           }
-          return output
         },
         onStop: () => {
-          if (liveAgent === undefined) return
+          if (jobs === undefined || liveAgent === undefined) return
           try {
             jobs.kill(jobId as JobId, liveAgent, 'stopped from the task browser')
           } catch {
@@ -1756,6 +1799,13 @@ export function apply(ctx: Context, config: Config): void {
         },
         onClose: () => refreshTasks(),
       })
+    }
+    /** One-line viewer hint for a job state (never touches the read cursor). */
+    const jobStatusHint = (status: string, detail: string | undefined): string => {
+      const tail = status === 'running' || status === 'stopping'
+        ? ' — output is delivered to the agent via job_output; viewing never consumes the job\u2019s read cursor'
+        : ` — final output: ask the agent to run job_output in the conversation${detail === undefined ? '' : ` (${detail})`}`
+      return `${status}${tail}`
     }
     // The queue pane mirrors the agent's durable inbox: next-turn followups
     // first, then next-step steers, in delivery order. The inbox is public on
@@ -1808,6 +1858,11 @@ export function apply(ctx: Context, config: Config): void {
       repaint(app, folder)
       refreshStatus()
       refreshQueue()
+      // The recall history is per-workspace: REPLACE it with the live
+      // session's persisted entries (editor history AND the persistence
+      // mirror), so switching sessions never recalls the old workspace's
+      // inputs nor writes them back under the new cwd.
+      app.resetInputHistory(tuiSettings?.get().history[sessionCwd()] ?? [])
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())} · ${agent.session.id}`)
       updateWelcomeCard()
       registerCommands()
@@ -1900,6 +1955,7 @@ export function apply(ctx: Context, config: Config): void {
       recomposeBlank: (id) => recomposeBlank(ctx, liveAgent as Agent, id),
       refreshStatus,
       updateWelcomeCard,
+      openJobView,
       enterView,
       requestExit,
       exit,

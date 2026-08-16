@@ -453,6 +453,35 @@ test('setDraft and getDraft round-trip the editor text', async () => {
   assert.equal(app.getDraft(), 'pulled back queue text')
 })
 
+test('resetInputHistory replaces the recall history wholesale (session switch)', async () => {
+  const { vt, app } = startApp()
+  const editorLine = (): string => {
+    const lines = vt.getViewport()
+    const index = lines.findIndex(line => line.includes('cmd') || line.includes('recall'))
+    return index === -1 ? '' : lines[index]!.trim()
+  }
+  app.seedInputHistory(['old cmd', 'older cmd'])
+  app.resetInputHistory(['new cmd'])
+  await vt.waitForRender()
+  assert.deepEqual(app.getInputHistory(), ['new cmd'], 'the persistence mirror must be replaced')
+  // ↑ in the EMPTY editor recalls the NEW workspace's entry, never the old one.
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(editorLine(), 'new cmd', 'the OLD workspace entry must not be recalled')
+  // An empty reset clears the mirror, and a later seed recalls ONLY the new
+  // entries (nothing of the old workspace survives).
+  app.resetInputHistory([])
+  assert.deepEqual(app.getInputHistory(), [], 'cleared mirror must be empty')
+  app.resetInputHistory(['fresh cmd'])
+  await vt.waitForRender()
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(editorLine(), 'fresh cmd', 'only the newest workspace entries must be recallable')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)

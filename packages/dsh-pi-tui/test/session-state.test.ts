@@ -57,6 +57,7 @@ function stubRunner(
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
+    openJobView: () => {},
     enterView: async () => {},
     requestExit: () => {},
     exit: () => {},
@@ -141,6 +142,40 @@ test('/settings working-directory row follows the live session cwd', async () =>
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('/ws/beta'), `updated session cwd missing:\n${view}`)
+  app.stop()
+})
+
+test('/tasks Enter opens the job detail through the shared openJobView', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('jobs', {
+    list: () => [{ id: 'bash-1', kind: 'bash', label: 'pnpm build', status: 'completed', startedAt: Date.now(), detail: 'exit code: 0' }],
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const opened: string[] = []
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'openJobView') return (id: string): void => { opened.push(id) }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const tasksDef = services.defs.find(def => def.name === 'tasks')
+  assert.ok(tasksDef?.handler !== undefined, 'tasks handler missing')
+  ;(tasksDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('bash · pnpm build'), `job row missing:\n${view}`)
+  // Enter on the row must open the detail — completed jobs are reachable
+  // exactly through this path (the ↓ trigger only arms while one runs).
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(opened, ['bash-1'], '/tasks selection must route to openJobView')
   app.stop()
 })
 

@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "test": "pnpm -r test",
+    "test": "pnpm -r test && node --test docs/tmux/*.test.mjs",
     "typecheck": "pnpm -r typecheck",
     "pack:release": "rm -f packages/dsh-pi-tui/xmoon76-dsh-pi-tui-*.tgz && pnpm --filter @xmoon76/dsh-pi-tui pack --pack-destination packages/dsh-pi-tui",
     "smoke:pack": "pnpm --filter @xmoon76/dsh-pi-tui exec node scripts/tarball-smoke.mjs"

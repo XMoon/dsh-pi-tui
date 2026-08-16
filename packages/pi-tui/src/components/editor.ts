@@ -466,6 +466,17 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/**
+	 * Drop every history entry (up/down recall) and leave browsing state.
+	 * Used by hosts that swap the whole history context (a session switch to
+	 * another workspace must not recall the previous workspace's inputs).
+	 */
+	clearHistory(): void {
+		this.history = [];
+		this.historyIndex = -1;
+		this.historyDraft = null;
+	}
+
 	private isEditorEmpty(): boolean {
 		return this.state.lines.length === 1 && this.state.lines[0] === "";
 	}

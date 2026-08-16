@@ -36,6 +36,50 @@ function stripAnsi(line: string): string {
 	return line.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+/** Resulting foreground-open state after applying one SGR sequence. */
+function fgOpenAfterSgr(prev: boolean, params: string): boolean {
+	if (params === "" || params === "0") {
+		return false;
+	}
+	let open = prev;
+	for (const part of params.split(";")) {
+		const code = Number.parseInt(part, 10);
+		if (code === 39) {
+			open = false;
+		} else if (code === 38 || (code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+			open = true; // 38;5;N / 38;2;R;G;B or standard 30-37 / bright 90-97
+		}
+	}
+	return open;
+}
+
+/** Assert no box-drawing character is rendered while a foreground color is open. */
+function assertNoBordersInOpenFgColor(lines: string[]): void {
+	const borderChar = /[│┌┐└┘├┤┬┴─]/;
+	const sgrRegex = /\x1b\[([0-9;]*)m/g;
+	for (const line of lines) {
+		if (!borderChar.test(line)) {
+			continue;
+		}
+		let fgOpen = false;
+		let lastIndex = 0;
+		let match: RegExpExecArray | null;
+		sgrRegex.lastIndex = 0;
+		while ((match = sgrRegex.exec(line)) !== null) {
+			const plain = line.slice(lastIndex, match.index);
+			if (fgOpen && borderChar.test(plain)) {
+				assert.fail(`Border char rendered inside an open foreground color: ${JSON.stringify(line)}`);
+			}
+			lastIndex = sgrRegex.lastIndex;
+			fgOpen = fgOpenAfterSgr(fgOpen, match[1]!);
+		}
+		const tail = line.slice(lastIndex);
+		if (fgOpen && borderChar.test(tail)) {
+			assert.fail(`Border char rendered inside an open foreground color: ${JSON.stringify(line)}`);
+		}
+	}
+}
+
 describe("Markdown component", () => {
 	describe("Transforms", () => {
 		it("caches transformed Markdown by source and available width", () => {
@@ -566,6 +610,27 @@ describe("Markdown component", () => {
 				const borderCount = line.split("│").length - 1;
 				assert.strictEqual(borderCount, 2, `Expected 2 borders, got ${borderCount}: "${line}"`);
 			}
+		});
+
+		it("should not leak wrapped inline-code color into table borders", () => {
+			const markdown = new Markdown(
+				`| a | b |
+| --- | --- |
+| x | \`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\` |
+| y | z |`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const width = 40;
+			const lines = markdown.render(width);
+
+			// The long inline-code token wraps across several physical rows;
+			// none of the `│`/`─` border characters may be rendered while the
+			// code's foreground color is still open (regression: the wrap left
+			// the color unclosed on split lines, so the borders turned colored).
+			assertNoBordersInOpenFgColor(lines);
 		});
 
 		it("should handle extremely narrow width gracefully", () => {

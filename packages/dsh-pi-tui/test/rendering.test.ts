@@ -14,8 +14,8 @@ import { TuiApp } from '../src/tui-app.ts'
 import { WorkingIndicator } from '../src/working.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
-function startApp(): { vt: VirtualTerminal; app: TuiApp } {
-  const vt = new VirtualTerminal(100, 24)
+function startApp(width = 100): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(width, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   return { vt, app }
@@ -136,6 +136,129 @@ test('question dialog tabs align with the box border and the hint fits the width
   // The hint must not be ellipsized.
   const hintIdx = lines.findIndex(line => line.includes('esc cancel'))
   assert.ok(hintIdx >= 0 && !lines[hintIdx]!.includes('…'), `hint truncated:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('the whole question dialog fits its height: long descriptions cannot push the hint out', async () => {
+  const { vt, app } = startApp()
+  // Review repro: 7 options, each with an ~800-char description, once
+  // wrapped to 112 rows; the overlay clips at maxHeight 26 and the user
+  // would be choosing blind. The shared budget must keep the current
+  // option and the hint visible.
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: Array.from({ length: 7 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'd'.repeat(800),
+    })),
+  }])
+  const view = await viewport(vt)
+  const rows = view.split('\n').filter(line => line.trim() !== '')
+  assert.ok(rows.length <= 26, `dialog overflowed the overlay:\n${view}`)
+  assert.ok(view.includes('Option 1'), `the current option was pushed out:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `the hint was pushed out:\n${view}`)
+  assert.ok(view.includes('more lines'), `truncation marker missing:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('long descriptions cannot hide the highlighted option while moving the cursor', async () => {
+  const { vt, app } = startApp()
+  // Review repro: 7 options, each with an ~800-char description. Rows above
+  // the cursor used to consume the whole option budget, so after a few Downs
+  // the page showed only the rows above the cursor and the `→` pointer
+  // vanished. The current option's label is anchored: every step must show
+  // the pointer.
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: Array.from({ length: 7 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'd'.repeat(800),
+    })),
+  }])
+  for (let step = 0; step < 6; step++) {
+    const view = await viewport(vt)
+    assert.ok(view.includes('→'), `highlighted option vanished at step ${step}:\n${view}`)
+    assert.ok(view.includes('esc cancel'), `hint vanished at step ${step}:\n${view}`)
+    vt.sendInput('\x1b[B') // Down
+  }
+  const view = await viewport(vt)
+  assert.ok(view.includes('→'), `highlighted option vanished after the final Down:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('the highlighted question option stays visible at narrow terminal widths', async () => {
+  for (const width of [50, 60, 70]) {
+    const { vt, app } = startApp(width)
+    const promise = app.askQuestions([{
+      id: 'q1',
+      question: 'Pick one',
+      options: Array.from({ length: 7 }, (_, i) => ({
+        label: `Option ${i + 1}`,
+        description: 'd'.repeat(800),
+      })),
+    }])
+    for (let step = 0; step < 7; step++) {
+      const view = await viewport(vt)
+      assert.ok(view.includes('→'), `highlighted option vanished at width ${width}, step ${step}:\n${view}`)
+      if (step < 6) vt.sendInput('\x1b[B')
+    }
+    vt.sendInput('\x1b')
+    await assert.rejects(promise, /cancelled/)
+  }
+})
+
+test('review page stays inside the dialog: Submit and the hint survive long answers', async () => {
+  const { vt, app } = startApp()
+  // Review repro: 3 questions, each ~900 chars, answered — the old review
+  // page wrapped every question/answer unbudgeted (54+ rows) and the overlay
+  // clipped Submit/Cancel at row 53. The budgeted review page must keep the
+  // action row and the hint visible no matter how long the answers are.
+  const longQuestion = 'q'.repeat(900)
+  const promise = app.askQuestions([
+    { id: 'q1', question: longQuestion, options: [{ label: 'A' }] },
+    { id: 'q2', question: longQuestion, options: [{ label: 'B' }] },
+    { id: 'q3', question: longQuestion, options: [{ label: 'C' }] },
+  ])
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\x1b[C') // → next question
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\x1b[C') // → next question
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\x1b[C') // → review page
+  const view = await viewport(vt)
+  assert.ok(view.includes('Submit'), `Submit action missing:\n${view}`)
+  assert.ok(view.includes('Cancel'), `Cancel action missing:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint missing:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a long unbroken question detail is row-budgeted so options and hints stay visible', async () => {
+  const { vt, app } = startApp()
+  // 3000 chars on ONE line: without a physical-row budget this wraps to
+  // dozens of rows and pushes the options + hint out of the dialog.
+  const longDetail = 'x'.repeat(3000)
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    detail: longDetail,
+    options: [{ label: 'Alpha' }, { label: 'Beta' }],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Alpha'), `option pushed out of the dialog:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint pushed out of the dialog:\n${view}`)
+  assert.ok(view.includes('more lines') || view.includes('more content hidden'), `truncation marker missing:\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)
 })

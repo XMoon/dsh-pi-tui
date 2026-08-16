@@ -129,6 +129,12 @@ export interface TuiCommandRunner {
   refreshStatus(): void
   /** Repaint the welcome card from the live agent's current facts (e.g. after a preset switch). */
   updateWelcomeCard(): void
+  /**
+   * Open one job's detail from a task list: bash jobs show the status
+   * viewer, subagent jobs the child transcript. Shared by the ↓/Ctrl+J
+   * browser and `/tasks`.
+   */
+  openJobView(jobId: string): void
   enterView(childId: SessionId, label?: string): Promise<void>
   exit(code: number): void
 }
@@ -851,7 +857,11 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
           label: `${job.kind} · ${job.label}`,
           description: `${job.status}${job.detail === undefined ? '' : ` — ${job.detail}`} · ${Math.max(0, Math.floor((now - job.startedAt) / 1000))}s`,
         })),
-        () => {},
+        // Enter on a row opens the SAME detail as the ↓ browser: the status
+        // viewer for bash jobs, the child transcript for subagent jobs.
+        // (Completed jobs are reachable exactly through this path — the ↓
+        // trigger only arms while a task is running.)
+        (jobId) => runner.openJobView(jobId),
         () => {},
       )
       return { kind: 'success' }

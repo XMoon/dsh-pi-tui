@@ -53,36 +53,97 @@ interface Draft {
 /** The "type your own answer" row shown below options (pi isOther parity). */
 const OTHER_ROW = '\u0000other'
 
-/** Max wrapped rows of a question's detail block (kimi MAX_BODY_LINES). */
-const MAX_DETAIL_LINES = 12
+/**
+ * Total physical-row budget of the question flow itself. The Frame wrapper
+ * adds its two border rows, and the overlay clips past maxHeight 26 instead
+ * of scrolling — so EVERYTHING (tabs, question, detail, options with their
+ * descriptions, scroll marker, skipped note, hint) must fit in 24 rows.
+ */
+const DIALOG_BUDGET = 24
+/**
+ * Total physical-row budget for the question body (question text + detail),
+ * shared so a single unbroken long line cannot push the options and hints
+ * out of the dialog's maxHeight (kimi MAX_BODY_LINES scale).
+ */
+const MAX_BODY_LINES = 12
 /** Max visible option rows before the list windows around the cursor. */
 const MAX_VISIBLE_OPTIONS = 7
 
 /**
- * Push `content` to `lines`, wrapping it to `width` with a hanging indent.
- * The first physical line starts with `firstPrefix`; continuation lines get
- * `continuationPrefix`. Content may carry its own ANSI styling (the wrapper
- * splits styled runs correctly). Every emitted line is guaranteed ≤ width,
- * so a wrapped dialog never hits the Frame's ellipsis truncation.
+ * Budgeted push of `content` to `lines`, wrapping it to `width`: pushes at
+ * most `budget` PHYSICAL (wrapped) rows, appends a `... N more` marker when
+ * content was cut, and returns the rows left for the next section. A 5000-char
+ * single-line detail wraps to dozens of rows without this — the options and
+ * hints would fall outside the dialog's maxHeight and the user would be
+ * choosing blind.
+ * @returns the remaining budget (≥ 0).
  */
-function appendWrapped(
+function appendWrappedBudgeted(
   lines: string[],
   firstPrefix: string,
   continuationPrefix: string,
   content: string,
   width: number,
-): void {
+  budget: number,
+): number {
+  if (budget <= 0) return 0
+  const prefixWidth = Math.max(visibleWidth(firstPrefix), visibleWidth(continuationPrefix))
+  const contentWidth = Math.max(1, width - prefixWidth)
+  const wrapped = wrapTextWithAnsi(content, contentWidth)
+  // The `... N more` marker RIDES INSIDE the budget: when content is cut,
+  // content rows cap at budget−1 so a section can never silently overflow
+  // the dialog's total height.
+  const hidden = wrapped.length > budget ? wrapped.length - (budget - 1) : 0
+  const contentLimit = wrapped.length - hidden
+  let used = 0
+  for (; used < contentLimit; used += 1) {
+    lines.push(`${used === 0 ? firstPrefix : continuationPrefix}${wrapped[used] ?? ''}`)
+  }
+  if (hidden > 0) {
+    lines.push(color.textDim(`${continuationPrefix}... ${hidden} more line${hidden > 1 ? 's' : ''}`))
+    used += 1
+  }
+  return Math.max(0, budget - used)
+}
+
+/**
+ * Push the CURRENT option's label: its first physical row is ALWAYS emitted
+ * (the `→` pointer must stay on screen), extra rows fill `budget`, and a
+ * `... N more` marker reports a label that was itself cut. Unlike
+ * {@link appendWrappedBudgeted}, a 1-row budget shows the label content, not
+ * just the cut marker — the anchored current option may never vanish.
+ * @returns the remaining budget (≥ 0).
+ */
+function appendCurrentLabel(
+  lines: string[],
+  firstPrefix: string,
+  continuationPrefix: string,
+  content: string,
+  width: number,
+  budget: number,
+): number {
+  if (budget <= 0) return 0
   const prefixWidth = Math.max(visibleWidth(firstPrefix), visibleWidth(continuationPrefix))
   const contentWidth = Math.max(1, width - prefixWidth)
   const wrapped = wrapTextWithAnsi(content, contentWidth)
   if (wrapped.length === 0) {
     lines.push(firstPrefix)
-    return
+    return Math.max(0, budget - 1)
   }
+  // The first row always carries content — never just the cut marker.
   lines.push(`${firstPrefix}${wrapped[0] ?? ''}`)
-  for (let i = 1; i < wrapped.length; i++) {
+  let used = 1
+  const extra = Math.min(wrapped.length - 1, Math.max(0, budget - 1))
+  for (let i = 1; i <= extra; i++) {
     lines.push(`${continuationPrefix}${wrapped[i] ?? ''}`)
+    used += 1
   }
+  const hidden = wrapped.length - 1 - extra
+  if (hidden > 0 && used < budget) {
+    lines.push(color.textDim(`${continuationPrefix}... ${hidden} more line${hidden > 1 ? 's' : ''}`))
+    used += 1
+  }
+  return Math.max(0, budget - used)
 }
 
 /** The current question's tab label: `Q{n}` or Submit. */
@@ -433,21 +494,57 @@ export class QuestionFlow implements Component, Focusable {
     lines.push(tabs.join('  '))
     lines.push('')
     if (this.tab >= this.questions.length) {
-      // Review page: every answer, then Submit/Cancel actions. Question
-      // texts wrap with a hanging indent so long questions read in full.
-      lines.push(color.textStrong('Review your answer before submit'))
-      this.questions.forEach((question, index) => {
-        const draft = this.drafts[index]
-        if (draft === undefined) return
+      // Review page: every answer, then Submit/Cancel actions. The page
+      // shares the SAME physical-row budget as the rest of the dialog: no
+      // matter how long the answers are, the Submit/Cancel row and the hint
+      // must stay visible. Fixed rows: tab strip + blank (already pushed),
+      // trailing blank, actions, hint = 5; title + questions get the rest,
+      // row-budgeted with the usual `... N more lines` cut marker.
+      let reviewBudget = DIALOG_BUDGET - 5
+      reviewBudget = appendWrappedBudgeted(
+        lines,
+        '',
+        '',
+        color.textStrong('Review your answer before submit'),
+        safeWidth,
+        reviewBudget,
+      )
+      if (reviewBudget > 0) {
+        lines.push('')
+        reviewBudget -= 1
+      }
+      for (let qi = 0; qi < this.questions.length && reviewBudget > 0; qi++) {
+        const question = this.questions[qi]
+        const draft = this.drafts[qi]
+        if (question === undefined || draft === undefined) continue
         const value = draft.skipped
           ? '(skipped)'
           : draft.custom !== '' && question.multiSelect !== true
             ? draft.custom
             : [...draft.selected].join(', ') + (draft.custom !== '' ? ` + ${draft.custom}` : '')
-        appendWrapped(lines, `${color.textDim(`Q${index + 1}`)}  `, '       ', question.question, safeWidth)
-        appendWrapped(lines, `  `, '    ', value === '' ? color.textDim('(no answer)') : value, safeWidth)
-      })
-      lines.push('')
+        reviewBudget = appendWrappedBudgeted(
+          lines,
+          `${color.textDim(`Q${qi + 1}`)}  `,
+          '       ',
+          question.question,
+          safeWidth,
+          reviewBudget,
+        )
+        if (reviewBudget > 0) {
+          reviewBudget = appendWrappedBudgeted(
+            lines,
+            '  ',
+            '    ',
+            value === '' ? color.textDim('(no answer)') : value,
+            safeWidth,
+            reviewBudget,
+          )
+        }
+      }
+      if (reviewBudget > 0) {
+        lines.push('')
+        reviewBudget -= 1
+      }
       const submit = this.submitIdx === 0 ? color.textStrong('Submit') : color.textDim('Submit')
       const cancel = this.submitIdx === 1 ? color.textStrong('Cancel') : color.textDim('Cancel')
       lines.push(`${this.submitIdx === 0 ? color.primary('→ ') : '  '}${submit}   ${cancel}`)
@@ -460,17 +557,27 @@ export class QuestionFlow implements Component, Focusable {
     if (question.header !== undefined && question.header !== '') {
       lines.push(color.textDim(question.header))
     }
-    // The question body wraps with a `?` marker and hanging indent — the
-    // Frame must never ellipsize a question mid-sentence.
-    appendWrapped(lines, `${color.primary('?')}  `, '    ', color.textStrong(question.question), safeWidth)
+    // The question body wraps with a `?` marker and hanging indent, sharing
+    // a PHYSICAL-row budget with the detail block so a long unbroken line
+    // can never push the options and hints out of the dialog.
+    let bodyBudget = MAX_BODY_LINES
+    bodyBudget = appendWrappedBudgeted(
+      lines,
+      `${color.primary('?')}  `,
+      '    ',
+      color.textStrong(question.question),
+      safeWidth,
+      bodyBudget,
+    )
     if (question.detail !== undefined && question.detail !== '') {
-      const detailLines = question.detail.split('\n')
-      const shown = detailLines.slice(0, MAX_DETAIL_LINES)
-      for (const line of shown) {
-        appendWrapped(lines, '   ', '   ', color.textDim(line), safeWidth)
-      }
-      if (detailLines.length > MAX_DETAIL_LINES) {
-        lines.push(color.textDim(`   ... ${detailLines.length - MAX_DETAIL_LINES} more lines`))
+      for (const line of question.detail.split('\n')) {
+        if (bodyBudget <= 1) {
+          // Keep ONE row inside the budget for the cut marker: a detail that
+          // never fits must still say so, without overflowing the dialog.
+          appendWrappedBudgeted(lines, '   ', '   ', color.textDim('... more content hidden'), safeWidth, bodyBudget)
+          break
+        }
+        bodyBudget = appendWrappedBudgeted(lines, '   ', '   ', color.textDim(line), safeWidth, bodyBudget)
       }
     }
     const rows = this.rows()
@@ -478,44 +585,121 @@ export class QuestionFlow implements Component, Focusable {
     const editingOther = this.editingOther && rows.some(row => row.key === OTHER_ROW)
     if (rows.length > 0 && !(rows.length === 1 && rows[0]?.key === OTHER_ROW)) {
       lines.push('')
-      // Window the option list around the cursor (kimi maxVisibleOptions):
-      // a long option list scrolls instead of overflowing the dialog.
-      const visibleCount = Math.min(rows.length, MAX_VISIBLE_OPTIONS)
-      const half = Math.floor(MAX_VISIBLE_OPTIONS / 2)
+      // The WHOLE dialog shares one physical-row budget (the overlay clips
+      // past its maxHeight, it does not scroll): tabs, question/detail,
+      // option labels AND descriptions, the scroll marker, and the hint must
+      // all fit. The option section gets whatever the body left, and the
+      // window shrinks with it — the CURRENT option's row is ANCHORED: its
+      // label rows are reserved before any neighbor renders, so long
+      // descriptions of rows above can never push the cursor's own `→` row
+      // off the page.
+      const showingRow = rows.length > MAX_VISIBLE_OPTIONS ? 1 : 0
+      const skippedRow = draft.skipped ? 1 : 0
+      // Reserve the trailing blank + hint (2 rows), the scroll marker and
+      // the (skipped) note.
+      let optionBudget = DIALOG_BUDGET - lines.length - 2 - showingRow - skippedRow
+      const maxWindow = Math.max(1, Math.min(MAX_VISIBLE_OPTIONS, optionBudget))
+      const visibleCount = Math.min(rows.length, maxWindow)
+      const half = Math.floor(maxWindow / 2)
       const maxStart = Math.max(0, rows.length - visibleCount)
       const start = Math.max(0, Math.min(this.cursor - half, maxStart))
       const end = Math.min(rows.length, start + visibleCount)
-      for (let index = start; index < end; index++) {
-        const row = rows[index]
-        if (row === undefined) continue
-        if (row.key === OTHER_ROW && this.editingOther) {
-          const prefix = `${color.primary('→')} ${color.textDim(`[${index + 1}]`)} `
-          const inputLines = this.otherInput.render(Math.max(1, safeWidth - visibleWidth(prefix)))
-          const inputLine = inputLines[0] ?? ''
-          const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
-          lines.push(prefix + stripped)
-          continue
+      if (optionBudget > 0) {
+        // Reserved rows for the current option's label (capped so one absurd
+        // label cannot eat the whole dialog).
+        const cursorRow = rows[this.cursor]
+        let reserved = 1
+        if (cursorRow !== undefined && cursorRow.key !== OTHER_ROW) {
+          const marker = multi || cursorRow.key === OTHER_ROW
+            ? draft.selected.has(question.options?.[Number(cursorRow.key)]?.label ?? '') ? '[✓]' : '[ ]'
+            : draft.selected.has(question.options?.[Number(cursorRow.key)]?.label ?? '')
+              ? `[${Number(cursorRow.key) + 1}]`
+              : `[${Number(cursorRow.key) + 1}]`
+          const prefix = `→ ${marker} `
+          const badge = cursorRow.recommended ? ` ${color.primary('[recommended]')}` : ''
+          reserved = Math.min(
+            Math.max(
+              1,
+              wrapTextWithAnsi(
+                `${color.textStrong(cursorRow.label)}${badge}`,
+                Math.max(1, safeWidth - visibleWidth(prefix)),
+              ).length,
+            ),
+            maxWindow,
+          )
         }
-        const selected = row.key === OTHER_ROW
-          ? draft.custom !== ''
-          : draft.selected.has(question.options?.[Number(row.key)]?.label ?? '')
-        const marker = multi || row.key === OTHER_ROW
-          ? selected ? color.success('[✓]') : color.textDim('[ ]')
-          : selected ? color.success(`[${Number(row.key) + 1}]`) : color.textDim(`[${Number(row.key) + 1}]`)
-        const pointer = index === this.cursor ? color.primary('→') : ' '
-        const prefix = `${pointer} ${marker} `
-        const badge = row.recommended ? ` ${color.primary('[recommended]')}` : ''
-        const label = index === this.cursor ? color.textStrong(row.label) : row.label
-        // Label and [recommended] badge share the row; the description gets
-        // its OWN wrapped dim lines so nothing is crammed or ellipsized.
-        appendWrapped(lines, prefix, ' '.repeat(visibleWidth(prefix)), `${label}${badge}`, safeWidth)
-        if (row.description !== undefined && row.description !== '') {
-          const descIndent = ' '.repeat(visibleWidth(prefix))
-          appendWrapped(lines, descIndent, descIndent, color.textDim(row.description), safeWidth)
+        let left = optionBudget
+        let cursorRendered = false
+        for (let index = start; index < end; index++) {
+          const row = rows[index]
+          if (row === undefined) continue
+          const isCursor = index === this.cursor
+          // Neighbors may consume at most `left - reserved` until the cursor
+          // renders; after that they may use whatever is left.
+          if (!isCursor && (cursorRendered ? left <= 0 : left <= reserved)) continue
+          if (row.key === OTHER_ROW && this.editingOther) {
+            const prefix = `${color.primary('→')} ${color.textDim(`[${index + 1}]`)} `
+            const inputLines = this.otherInput.render(Math.max(1, safeWidth - visibleWidth(prefix)))
+            const inputLine = inputLines[0] ?? ''
+            const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
+            left -= 1
+            lines.push(prefix + stripped)
+            if (isCursor) cursorRendered = true
+            continue
+          }
+          const selected = row.key === OTHER_ROW
+            ? draft.custom !== ''
+            : draft.selected.has(question.options?.[Number(row.key)]?.label ?? '')
+          const marker = multi || row.key === OTHER_ROW
+            ? selected ? color.success('[✓]') : color.textDim('[ ]')
+            : selected ? color.success(`[${Number(row.key) + 1}]`) : color.textDim(`[${Number(row.key) + 1}]`)
+          const pointer = isCursor ? color.primary('→') : ' '
+          const prefix = `${pointer} ${marker} `
+          const badge = row.recommended ? ` ${color.primary('[recommended]')}` : ''
+          const label = isCursor ? color.textStrong(row.label) : row.label
+          // Label and [recommended] badge share the row; the description gets
+          // its OWN wrapped dim lines, both drawing from the same budget so a
+          // wall of descriptions can never push the hint out of the dialog.
+          // Neighbors (before the cursor renders) may consume at most
+          // `left - reserved` — label AND description — so the anchored
+          // current option always keeps its label rows.
+          const indent = ' '.repeat(visibleWidth(prefix))
+          const available = isCursor || cursorRendered ? left : left - reserved
+          const beforeLabel = lines.length
+          if (isCursor) {
+            appendCurrentLabel(lines, prefix, indent, `${label}${badge}`, safeWidth, available)
+          } else {
+            appendWrappedBudgeted(lines, prefix, indent, `${label}${badge}`, safeWidth, available)
+          }
+          // `available` may exclude rows reserved for the cursor. Helpers
+          // return the remainder of THAT restricted budget, not the dialog's
+          // total remainder, so only subtract rows actually emitted here.
+          left -= lines.length - beforeLabel
+          if (row.description !== undefined && row.description !== '' && left > 0) {
+            const descCap = isCursor || cursorRendered ? left : left - reserved
+            const beforeDescription = lines.length
+            appendWrappedBudgeted(
+              lines,
+              indent,
+              indent,
+              color.textDim(row.description),
+              safeWidth,
+              descCap,
+            )
+            left -= lines.length - beforeDescription
+          }
+          if (isCursor) cursorRendered = true
         }
-      }
-      if (rows.length > visibleCount) {
-        lines.push(color.textDim(`   showing ${start + 1}-${end} of ${rows.length}`))
+        if (showingRow === 1 && left > 0) {
+          left = appendWrappedBudgeted(
+            lines,
+            '   ',
+            '   ',
+            `showing ${start + 1}-${end} of ${rows.length}`,
+            safeWidth,
+            left,
+          )
+        }
       }
     } else if (this.editingOther || (question.options?.length ?? 0) === 0) {
       // Optionless question: the real Input owns the line (placeholder hint).

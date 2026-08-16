@@ -71,7 +71,7 @@ node docs/tmux/ansi2html.mjs /tmp/pane.ansi /tmp/pane.html "阶段名"
 切换后**等 ≥1.5s 再 capture**(面板重绘跟随输入,抓早了看到的是旧值)。
 
 完整主题演示流程(深色启动 → 浅色自动检测 → UI 切换 → 持久化重启):
-`bash docs/tmux/tui-demo.sh`,产物在 `/tmp/tui-demo/`(`.txt` 纯文本 +
+`bash docs/tmux/tui-demo.sh`,产物在脚本打印的私有 `/tmp/tui-demo.XXXXXX/`(`.txt` 纯文本 +
 `.html` 带色)。
 
 ## 真实模型端到端(后台任务、subagent、守卫)
@@ -110,7 +110,17 @@ node docs/tmux/ansi2html.mjs /tmp/pane.ansi /tmp/pane.html "阶段名"
    SettingsList 搜索框吃掉,说明有 overlay 没关(当前版本动作后自动关闭);
    `Esc` 逐层清理。
 7. 演示会写 `~/.dsh/settings.yaml`(theme/permission),结束后记得恢复
-   (`theme: auto`、`defaultPreset: workspace-write`)。
+   (`theme: auto`、`defaultPreset: workspace-write`)。`docs/tmux/tui-demo.sh`
+   现在会在启动前对 settings.yaml 做字节级备份并 `cmp` 验证(备份失败则拒绝
+   运行),清理逻辑只挂在 EXIT trap 上(幂等),INT/TERM handler 显式
+   `exit 130/143` 让 EXIT 只跑一次;每次运行使用私有 output/backup 目录,并在
+   备份前持有 settings 文件的进程锁(并发实例 fail closed);tmux session 名带
+   PID+随机后缀,脚本只会杀自己本次创建的 session——不要用"结尾写 auto"代替恢复。
+8. **不要手动 kill 残留的 dsh 进程**:`dsh --profile pi-tui-dev` 进程可能正是
+   当前承载 agent/会话的进程,`kill` 它会把自己运行的会话一起杀掉(实测踩过:
+   清理"残留"时把承载自己的进程 kill 了)。只清理脚本自建的 tmux session
+   (`tmux kill-session -t <name>`);脚本的 trap 已负责它的资源,进程级清理
+   交给用户。
 
 ## 脚本
 
