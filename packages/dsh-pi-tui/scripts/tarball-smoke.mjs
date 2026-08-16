@@ -41,7 +41,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { zstdCompressSync } from 'node:zlib'
@@ -68,8 +68,13 @@ function run(command, args, options = {}) {
  * place depending on how the lifecycle was invoked). */
 function resolveTarball(explicit) {
   if (explicit !== undefined) {
-    if (!existsSync(explicit)) throw new Error(`tarball not found: ${explicit}`)
-    return explicit
+    // Absolutize BEFORE any subprocess uses it: `npm install` below runs
+    // with cwd=probeDir, so a caller-relative path (e.g. the CI artifact
+    // download `tarball/xmoon76-*.tgz`) would resolve against the temp
+    // probe and fail with ENOENT.
+    const absolute = resolve(explicit)
+    if (!existsSync(absolute)) throw new Error(`tarball not found: ${explicit}`)
+    return absolute
   }
   // npm/pnpm strip the `@` scope from tarball filenames, so the glob is
   // `xmoon76-dsh-pi-tui-*.tgz` even though the package is @xmoon76/dsh-pi-tui.
