@@ -401,6 +401,82 @@ test('the footer badges active tasks and advertises the ↓ trigger on an empty 
   assert.ok(!vt.getViewport().join('\n').includes('task running'), `badge survived clearing:\n${view}`)
 })
 
+test('live continuable subagents arm the task browser trigger through setAgents', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let opened = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenTasks: () => { opened += 1; app.requestRender() },
+  })
+  app.start()
+  const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+  await vt.waitForRender()
+  // No live agents: inert.
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  assert.equal(opened, 0, `no agents means no browser`)
+  // A live continuable child arms the trigger even with zero jobs.
+  app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  assert.equal(opened, 1, `down must open the task browser with a live subagent`)
+  vt.sendInput('\n') // ctrl+j is LF
+  await sleep(20)
+  assert.equal(opened, 2, `ctrl+j must open the task browser with a live subagent`)
+  // Clearing agents disarms; clearing jobs while agents live must not.
+  app.setAgents([])
+  app.setTasks([])
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  assert.equal(opened, 2, `the trigger must disarm when no agents are active`)
+  app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  app.setAgents([])
+  await vt.waitForRender()
+  app.setTasks([])
+  app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  assert.equal(opened, 3, `agents must keep the trigger armed when tasks clear`)
+  app.stop()
+})
+
+test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
+  const { vt, app } = startApp()
+  app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[1 agent · ↓ view]'), `agent-only badge missing:\n${view}`)
+  app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[1 task running · 1 agent · ↓ view]'), `combined badge missing:\n${view}`)
+  app.setDraft('typed text')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[1 task running · 1 agent]'), `badge must stay with a draft:\n${view}`)
+  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while a draft is being edited:\n${view}`)
+  app.setTasks([])
+  app.setAgents([])
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('agent ·'), `badge survived clearing:\n${view}`)
+})
+
+test('the dock renders live subagent lines with their own glyph', async () => {
+  const { vt, app } = startApp()
+  app.setAgents([
+    { id: 'child-abc', label: 'research', activity: 'running' },
+    { id: 'child-def', label: 'audit repo', activity: 'running' },
+  ])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🤖  child-abc · research'), `dock agent line missing:\n${view}`)
+  assert.ok(view.includes('🤖  child-def · audit repo'), `second dock agent line missing:\n${view}`)
+})
+
 test('the output viewer refreshes on a timer, stops on s, and closes on esc', async () => {
   const { vt, app } = startApp()
   const stopped: string[] = []

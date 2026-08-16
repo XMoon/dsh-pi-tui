@@ -152,9 +152,17 @@ registry package for real use.
 - `@` — file/folder mentions in the editor: `@` + Tab completes files from the
   whole workspace (fd-backed when `fd` is on PATH, with a built-in recursive
   fallback otherwise). The literal `@path` is submitted and the model reads
-  the file itself. With background tasks running, an empty editor's `↓` or
-  `Ctrl+J` opens the task browser (Enter views a job's output or a subagent's
-  transcript, `s` stops).
+  the file itself. With background work running, an empty editor's `↓` or
+  `Ctrl+J` opens the task browser over both surfaces:
+  - **subagent rows** (live continuable children) — `Enter` opens the child's
+    transcript read-only (`Esc` returns); they never register jobs records, so
+    this browser is their only glanceable home.
+  - **job rows** (bash and one-shot subagent jobs) — `Enter` shows the status
+    viewer only: a bash job's output read cursor belongs to the model's
+    `job_output`, and a one-shot subagent job record carries no child session
+    id, so the transcript is reached via `/subagents` (`s` stops a job).
+  The footer badge shows `[N tasks running · M agents · ↓ view]` while any
+  background work is live.
 
 ## Session lifecycle
 
