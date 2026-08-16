@@ -343,6 +343,13 @@ export interface TuiAppEventsBase {
    * falls back to the draft alone otherwise. Optional.
    */
   onSteer?: (text: string) => void
+  /**
+   * The busy-Enter opposite chord (Ctrl+Enter): submit the draft in the
+   * QUEUE delivery mode regardless of the busyEnter preference (web
+   * busyEnter parity — the accelerated chord uses the other behavior).
+   * Optional.
+   */
+  onQueueSubmit?: (text: string) => void
   /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
   /** The transcript-search query changed (Ctrl+Shift+F opens the search). Optional. */
@@ -898,6 +905,24 @@ export class TuiApp {
       // keep the key for themselves.
       if (this.overlayHost.hasOverlayEntries) return undefined
       this.events.onDequeue?.()
+      return { consume: true }
+    }
+    if (matchesKey(data, 'ctrl+enter')) {
+      // The busy-Enter opposite chord (web busyEnter parity): Ctrl+Enter
+      // forces the QUEUE delivery mode while the agent is busy, regardless
+      // of the busyEnter preference (plain Enter then steers when the
+      // preference is 'steer'). Overlays keep the key for themselves; the
+      // editor never sees the chord — the submit mirrors a plain Enter
+      // (history + notify clear + draft clear). Without a wired
+      // onQueueSubmit the key falls through to the editor instead of
+      // dropping the draft.
+      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.events.onQueueSubmit === undefined) return undefined
+      const text = this.editor.getText()
+      this.rememberInput(text)
+      this.clearNotify()
+      this.editor.setText('')
+      this.events.onQueueSubmit(text)
       return { consume: true }
     }
     if (matchesKey(data, 'escape')) {

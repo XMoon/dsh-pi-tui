@@ -110,10 +110,10 @@ export function presetDisplayText(preset: {
   }
 }
 
-/** The TUI settings document surface (theme/footer/fullscreen/history). */
+/** The TUI settings document surface (theme/footer/fullscreen/busyEnter/history). */
 export interface TuiSettingsLike {
-  get(): { theme: string; footer: string; fullscreen: string; history: Record<string, string[]> }
-  replace(doc: { theme: string; footer: string; fullscreen: string; history: Record<string, string[]> }): unknown
+  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string; history: Record<string, string[]> }
+  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; history: Record<string, string[]> }): unknown
 }
 
 /** The agents-service surface /new and /fork create sessions through. */
@@ -372,6 +372,13 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             values: ['full', 'compact'],
           },
           {
+            id: 'busy-enter',
+            label: 'Enter while busy',
+            description: 'Steer injects the draft into the running turn; Ctrl+Enter uses the other behavior',
+            currentValue: tuiSettings?.get().busyEnter ?? 'queue',
+            values: ['queue', 'steer'],
+          },
+          {
             id: 'fullscreen',
             label: 'Fullscreen',
             description: 'Alt-screen mode: on keeps the terminal clean (default); off keeps the scrollback',
@@ -468,6 +475,13 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
               const settings = tuiSettings
               if (settings !== undefined) {
                 detach('settings footer write', () => settings.replace({ ...settings.get(), footer: value }) as Promise<unknown>, { notify: true })
+              }
+            }
+          } else if (id === 'busy-enter') {
+            if (value === 'queue' || value === 'steer') {
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings busy enter write', () => settings.replace({ ...settings.get(), busyEnter: value }) as Promise<unknown>, { notify: true })
               }
             }
           } else if (id === 'fullscreen') {
@@ -1402,7 +1416,8 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     name: 'help',
     description: 'Show keybindings and available commands',
     handler: () => {
-      const rows: SettingItem[] = [        { id: 'k-enter', label: 'Enter', description: 'Submit (slash commands dispatch without a model turn)', currentValue: '' },
+      const rows: SettingItem[] = [        { id: 'k-enter', label: 'Enter', description: 'Submit (steers the running turn while busy when Enter while busy is Steer)', currentValue: '' },
+        { id: 'k-queue', label: 'Ctrl+Enter', description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
         { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
         { id: 'k-cancel', label: 'Double-Esc', description: 'Cancel the active turn / tool / shell command', currentValue: '' },
         { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool output and thinking', currentValue: '' },

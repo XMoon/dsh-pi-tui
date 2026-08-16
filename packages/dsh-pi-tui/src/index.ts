@@ -1362,60 +1362,163 @@ export function apply(ctx: Context, config: Config): void {
         },
       })
     }
+    /**
+     * Steer into the running turn with guard re-validation. Shared by
+     * Ctrl+S (the whole queue plus a non-empty draft) and the busy-Enter
+     * preference — Enter while the agent is running with busyEnter=steer
+     * steers the DRAFT ONLY (web busyEnter parity): explicitly queued
+     * messages stay queued until Ctrl+S or the /queue actions, because
+     * already-steered input cannot be pulled back.
+     * @param text - the submitted draft ('' allowed for Ctrl+S).
+     * @param onlyDraft - busy-Enter mode: never read or remove the queue.
+     */
+    const steerNow = (text: string, onlyDraft = false): void => {
+      // The subagent viewer is read-only: steering would send to the
+      // PARENT session. Refuse with a notice and restore the draft.
+      if (viewing !== undefined) {
+        if (text.trim() !== '') app.setEditorText(mergeDraft(app.getDraft(), text))
+        app.notify('viewing a subagent — Esc returns before steering', 'info')
+        return
+      }
+      // Ctrl+S: send everything pending (kimi parity: the whole queue plus
+      // a non-empty draft rides along). With queued messages the entire
+      // queue is steered at once — the queue pane above the editor is the
+      // primary surface; without a queue it stays the classic single-draft
+      // steer. Nothing to send at all is a no-op BEFORE any session is
+      // created (deferred start). Every message goes through steer(): the
+      // next step boundary claims all next-step input together, so the
+      // batch arrives in one shot (an idle driver starts a turn with it).
+      if (onlyDraft) {
+        if (text.trim() === '') return
+      } else if (liveAgent !== undefined) {
+        const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
+        if (queued.length === 0 && text.trim() === '') return
+      } else if (text.trim() === '') {
+        return
+      }
+      // An owned workflow: the send's outcome drives the draft restore and
+      // the notices — runOwned (AGENTS.md), never a bare void.
+      runOwned('steer', () => ensureSession().then(async () => {
+        if (liveAgent === undefined) return
+        // The whole send (snapshot → guard → re-validate → confirm-and-
+        // send) lives in steer.ts so the races are testable: a queue
+        // splice or session switch while the guard reads the file aborts
+        // with a retry notice instead of losing messages or writing to a
+        // session the guard never checked.
+        await steerAll({
+          currentAgent: () => liveAgent as unknown as SteerAgentLike,
+          currentGeneration: () => sessionGeneration,
+          guard: {
+            run: async (identity) => {
+              const verdict = await guardSend('save', identity)
+              if (verdict.kind === 'blocked') {
+                return { kind: 'blocked', reason: verdict.reason }
+              }
+              return { kind: verdict.kind === 'forced' ? 'forced' : 'ok' }
+            },
+          },
+          notify: (message, kind) => app.notify(message, kind),
+          restoreDraft: (draft) => {
+            const merged = mergeDraft(app.getDraft(), draft)
+            app.setEditorText(merged)
+            return merged === draft
+          },
+          createDraft: (draft) => createUserMessage({
+            content: [{ type: 'text', text: draft }],
+            source: { kind: 'user' },
+          }),
+          blockedNotice: (reason) => reason === 'removed'
+            ? GUARD_REMOVED_NOTIFY('save')
+            : reason === 'tail-mismatch'
+              ? GUARD_TAIL_MISMATCH_NOTIFY('save')
+              : GUARD_BLOCKED_NOTIFY('save'),
+          forcedNotice: () => GUARD_FORCED_NOTIFY,
+          staleNotice: () => 'the queue or session changed while sending — try again',
+          mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
+        }, text, onlyDraft ? { onlyDraft: true } : undefined)
+      }), {
+        diag,
+        sessionId: () => liveAgent?.session.id,
+        onError: failSubmission(text),
+      })
+    }
+    /**
+     * Dispatch one user submission end to end: the viewer guard, the input-
+     * history persistence, `!` local shells, sessionless commands, the
+     * busy-Enter preference, and the session dispatch. The Ctrl+Enter
+     * opposite chord forces the QUEUE mode (forceQueue), web busyEnter
+     * parity — the accelerated chord uses the other behavior.
+     * @param text - the submitted draft.
+     * @param forceQueue - the chord: never steer, queue instead.
+     */
+    const dispatchUserInput = (text: string, forceQueue = false): void => {
+      // The subagent viewer is READ-ONLY: submitting while viewing would
+      // silently send to the PARENT session. Refuse with a notice instead.
+      if (viewing !== undefined) {
+        app.setEditorText(mergeDraft(app.getDraft(), text))
+        app.notify('viewing a subagent — Esc returns before submitting', 'info')
+        return
+      }
+      // Persist the (newest-first) input history for the LIVE session's
+      // cwd (the editor already recorded the line through TuiApp's submit
+      // hook). A failed settings write is user-recoverable: notify instead
+      // of dropping it.
+      const history = app.getInputHistory()
+      if (history.length > 0) {
+        const settings = tuiSettings
+        if (settings !== undefined) {
+          runDetached('settings history write', () => settings.replace({ ...settings.get(), history: { ...settings.get().history, [sessionCwd()]: history } }), {
+            diag,
+            notify: (message) => app.notify(message, 'error'),
+            recoverable: () => true,
+          })
+        }
+      }
+      // `!` commands run locally through the shell (or into context for
+      // `!!`) without a model turn; everything else dispatches as before.
+      // A local `!` needs no session at all; every other submission creates
+      // the session first (the FIRST user message is the deferred trigger).
+      if (text.startsWith('!')) {
+        if (text.startsWith('!!')) {
+          // An owned workflow: the session creation failure restores the
+          // draft (failSubmission) — runOwned (AGENTS.md), never a bare
+          // void.
+          runOwned('contextual shell', () => ensureSession().then(() => runLocalShell(text)), {
+            diag,
+            sessionId: () => liveAgent?.session.id,
+            onError: failSubmission(text),
+          })
+        } else {
+          runLocalShell(text)
+        }
+        return
+      }
+      // A sessionless slash command runs locally BEFORE any session exists:
+      // typing /exit, /settings, /help, ... must not create one (deferred
+      // start). Everything else — session-backed commands, core commands
+      // like /plan, and plain prompts — creates the session lazily.
+      const parsed = parseCommand(text)
+      if (parsed !== undefined && liveAgent === undefined && SESSIONLESS_COMMANDS.has(parsed.name)) {
+        runLocalCommand(parsed, text)
+        return
+      }
+      // Busy-Enter preference (web busyEnter parity): while the agent is
+      // RUNNING and the preference is 'steer', plain Enter steers the
+      // draft into the running turn instead of queueing a followup; the
+      // Ctrl+Enter chord forces the queue mode. Slash commands and `!`
+      // shells are never steered.
+      if (!forceQueue && parsed === undefined
+        && liveAgent?.status === 'running' && tuiSettings?.get().busyEnter === 'steer') {
+        steerNow(text, true)
+        return
+      }
+      dispatchViaSession(text)
+    }
     app = startProcessTui({
-      onSubmit: (text) => {
-        // The subagent viewer is READ-ONLY: submitting while viewing would
-        // silently send to the PARENT session. Refuse with a notice instead.
-        if (viewing !== undefined) {
-          app.setEditorText(mergeDraft(app.getDraft(), text))
-          app.notify('viewing a subagent — Esc returns before submitting', 'info')
-          return
-        }
-        // Persist the (newest-first) input history for the LIVE session's
-        // cwd (the editor already recorded the line through TuiApp's submit
-        // hook). A failed settings write is user-recoverable: notify instead
-        // of dropping it.
-        const history = app.getInputHistory()
-        if (history.length > 0) {
-          const settings = tuiSettings
-          if (settings !== undefined) {
-            runDetached('settings history write', () => settings.replace({ ...settings.get(), history: { ...settings.get().history, [sessionCwd()]: history } }), {
-              diag,
-              notify: (message) => app.notify(message, 'error'),
-              recoverable: () => true,
-            })
-          }
-        }
-        // `!` commands run locally through the shell (or into context for
-        // `!!`) without a model turn; everything else dispatches as before.
-        // A local `!` needs no session at all; every other submission creates
-        // the session first (the FIRST user message is the deferred trigger).
-        if (text.startsWith('!')) {
-          if (text.startsWith('!!')) {
-            // An owned workflow: the session creation failure restores the
-            // draft (failSubmission) — runOwned (AGENTS.md), never a bare
-            // void.
-            runOwned('contextual shell', () => ensureSession().then(() => runLocalShell(text)), {
-              diag,
-              sessionId: () => liveAgent?.session.id,
-              onError: failSubmission(text),
-            })
-          } else {
-            runLocalShell(text)
-          }
-          return
-        }
-        // A sessionless slash command runs locally BEFORE any session exists:
-        // typing /exit, /settings, /help, ... must not create one (deferred
-        // start). Everything else — session-backed commands, core commands
-        // like /plan, and plain prompts — creates the session lazily.
-        const parsed = parseCommand(text)
-        if (parsed !== undefined && liveAgent === undefined && SESSIONLESS_COMMANDS.has(parsed.name)) {
-          runLocalCommand(parsed, text)
-          return
-        }
-        dispatchViaSession(text)
-      },
+      onSubmit: (text) => dispatchUserInput(text),
+      // The Ctrl+Enter opposite chord (web busyEnter parity): force the
+      // QUEUE delivery mode regardless of the busyEnter preference.
+      onQueueSubmit: (text) => dispatchUserInput(text, true),
       // The owned-task entry for UI-layer one-shot flows (the external
       // editor): runOwned with the runner's diag pre-attached.
       runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
@@ -1435,74 +1538,7 @@ export function apply(ctx: Context, config: Config): void {
         localShellController?.abort()
         liveAgent?.cancel({ kind: 'user' })
       },
-      onSteer: (text) => {
-        // The subagent viewer is read-only: steering would send to the
-        // PARENT session. Refuse with a notice and restore the draft.
-        if (viewing !== undefined) {
-          if (text.trim() !== '') app.setEditorText(mergeDraft(app.getDraft(), text))
-          app.notify('viewing a subagent — Esc returns before steering', 'info')
-          return
-        }
-        // Ctrl+S: send everything pending (kimi parity: the whole queue plus
-        // a non-empty draft rides along). With queued messages the entire
-        // queue is steered at once — the queue pane above the editor is the
-        // primary surface; without a queue it stays the classic single-draft
-        // steer. Nothing to send at all is a no-op BEFORE any session is
-        // created (deferred start). Every message goes through steer(): the
-        // next step boundary claims all next-step input together, so the
-        // batch arrives in one shot (an idle driver starts a turn with it).
-        if (liveAgent !== undefined) {
-          const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
-          if (queued.length === 0 && text.trim() === '') return
-        } else if (text.trim() === '') {
-          return
-        }
-        // An owned workflow: the send's outcome drives the draft restore and
-        // the notices — runOwned (AGENTS.md), never a bare void.
-        runOwned('steer', () => ensureSession().then(async () => {
-          if (liveAgent === undefined) return
-          // The whole send (snapshot → guard → re-validate → confirm-and-
-          // send) lives in steer.ts so the races are testable: a queue
-          // splice or session switch while the guard reads the file aborts
-          // with a retry notice instead of losing messages or writing to a
-          // session the guard never checked.
-          await steerAll({
-            currentAgent: () => liveAgent as unknown as SteerAgentLike,
-            currentGeneration: () => sessionGeneration,
-            guard: {
-              run: async (identity) => {
-                const verdict = await guardSend('save', identity)
-                if (verdict.kind === 'blocked') {
-                  return { kind: 'blocked', reason: verdict.reason }
-                }
-                return { kind: verdict.kind === 'forced' ? 'forced' : 'ok' }
-              },
-            },
-            notify: (message, kind) => app.notify(message, kind),
-            restoreDraft: (draft) => {
-              const merged = mergeDraft(app.getDraft(), draft)
-              app.setEditorText(merged)
-              return merged === draft
-            },
-            createDraft: (draft) => createUserMessage({
-              content: [{ type: 'text', text: draft }],
-              source: { kind: 'user' },
-            }),
-            blockedNotice: (reason) => reason === 'removed'
-              ? GUARD_REMOVED_NOTIFY('save')
-              : reason === 'tail-mismatch'
-                ? GUARD_TAIL_MISMATCH_NOTIFY('save')
-                : GUARD_BLOCKED_NOTIFY('save'),
-            forcedNotice: () => GUARD_FORCED_NOTIFY,
-            staleNotice: () => 'the queue or session changed while sending — try again',
-            mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
-          }, text)
-        }), {
-          diag,
-          sessionId: () => liveAgent?.session.id,
-          onError: failSubmission(text),
-        })
-      },
+      onSteer: (text) => steerNow(text),
       openExternalEditor: async (draft) => {
         // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
         // parse with a real shell-word parser, never a plain split.
@@ -1715,9 +1751,12 @@ export function apply(ctx: Context, config: Config): void {
         theme: z.string(),
         footer: z.string(),
         fullscreen: z.string(),
+        // Busy-Enter delivery mode for plain Enter while the agent is
+        // running (web busyEnter parity): 'queue' (default) or 'steer'.
+        busyEnter: z.string(),
         history: z.dict(z.array(z.string())),
       }),
-      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', history: {} } },
+      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue', history: {} } },
     )
     // Fullscreen is a persisted preference like the theme and the footer
     // (new installs default to 'on' — alt screen by default): boot applies
