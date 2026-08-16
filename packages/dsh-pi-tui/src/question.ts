@@ -1,12 +1,13 @@
 /**
- * The user-questions dialog flow (ask_user_question v2): a focusable overlay
- * component that walks one question at a time, collects drafts per question,
- * and submits the whole batch at the end — the Web QuestionComposer
- * semantics (per-question paging, batch submit, skip) with pi/kimi keyboard
- * ergonomics (↑↓ highlight, digits, real Input for free text, review page).
+ * The user-questions dialog flow (ask_user_question v2): the component that
+ * sits in the EDITOR SEAT (kimi's mountEditorReplacement pattern) while the
+ * agent asks — one question at a time, drafts per question, whole batch
+ * submitted at the end — the Web QuestionComposer semantics (per-question
+ * paging, batch submit, skip) with pi/kimi keyboard ergonomics (↑↓
+ * highlight, digits, real Input for free text, review page).
  *
- * Pure component: the app layer owns the promise/abort plumbing and routes
- * input here while the flow is active.
+ * Pure component: the app layer owns the promise/abort plumbing, the seat
+ * swap, and routes input here while the flow is active.
  * @module @xmoon76/dsh-pi-tui/question
  */
 
@@ -54,12 +55,22 @@ interface Draft {
 const OTHER_ROW = '\u0000other'
 
 /**
- * Total physical-row budget of the question flow itself. The Frame wrapper
- * adds its two border rows, and the overlay clips past maxHeight 26 instead
- * of scrolling — so EVERYTHING (tabs, question, detail, options with their
- * descriptions, scroll marker, skipped note, hint) must fit in 24 rows.
+ * Default total physical-row budget of the question flow itself. The
+ * QuestionFrame in tui-app.ts re-derives the budget from the terminal height
+ * on every render (60% cap, 8..24 content rows) and pushes it through
+ * {@link QuestionFlow.setMaxRows}; 24 is the fallback for direct renders.
+ * The Frame wrapper adds its two border rows, and NOTHING clips the flow's
+ * output in the editor-seat layout — so EVERYTHING (tabs, question, detail,
+ * options with their descriptions, scroll marker, skipped note, hint) must
+ * fit in the budget.
  */
-const DIALOG_BUDGET = 24
+const DEFAULT_BUDGET = 24
+/**
+ * Smallest supported content-row budget (a 16-row terminal caps the frame at
+ * 10 rows). Below this the required rows (tabs, the question's first row,
+ * the current option, the hint) cannot all coexist.
+ */
+const MIN_SUPPORTED_BUDGET = 8
 /**
  * Total physical-row budget for the question body (question text + detail),
  * shared so a single unbroken long line cannot push the options and hints
@@ -107,14 +118,15 @@ function appendWrappedBudgeted(
 }
 
 /**
- * Push the CURRENT option's label: its first physical row is ALWAYS emitted
- * (the `→` pointer must stay on screen), extra rows fill `budget`, and a
- * `... N more` marker reports a label that was itself cut. Unlike
- * {@link appendWrappedBudgeted}, a 1-row budget shows the label content, not
- * just the cut marker — the anchored current option may never vanish.
+ * Required-first push: the FIRST physical row always carries `content` —
+ * never just a cut marker — while extra rows fill `budget` and a `... N
+ * more` marker reports content that was itself cut, only when a row remains
+ * after the content. Used for the question body and the highlighted option
+ * label, whose first rows may never vanish (a 1-row budget shows the
+ * content, not the marker).
  * @returns the remaining budget (≥ 0).
  */
-function appendCurrentLabel(
+function appendContentFirst(
   lines: string[],
   firstPrefix: string,
   continuationPrefix: string,
@@ -189,7 +201,14 @@ export class QuestionFlow implements Component, Focusable {
   private readonly otherInput = new Input()
   /** Review-page action highlight (0 = Submit, 1 = Cancel). */
   private submitIdx = 0
-  focused = false
+  /**
+   * Current content-row budget (8..24). The editor-seat QuestionFrame in
+   * tui-app.ts re-derives it from the terminal height on every render and
+   * pushes it through {@link setMaxRows}; nothing clips the flow's output
+   * in that layout, so every render must fit the budget exactly.
+   */
+  private budget = DEFAULT_BUDGET
+  private _focused = false
 
   constructor(
     questions: readonly QuestionFlowQuestion[],
@@ -205,6 +224,31 @@ export class QuestionFlow implements Component, Focusable {
     this.otherInput.onEscape = () => this.exitOther()
     // An optionless first question edits text from the start.
     this.syncEditMode()
+  }
+
+  /**
+   * Focus mirror for the editor-seat layout: the app focuses the wrapping
+   * QuestionFrame, which forwards here. The free-text Input renders its
+   * hardware cursor only while focused AND editing, so the mirror must sync
+   * it — a plain field would leave the cursor permanently hidden.
+   */
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    if (this.editingOther) this.otherInput.focused = value
+  }
+
+  /**
+   * Replace the content-row budget (the Frame wrapper adds its two border
+   * rows on top). Called by QuestionFrame on every render immediately
+   * before the flow renders, so no invalidation is needed; values outside
+   * [MIN_SUPPORTED_BUDGET, DEFAULT_BUDGET] are clamped.
+   */
+  setMaxRows(rows: number): void {
+    this.budget = Math.max(MIN_SUPPORTED_BUDGET, Math.min(DEFAULT_BUDGET, Math.floor(rows)))
   }
 
   /** The rows of the current question (options plus the free-text row). */
@@ -497,10 +541,10 @@ export class QuestionFlow implements Component, Focusable {
       // Review page: every answer, then Submit/Cancel actions. The page
       // shares the SAME physical-row budget as the rest of the dialog: no
       // matter how long the answers are, the Submit/Cancel row and the hint
-      // must stay visible. Fixed rows: tab strip + blank (already pushed),
-      // trailing blank, actions, hint = 5; title + questions get the rest,
+      // must stay visible — they are the REQUIRED tail (2 rows), and title,
+      // separators, questions and answers share everything else,
       // row-budgeted with the usual `... N more lines` cut marker.
-      let reviewBudget = DIALOG_BUDGET - 5
+      let reviewBudget = this.budget - lines.length - 2
       reviewBudget = appendWrappedBudgeted(
         lines,
         '',
@@ -554,14 +598,32 @@ export class QuestionFlow implements Component, Focusable {
     const question = this.questions[this.tab]
     const draft = this.draft()
     if (question === undefined || draft === undefined) return lines
-    if (question.header !== undefined && question.header !== '') {
-      lines.push(color.textDim(question.header))
+    const rows = this.rows()
+    const multi = question.multiSelect === true
+    const editingOther = this.editingOther && rows.some(row => row.key === OTHER_ROW)
+    const skippedRow = draft.skipped ? 1 : 0
+    const optionless = rows.length === 0 || (rows.length === 1 && rows[0]?.key === OTHER_ROW)
+    // Required tail — the rows that must render below the body:
+    //   choice page: separator blank + highlighted option + (skipped) note +
+    //                trailing blank + hint = 4 + skippedRow
+    //   optionless:  input row + (skipped) note + trailing blank + hint =
+    //                3 + skippedRow
+    const tail = optionless ? 3 + skippedRow : 4 + skippedRow
+    let bodyAllowance = this.budget - lines.length - tail
+    const header = question.header
+    // The header is decorative: it renders only when the question body still
+    // gets at least one row (the required-first guarantee below).
+    const headerShown = header !== undefined && header !== '' && bodyAllowance >= 2
+    if (headerShown) {
+      lines.push(color.textDim(header))
+      bodyAllowance -= 1
     }
-    // The question body wraps with a `?` marker and hanging indent, sharing
-    // a PHYSICAL-row budget with the detail block so a long unbroken line
-    // can never push the options and hints out of the dialog.
-    let bodyBudget = MAX_BODY_LINES
-    bodyBudget = appendWrappedBudgeted(
+    // The question body is REQUIRED-FIRST: its first physical row always
+    // carries the question text (never a cut marker). Detail spends what the
+    // question leaves, capped at MAX_BODY_LINES so a single unbroken long
+    // line can never push the options and hints out of the dialog.
+    const bodyBudget = Math.min(MAX_BODY_LINES, Math.max(1, bodyAllowance))
+    let bodyLeft = appendContentFirst(
       lines,
       `${color.primary('?')}  `,
       '    ',
@@ -571,40 +633,34 @@ export class QuestionFlow implements Component, Focusable {
     )
     if (question.detail !== undefined && question.detail !== '') {
       for (const line of question.detail.split('\n')) {
-        if (bodyBudget <= 1) {
+        if (bodyLeft <= 1) {
           // Keep ONE row inside the budget for the cut marker: a detail that
           // never fits must still say so, without overflowing the dialog.
-          appendWrappedBudgeted(lines, '   ', '   ', color.textDim('... more content hidden'), safeWidth, bodyBudget)
+          appendWrappedBudgeted(lines, '   ', '   ', color.textDim('... more content hidden'), safeWidth, bodyLeft)
           break
         }
-        bodyBudget = appendWrappedBudgeted(lines, '   ', '   ', color.textDim(line), safeWidth, bodyBudget)
+        bodyLeft = appendWrappedBudgeted(lines, '   ', '   ', color.textDim(line), safeWidth, bodyLeft)
       }
     }
-    const rows = this.rows()
-    const multi = question.multiSelect === true
-    const editingOther = this.editingOther && rows.some(row => row.key === OTHER_ROW)
-    if (rows.length > 0 && !(rows.length === 1 && rows[0]?.key === OTHER_ROW)) {
+    if (!optionless) {
       lines.push('')
-      // The WHOLE dialog shares one physical-row budget (the overlay clips
-      // past its maxHeight, it does not scroll): tabs, question/detail,
+      // The WHOLE dialog shares one physical-row budget (nothing clips the
+      // flow's output in the editor-seat layout): tabs, question/detail,
       // option labels AND descriptions, the scroll marker, and the hint must
-      // all fit. The option section gets whatever the body left, and the
-      // window shrinks with it — the CURRENT option's row is ANCHORED: its
-      // label rows are reserved before any neighbor renders, so long
-      // descriptions of rows above can never push the cursor's own `→` row
-      // off the page.
-      const showingRow = rows.length > MAX_VISIBLE_OPTIONS ? 1 : 0
-      const skippedRow = draft.skipped ? 1 : 0
-      // Reserve the trailing blank + hint (2 rows), the scroll marker and
-      // the (skipped) note.
-      let optionBudget = DIALOG_BUDGET - lines.length - 2 - showingRow - skippedRow
+      // all fit. The tail allocation above guarantees optionBudget >= 1, so
+      // the window never shrinks to zero — the CURRENT option's row is
+      // ANCHORED: its label rows are reserved before any neighbor renders,
+      // so long descriptions of rows above can never push the cursor's own
+      // `→` row off the page. The `showing X-Y of N` marker is optional and
+      // renders only when option rows leave space.
+      const optionBudget = this.budget - lines.length - skippedRow - 2
       const maxWindow = Math.max(1, Math.min(MAX_VISIBLE_OPTIONS, optionBudget))
       const visibleCount = Math.min(rows.length, maxWindow)
       const half = Math.floor(maxWindow / 2)
       const maxStart = Math.max(0, rows.length - visibleCount)
       const start = Math.max(0, Math.min(this.cursor - half, maxStart))
       const end = Math.min(rows.length, start + visibleCount)
-      if (optionBudget > 0) {
+      {
         // Reserved rows for the current option's label (capped so one absurd
         // label cannot eat the whole dialog).
         const cursorRow = rows[this.cursor]
@@ -667,7 +723,7 @@ export class QuestionFlow implements Component, Focusable {
           const available = isCursor || cursorRendered ? left : left - reserved
           const beforeLabel = lines.length
           if (isCursor) {
-            appendCurrentLabel(lines, prefix, indent, `${label}${badge}`, safeWidth, available)
+            appendContentFirst(lines, prefix, indent, `${label}${badge}`, safeWidth, available)
           } else {
             appendWrappedBudgeted(lines, prefix, indent, `${label}${badge}`, safeWidth, available)
           }
@@ -690,7 +746,7 @@ export class QuestionFlow implements Component, Focusable {
           }
           if (isCursor) cursorRendered = true
         }
-        if (showingRow === 1 && left > 0) {
+        if (rows.length > MAX_VISIBLE_OPTIONS && left > 0) {
           left = appendWrappedBudgeted(
             lines,
             '   ',
@@ -701,7 +757,7 @@ export class QuestionFlow implements Component, Focusable {
           )
         }
       }
-    } else if (this.editingOther || (question.options?.length ?? 0) === 0) {
+    } else {
       // Optionless question: the real Input owns the line (placeholder hint).
       const inputLines = this.otherInput.render(Math.max(1, safeWidth - 2))
       const inputLine = inputLines[0] ?? ''

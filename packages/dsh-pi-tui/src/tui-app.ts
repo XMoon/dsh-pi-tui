@@ -34,6 +34,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
   type Component,
+  type Focusable,
   type OverlayHandle,
   type OverlayOptions,
   type SettingItem,
@@ -148,6 +149,41 @@ export class Frame implements Component {
     }
     out.push(b(`╰${'─'.repeat(frameWidth - 2)}╯`))
     return out
+  }
+}
+
+/**
+ * Frame for the question flow in the EDITOR SEAT: it re-derives the flow's
+ * row budget from the terminal height on EVERY render (60% cap, 8..24
+ * content rows — the flow's render output IS its height in the seat layout,
+ * nothing clips it), so an active resize or a queued flow presented later
+ * always budgets against the current terminal. It also forwards focus to the
+ * flow so its free-text Input keeps the hardware cursor (a plain Frame would
+ * swallow the focus flag).
+ */
+class QuestionFrame extends Frame implements Focusable {
+  private readonly flow: QuestionFlow
+  private readonly heightOf: () => number
+
+  constructor(flow: QuestionFlow, heightOf: () => number) {
+    super(flow, true)
+    this.flow = flow
+    this.heightOf = heightOf
+  }
+
+  render(width: number): string[] {
+    const rows = Math.max(1, this.heightOf())
+    const frameRows = Math.max(10, Math.min(26, Math.floor(rows * 0.6)))
+    this.flow.setMaxRows(frameRows - 2)
+    return super.render(width)
+  }
+
+  get focused(): boolean {
+    return this.flow.focused
+  }
+
+  set focused(value: boolean) {
+    this.flow.focused = value
   }
 }
 
@@ -531,10 +567,18 @@ export interface TuiQuestionAnswer {
   custom?: string
 }
 
-/** Live state of one user-questions flow (the QuestionFlow overlay). */
+/** Live state of one user-questions flow (the QuestionFlow seat). */
 interface QuestionState {
   flow: QuestionFlow
-  handle?: OverlayHandle
+  /** The mounted QuestionFrame, while this flow owns the editor seat. */
+  frame?: QuestionFrame
+  /**
+   * Overlay handles suspended (hidden) while this flow owns the seat; they
+   * are restored when the LAST queued flow settles, or transferred to the
+   * next flow. The frontmost suspended handle may own further hidden
+   * overlays through overlayDependents (reverse modal order).
+   */
+  suspendedOverlays: Set<OverlayHandle>
   resolve: (answers: TuiQuestionAnswer[]) => void
   reject: (error: unknown) => void
   signal?: AbortSignal
@@ -670,6 +714,13 @@ export class TuiApp {
   private readonly terminal: Terminal
   private readonly tui: TuiMainScreen
   private readonly editor: Editor
+  /**
+   * The editor's SEAT (kimi's editorContainer): holds the editor normally,
+   * the QuestionFrame while a question flow is active — so the dialog
+   * renders in the editor's row position (full width, above the footer)
+   * instead of a centered modal that covered the transcript.
+   */
+  private readonly editorSeat: Container
   private readonly header: Text
   private readonly messagesView: Container
   private readonly footer: Text
@@ -856,15 +907,18 @@ export class TuiApp {
       ? {}
       : { intervalMs: options.workingIntervalMs })
     this.footer = new Text('', 0, 0)
-    // The working row sits between the todo panel and the editor so it is
-    // always the row directly above the editor border (pi's statusContainer).
+    this.editorSeat = new Container()
+    this.editorSeat.addChild(this.editor)
+    // The working row sits between the todo panel and the editor seat so it
+    // is always the row directly above the editor border (pi's
+    // statusContainer).
     this.tui.addChild(this.header)
     this.tui.addChild(this.messagesView)
     this.tui.addChild(this.dock)
     this.tui.addChild(this.todoPanel)
     this.tui.addChild(this.queuePane)
     this.tui.addChild(this.working)
-    this.tui.addChild(this.editor)
+    this.tui.addChild(this.editorSeat)
     this.tui.addChild(this.footer)
     this.tui.setFocus(this.editor)
     // Input routes through routeInput (see its doc): the autocomplete
@@ -1098,6 +1152,14 @@ export class TuiApp {
    * compositor interleaves stacked boxes line by line (two different-width
    * dialogs would garble into one frame), and modal hiding is done here so
    * the vendored fork stays pristine.
+   *
+   * While a question flow owns the seat (a logical capturing modal), a NEW
+   * overlay joins the question's suspension set instead of appearing on top:
+   * it is hidden, the question's directly suspended handles become ITS
+   * dependents (kept hidden, restored only when it closes), and the overlay
+   * itself becomes the question's frontmost suspended handle — so reverse
+   * modal order survives the question. Question input keeps first priority
+   * either way (routeInput).
    * @param component - the overlay content.
    * @param options - overlay sizing/positioning.
    * @returns the handle; hide() also forgets the handle.
@@ -1105,6 +1167,33 @@ export class TuiApp {
   private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
     const handle = this.overlayHost.showOverlay(component, options)
     this.overlayHandles.add(handle)
+    const question = this.activeQuestions
+    if (question !== undefined) {
+      // Sweep: any tracked overlay still visible (normally none — the
+      // question suspended every visible one at present) joins the
+      // suspension alongside the new overlay.
+      for (const other of this.overlayHandles) {
+        if (other !== handle && !other.isHidden()) {
+          other.setHidden(true)
+          question.suspendedOverlays.add(other)
+        }
+      }
+      if (options?.nonCapturing !== true) {
+        // The new capturing overlay takes the modal front: the question's
+        // directly suspended handles become its dependents (kept hidden),
+        // so settling the question reveals IT, and settling it reveals the
+        // overlays beneath — in reverse arrival order.
+        const dependents = new Set<OverlayHandle>()
+        for (const other of question.suspendedOverlays) dependents.add(other)
+        if (dependents.size > 0) {
+          for (const other of dependents) question.suspendedOverlays.delete(other)
+          this.overlayDependents.set(handle, dependents)
+        }
+      }
+      handle.setHidden(true)
+      question.suspendedOverlays.add(handle)
+      return { ...handle, hide: () => this.closeOverlayHandle(handle) }
+    }
     if (options?.nonCapturing !== true) {
       const hidden = new Set<OverlayHandle>()
       for (const other of this.overlayHandles) {
@@ -1115,15 +1204,34 @@ export class TuiApp {
       }
       if (hidden.size > 0) this.overlayDependents.set(handle, hidden)
     }
-    return {
-      ...handle,
-      hide: () => {
-        this.overlayDependents.get(handle)?.forEach(other => other.setHidden(false))
-        this.overlayDependents.delete(handle)
-        this.overlayHandles.delete(handle)
-        handle.hide()
-      },
+    return { ...handle, hide: () => this.closeOverlayHandle(handle) }
+  }
+
+  /**
+   * Question-aware close for one tracked overlay handle (the wrapper's
+   * hide). Without an active question this matches the historical behavior:
+   * the handle's dependents are unhidden, the graph is cleaned, and the
+   * overlay is removed. While a question owns the seat, the handle leaves
+   * the question's suspension set, every dependency set drops it (no parent
+   * retains a dead child), and its still-mounted dependents remain hidden
+   * and become DIRECTLY owned by the question — they must not flash back
+   * while the question is still up.
+   */
+  private closeOverlayHandle(handle: OverlayHandle): void {
+    const question = this.activeQuestions
+    if (question !== undefined) question.suspendedOverlays.delete(handle)
+    for (const dependents of this.overlayDependents.values()) dependents.delete(handle)
+    const owned = this.overlayDependents.get(handle)
+    if (owned !== undefined) {
+      this.overlayDependents.delete(handle)
+      if (question !== undefined) {
+        for (const dependent of owned) question.suspendedOverlays.add(dependent)
+      } else {
+        for (const dependent of owned) dependent.setHidden(false)
+      }
     }
+    this.overlayHandles.delete(handle)
+    handle.hide()
   }
 
   /**
@@ -1297,8 +1405,17 @@ export class TuiApp {
     if (enabled === active) return
     const pending = this.activeApproval
     pending?.handle?.hide()
+    // overlayHandles holds RAW handles (showOverlayOnHost stores them before
+    // wrapping), so this loop calls the pi-tui hide directly: it removes
+    // every overlay from the OLD screen's stack. The tracking graph below
+    // (overlayHandles, overlayDependents, the active question's suspension)
+    // is then cleared wholesale — every one of those handles is dead, and
+    // the pending-approval rebuild re-suspends a fresh handle on the new
+    // screen.
     for (const handle of this.overlayHandles) handle.hide()
     this.overlayHandles.clear()
+    this.overlayDependents.clear()
+    if (this.activeQuestions !== undefined) this.activeQuestions.suspendedOverlays.clear()
     if (enabled) {
       // The alt screen owns mouse handling (wheel scroll, drag selection,
       // right-click paste — pi's fullscreen behavior); a same-cell primary
@@ -1329,7 +1446,7 @@ export class TuiApp {
         // The busy indicator row sits directly above the editor border
         // (pi's statusContainer placement); idle it renders zero rows.
         { component: this.working, shrink: 0 },
-        { component: this.editor, shrink: 0 },
+        { component: this.editorSeat, shrink: 0 },
         { component: this.footer, shrink: 0 },
       ])
       alt.setLayoutRoot(root)
@@ -1360,6 +1477,16 @@ export class TuiApp {
     }
     this.events.onFullscreenChange?.(enabled)
     if (pending !== undefined) this.renderApprovalDialog(pending)
+    // A question survives the switch through the SHARED seat (both screens'
+    // layouts hold the same editorSeat): keep its frame focused on the new
+    // screen — the flow's input routing is screen-agnostic. The old screen's
+    // overlay handles are dead and were dropped from the tracking graph
+    // above; the rebuilt approval (if any) is suspended afresh on the new
+    // screen.
+    const question = this.activeQuestions
+    if (question?.frame !== undefined) {
+      (this.fullscreen ?? this.tui).setFocus(question.frame)
+    }
   }
 
   /**
@@ -2365,6 +2492,21 @@ export class TuiApp {
   }
 
   /**
+   * Headless-test hook: current overlay tracking-graph sizes. The graph
+   * (overlayHandles / overlayDependents / the active question's suspension)
+   * is behaviorally invisible — stale entries only leak memory — so the
+   * headless suite asserts its sizes directly (e.g. the fullscreen teardown
+   * must leave it empty instead of retaining dead handles).
+   */
+  overlayGraphState(): { handles: number; dependents: number; suspended: number } {
+    return {
+      handles: this.overlayHandles.size,
+      dependents: this.overlayDependents.size,
+      suspended: this.activeQuestions?.suspendedOverlays.size ?? 0,
+    }
+  }
+
+  /**
    * Rebuild the persistent dock strip above the todo panel: todo summary and
    * background tasks — one truncated line each, only while non-empty (kimi
    * chrome parity). The dock is the "at a glance" surface under the
@@ -2898,6 +3040,7 @@ export class TuiApp {
           (answers) => this.settleQuestions(state, answers),
           () => this.settleQuestions(state, undefined),
         ),
+        suspendedOverlays: new Set(),
         resolve,
         reject,
         signal,
@@ -2922,14 +3065,27 @@ export class TuiApp {
     })
   }
 
-  /** Mount one flow's overlay and make it the active one. */
+  /** Mount one flow into the editor seat and make it the active one. */
   private presentQuestion(state: QuestionState): void {
+    // Set the active flow BEFORE touching overlays: showOverlayOnHost and
+    // the suspension bookkeeping branch on it.
     this.activeQuestions = state
-    // 85% of the terminal (min 64) with a fillWidth frame: on a wide screen
-    // the dialog used to hug its ~60-col content, a narrow strip in the
-    // middle of the terminal (issue #3). Width is a Frame/overlay concern —
-    // the flow itself keeps rendering content rows at whatever width it gets.
-    state.handle = this.showOverlayOnHost(new Frame(state.flow, true), { width: '85%', minWidth: 64, maxHeight: 26 })
+    // A question is a logical capturing modal: every visible overlay is
+    // suspended (hidden, state intact) until the flow settles — the same
+    // stacking rule showOverlayOnHost applies to a new overlay.
+    for (const handle of this.overlayHandles) {
+      if (!handle.isHidden()) {
+        handle.setHidden(true)
+        state.suspendedOverlays.add(handle)
+      }
+    }
+    const frame = new QuestionFrame(state.flow, () => this.terminal.rows)
+    state.frame = frame
+    this.editorSeat.clear()
+    this.editorSeat.addChild(frame)
+    const screen = this.fullscreen ?? this.tui
+    screen.setFocus(frame)
+    screen.requestRender()
   }
 
   /** Abort one flow (its signal fired). The ACTIVE flow settles rejected
@@ -2949,13 +3105,6 @@ export class TuiApp {
     const index = this.questionQueue.indexOf(state)
     if (index !== -1) this.questionQueue.splice(index, 1)
     state.reject(cancellationError('question flow cancelled'))
-  }
-
-  /** Show the next queued flow, if any (called after the active one settles). */
-  private nextQuestion(): void {
-    const next = this.questionQueue.shift()
-    if (next === undefined) return
-    this.presentQuestion(next)
   }
 
   /** Cancel every pending flow: each promise rejects exactly once. */
@@ -2979,19 +3128,51 @@ export class TuiApp {
   private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (this.activeQuestions !== state || state.settled === true) return
     state.settled = true
-    this.activeQuestions = undefined
-    state.handle?.hide()
     if (state.onAbort !== undefined && state.signal !== undefined) {
       state.signal.removeEventListener('abort', state.onAbort)
     }
-    this.overlayHost.setFocus(this.editor)
+    const next = this.questionQueue.shift()
+    if (next !== undefined) {
+      // Ownership transfer: the seat and the suspended overlays pass to the
+      // next flow directly — the editor and the overlays are NEVER restored
+      // between two queued flows (a restore would flash the editor row and
+      // reveal overlays that must stay hidden under the question).
+      next.suspendedOverlays = state.suspendedOverlays
+      state.suspendedOverlays = new Set()
+      const frame = new QuestionFrame(next.flow, () => this.terminal.rows)
+      next.frame = frame
+      this.editorSeat.clear()
+      this.editorSeat.addChild(frame)
+      this.activeQuestions = next
+      const screen = this.fullscreen ?? this.tui
+      screen.setFocus(frame)
+      screen.requestRender()
+      this.settle(state, answers)
+      return
+    }
+    // Final restoration: the editor FIRST, then the suspended overlays — a
+    // restored capturing overlay focuses itself through setHidden(false),
+    // so the editor must not be re-focused afterwards.
+    this.editorSeat.clear()
+    this.editorSeat.addChild(this.editor)
+    this.activeQuestions = undefined
+    const screen = this.fullscreen ?? this.tui
+    screen.setFocus(this.editor)
+    for (const handle of state.suspendedOverlays) {
+      if (this.overlayHandles.has(handle)) handle.setHidden(false)
+    }
+    state.suspendedOverlays.clear()
+    screen.requestRender()
+    this.settle(state, answers)
+  }
+
+  /** Resolve or reject the settled promise (exactly once, by construction). */
+  private settle(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (answers === undefined) {
       state.reject(cancellationError('question flow cancelled'))
     } else {
       state.resolve(answers)
     }
-    // A queued flow takes the screen next.
-    this.nextQuestion()
   }
 }
 

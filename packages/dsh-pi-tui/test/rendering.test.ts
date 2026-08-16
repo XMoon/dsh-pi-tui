@@ -24,8 +24,8 @@ process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
 
-function startApp(width = 100): { vt: VirtualTerminal; app: TuiApp } {
-  const vt = new VirtualTerminal(width, 24)
+function startApp(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(width, height)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   return { vt, app }
@@ -150,21 +150,90 @@ test('question dialog tabs align with the box border and the hint fits the width
   await assert.rejects(promise, /cancelled/)
 })
 
-test('question dialog spans 85% of a wide terminal instead of hugging its content', async () => {
-  // Issue #3: on a wide screen the Frame used to shrink to the ~60-col
-  // content, a narrow strip in the middle of the terminal. The overlay now
-  // takes 85% (min 64) and the fillWidth frame spans it.
+test('question dialog docks in the editor seat at full width above the footer', async () => {
+  // Issue #3 follow-up: the dialog used to be a centered 85%-wide × 26-row
+  // modal that covered the whole transcript on common terminals. It now
+  // spans the full terminal width and sits in the EDITOR SEAT (kimi's
+  // mountEditorReplacement), with the footer (status line) still visible
+  // BELOW it.
   const { vt, app } = startApp(160)
+  app.setStatus({ model: 'my-model', cwd: 'c' })
   const promise = app.askQuestions([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }])
   const view = await viewport(vt)
-  const top = view.split('\n').find(line => line.includes('╭') && line.includes('╮'))
-  assert.ok(top !== undefined, `dialog missing:\n${view}`)
-  // The viewport line is padded to the terminal width; measure the border
-  // between its corners. 85% of 160 = 136.
-  const borderWidth = top.lastIndexOf('╮') - top.indexOf('╭') + 1
-  assert.equal(borderWidth, 136, `frame must span 85% of 160 cols, got ${borderWidth}:\n${view}`)
+  const lines = view.split('\n')
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const qIdx = lines.findIndex(line => strip(line).includes('Pick'))
+  assert.ok(qIdx >= 0, `question missing:\n${view}`)
+  let topIdx = -1
+  let bottomIdx = -1
+  for (let i = qIdx; i >= 0; i--) {
+    const s = strip(lines[i] ?? '')
+    if (s.includes('╭') && s.includes('╮')) { topIdx = i; break }
+  }
+  for (let i = qIdx; i < lines.length; i++) {
+    const s = strip(lines[i] ?? '')
+    if (s.includes('╰') && s.includes('╯')) { bottomIdx = i; break }
+  }
+  assert.ok(topIdx >= 0 && bottomIdx >= 0, `question frame missing:\n${view}`)
+  // Full width: the border spans all 160 columns.
+  const top = strip(lines[topIdx]!)
+  assert.equal(top.lastIndexOf('╮') - top.indexOf('╭') + 1, 160, `frame must span the full 160 cols:\n${view}`)
+  // The dialog is docked at the bottom, not centered: its bottom border sits
+  // immediately above the footer's first row.
+  const footerIdx = lines.findIndex(line => strip(line).includes('my-model'))
+  assert.ok(footerIdx >= 0, `footer missing:\n${view}`)
+  assert.equal(bottomIdx + 1, footerIdx, `dialog bottom border must sit directly above the footer:\n${view}`)
+  assert.ok(topIdx > 0, `dialog must not start at row 0 (docked, not centered):\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)
+})
+
+/** Measure the question frame's span (bottom border row - top border row + 1).
+ * The question frame is the BOTTOM-MOST frame in the viewport (the editor
+ * seat sits above the footer); frames above it (welcome card, header) are
+ * ignored. Returns -1 when no frame is found. */
+function questionFrameSpan(view: string): number {
+  const lines = view.split('\n')
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let top = -1
+  let bottom = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const s = strip(lines[i] ?? '')
+    if (bottom === -1 && s.includes('╰') && s.includes('╯')) bottom = i
+    if (top === -1 && s.includes('╭') && s.includes('╮')) top = i
+    if (top !== -1 && bottom !== -1) break
+  }
+  return top >= 0 && bottom >= 0 ? bottom - top + 1 : -1
+}
+
+test('the question dialog height cap tracks the terminal height', async () => {
+  // The cap is 60% of the terminal height (8..24 content rows + 2 borders).
+  // The fixture must FILL the budget (7 long-description options), and the
+  // assertion measures the question frame's ACTUAL span — a short question
+  // renders fewer rows and proves nothing about the cap.
+  const cases: Array<[number, number]> = [[16, 10], [24, 14], [40, 24], [60, 26]]
+  for (const [rows, maxSpan] of cases) {
+    const vt = new VirtualTerminal(100, rows)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    const promise = app.askQuestions([{
+      id: 'q1',
+      question: 'Pick one',
+      options: Array.from({ length: 7 }, (_, i) => ({
+        label: `Option ${i + 1}`,
+        description: 'd'.repeat(800),
+      })),
+    }])
+    const view = await viewport(vt)
+    const span = questionFrameSpan(view)
+    assert.ok(span > 4, `dialog missing at ${rows} rows:\n${view}`)
+    assert.ok(span <= maxSpan, `dialog span ${span} > ${maxSpan} at ${rows} rows:\n${view}`)
+    assert.ok(view.includes('→'), `pointer pushed out at ${rows} rows:\n${view}`)
+    assert.ok(view.includes('esc cancel'), `hint pushed out at ${rows} rows:\n${view}`)
+    assert.ok(view.includes('more lines'), `truncation marker missing at ${rows} rows:\n${view}`)
+    await vt.sendInput('\x1b')
+    await assert.rejects(promise, /cancelled/)
+  }
 })
 
 test('the whole question dialog fits its height: long descriptions cannot push the hint out', async () => {
@@ -182,8 +251,12 @@ test('the whole question dialog fits its height: long descriptions cannot push t
     })),
   }])
   const view = await viewport(vt)
-  const rows = view.split('\n').filter(line => line.trim() !== '')
-  assert.ok(rows.length <= 26, `dialog overflowed the overlay:\n${view}`)
+  // Measure the question frame only (24-row terminal: cap = 14 rows) — the
+  // docked layout leaves other content visible, so whole-viewport row counts
+  // would prove nothing.
+  const span = questionFrameSpan(view)
+  assert.ok(span > 4, `dialog missing:\n${view}`)
+  assert.ok(span <= 14, `dialog overflowed the 60% height cap (span ${span}):\n${view}`)
   assert.ok(view.includes('Option 1'), `the current option was pushed out:\n${view}`)
   assert.ok(view.includes('esc cancel'), `the hint was pushed out:\n${view}`)
   assert.ok(view.includes('more lines'), `truncation marker missing:\n${view}`)
@@ -288,6 +361,331 @@ test('a long unbroken question detail is row-budgeted so options and hints stay 
   assert.ok(view.includes('more lines') || view.includes('more content hidden'), `truncation marker missing:\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)
+})
+
+test('an active question re-budgets when the terminal resizes', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: Array.from({ length: 7 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'd'.repeat(800),
+    })),
+  }])
+  let view = await viewport(vt)
+  assert.ok(questionFrameSpan(view) <= 24, `dialog must fit 24 rows at 40 rows:\n${view}`)
+  vt.resize(100, 16)
+  view = await viewport(vt)
+  const span = questionFrameSpan(view)
+  assert.ok(span <= 10, `dialog must re-budget to 10 rows after resize (span ${span}):\n${view}`)
+  assert.ok(view.includes('→'), `pointer lost after resize:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint lost after resize:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a queued question budgets against the terminal height at presentation', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [
+    ...Array.from({ length: 7 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(800) })),
+  ] }])
+  await viewport(vt)
+  // Resize while the FIRST flow is active: the queued flow must present at
+  // the CURRENT height, not the height captured at askQuestions time.
+  vt.resize(100, 16)
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\r')
+  await first
+  const view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `queued question must take the seat:\n${view}`)
+  const span = questionFrameSpan(view)
+  assert.ok(span <= 10, `queued dialog must budget at the current height (span ${span}):\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint lost:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(second, /cancelled/)
+})
+
+test('the previous assistant reply stays visible above the question dialog', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'Here is the plan I propose: step one, step two, step three.' }])
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }, { label: 'No' }] }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Here is the plan I propose'), `reply hidden behind the dialog:\n${view}`)
+  assert.ok(view.includes('Proceed?'), `question missing:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('question dialog invariants hold under saturated chrome', async () => {
+  // Busy indicator + queue + todo + dock content are pinned rows above the
+  // seat; the dialog must keep its own invariants (height cap, pointer,
+  // hint) even when the transcript is squeezed out entirely. Transcript
+  // visibility is best-effort — it is NOT asserted here.
+  const { vt, app } = startApp()
+  app.setTodoSummary([
+    { content: 'todo one', status: 'in_progress' },
+    { content: 'todo two', status: 'pending' },
+  ])
+  app.setTasks([{ id: 't1', label: 'sleep 10', status: 'running' }])
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: Array.from({ length: 7 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'd'.repeat(800),
+    })),
+  }])
+  const view = await viewport(vt)
+  const span = questionFrameSpan(view)
+  assert.ok(span <= 14, `dialog overflowed under chrome (span ${span}):\n${view}`)
+  assert.ok(view.includes('→'), `pointer pushed out under chrome:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint pushed out under chrome:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a question flow preserves the editor draft across cancel', async () => {
+  const { vt, app } = startApp()
+  app.setDraft('my precious draft')
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+  // The SAME editor instance swaps back into the seat — the draft survives.
+  assert.equal(app.getDraft(), 'my precious draft')
+})
+
+test('aborting a question restores the editor without any key input', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }], controller.signal)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Proceed?'), `question missing:\n${view}`)
+  // The AbortSignal path never passes through handleQuestionKey's repaint:
+  // the settle must request the repaint itself.
+  controller.abort()
+  await assert.rejects(promise, /cancelled/)
+  view = await viewport(vt)
+  assert.ok(!view.includes('Proceed?'), `stale question frame after abort:\n${view}`)
+})
+
+test('a question flow suspends the settings panel and restores it on settle', async () => {
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Settings row A'), `settings missing before question:\n${view}`)
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Proceed?'), `question missing:\n${view}`)
+  assert.ok(!view.includes('Settings row A'), `settings must be suspended while the question is up:\n${view}`)
+  // The question is answerable while the settings panel is hidden.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Settings row A'), `settings must return after the question:\n${view}`)
+})
+
+test('an approval arriving during a question is suspended and revealed in order', async () => {
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const question = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('Approve bash?'), `approval must stay hidden under the question:\n${view}`)
+  // Settle the question: the approval appears (it was created while the
+  // question owned the modal front), the settings stay hidden beneath it.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await question
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Approve bash?'), `approval must appear after the question:\n${view}`)
+  assert.ok(!view.includes('Settings row A'), `settings must stay hidden under the approval:\n${view}`)
+  // Rejecting the approval restores the settings beneath it.
+  vt.sendInput('n')
+  assert.equal(await approval, 'rejected')
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Settings row A'), `settings must return after the approval:\n${view}`)
+})
+
+test('closing a suspended overlay during a question must not revive it', async () => {
+  const { vt, app } = startApp()
+  const close = app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  // Close the suspended settings programmatically while the question is up.
+  close()
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('Settings row A'), `settings must stay hidden:\n${view}`)
+  // Settling the question must NOT revive the closed overlay.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await promise
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('Settings row A'), `a closed overlay must not revive after the question:\n${view}`)
+})
+
+test('queued question flows transfer the seat and suspension without restoring', async () => {
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }])
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('First?'), `first question missing:\n${view}`)
+  assert.ok(!view.includes('Settings row A'), `settings must be suspended:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await first
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Second?'), `second question must take the seat:\n${view}`)
+  assert.ok(!view.includes('First?'), `first frame must be gone:\n${view}`)
+  assert.ok(!view.includes('Settings row A'), `settings must stay suspended between flows:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await second
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Settings row A'), `settings must return after the LAST flow:\n${view}`)
+})
+
+test('a question preempts a visible approval and restores it on settle', async () => {
+  const { vt, app } = startApp()
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  const question = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Proceed?'), `question must take the front:\n${view}`)
+  assert.ok(!view.includes('Approve bash?'), `approval must be suspended:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await question
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Approve bash?'), `approval must return after the question:\n${view}`)
+  vt.sendInput('y')
+  assert.equal(await approval, 'allowed-once')
+})
+
+test('a question renders and restores inside fullscreen', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Proceed?'), `question missing in fullscreen:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Proceed?'), `stale question frame in fullscreen:\n${after}`)
+})
+
+test('setFullscreen during an active question keeps the question mounted', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  // Direct toggle (not reachable through Ctrl+F — question input wins — but
+  // the public method must not crash or lose the question).
+  app.setFullscreen(true)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Proceed?'), `question must survive the toggle:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  view = await viewport(vt)
+  assert.ok(!view.includes('Proceed?'), `stale question frame after leaving fullscreen:\n${view}`)
+})
+
+test('fullscreen toggle clears the overlay tracking graph (no stale handles)', async () => {
+  // The toggle destroys the OLD screen's overlays — including ones suspended
+  // under an active question. The tracking graph (overlayHandles,
+  // overlayDependents, the question's suspension set) must be cleared at the
+  // toggle. This is a GRAPH assertion: stale handles are behaviorally
+  // invisible (settleQuestions guards revival with overlayHandles.has()), so
+  // a screen-output test cannot distinguish the leak from the fix — only the
+  // graph sizes can.
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  // Before the toggle: the settings overlay is suspended under the question.
+  assert.deepEqual(app.overlayGraphState(), { handles: 1, dependents: 0, suspended: 1 })
+  app.setFullscreen(true)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Proceed?'), `question must survive the toggle:\n${view}`)
+  // After the toggle: the destroyed overlays leave NO dead handles behind
+  // (this assertion fails on the pre-fix code, which kept stale
+  // overlayDependents / suspendedOverlays entries across the toggle).
+  assert.deepEqual(app.overlayGraphState(), { handles: 0, dependents: 0, suspended: 0 })
+  // Settle the question: the destroyed settings must not revive.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.deepEqual(app.overlayGraphState(), { handles: 0, dependents: 0, suspended: 0 })
+  view = await viewport(vt)
+  assert.ok(!view.includes('Settings row A'), `destroyed settings must not revive:\n${view}`)
 })
 
 test('askQuestions toggles multi-select options', async () => {
