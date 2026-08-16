@@ -11,22 +11,26 @@
  *    identity (see subagentJobTranscriptId).
  *
  * Source B — the subagent registry (`ctx.subagents.listChildren`):
- * continuable children. These are separate durable conversations that
- * deliver no result to the parent, so Enter may open the read-only
- * transcript viewer directly.
+ * live child subagents. Continuable children are separate durable
+ * conversations that deliver no result to the parent, so Enter may open
+ * the read-only transcript viewer directly. A RUNNING one-shot child
+ * (the parent's pending foreground tool call, which registers no job
+ * record) is merged the same way, so the ↓ trigger stays armed while a
+ * foreground delegation is in flight. A finished one-shot child is not
+ * merged — its work is over and `/subagents` remains its surface.
  *
- * One-shot children are deliberately NOT merged: a background one-shot has
- * both a job record and a child record with no cross-reference (listing
- * both would double rows with no safe dedup), and a foreground one-shot is
- * the parent's pending tool call, not a background task. `/subagents`
- * remains their surface.
+ * Deliberate overlap: a running BACKGROUND one-shot has BOTH a job record
+ * and a child record with no cross-reference, so it may appear twice — the
+ * job row (status-only) and the child row (transcript viewable). Dedup is
+ * impossible without the missing childSessionId on the job record; the
+ * viewable child row is strictly more useful, so the overlap is accepted.
  *
  * Pure and injectable so row typing, ordering, and descriptions are
  * unit-testable without any dsh service.
  * @module @xmoon76/dsh-pi-tui/tasks-browser
  */
 
-/** Picker-value prefix for a continuable-subagent row. */
+/** Picker-value prefix for a subagent row. */
 export const AGENT_ROW_PREFIX = 'agent:'
 /** Picker-value prefix for a job row. */
 export const JOB_ROW_PREFIX = 'job:'
@@ -74,7 +78,7 @@ export type TaskBrowserRow =
       readonly finishedAt?: number
     }
   | {
-      readonly kind: 'continuable-subagent'
+      readonly kind: 'subagent'
       readonly value: string
       readonly childId: string
       readonly label: string
@@ -94,13 +98,17 @@ export function buildTaskRows(
   jobs: readonly TaskBrowserJobInput[],
   agents: readonly TaskBrowserAgentInput[],
 ): TaskBrowserRow[] {
-  // Only continuable children become rows; one-shot children and
-  // diagnostics stay out (their surface is /subagents).
-  type AgentRow = Extract<TaskBrowserRow, { kind: 'continuable-subagent' }>
+  // Child rows: every continuable child (resumable conversations stay
+  // reachable) plus RUNNING one-shot children (the parent's pending
+  // foreground tool call). Finished one-shot children and diagnostics
+  // stay out — their surface is /subagents.
+  type AgentRow = Extract<TaskBrowserRow, { kind: 'subagent' }>
   const agentRows: AgentRow[] = agents
-    .filter(agent => agent.kind === 'child' && agent.mode === 'continuable')
+    .filter(agent => agent.kind === 'child' && (
+      agent.mode === 'continuable' || (agent.mode === 'one-shot' && agent.activity === 'running')
+    ))
     .map(agent => ({
-      kind: 'continuable-subagent' as const,
+      kind: 'subagent' as const,
       value: `${AGENT_ROW_PREFIX}${agent.id}`,
       childId: agent.id,
       label: agent.label ?? agent.id,

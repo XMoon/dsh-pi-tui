@@ -99,8 +99,11 @@ private `/tmp/tui-demo.XXXXXX/` (`.txt` plain + `.html` colored).
 
 Note: whether the model registers a subagent in the jobs registry depends on
 it passing `run_in_background: true` (both local runs took the continuable
-path), so subagent rows in the task browser are not controllable from the
-TUI side — that branch is covered headless.
+path). Since the task browser now merges RUNNING one-shot children too, a
+foreground delegation (`run_in_background: false`) shows as a `🤖` dock row
+and arms the badge while it works, even without any job record; the
+background-one-shot double row (job row + child row) is expected, see
+tasks-browser.ts.
 
 ## Trap list (every item hit in real testing)
 

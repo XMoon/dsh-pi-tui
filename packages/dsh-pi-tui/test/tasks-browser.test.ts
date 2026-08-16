@@ -1,7 +1,8 @@
 /**
  * Unit tests for the merged task-browser row model. The browser is the
- * union of the jobs registry (status-only rows) and the continuable-subagent
- * registry (viewable rows); one-shot children are deliberately absent.
+ * union of the jobs registry (status-only rows) and the subagent registry
+ * (viewable rows): continuable children always, one-shot children while
+ * running; finished one-shot children stay out.
  * @module @xmoon76/dsh-pi-tui/tasks-browser.test
  */
 
@@ -53,16 +54,19 @@ test('jobs map to status-only rows with prefixed picker values', () => {
   assert.equal(describeTaskRow(row, 3_000), 'running · 2s')
 })
 
-test('continuable children map to viewable rows; one-shot children are excluded', () => {
+test('continuable children map to viewable rows; running one-shot children join them', () => {
   const rows = buildTaskRows([], [
     agent({ id: 'child-a', activity: 'inactive' }),
     agent({ id: 'child-b' }),
-    // A one-shot child is NOT a browser row: it has no job record here and
-    // no cross-reference to match, and its surface is /subagents.
+    // A RUNNING one-shot child (the parent's pending foreground tool
+    // call) IS a browser row: it has no job record and its transcript is
+    // viewable while it works.
     agent({ id: 'child-c', mode: 'one-shot', activity: 'running' }),
+    // A finished one-shot child is not: its surface is /subagents.
+    agent({ id: 'child-d', mode: 'one-shot', activity: 'inactive' }),
   ])
-  assert.deepEqual(kinds(rows), ['continuable-subagent', 'continuable-subagent'])
-  const [first, second] = rows as Extract<TaskBrowserRow, { kind: 'continuable-subagent' }>[]
+  assert.deepEqual(kinds(rows), ['subagent', 'subagent', 'subagent'])
+  const [first, second, third] = rows as Extract<TaskBrowserRow, { kind: 'subagent' }>[]
   // Registry order is preserved (running first, then inactive — the caller
   // passes listChildren's createdAt order).
   assert.equal(first.childId, 'child-b')
@@ -71,8 +75,19 @@ test('continuable children map to viewable rows; one-shot children are excluded'
   assert.equal(taskRowLabel(first), 'subagent · research')
   assert.equal(rowGroup(first), SUBAGENT_GROUP)
   assert.equal(describeTaskRow(first, 5_000), 'running')
-  assert.equal(second.childId, 'child-a')
-  assert.equal(describeTaskRow(second, 5_000), 'inactive')
+  assert.equal(second.childId, 'child-c')
+  assert.equal(second.activity, 'running')
+  assert.equal(taskRowLabel(second), 'subagent · research')
+  assert.equal(third.childId, 'child-a')
+  assert.equal(describeTaskRow(third, 5_000), 'inactive')
+})
+
+test('one-shot children without a label fall back to the child id', () => {
+  const rows = buildTaskRows([], [
+    { kind: 'child', id: 'child-nolabel', mode: 'one-shot', activity: 'running', hasChildren: false },
+  ])
+  assert.equal(rows.length, 1)
+  assert.equal(taskRowLabel(rows[0]!), 'subagent · child-nolabel')
 })
 
 test('diagnostic children never become rows', () => {

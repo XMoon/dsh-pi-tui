@@ -575,7 +575,7 @@ export class TuiApp {
   private readonly dock: Text
   /** Active background tasks for the dock/footer lines (label + status). */
   private dockTasks: readonly { id: string; label: string; status: string; kind?: string }[] = []
-  /** Live continuable subagents for the dock/footer lines (never jobs records). */
+  /** Live child subagents (continuable or running one-shot) for the dock/footer lines (never jobs records). */
   private dockAgents: readonly { id: string; label: string; activity: string }[] = []
   /**
    * The queued-input pane below the todo panel (kimi QueuePane parity):
@@ -2067,9 +2067,10 @@ export class TuiApp {
   }
 
   /**
-   * Replace the live continuable-subagent list for the dock lines and the
-   * footer badge. Continuable children never register jobs records
-   * (AGENTS.md), so they arm the ↓/Ctrl+J trigger through this channel.
+   * Replace the live child-subagent list for the dock lines and the
+   * footer badge. Continuable children and foreground one-shot children
+   * never register jobs records (AGENTS.md), so they arm the ↓/Ctrl+J
+   * trigger through this channel.
    * @param agents - live children (id + label + activity), empty to hide.
    */
   setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
@@ -2184,7 +2185,7 @@ export class TuiApp {
       }
     }
     if (this.dockAgents.length > 0) {
-      // One line per live continuable subagent, same cap; a subagent has no
+      // One line per live child subagent, same cap; a subagent has no
       // job record, so the dock marks it with its own glyph.
       const shown = this.dockAgents.slice(0, 3)
       for (const agent of shown) {

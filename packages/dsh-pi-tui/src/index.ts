@@ -1632,16 +1632,18 @@ export function apply(ctx: Context, config: Config): void {
         refreshQueue()
       },
       // ↓ / Ctrl+J with an empty editor: the task browser over BOTH
-      // background surfaces. Job rows (bash + one-shot subagent jobs) are
-      // status-only: the bash output read cursor belongs to the model's
-      // job_output and a subagent job record carries no child session id,
-      // so Enter opens the status viewer (never the output). Continuable
-      // subagent rows (the subagent registry) deliver no result to the
-      // parent, so Enter opens the child transcript directly. One-shot
-      // children are deliberately absent — a background one-shot is already
-      // its job row, a foreground one-shot is the parent's pending tool
-      // call, and the two records have no cross-reference (see
-      // tasks-browser.ts). The children half enriches asynchronously:
+      // background surfaces. Job rows (bash + background one-shot subagent
+      // jobs) are status-only: the bash output read cursor belongs to the
+      // model's job_output and a subagent job record carries no child
+      // session id, so Enter opens the status viewer (never the output).
+      // Subagent rows (live children from the subagent registry) deliver no
+      // result to the parent, so Enter opens the child transcript directly:
+      // continuable children always, and one-shot children while RUNNING (a
+      // foreground delegation is the parent's pending tool call, so the
+      // trigger would otherwise look dead). A running BACKGROUND one-shot
+      // appears twice — its job row and its child row — because the two
+      // records have no cross-reference to dedup; the viewable child row is
+      // the more useful one. The children half enriches asynchronously:
       // listChildren may read persistence for cold children, so the picker
       // opens on the jobs half and setItems merges the rest in.
       onOpenTasks: () => {
@@ -1663,7 +1665,7 @@ export function apply(ctx: Context, config: Config): void {
         const selectRow = (value: string): void => {
           const row = rows.find(candidate => candidate.value === value)
           if (row === undefined) return
-          if (row.kind === 'continuable-subagent') {
+          if (row.kind === 'subagent') {
             runOwned('subagent view from tasks', () => enterView(row.childId as SessionId, row.label), {
               diag,
               sessionId: () => liveAgent?.session.id,
@@ -1784,15 +1786,15 @@ export function apply(ctx: Context, config: Config): void {
       jobs.onJobsChanged(() => { refreshTasks(); refreshAgents() })
       refreshTasks()
     }
-    // Continuable children never register jobs records (AGENTS.md), so the
-    // dock badge and the task browser need their own channel into the
-    // subagent registry. `refreshAgents` is event-driven: subagent
-    // lifecycle events (start/end), subagent tool calls in the live
-    // session (the scope-filtered lifecycle events may not reach this
-    // context), and every jobs change (a one-shot settlement implies a
-    // child may have gone inactive). listChildren is async and may read
-    // persistence for cold children, so the commit is generation-guarded
-    // and never lands on a newer session.
+    // Continuable children and foreground one-shot children never register
+    // jobs records (AGENTS.md), so the dock badge and the task browser need
+    // their own channel into the subagent registry. `refreshAgents` is
+    // event-driven: subagent lifecycle events (start/end), subagent tool
+    // calls in the live session (the scope-filtered lifecycle events may
+    // not reach this context), and every jobs change (a one-shot settlement
+    // implies a child may have gone inactive). listChildren is async and
+    // may read persistence for cold children, so the commit is
+    // generation-guarded and never lands on a newer session.
     const subagents = ctx.get('subagents')
     if (subagents !== undefined) {
       refreshAgents = (): void => {
@@ -1807,10 +1809,15 @@ export function apply(ctx: Context, config: Config): void {
           sessionId: () => liveAgent?.session.id,
           onResult: (entries) => {
             if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
+            // Live child subagents arm the badge/trigger: every continuable
+            // child plus RUNNING one-shot children (a foreground delegation
+            // is the parent's pending tool call and registers no job row).
+            // Finished one-shot children drop off — their surface is
+            // /subagents.
             app.setAgents(entries
-              .filter((entry): entry is Extract<SubagentListEntry, { kind: 'child'; mode: 'continuable' }> =>
-                entry.kind === 'child' && entry.mode === 'continuable' && entry.activity === 'running')
-              .map(entry => ({ id: entry.id, label: entry.label, activity: entry.activity })))
+              .filter((entry): entry is Extract<SubagentListEntry, { kind: 'child' }> =>
+                entry.kind === 'child' && entry.activity === 'running')
+              .map(entry => ({ id: entry.id, label: entry.label ?? entry.id, activity: entry.activity })))
           },
         })
       }
