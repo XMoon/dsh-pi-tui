@@ -1182,14 +1182,18 @@ export function apply(ctx: Context, config: Config): void {
       }
       viewing = { id: childId, folder: childFolder }
       repaint(app, childFolder)
-      app.notify(`viewing subagent ${label ?? childId} — Esc returns`, 'info')
+      // The viewer bar covers the editor (read-only placeholder, accent
+      // border) and the header badges the mode — the transient notify is
+      // no longer the only "you are elsewhere" signal.
+      app.setViewerMode({ id: childId, label: label ?? childId })
     }
     /** Leave the subagent viewer (single Esc). Returns whether it exited. */
     const exitView = (): boolean => {
       if (viewing === undefined) return false
       viewing = undefined
       app.clearLocalMessages()
-      app.clearNotify() // the "viewing subagent — Esc returns" notice is stale now
+      app.clearNotify() // a viewer notify (if any) is stale now
+      app.setViewerMode(undefined)
       repaint(app, folder)
       refreshStatus()
       return true

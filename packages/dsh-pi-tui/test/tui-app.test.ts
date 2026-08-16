@@ -776,3 +776,62 @@ test('a big diff card caps in the default view with an expand hint', async () =>
   assert.ok(view.includes('more changes hidden (click to expand)'), `cap footer missing:\n${view}`)
   app.stop()
 })
+
+test('the subagent viewer covers the editor, consumes input, and restores the draft on exit', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  let singleEscapes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    onSingleEscape: () => { singleEscapes += 1; return true },
+  })
+  app.start()
+  const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+  app.setDraft('my precious draft')
+  await vt.waitForRender()
+  app.setViewerMode({ id: 'child-1', label: 'research' })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('viewing subagent: research — read-only · Esc returns'), `placeholder missing:\n${view}`)
+  assert.ok(view.includes('[viewing subagent]'), `header badge missing:\n${view}`)
+  // Typing goes nowhere, Enter does not submit, ↓ does not open anything.
+  vt.sendInput('hello')
+  vt.sendInput('\r')
+  vt.sendInput('\x1b[B')
+  await sleep(20)
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('hello'), `typed text leaked into the editor:\n${view}`)
+  assert.ok(view.includes('viewing subagent: research'), `placeholder must survive keys:\n${view}`)
+  assert.equal(submitted.length, 0, `Enter must not submit while viewing`)
+  // The preserved draft is still the real draft.
+  assert.equal(app.getDraft(), 'my precious draft')
+  // Esc exits through onSingleEscape while the viewer is up.
+  vt.sendInput('\x1b')
+  await sleep(20)
+  assert.equal(singleEscapes, 1, `Esc must reach onSingleEscape while viewing`)
+  // Leaving the viewer restores the draft and drops the badge.
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('my precious draft'), `draft not restored:\n${view}`)
+  assert.ok(!view.includes('[viewing subagent]'), `badge survived leaving:\n${view}`)
+  app.stop()
+})
+
+test('ctrl+o still folds the viewed transcript while the viewer is up', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  })
+  app.start()
+  app.setViewerMode({ id: 'child-1', label: 'research' })
+  await vt.waitForRender()
+  app.setToolOutputExpanded(false)
+  vt.sendInput('\x0f') // ctrl+o
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), true, `ctrl+o must still toggle the fold while viewing`)
+  app.setViewerMode(undefined)
+  app.stop()
+})

@@ -671,6 +671,13 @@ export class TuiApp {
   private externalEditorInFlight = false
   /** The live session's auto-generated title, shown in the header when set. */
   private sessionTitleText = ''
+  /** The read-only subagent viewer: while set, the editor bar shows a
+   * placeholder, the editor border switches to the accent color, and the
+   * header carries a persistent badge — the transient notify line is not
+   * the only signal. */
+  private viewerMode: { id: string; label: string } | undefined
+  /** The real draft preserved while the viewer covers the editor bar. */
+  private draftBeforeViewer: string | undefined
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
     // The external-editor capability is a BOUND pair: the Ctrl+G flow
@@ -793,6 +800,14 @@ export class TuiApp {
     }
     if (this.activeApproval !== undefined) {
       return this.handleApprovalKey(data)
+    }
+    // The subagent viewer is READ-ONLY: while viewing, every key except
+    // Esc (exit) and Ctrl+O (fold toggle — the viewed transcript still
+    // folds) is inert — no typing into the placeholder bar, no Enter
+    // submit, no Ctrl+S steer, no ↓ browser. Overlays keep their keys.
+    if (this.viewerMode !== undefined && !this.overlayHost.hasOverlayEntries
+      && !matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
+      return { consume: true }
     }
     // Transcript search owns these keys while its overlay is up; everything
     // else falls through to the focused search input.
@@ -1428,9 +1443,47 @@ export class TuiApp {
   /**
    * Replace the editor draft. The runner restores a submission that the
    * divergence guard blocked, so the user's text survives for a retry.
+   * While the subagent viewer covers the editor, the write goes to the
+   * preserved draft (the placeholder bar stays up; the draft is restored
+   * on exit).
    */
   setEditorText(text: string): void {
+    if (this.viewerMode !== undefined) {
+      this.draftBeforeViewer = text
+      return
+    }
     this.editor.setText(text)
+  }
+
+  /**
+   * Enter or leave the read-only subagent viewer. While viewing, the
+   * editor bar is covered by a placeholder (the real draft is preserved
+   * and restored on exit), the editor border switches to the accent color,
+   * and the header shows a persistent `[viewing subagent]` badge — so the
+   * mode reads at a glance instead of relying on the transient notify.
+   * @param mode - the child identity + label; `undefined` leaves the viewer.
+   */
+  setViewerMode(mode: { id: string; label: string } | undefined): void {
+    if (mode === undefined) {
+      if (this.viewerMode === undefined) return
+      this.viewerMode = undefined
+      this.editor.borderColor = this.editorBorder
+      this.editor.setText(this.draftBeforeViewer ?? '')
+      this.draftBeforeViewer = undefined
+      this.editor.invalidate()
+      this.renderHeader()
+      this.requestRender()
+      return
+    }
+    if (this.viewerMode === undefined) {
+      this.draftBeforeViewer = this.editor.getText()
+    }
+    this.viewerMode = mode
+    this.editor.borderColor = color.accent
+    this.editor.setText(`viewing subagent: ${mode.label} — read-only · Esc returns`)
+    this.editor.invalidate()
+    this.renderHeader()
+    this.requestRender()
   }
 
   /**
@@ -1981,8 +2034,11 @@ export class TuiApp {
    * switch only has to re-run this. */
   private renderHeader(): void {
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
-    const title = this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    this.header.setText(`🐋  dsh-pi-tui${title}${this.todoText}${badge}`)
+    const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent('[viewing subagent]')}`
+    const title = this.viewerMode !== undefined
+      ? ` · ${color.textMuted(this.viewerMode.label)}`
+      : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
+    this.header.setText(`🐋  dsh-pi-tui${title}${this.todoText}${badge}${viewerBadge}`)
     this.requestRender()
   }
 
@@ -2071,16 +2127,24 @@ export class TuiApp {
 
   /**
    * Replace the editor draft wholesale (the Alt+↑ dequeue path pulls every
-   * queued message back into the editor for editing).
+   * queued message back into the editor for editing). While the subagent
+   * viewer covers the editor, the write goes to the preserved draft.
    */
   setDraft(text: string): void {
+    if (this.viewerMode !== undefined) {
+      this.draftBeforeViewer = text
+      return
+    }
     this.editor.setText(text)
     this.requestRender()
   }
 
-  /** The editor's current draft text (the Alt+↑ dequeue merge reads it). */
+  /** The editor's current draft text (the Alt+↑ dequeue merge reads it);
+   * while the viewer covers the editor, the preserved draft is returned. */
   getDraft(): string {
-    return this.editor.getText()
+    return this.viewerMode !== undefined && this.draftBeforeViewer !== undefined
+      ? this.draftBeforeViewer
+      : this.editor.getText()
   }
 
   /**
