@@ -32,6 +32,65 @@ test('approval prompt shows an overlay describing the tool', async () => {
   assert.ok(decision instanceof Promise)
 })
 
+/** The dialog's user-visible invariant: both borders, the key hints, and a
+ * height within the overlay's maxHeight must survive whatever content is
+ * shown (the 80x24 test terminal yields maxHeight 16). */
+function assertDialogIntact(view: string): void {
+  assert.ok(view.includes('╭'), `top border missing:\n${view}`)
+  assert.ok(view.includes('╰'), `bottom border missing (dialog sliced past maxHeight):\n${view}`)
+  assert.ok(view.includes('[y] allow once'), `key hints missing:\n${view}`)
+  const lines = view.split('\n')
+  const top = lines.findIndex(line => line.includes('╭'))
+  const bottom = lines.findIndex(line => line.includes('╰'))
+  assert.ok(top >= 0 && bottom >= top, `frame bounds not found:\n${view}`)
+  assert.ok(bottom - top + 1 <= 16, `frame taller than maxHeight:\n${view}`)
+}
+
+test('approval prompt with long args and reason keeps the frame and key hints intact', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({
+    toolName: 'edit_file',
+    arguments: '#!/usr/bin/env bash\n' + 'x'.repeat(240),
+    reason: 'the sandbox denied the previous write and the model retried '.repeat(8),
+  })
+  const view = await viewport(vt)
+  assertDialogIntact(view)
+  assert.ok(view.includes('more line'), `overflow marker missing:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('dangerous approval with long content keeps hints and both borders', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({
+    toolName: 'bash',
+    danger: true,
+    arguments: 'rm -rf /tmp/artifact'.repeat(30),
+    reason: 'cleanup after a failed build '.repeat(20),
+  })
+  const view = await viewport(vt)
+  assert.ok(view.includes('DANGEROUS COMMAND'), `danger notice missing:\n${view}`)
+  assertDialogIntact(view)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('a long single-line argument preview is fully shown when it fits the budget', async () => {
+  // 300 chars wrap to 5 rows at the 72-col content width — inside the
+  // preview budget. The old 240-char '…' pre-cap used to cut it silently
+  // (an uncounted truncation); the marker helper owns truncation now.
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: 'a'.repeat(300) })
+  const view = await viewport(vt)
+  assert.ok(!view.includes('…'), `preview must not show a bare ellipsis:\n${view}`)
+  const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '')
+  const body = view.split('\n').map(l => stripAnsi(l).replace(/[│╭╮╰╯─ ]/g, '')).join('')
+  assert.ok(body.includes('a'.repeat(300)), `preview must show all 300 chars:\n${view}`)
+  assertDialogIntact(view)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
 test('y allows once and closes the dialog', async () => {
   const { vt, app } = startApp()
   const decision = app.showApprovalPrompt({ toolName: 'bash' })
@@ -250,7 +309,8 @@ test('long single-line arguments cannot push the hints off a small terminal', as
 
 test('a long single-line reason is wrap-cropped so the hints survive', async () => {
   // One 200-char reason line wraps to ~7 rows at a 32-col content width —
-  // the budget must crop it (with an ellipsis) instead of losing the hints.
+  // the budget must crop it (with a `... N more` marker) instead of losing
+  // the hints.
   const vt = new VirtualTerminal(40, 12)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -259,7 +319,7 @@ test('a long single-line reason is wrap-cropped so the hints survive', async () 
   const view = await viewport(vt)
   assert.ok(view.includes('[y] allow once'), `key hints sliced off:\n${view}`)
   assert.ok(view.includes('╰'), `bottom border sliced off:\n${view}`)
-  assert.ok(view.includes('…'), `truncation marker missing:\n${view}`)
+  assert.ok(view.includes('more line'), `truncation marker missing:\n${view}`)
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
 })

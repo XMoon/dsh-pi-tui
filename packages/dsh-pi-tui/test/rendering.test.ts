@@ -150,6 +150,23 @@ test('question dialog tabs align with the box border and the hint fits the width
   await assert.rejects(promise, /cancelled/)
 })
 
+test('question dialog spans 85% of a wide terminal instead of hugging its content', async () => {
+  // Issue #3: on a wide screen the Frame used to shrink to the ~60-col
+  // content, a narrow strip in the middle of the terminal. The overlay now
+  // takes 85% (min 64) and the fillWidth frame spans it.
+  const { vt, app } = startApp(160)
+  const promise = app.askQuestions([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }])
+  const view = await viewport(vt)
+  const top = view.split('\n').find(line => line.includes('╭') && line.includes('╮'))
+  assert.ok(top !== undefined, `dialog missing:\n${view}`)
+  // The viewport line is padded to the terminal width; measure the border
+  // between its corners. 85% of 160 = 136.
+  const borderWidth = top.lastIndexOf('╮') - top.indexOf('╭') + 1
+  assert.equal(borderWidth, 136, `frame must span 85% of 160 cols, got ${borderWidth}:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
 test('the whole question dialog fits its height: long descriptions cannot push the hint out', async () => {
   const { vt, app } = startApp()
   // Review repro: 7 options, each with an ~800-char description, once

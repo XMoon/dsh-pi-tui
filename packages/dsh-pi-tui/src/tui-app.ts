@@ -102,14 +102,17 @@ const CONTEXT_BAR_WIDTH = 12
 
 /**
  * Rounded-frame wrapper for overlay content: `╭─╮` border in the border
- * token, one cell of padding, width sized to the content. Keyboard input
- * forwards to the wrapped component.
+ * token, one cell of padding, width sized to the content. With `fillWidth`
+ * the frame keeps the overlay's full width instead of hugging the widest
+ * content row. Keyboard input forwards to the wrapped component.
  */
 export class Frame implements Component {
   private readonly child: Component
+  private readonly fillWidth: boolean
 
-  constructor(child: Component) {
+  constructor(child: Component, fillWidth = false) {
     this.child = child
+    this.fillWidth = fillWidth
   }
 
   invalidate(): void {
@@ -127,7 +130,9 @@ export class Frame implements Component {
   render(width: number): string[] {
     const inner = Math.max(1, Math.floor(width) - 4)
     const lines = this.child.render(inner).map(line => truncateToWidth(line, inner, '…'))
-    const contentWidth = Math.min(inner, Math.max(1, ...lines.map(line => visibleWidth(line))))
+    const contentWidth = this.fillWidth
+      ? inner
+      : Math.min(inner, Math.max(1, ...lines.map(line => visibleWidth(line))))
     const frameWidth = contentWidth + 4
     const b = color.border
     const out = [b(`╭${'─'.repeat(frameWidth - 2)}╮`)]
@@ -317,6 +322,38 @@ export function capWrappedToHeight(text: string, width: number, budget: number):
     else high = mid - 1
   }
   return { text: `${text.slice(0, low)}…`, truncated: true }
+}
+
+/**
+ * Fit `text` into `budget` wrapped rows for the approval dialog, ending with
+ * a dimmed `... N more` marker row when the content is cut. The marker rides
+ * INSIDE the budget (content rows cap at budget−1, the marker itself is
+ * width-cropped so it can never wrap), so a section can never silently
+ * overflow the dialog's maxHeight — same marker semantics as the
+ * question flow's `appendWrappedBudgeted`. A single-row budget keeps
+ * the old width-cropped ellipsis (a bare marker row would waste the row).
+ * @returns the display text (rows joined with '\n') and the hidden row count.
+ */
+function capWrappedToMarker(text: string, width: number, budget: number): { text: string; hidden: number } {
+  if (text === '' || budget <= 0) return { text: '', hidden: 0 }
+  const total = wrapTextWithAnsi(text, width).length
+  if (total <= budget) return { text, hidden: 0 }
+  if (budget === 1) return { text: truncateToWidth(text, width, '…'), hidden: total - 1 }
+  // The longest prefix fitting budget−1 rows; the marker takes the last row.
+  const target = budget - 1
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2)
+    if (wrapTextWithAnsi(text.slice(0, mid), width).length <= target) low = mid
+    else high = mid - 1
+  }
+  const hidden = total - target
+  const marker = truncateToWidth(color.textDim(`... ${hidden} more line${hidden > 1 ? 's' : ''}`), width, '…')
+  return {
+    text: `${text.slice(0, low)}\n${marker}`,
+    hidden,
+  }
 }
 
 /** The live job-output viewer body: a title line + refreshable text panel. */
@@ -2751,10 +2788,12 @@ export class TuiApp {
     const chrome = 1 + (dangerShown === '' ? 0 : 1) + 1 + hintWrapped + 2 + 2
     // The reason and the argument preview share what the chrome leaves:
     // BOTH capped by their wrapped height, because a single long line can
-    // wrap across many display rows (a raw-line count under-budgets).
+    // wrap across many display rows (a raw-line count under-budgets). A cut
+    // section ends in a `... N more` marker row that rides inside its
+    // budget, so the dialog tells the user what was dropped.
     const reasonBudget = Math.max(0, maxHeight - chrome)
     const reasonRaw = pending.request.reason ?? ''
-    const reasonShown = capWrappedToHeight(reasonRaw, contentWidth, reasonBudget).text
+    const reasonShown = capWrappedToMarker(reasonRaw, contentWidth, reasonBudget).text
     const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
     const previewBudget = Math.max(0, maxHeight - chrome - reasonWrapped)
     const dialog = new Box(1, 1)
@@ -2763,9 +2802,11 @@ export class TuiApp {
       dialog.addChild(new Text(color.error(dangerShown), 1, 0))
     }
     if (pending.request.arguments !== undefined && pending.request.arguments !== '' && previewBudget > 0) {
+      // Preview the first six argument lines; the marker helper owns ALL
+      // truncation (a separate 240-char '…' pre-cap left an uncounted cut
+      // when the capped string still fit the budget).
       const sixLines = pending.request.arguments.split('\n').slice(0, 6).join('\n')
-      const capped = sixLines.length > 240 ? `${sixLines.slice(0, 240)}…` : sixLines
-      const previewShown = capWrappedToHeight(capped, contentWidth, previewBudget).text
+      const previewShown = capWrappedToMarker(sixLines, contentWidth, previewBudget).text
       if (previewShown !== '') {
         dialog.addChild(new Text(color.textDim(previewShown), 1, 0))
       }
@@ -2869,7 +2910,11 @@ export class TuiApp {
   /** Mount one flow's overlay and make it the active one. */
   private presentQuestion(state: QuestionState): void {
     this.activeQuestions = state
-    state.handle = this.showOverlayOnHost(new Frame(state.flow), { width: 76, maxHeight: 26 })
+    // 85% of the terminal (min 64) with a fillWidth frame: on a wide screen
+    // the dialog used to hug its ~60-col content, a narrow strip in the
+    // middle of the terminal (issue #3). Width is a Frame/overlay concern —
+    // the flow itself keeps rendering content rows at whatever width it gets.
+    state.handle = this.showOverlayOnHost(new Frame(state.flow, true), { width: '85%', minWidth: 64, maxHeight: 26 })
   }
 
   /** Abort one flow (its signal fired). The ACTIVE flow settles rejected
