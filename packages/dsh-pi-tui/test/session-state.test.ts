@@ -15,6 +15,15 @@ import { createDiag } from '../src/diag.ts'
 import { currentPalette, darkColors, lightColors } from '../src/theme.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+// themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
+// CI=true — CI runners export CI=true, which would short-circuit the
+// autodetect paths this suite drives through the /settings panel. Clear all
+// three (the tests inject terminal replies, so the opt-out only masks the
+// code under test).
+process.env.NO_COLOR = ''
+process.env.FORCE_COLOR = ''
+process.env.CI = ''
+
 /** A promise the test resolves manually, to stage late completions. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void
@@ -650,15 +659,17 @@ test('/settings theme autodetect applies only while auto stays the latest choice
   vt.sendInput('\x1b[B') // → Theme 行（起点 auto）
   await vt.waitForRender()
   // auto → dark → light → auto：最后一次选择是 auto，落地应应用。
+  // 注入与当前调色板（light，上一步显式选择）不同的深色应答：只有
+  // 检测真正落地才能变 dark——断言不能被显式选择的副作用掩盖。
   vt.sendInput('\r')
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
   vt.sendInput('\r') // light → auto（autodetect 发出）
   await vt.waitForRender()
-  vt.sendInput('\x1b]11;#eeeeee\x07') // 浅色应答
+  vt.sendInput('\x1b]11;#000000\x07') // 深色应答
   await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(currentPalette, lightColors,
+  assert.equal(currentPalette, darkColors,
     'a detection landing while auto is the latest choice must apply')
   // 再选 auto，然后在查询落地前切走：落地必须被拒绝。
   vt.sendInput('\r') // auto → dark
@@ -669,7 +680,7 @@ test('/settings theme autodetect applies only while auto stays the latest choice
   await vt.waitForRender()
   vt.sendInput('\r') // auto → dark（查询仍在途，latest choice = dark）
   await vt.waitForRender()
-  vt.sendInput('\x1b]11;#eeeeee\x07') // 浅色应答：守卫应拒绝
+  vt.sendInput('\x1b]11;#eeeeee\x07') // 浅色应答：守卫应拒绝，保持 dark
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.equal(currentPalette, darkColors,
     'a detection landing after the user left auto must not apply')

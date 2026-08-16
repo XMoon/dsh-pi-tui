@@ -15,10 +15,14 @@ import { WorkingIndicator } from '../src/working.ts'
 import type { Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
-// The CI/tooling environment may export NO_COLOR, which themeOptOut()
-// honours by skipping terminal queries entirely — that would silently turn
-// every autodetect test into a no-op assertion. Clear it for this suite.
+// CI/tooling environments export NO_COLOR, FORCE_COLOR=0 and CI=true, which
+// themeOptOut() honours by skipping terminal queries entirely — that would
+// silently turn every autodetect test into a no-op assertion. Clear all
+// three for this suite (the tests inject terminal replies, so the opt-out
+// would only mask the code paths under test).
 process.env.NO_COLOR = ''
+process.env.FORCE_COLOR = ''
+process.env.CI = ''
 
 function startApp(width = 100): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(width, 24)
