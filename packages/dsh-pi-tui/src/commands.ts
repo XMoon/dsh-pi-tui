@@ -255,6 +255,12 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       const tuiSettings = runner.tuiSettings
       const theme = tuiSettings?.get().theme ?? 'auto'
       const themeValue = theme.startsWith('custom:') ? theme.slice('custom:'.length) : theme
+      // The autodetect guard reads THIS synchronous "latest choice", never
+      // the persisted doc: the settings write is asynchronous, so at the
+      // moment an OSC 11 reply lands the doc may still hold the PREVIOUS
+      // theme — a doc-based guard would wrongly refuse a just-selected
+      // `auto` (and wrongly apply over a just-selected explicit theme).
+      let lastThemeChoice = themeValue
       // The permission-presets service owns the composed preset table and the
       // persisted default for new sessions (settings namespace 'permission').
       // Both panel rows degrade gracefully when the service is absent.
@@ -372,14 +378,26 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
             }
           } else if (id === 'theme') {
             if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)) {
+              lastThemeChoice = value
               if (value === 'auto') {
-                detach('theme autodetect', () => app.autoDetectTheme())
+                // The settled detection applies only while the preference is
+                // STILL auto — a late result must never override a theme the
+                // user picked while the query was in flight (rapid cycling).
+                // The guard reads the synchronous lastThemeChoice, NOT the
+                // persisted doc (whose write is asynchronous and may lag the
+                // query settlement by hundreds of ms).
+                detach('theme autodetect', () => app.autoDetectTheme({
+                  shouldApply: () => lastThemeChoice === 'auto',
+                }))
+                app.trackTerminalTheme(true)
               } else if (value === 'dark' || value === 'light') {
                 app.applyTheme(value)
+                app.trackTerminalTheme(false)
               } else {
                 const palette = loadCustomTheme(value)
                 if (palette !== undefined) {
                   app.applyPalette(palette)
+                  app.trackTerminalTheme(false)
                 } else {
                   app.notify(`theme ${value} not found`, 'error')
                   return
@@ -646,13 +664,22 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
       const settings = runner.tuiSettings
       if (settings !== undefined) {
         const doc = settings.get()
-        if (doc.theme === 'auto') {
-          detach('theme autodetect', () => app.autoDetectTheme())
-        } else if (doc.theme === 'dark' || doc.theme === 'light') {
-          app.applyTheme(doc.theme)
-        } else if (doc.theme.startsWith('custom:')) {
-          const palette = loadCustomTheme(doc.theme.slice('custom:'.length))
+        // The autodetect guard reads this synchronous snapshot of the
+        // reload-time theme, never a re-read of the doc: a settings write
+        // from the panel may still be in flight when the reply lands.
+        const reloadTheme = doc.theme
+        if (reloadTheme === 'auto') {
+          detach('theme autodetect', () => app.autoDetectTheme({
+            shouldApply: () => reloadTheme === 'auto',
+          }))
+          app.trackTerminalTheme(true)
+        } else if (reloadTheme === 'dark' || reloadTheme === 'light') {
+          app.applyTheme(reloadTheme)
+          app.trackTerminalTheme(false)
+        } else if (reloadTheme.startsWith('custom:')) {
+          const palette = loadCustomTheme(reloadTheme.slice('custom:'.length))
           if (palette !== undefined) app.applyPalette(palette)
+          app.trackTerminalTheme(false)
         }
         app.setFooterPreset(doc.footer === 'compact' ? 'compact' : 'full')
         app.setFullscreen(doc.fullscreen === 'on')

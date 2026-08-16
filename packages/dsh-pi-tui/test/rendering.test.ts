@@ -9,10 +9,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import { parseReadEnvelopes, toolPresenterFrom } from '../src/present.ts'
-import { color, currentPalette, darkColors, setTheme } from '../src/theme.ts'
+import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { WorkingIndicator } from '../src/working.ts'
+import type { Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+// The CI/tooling environment may export NO_COLOR, which themeOptOut()
+// honours by skipping terminal queries entirely — that would silently turn
+// every autodetect test into a no-op assertion. Clear it for this suite.
+process.env.NO_COLOR = ''
 
 function startApp(width = 100): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(width, 24)
@@ -479,6 +485,96 @@ test('autoDetectTheme resolves without changing the theme when the terminal is s
   const before = currentPalette
   await app.autoDetectTheme() // VirtualTerminal never answers OSC 11
   assert.equal(currentPalette, before, 'silent terminal must not change the palette')
+})
+
+test('autoDetectTheme applies the detected theme through the ACTIVE screen in fullscreen mode', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await viewport(vt)
+  // The alt screen owns the terminal input handler: the OSC 11 reply must
+  // resolve the query registered on the ACTIVE screen. A query on the
+  // stopped main screen would have its reply swallowed by the alt screen's
+  // OSC 11 consumer and time out — the bug that made `auto` a silent no-op
+  // in fullscreen mode.
+  const pending = app.autoDetectTheme()
+  vt.sendInput('\x1b]11;#eeeeee\x07') // bright background -> light palette
+  await pending
+  assert.equal(currentPalette, lightColors, 'fullscreen autodetect must apply the detected palette')
+})
+
+test('autoDetectTheme coalesces concurrent calls onto one shared query', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const writes: string[] = []
+  const spy = new Proxy(vt, {
+    get(target, prop) {
+      if (prop === 'write') {
+        return (data: string): void => { writes.push(data); target.write(data) }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as unknown as Terminal
+  const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  try {
+    const first = app.autoDetectTheme()
+    const second = app.autoDetectTheme()
+    assert.equal(writes.filter(data => data.includes('\x1b]11;?')).length, 1,
+      'concurrent autodetect calls must share one OSC 11 query')
+    vt.sendInput('\x1b]11;#eeeeee\x07')
+    await Promise.all([first, second])
+    assert.equal(currentPalette, lightColors, 'the shared query result must apply once')
+  } finally {
+    app.stop()
+  }
+})
+
+test('autoDetectTheme drops the settled result when shouldApply returns false', async () => {
+  const { vt, app } = startApp()
+  const before = currentPalette
+  const pending = app.autoDetectTheme({ shouldApply: () => false })
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await pending
+  assert.equal(currentPalette, before, 'a refused result must not change the palette')
+})
+
+test('trackTerminalTheme enables DSR 996 scheme tracking idempotently', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const writes: string[] = []
+  const spy = new Proxy(vt, {
+    get(target, prop) {
+      if (prop === 'write') {
+        return (data: string): void => { writes.push(data); target.write(data) }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as unknown as Terminal
+  const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  try {
+    app.trackTerminalTheme(true)
+    app.trackTerminalTheme(true) // idempotent: no second query
+    assert.equal(writes.filter(data => data.includes('\x1b[?996n')).length, 1,
+      'enabling tracking must query DSR 996 exactly once')
+    app.trackTerminalTheme(false)
+    app.trackTerminalTheme(true) // re-enabling after disable queries again
+    assert.equal(writes.filter(data => data.includes('\x1b[?996n')).length, 2,
+      're-enabling after disable must query again')
+  } finally {
+    app.stop()
+  }
+})
+
+test('scheme reports reach listeners while the alt screen owns input', async () => {
+  const { vt, app } = startApp()
+  const received: string[] = []
+  app.onTerminalThemeChange((theme) => { received.push(theme) })
+  app.setFullscreen(true)
+  await viewport(vt)
+  vt.sendInput('\x1b[?997;2n') // light — consumed by the alt screen
+  assert.deepEqual(received, ['light'], 'reports must fan out from the active screen')
+  app.stop()
 })
 
 test('fullscreen scrollback search opens with ctrl+shift+f', async () => {

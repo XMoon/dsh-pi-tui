@@ -599,6 +599,19 @@ export class TuiApp {
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
+  /** One shared in-flight autodetect; concurrent callers coalesce onto it
+   * (overlapping OSC 11 queries would mis-pair replies by FIFO order). */
+  private autoDetectInFlight: Promise<void> | undefined
+  /** The LATEST shouldApply guard of the in-flight autodetect; consulted at
+   * settle time so a late result can never override a newer explicit
+   * choice; reset when the flight settles. */
+  private autoDetectGuard: (() => boolean) | undefined
+  /** Whether the terminal's live scheme reports are being tracked. */
+  private followingTerminalTheme = false
+  /** Terminal-scheme listeners, fanned out from every screen's reports. */
+  private readonly terminalSchemeListeners = new Set<(theme: 'dark' | 'light') => void>()
+  /** Per-screen scheme-report registrations, rebuilt on screen switches. */
+  private schemeDisposers: (() => void)[] = []
   /** The mounted transcript-search overlay, while one is open. */
   private searchOverlay: OverlayHandle | undefined
   /** The search input component, while one is open (for match counts). */
@@ -757,6 +770,8 @@ export class TuiApp {
     // Every pending question flow settles rejected: a stopped TUI must not
     // leave askQuestions promises hanging forever.
     this.cancelQuestionFlows()
+    for (const dispose of this.schemeDisposers) dispose()
+    this.schemeDisposers = []
     this.tui.stop()
     this.fullscreen?.stop()
     this.fullscreen = undefined
@@ -1140,6 +1155,9 @@ export class TuiApp {
       // shortcuts, but the editor never receives text or Enter).
       alt.setFocus(this.editor)
       this.fullscreen = alt
+      // The alt screen now owns the terminal input handler: scheme reports
+      // arrive THERE, so re-register the fan-out on both screens.
+      this.refreshSchemeRegistrations()
     } else {
       this.fullscreen?.stop()
       this.fullscreen = undefined
@@ -1151,6 +1169,8 @@ export class TuiApp {
       // redraws cleanly from row 0.
       this.tui.requestRender(true)
       this.tui.setFocus(this.editor)
+      // The main screen owns the terminal input handler again.
+      this.refreshSchemeRegistrations()
     }
     this.events.onFullscreenChange?.(enabled)
     if (pending !== undefined) this.renderApprovalDialog(pending)
@@ -2306,26 +2326,95 @@ export class TuiApp {
    * FORCE_COLOR=0 / CI) stay dark without querying; a terminal that never
    * answers falls back to COLORFGBG (VT100/xterm convention); a terminal
    * with neither leaves the current theme untouched.
+   *
+   * The query targets the screen that OWNS the terminal input handler (the
+   * alt screen in fullscreen mode): a query on the stopped main screen
+   * would have its reply swallowed by the alt screen's OSC 11 consumer and
+   * time out, silently turning `auto` into a no-op.
+   *
+   * Concurrent calls COALESCE onto one shared in-flight query — overlapping
+   * OSC 11 queries have no sequence ids, so replies would mis-pair by FIFO
+   * order. The LATEST {@link AutoDetectOptions.shouldApply} guard is
+   * consulted at settle time, so a late result can never override a newer
+   * explicit theme choice.
+   * @param options.shouldApply - returns false to drop the settled result
+   *   instead of applying it (default: always apply).
    */
-  async autoDetectTheme(): Promise<void> {
+  async autoDetectTheme(options?: { shouldApply?: () => boolean }): Promise<void> {
     if (themeOptOut()) return
-    const rgb = await this.tui.queryTerminalBackgroundColor({ timeoutMs: 800 })
+    if (options?.shouldApply !== undefined) this.autoDetectGuard = options.shouldApply
+    if (this.autoDetectInFlight === undefined) {
+      this.autoDetectInFlight = this.runAutoDetect().finally(() => {
+        this.autoDetectInFlight = undefined
+        this.autoDetectGuard = undefined
+      })
+    }
+    return this.autoDetectInFlight
+  }
+
+  private async runAutoDetect(): Promise<void> {
+    const rgb = await this.overlayHost.queryTerminalBackgroundColor({ timeoutMs: 800 })
+    const guard = this.autoDetectGuard
+    const apply = (): boolean => guard === undefined || guard()
     if (rgb !== undefined) {
-      this.applyTheme(detectThemeFromBackground(rgb))
+      if (apply()) this.applyTheme(detectThemeFromBackground(rgb))
       return
     }
     const fromEnv = detectThemeFromColorFgBg()
-    if (fromEnv !== undefined) this.applyTheme(fromEnv)
+    if (fromEnv !== undefined && apply()) this.applyTheme(fromEnv)
+  }
+
+  /**
+   * Follow the terminal's live colour-scheme reports while `following` is
+   * true. Enabling sends one DSR 996 query — xterm-class terminals only
+   * START reporting after being asked — and reported schemes fan out to the
+   * {@link onTerminalThemeChange} listeners (which guard whether to apply,
+   * typically against the persisted `auto` preference). Disabling stops
+   * tracking. Idempotent.
+   * @param following - whether to track and apply live scheme reports.
+   */
+  trackTerminalTheme(following: boolean): void {
+    if (following === this.followingTerminalTheme) return
+    this.followingTerminalTheme = following
+    if (!following) return
+    this.overlayHost.queryTerminalColorScheme({ timeoutMs: 800 })
+      .then((scheme) => {
+        if (scheme === undefined || !this.followingTerminalTheme) return
+        for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
+      })
+      .catch(() => {})
   }
 
   /**
    * Register a live terminal-theme listener (colour-scheme reports). The
-   * runner uses it to follow the terminal when the preference is `auto`.
+   * listener is registered on EVERY screen: reports arrive only at the
+   * screen that owns the terminal input handler (the alt screen in
+   * fullscreen mode), so the registrations never double-fire. The caller
+   * guards whether to apply (typically: only while the persisted preference
+   * is `auto`).
    * @param listener - receives the detected palette family.
    * @returns a disposer.
    */
   onTerminalThemeChange(listener: (theme: 'dark' | 'light') => void): () => void {
-    return this.tui.onTerminalColorSchemeChange((scheme) => listener(scheme))
+    this.terminalSchemeListeners.add(listener)
+    this.refreshSchemeRegistrations()
+    return () => {
+      this.terminalSchemeListeners.delete(listener)
+      this.refreshSchemeRegistrations()
+    }
+  }
+
+  /** (Re)register the scheme-report fan-out on every screen. */
+  private refreshSchemeRegistrations(): void {
+    for (const dispose of this.schemeDisposers) dispose()
+    this.schemeDisposers = []
+    const screens: Array<TuiMainScreen | TuiAltScreen> = [this.tui]
+    if (this.fullscreen !== undefined) screens.push(this.fullscreen)
+    for (const screen of screens) {
+      this.schemeDisposers.push(screen.onTerminalColorSchemeChange((scheme) => {
+        for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
+      }))
+    }
   }
 
   /**

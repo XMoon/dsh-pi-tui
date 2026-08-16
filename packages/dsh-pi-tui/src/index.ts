@@ -1666,27 +1666,39 @@ export function apply(ctx: Context, config: Config): void {
       }),
       { base: { theme: 'auto', footer: 'full', fullscreen: 'on', history: {} } },
     )
+    // Fullscreen is a persisted preference like the theme and the footer
+    // (new installs default to 'on' — alt screen by default): boot applies
+    // it FIRST so the alt screen owns the terminal input handler before any
+    // theme query below targets "the active screen" — a query sent while the
+    // main screen still owned input would have its reply swallowed by the
+    // alt screen's OSC 11 consumer and time out, silently disabling `auto`.
+    if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
     const storedTheme = tuiSettings?.get().theme
     if (storedTheme === 'auto') {
       // Follow the terminal: query once at boot, then track scheme reports.
       // The boot query is detached: a terminal that never answers (or a
-      // failure) must not crash the runner.
-      runDetached('theme autodetect', () => app.autoDetectTheme(), { diag })
+      // failure) must not crash the runner. The settled result applies only
+      // while the preference is STILL auto — a boot-time detection must
+      // never override a theme the user chose while the query was in flight.
+      runDetached('theme autodetect', () => app.autoDetectTheme({
+        shouldApply: () => tuiSettings?.get().theme === 'auto',
+      }), { diag })
       app.onTerminalThemeChange((theme) => {
         if (tuiSettings?.get().theme === 'auto') app.applyTheme(theme)
       })
+      // Ask for DSR 996 once: xterm-class terminals only start reporting
+      // scheme changes after being queried.
+      app.trackTerminalTheme(true)
     } else if (storedTheme === 'dark' || storedTheme === 'light') {
       app.applyTheme(storedTheme)
+      app.trackTerminalTheme(false)
     } else if (storedTheme?.startsWith('custom:')) {
       const palette = loadCustomTheme(storedTheme.slice('custom:'.length))
       if (palette !== undefined) app.applyPalette(palette)
+      app.trackTerminalTheme(false)
     }
     const storedFooter = tuiSettings?.get().footer
     if (storedFooter === 'compact') app.setFooterPreset('compact')
-    // Fullscreen is a persisted preference like the theme and the footer
-    // (new installs default to 'on' — alt screen by default): boot applies
-    // it, the settings panel and Ctrl+F both write through it.
-    if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
     // Input history is loaded PER SESSION by initLiveSession (keyed on the
     // live session's cwd), never once at boot: a session switch to another
     // workspace must replace the recall history, not keep the old one.

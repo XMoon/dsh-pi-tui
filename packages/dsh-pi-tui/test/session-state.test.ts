@@ -12,6 +12,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { TuiApp } from '../src/tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
+import { currentPalette, darkColors, lightColors } from '../src/theme.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A promise the test resolves manually, to stage late completions. */
@@ -24,7 +25,8 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 /** A minimal fake agent whose identity marks which session a refresh ran for. */
 function fakeAgent(sessionId: string): Agent {
   return {
-    session: { id: sessionId, header: { cwd: '/ws' } },
+    session: { id: sessionId, header: { cwd: '/ws' }, events: [] },
+    options: { provider: 'p', model: 'm' },
   } as unknown as Agent
 }
 
@@ -630,5 +632,46 @@ test('/title and /rename degrade when the sessionTitle service is absent', async
     assert.equal(result.kind, 'error')
     assert.equal(result.text, 'session title service unavailable')
   }
+  app.stop()
+})
+
+test('/settings theme autodetect applies only while auto stays the latest choice', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const settingsDef = services.defs.find(def => def.name === 'settings')
+  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
+  ;(settingsDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Theme 行（起点 auto）
+  await vt.waitForRender()
+  // auto → dark → light → auto：最后一次选择是 auto，落地应应用。
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r') // light → auto（autodetect 发出）
+  await vt.waitForRender()
+  vt.sendInput('\x1b]11;#eeeeee\x07') // 浅色应答
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(currentPalette, lightColors,
+    'a detection landing while auto is the latest choice must apply')
+  // 再选 auto，然后在查询落地前切走：落地必须被拒绝。
+  vt.sendInput('\r') // auto → dark
+  await vt.waitForRender()
+  vt.sendInput('\r') // dark → light
+  await vt.waitForRender()
+  vt.sendInput('\r') // light → auto（新查询）
+  await vt.waitForRender()
+  vt.sendInput('\r') // auto → dark（查询仍在途，latest choice = dark）
+  await vt.waitForRender()
+  vt.sendInput('\x1b]11;#eeeeee\x07') // 浅色应答：守卫应拒绝
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(currentPalette, darkColors,
+    'a detection landing after the user left auto must not apply')
   app.stop()
 })
