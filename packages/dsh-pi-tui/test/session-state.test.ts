@@ -10,9 +10,10 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { TuiApp } from '../src/tui-app.ts'
+import { CatalogRefreshCoordinator } from '../src/catalog-refresh.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
+import { readSurfaceCatalog, type SurfaceCatalogContext } from '../src/surface-catalog.ts'
 import { createDiag } from '../src/diag.ts'
-import { runDetached } from '../src/detached.ts'
 import { currentPalette, darkColors, lightColors } from '../src/theme.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -67,6 +68,7 @@ function stubRunner(
     swapTo: async () => undefined,
     currentPreset: () => undefined,
     pendingPreset: undefined,
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
@@ -194,7 +196,7 @@ test('/tasks Enter opens the job detail through the shared openJobView', async (
   app.stop()
 })
 
-test('a stale skill refresh cannot register commands into a newer session', async () => {
+test('a stale catalog refresh cannot install commands into a newer session', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -203,23 +205,40 @@ test('a stale skill refresh cannot register commands into a newer session', asyn
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
   const state = { agent: fakeAgent('session-a'), generation: 1 }
-  const { refreshSkills } = registerTuiCommands(stubRunner(ctx, app, state))
+  const installed = registerTuiCommands(stubRunner(ctx, app, state))
+  // A coordinator over the real surface hooks: the post-mount refresh owner.
+  const coordinator = new CatalogRefreshCoordinator({
+    readAgent: (agent, signal) => readSurfaceCatalog(agent, signal, ctx as unknown as SurfaceCatalogContext),
+    probeComposition: async () => { throw new Error('not used') },
+    installSnapshot: installed.installSnapshot,
+    enterCatalogTransition: installed.enterTransition,
+  }, new AbortController().signal, createDiag({ filePath: undefined, stderrLevel: 'off' }))
 
   // Session A's refresh starts and hangs on the catalog fetch.
-  const refreshA = refreshSkills()
+  const refreshA = coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: state.generation },
+    agent: state.agent,
+  })
   // The session switches to B while A's catalog is still loading.
   state.agent = fakeAgent('session-b')
   state.generation = 2
-  const refreshB = refreshSkills()
+  const refreshB = coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: state.generation },
+    agent: state.agent,
+  })
   // B's catalog arrives: its commands register.
   services.catalogs.get(state.agent)?.resolve([{ name: 'skill-b', description: 'b', invocation: { modelInvocable: true, userInvocable: true } }])
-  await refreshB
+  const outcomeB = await refreshB
+  assert.equal(outcomeB.kind, 'applied')
   assert.ok(services.registered.includes('skill-b'), 'the current session\'s commands must register')
-  // A's catalog lands LATE: the generation check must drop it entirely.
+  // A's catalog lands LATE: the coordinator's epoch must drop it entirely.
   for (const [scope, gate] of services.catalogs) {
     if (scope !== state.agent) gate.resolve([{ name: 'skill-a', description: 'a', invocation: { modelInvocable: true, userInvocable: true } }])
   }
-  await refreshA
+  const outcomeA = await refreshA
+  assert.equal(outcomeA.kind, 'superseded', 'the stale refresh must report superseded')
   assert.ok(!services.registered.includes('skill-a'), 'a stale refresh must not register old-session commands')
   assert.ok(services.registered.includes('skill-b'), 'the new session\'s commands survive the stale refresh')
   app.stop()
@@ -407,7 +426,7 @@ test('a late FAILED save never rolls back a newer successful selection (latest-w
   }
 })
 
-test('a failing skill catalog refresh lands in diagnostics, never silently swallowed', async () => {
+test('a failing skill catalog refresh degrades to a detached issue, never an unhandled rejection', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -423,15 +442,31 @@ test('a failing skill catalog refresh lands in diagnostics, never silently swall
   const diag = createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: (line: string) => { lines.push(line) } }] })
   try {
     const state = { agent: fakeAgent('session-a'), generation: 1 }
-    const { refreshSkills } = registerTuiCommands(stubRunner(ctx, app, state, diag))
-    // The runner's unified fire-and-forget entry (index.ts wraps the hook
-    // the same way): a failure must land in diagnostics, never leak as an
-    // unhandled rejection.
-    runDetached('skill command refresh', () => refreshSkills(), { diag })
-    await new Promise(resolve => setTimeout(resolve, 30))
+    const installed = registerTuiCommands(stubRunner(ctx, app, state, diag))
+    const coordinator = new CatalogRefreshCoordinator({
+      readAgent: (agent, signal) => readSurfaceCatalog(agent, signal, ctx as unknown as SurfaceCatalogContext),
+      probeComposition: async () => { throw new Error('not used') },
+      installSnapshot: installed.installSnapshot,
+      enterCatalogTransition: installed.enterTransition,
+    }, new AbortController().signal, diag)
+    // The provider failure becomes a DETACHED issue inside the snapshot:
+    // the refresh still applies (the commands field survives), the issue
+    // lands in diagnostics, and nothing rejects.
+    const outcome = await coordinator.refresh({
+      source: 'live-session',
+      target: { kind: 'agent', key: state.generation },
+      agent: state.agent,
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
     assert.deepEqual(unhandled, [], 'the catalog failure must not leak as an unhandled rejection')
-    assert.ok(lines.some(line => /WARN skill catalog issue/.test(line) && /catalog down/.test(line)),
-      `diag must record the failure:\n${lines.join('\n')}`)
+    assert.equal(outcome.kind, 'applied', 'a provider issue is a partial failure, not a refresh failure')
+    if (outcome.kind === 'applied') {
+      assert.equal(outcome.snapshot.issues.length, 1, 'the issue must be recorded on the snapshot')
+      assert.equal(outcome.snapshot.issues[0]?.provider, 'skills')
+      assert.deepEqual(outcome.snapshot.skills, [], 'the failed skills field stays empty')
+    }
+    assert.ok(lines.some(line => /INFO catalog applied/.test(line) && /issues=1/.test(line)),
+      `diag must record the partial failure:\n${lines.join('\n')}`)
   } finally {
     process.off('unhandledRejection', onUnhandled)
     app.stop()

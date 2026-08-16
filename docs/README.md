@@ -14,6 +14,7 @@ knows where the rest lives.
 | `concurrency.md` | contributors | Why dsh sessions cannot be shared across processes, and the divergence guard that enforces it |
 | `failure-model.md` | contributors | The async failure & cancellation contract (`runDetached` / `runOwned`, error observation, lifecycle roots) — the rules that prevent unhandled rejections and misclassified cancellations |
 | `repair-session.md` | ops | `scripts/repair-session.mjs`: damage classes, the zstd frame-layout constraint, and the failure modes that broke real logs |
+| `surface-catalog.md` | contributors | The surface catalog design: resume prefetch + refresh coordinator; why composition probes are disabled (host `session/created` observers write durable knob events), and the invariants that keep snapshots detached and first submissions correctly routed |
 | `perf-baseline.md` | contributors | Measured rendering performance before/after the incremental read grouping + render-cache optimization, and how to re-run it |
 | `tmux-testing.md` | contributors | When to test in tmux instead of headless, the manual verification flows, and every trap hit while real-testing |
 | `tmux/` | — | Helper scripts (`ansi2html.mjs`, `tui-demo.sh`) with their own tests |

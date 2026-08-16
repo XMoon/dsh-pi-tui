@@ -29,7 +29,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { cancellationError } from './detached.ts'
+import { cancellationError, isCancellation } from './detached.ts'
 import type { Diag } from './diag.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceCatalogSnapshot } from './surface-catalog.ts'
@@ -73,6 +73,27 @@ export interface ProbeSurfaceCatalogOptions {
 }
 
 /**
+ * A probe failure classified by WHEN it happened:
+ * - `create` — no handle existed; a different composition may succeed (the
+ *   caller may retry with the fallback default composition);
+ * - `post-create` — the probe RAN and violated a release contract (zero
+ *   events, dispose, collector, whenIdle) or failed after publication; the
+ *   violation is composition-independent, so retrying cannot fix it and the
+ *   caller MUST propagate it (a non-zero event or leaked handle is never a
+ *   soft degrade).
+ * Cancellations are rethrown as-is (never wrapped): the classifier must
+ * recognize them.
+ */
+export class CatalogProbeError extends Error {
+  readonly kind: 'create' | 'post-create'
+  constructor(kind: 'create' | 'post-create', message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'CatalogProbeError'
+    this.kind = kind
+  }
+}
+
+/**
  * Run one catalog probe to completion and return the detached snapshot.
  *
  * The probe's session id is a legal, globally-unique ordinary `SessionId`
@@ -98,32 +119,50 @@ export async function probeSurfaceCatalog(options: ProbeSurfaceCatalogOptions): 
   let handle: AgentHandle | undefined
   let primaryFailure: unknown
   try {
-    handle = await agents.create({
-      sessionId,
-      meta: { cwd, ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }) },
-      agentOptions,
-      setup: composition.setup,
-      signal,
-    })
-    await whenIdleOrAbort(handle.agent, signal)
-    const snapshot = await readCatalog(handle.agent, signal)
-    const events = handle.agent.session.events
-    if (events.length !== 0) {
-      const types = [...new Set(events.map(event => event.type))].join(', ')
-      diag.error('catalog probe emitted events', { count: events.length, types })
-      throw new Error(
-        `catalog probe emitted ${events.length} session event(s) (${types}); ` +
-        'the surface catalog is not zero-event and will not be installed',
-      )
+    try {
+      handle = await agents.create({
+        sessionId,
+        meta: { cwd, ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }) },
+        agentOptions,
+        setup: composition.setup,
+        signal,
+      })
+    } catch (error) {
+      // No handle exists: a create failure is composition-specific and the
+      // caller may retry with a fallback composition (cancellations stay
+      // unwrapped so the classifier recognizes them).
+      if (isCancellation(error)) throw error
+      throw new CatalogProbeError('create', `catalog probe create failed: ${safeErrorMessage(error)}`, { cause: error })
     }
-    diag.info('catalog probe ready', {
-      durationMs: Date.now() - startedAt,
-      commands: snapshot.commands.length,
-      scopedCommands: snapshot.scopedCommands.length,
-      skills: snapshot.skills.length,
-      events: 0,
-    })
-    return snapshot
+    try {
+      await whenIdleOrAbort(handle.agent, signal)
+      const snapshot = await readCatalog(handle.agent, signal)
+      const events = handle.agent.session.events
+      if (events.length !== 0) {
+        const types = [...new Set(events.map(event => event.type))].join(', ')
+        diag.error('catalog probe emitted events', { count: events.length, types })
+        throw new CatalogProbeError(
+          'post-create',
+          `catalog probe emitted ${events.length} session event(s) (${types}); ` +
+          'the surface catalog is not zero-event and will not be installed',
+        )
+      }
+      diag.info('catalog probe ready', {
+        durationMs: Date.now() - startedAt,
+        commands: snapshot.commands.length,
+        scopedCommands: snapshot.scopedCommands.length,
+        skills: snapshot.skills.length,
+        events: 0,
+      })
+      return snapshot
+    } catch (error) {
+      // Post-create failures (whenIdle, collector, the zero-event gate)
+      // are composition-independent: they must propagate, never look like a
+      // retryable create failure. Cancellations stay unwrapped.
+      if (isCancellation(error)) throw error
+      if (error instanceof CatalogProbeError) throw error
+      throw new CatalogProbeError('post-create', safeErrorMessage(error), { cause: error })
+    }
   } catch (error) {
     primaryFailure = error
     throw error
@@ -138,7 +177,8 @@ export async function probeSurfaceCatalog(options: ProbeSurfaceCatalogOptions): 
         // as a debug line over a returned catalog.
         const disposeMessage = `catalog probe dispose failed: ${safeErrorMessage(error)}`
         diag.error('catalog probe dispose failed', { error: safeErrorMessage(error) })
-        throw new Error(
+        throw new CatalogProbeError(
+          'post-create',
           primaryFailure === undefined
             ? disposeMessage
             : `${disposeMessage} (while handling: ${safeErrorMessage(primaryFailure)})`,

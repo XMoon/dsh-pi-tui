@@ -44,12 +44,11 @@ import {
   type SessionQueryLike,
 } from './sessions.ts'
 import { customThemeNames } from './theme.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshRequest } from './catalog-refresh.ts'
 import {
   commandSummaryOf,
   listGlobalCommands,
-  readSurfaceCatalog,
   type HumanSkillSummary,
-  type SurfaceCatalogContext,
   type SurfaceCatalogSnapshot,
   type SurfaceCommandSummary,
 } from './surface-catalog.ts'
@@ -187,6 +186,11 @@ export interface TuiCommandRunner {
   /** The preset chosen with /preset while no session exists yet; the next
    * session composes on it (run-local, ahead of launchPreset/default). */
   pendingPreset: string | undefined
+  /** Run one catalog refresh through the coordinator (the surface's only
+   * post-mount refresh path; live-agent targets only — composition probes
+   * are disabled in this deployment, see docs/surface-catalog.md). Never
+   * rejects: outcomes are `applied`, `failed` or `superseded`. */
+  refreshCatalog(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Re-compose a still-blank session onto another preset (see recomposeBlank). */
   recomposeBlank(presetId: string): Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshStatus(): void
@@ -222,7 +226,13 @@ export interface TuiCommandRunner {
 export function registerTuiCommands(
   runner: TuiCommandRunner,
   initialSnapshot?: SurfaceCatalogSnapshot,
-): { refreshSkills(): Promise<number>; wasAdvertised(name: string): boolean } {
+): {
+  wasAdvertised(name: string): boolean
+  /** One synchronous catalog commit (the coordinator's install hook). */
+  installSnapshot(snapshot: SurfaceCatalogSnapshot): void
+  /** The revalidating transition (the coordinator's target-change hook). */
+  enterTransition(): void
+} {
   const { ctx, app } = runner
   const cwd = runner.cwd
   const signal = runner.signal
@@ -333,6 +343,30 @@ export function registerTuiCommands(
       ? mergeGlobalAndSavedScoped()
       : commands.list(liveAgent).map(commandSummaryOf))
   }
+  // ── registry-change coalescing ─────────────────────────────────────────
+  // `commands.register/dispose` fire `commands/change` SYNCHRONOUSLY per
+  // command; a bulk commit (the skill wrappers, the transitions) would
+  // otherwise repaint the completions once per wrapper. The commit depth
+  // wraps a whole bulk phase: listeners only mark dirty, and the outermost
+  // commit recomputes ONCE.
+  let commandCommitDepth = 0
+  let commandCommitDirty = false
+  /** Run one bulk command commit; registry changes inside are coalesced. */
+  const withCommandCommit = (phase: () => void): void => {
+    commandCommitDepth += 1
+    try {
+      phase()
+    } finally {
+      commandCommitDepth -= 1
+      if (commandCommitDepth === 0 && commandCommitDirty) {
+        commandCommitDirty = false
+        refreshCompletions()
+      }
+    }
+  }
+  // The commands/change listener is registered at the END of registration
+  // (see below): the TUI's built-in registrations need no coalescing, and
+  // the snapshot/wrapper bulk commits use withCommandCommit instead.
   refreshCompletions()
 
   // Shared by /exit and its /quit alias. The exit orchestration lives in
@@ -749,38 +783,51 @@ export function registerTuiCommands(
    * replace the direct skill wrappers, save the scoped overrides, and merge
    * the completions (fresh global view + saved overrides). No await between
    * the pieces, so a first input can never observe a half-installed catalog.
+   * A FAILED skills provider keeps the current wrappers (transitions or the
+   * previous catalog): they re-validate against the current agent at
+   * execution time, so a submitted skill name can never fall through to a
+   * plain model message while the catalog is unavailable.
    */
   const installSurfaceSnapshot = (snapshot: SurfaceCatalogSnapshot): void => {
     const scopedNames = new Set(snapshot.scopedCommands.map(command => command.name))
-    replaceSkillCommands(snapshot.skills, scopedNames)
-    savedScopedCommands = snapshot.scopedCommands
-    installCompletions(mergeGlobalAndSavedScoped())
+    const skillsFailed = snapshot.issues.some(issue => issue.provider === 'skills')
+    withCommandCommit(() => {
+      if (!skillsFailed) replaceSkillCommands(snapshot.skills, scopedNames)
+      savedScopedCommands = snapshot.scopedCommands
+      installCompletions(mergeGlobalAndSavedScoped())
+    })
   }
   /**
-   * Rebuild the per-skill commands from the LIVE agent's catalog (the async
-   * refresh; /reload and the session-live path await it). The catalog fetch
-   * captures the session generation so a refresh issued for an OLD session
-   * (superseded by a switch while the catalog was loading) cannot install
-   * into the NEW session's surface.
+   * The revalidating transition (target/owner change): scoped previews clear
+   * so new inputs complete against the current global view only, and every
+   * old skill wrapper becomes a revalidating transition command whose
+   * handler re-fetches from the CURRENT live agent and re-checks the policy
+   * at execution time. The names survive so an already-submitted skill
+   * command can never become a plain model message mid-switch.
    */
-  const refreshSkillCommands = async (): Promise<number> => {
-    const generation = runner.sessionGeneration
-    const liveAgent = runner.liveAgent
-    // No session yet (deferred start): the agent-scoped catalog is
-    // unavailable; the prefetched snapshot covers the sessionless surface.
-    if (liveAgent === undefined) return 0
-    const snapshot = await readSurfaceCatalog(liveAgent, signal, runner.ctx as unknown as SurfaceCatalogContext)
-    // A newer session owns the surface now: drop this refresh's install
-    // silently (the newer session's own refresh is in flight or applied).
-    if (generation !== runner.sessionGeneration) return 0
-    // Provider issues are partial failures: the surviving providers still
-    // install, the failed field degrades, and the issue lands in diagnostics
-    // (never a silent empty catalog, never a swallowed error).
-    for (const issue of snapshot.issues) {
-      runner.diag.warn('skill catalog issue', { provider: issue.provider, error: issue.message })
-    }
-    installSurfaceSnapshot(snapshot)
-    return snapshot.skills.length
+  const enterCatalogTransition = (): void => {
+    const names = [...skillDisposers.keys()]
+    withCommandCommit(() => {
+      for (const dispose of skillDisposers.values()) dispose()
+      skillDisposers.clear()
+      savedScopedCommands = []
+      for (const name of names) {
+        try {
+          const dispose = commands.register({
+            name,
+            description: `[skill: revalidating] ${name}`,
+            handler: async () => {
+              const agent = await requireAgent()
+              return loadSkill(agent, name)
+            },
+          })
+          skillDisposers.set(name, dispose)
+        } catch {
+          // Registration raced with another plugin; the picker still works.
+        }
+      }
+      installCompletions(mergeGlobalAndSavedScoped())
+    })
   }
   /** Whether one command name is advertised by the CURRENT completion list
    * (the claim captured at submit time, before any session creation). */
@@ -826,14 +873,32 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'reload',
-    description: 'Reload TUI settings and refresh skill commands',
+    description: 'Reload TUI settings and refresh the live command/skill catalog',
     handler: async () => {
-      // 1. Rebuild the per-skill slash commands from the live catalog.
-      let skillCount = 0
-      try {
-        skillCount = await refreshSkillCommands()
-      } catch {
-        // The catalog read is best-effort; the settings pass still runs.
+      // 1. Refresh the surface catalog through the coordinator — LIVE agent
+      // only: a composition probe would emit durable events in this
+      // deployment (see docs/surface-catalog.md), so the sessionless state
+      // refreshes settings only and its catalog installs on the first real
+      // session. The handler awaits the attempt and reports the outcome
+      // (counts, partial issues, supersession).
+      let catalogText = 'no live session — catalog installs on the first session'
+      const liveAgent = runner.liveAgent
+      if (liveAgent !== undefined) {
+        const outcome = await runner.refreshCatalog({
+          source: 'reload',
+          target: { kind: 'agent', key: runner.sessionGeneration },
+          agent: liveAgent,
+        })
+        if (outcome.kind === 'applied') {
+          catalogText = `${outcome.snapshot.commands.length} commands \u00b7 ${outcome.snapshot.skills.length} skills`
+          if (outcome.snapshot.issues.length > 0) {
+            catalogText += ` \u00b7 partial: ${outcome.snapshot.issues.map(issue => issue.provider).join(', ')} unavailable`
+          }
+        } else if (outcome.kind === 'failed') {
+          catalogText = `catalog refresh failed: ${outcome.error}`
+        } else {
+          catalogText = 'catalog refresh superseded'
+        }
       }
       // 2. Re-apply the persisted TUI settings (theme, footer, fullscreen),
       // the same policy the runner applies at boot.
@@ -860,7 +925,7 @@ export function registerTuiCommands(
         app.setFooterPreset(doc.footer === 'compact' ? 'compact' : 'full')
         app.setFullscreen(doc.fullscreen === 'on')
       }
-      app.notify(`reloaded — ${skillCount} skills \u00b7 settings reapplied`, 'info')
+      app.notify(`reloaded — ${catalogText} \u00b7 settings reapplied`, 'info')
       return { kind: 'success' }
     },
   })
@@ -1131,6 +1196,10 @@ export function registerTuiCommands(
           const doc = settings.get(ns) as { default?: string } | undefined
           return { kind: 'success', text: `default preset: ${doc?.default ?? presets.defaultId}` }
         }
+        // The saved default only affects sessions created from now on; the
+        // sessionless surface catalog is NOT re-probed (composition probes
+        // are disabled in this deployment — the next real session's
+        // coordinator refresh installs the catalog for its composition).
         await settings.mutate(ns, [{ op: 'set', path: ['default'], value: rest }])
         return { kind: 'success', text: `default preset set: ${rest}` }
       }
@@ -1145,11 +1214,22 @@ export function registerTuiCommands(
         if (liveAgent === undefined) {
           const resolved = await presets.resolve(id)
           runner.pendingPreset = resolved.id
+          // The sessionless catalog is NOT re-probed: composition probes are
+          // disabled in this deployment (see docs/surface-catalog.md) — the
+          // next real session's coordinator refresh installs the catalog for
+          // the chosen composition.
           return { kind: 'pending', preset: resolved.id }
         }
         const outcome = await runner.recomposeBlank(id)
         if (outcome.kind === 'locked') return { kind: 'locked', sessionId: liveAgent.session.id }
-        refreshCompletions()
+        // The still-blank session's agent layer changed: refresh the live
+        // catalog for the SAME owner (no transition — the old scoped
+        // previews are being replaced by the new composition's).
+        await runner.refreshCatalog({
+          source: 'preset',
+          target: { kind: 'agent', key: runner.sessionGeneration },
+          agent: runner.liveAgent,
+        })
         // A still-blank session's welcome card shows the preset: repaint it
         // so the switch is visible before any conversation starts.
         runner.updateWelcomeCard()
@@ -1223,7 +1303,14 @@ export function registerTuiCommands(
         }),
         (id) => {
           close()
-          detach('preset pick', () => pickPreset(id))
+          // The picker's selection is an async result-consuming flow: the
+          // outcome drives the notices — runOwned (AGENTS.md), never a bare
+          // void; cancellation (a torn-down TUI) is debug-only.
+          runOwned('preset pick', () => pickPreset(id), {
+            diag: runner.diag,
+            sessionId: () => runner.liveAgent?.session.id,
+            onError: (error) => app.notify(`preset selection failed: ${safeErrorMessage(error)}`, 'error'),
+          })
         },
         () => {},
       )
@@ -1560,16 +1647,34 @@ export function registerTuiCommands(
   // prefetched before the TUI mounted) installs SYNCHRONOUSLY here: no
   // detached refresh, no await — the first input can never beat it. Without
   // a snapshot the plain global completion refresh runs as before, and the
-  // per-skill commands wait for a live session (initLiveSession's refresh)
+  // per-skill commands wait for the first live session's coordinator refresh
   // or /reload.
   if (initialSnapshot !== undefined) {
     installSurfaceSnapshot(initialSnapshot)
   } else {
     refreshCompletions()
   }
+  // Registry changes from OUTSIDE this surface (global plugins, agent
+  // mounts/unmounts) refresh the completions immediately: sessionless →
+  // fresh global view + saved scoped overrides (never a re-probe); live →
+  // the live agent's effective view. The probe's own scoped registrations
+  // fire the same event; the merge rules keep them from recursing. The
+  // listener is registered AFTER the TUI's built-in commands (whose
+  // registrations need no coalescing — the snapshot/wrapper bulk commits
+  // use withCommandCommit instead).
+  ctx.on('commands/change', () => {
+    if (commandCommitDepth > 0) {
+      commandCommitDirty = true
+      return
+    }
+    refreshCompletions()
+  })
   return {
-    refreshSkills: () => refreshSkillCommands(),
     /** The claim test for the dispatch: is /name advertised right now? */
     wasAdvertised,
+    /** One synchronous catalog commit (the coordinator's install hook). */
+    installSnapshot: (snapshot: SurfaceCatalogSnapshot): void => installSurfaceSnapshot(snapshot),
+    /** The revalidating transition (the coordinator's target-change hook). */
+    enterTransition: (): void => enterCatalogTransition(),
   }
 }

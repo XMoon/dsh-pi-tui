@@ -113,6 +113,7 @@ function stubRunner(options: {
     currentPreset: () => undefined,
     get pendingPreset() { return pending.value },
     set pendingPreset(id: string | undefined) { pending.value = id },
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: options.recomposeBlank ?? (async () => ({ kind: 'switched', preset: 'standard' })),
     refreshStatus: () => {},
     updateWelcomeCard: () => {},

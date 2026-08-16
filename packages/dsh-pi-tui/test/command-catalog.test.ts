@@ -53,6 +53,7 @@ function stubRunner(
     swapTo: async () => undefined,
     currentPreset: () => undefined,
     pendingPreset: undefined,
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
@@ -67,9 +68,9 @@ function stubRunner(
  * service with scripted list/get and invocation policies. */
 function fakeServices() {
   const registered: string[] = []
-  const defs: { name: string; handler?: unknown }[] = []
+  const defs: { name: string; description?: string; handler?: unknown }[] = []
   const commands = {
-    register: (def: { name: string; handler?: unknown }): (() => void) => {
+    register: (def: { name: string; description?: string; handler?: unknown }): (() => void) => {
       registered.push(def.name)
       defs.push(def)
       return (): void => {
@@ -177,6 +178,61 @@ test('a scoped override blocks a same-name skill wrapper; the effective command 
     'only the non-colliding wrapper installs; scoped and global commands win',
   )
   assert.equal(wasAdvertised('scoped-cmd'), true, 'the effective command stays advertised')
+  app.stop()
+})
+
+test('a commands/change event re-merges completions without re-probing and without losing the saved scoped overrides', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const snapshot = snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] })
+  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent: undefined }), snapshot)
+  assert.equal(wasAdvertised('scoped-cmd'), true, 'the scoped override is advertised after the install')
+  const readsBefore = services.skills.listCalls()
+  // An external registry change (e.g. a global plugin registering a command):
+  // the listener re-reads the GLOBAL view and re-merges the saved overrides.
+  ctx.emit('commands/change')
+  assert.equal(wasAdvertised('scoped-cmd'), true, 'the saved scoped override survives the re-merge')
+  assert.equal(wasAdvertised('builtin'), true, 'the fresh global view flows in')
+  assert.equal(services.skills.listCalls(), readsBefore, 'a commands/change never re-probes')
+  app.stop()
+})
+
+test('the revalidating transition keeps skill names as revalidating handlers and clears scoped previews', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const injected: string[] = []
+  const agent = fakeAgent('session-a', injected)
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  const { wasAdvertised, enterTransition } = registerTuiCommands(
+    stubRunner(ctx, app, { agent }),
+    snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }),
+  )
+  assert.equal(wasAdvertised('scoped-cmd'), true)
+  // The target changes (composition → live agent): the transition fires.
+  enterTransition()
+  const wrapper = services.defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper !== undefined, 'the skill NAME survives the transition')
+  assert.match(wrapper!.description ?? '', /\[skill: revalidating\]/, 'the wrapper is marked revalidating')
+  assert.equal(wasAdvertised('scoped-cmd'), false, 'scoped previews clear: no new input sees the old scope')
+  assert.equal(wasAdvertised('glab'), true,
+    'the transition wrapper stays advertised: submitting /glab resolves through the revalidating handler')
+  // The transition handler still executes against the CURRENT agent with a
+  // fresh get + policy recheck (the same execution boundary).
+  const result = await (wrapper!.handler as () => Promise<{ kind: string }>)()
+  assert.equal(result.kind, 'success')
+  assert.equal(injected.length, 1, 'the transition executes through loadSkill on the current agent')
   app.stop()
 })
 
