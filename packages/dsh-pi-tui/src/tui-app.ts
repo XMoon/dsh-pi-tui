@@ -164,6 +164,10 @@ export class Frame implements Component {
 class QuestionFrame extends Frame implements Focusable {
   private readonly flow: QuestionFlow
   private readonly heightOf: () => number
+  /** Rendered height of the last frame (fullscreen click hit-testing). */
+  private lastRows = 0
+  /** Terminal height the last render used (click staleness guard). */
+  private lastTermRows = 0
 
   constructor(flow: QuestionFlow, heightOf: () => number) {
     super(flow, true)
@@ -173,9 +177,29 @@ class QuestionFrame extends Frame implements Focusable {
 
   render(width: number): string[] {
     const rows = Math.max(1, this.heightOf())
-    const frameRows = Math.max(10, Math.min(26, Math.floor(rows * 0.6)))
+    this.lastTermRows = rows
+    // The 60% cap is the DEFAULT (keeps the transcript visible); an explicit
+    // body expand ('e' or a click on the scroll marker) grows the frame
+    // toward 80% — the user asked for the room, and the flow's budget math
+    // is proven for every budget up to MAX_BUDGET.
+    const expanded = this.flow.isBodyExpanded()
+    const frameRows = expanded
+      ? Math.max(10, Math.min(40, Math.floor(rows * 0.8)))
+      : Math.max(10, Math.min(26, Math.floor(rows * 0.6)))
     this.flow.setMaxRows(frameRows - 2)
-    return super.render(width)
+    const out = super.render(width)
+    this.lastRows = out.length
+    return out
+  }
+
+  /** The frame's height from the last render (0 before the first one). */
+  get rows(): number {
+    return this.lastRows
+  }
+
+  /** The terminal height the last render used. */
+  get termRows(): number {
+    return this.lastTermRows
   }
 
   get focused(): boolean {
@@ -1652,6 +1676,34 @@ export class TuiApp {
    * The global Ctrl+O fold still wins, so keyboard behavior is unchanged.
    */
   private handleFullscreenClick(x: number, y: number): void {
+    // A question owns the modal front: clicks inside its frame (the editor
+    // seat, pinned above the footer) route to the flow — option rows select,
+    // the body scroll marker toggles the expanded region. The seat's screen
+    // range is derived from the bottom: footer height + the frame's last
+    // rendered height.
+    const question = this.activeQuestions
+    if (question?.frame !== undefined) {
+      // Stale-geometry guard: between a terminal resize and the next
+      // repaint the frame's rendered height (and the flow's hit map) still
+      // reflect the OLD terminal — a click in that window would map to the
+      // wrong content row. Ignore clicks until the next render.
+      if (this.terminal.rows !== question.frame.termRows) return
+      const width = this.terminal.columns
+      const height = this.terminal.rows
+      const footerHeight = this.footer.render(width).length
+      const seatHeight = question.frame.rows
+      const seatBottom = height - footerHeight
+      const seatTop = seatBottom - seatHeight
+      if (y >= seatTop && y < seatBottom) {
+        // Inside the frame: its side borders + padding occupy columns 0-1
+        // and the last two; content rows start below the top border.
+        if (x >= 2 && x <= width - 3) {
+          question.flow.clickRow(y - seatTop - 1)
+          this.requestRender()
+        }
+        return
+      }
+    }
     void x
     const width = this.terminal.columns
     // Fullscreen layout: header row(s), then the transcript scroll pane.

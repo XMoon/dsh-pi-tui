@@ -688,6 +688,200 @@ test('fullscreen toggle clears the overlay tracking graph (no stale handles)', a
   assert.ok(!view.includes('Settings row A'), `destroyed settings must not revive:\n${view}`)
 })
 
+/** Long detail: distinct lines that fit one row at width 100 (the app-level
+ * fixtures run at 100 cols) — a deterministic scrollport fixture. */
+function longDetailLines(n: number): string {
+  return Array.from({ length: n }, (_, i) => `detail-${String(i).padStart(2, '0')} ` + 'y'.repeat(70)).join('\n')
+}
+
+test('the question body scrolls with PageUp/PageDown', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    detail: longDetailLines(60),
+    options: [{ label: 'Alpha' }, { label: 'Beta' }],
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('detail-00'), `top content missing:\n${view}`)
+  assert.ok(view.includes('↓ '), `down marker missing:\n${view}`)
+  assert.ok(!view.includes('detail-05'), `deep content must be clipped compact:\n${view}`)
+  vt.sendInput('\x1b[6~') // PageDown
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(!view.includes('detail-00'), `top content must scroll away:\n${view}`)
+  assert.ok(view.includes('↑ '), `up marker missing after scrolling:\n${view}`)
+  vt.sendInput('\x1b[5~') // PageUp
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('detail-00'), `PageUp must return to the top:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('e expands the question panel and collapses it back', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    detail: longDetailLines(60),
+    options: [{ label: 'Alpha' }, { label: 'Beta' }],
+  }])
+  let view = await viewport(vt)
+  const compactSpan = questionFrameSpan(view)
+  assert.ok(compactSpan <= 14, `compact panel must respect the 60% cap (span ${compactSpan}):\n${view}`)
+  assert.ok(!view.includes('detail-05'), `deep content must be clipped compact:\n${view}`)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const expandedSpan = questionFrameSpan(view)
+  assert.ok(expandedSpan > compactSpan, `expand must grow the panel (${compactSpan} -> ${expandedSpan}):\n${view}`)
+  assert.ok(expandedSpan <= 20, `expanded panel must respect the 80% cap (span ${expandedSpan}):\n${view}`)
+  assert.ok(view.includes('detail-05'), `expand must reveal deeper content:\n${view}`)
+  assert.ok(view.includes('→'), `pointer must survive expand:\n${view}`)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.equal(questionFrameSpan(view), compactSpan, `collapse must restore the panel size:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+/** Send an SGR primary-button press+release (1-based coords) at a screen row. */
+function clickCell(vt: { sendInput: (data: string) => void }, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+}
+
+test('a fullscreen click on an option row selects it', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }, { label: 'No' }] }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = view.split('\n')
+  const yesIdx = lines.findIndex(line => strip(line).includes('[1] Yes'))
+  assert.ok(yesIdx >= 0, `option row missing:\n${view}`)
+  // Click the "Yes" row (x inside the content columns; y from the viewport).
+  clickCell(vt, 10, yesIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  // Single-select on the last question advances to the review page.
+  assert.ok(view.includes('Submit'), `click must select the option:\n${view}`)
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+})
+
+test('a fullscreen click on the body scroll marker expands the panel', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    detail: longDetailLines(60),
+    options: [{ label: 'Alpha' }],
+  }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = view.split('\n')
+  const markerIdx = lines.findIndex(line => strip(line).includes('↓ '))
+  assert.ok(markerIdx >= 0, `scroll marker missing:\n${view}`)
+  const compactSpan = questionFrameSpan(view)
+  clickCell(vt, 10, markerIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const expandedSpan = questionFrameSpan(view)
+  assert.ok(expandedSpan > compactSpan, `marker click must expand the panel (${compactSpan} -> ${expandedSpan}):\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a fullscreen click toggles a multi-select option', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick some',
+    multiSelect: true,
+    options: [{ label: 'A' }, { label: 'B' }],
+  }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const aIdx = view.split('\n').findIndex(line => strip(line).includes('[ ] A'))
+  assert.ok(aIdx >= 0, `option A row missing:\n${view}`)
+  clickCell(vt, 10, aIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('[✓] A'), `click must toggle A on:\n${view}`)
+  const bIdx = view.split('\n').findIndex(line => strip(line).includes('[ ] B'))
+  assert.ok(bIdx >= 0, `option B row missing:\n${view}`)
+  clickCell(vt, 10, bIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('[✓] B'), `click must toggle B on:\n${view}`)
+  // Multi-select stays on the question; the second click on A toggles it off.
+  const aOn = view.split('\n').findIndex(line => strip(line).includes('[✓] A'))
+  clickCell(vt, 10, aOn)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('[ ] A'), `click must toggle A back off:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a fullscreen click on the "Type something." row enters free-text mode', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const otherIdx = view.split('\n').findIndex(line => strip(line).includes('Type something.'))
+  assert.ok(otherIdx >= 0, `free-text row missing:\n${view}`)
+  clickCell(vt, 10, otherIdx)
+  await vt.waitForRender()
+  // Free-text mode is active: typed text lands in the row's real Input.
+  vt.sendInput('custom answer')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('custom answer'), `typed text must land in the free-text row:\n${view}`)
+  // A second click on the SAME row must not reset the in-progress text.
+  const editIdx = view.split('\n').findIndex(line => strip(line).includes('custom answer'))
+  clickCell(vt, 10, editIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('custom answer'), `re-click must not discard the typed text:\n${view}`)
+  // Esc leaves free-text mode (a second Esc cancels the flow).
+  await vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a fullscreen click is inert on the review page', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  vt.sendInput('1') // single-select advances to the review page
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(view.includes('Submit'), `review page missing:\n${view}`)
+  const submitIdx = view.split('\n').findIndex(line => strip(line).includes('Submit'))
+  assert.ok(submitIdx >= 0, `Submit row missing:\n${view}`)
+  clickCell(vt, 10, submitIdx)
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  // The review page has no hit map and no scroll marker: the click is inert.
+  assert.equal(after, view, `click must be inert on the review page:\n${after}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
 test('askQuestions toggles multi-select options', async () => {
   const { vt, app } = startApp()
   const promise = app.askQuestions([{
