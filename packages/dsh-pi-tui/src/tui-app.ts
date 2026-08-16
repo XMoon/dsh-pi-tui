@@ -282,6 +282,35 @@ export class BulletedComponent implements Component {
   }
 }
 
+/**
+ * Longest prefix of `text` whose WRAPPED height fits `budget` rows at
+ * `width`, with an ellipsis marking a cut — the approval dialog's height
+ * budget must count wrapped rows, not raw lines, because a single long
+ * line can wrap across many display rows. Wrapped height is monotonic in
+ * the prefix length, so a binary search bounds the wrap calls. The
+ * ellipsis reserves its own row when truncating (a full last row would
+ * otherwise push it onto a new row and overflow the budget).
+ * @param text - the candidate text ('' yields '').
+ * @param width - the wrap width.
+ * @param budget - the row budget; 0 or negative yields '…' for non-empty.
+ * @returns the fitted text and whether it was truncated.
+ */
+export function capWrappedToHeight(text: string, width: number, budget: number): { text: string; truncated: boolean } {
+  if (text === '') return { text: '', truncated: false }
+  const fits = (candidate: string, rows: number): boolean => wrapTextWithAnsi(candidate, width).length <= rows
+  if (fits(text, budget)) return { text, truncated: false }
+  const target = Math.max(0, budget - 1)
+  if (target === 0) return { text: '…', truncated: true }
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2)
+    if (fits(text.slice(0, mid), target)) low = mid
+    else high = mid - 1
+  }
+  return { text: `${text.slice(0, low)}…`, truncated: true }
+}
+
 /** The live job-output viewer body: a title line + refreshable text panel. */
 class OutputViewerPanel implements Component {
   private readonly title: Text
@@ -915,10 +944,13 @@ export class TuiApp {
       // editor never sees the chord — the submit mirrors a plain Enter
       // (history + notify clear + draft clear). Without a wired
       // onQueueSubmit the key falls through to the editor instead of
-      // dropping the draft.
+      // dropping the draft; an EMPTY draft falls through too — plain Enter
+      // on an empty editor does not submit, and an empty chord would
+      // otherwise dispatch a session-creating empty followup.
       if (this.overlayHost.hasOverlayEntries) return undefined
       if (this.events.onQueueSubmit === undefined) return undefined
       const text = this.editor.getText()
+      if (text.trim() === '') return undefined
       this.rememberInput(text)
       this.clearNotify()
       this.editor.setText('')
@@ -2682,30 +2714,30 @@ export class TuiApp {
     const width = this.terminal.columns
     const maxHeight = Math.max(8, Math.min(16, this.terminal.rows - 2))
     const contentWidth = Math.max(1, width - 8)
-    // Height budget: the dialog must NEVER lose the key hints to the
-    // maxHeight slice — count the fixed rows (title, danger banner, blank
-    // spacer, hints, box padding, borders) plus the reason's WRAPPED
-    // height, and give every remaining row to the argument preview. A
-    // pathological reason is capped raw-line-wise with an ellipsis.
-    const reasonRaw = pending.request.reason ?? ''
-    const reasonCap = Math.max(1, maxHeight - 10)
-    const reasonLines = reasonRaw.split('\n')
-    const reasonShown = reasonRaw === '' || reasonLines.length <= reasonCap
-      ? reasonRaw
-      : `${reasonLines.slice(0, reasonCap).join('\n')}\n…`
-    const reasonWrapped = reasonShown === ''
-      ? 0
-      : wrapTextWithAnsi(reasonShown, contentWidth).length
+    // Height budget in WRAPPED rows: the dialog must NEVER lose the key
+    // hints to the maxHeight slice. Fixed chrome (title, danger banner,
+    // blank spacer, hints, box padding, borders) plus the reason's wrapped
+    // height leave every remaining row to the argument preview — BOTH
+    // capped by their wrapped height, because a single long line can wrap
+    // across many display rows (a raw-line count under-budgets).
     const baseFixed = 1 + (pending.request.danger === true ? 1 : 0) + 1 + 1 + 2 + 2
-    const previewLines = Math.max(0, Math.min(6, maxHeight - baseFixed - reasonWrapped))
+    const reasonBudget = Math.max(0, maxHeight - baseFixed)
+    const reasonRaw = pending.request.reason ?? ''
+    const reasonShown = capWrappedToHeight(reasonRaw, contentWidth, reasonBudget).text
+    const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
+    const previewBudget = Math.max(0, maxHeight - baseFixed - reasonWrapped)
     const dialog = new Box(1, 1)
     dialog.addChild(new Text(`Approve ${pending.request.toolName}?`, 1, 0))
     if (pending.request.danger === true) {
       dialog.addChild(new Text(color.error('⚠ DANGEROUS COMMAND — confirm carefully'), 1, 0))
     }
-    if (pending.request.arguments !== undefined && pending.request.arguments !== '' && previewLines > 0) {
-      const preview = pending.request.arguments.split('\n').slice(0, previewLines).join('\n')
-      dialog.addChild(new Text(color.textDim(preview.length > 240 ? `${preview.slice(0, 240)}…` : preview), 1, 0))
+    if (pending.request.arguments !== undefined && pending.request.arguments !== '' && previewBudget > 0) {
+      const sixLines = pending.request.arguments.split('\n').slice(0, 6).join('\n')
+      const capped = sixLines.length > 240 ? `${sixLines.slice(0, 240)}…` : sixLines
+      const previewShown = capWrappedToHeight(capped, contentWidth, previewBudget).text
+      if (previewShown !== '') {
+        dialog.addChild(new Text(color.textDim(previewShown), 1, 0))
+      }
     }
     if (reasonShown !== '') {
       dialog.addChild(new Text(reasonShown, 1, 0))

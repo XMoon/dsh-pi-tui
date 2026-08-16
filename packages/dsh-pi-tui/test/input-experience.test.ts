@@ -147,6 +147,20 @@ test('ctrl+enter without a wired chord falls through (no draft loss)', async () 
   void app
 })
 
+test('ctrl+enter on an empty draft does not fire the chord (no session-creating submit)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const queued: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onQueueSubmit: (text) => queued.push(text),
+  })
+  app.start()
+  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter with an empty editor
+  await viewport(vt)
+  assert.deepEqual(queued, [], 'an empty chord must not submit an empty followup')
+})
+
 test('ctrl+g opens the external editor and restores its content', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []

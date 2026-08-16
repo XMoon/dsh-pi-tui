@@ -903,6 +903,30 @@ test('running bash cards surface the command row when expanded', async () => {
   assert.ok(view.includes('$ pnpm test'), `running card lost the command:\n${view}`)
 })
 
+test('running bash cards use the presenter command and never double-render it', async () => {
+  // The presenter path (callView.card === 'terminal') takes the command
+  // from the tool's own presentCall title; the command row must render
+  // exactly ONCE (the branch returns before the args-derived fallback).
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'terminal', title: 'echo hi' }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"echo hi"}',
+    result: '', status: 'running', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  const matches = view.match(/\$ echo hi/g) ?? []
+  assert.equal(matches.length, 1, `command row must render exactly once:\n${view}`)
+  app.stop()
+})
+
 test('injected context renders a web-style labeled row and expands to its body', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{
