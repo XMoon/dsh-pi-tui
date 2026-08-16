@@ -25,6 +25,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { CallId } from '@deepseek-ai/dsh-llm'
 // P7d: the subagent registry merge for ctx.subagents (listChildren/interrupt).
 import type {} from '@deepseek-ai/dsh-subagent'
+import type { SubagentListEntry } from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 // P6: the agent-preset roster — ctx.agentPresets, the session preset
@@ -76,6 +77,7 @@ import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type TuiApp } from './tui-app.ts'
+import { buildTaskRows, describeTaskRow, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
 import { registerTuiCommands, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
@@ -1615,39 +1617,73 @@ export function apply(ctx: Context, config: Config): void {
         app.setDraft([queuedText, current].filter(part => part.trim() !== '').join('\n\n'))
         refreshQueue()
       },
-      // ↓ / Ctrl+J with an empty editor: the task browser over the live job
-      // registry (bash + subagent jobs). Enter opens the viewer (job output
-      // for bash, the child transcript for subagents).
+      // ↓ / Ctrl+J with an empty editor: the task browser over BOTH
+      // background surfaces. Job rows (bash + one-shot subagent jobs) are
+      // status-only: the bash output read cursor belongs to the model's
+      // job_output and a subagent job record carries no child session id,
+      // so Enter opens the status viewer (never the output). Continuable
+      // subagent rows (the subagent registry) deliver no result to the
+      // parent, so Enter opens the child transcript directly. One-shot
+      // children are deliberately absent — a background one-shot is already
+      // its job row, a foreground one-shot is the parent's pending tool
+      // call, and the two records have no cross-reference (see
+      // tasks-browser.ts). The children half enriches asynchronously:
+      // listChildren may read persistence for cold children, so the picker
+      // opens on the jobs half and setItems merges the rest in.
       onOpenTasks: () => {
-        if (jobs === undefined || liveAgent === undefined) return
-        let snapshots: ReturnType<NonNullable<typeof jobs>['list']>
-        try {
-          snapshots = jobs.list(liveAgent)
-        } catch {
-          return
+        if (liveAgent === undefined) return
+        let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
+        if (jobs !== undefined) {
+          try {
+            jobSnapshots = jobs.list(liveAgent)
+          } catch {
+            // The registry read is best-effort; the jobs half stays empty.
+          }
         }
-        if (snapshots.length === 0) return
         const now = Date.now()
-        // Active jobs first (registration order), terminal jobs last (newest
-        // finish first) — kimi's tasks-browser ordering.
-        const terminal = (status: string): boolean => status !== 'running' && status !== 'stopping'
-        const ordered = [...snapshots].sort((a, b) => {
-          const aTerminal = terminal(a.status)
-          const bTerminal = terminal(b.status)
-          if (aTerminal !== bTerminal) return aTerminal ? 1 : -1
-          if (!aTerminal) return a.startedAt - b.startedAt
-          return (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt)
-        })
-        app.openPicker(
-          ordered.map(job => ({
-            value: job.id,
-            label: `${job.kind} · ${job.label}`,
-            description: `${job.status}${job.detail === undefined ? '' : ` — ${job.detail}`} · ${Math.max(0, Math.floor((now - job.startedAt) / 1000))}s`,
-          })),
-          (jobId) => openJobView(jobId),
+        let rows: TaskBrowserRow[] = buildTaskRows(jobSnapshots, [])
+        if (rows.length === 0) return
+        const selectRow = (value: string): void => {
+          const row = rows.find(candidate => candidate.value === value)
+          if (row === undefined) return
+          if (row.kind === 'continuable-subagent') {
+            runOwned('subagent view from tasks', () => enterView(row.childId as SessionId, row.label), {
+              diag,
+              sessionId: () => liveAgent?.session.id,
+              onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
+            })
+            return
+          }
+          openJobView(row.jobId)
+        }
+        const pickerItems = (target: readonly TaskBrowserRow[]): { value: string; label: string; description: string; group: string }[] =>
+          target.map(row => ({
+            value: row.value,
+            label: taskRowLabel(row),
+            description: describeTaskRow(row, now),
+            group: rowGroup(row),
+          }))
+        const handle = app.openPicker(
+          pickerItems(rows),
+          selectRow,
           () => {},
-          { header: `tasks (${snapshots.length})`, enableSearch: true, showHint: true },
+          { header: 'tasks · subagents', enableSearch: true, showHint: true },
         )
+        if (subagents !== undefined) {
+          const sessionId = liveAgent.session.id
+          const generation = sessionGeneration
+          runOwned('task browser children', () => subagents.listChildren(sessionId), {
+            diag,
+            sessionId: () => liveAgent?.session.id,
+            onResult: (entries) => {
+              // The browser belongs to the session it was opened for; a
+              // switch while the listing was in flight must not repaint it.
+              if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
+              rows = buildTaskRows(jobSnapshots, entries)
+              handle.setItems(pickerItems(rows))
+            },
+          })
+        }
       },
     }, {
       present,
@@ -1712,6 +1748,7 @@ export function apply(ctx: Context, config: Config): void {
     // (openJobView, defined earlier in this closure) can refresh the badge
     // after stop/close.
     let refreshTasks: () => void = () => {}
+    let refreshAgents: () => void = () => {}
     const jobs = ctx.get('jobs')
     if (jobs !== undefined) {
       refreshTasks = (): void => {
@@ -1725,8 +1762,42 @@ export function apply(ctx: Context, config: Config): void {
         }
         app.setTasks(tasks)
       }
-      jobs.onJobsChanged(() => refreshTasks())
+      // A jobs change usually means a delegation settled; the subagent half
+      // of the dock may have changed with it.
+      jobs.onJobsChanged(() => { refreshTasks(); refreshAgents() })
       refreshTasks()
+    }
+    // Continuable children never register jobs records (AGENTS.md), so the
+    // dock badge and the task browser need their own channel into the
+    // subagent registry. `refreshAgents` is event-driven: subagent
+    // lifecycle events (start/end), subagent tool calls in the live
+    // session (the scope-filtered lifecycle events may not reach this
+    // context), and every jobs change (a one-shot settlement implies a
+    // child may have gone inactive). listChildren is async and may read
+    // persistence for cold children, so the commit is generation-guarded
+    // and never lands on a newer session.
+    const subagents = ctx.get('subagents')
+    if (subagents !== undefined) {
+      refreshAgents = (): void => {
+        if (liveAgent === undefined) {
+          app.setAgents([])
+          return
+        }
+        const sessionId = liveAgent.session.id
+        const generation = sessionGeneration
+        runOwned('task browser agents refresh', () => subagents.listChildren(sessionId), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onResult: (entries) => {
+            if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
+            app.setAgents(entries
+              .filter((entry): entry is Extract<SubagentListEntry, { kind: 'child'; mode: 'continuable' }> =>
+                entry.kind === 'child' && entry.mode === 'continuable' && entry.activity === 'running')
+              .map(entry => ({ id: entry.id, label: entry.label, activity: entry.activity })))
+          },
+        })
+      }
+      refreshAgents()
     }
     /**
      * Open one job from the task browser: a bash job shows a STATUS viewer
@@ -1870,6 +1941,11 @@ export function apply(ctx: Context, config: Config): void {
       repaint(app, folder)
       refreshStatus()
       refreshQueue()
+      // Repaint both background channels: the dock/badge are owner-fenced,
+      // and a session switch must not leave the previous session's tasks
+      // or subagents on screen until the next registry event.
+      refreshTasks()
+      refreshAgents()
       // The recall history is per-workspace: REPLACE it with the live
       // session's persisted entries (editor history AND the persistence
       // mirror), so switching sessions never recalls the old workspace's
@@ -2037,6 +2113,13 @@ export function apply(ctx: Context, config: Config): void {
         callArgs.set(event.data.callId, typeof event.data.arguments === 'string'
           ? event.data.arguments
           : JSON.stringify(event.data.arguments))
+        // Continuable children never register jobs, and their lifecycle
+        // events are scope-filtered (may not reach this context), so the
+        // subagent tool's own call in the live session is the reliable
+        // badge-arming signal.
+        if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
+          refreshAgents()
+        }
       } else if (event.type === 'tool/result') {
         callArgs.delete(event.data.message.content[0]?.toolCallId ?? ('' as CallId))
       }
@@ -2107,6 +2190,12 @@ export function apply(ctx: Context, config: Config): void {
         refreshStatus()
       }
     })
+    // Subagent lifecycle events drive the continuable-children half of the
+    // dock badge (they never register jobs). Scope-filtered by the
+    // delegating parent — when they do not reach this context, the
+    // tool/call fallback above still arms the badge.
+    ctx.on('subagent/start', () => refreshAgents())
+    ctx.on('subagent/end', () => refreshAgents())
     // Initial plan badge, busy indicator, and auto title from the log (a
     // resumed session may be persisted mid-turn). Without a session the
     // surfaces stay at their idle defaults.

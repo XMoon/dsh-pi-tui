@@ -575,6 +575,8 @@ export class TuiApp {
   private readonly dock: Text
   /** Active background tasks for the dock/footer lines (label + status). */
   private dockTasks: readonly { id: string; label: string; status: string; kind?: string }[] = []
+  /** Live continuable subagents for the dock/footer lines (never jobs records). */
+  private dockAgents: readonly { id: string; label: string; activity: string }[] = []
   /**
    * The queued-input pane below the todo panel (kimi QueuePane parity):
    * a border rule plus one `❯ text` row per pending message and a dim hint.
@@ -2003,7 +2005,20 @@ export class TuiApp {
    */
   setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
-    this.tasksActive = tasks.length > 0
+    this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
+    this.renderDock()
+    this.renderFooter()
+  }
+
+  /**
+   * Replace the live continuable-subagent list for the dock lines and the
+   * footer badge. Continuable children never register jobs records
+   * (AGENTS.md), so they arm the ↓/Ctrl+J trigger through this channel.
+   * @param agents - live children (id + label + activity), empty to hide.
+   */
+  setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
+    this.dockAgents = agents
+    this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
     this.renderDock()
     this.renderFooter()
   }
@@ -2104,6 +2119,18 @@ export class TuiApp {
         lines.push(color.textDim(`   … ${this.dockTasks.length - 3} more`))
       }
     }
+    if (this.dockAgents.length > 0) {
+      // One line per live continuable subagent, same cap; a subagent has no
+      // job record, so the dock marks it with its own glyph.
+      const shown = this.dockAgents.slice(0, 3)
+      for (const agent of shown) {
+        const label = agent.label.length > 40 ? `${agent.label.slice(0, 40)}…` : agent.label
+        lines.push(color.textDim(`🤖  ${agent.id} · ${label}`))
+      }
+      if (this.dockAgents.length > 3) {
+        lines.push(color.textDim(`   … ${this.dockAgents.length - 3} more`))
+      }
+    }
     this.dock.setText(lines.join('\n'))
     this.requestRender()
   }
@@ -2140,14 +2167,25 @@ export class TuiApp {
           : this.status.permission === 'custom'
             ? color.warning('[custom]')
             : ''
+    // One combined badge (kimi splits bash/agent badges; a single badge
+    // keeps the ↓ hint in exactly one place): counts both active jobs and
+    // live continuable subagents.
+    const badgeParts: string[] = []
+    if (this.dockTasks.length > 0) {
+      badgeParts.push(`${this.dockTasks.length} task${this.dockTasks.length === 1 ? '' : 's'} running`)
+    }
+    if (this.dockAgents.length > 0) {
+      badgeParts.push(`${this.dockAgents.length} agent${this.dockAgents.length === 1 ? '' : 's'}`)
+    }
+    const taskBadge = badgeParts.length === 0
+      ? ''
+      : color.primary(`[${badgeParts.join(' · ')}${this.editor.getText().trim() === '' ? ' · ↓ view' : ''}]`)
     const line1 = [
       permissionBadge,
       this.planMode ? color.warning('[plan]') : '',
       this.status.goal === undefined || this.status.goal === '' ? '' : color.primary(this.status.goal),
       this.status.model === '' ? '' : `[${this.status.model}]`,
-      this.tasksActive
-        ? color.primary(`[${this.dockTasks.length} task${this.dockTasks.length === 1 ? '' : 's'} running${this.editor.getText().trim() === '' ? ' · ↓ view' : ''}]`)
-        : '',
+      taskBadge,
       this.status.cwd,
       this.status.branch === '' ? '' : this.status.branch,
       context,
