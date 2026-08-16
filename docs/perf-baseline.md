@@ -1,7 +1,7 @@
-# Performance baseline (stage J)
+# Performance baseline
 
-> Measured 2026-08-15 · commit `57e835d` (before) vs the stage-J working tree
-> (after: incremental read grouping + per-message render cache) ·
+> Measured 2026-08-15 · commit `57e835d` (before) vs the working tree after
+> the optimization (incremental read grouping + per-message render cache) ·
 > Node v26.7.0 · headless xterm at 24 rows · `BENCH_FAST=1` iteration counts.
 >
 > Re-run: `node --expose-gc packages/dsh-pi-tui/scripts/bench.mts`
@@ -25,7 +25,7 @@
 | fullscreen rebuild @120 | p50 70.78ms · p95 72.93ms |
 | heap growth per warm rebuild | ≈ 0 B/rebuild |
 
-## After (stage-J optimization)
+## After (optimized)
 
 | scenario | value |
 |---|---|
@@ -58,7 +58,7 @@
   the transcript size (the cache holds one rendered component per message,
   bounded and cleared on session switch).
 
-## Acceptance mapping (plan §12.4)
+## Acceptance criteria
 
 - ✅ baseline saved (this file + `scripts/bench.mts` rerunnable);
 - ✅ 10k-event streaming per-frame cost no longer linear in history

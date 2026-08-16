@@ -116,7 +116,7 @@ so rendering and input routing are verified without a TTY or a model connection.
 ### Development history (dogfooding)
 
 This project started development on the browser surface (`dsh --profile web`) and
-switched to building itself with itself: since the 2026-08 batch, all fixes and
+switched to building itself with itself: since August 15 2026, all fixes and
 features are developed inside this TUI, the same way this README and the
 codebase are maintained. The dev loop runs on a dedicated `pi-tui-dev` profile
 installed with Option B's `link:` specifier
@@ -198,7 +198,8 @@ runs without needing a session.
   log. The TUI detects the other writer and blocks the send; the SAME action
   pressed again (Enter for a submit, Ctrl+S for a steer, unchanged draft)
   forces through — an edited draft, a swapped key, a new file revision, or a
-  session switch invalidates the force. Never run two surfaces on one session.
+  session switch invalidates the force. Never run two surfaces on one session
+  (the guard's full contract: `docs/concurrency.md`).
 - **Session repair.** `node_modules/@xmoon76/dsh-pi-tui/scripts/repair-session.mjs`
   repairs corrupted logs (`--scan` lists damage read-only; `--yes` applies with
   a mandatory backup). A torn (truncated) tail is truncated at the last
@@ -206,7 +207,8 @@ runs without needing a session.
   duplicated seq are never auto-resolved — the repair refuses and asks for
   `--duplicate-reference=first|last|segment`. Repaired logs are re-verified
   with the dsh reader's own layout checks before the backup is considered
-  redundant.
+  redundant. (Full repair contract, incl. the frame-layout constraint:
+  `docs/repair-session.md`.)
 - **Exit.** `/exit` (alias `/quit`) flushes the session with a 10s hard
   timeout: a hung provider cannot trap the TUI. If the flush fails or times
   out, the terminal prints a warning (the tail may not be persisted) and the

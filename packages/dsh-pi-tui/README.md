@@ -2,7 +2,7 @@
 
 A third-party TUI mode for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui).
 
-This package is the `dsh.bundle` layer that makes `dsh --profile pi-tui` run a terminal UI instead of the browser GUI (`dsh --profile web`) or one-shot mode (`dsh --profile headless`). The vendored pi-tui fork (`@xmoon76/pi-tui`, with its five local rendering fixes) is bundled inside this package's build output — you only ever install this one package.
+This package is the `dsh.bundle` layer that makes `dsh --profile pi-tui` run a terminal UI instead of the browser GUI (`dsh --profile web`) or one-shot mode (`dsh --profile headless`). The vendored pi-tui fork (`@xmoon76/pi-tui`, with its local rendering fixes — the divergence ledger lives in the repo at `packages/pi-tui/AGENTS.md`) is bundled inside this package's build output — you only ever install this one package.
 
 ## Install
 

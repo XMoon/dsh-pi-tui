@@ -1,10 +1,11 @@
 # @xmoon76/pi-tui
 
 > **Vendored fork.** This package is a rescoped copy of `@moonshot-ai/pi-tui`
-> (kimi-code commit `b6144f94ea6b22455a4e750d1750d220987e7bc2`, v0.84.2) with
-> five local fixes (CJK wrap recursion guard, container width clamp, overwide-line
-> truncation, negative-width guards, per-frame processed-line reuse — see
-> [AGENTS.md](AGENTS.md)). It is **not** published to npm and is consumed only as
+> — the exact upstream version and commit live in `package.json`
+> `repository.note` (the single source of truth, refreshed on every
+> re-vendor). The local divergence ledger with guarding tests lives in
+> [AGENTS.md](AGENTS.md), the source of record for every re-vendor. It is
+> **not** published to npm and is consumed only as
 > the `dsh-pi-tui` TUI foundation. Note: the upstream README's `TUI` class is named
 > `TuiMainScreen` in this fork (`TuiAltScreen` is the alternative) — `new TUI(...)`
 > below is stale upstream API; the constructible entry is `TuiMainScreen`.

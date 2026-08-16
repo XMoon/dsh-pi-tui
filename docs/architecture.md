@@ -1,11 +1,11 @@
-# Architecture: controller ownership (plan stage K)
+# Architecture: controller ownership
 
-Behavior work is complete (stages A–J); this document records the OWNERSHIP
-map for the large modules so future extractions follow it one responsibility
-at a time — each move in its own commit, no "god Context" with dozens of
-mutable fields.
+The behavior work is complete; this document records the OWNERSHIP map for
+the large modules so future extractions follow it one responsibility at a
+time — each move in its own commit, no "god Context" with dozens of mutable
+fields.
 
-## Current surface (2026-08, after stages A–J)
+## Current surface
 
 | Concern | Lives in | State it owns |
 |---|---|---|
@@ -43,7 +43,7 @@ mutable fields.
    (semantic state → render at theme revision; the re-render plumbing is
    already in `TuiApp.repaintAllSurfaces`).
 
-## Rules (from the plan, §13.1)
+## Rules
 
 - No single controller holds a "universal Context" of mutable fields; each
   controller declares the state it owns, its `dispose()` method, and a
@@ -52,6 +52,6 @@ mutable fields.
   lifecycle.
 - Move exactly one responsibility per commit; the diff must stay reviewable
   and the headless suites green at every step.
-- Behavior fixes land BEFORE extraction (stages A–J did this); the remaining
-  moves are pure restructuring with no behavior change, so each one is
-  verified by the unchanged suites.
+- Behavior fixes land BEFORE extraction (the completed work did this); the
+  remaining moves are pure restructuring with no behavior change, so each
+  one is verified by the unchanged suites.
