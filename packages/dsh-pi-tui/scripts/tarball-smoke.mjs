@@ -175,10 +175,15 @@ function main() {
     // check on its own file). The dynamic-root checks still apply to it.
     const repoRoot = realpathSync(join(SCRIPT_DIR, '..', '..', '..'))
     const packageRoot = realpathSync(PACKAGE_ROOT)
+    // The bundle dist may be absent (a smoke run on a raw checkout); the
+    // structure checks below already fail loudly for that, so never crash
+    // here — realpathSync on a missing dir would throw ENOENT and turn the
+    // failure into a bare `tarball-smoke: ...` stderr line.
+    const distRoot = join(PACKAGE_ROOT, 'dist')
     const leakRoots = [...new Set([
       repoRoot,
       packageRoot,
-      realpathSync(join(PACKAGE_ROOT, 'dist')),
+      ...(existsSync(distRoot) ? [realpathSync(distRoot)] : []),
     ])]
     const absolutePathPatterns = [
       /\/home\/[^/"']+/,
