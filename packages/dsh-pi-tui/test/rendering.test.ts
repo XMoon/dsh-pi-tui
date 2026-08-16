@@ -530,6 +530,22 @@ test('live theme switch recolors every surface while the content stays identical
   app.stop()
 })
 
+test('theme switch recolors the welcome card (its width cache must not freeze ANSI)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-x', model: 'p/m', version: '0.0.0' })
+  await vt.waitForRender()
+  const row = vt.getViewport().findIndex(line => line.includes('╭'))
+  assert.ok(row >= 0, `welcome card missing:\n${vt.getViewport().join('\n')}`)
+  // Dark border #5A5A5A → light border #737373 after the switch.
+  assert.equal(vt.getCellFgRgb(row, 0), 0x5a5a5a, 'dark welcome border must be #5A5A5A')
+  app.applyTheme('light')
+  await vt.waitForRender()
+  assert.equal(vt.getCellFgRgb(row, 0), 0x737373, 'welcome border must follow the live theme')
+  app.stop()
+})
+
 test('working indicator keeps animating in fullscreen and after leaving it, with a single timer', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })

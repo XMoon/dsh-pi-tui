@@ -2250,6 +2250,11 @@ export class TuiApp {
 
   /** Re-render every palette-dependent surface from its semantic state. */
   private repaintAllSurfaces(): void {
+    // The welcome card keeps its OWN render cache (keyed on width): unlike
+    // the Text-based surfaces, clearing the messages view never invalidates
+    // it, so a theme switch would leave its ANSI-baked borders/text in the
+    // OLD palette. Drop the cache here.
+    this.welcomeCard.invalidate()
     this.rebuildMessages()
     this.renderHeader()
     this.renderFooter()
