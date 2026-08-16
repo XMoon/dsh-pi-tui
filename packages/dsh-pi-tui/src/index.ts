@@ -144,6 +144,45 @@ export const SESSIONLESS_COMMANDS = new Set([
 ])
 
 /**
+ * TUI-owned UI/control commands: these ALWAYS execute locally through the
+ * commands service and are never steered, regardless of the busyEnter
+ * preference. Everything NOT in this set — plain prompts AND non-local
+ * commands (the per-skill slash commands like /grilling or /matrix-cli) —
+ * flows through the busy-Enter submission policy while the agent is
+ * running: web parity, where a skill invocation is a plain `session.prompt`
+ * whose leading `/name` line the host's pre-step listener (dsh-tool-skill)
+ * resolves into the injected skill body — there is no command-execution
+ * wire for skills.
+ */
+export const LOCAL_COMMANDS = new Set([
+  'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
+  'model', 'new', 'preset', 'queue', 'quit', 'reload', 'rename', 'resume',
+  'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
+  'title', 'yolo',
+])
+
+/**
+ * Whether one submission steers under the busy-Enter preference: NOT a
+ * force-queued chord, NOT a TUI-owned local command, and the agent is
+ * running with the preference set to 'steer'. Pure so the dispatch gate
+ * (inside the runner closure) is testable headless.
+ * @param parsed - the parsed slash command, undefined for a plain prompt.
+ * @param running - whether the live agent reports running.
+ * @param busyEnter - the persisted preference value (''/undefined = queue).
+ * @param forceQueue - the Ctrl+Enter chord: always queue, never steer.
+ */
+export function shouldSteerOnEnter(
+  parsed: { name: string } | undefined,
+  running: boolean,
+  busyEnter: string | undefined,
+  forceQueue: boolean,
+): boolean {
+  if (forceQueue) return false
+  if (parsed !== undefined && LOCAL_COMMANDS.has(parsed.name)) return false
+  return running && busyEnter === 'steer'
+}
+
+/**
  * Read an explicit child-session reference from a future/extended job record.
  * Current dsh JobSnapshot records do not expose one, so this normally returns
  * undefined. Crucially, label, registration order and timestamps are never
@@ -1503,12 +1542,15 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       // Busy-Enter preference (web busyEnter parity): while the agent is
-      // RUNNING and the preference is 'steer', plain Enter steers the
-      // draft into the running turn instead of queueing a followup; the
-      // Ctrl+Enter chord forces the queue mode. Slash commands and `!`
-      // shells are never steered.
-      if (!forceQueue && parsed === undefined
-        && liveAgent?.status === 'running' && tuiSettings?.get().busyEnter === 'steer') {
+      // RUNNING and the preference is 'steer', agent-facing input steers
+      // into the running turn — plain prompts AND non-local commands. The
+      // per-skill slash commands steer as their raw `/name` line, which the
+      // host's pre-step listener resolves into the injected skill body
+      // (dsh-tool-skill) — exactly like the web's `session.prompt`, which
+      // has no command-execution wire for skills. TUI-owned LOCAL commands
+      // (/status, /settings, ...) always execute directly; `!` shells and
+      // sessionless commands returned before this gate.
+      if (shouldSteerOnEnter(parsed, liveAgent?.status === 'running', tuiSettings?.get().busyEnter, forceQueue)) {
         steerNow(text, true)
         return
       }

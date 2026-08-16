@@ -1416,7 +1416,7 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     name: 'help',
     description: 'Show keybindings and available commands',
     handler: () => {
-      const rows: SettingItem[] = [        { id: 'k-enter', label: 'Enter', description: 'Submit (steers the running turn while busy when Enter while busy is Steer)', currentValue: '' },
+      const rows: SettingItem[] = [        { id: 'k-enter', label: 'Enter', description: 'Submit (steers the running turn while busy when Enter while busy is Steer; skill commands steer too, UI commands run locally)', currentValue: '' },
         { id: 'k-queue', label: 'Ctrl+Enter', description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
         { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
         { id: 'k-cancel', label: 'Double-Esc', description: 'Cancel the active turn / tool / shell command', currentValue: '' },

@@ -1,11 +1,12 @@
 /**
  * Headless tests for the busy-Enter preference surface (web busyEnter
  * parity): the /settings row reflects the persisted value and its Enter
- * toggle persists the other behavior. The steer-side semantics (steerAll
- * onlyDraft) live in steer.test.ts; the Ctrl+Enter chord lives in
- * input-experience.test.ts; the runner's Enter dispatch decision is
- * closure glue verified end-to-end (tmux), like the rest of the submit
- * path.
+ * toggle persists the other behavior, and the pure dispatch gate
+ * (shouldSteerOnEnter) separates LOCAL commands (always execute) from
+ * everything else (plain prompts AND per-skill slash commands steer while
+ * the agent is running). The steer-side semantics (steerAll onlyDraft)
+ * live in steer.test.ts; the Ctrl+Enter chord lives in
+ * input-experience.test.ts.
  * @module @xmoon76/dsh-pi-tui/busy-enter.test
  */
 
@@ -14,9 +15,56 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
+import { LOCAL_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** The TUI-owned command names registered by registerTuiCommands (commands.ts). */
+const TUI_OWNED = [
+  'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
+  'model', 'new', 'preset', 'queue', 'quit', 'reload', 'rename', 'resume',
+  'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
+  'title', 'yolo',
+]
+
+test('LOCAL_COMMANDS covers every TUI-owned command and nothing else', () => {
+  for (const name of TUI_OWNED) {
+    assert.ok(LOCAL_COMMANDS.has(name), `TUI-owned command ${name} must be local`)
+  }
+  // A skill command name is NOT local (the per-skill registrations live in
+  // the catalog, not in the TUI-owned set).
+  assert.ok(!LOCAL_COMMANDS.has('grilling'), 'skill commands must not be local')
+  assert.ok(!LOCAL_COMMANDS.has('matrix-cli'), 'skill commands must not be local')
+  // SESSIONLESS_COMMANDS is a subset (sessionless commands run locally).
+  for (const name of ['exit', 'settings', 'help', 'login', 'logout', 'model', 'reload', 'sessions', 'resume', 'search', 'new', 'fork', 'preset']) {
+    assert.ok(LOCAL_COMMANDS.has(name), `sessionless command ${name} must be local`)
+  }
+})
+
+test('shouldSteerOnEnter: plain prompts and skill commands steer; local commands never do', () => {
+  const cmd = (name: string) => ({ name })
+  // Plain prompt (no slash command): steers while running with the
+  // preference set — the web parity baseline.
+  assert.equal(shouldSteerOnEnter(undefined, true, 'steer', false), true, 'plain prompt + running + steer')
+  assert.equal(shouldSteerOnEnter(undefined, true, 'queue', false), false, 'queue preference queues')
+  assert.equal(shouldSteerOnEnter(undefined, false, 'steer', false), false, 'idle never steers')
+  assert.equal(shouldSteerOnEnter(undefined, true, undefined, false), false, 'absent preference queues')
+  // Local commands ALWAYS execute, even with the preference set.
+  assert.equal(shouldSteerOnEnter(cmd('status'), true, 'steer', false), false, '/status must execute')
+  assert.equal(shouldSteerOnEnter(cmd('settings'), true, 'steer', false), false, '/settings must execute')
+  assert.equal(shouldSteerOnEnter(cmd('queue'), true, 'steer', false), false, '/queue must execute')
+  assert.equal(shouldSteerOnEnter(cmd('skill'), true, 'steer', false), false, '/skill picker must execute')
+  // Non-local commands (per-skill slash commands) steer like plain prompts:
+  // the raw `/name` line lands in the running turn and the host's pre-step
+  // listener (dsh-tool-skill) resolves the skill body — web parity.
+  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'steer', false), true, 'skill command steers while running')
+  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'queue', false), false, 'queue preference queues the skill')
+  assert.equal(shouldSteerOnEnter(cmd('grilling'), false, 'steer', false), false, 'idle skill executes normally')
+  // The Ctrl+Enter chord forces queue mode for EVERYTHING.
+  assert.equal(shouldSteerOnEnter(undefined, true, 'steer', true), false, 'the chord never steers')
+  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'steer', true), false, 'the chord queues skill commands')
+})
 
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
 // CI=true — clear all three so the render paths under test stay live.
