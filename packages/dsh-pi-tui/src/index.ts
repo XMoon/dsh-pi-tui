@@ -1641,8 +1641,11 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
         const now = Date.now()
+        // The trigger only fires while something is ACTIVE (jobs or live
+        // children), so an empty jobs half is NOT an empty browser: the
+        // children half enriches below. Never early-return on row count —
+        // a children-only session would never open the browser.
         let rows: TaskBrowserRow[] = buildTaskRows(jobSnapshots, [])
-        if (rows.length === 0) return
         const selectRow = (value: string): void => {
           const row = rows.find(candidate => candidate.value === value)
           if (row === undefined) return
