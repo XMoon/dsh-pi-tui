@@ -102,14 +102,17 @@ const CONTEXT_BAR_WIDTH = 12
 
 /**
  * Rounded-frame wrapper for overlay content: `╭─╮` border in the border
- * token, one cell of padding, width sized to the content. Keyboard input
- * forwards to the wrapped component.
+ * token, one cell of padding, width sized to the content. With `fillWidth`
+ * the frame keeps the overlay's full width instead of hugging the widest
+ * content row. Keyboard input forwards to the wrapped component.
  */
 export class Frame implements Component {
   private readonly child: Component
+  private readonly fillWidth: boolean
 
-  constructor(child: Component) {
+  constructor(child: Component, fillWidth = false) {
     this.child = child
+    this.fillWidth = fillWidth
   }
 
   invalidate(): void {
@@ -127,7 +130,9 @@ export class Frame implements Component {
   render(width: number): string[] {
     const inner = Math.max(1, Math.floor(width) - 4)
     const lines = this.child.render(inner).map(line => truncateToWidth(line, inner, '…'))
-    const contentWidth = Math.min(inner, Math.max(1, ...lines.map(line => visibleWidth(line))))
+    const contentWidth = this.fillWidth
+      ? inner
+      : Math.min(inner, Math.max(1, ...lines.map(line => visibleWidth(line))))
     const frameWidth = contentWidth + 4
     const b = color.border
     const out = [b(`╭${'─'.repeat(frameWidth - 2)}╮`)]
@@ -2869,7 +2874,7 @@ export class TuiApp {
   /** Mount one flow's overlay and make it the active one. */
   private presentQuestion(state: QuestionState): void {
     this.activeQuestions = state
-    state.handle = this.showOverlayOnHost(new Frame(state.flow), { width: 76, maxHeight: 26 })
+    state.handle = this.showOverlayOnHost(new Frame(state.flow, true), { width: '85%', minWidth: 64, maxHeight: 26 })
   }
 
   /** Abort one flow (its signal fired). The ACTIVE flow settles rejected

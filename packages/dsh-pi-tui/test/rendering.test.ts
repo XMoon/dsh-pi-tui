@@ -24,8 +24,8 @@ process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
 
-function startApp(width = 100): { vt: VirtualTerminal; app: TuiApp } {
-  const vt = new VirtualTerminal(width, 24)
+function startApp(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(width, height)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   return { vt, app }
@@ -103,6 +103,21 @@ test('askQuestions collects a single selection', async () => {
   await viewport(vt)
   vt.sendInput('\r')
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['No'] }])
+})
+
+test('question dialog fills 85% of a wide terminal instead of hugging the longest row', async () => {
+  const { vt, app } = startApp(160, 32)
+  const promise = app.askQuestions([{ id: 'q1', question: 'Continue?', options: [{ label: 'Yes' }] }])
+  const view = await viewport(vt)
+  const lines = view.split('\n').map(line => line.replace(/\x1b\[[0-9;?]*m/g, ''))
+  const top = lines.findIndex(line => line.includes('╭'))
+  const bottom = lines.findIndex(line => line.includes('╰'))
+  assert.ok(top >= 0 && bottom >= top, `frame missing:\n${view}`)
+  // 85% of 160 columns = 136, borders included.
+  assert.equal(lines[top]!.trim().length, 136, `frame should fill 85% of the terminal:\n${view}`)
+  assert.equal(lines[bottom]!.trim().length, 136, `bottom border must match the top:\n${view}`)
+  vt.sendInput('\x1b')
+  await promise.catch(() => {})
 })
 
 test('question dialog wraps long text, keeps descriptions on their own lines, and never ellipsizes', async () => {
