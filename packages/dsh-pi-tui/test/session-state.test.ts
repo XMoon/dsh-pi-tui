@@ -432,3 +432,203 @@ test('clearSessionOverrides drops per-message expansion toggles', () => {
   assert.equal(overrides.size, 0, 'session-scoped expansion overrides must clear on switch')
   app.stop()
 })
+
+/** A title-handler invocation; only rawInput and signal are consumed. */
+function titleInvocation(rawInput: string, signal: AbortSignal = new AbortController().signal) {
+  return { commandId: 'cmd-test', agent: undefined as never, rawInput, signal }
+}
+
+/** A fake sessionTitle service recording rename/refresh calls. */
+function fakeTitles(overrides: {
+  refresh?: (session: unknown, signal?: AbortSignal) => Promise<unknown>
+  rename?: (session: unknown, name: string) => unknown
+} = {}) {
+  const calls = {
+    rename: [] as { session: unknown; name: string }[],
+    refresh: [] as { session: unknown; signal: AbortSignal | undefined }[],
+  }
+  const titles = {
+    get: () => undefined,
+    rename: (session: unknown, name: string): unknown => {
+      calls.rename.push({ session, name })
+      if (overrides.rename !== undefined) return overrides.rename(session, name)
+      return { title: name, eventSeq: 1, messageSeqs: [], source: { kind: 'user' } }
+    },
+    refresh: async (session: unknown, signal?: AbortSignal): Promise<unknown> => {
+      calls.refresh.push({ session, signal })
+      if (overrides.refresh !== undefined) return overrides.refresh(session, signal)
+      return undefined
+    },
+  }
+  return { titles, calls }
+}
+
+test('/rename is a registered alias of /title sharing its handler', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  const renameDef = services.defs.find(def => def.name === 'rename')
+  assert.ok(titleDef !== undefined, '/title must be registered')
+  assert.ok(renameDef !== undefined, '/rename must be registered')
+  assert.equal(renameDef!.handler, titleDef!.handler, '/rename must share the /title handler')
+  app.stop()
+})
+
+test('/title without an argument regenerates and overwrites the current title', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles, calls } = fakeTitles({
+    refresh: async () => ({ title: 'fresh ai title', eventSeq: 3, messageSeqs: [], source: { kind: 'auto' } }),
+  })
+  ctx.provide('sessionTitle', titles as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const signal = new AbortController().signal
+  registerTuiCommands(stubRunner(ctx, app, state))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('', signal))
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(calls.rename, [], 'a no-argument call must never pin a title')
+  assert.equal(calls.refresh.length, 1, 'a no-argument call must refresh once')
+  assert.equal(calls.refresh[0]!.session, state.agent.session, 'refresh must target the live session')
+  assert.equal(calls.refresh[0]!.signal, signal, 'the invocation signal must be forwarded to refresh')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('title regenerated: fresh ai title'), `regeneration notice missing:\n${view}`)
+  app.stop()
+})
+
+test('/rename without an argument behaves identically (regenerates)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles, calls } = fakeTitles({
+    refresh: async () => ({ title: 'renamed by ai', eventSeq: 4, messageSeqs: [], source: { kind: 'auto' } }),
+  })
+  ctx.provide('sessionTitle', titles as never)
+  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const renameDef = services.defs.find(def => def.name === 'rename')
+  assert.ok(renameDef?.handler !== undefined, '/rename handler missing')
+  const result = await (renameDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+  assert.equal(result.kind, 'success')
+  assert.equal(calls.refresh.length, 1, '/rename without an argument must refresh')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('title regenerated: renamed by ai'), `regeneration notice missing:\n${view}`)
+  app.stop()
+})
+
+test('/title without an argument on a blank session leaves the title as-is', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles, calls } = fakeTitles({ refresh: async () => undefined })
+  ctx.provide('sessionTitle', titles as never)
+  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+  assert.equal(result.kind, 'success', 'a blank session must degrade to a success notice, not an error')
+  assert.equal(calls.refresh.length, 1)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('no conversation yet — title left as-is'), `blank-session notice missing:\n${view}`)
+  app.stop()
+})
+
+test('/title with an argument pins the title; an invalid title surfaces as an error result', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles, calls } = fakeTitles({
+    // The service rejects only hostile input; a plain title pins cleanly.
+    rename: (_session, name: string) => {
+      if (name.includes('\u0000')) throw new Error('session title must contain visible characters')
+    },
+  })
+  ctx.provide('sessionTitle', titles as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  registerTuiCommands(stubRunner(ctx, app, state))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const ok = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('fix footer'))
+  assert.equal(ok.kind, 'success')
+  assert.deepEqual(calls.rename, [{ session: state.agent.session, name: 'fix footer' }],
+    'an argument must pin exactly the trimmed name')
+  assert.deepEqual(calls.refresh, [], 'an argument must never trigger regeneration')
+  // Whitespace-only input counts as NO argument: it regenerates, never pins.
+  const whitespace = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('   '))
+  assert.equal(whitespace.kind, 'success')
+  assert.equal(calls.refresh.length, 1, 'whitespace-only input must take the regeneration path')
+  // Hostile input the service rejects must surface as an error result.
+  const bad = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('\u0000bad'))
+  assert.equal(bad.kind, 'error')
+  assert.ok((bad.text ?? '').includes('must contain visible characters'),
+    `the invalid-title failure must surface as an error result, got: ${bad.text}`)
+  app.stop()
+})
+
+test('/title without an argument surfaces a failing refresh as an error result', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles } = fakeTitles({ refresh: async () => { throw new Error('provider quota exceeded') } })
+  ctx.provide('sessionTitle', titles as never)
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+    const titleDef = services.defs.find(def => def.name === 'title')
+    assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+    const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+    assert.equal(result.kind, 'error')
+    assert.ok((result.text ?? '').includes('provider quota exceeded'),
+      `the refresh failure must surface as an error result, got: ${result.text}`)
+    assert.deepEqual(unhandled, [], 'the refresh rejection must not leak as an unhandled rejection')
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    app.stop()
+  }
+})
+
+test('/title and /rename degrade when the sessionTitle service is absent', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  const renameDef = services.defs.find(def => def.name === 'rename')
+  assert.ok(titleDef?.handler !== undefined && renameDef?.handler !== undefined)
+  for (const def of [titleDef!, renameDef!]) {
+    const result = await (def.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+    assert.equal(result.kind, 'error')
+    assert.equal(result.text, 'session title service unavailable')
+  }
+  app.stop()
+})

@@ -1,9 +1,9 @@
 /**
  * The TUI-owned slash commands (/exit /settings /sessions /skill /model
- * /new /tasks /preset /subagents /search /title /copy /export /fork
- * /status /login /logout /help), extracted from the runner's monolithic
- * apply() so the registration surface is testable and the runner closure
- * shrinks. Every command reads the live runner state through the
+ * /new /tasks /preset /subagents /search /title /rename /copy /export
+ * /fork /status /login /logout /help), extracted from the runner's
+ * monolithic apply() so the registration surface is testable and the runner
+ * closure shrinks. Every command reads the live runner state through the
  * {@link TuiCommandRunner} interface, whose accessors re-read the current
  * agent/settings on every access (sessions can swap the live agent).
  * @module @xmoon76/dsh-pi-tui/commands
@@ -17,6 +17,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -1065,22 +1066,50 @@ export function registerTuiCommands(runner: TuiCommandRunner): { refreshSkills()
     },
   })
 
+  // Shared by /title and its /rename alias. With an argument, pins the
+  // session title (explicit user rename). WITHOUT an argument, regenerates
+  // it from the conversation through the sessionTitle service's explicit
+  // refresh — the deliberate unpin: regeneration OVERWRITES the current
+  // title, including one the user pinned earlier. A blank session (no user
+  // message yet) leaves the title untouched and informs the user.
+  const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult> => {
+    const liveAgent = await requireAgent()
+    const titles = ctx.get('sessionTitle')
+    if (titles === undefined) return { kind: 'error', text: 'session title service unavailable' }
+    const name = invocation.rawInput.trim()
+    if (name !== '') {
+      try {
+        titles.rename(liveAgent.session, name)
+      } catch (error) {
+        return { kind: 'error', text: safeErrorMessage(error) }
+      }
+      return { kind: 'success', text: `title set: ${name}` }
+    }
+    try {
+      const regenerated = await titles.refresh(liveAgent.session, invocation.signal)
+      if (regenerated === undefined) {
+        app.notify('no conversation yet — title left as-is', 'info')
+        return { kind: 'success' }
+      }
+      app.notify(`title regenerated: ${regenerated.title}`, 'info')
+      return { kind: 'success' }
+    } catch (error) {
+      return { kind: 'error', text: safeErrorMessage(error) }
+    }
+  }
+
   commands.register({
     name: 'title',
-    description: 'Set or show the session title',
+    description: 'Set the session title; without an argument, regenerate it from the conversation (overwrites the current title)',
     input: { hint: '<title>' },
-    handler: async (invocation) => {
-      const liveAgent = await requireAgent()
-      const titles = ctx.get('sessionTitle')
-      if (titles === undefined) return { kind: 'error', text: 'session title service unavailable' }
-      const name = invocation.rawInput.trim()
-      if (name === '') {
-        const current = titles.get(liveAgent.session)
-        return { kind: 'success', text: current === undefined ? 'no title set' : `title: ${current.title}` }
-      }
-      titles.rename(liveAgent.session, name)
-      return { kind: 'success', text: `title set: ${name}` }
-    },
+    handler: titleHandler,
+  })
+
+  commands.register({
+    name: 'rename',
+    description: 'Alias of /title: set the session title, or regenerate it without an argument (overwrites the current title)',
+    input: { hint: '<title>' },
+    handler: titleHandler,
   })
 
   commands.register({

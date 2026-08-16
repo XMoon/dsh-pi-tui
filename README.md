@@ -123,8 +123,11 @@ registry package for real use.
   read. Enter switches to the selected session.
 - `/search <query>` — full-text search over persisted session logs, then
   switch to a hit.
-- `/title [title]` — show or set the current session's title (titles appear
-  in the `/sessions` picker).
+- `/title [title]` / `/rename [title]` — with an argument, set the current
+  session's title (pins it against automatic generation; titles appear in
+  the `/sessions` picker); **without an argument, regenerate the title from
+  the conversation — this overwrites the current title, including one you
+  pinned earlier**.
 - `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
 - `/queue` — per-item queue management: edit, delete, steer one, or insert a
   message into the agent's inbox (the queue pane above the editor shows
