@@ -927,6 +927,46 @@ test('running bash cards use the presenter command and never double-render it', 
   app.stop()
 })
 
+test('pwsh cards render the command under a PS> prompt', async () => {
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'pwsh',
+    args: '{"command":"Get-ChildItem"}',
+    result: 'file1', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('PS> Get-ChildItem'), `pwsh prompt missing:\n${view}`)
+  assert.ok(!view.includes('$ Get-ChildItem'), `bash prompt leaked into a pwsh card:\n${view}`)
+  assert.ok(view.includes('file1'), `output missing:\n${view}`)
+})
+
+test('generic presenter cards keep the command row above the raw input', async () => {
+  // A presenter returning 'generic' with rawInput for a bash call must
+  // still lead with the `$ command` row (a no-op for non-terminal tools).
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'generic', title: 'Sleep 5 seconds', rawInput: { command: 'sleep 5' } }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"sleep 5"}',
+    result: '', status: 'running', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  const commandAt = view.indexOf('$ sleep 5')
+  assert.ok(commandAt >= 0, `command row missing:\n${view}`)
+  // The presenter rawInput renders pretty-printed (JSON.stringify(…, null, 2)).
+  const rawAt = view.indexOf('"command": "sleep 5"')
+  assert.ok(rawAt > commandAt, `command must render above the raw input:\n${view}`)
+  app.stop()
+})
+
 test('injected context renders a web-style labeled row and expands to its body', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{
