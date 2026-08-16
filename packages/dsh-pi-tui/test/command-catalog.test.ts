@@ -123,7 +123,7 @@ test('an initial snapshot installs skill wrappers and claims SYNCHRONOUSLY with 
   ctx.provide('skills', services.skills as never)
   const state = { agent: undefined }
   const snapshot = snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }, { name: 'find-skills', description: 'Find skills' }] })
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, state), snapshot)
+  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, state), { snapshot })
   // No await anywhere: the whole install is one synchronous commit.
   assert.deepEqual(
     services.registered.filter(name => name === 'glab' || name === 'find-skills').sort(),
@@ -171,7 +171,7 @@ test('a scoped override blocks a same-name skill wrapper; the effective command 
       { name: 'builtin', description: 'a skill that collides with the global view' },
     ],
   })
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent: undefined }), snapshot)
+  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent: undefined }), { snapshot })
   assert.deepEqual(
     services.registered.filter(name => name === 'glab' || name === 'scoped-cmd' || name === 'builtin'),
     ['glab'],
@@ -190,7 +190,7 @@ test('a commands/change event re-merges completions without re-probing and witho
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
   const snapshot = snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] })
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent: undefined }), snapshot)
+  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent: undefined }), { snapshot })
   assert.equal(wasAdvertised('scoped-cmd'), true, 'the scoped override is advertised after the install')
   const readsBefore = services.skills.listCalls()
   // An external registry change (e.g. a global plugin registering a command):
@@ -217,7 +217,7 @@ test('the revalidating transition keeps skill names as revalidating handlers and
   } as never)
   const { wasAdvertised, enterTransition } = registerTuiCommands(
     stubRunner(ctx, app, { agent }),
-    snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }),
+    { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) },
   )
   assert.equal(wasAdvertised('scoped-cmd'), true)
   // The target changes (composition → live agent): the transition fires.
@@ -315,9 +315,9 @@ test('a direct skill wrapper re-checks the policy on the CURRENT agent at execut
     get: async () => ({ name: 'flipped', description: 'now model only', content: 'body', invocation: { modelInvocable: true, userInvocable: false }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent }), snapshotOf({
+  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'flipped', description: 'was human invocable' }],
-  }))
+  }) })
   assert.equal(wasAdvertised('flipped'), true, 'the snapshot advertised it')
   const wrapper = defs.find(def => def.name === 'flipped')
   assert.ok(wrapper?.handler !== undefined)

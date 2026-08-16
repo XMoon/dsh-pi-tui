@@ -78,7 +78,7 @@ import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type TuiApp } from './tui-app.ts'
 import { buildTaskRows, describeTaskRow, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
-import { registerTuiCommands, type TuiCommandRunner } from './commands.ts'
+import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
@@ -95,6 +95,12 @@ import {
   type SurfaceCatalogContext,
   type SurfaceCatalogSnapshot,
 } from './surface-catalog.ts'
+import {
+  readHumanSkillCatalog,
+  resolveColdSkillTarget,
+  type HumanSkillCatalog,
+  type SkillCatalogContext,
+} from './skill-catalog.ts'
 import {
   checkDivergence,
   draftFingerprint,
@@ -210,33 +216,37 @@ export function shouldConsumeAdvertisedMiss(
 }
 
 /**
- * The pre-mount surface catalog resolution for an explicit `--session`
- * start: the resumed agent's effective catalog is PREFETCHED directly (a
- * live read emits no session events), and the snapshot installs
- * synchronously after mount (the ready barrier), so the first input is
- * served by the complete catalog.
+ * The pre-mount surface catalog resolution:
+ * - an explicit `--session` start PREFETCHES the resumed agent's effective
+ *   catalog (a live read emits no session events);
+ * - the deferred start (no `--session`) reads the cold HUMAN SKILL catalog
+ *   through the preset's STANDING SCOPE — no Agent, no session, no turn —
+ *   so the first input sees human-invocable skills without any durable
+ *   side effect (the mechanism that avoids the probe dead end: host
+ *   `session/created` observers write durable knob events into every fresh
+ *   session).
  *
- * The deferred start (no `--session`) resolves NOTHING here: a startup
- * catalog probe is DISABLED in this deployment because host-level
- * `session/created` observers (dsh-permission-presets) write durable knob
- * events into every fresh session, so any probe would both fail the
- * zero-event gate and materialize a session artifact (write-behind 200ms).
- * The sessionless surface therefore starts with the global command view and
- * the first real session's coordinator refresh swaps in the live catalog.
+ * The snapshot (resume) or the skill catalog (cold) installs synchronously
+ * after mount (the ready barrier).
  *
- * Failure taxonomy:
+ * Failure taxonomy (plan appendix B):
  * - lifecycle cancellation: nothing installed, no notice;
- * - a prefetch read failure degrades to a one-shot notice (the TUI mounts
- *   with the global catalog);
+ * - a prefetch/standing read failure degrades to a one-shot notice (the
+ *   TUI mounts with the global view and built-in commands);
+ * - a missing/unknown preset or a broken standing mount degrades the cold
+ *   target to the global layer with a one-shot notice — never a probe
+ *   Agent, never a startup failure;
  * - an ordinary provider read failure never rejects here: it becomes an
- *   empty field + detached issue inside the snapshot.
+ *   empty field + detached issue inside the catalog.
  * @param options - injected dependencies (see {@link ResolveInitialCatalogOptions}).
- * @returns the snapshot to install and an optional one-shot notice.
+ * @returns the snapshot / skill catalog to install and an optional notice.
  */
 export interface InitialCatalogResolution {
-  /** The snapshot to install at mount (absent when nothing was readable). */
+  /** The resume prefetch snapshot to install at mount. */
   readonly snapshot?: SurfaceCatalogSnapshot
-  /** A user-facing notice when the prefetch degraded (shown once). */
+  /** The cold standing-scope human skill catalog (deferred start). */
+  readonly skills?: HumanSkillCatalog
+  /** A user-facing notice when the prefetch/standing read degraded. */
   readonly notice?: string
 }
 
@@ -244,37 +254,57 @@ export interface InitialCatalogResolution {
 export interface ResolveInitialCatalogOptions {
   /** The resumed live agent, if any (prefetch path). */
   readonly liveAgent?: Agent
+  /** The effective preset id for the cold standing read (undefined = the
+   * deployment default; only consulted for the deferred start). */
+  readonly presetId?: string
   readonly signal: AbortSignal
-  /** The context surface the collector reads services from. */
+  /** The context surface the collectors read services from. */
   readonly ctx: SurfaceCatalogContext
   readonly diag: Diag
 }
 
 export async function resolveInitialCatalog(options: ResolveInitialCatalogOptions): Promise<InitialCatalogResolution> {
-  const { liveAgent, signal, ctx, diag } = options
-  if (liveAgent === undefined) return {}
+  const { liveAgent, presetId, signal, ctx, diag } = options
+  if (liveAgent !== undefined) {
+    try {
+      const snapshot = await readSurfaceCatalog(liveAgent, signal, ctx)
+      diag.info('surface catalog prefetched', {
+        commands: snapshot.commands.length,
+        scopedCommands: snapshot.scopedCommands.length,
+        skills: snapshot.skills.length,
+      })
+      return { snapshot }
+    } catch (error) {
+      if (isCancellation(error)) return {}
+      const message = safeErrorMessage(error)
+      diag.warn('surface catalog unavailable', { phase: 'resume', error: message })
+      return { notice: `surface catalog unavailable: ${message}` }
+    }
+  }
+  // Deferred start: the cold standing-scope skill read. No Agent, no
+  // session, no turn — and no probe fallback on any failure.
+  const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
+  if (target.target === undefined) return {}
   try {
-    const snapshot = await readSurfaceCatalog(liveAgent, signal, ctx)
-    diag.info('surface catalog prefetched', {
-      commands: snapshot.commands.length,
-      scopedCommands: snapshot.scopedCommands.length,
-      skills: snapshot.skills.length,
+    const catalog = await readHumanSkillCatalog(target.target.registry, {
+      cwd: target.target.cwd,
+      scope: target.target.scope,
+      signal,
     })
-    return { snapshot }
+    diag.info('skill catalog standing ready', {
+      preset: presetId ?? 'default',
+      skills: catalog.skills.length,
+      complete: catalog.complete,
+    })
+    return { skills: catalog, ...target.degraded === undefined ? {} : { notice: target.degraded } }
   } catch (error) {
     if (isCancellation(error)) return {}
     const message = safeErrorMessage(error)
-    diag.warn('surface catalog unavailable', { phase: 'resume', error: message })
-    return { notice: `surface catalog unavailable: ${message}` }
+    diag.warn('skill catalog unavailable', { phase: 'cold', error: message })
+    return { notice: `skill catalog unavailable: ${message}` }
   }
 }
 
-/**
- * Read an explicit child-session reference from a future/extended job record.
- * Current dsh JobSnapshot records do not expose one, so this normally returns
- * undefined. Crucially, label, registration order and timestamps are never
- * accepted as identity signals.
- */
 export function subagentJobTranscriptId(snapshot: unknown): string | undefined {
   if (typeof snapshot !== 'object' || snapshot === null) return undefined
   const childSessionId = (snapshot as { readonly childSessionId?: unknown }).childSessionId
@@ -769,24 +799,39 @@ export function apply(ctx: Context, config: Config): void {
     if (liveAgent !== undefined) await liveAgent.whenIdle()
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
     // a resumed agent prefetches its effective catalog (a live read emits no
-    // session events). The deferred start resolves nothing — a startup probe
-    // is disabled in this deployment (host `session/created` observers write
-    // durable knob events, so any probe would fail the zero-event gate and
-    // materialize a session artifact); its sessionless surface starts with
-    // the global command view and the first real session's coordinator
-    // refresh swaps in the live catalog. `initialSnapshot` is undefined for
-    // the deferred start; `surfaceNotice` carries the one-shot degradation
-    // message when a prefetch failed.
+    // session events); the deferred start reads the cold HUMAN SKILL catalog
+    // through the effective preset's STANDING SCOPE — no Agent, no session,
+    // no turn, no durable artifact. `initialSnapshot` is undefined for the
+    // deferred start; `initialSkills` carries the cold catalog; `surfaceNotice`
+    // carries the one-shot degradation message on any failure.
     let initialSnapshot: SurfaceCatalogSnapshot | undefined
+    let initialSkills: HumanSkillCatalog | undefined
     let surfaceNotice: string | undefined
     {
+      // The effective preset for the cold standing read — the SAME
+      // precedence ensureSession uses (pendingPreset → launch → default).
+      // A failing launch preset falls back to the default inside
+      // launchComposition; a fully broken roster must not block startup —
+      // the cold read then uses the deployment default (and degrades
+      // inside resolveColdSkillTarget if that is broken too), and
+      // ensureSession surfaces the preset failure on the first input.
+      let effectivePresetId: string | undefined
+      try {
+        const launched = await launchComposition()
+        if (launched.failure !== undefined) resumeFailure = launched.failure
+        effectivePresetId = launched.composition.agentPreset
+      } catch (error) {
+        diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
+      }
       const resolution = await resolveInitialCatalog({
         liveAgent,
+        presetId: effectivePresetId,
         signal: lifecycleController.signal,
         ctx: ctx as unknown as SurfaceCatalogContext,
         diag,
       })
       initialSnapshot = resolution.snapshot
+      initialSkills = resolution.skills
       surfaceNotice = resolution.notice
     }
     // Cross-process divergence guard state for the live session; reset on
@@ -2273,7 +2318,7 @@ export function apply(ctx: Context, config: Config): void {
       app.resetInputHistory(tuiSettings?.get().history[sessionCwd()] ?? [])
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())} · ${agent.session.id}`)
       updateWelcomeCard()
-      registerCommands(initialSnapshot)
+      registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
     }
     /**
      * Create the first session lazily — the FIRST user message triggers it
@@ -2388,13 +2433,13 @@ export function apply(ctx: Context, config: Config): void {
       requestExit,
       exit,
     }
-    const registerCommands = (snapshot?: SurfaceCatalogSnapshot): void => {
+    const registerCommands = (initial?: InitialCommandCatalog): void => {
       if (commandsRegistered) return
       const commands = ctx.get('commands')
       if (commands === undefined) return
       commandsRegistered = true
       try {
-        const installed = registerTuiCommands(runner, snapshot)
+        const installed = registerTuiCommands(runner, initial)
         wasAdvertisedClaim = installed.wasAdvertised
         // The coordinator's surface hooks point INTO the command surface;
         // the runner's refreshCatalog routes every post-mount refresh here.
@@ -2455,7 +2500,7 @@ export function apply(ctx: Context, config: Config): void {
     // path registers here so /exit /settings /help work before any message).
     // The pre-mount snapshot installs SYNCHRONOUSLY inside registration —
     // the first terminal input cannot arrive before this call stack unwinds.
-    registerCommands(initialSnapshot)
+    registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
     if (surfaceNotice !== undefined) {
       app.notify(surfaceNotice, 'error')
       surfaceNotice = undefined

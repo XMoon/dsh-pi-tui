@@ -52,6 +52,7 @@ import {
   type SurfaceCatalogSnapshot,
   type SurfaceCommandSummary,
 } from './surface-catalog.ts'
+import type { HumanSkillCatalog } from './skill-catalog.ts'
 
 /** A balanced completed-turn prefix for forking: the log up to (and including)
  * the last `turn/end`. Undefined when no turn has completed yet.
@@ -207,25 +208,37 @@ export interface TuiCommandRunner {
 }
 
 /**
+ * The initial catalog a startup hands the command surface:
+ * - `snapshot` — the RESUME prefetch (commands + skills + scoped
+ *   overrides, from `readSurfaceCatalog`);
+ * - `skills` — the cold STANDING-SCOPE skill catalog (deferred start,
+ *   skill-only, from the standing-scope adapter).
+ * Both install synchronously during registration (the first-input ready
+ * barrier); `snapshot` wins when both are somehow present.
+ */
+export interface InitialCommandCatalog {
+  readonly snapshot?: SurfaceCatalogSnapshot
+  readonly skills?: HumanSkillCatalog
+}
+
+/**
  * Register the TUI-owned slash commands on the commands service. The
  * completion list is refreshed after every registration so TUI-owned
  * commands appear in the editor's tab list. Registration is sessionless:
  * the commands service's global layer needs no agent, so the whole surface
  * is available before the first session exists (deferred start).
  *
- * When an `initialSnapshot` was prefetched (startup probe or resumed
- * agent), it installs SYNCHRONOUSLY at the end of registration — direct
- * skill wrappers plus the effective completion merge — so the first input
- * is served by the complete catalog with zero async I/O in between.
+ * When an `initial` catalog was prefetched (resume snapshot or cold
+ * standing-scope skills), it installs SYNCHRONOUSLY at the end of
+ * registration — direct skill wrappers plus the completion merge — so the
+ * first input is served by the complete catalog with zero async I/O in
+ * between.
  * @param runner - the live runner surface.
- * @param initialSnapshot - optional prefetched catalog installed synchronously.
- * @returns `refreshSkills` (the async live-catalog refresh; a no-op until
- *   the first session exists, since the skill catalog scope is the agent)
- *   and `wasAdvertised` (the claim test for the submit dispatch).
+ * @param initial - optional prefetched catalogs installed synchronously.
  */
 export function registerTuiCommands(
   runner: TuiCommandRunner,
-  initialSnapshot?: SurfaceCatalogSnapshot,
+  initial?: InitialCommandCatalog,
 ): {
   wasAdvertised(name: string): boolean
   /** One synchronous catalog commit (the coordinator's install hook). */
@@ -1649,8 +1662,17 @@ export function registerTuiCommands(
   // a snapshot the plain global completion refresh runs as before, and the
   // per-skill commands wait for the first live session's coordinator refresh
   // or /reload.
-  if (initialSnapshot !== undefined) {
-    installSurfaceSnapshot(initialSnapshot)
+  if (initial?.snapshot !== undefined) {
+    installSurfaceSnapshot(initial.snapshot)
+  } else if (initial?.skills !== undefined) {
+    // Cold standing-scope skills (deferred start): wrappers + the global
+    // completion merge in one synchronous commit — no scoped overrides
+    // exist before a session, so the merge base is the current global view.
+    withCommandCommit(() => {
+      replaceSkillCommands(initial.skills!.skills, new Set())
+      savedScopedCommands = []
+      installCompletions(mergeGlobalAndSavedScoped())
+    })
   } else {
     refreshCompletions()
   }
