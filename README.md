@@ -73,12 +73,11 @@ cd dsh-pi-tui
 pnpm install
 pnpm build        # pi-tui tsdown (dist/) + dsh-pi-tui tsdown (dist/, bundles pi-tui)
 
-# file: — copies the bundle into the profile's node_modules at add time;
-# after a rebuild you must re-add (see "Update / uninstall" below)
+# file: — the bundle is copied into the profile at add time; rebuild + re-add
+# to refresh (see "Update / uninstall" below)
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
 
-# link: — installs a live symlink instead; `pnpm build` output is picked up
-# immediately, no re-add after every rebuild (the development loop below)
+# link: — a live symlink instead; `pnpm build` output is picked up directly
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui
 ```
 
@@ -116,22 +115,14 @@ so rendering and input routing are verified without a TTY or a model connection.
 
 ### Live-link dev profile
 
-The development loop uses a dedicated profile whose manifest declares a
-`link:` dependency on this repo — a live symlink, so `pnpm build` output is
-picked up immediately with no re-add (and `pi-tui` itself stays on the
-published registry package for real use):
+The development loop installs the bundle into a dedicated profile with the
+same official `dsh plugin` command, using the `link:` specifier — parallel
+to the `file:` one above. The dependency is a live symlink, so a `pnpm build`
+is picked up without re-adding; the `pi-tui` profile itself stays on the
+published registry package for real use:
 
 ```sh
-mkdir -p ~/.dsh/profiles/pi-tui-dev
-cat > ~/.dsh/profiles/pi-tui-dev/package.json <<'EOF'
-{
-  "name": "dsh-profile-pi-tui-dev",
-  "private": true,
-  "dependencies": { "@xmoon76/dsh-pi-tui": "link:/abs/path/to/dsh-pi-tui/packages/dsh-pi-tui" },
-  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@xmoon76/dsh-pi-tui"] } }
-}
-EOF
-cd ~/.dsh/profiles/pi-tui-dev && pnpm install
+dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui
 pnpm build                                        # from the repo checkout
 dsh --profile pi-tui-dev [--session <id>]         # dev loop
 ```
