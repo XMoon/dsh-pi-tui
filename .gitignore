@@ -6,4 +6,4 @@ packages/dsh-pi-tui/dist/
 *.tgz
 .DS_Store
 temp/
-.agents/
+*.local.md
