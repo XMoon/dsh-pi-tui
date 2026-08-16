@@ -297,10 +297,18 @@ export class BulletedComponent implements Component {
  */
 export function capWrappedToHeight(text: string, width: number, budget: number): { text: string; truncated: boolean } {
   if (text === '') return { text: '', truncated: false }
+  // No row budgeted: nothing can render — the caller skips the child
+  // (a single '…' row would overflow the budget it was promised).
+  if (budget <= 0) return { text: '', truncated: true }
   const fits = (candidate: string, rows: number): boolean => wrapTextWithAnsi(candidate, width).length <= rows
   if (fits(text, budget)) return { text, truncated: false }
-  const target = Math.max(0, budget - 1)
-  if (target === 0) return { text: '…', truncated: true }
+  // A single row: width-crop the text so the leading part stays readable
+  // (a bare '…' row would lose everything).
+  if (budget === 1) return { text: truncateToWidth(text, width, '…'), truncated: true }
+  // More rows: the longest prefix fitting `budget - 1` rows, with the
+  // ellipsis appended to the cut (it joins the last row when it has room,
+  // or wraps to the reserved final row — never overflows the budget).
+  const target = budget - 1
   let low = 0
   let high = text.length
   while (low < high) {
@@ -1858,19 +1866,21 @@ export class TuiApp {
   }
 
   /**
-   * The expanded card's terminal-command row: `$ cmd` in the shell prompt
-   * token, dimmed (kimi ShellExecution parity — the folded card shows the
-   * command; the expanded body must not drop it). Multi-line commands
-   * render every line under the prompt. No-op for an empty command.
+   * The expanded card's terminal-command row: `$ cmd` (bash) or `PS> cmd`
+   * (pwsh) in the shell prompt token, dimmed (kimi ShellExecution parity —
+   * the folded card shows the command; the expanded body must not drop
+   * it). Multi-line commands render every line under the prompt. No-op for
+   * an empty command.
    * @param card - the card container to fill.
    * @param command - the command text.
+   * @param prompt - the shell prompt token (`$ ` or `PS> `).
    */
-  private addTerminalCommandRow(card: Container, command: string): void {
+  private addTerminalCommandRow(card: Container, command: string, prompt: string): void {
     if (command === '') return
-    const prompt = color.shellMode('$ ')
+    const styledPrompt = color.shellMode(prompt)
     const lines = command.split('\n')
     for (const [index, line] of lines.entries()) {
-      const prefix = index === 0 ? prompt : ' '.repeat(visibleWidth(prompt))
+      const prefix = index === 0 ? styledPrompt : ' '.repeat(visibleWidth(styledPrompt))
       card.addChild(new Text(`${prefix}${color.textDim(line)}`, 0, 0))
     }
   }
@@ -1879,6 +1889,11 @@ export class TuiApp {
   private terminalCommand(name: string, argsRaw: string): string {
     const call = parseCallPreview(name, argsRaw)
     return call?.kind === 'bash' ? call.command : ''
+  }
+
+  /** The shell prompt token for a terminal tool (pwsh renders `PS> `). */
+  private shellPrompt(name: string): string {
+    return name === 'pwsh' ? 'PS> ' : '$ '
   }
 
   /**
@@ -1945,19 +1960,22 @@ export class TuiApp {
         // tool's own presentCall carries it as the card title), so an
         // expanding card never loses the command while it runs.
         if (callView.card === 'terminal') {
-          this.addTerminalCommandRow(card, callView.title)
+          this.addTerminalCommandRow(card, callView.title, this.shellPrompt(message.name))
           return
         }
         if (callView.card === 'generic' && callView.rawInput !== undefined) {
+          // Keep the command row above the presenter's raw input (a no-op
+          // for non-terminal tools, so generic cards are unchanged).
+          this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
           const raw = typeof callView.rawInput === 'string' ? callView.rawInput : JSON.stringify(callView.rawInput, null, 2)
           card.addChild(new Text(color.textDim(raw), 0, 0))
           return
         }
       }
-      // No presenter view: bash/pwsh still surface the command from the raw
-      // args (the folded card's preview source), so the expanded card keeps
-      // the command row in every wiring.
-      this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args))
+      // No presenter view (or no presenter-specific case): bash/pwsh still
+      // surface the command from the raw args (the folded card's preview
+      // source), so the expanded card keeps the command row in every wiring.
+      this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
       return
     }
     if (message.result === '' && (message.resultBlocks?.length ?? 0) === 0) return
@@ -2001,7 +2019,7 @@ export class TuiApp {
           // The result view carries output + exit only; the command comes
           // from the raw args (kimi ShellExecution parity: the command row
           // stays visible when the card expands).
-          this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args))
+          this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
           if (resultView.output !== undefined && resultView.output !== '') {
             for (const line of resultView.output.split('\n')) {
               card.addChild(new Text(color.textDim(line), 0, 0))
@@ -2071,7 +2089,7 @@ export class TuiApp {
     } else {
       // Bash/pwsh keep the `$ command` row above the raw output even
       // without a presenter (the folded card's preview source).
-      this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args))
+      this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
       card.addChild(new Text(color.textDim(message.result), 0, 0))
     }
   }
@@ -2715,21 +2733,33 @@ export class TuiApp {
     const maxHeight = Math.max(8, Math.min(16, this.terminal.rows - 2))
     const contentWidth = Math.max(1, width - 8)
     // Height budget in WRAPPED rows: the dialog must NEVER lose the key
-    // hints to the maxHeight slice. Fixed chrome (title, danger banner,
-    // blank spacer, hints, box padding, borders) plus the reason's wrapped
-    // height leave every remaining row to the argument preview — BOTH
-    // capped by their wrapped height, because a single long line can wrap
-    // across many display rows (a raw-line count under-budgets).
-    const baseFixed = 1 + (pending.request.danger === true ? 1 : 0) + 1 + 1 + 2 + 2
-    const reasonBudget = Math.max(0, maxHeight - baseFixed)
+    // hints or the bottom border to the maxHeight slice. The title and the
+    // danger banner are width-cropped so each is exactly ONE display row;
+    // the hints row wraps naturally and its WRAPPED height is counted
+    // (shrunk when the terminal is too small for it). Fixed chrome = 1
+    // title + danger + 1 blank spacer + hint rows + 2 Box paddingY
+    // (Box(1,1)) + 2 Frame borders — keep in sync with the geometry below.
+    const titleShown = truncateToWidth(`Approve ${pending.request.toolName}?`, contentWidth, '…')
+    const dangerShown = pending.request.danger === true
+      ? truncateToWidth('⚠ DANGEROUS COMMAND — confirm carefully', contentWidth, '…')
+      : ''
+    const HINTS = '[y] allow once   [n] reject   [esc/ctrl+c] cancel'
+    const hintBudget = Math.max(0, maxHeight - (1 + (dangerShown === '' ? 0 : 1) + 1 + 2 + 2))
+    const hintShown = capWrappedToHeight(HINTS, contentWidth, hintBudget).text
+    const hintWrapped = hintShown === '' ? 0 : wrapTextWithAnsi(hintShown, contentWidth).length
+    const chrome = 1 + (dangerShown === '' ? 0 : 1) + 1 + hintWrapped + 2 + 2
+    // The reason and the argument preview share what the chrome leaves:
+    // BOTH capped by their wrapped height, because a single long line can
+    // wrap across many display rows (a raw-line count under-budgets).
+    const reasonBudget = Math.max(0, maxHeight - chrome)
     const reasonRaw = pending.request.reason ?? ''
     const reasonShown = capWrappedToHeight(reasonRaw, contentWidth, reasonBudget).text
     const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
-    const previewBudget = Math.max(0, maxHeight - baseFixed - reasonWrapped)
+    const previewBudget = Math.max(0, maxHeight - chrome - reasonWrapped)
     const dialog = new Box(1, 1)
-    dialog.addChild(new Text(`Approve ${pending.request.toolName}?`, 1, 0))
-    if (pending.request.danger === true) {
-      dialog.addChild(new Text(color.error('⚠ DANGEROUS COMMAND — confirm carefully'), 1, 0))
+    dialog.addChild(new Text(titleShown, 1, 0))
+    if (dangerShown !== '') {
+      dialog.addChild(new Text(color.error(dangerShown), 1, 0))
     }
     if (pending.request.arguments !== undefined && pending.request.arguments !== '' && previewBudget > 0) {
       const sixLines = pending.request.arguments.split('\n').slice(0, 6).join('\n')
@@ -2743,7 +2773,7 @@ export class TuiApp {
       dialog.addChild(new Text(reasonShown, 1, 0))
     }
     dialog.addChild(new Text(' ', 1, 0))
-    dialog.addChild(new Text('[y] allow once   [n] reject   [esc/ctrl+c] cancel', 1, 0))
+    dialog.addChild(new Text(hintShown, 1, 0))
     pending.handle = this.showOverlayOnHost(new Frame(dialog), { width, maxHeight })
   }
 

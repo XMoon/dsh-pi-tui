@@ -263,3 +263,19 @@ test('a long single-line reason is wrap-cropped so the hints survive', async () 
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
 })
+
+test('danger on a tiny terminal drops the reason, never the hints', async () => {
+  // rows=10 -> maxHeight = max(8, min(16, 8)) = 8; the danger banner fills
+  // the fixed chrome (7 + 1), leaving ZERO rows for the reason — it must be
+  // skipped entirely (a stray '…' row would overflow and slice the border).
+  const vt = new VirtualTerminal(40, 10)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'dangerous thing', danger: true })
+  const view = await viewport(vt)
+  assert.ok(view.includes('DANGEROUS'), `danger banner missing:\n${view}`)
+  assert.ok(view.includes('[y] allow once'), `key hints sliced off:\n${view}`)
+  assert.ok(view.includes('╰'), `bottom border sliced off:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})

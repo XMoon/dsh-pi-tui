@@ -144,15 +144,16 @@ export const SESSIONLESS_COMMANDS = new Set([
 ])
 
 /**
- * TUI-owned UI/control commands: these ALWAYS execute locally through the
- * commands service and are never steered, regardless of the busyEnter
- * preference. Everything NOT in this set — plain prompts AND non-local
- * commands (the per-skill slash commands like /grilling or /matrix-cli) —
- * flows through the busy-Enter submission policy while the agent is
- * running: web parity, where a skill invocation is a plain `session.prompt`
- * whose leading `/name` line the host's pre-step listener (dsh-tool-skill)
- * resolves into the injected skill body — there is no command-execution
- * wire for skills.
+ * The LOCAL-execute command set: TUI-owned UI/control commands AND core
+ * control commands the TUI does not itself register (e.g. /kill) that
+ * must ALWAYS run locally through the commands service, never steered,
+ * regardless of the busyEnter preference. Everything NOT in this set —
+ * plain prompts AND non-local commands (the per-skill slash commands like
+ * /grilling or /matrix-cli) — flows through the busy-Enter submission
+ * policy while the agent is running: web parity, where a skill invocation
+ * is a plain `session.prompt` whose leading `/name` line the host's
+ * pre-step listener (dsh-tool-skill) resolves into the injected skill
+ * body — there is no command-execution wire for skills.
  */
 export const LOCAL_COMMANDS = new Set([
   'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
@@ -1412,6 +1413,10 @@ export function apply(ctx: Context, config: Config): void {
      * @param onlyDraft - busy-Enter mode: never read or remove the queue.
      */
     const steerNow = (text: string, onlyDraft = false): void => {
+      // The guard action is deliberately the Ctrl+S 'save' action (not
+      // 'submit'): the busy-Enter steer writes the session like Ctrl+S,
+      // and the one-time force token embeds the payload identity, so an
+      // Enter-steer token can never cross-match a followup's token.
       // The subagent viewer is read-only: steering would send to the
       // PARENT session. Refuse with a notice and restore the draft.
       if (viewing !== undefined) {

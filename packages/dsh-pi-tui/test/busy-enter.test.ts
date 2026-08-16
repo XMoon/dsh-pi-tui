@@ -157,8 +157,18 @@ function setup(options: { busyEnter?: string } = {}) {
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, view, settings }
+  return { vt, app, run, view, settings, registered: commands.defs.map(def => def.name) }
 }
+
+test('every command registerTuiCommands registers is in LOCAL_COMMANDS', () => {
+  // A future TUI command added to commands.ts but forgotten in the local
+  // set would silently steer under busyEnter=steer instead of executing.
+  const t = setup()
+  for (const name of t.registered) {
+    assert.ok(LOCAL_COMMANDS.has(name), `registered command ${name} must be local`)
+  }
+  t.app.stop()
+})
 
 test('/settings shows the busy-enter row with the persisted value', async () => {
   const t = setup({ busyEnter: 'steer' })
