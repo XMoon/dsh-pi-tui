@@ -113,28 +113,16 @@ node --expose-gc packages/dsh-pi-tui/scripts/bench.mts   # performance baseline 
 Tests drive the UI through `@xterm/headless` (see `packages/dsh-pi-tui/test/virtual-terminal.ts`),
 so rendering and input routing are verified without a TTY or a model connection.
 
-### Live-link dev profile
-
-The development loop installs the bundle into a dedicated profile with the
-same official `dsh plugin` command, using the `link:` specifier — parallel
-to the `file:` one above. The dependency is a live symlink, so a `pnpm build`
-is picked up without re-adding; the `pi-tui` profile itself stays on the
-published registry package for real use:
-
-```sh
-dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui
-pnpm build                                        # from the repo checkout
-dsh --profile pi-tui-dev [--session <id>]         # dev loop
-```
-
 ### Development history (dogfooding)
 
 This project started development on the browser surface (`dsh --profile web`) and
 switched to building itself with itself: since the 2026-08 batch, all fixes and
-features are developed inside this TUI (`dsh --profile pi-tui-dev`, a `link:`
-dependency on this repo — see the repo AGENTS.md), the same way this README and
-the codebase are maintained. The `pi-tui` profile stays on the published
-registry package for real use.
+features are developed inside this TUI, the same way this README and the
+codebase are maintained. The dev loop runs on a dedicated `pi-tui-dev` profile
+installed with Option B's `link:` specifier
+(`dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui`)
+— a live symlink, so `pnpm build` is picked up without re-adding — while the
+`pi-tui` profile stays on the published registry package for real use.
 
 ## Slash commands (selection)
 
