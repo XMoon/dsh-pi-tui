@@ -1,0 +1,4 @@
+# M0 fixture preset: intentionally empty (no rows) so the standing mount
+# needs no extra services; row-mount verification happens with the full
+# service set or in the real-profile smoke.
+[]
