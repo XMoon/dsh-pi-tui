@@ -72,7 +72,14 @@ git clone https://github.com/XMoon/dsh-pi-tui
 cd dsh-pi-tui
 pnpm install
 pnpm build        # pi-tui tsdown (dist/) + dsh-pi-tui tsdown (dist/, bundles pi-tui)
+
+# file: — copies the bundle into the profile's node_modules at add time;
+# after a rebuild you must re-add (see "Update / uninstall" below)
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
+
+# link: — installs a live symlink instead; `pnpm build` output is picked up
+# immediately, no re-add after every rebuild (the development loop below)
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui
 ```
 
 ### Verify the install
@@ -87,7 +94,8 @@ dsh --profile pi-tui                         # TUI starts instead of the web GUI
 ```sh
 # registry installs:
 dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
-# or rebuild + re-add for file: installs:
+# file: source installs copy at add time — rebuild + re-add to refresh
+# (link: installs track the repo live and need only `pnpm build`):
 pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
 
 dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
@@ -105,6 +113,28 @@ node --expose-gc packages/dsh-pi-tui/scripts/bench.mts   # performance baseline 
 
 Tests drive the UI through `@xterm/headless` (see `packages/dsh-pi-tui/test/virtual-terminal.ts`),
 so rendering and input routing are verified without a TTY or a model connection.
+
+### Live-link dev profile
+
+The development loop uses a dedicated profile whose manifest declares a
+`link:` dependency on this repo — a live symlink, so `pnpm build` output is
+picked up immediately with no re-add (and `pi-tui` itself stays on the
+published registry package for real use):
+
+```sh
+mkdir -p ~/.dsh/profiles/pi-tui-dev
+cat > ~/.dsh/profiles/pi-tui-dev/package.json <<'EOF'
+{
+  "name": "dsh-profile-pi-tui-dev",
+  "private": true,
+  "dependencies": { "@xmoon76/dsh-pi-tui": "link:/abs/path/to/dsh-pi-tui/packages/dsh-pi-tui" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@xmoon76/dsh-pi-tui"] } }
+}
+EOF
+cd ~/.dsh/profiles/pi-tui-dev && pnpm install
+pnpm build                                        # from the repo checkout
+dsh --profile pi-tui-dev [--session <id>]         # dev loop
+```
 
 ### Development history (dogfooding)
 
