@@ -989,6 +989,10 @@ export function apply(ctx: Context, config: Config): void {
       const includeInContext = shellModeOf(text) === 'context'
       const command = shellCommandOf(text)
       if (command === '') return
+      // The generation the run STARTED under: a session switch while the
+      // command runs must not post the output into the new session (the
+      // switch already cleared the card; the notify explains what happened).
+      const generationAtRun = sessionGeneration
       localShellController?.abort()
       localShellController = new AbortController()
       const localSignal = localShellController.signal
@@ -1016,6 +1020,15 @@ export function apply(ctx: Context, config: Config): void {
        * notify and the card — runOwned (AGENTS.md), never a bare void.
        */
       const submitResult = (result: string): void => {
+        // A session switch while the command ran: the output must not be
+        // posted into a session the user has left (the switch already
+        // cleared the card; the notify explains what happened). The
+        // guard-window switch (between the guard read and the followup) is
+        // caught by submitShellResult's own re-validation.
+        if (sessionGeneration !== generationAtRun) {
+          app.notify('the session changed while the command ran — the output was not submitted', 'error')
+          return
+        }
         const submitted = formatShellSubmitText(command, result)
         runOwned('shell submit', () => submitShellResult({
           currentAgent: () => liveAgent as unknown as ShellSubmitAgentLike | undefined,
@@ -1034,9 +1047,11 @@ export function apply(ctx: Context, config: Config): void {
             ? `This session's log was removed externally — the command output was not submitted (it stays on the card). Run the same ! command again to force`
             : reason === 'tail-mismatch'
               ? 'This session file was rewritten by another process (same event count, different content) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)'
-              : 'This session may be open in another dsh process (TUI/web) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)',
+              : reason === 'unreadable'
+                ? "This session's log could not be read (locked or corrupt) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)"
+                : 'This session may be open in another dsh process (TUI/web) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)',
           forcedNotice: () => GUARD_FORCED_NOTIFY,
-          staleNotice: () => 'the session changed while the command ran — the output was not submitted (it stays on the card)',
+          staleNotice: () => 'the session changed while the submission was being checked — the output was not submitted',
           createMessage: (text) => createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
