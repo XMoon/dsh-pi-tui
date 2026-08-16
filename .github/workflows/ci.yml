@@ -166,7 +166,10 @@ jobs:
           fi
       # Publish the EXACT CI-verified bytes; never rebuild, never repack.
       # The glob must match exactly one tarball (build-and-pack packs into
-      # a clean checkout, so only one can exist).
+      # a clean checkout, so only one can exist). Publish an ABSOLUTE path:
+      # npm resolves a relative tarball argument against its cwd, which is
+      # the checkout root here, but never rely on that (the smoke already
+      # learned this lesson the hard way).
       - name: Publish the CI-verified tarball
         run: |
           set -euo pipefail
@@ -175,6 +178,6 @@ jobs:
             echo "expected exactly one tarball, found ${#TARBALLS[@]}" >&2
             exit 1
           fi
-          npm publish "${TARBALLS[0]}" --provenance --access public
+          npm publish "$GITHUB_WORKSPACE/${TARBALLS[0]}" --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
