@@ -78,16 +78,29 @@ import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type TuiApp } from './tui-app.ts'
 import { buildTaskRows, describeTaskRow, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
-import { registerTuiCommands, type TuiCommandRunner } from './commands.ts'
+import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, type Diag } from './diag.ts'
-import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
+import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import { formatShellSubmitText, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from './skill-catalog-refresh.ts'
+import {
+  readSurfaceCatalog,
+  type SurfaceCatalogContext,
+  type SurfaceCatalogSnapshot,
+} from './surface-catalog.ts'
+import {
+  readHumanSkillCatalog,
+  resolveColdSkillTarget,
+  subscribeSkillsChange,
+  type HumanSkillCatalog,
+  type SkillCatalogContext,
+} from './skill-catalog.ts'
 import {
   checkDivergence,
   draftFingerprint,
@@ -185,11 +198,113 @@ export function shouldSteerOnEnter(
 }
 
 /**
- * Read an explicit child-session reference from a future/extended job record.
- * Current dsh JobSnapshot records do not expose one, so this normally returns
- * undefined. Crucially, label, registration order and timestamps are never
- * accepted as identity signals.
+ * The advertised-claim miss decision (pure, exported for the headless
+ * suite): a slash input whose name was advertised by the completion list at
+ * submit time but that the REAL session's catalog lacks is CONSUMED with an
+ * explicit error — never sent to the model as a plain user message. An
+ * unadvertised miss keeps the existing plain-input fallback (the user may
+ * deliberately send slash text to the model).
+ * @param execution - the settled `commands.execute` outcome.
+ * @param wasAdvertised - the claim captured BEFORE session creation.
+ * @returns whether the miss must be consumed as an advertised miss.
  */
+export function shouldConsumeAdvertisedMiss(
+  execution: { readonly result: unknown } | undefined,
+  wasAdvertised: boolean,
+): boolean {
+  return execution === undefined && wasAdvertised
+}
+
+/**
+ * The pre-mount surface catalog resolution:
+ * - an explicit `--session` start PREFETCHES the resumed agent's effective
+ *   catalog (a live read emits no session events);
+ * - the deferred start (no `--session`) reads the cold HUMAN SKILL catalog
+ *   through the preset's STANDING SCOPE — no Agent, no session, no turn —
+ *   so the first input sees human-invocable skills without any durable
+ *   side effect (the mechanism that avoids the probe dead end: host
+ *   `session/created` observers write durable knob events into every fresh
+ *   session).
+ *
+ * The snapshot (resume) or the skill catalog (cold) installs synchronously
+ * after mount (the ready barrier).
+ *
+ * Failure taxonomy (plan appendix B):
+ * - lifecycle cancellation: nothing installed, no notice;
+ * - a prefetch/standing read failure degrades to a one-shot notice (the
+ *   TUI mounts with the global view and built-in commands);
+ * - a missing/unknown preset or a broken standing mount degrades the cold
+ *   target to the global layer with a one-shot notice — never a probe
+ *   Agent, never a startup failure;
+ * - an ordinary provider read failure never rejects here: it becomes an
+ *   empty field + detached issue inside the catalog.
+ * @param options - injected dependencies (see {@link ResolveInitialCatalogOptions}).
+ * @returns the snapshot / skill catalog to install and an optional notice.
+ */
+export interface InitialCatalogResolution {
+  /** The resume prefetch snapshot to install at mount. */
+  readonly snapshot?: SurfaceCatalogSnapshot
+  /** The cold standing-scope human skill catalog (deferred start). */
+  readonly skills?: HumanSkillCatalog
+  /** A user-facing notice when the prefetch/standing read degraded. */
+  readonly notice?: string
+}
+
+/** Options for {@link resolveInitialCatalog}. */
+export interface ResolveInitialCatalogOptions {
+  /** The resumed live agent, if any (prefetch path). */
+  readonly liveAgent?: Agent
+  /** The effective preset id for the cold standing read (undefined = the
+   * deployment default; only consulted for the deferred start). */
+  readonly presetId?: string
+  readonly signal: AbortSignal
+  /** The context surface the collectors read services from. */
+  readonly ctx: SurfaceCatalogContext
+  readonly diag: Diag
+}
+
+export async function resolveInitialCatalog(options: ResolveInitialCatalogOptions): Promise<InitialCatalogResolution> {
+  const { liveAgent, presetId, signal, ctx, diag } = options
+  if (liveAgent !== undefined) {
+    try {
+      const snapshot = await readSurfaceCatalog(liveAgent, signal, ctx)
+      diag.info('surface catalog prefetched', {
+        commands: snapshot.commands.length,
+        scopedCommands: snapshot.scopedCommands.length,
+        skills: snapshot.skills.length,
+      })
+      return { snapshot }
+    } catch (error) {
+      if (isCancellation(error)) return {}
+      const message = safeErrorMessage(error)
+      diag.warn('surface catalog unavailable', { phase: 'resume', error: message })
+      return { notice: `surface catalog unavailable: ${message}` }
+    }
+  }
+  // Deferred start: the cold standing-scope skill read. No Agent, no
+  // session, no turn — and no probe fallback on any failure.
+  const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
+  if (target.target === undefined) return {}
+  try {
+    const catalog = await readHumanSkillCatalog(target.target.registry, {
+      cwd: target.target.cwd,
+      scope: target.target.scope,
+      signal,
+    })
+    diag.info('skill catalog standing ready', {
+      preset: presetId ?? 'default',
+      skills: catalog.skills.length,
+      complete: catalog.complete,
+    })
+    return { skills: catalog, ...target.degraded === undefined ? {} : { notice: target.degraded } }
+  } catch (error) {
+    if (isCancellation(error)) return {}
+    const message = safeErrorMessage(error)
+    diag.warn('skill catalog unavailable', { phase: 'cold', error: message })
+    return { notice: `skill catalog unavailable: ${message}` }
+  }
+}
+
 export function subagentJobTranscriptId(snapshot: unknown): string | undefined {
   if (typeof snapshot !== 'object' || snapshot === null) return undefined
   const childSessionId = (snapshot as { readonly childSessionId?: unknown }).childSessionId
@@ -682,6 +797,43 @@ export function apply(ctx: Context, config: Config): void {
     let liveHandle = handle
     let liveAgent = handle?.agent
     if (liveAgent !== undefined) await liveAgent.whenIdle()
+    // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
+    // a resumed agent prefetches its effective catalog (a live read emits no
+    // session events); the deferred start reads the cold HUMAN SKILL catalog
+    // through the effective preset's STANDING SCOPE — no Agent, no session,
+    // no turn, no durable artifact. `initialSnapshot` is undefined for the
+    // deferred start; `initialSkills` carries the cold catalog; `surfaceNotice`
+    // carries the one-shot degradation message on any failure.
+    let initialSnapshot: SurfaceCatalogSnapshot | undefined
+    let initialSkills: HumanSkillCatalog | undefined
+    let surfaceNotice: string | undefined
+    {
+      // The effective preset for the cold standing read — the SAME
+      // precedence ensureSession uses (pendingPreset → launch → default).
+      // A failing launch preset falls back to the default inside
+      // launchComposition; a fully broken roster must not block startup —
+      // the cold read then uses the deployment default (and degrades
+      // inside resolveColdSkillTarget if that is broken too), and
+      // ensureSession surfaces the preset failure on the first input.
+      let effectivePresetId: string | undefined
+      try {
+        const launched = await launchComposition()
+        if (launched.failure !== undefined) resumeFailure = launched.failure
+        effectivePresetId = launched.composition.agentPreset
+      } catch (error) {
+        diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
+      }
+      const resolution = await resolveInitialCatalog({
+        liveAgent,
+        presetId: effectivePresetId,
+        signal: lifecycleController.signal,
+        ctx: ctx as unknown as SurfaceCatalogContext,
+        diag,
+      })
+      initialSnapshot = resolution.snapshot
+      initialSkills = resolution.skills
+      surfaceNotice = resolution.notice
+    }
     // Cross-process divergence guard state for the live session; reset on
     // every session switch (the cursor is per-session).
     let guardState: GuardState = freshGuardState()
@@ -823,6 +975,12 @@ export function apply(ctx: Context, config: Config): void {
       // work from the old session cannot commit, and clear old-session state.
       bumpSessionGeneration()
       await initLiveSession(next.agent)
+      // The new owner's catalog refresh is AWAITED before the switch is
+      // reported: the old wrappers became revalidating transitions at the
+      // target change, and the report must not precede the new catalog (a
+      // failed attempt still returns a successful switch — the coordinator
+      // warns and the transition commands keep re-validating).
+      await refreshLiveCatalog(next.agent)
       diag.info('switch ok', { from: from ?? '(none)', to: next.agent.session.id, seq: next.agent.session.events.length })
       return undefined
     }
@@ -938,6 +1096,9 @@ export function apply(ctx: Context, config: Config): void {
       // A pending force token is stale once the process tears down.
       guardToken = undefined
       lifecycleController.abort()
+      // Abort any in-flight catalog refresh: its late result must never
+      // register commands or repaint after the app is gone.
+      catalogCoordinator?.dispose()
       localShellController?.abort()
       for (const file of shellTempFiles) {
         try {
@@ -1323,6 +1484,14 @@ export function apply(ctx: Context, config: Config): void {
      * user input is the deferred trigger), guard against cross-process
      * divergence, then execute a registered slash command or follow up. */
     const dispatchViaSession = (text: string): void => {
+      // Capture the advertised claim BEFORE any session creation: the
+      // boolean must reflect the completion generation at submit time, never
+      // a re-query after ensureSession (a refresh may have already revoked
+      // the claim). A probed command the real session then lacks is consumed
+      // with an explicit error below — it must never fall through to the
+      // model as a plain user message.
+      const parsedAtSubmit = parseCommand(text)
+      const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
       runOwned('submit', () => ensureSession().then(async () => {
@@ -1381,6 +1550,16 @@ export function apply(ctx: Context, config: Config): void {
             diag,
             sessionId: () => agent.session.id,
             onResult: (execution) => {
+              // A command the surface advertised (e.g. from the startup
+              // probe) but the real session's catalog lacks: consume the
+              // slash input with an explicit error — never a plain model
+              // message, never an automatic draft restore (the refreshed
+              // completions already revoked the claim, and a mechanical
+              // retry could ride the unadvertised fallback).
+              if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
+                app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
+                return
+              }
               // The fallback follow-up still targets the CAPTURED agent; if
               // the session moved on while the command ran, restore the
               // draft instead of posting into a session the user has left.
@@ -2108,7 +2287,12 @@ export function apply(ctx: Context, config: Config): void {
     // re-reads the live agent on every access, so a session swap
     // mid-flight is always reflected. Defined after ensureSession below
     // (the runner object closes over it).
-    /** Rebuild every live-session surface after resume, create, or swap. */
+    /**
+     * Rebuild every live-session surface after resume, create, or swap.
+     * The surface catalog is NOT touched here: the initial owner's catalog
+     * came from the pre-mount prefetch/probe, and the first deferred create
+     * plus every switch await the coordinator refresh themselves.
+     */
     const initLiveSession = async (agent: Agent): Promise<void> => {
       folder = new TranscriptFolder()
       folder.apply(agent.session.events)
@@ -2134,10 +2318,7 @@ export function apply(ctx: Context, config: Config): void {
       app.resetInputHistory(tuiSettings?.get().history[sessionCwd()] ?? [])
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())} · ${agent.session.id}`)
       updateWelcomeCard()
-      registerCommands()
-      // The per-skill slash commands are agent-scoped: they appear once the
-      // first session exists and refresh on every session switch.
-      refreshSkillCommands()
+      registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
     }
     /**
      * Create the first session lazily — the FIRST user message triggers it
@@ -2163,6 +2344,12 @@ export function apply(ctx: Context, config: Config): void {
           await liveAgent.whenIdle()
           bumpSessionGeneration()
           await initLiveSession(liveAgent)
+          // The first real session's catalog comes from the REAL agent:
+          // await the coordinator refresh so the first submission rides the
+          // live scope (the probe snapshot is never execution
+          // authorization). Provider issues degrade fields inside the
+          // snapshot; a failed attempt is warned, never fatal.
+          await refreshLiveCatalog(liveAgent)
         } catch (error) {
           // A preset that resolves but fails to MOUNT (e.g. a row waiting for
           // a host service) rejects inside the agent-factory setup. Surface it
@@ -2183,6 +2370,7 @@ export function apply(ctx: Context, config: Config): void {
           await liveAgent.whenIdle()
           bumpSessionGeneration()
           await initLiveSession(liveAgent)
+          await refreshLiveCatalog(liveAgent)
         }
         if (resumeFailure !== undefined) {
           app.notify(resumeFailure, 'error')
@@ -2198,7 +2386,67 @@ export function apply(ctx: Context, config: Config): void {
     // `refreshSkills` rebuilds the agent-scoped per-skill commands once a
     // session becomes live.
     let commandsRegistered = false
-    let refreshSkills: (() => Promise<number>) | undefined
+    /** The claim test installed by registerTuiCommands: is a slash name
+     * advertised by the CURRENT completion list? The dispatch captures it
+     * BEFORE any session creation (see dispatchViaSession). */
+    let wasAdvertisedClaim: ((name: string) => boolean) | undefined
+    /** The catalog refresh coordinator: the ONE post-mount refresh owner
+     * (first session, switches, /preset, /reload). Built inside
+     * registerCommands once the surface hooks exist. */
+    let catalogRefreshRequest: ((request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>) | undefined
+    let catalogCoordinator: CatalogRefreshCoordinator | undefined
+    /** `skills/change` coalescing: bursts of invalidation notifications cost
+     * at most two reads, and the follow-up re-read observes the CURRENT
+     * ownership (live agent vs standing preset). */
+    let skillsChangeSubscribed = false
+    const skillsChangeGate = new CoalescingRefreshGate(() => {
+      runOwned('skills/change refresh', async () => {
+        const refresh = catalogRefreshRequest
+        if (refresh === undefined) return undefined
+        const target = liveAgent === undefined
+          ? { kind: 'preset', presetId: pendingPreset ?? launchPreset } as const
+          : { kind: 'agent', key: sessionGeneration } as const
+        return refresh({
+          source: 'invalidation',
+          target,
+          ...target.kind === 'agent' ? { agent: liveAgent } : {},
+        })
+      }, {
+        diag,
+        sessionId: () => liveAgent?.session.id,
+        onResult: (outcome) => {
+          // NOTIFY BEFORE settled(): if app.notify throws, runOwned routes
+          // to onError, whose settled() is then the ONLY settle — a dirty
+          // follow-up cannot be double-settled (a second settle would clear
+          // the follow-up's in-flight flag while it is still running).
+          if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
+            app.notify(outcome.notice, 'error')
+          }
+          skillsChangeGate.settled()
+        },
+        onCancel: () => { skillsChangeGate.settled() },
+        onError: (error) => {
+          skillsChangeGate.settled()
+          app.notify(`skill catalog refresh failed: ${safeErrorMessage(error)}`, 'error')
+        },
+      })
+    })
+    /** Subscribe to the dsh-skill invalidation notification once, through
+     * the single-point adapter (plan appendix B.1). The event carries no
+     * scope or cwd, so the refresh target follows the CURRENT ownership; an
+     * unavailable or throwing subscription degrades to no subscription —
+     * owner switches and /reload still refresh. The flag is set only after
+     * a successful subscribe, so a throwing subscribe can retry on a later
+     * registration attempt. */
+    const subscribeSkillsChangeEvents = (): void => {
+      if (skillsChangeSubscribed) return
+      try {
+        subscribeSkillsChange(ctx as never, () => skillsChangeGate.notify())
+        skillsChangeSubscribed = true
+      } catch (error) {
+        diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
+      }
+    }
     const runner: TuiCommandRunner = {
       ctx,
       app,
@@ -2220,6 +2468,17 @@ export function apply(ctx: Context, config: Config): void {
       compose,
       get pendingPreset() { return pendingPreset },
       set pendingPreset(id: string | undefined) { pendingPreset = id },
+      /** The effective preset id for COLD (sessionless) reads: the run-local
+       * pending override ahead of the launch-time --preset (the SAME
+       * precedence ensureSession uses); undefined = the saved/default
+       * preset applies. */
+      get effectivePresetId() { return pendingPreset ?? launchPreset },
+      refreshCatalog: (request) => {
+        const refresh = catalogRefreshRequest
+        return refresh === undefined
+          ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
+          : refresh(request)
+      },
       switchSession,
       swapTo: (next) => swapTo(next as Awaited<ReturnType<typeof agents.resume>>),
       currentPreset,
@@ -2231,13 +2490,38 @@ export function apply(ctx: Context, config: Config): void {
       requestExit,
       exit,
     }
-    const registerCommands = (): void => {
+    const registerCommands = (initial?: InitialCommandCatalog): void => {
       if (commandsRegistered) return
       const commands = ctx.get('commands')
       if (commands === undefined) return
       commandsRegistered = true
       try {
-        refreshSkills = registerTuiCommands(runner).refreshSkills
+        const installed = registerTuiCommands(runner, initial)
+        wasAdvertisedClaim = installed.wasAdvertised
+        // The coordinator's surface hooks point INTO the command surface;
+        // the runner's refreshCatalog routes every post-mount refresh here.
+        catalogCoordinator = new CatalogRefreshCoordinator({
+          readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, ctx as unknown as SurfaceCatalogContext),
+          // The sessionless (preset) target reads the STANDING skill catalog
+          // — the capability-gated cold path (standing key → global →
+          // degraded global with a notice), never an Agent probe: probes
+          // emit durable session events in this deployment (see
+          // docs/surface-catalog.md).
+          readStanding: async (presetId, readSignal) => {
+            const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
+            if (target.target === undefined) throw new Error('skill service unavailable')
+            const catalog = await readHumanSkillCatalog(target.target.registry, {
+              cwd: target.target.cwd,
+              scope: target.target.scope,
+              signal: readSignal,
+            })
+            return { catalog, ...target.degraded === undefined ? {} : { notice: target.degraded } }
+          },
+          installSnapshot: (next) => installed.installSnapshot(next),
+          enterCatalogTransition: () => installed.enterTransition(),
+        }, lifecycleController.signal, diag)
+        catalogRefreshRequest = (request) => catalogCoordinator!.refresh(request)
+        subscribeSkillsChangeEvents()
       } catch (error) {
         // A failed registration must not lock the surface forever (a locked
         // flag would leave every later command resolving to a plain message
@@ -2250,20 +2534,25 @@ export function apply(ctx: Context, config: Config): void {
         app.notify(`command registration failed: ${message}`, 'error')
       }
     }
-    /** Rebuild the agent-scoped per-skill commands after a session exists. */
-    const refreshSkillCommands = (): void => {
-      const refresh = refreshSkills
+    /** Await one live-owner catalog refresh through the coordinator (the
+     * first deferred create and every session switch): the refresh attempt
+     * settles before the caller continues, and its outcome is an outcome —
+     * provider issues degrade fields, failures warn, the submission or the
+     * switch proceeds either way. */
+    const refreshLiveCatalog = async (agent: Agent): Promise<void> => {
+      const refresh = catalogRefreshRequest
       if (refresh === undefined) return
-      // Unified fire-and-forget entry: task label + live session id in the
-      // diagnostics, cancellations debug-only (the runner is tearing down).
-      runDetached('skill command refresh', () => refresh(), {
-        diag,
-        sessionId: () => liveAgent?.session.id,
+      await refresh({
+        source: 'live-session',
+        target: { kind: 'agent', key: sessionGeneration },
+        agent,
       })
     }
     // The startup surface: a resumed session initializes everything; the
     // deferred path shows the pre-session invitation until the first message.
     if (liveAgent !== undefined) {
+      // The initial owner's catalog was prefetched before mount: no
+      // duplicate refresh.
       await initLiveSession(liveAgent)
     } else {
       app.setWelcomeIdle(true)
@@ -2273,7 +2562,13 @@ export function apply(ctx: Context, config: Config): void {
     // Command registration is sessionless: it must run on BOTH startup
     // surfaces (resume path registers inside initLiveSession; the deferred
     // path registers here so /exit /settings /help work before any message).
-    registerCommands()
+    // The pre-mount snapshot installs SYNCHRONOUSLY inside registration —
+    // the first terminal input cannot arrive before this call stack unwinds.
+    registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
+    if (surfaceNotice !== undefined) {
+      app.notify(surfaceNotice, 'error')
+      surfaceNotice = undefined
+    }
     if (resumeFailure !== undefined) {
       app.notify(resumeFailure, 'error')
       resumeFailure = undefined

@@ -135,6 +135,8 @@ function setup(options: { busyEnter?: string } = {}) {
     currentPreset: () => undefined,
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
     refreshStatus: () => {},
     updateWelcomeCard: () => {},

@@ -13,6 +13,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'
 import { SESSIONLESS_COMMANDS } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -84,15 +85,20 @@ function fakeCommands() {
   }
 }
 
-/** A stub runner with a MUTABLE pending preset and an optional recompose. */
+/** A stub runner with a MUTABLE pending preset and an optional recompose.
+ * `refreshCatalog` records every request and resolves a scripted outcome
+ * (a failed outcome by default, so a test that does not care about the
+ * refresh still sees the preset change succeed). */
 function stubRunner(options: {
   ctx: Context
   app: TuiApp
   agent: Agent | undefined
   recomposeBlank?: (id: string) => Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
+  refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   ensureCalls?: string[]
-}): { runner: TuiCommandRunner; pending: { value: string | undefined } } {
+}): { runner: TuiCommandRunner; pending: { value: string | undefined }; refreshes: CatalogRefreshRequest[] } {
   const pending = { value: undefined as string | undefined }
+  const refreshes: CatalogRefreshRequest[] = []
   const runner: TuiCommandRunner = {
     ctx: options.ctx,
     app: options.app,
@@ -113,6 +119,11 @@ function stubRunner(options: {
     currentPreset: () => undefined,
     get pendingPreset() { return pending.value },
     set pendingPreset(id: string | undefined) { pending.value = id },
+    get effectivePresetId() { return pending.value },
+    refreshCatalog: async (request) => {
+      refreshes.push(request)
+      return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
+    },
     recomposeBlank: options.recomposeBlank ?? (async () => ({ kind: 'switched', preset: 'standard' })),
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
@@ -121,7 +132,7 @@ function stubRunner(options: {
     requestExit: () => {},
     exit: () => {},
   }
-  return { runner, pending }
+  return { runner, pending, refreshes }
 }
 
 function invoke(rawInput: string): CommandInvocation {
@@ -138,6 +149,8 @@ function setup(options: {
   rows?: { id: string; name?: string; description?: string; trust?: string }[]
   agent?: Agent
   recomposeBlank?: (id: string) => Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
+  refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
+  settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
   width?: number
 }) {
   const ctx = new Context()
@@ -148,20 +161,26 @@ function setup(options: {
   ctx.provide('commands', commands.service as never)
   const presets = presetService(options.rows ?? SHIPPED_ROWS)
   ctx.provide('agentPresets', presets.service as never)
+  if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   const ensureCalls: string[] = []
-  const { runner, pending } = stubRunner({
-    ctx, app, agent: options.agent, recomposeBlank: options.recomposeBlank, ensureCalls,
+  const { runner, pending, refreshes } = stubRunner({
+    ctx, app, agent: options.agent, recomposeBlank: options.recomposeBlank, refreshCatalog: options.refreshCatalog, ensureCalls,
   })
   registerTuiCommands(runner)
   const def = commands.defs.find(entry => entry.name === 'preset')
   assert.ok(def?.handler !== undefined, 'preset handler missing')
   const run = async (rawInput: string): Promise<unknown> =>
     (def!.handler as (inv: CommandInvocation) => unknown)(invoke(rawInput))
+  const runCommand = async (name: string, rawInput = ''): Promise<unknown> => {
+    const found = commands.defs.find(entry => entry.name === name)
+    assert.ok(found?.handler !== undefined, `${name} handler missing`)
+    return (found!.handler as (inv: CommandInvocation) => unknown)(invoke(rawInput))
+  }
   const view = async (): Promise<string> => {
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, view, pending, presets, ensureCalls }
+  return { vt, app, run, runCommand, view, pending, presets, ensureCalls, refreshes }
 }
 
 test('/preset is in the sessionless dispatch gate', () => {
@@ -279,5 +298,126 @@ test('/preset <id> with a started session refuses with the locked text', async (
   assert.equal(result.kind, 'error')
   assert.match(result.text, /has already started; its agent preset is fixed/)
   assert.equal(recomposed, 1)
+  t.app.stop()
+})
+
+/** A skills-only applied outcome shaped like the coordinator's standing
+ * install (the shape /preset and /reload report). */
+function standingOutcome(skills: string[], notice?: string): CatalogRefreshOutcome {
+  return {
+    kind: 'applied',
+    snapshot: Object.freeze({
+      commands: Object.freeze([]),
+      scopedCommands: Object.freeze([]),
+      skills: Object.freeze(skills.map(name => Object.freeze({ name, description: name }))),
+      issues: Object.freeze([]),
+    }),
+    ...notice === undefined ? {} : { notice },
+  }
+}
+
+test('/preset <id> with no session requests a STANDING refresh of the new preset, creating nothing', async () => {
+  const t = setup({ refreshCatalog: async () => standingOutcome(['glab']) })
+  const result = await t.run('code')
+  assert.equal(t.pending.value, 'code')
+  assert.equal(t.refreshes.length, 1, 'the preset choice must request one standing refresh')
+  assert.equal(t.refreshes[0]?.source, 'preset')
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
+  assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
+  t.app.stop()
+})
+
+test('/preset <id> with no session surfaces the standing degradation notice', async () => {
+  const t = setup({
+    refreshCatalog: async () => standingOutcome(['global-skill'], 'skill catalog unavailable for preset "code": preset exploded'),
+  })
+  const result = await t.run('code') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, 'new sessions will start on preset code')
+  assert.equal(t.pending.value, 'code')
+  await t.view()
+  const view = t.vt.getViewport().join('\n')
+  assert.ok(view.includes('preset exploded'), `degradation notice missing:\n${view}`)
+  t.app.stop()
+})
+
+test('/preset default <id> with no override requests a standing refresh of the new default', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }); return undefined },
+    },
+  })
+  const result = await t.run('default code') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, 'default preset set: code')
+  assert.equal(mutated.length, 1)
+  assert.equal(t.refreshes.length, 1, 'an unmasked default change must refresh the standing catalog')
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
+  t.app.stop()
+})
+
+test('/preset default <id> masked by a pending preset does NOT refresh', async () => {
+  const t = setup({
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async () => undefined,
+    },
+  })
+  t.pending.value = 'minimal'
+  const result = await t.run('default code') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(t.refreshes.length, 0, 'the pending override masks the new default — no refresh')
+  t.app.stop()
+})
+
+test('/reload with no session refreshes the STANDING catalog and reports the skill count', async () => {
+  const t = setup({ refreshCatalog: async () => standingOutcome(['glab', 'find-skills']) })
+  const result = await t.runCommand('reload') as { kind: string; text: string }
+  assert.ok(result.kind === 'success')
+  await t.view()
+  const view = t.vt.getViewport().join('\n')
+  assert.ok(view.includes('reloaded'), `reload notify missing:\n${view}`)
+  assert.ok(view.includes('2 human skills'), `skill count missing:\n${view}`)
+  assert.equal(t.refreshes.length, 1)
+  assert.equal(t.refreshes[0]?.source, 'reload')
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: undefined },
+    'the effective preset id (none pending) resolves to the deployment default')
+  t.app.stop()
+})
+
+test('/reload with a pending preset reports the standing degradation notice', async () => {
+  const t = setup({
+    refreshCatalog: async () => standingOutcome([], 'skill catalog unavailable for preset "code": preset exploded'),
+  })
+  t.pending.value = 'code'
+  await t.runCommand('reload')
+  await t.view()
+  const view = t.vt.getViewport().join('\n')
+  assert.ok(view.includes('0 human skills'), `skill count missing:\n${view}`)
+  assert.ok(view.includes('preset exploded'), `degradation notice missing:\n${view}`)
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
+  t.app.stop()
+})
+
+test('/reload with a live agent refreshes the AGENT target, never the standing path', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    refreshCatalog: async () => ({
+      kind: 'applied',
+      snapshot: Object.freeze({
+        commands: Object.freeze([Object.freeze({ name: 'builtin', description: 'b' })]),
+        scopedCommands: Object.freeze([]),
+        skills: Object.freeze([]),
+        issues: Object.freeze([]),
+      }),
+    }),
+  })
+  await t.runCommand('reload')
+  assert.equal(t.refreshes.length, 1)
+  assert.equal(t.refreshes[0]?.target.kind, 'agent', 'a live session must refresh the agent target')
   t.app.stop()
 })

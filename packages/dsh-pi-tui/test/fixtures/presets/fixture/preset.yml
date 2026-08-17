@@ -1,0 +1,4 @@
+id: fixture
+name: Fixture preset
+description: Headless standing-scope test fixture composition (intentionally empty)
+trust: system
