@@ -10,7 +10,7 @@
 		"type": "git",
 		"url": "git+https://github.com/XMoon/dsh-pi-tui.git",
 		"directory": "packages/pi-tui",
-		"note": "vendored snapshot of @moonshot-ai/pi-tui at kimi-code commit 13d86f8b7cfbd0ef10bb50e5ce1540e5c3319a9d (v0.84.3); carries the local divergences listed in packages/pi-tui/AGENTS.md (re-verify all on every re-vendor)"
+		"note": "vendored snapshot of @moonshot-ai/pi-tui at kimi-code commit 44a6c70e66762ea9e122f8dceae16dc759086a7c (v0.84.3); carries the local divergences listed in packages/pi-tui/AGENTS.md (re-verify all on every re-vendor)"
 	},
 	"keywords": [
 		"tui",

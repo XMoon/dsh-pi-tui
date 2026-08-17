@@ -20,6 +20,8 @@ export interface SelectItem {
 	 * renders a flat list).
 	 */
 	group?: string;
+	/** Provider-specific metadata (e.g. autocomplete item markers), passed through unchanged. */
+	data?: Record<string, unknown>;
 }
 
 export interface SelectListTheme {
