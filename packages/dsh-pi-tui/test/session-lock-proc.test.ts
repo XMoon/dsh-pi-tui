@@ -86,6 +86,58 @@ test('probe: a zombie state is stale (injected stat read)', () => {
   assert.equal(outcome.kind, 'stale')
 })
 
+test('probe: a cmdline read failure is unknown, never a stale takeover', () => {
+  // The stat proves the process is alive and is the same one; an unreadable
+  // cmdline (hidepid, transient race) must not classify the owner as stale —
+  // that would take a possibly-live owner's lock over.
+  const probe = createProcProbe({
+    readFile: (path) => {
+      if (path.endsWith('/stat')) {
+        return '1 (MainThread) S 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 123 21 22'
+      }
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+    },
+  })
+  const outcome = probe.probe(
+    { pid: 9999, starttime: 123, startedAt: 0, profile: 'pi-tui-dev' },
+    selfOwner(),
+  )
+  assert.equal(outcome.kind, 'unknown')
+})
+
+test('probe: a matching stat with a non-dsh cmdline is stale (pid reuse)', () => {
+  const probe = createProcProbe({
+    readFile: (path) => {
+      if (path.endsWith('/stat')) {
+        return '1 (MainThread) S 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 123 21 22'
+      }
+      return '/usr/bin/sshd' // same pid/starttime, but not a dsh invocation
+    },
+  })
+  const outcome = probe.probe(
+    { pid: 9999, starttime: 123, startedAt: 0, profile: 'pi-tui-dev' },
+    selfOwner(),
+  )
+  assert.equal(outcome.kind, 'stale')
+})
+
+test('probe: a matching stat with a dsh cmdline is alive', () => {
+  const probe = createProcProbe({
+    readFile: (path) => {
+      if (path.endsWith('/stat')) {
+        // A live process whose starttime matches the owner record.
+        return '1 (MainThread) S 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 123 21 22'
+      }
+      return '/usr/bin/node /home/user/.nvm/versions/node/v24/bin/dsh --profile pi-tui'
+    },
+  })
+  const outcome = probe.probe(
+    { pid: 9999, starttime: 123, startedAt: 0, profile: 'pi-tui-dev' },
+    selfOwner(),
+  )
+  assert.equal(outcome.kind, 'alive')
+})
+
 test('probe: non-Linux degradation with a matching command is alive', () => {
   const probe = createProcProbe({
     platform: 'darwin',

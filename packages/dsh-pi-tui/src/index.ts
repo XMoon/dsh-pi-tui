@@ -605,7 +605,11 @@ export function resumeCommand(profile: string, sessionId: string): string | unde
 }
 
 /** The lock identity of THIS process: pid + boot-relative starttime. */
+// The lock identity of THIS process, computed once: pid + starttime are
+// boot-constants, so re-reading /proc/self/stat per acquire is pure waste.
+let cachedSelfLockInfo: SessionLockInfo | undefined
 function selfLockInfo(): SessionLockInfo {
+  if (cachedSelfLockInfo !== undefined) return cachedSelfLockInfo
   const info: SessionLockInfo = {
     pid: process.pid,
     starttime: 0,
@@ -619,6 +623,7 @@ function selfLockInfo(): SessionLockInfo {
     // this process's own lock record (the same-process shortcut compares
     // pid AND starttime, so 0 is fine for self-consistency).
   }
+  cachedSelfLockInfo = info
   return info
 }
 /** Human-readable lock owner description for the refusal notice. */
@@ -1033,6 +1038,9 @@ export function apply(ctx: Context, config: Config): void {
         ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
         diag.error('resume failed', { session: sessionId, error: message })
         resumeFailure = `session ${sessionId} could not be resumed; started a fresh session`
+        // The failed target's lock (if we took one) must not leak: we are
+        // about to hand the surface to a different session.
+        releaseOpenLock(sessionId)
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
         handle = await agents.create({
@@ -1041,6 +1049,9 @@ export function apply(ctx: Context, config: Config): void {
           agentOptions,
           setup: launched.composition.setup,
         })
+        // The fallback session is now a real persisted artifact: take its
+        // open lock like any other created session.
+        acquireOpenLock(handle.agent.session.id, handle.agent.session.header)
       }
     } else {
       // Deferred session creation: without --session the TUI opens with NO
@@ -1211,12 +1222,12 @@ export function apply(ctx: Context, config: Config): void {
       const from = liveAgent?.session.id
       try {
         if (liveAgent !== undefined) {
-          // Release the OLD session's open lock before the agent is disposed:
-          // the swap is complete from the old session's perspective once we
-          // stop writing it. (The divergence guard still protects a racing
-          // opener until our final flush lands — the flush below happens
-          // before any of our own later writes.)
-          releaseOpenLock(liveAgent.session.id)
+          // Flush BEFORE releasing the old session's open lock: the lock must
+          // cover the old session's last durable write, so a racing opener
+          // cannot resume the session while our flush is still appending from
+          // our in-memory seq (dsh's prepare would synthesize closers into
+          // the shared log and collide with our flush — the exact corruption
+          // the lock exists to prevent).
           await sessions.flush(liveAgent.session)
           await liveHandle?.dispose()
         }
@@ -1227,6 +1238,22 @@ export function apply(ctx: Context, config: Config): void {
         const message = safeErrorMessage(error)
         diag.error('swap failed', { from, error: message })
         return `swap failed: ${message}`
+      }
+      // The old session is now fully flushed: release its lock. (A switch
+      // that never acquired one is a no-op; a switch that already released
+      // via switchSession is idempotent by session id.)
+      if (from !== undefined) releaseOpenLock(from)
+      // The new session is now ours: take its open lock. This covers EVERY
+      // swapTo caller — /resume, /sessions, /new and /fork — so a session
+      // created or resumed by this TUI always carries a lock. A caller that
+      // already acquired it (switchSession) hits the same-process shortcut
+      // and is a no-op. A refusal here is defensive-only (a fresh UUID or a
+      // pre-checked switch cannot be held); the write-path guard still
+      // protects the session.
+      const swapLockRefusal = acquireOpenLock(next.agent.session.id, next.agent.session.header)
+      if (swapLockRefusal !== undefined) {
+        ctx.logger.warn(`tui-runner: lock refused on swap to ${next.agent.session.id}: ${swapLockRefusal}`)
+        diag.warn('session lock refused on swap', { session: next.agent.session.id })
       }
       guardState = freshGuardState()
       guardToken = undefined
@@ -1249,6 +1276,15 @@ export function apply(ctx: Context, config: Config): void {
      * string so callers' `.then(error => ...)` need no rejection path. */
     const switchSession = async (sessionId: string): Promise<string | undefined> => {
       try {
+        // The tracker is a single slot: acquiring the target first would
+        // overwrite it, leaving the current session's lock leaked for the
+        // whole TUI lifetime (swapTo's release-by-id would then be a no-op).
+        // So release the current lock BEFORE taking the target's. If the
+        // target is refused, re-take the current lock — the current session
+        // stays live and must stay protected. (Flushing happens inside
+        // swapTo, which runs after this acquire.)
+        const from = liveAgent?.session.id
+        if (from !== undefined) releaseOpenLock(from)
         // Refuse to switch into a session another live dsh process holds —
         // same corruption risk as the --session launch path.
         let lockHeader: { cwd?: string } | undefined
@@ -1262,6 +1298,10 @@ export function apply(ctx: Context, config: Config): void {
         if (lockRefusal !== undefined) {
           ctx.logger.warn(`tui-runner: switch to ${sessionId} refused: ${lockRefusal}`)
           diag.warn('session lock held on switch', { session: sessionId })
+          // The switch did not happen: the current session is still live and
+          // must keep its lock (best-effort — an unavailable deployment has
+          // no lock to re-take and the guard still protects the write path).
+          if (from !== undefined) acquireOpenLock(from, liveAgent?.session.header)
           return lockRefusal
         }
         // The target session's recorded preset, exactly like the resume path.
@@ -1279,9 +1319,12 @@ export function apply(ctx: Context, config: Config): void {
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
         diag.error('switch failed', { session: sessionId, error: message })
-        // If the resume failed after we took the lock, release it so the
-        // session is not left locked for a session we never entered.
+        // If the resume failed after we took the target's lock, release it so
+        // the target session is not left locked for a session we never
+        // entered. The CURRENT session is still live (the switch failed):
+        // re-take its lock, which was released before the target acquire.
         releaseOpenLock(sessionId)
+        if (liveAgent !== undefined) acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
         return `switch failed: ${message}`
       }
     }
@@ -2711,7 +2754,9 @@ export function apply(ctx: Context, config: Config): void {
           // A freshly created session is now a real persisted artifact: take
           // the open-time lock so another dsh process cannot open it while we
           // hold it. The lock is best-effort (unavailable deployments skip it
-          // and rely on the write-path guard).
+          // and rely on the write-path guard). A refusal cannot happen here:
+          // the id is a brand-new UUID, so no other process can hold it —
+          // the return value is deliberately ignored (it is not a fatal path).
           acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
           await liveAgent.whenIdle()
           bumpSessionGeneration()
@@ -2742,7 +2787,9 @@ export function apply(ctx: Context, config: Config): void {
           // A freshly created session is now a real persisted artifact: take
           // the open-time lock so another dsh process cannot open it while we
           // hold it. The lock is best-effort (unavailable deployments skip it
-          // and rely on the write-path guard).
+          // and rely on the write-path guard). A refusal cannot happen here:
+          // the id is a brand-new UUID, so no other process can hold it —
+          // the return value is deliberately ignored (it is not a fatal path).
           acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
           await liveAgent.whenIdle()
           bumpSessionGeneration()

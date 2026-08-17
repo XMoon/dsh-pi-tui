@@ -13,6 +13,7 @@ import {
   lockPathOf,
   parseLockInfo,
   serializeLockInfo,
+  TAKEOVER_RETRIES,
   type SessionLockFs,
   type SessionLockInfo,
   type SessionLockProc,
@@ -206,18 +207,19 @@ test('acquire: a malformed lock file is unverifiable, never guessed', () => {
 })
 
 test('acquire: a takeover race retries, then refuses as held when the lock keeps reappearing', () => {
-  // Every probe says stale, and every create finds the file recreated by a
-  // concurrent taker (the memFs create throws EEXIST because the file is
-  // still there after unlink is defeated).
+  // Every probe says stale, and every unlink fails (a concurrent taker owns
+  // the file between our read and unlink, or the fs is wedged) — the retry
+  // budget is consumed and the acquire refuses as held instead of looping
+  // forever.
   const fs = memFs({ [LOCK]: serializeLockInfo(OTHER) })
   fs.unlinkSync = () => {
-    // Defeat the takeover: the file survives.
+    throw Object.assign(new Error('EIO'), { code: 'EIO' })
   }
   const proc = scriptedProc([{ kind: 'stale' }])
   const outcome = acquireSessionLock(deps(fs, proc), SESSION, SELF)
   assert.equal(outcome.kind, 'held')
   // The retry budget was consumed: 1 probe for the first read + retries.
-  assert.equal(proc.calls, 1 + 2)
+  assert.equal(proc.calls, 1 + TAKEOVER_RETRIES)
 })
 
 test('acquire: no persistence surface is unavailable, not blocked', () => {
@@ -243,7 +245,67 @@ test('acquire: a write error on the create is unavailable, not blocked', () => {
   fs.failNextWrite = Object.assign(new Error('EACCES'), { code: 'EACCES' })
   const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
   assert.equal(outcome.kind, 'unavailable')
+  // EACCES on an existing directory is a write-error, not a missing dir.
+  assert.equal((outcome as { kind: 'unavailable'; reason: string }).reason, 'write-error')
+})
+
+test('acquire: an ENOENT write (missing session dir) is unavailable as no-lock-dir', () => {
+  const fs = memFs()
+  fs.failNextWrite = Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
+  assert.equal(outcome.kind, 'unavailable')
   assert.equal((outcome as { kind: 'unavailable'; reason: string }).reason, 'no-lock-dir')
+})
+
+test('acquire: every lock creation passes the 0600 mode', () => {
+  const fs = memFs()
+  // The memFs records the mode via a spy: patch writeFileSync to capture it.
+  const modes: Array<number | undefined> = []
+  const originalWrite = fs.writeFileSync.bind(fs)
+  fs.writeFileSync = ((path: string, content: string, options?: { flag?: string; mode?: number }) => {
+    modes.push(options?.mode)
+    return originalWrite(path, content, options)
+  }) as never
+  const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
+  assert.equal(outcome.kind, 'acquired')
+  assert.ok(modes.length >= 1)
+  assert.ok(modes.every(mode => mode === 0o600), `all creates mode 0600, got ${JSON.stringify(modes)}`)
+})
+
+test('release: does not delete a lock another process took over', () => {
+  const fs = memFs()
+  const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
+  assert.equal(outcome.kind, 'acquired')
+  const release = (outcome as { kind: 'acquired'; release: () => void }).release
+  // Ownership lost: another process replaced our lock with its own.
+  fs.files.set(LOCK, serializeLockInfo(OTHER))
+  release()
+  // The new owner's lock survives our release.
+  assert.deepEqual(parseLockInfo(fs.files.get(LOCK)!), OTHER)
+})
+
+test('acquire: a lock that vanishes between create-EEXIST and read retries the create', () => {
+  // First create fails (file exists), then the read finds it gone (a
+  // concurrent taker removed it) — the acquire must retry, not refuse.
+  const fs = memFs({ [LOCK]: serializeLockInfo(OTHER) })
+  const originalRead = fs.readFileSync.bind(fs)
+  let reads = 0
+  fs.readFileSync = ((path: string) => {
+    reads += 1
+    if (reads === 1) {
+      // The file exists at create time (EEXIST) but is gone by read time:
+      // simulate the concurrent taker's removal, then let the retry create
+      // succeed.
+      fs.files.delete(path)
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    }
+    return originalRead(path)
+  }) as never
+  const proc = scriptedProc([])
+  const outcome = acquireSessionLock(deps(fs, proc), SESSION, SELF)
+  // The retry create succeeds once the file is gone.
+  assert.equal(outcome.kind, 'acquired')
+  assert.deepEqual(parseLockInfo(fs.files.get(LOCK)!), SELF)
 })
 
 test('lockPathOf derives the lock path from the artifact path', () => {

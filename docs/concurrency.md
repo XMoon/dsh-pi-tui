@@ -72,10 +72,24 @@ process and REFUSES the open.
 | Entry | Behavior |
 |---|---|
 | `--session <id>` launch | acquire before `agents.resume()`; refusal is fatal (the runner exits with the refusal message — the user asked for a specific session, there is no safe fallback) |
-| `/resume` / `/sessions` switch | acquire before `agents.resume()`; refusal returns an error text to the picker |
+| `/resume` / `/sessions` switch | release the CURRENT lock, then acquire the target before `agents.resume()`; a refusal re-takes the current lock (the switch did not happen) and returns an error text to the picker |
+| `/new` / `/fork` | acquire in `swapTo` for the incoming session (covers every swapTo caller) |
 | first deferred message | acquire after the session is created |
-| switch away / clean exit | release (idempotent) |
+| switch away / clean exit | release (idempotent), AFTER the final flush |
 | crash / kill -9 | lock stays; the next open's stale check takes it over |
+
+Two orderings are load-bearing and were both bug-fixed in review:
+
+- **Flush before release.** `swapTo` flushes the outgoing session, THEN
+  releases its lock. Releasing first would open a window where a racing
+  opener's resume synthesizes closers into the shared log while our flush
+  still appends from our in-memory seq — the exact corruption the lock
+  exists to prevent.
+- **Release old before acquire new.** The lock tracker is a single slot;
+  acquiring the target first overwrites it and the outgoing session's lock
+  leaks for the whole TUI lifetime (a later release-by-id is a no-op). The
+  switch therefore releases the current lock first; a refused or failed
+  switch re-takes it because the current session stays live.
 
 ## How the guard works (the decision)
 

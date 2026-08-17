@@ -42,7 +42,10 @@ export function parseProcStat(content: string): { state: string; starttime: numb
   return { state, starttime }
 }
 
-/** Read a process's command line from /proc (NUL-separated, trailing NULs trimmed). */
+/** Read a process's command line from /proc (NUL-separated, trailing NULs trimmed).
+ * The probe below reads cmdline through its INJECTED `readFile` (so tests can
+ * drive every branch); this real-fs helper is exported for diagnostics and
+ * for tests that exercise the real /proc. */
 export function readProcCmdline(pid: number): string | undefined {
   try {
     const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
@@ -105,29 +108,30 @@ export function createProcProbe(options?: {
         if (parsed.starttime !== owner.starttime) return { kind: 'stale' }
         // The process is alive and is the same process we locked: confirm it
         // is still a dsh invocation (a pid-reused process could be anything).
+        // A cmdline READ FAILURE must not classify as stale: the stat already
+        // proved the process is alive and the same one — an unreadable
+        // cmdline (hidepid, transient race) is unverifiable, never a reason
+        // to take a possibly-live owner's lock over.
         let cmdline: string | undefined
         try {
           cmdline = readFile(`/proc/${owner.pid}/cmdline`)
             .split('\0').filter(arg => arg !== '').join(' ')
         } catch {
-          cmdline = undefined
+          return { kind: 'unknown' }
         }
-        if (!looksLikeDsh(cmdline)) return { kind: 'stale' }
+        if (cmdline !== undefined && !looksLikeDsh(cmdline)) return { kind: 'stale' }
         return { kind: 'alive' }
       }
 
       // Non-Linux degradation: existence via kill(pid, 0), then best-effort
       // command-line comparison. Unverifiable → unknown (never take over).
-      let alive = true
       try {
         process.kill(owner.pid, 0)
       } catch (error) {
         if ((error as NodeJS.ErrnoException | undefined)?.code === 'ESRCH') return { kind: 'stale' }
         // EPERM: the process exists but is not ours — treat as alive (the
         // owner identity check below still applies when possible).
-        alive = true
       }
-      if (!alive) return { kind: 'stale' }
       try {
         const command = execFile('ps', ['-p', String(owner.pid), '-o', 'command='], { encoding: 'utf8' }).trim()
         if (command === '') return { kind: 'stale' } // zombie or vanished

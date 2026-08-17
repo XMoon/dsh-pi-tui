@@ -70,10 +70,11 @@ export interface SessionLockPersistence {
 
 /** The filesystem surface the lock needs. `writeFileSync` MUST create
  * exclusively (`wx`) — a plain `w` write would silently overwrite another
- * process's lock and the whole exclusion collapses. */
+ * process's lock and the whole exclusion collapses — and must set the mode
+ * explicitly (0600), matching the session log's own file mode. */
 export interface SessionLockFs {
   readFileSync(path: string): string
-  writeFileSync(path: string, content: string, options?: { flag?: string }): void
+  writeFileSync(path: string, content: string, options?: { flag?: string; mode?: number }): void
   unlinkSync(path: string): void
 }
 
@@ -113,7 +114,7 @@ export type SessionLockOutcome =
 export const LOCK_FILE_NAME = 'owner.lock'
 
 /** How many times the takeover path retries the atomic create on EEXIST. */
-const TAKEOVER_RETRIES = 2
+export const TAKEOVER_RETRIES = 2
 
 /** A tiny deterministic serializer for the lock record (single-line JSON). */
 export function serializeLockInfo(info: SessionLockInfo): string {
@@ -153,16 +154,18 @@ function tryCreate(
   fs: SessionLockFs,
   lockPath: string,
   self: SessionLockInfo,
-): { created: true } | { created: false; reason: 'exists' | 'error' } {
+): { created: true } | { created: false; reason: 'exists' | 'error'; error?: NodeJS.ErrnoException } {
   try {
-    // Exclusive create: a plain write would overwrite a live owner's lock.
-    fs.writeFileSync(lockPath, serializeLockInfo(self), { flag: 'wx' })
+    // Exclusive create (wx) + explicit 0600: a plain write would overwrite a
+    // live owner's lock, and the umask default (0644) would leak the owner
+    // pid to group/other readers.
+    fs.writeFileSync(lockPath, serializeLockInfo(self), { flag: 'wx', mode: 0o600 })
     return { created: true }
   } catch (error) {
     if ((error as NodeJS.ErrnoException | undefined)?.code === 'EEXIST') {
       return { created: false, reason: 'exists' }
     }
-    return { created: false, reason: 'error' }
+    return { created: false, reason: 'error', error: error as NodeJS.ErrnoException }
   }
 }
 
@@ -199,13 +202,18 @@ export function acquireSessionLock(
     const created = tryCreate(fs, lockPath, self)
     if (created.created) {
       return tookOver
-        ? { kind: 'taken-over-stale', release: makeRelease(fs, lockPath) }
-        : { kind: 'acquired', release: makeRelease(fs, lockPath) }
+        ? { kind: 'taken-over-stale', release: makeRelease(fs, lockPath, self) }
+        : { kind: 'acquired', release: makeRelease(fs, lockPath, self) }
     }
     if (created.reason === 'error') {
-      // The lock directory may not exist yet for a lazy session, or write
-      // permission is missing: do not block the open.
-      return { kind: 'unavailable', reason: 'no-lock-dir' }
+      // A write failure: ENOENT means the session directory does not exist
+      // yet (lazy session) — no lock possible; anything else is a permission
+      // or IO problem. Either way do not block the open (the guard still
+      // protects the write path).
+      return {
+        kind: 'unavailable',
+        reason: created.error?.code === 'ENOENT' ? 'no-lock-dir' : 'write-error',
+      }
     }
 
     // The lock file exists. Read it and decide: same process (allow), a live
@@ -213,19 +221,27 @@ export function acquireSessionLock(
     let owner: SessionLockInfo | undefined
     try {
       owner = parseLockInfo(fs.readFileSync(lockPath))
-    } catch {
-      // Unreadable lock file: treat as unverifiable (never destroy a lock we
-      // cannot inspect — the owner might be alive).
-      return { kind: 'unverifiable', owner: owner }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+        // The lock vanished between the failed create and the read (a
+        // concurrent taker removed it): retry the create instead of
+        // refusing — the file is already gone, "delete the lock" advice
+        // would be wrong.
+        continue
+      }
+      // Unreadable lock file (permission, transient IO): treat as
+      // unverifiable (never destroy a lock we cannot inspect — the owner
+      // might be alive).
+      return { kind: 'unverifiable', owner }
     }
     if (owner === undefined) {
       // Malformed lock file: refuse rather than guess.
-      return { kind: 'unverifiable', owner: owner }
+      return { kind: 'unverifiable', owner }
     }
     if (owner.pid === self.pid && owner.starttime === self.starttime) {
       // Same process re-opening its own session (e.g. /sessions back to the
       // current session): the lock is already ours.
-      return { kind: 'acquired', release: makeRelease(fs, lockPath) }
+      return { kind: 'acquired', release: makeRelease(fs, lockPath, self) }
     }
     const verdict = proc.probe(owner, self)
     if (verdict.kind === 'alive') {
@@ -234,32 +250,50 @@ export function acquireSessionLock(
     if (verdict.kind === 'unknown') {
       return { kind: 'unverifiable', owner }
     }
-    // Stale: remove and retry the atomic create. A concurrent taker may have
-    // recreated the file between our unlink and create; the loop re-reads.
+    // Stale: remove and retry the atomic create — but ONLY if the file still
+    // holds the exact stale owner we just probed. A concurrent taker may have
+    // replaced it between our read and this unlink; deleting their fresh lock
+    // would make both processes believe they own the session.
+    let removed = false
     try {
-      fs.unlinkSync(lockPath)
-      tookOver = true
+      const current = parseLockInfo(fs.readFileSync(lockPath))
+      if (current !== undefined && current.pid === owner.pid && current.starttime === owner.starttime) {
+        fs.unlinkSync(lockPath)
+        removed = true
+      }
     } catch {
-      // Already gone — the retry create decides.
+      // Unreadable or already gone: the retry create decides.
     }
-    if (attempt >= TAKEOVER_RETRIES) {
-      // The lock keeps reappearing under our hands: someone else is taking
-      // it over too. Refuse as held (the notice explains the situation).
+    if (removed) {
+      tookOver = true
+    } else if (attempt >= TAKEOVER_RETRIES) {
+      // The lock keeps changing under our hands: someone else is taking it
+      // over too. Refuse as held (the notice explains the situation).
       return { kind: 'held', owner }
     }
   }
 }
 
-/** An idempotent release: removing a missing file is not an error. */
-function makeRelease(fs: SessionLockFs, lockPath: string): () => void {
+/**
+ * An idempotent release that only removes the lock if it is still OURS.
+ * Compare-and-delete: after ownership is lost (a concurrent takeover, manual
+ * removal and recreation by another process), the exit-time release must not
+ * delete the new owner's lock file.
+ */
+function makeRelease(fs: SessionLockFs, lockPath: string, self: SessionLockInfo): () => void {
   let released = false
   return () => {
     if (released) return
     released = true
     try {
-      fs.unlinkSync(lockPath)
+      const owner = parseLockInfo(fs.readFileSync(lockPath))
+      if (owner !== undefined && owner.pid === self.pid && owner.starttime === self.starttime) {
+        fs.unlinkSync(lockPath)
+      }
+      // A missing file, an unreadable file, or a lock owned by someone else:
+      // nothing to do — the session is already openable.
     } catch {
-      // Already gone (crash cleanup by a takeover, manual removal): fine.
+      // Missing/unreadable: nothing to remove.
     }
   }
 }
