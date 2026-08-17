@@ -11,7 +11,7 @@ knows where the rest lives.
 | File | Audience | What it records |
 |---|---|---|
 | `architecture.md` | contributors | Which module owns which state, and the planned extraction order for the runner's remaining responsibilities |
-| `concurrency.md` | contributors | Why dsh sessions cannot be shared across processes, and the divergence guard that enforces it |
+| `concurrency.md` | contributors | Why dsh sessions cannot be shared across processes; the open-time session lock (`owner.lock`, pid/starttime stale takeover) and the write-path divergence guard that enforce it |
 | `failure-model.md` | contributors | The async failure & cancellation contract (`runDetached` / `runOwned`, error observation, lifecycle roots) — the rules that prevent unhandled rejections and misclassified cancellations |
 | `input-history.md` | contributors | Per-cwd input history: why it left the settings document, the JSONL file design, the recall-order contract, and the migration path |
 | `surface-decisions.md` | contributors | Plain-`exit` quitting, background-subagent notices in the queue pane, the /login credential-target resolution, and the Web-parity tool-card rendering rules (web cards, structured rawInput, plan content) |

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Open-time session lock: opening a session (`--session`, `/resume`,
+  `/sessions`) refuses when another live dsh process already holds it — an
+  `owner.lock` file next to the session log records the owner's pid and
+  `/proc` starttime; a crashed owner's stale lock is taken over automatically.
+  This closes the corruption path where a second opener's resume made the
+  persistence layer synthesize interrupted-turn closers into the shared log
+  while the first process kept appending from its own in-memory seq (the
+  write-path guard cannot see that collision — the second opener's memory
+  matches the file). The divergence guard remains the backstop for surfaces
+  that know nothing about the lock.
 - Plain `exit` (exact trimmed word) quits the TUI before session creation or
   the busy-Enter gate; `/exit` is unchanged.
 - `/login` and `/logout` resolve credential targets: deepseek official plus
