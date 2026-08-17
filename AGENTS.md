@@ -23,6 +23,12 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
   doc — including preset description YAML and the context-injection label
   (both crept in as Chinese once); scan `src/` and `config/` for CJK before
   committing. i18n is deferred.
+- **README bilingual sync (hard rule).** `README.md` (English) and
+  `README.zh-CN.md` (简体中文) must stay in sync: every change to the English
+  README must be mirrored in the Chinese one in the same commit, and vice
+  versa — including wording, structure and links. Each README carries a
+  language switcher at the top linking to the other. This rule is the single
+  exception to "English only" (README.zh-CN.md is intentionally Chinese).
 - **No near-synonym command names.** `/session` was renamed to `/status`
   after colliding with `/sessions`; before adding a command, check the
   existing set and the official dsh command set for confusion risk.
