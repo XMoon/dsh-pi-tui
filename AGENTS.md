@@ -27,11 +27,35 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
   `README.zh-CN.md` (简体中文) must stay in sync: every change to the English
   README must be mirrored in the Chinese one in the same commit, and vice
   versa — including wording, structure and links. Each README carries a
-  language switcher at the top linking to the other. This rule is the single
-  exception to "English only" (README.zh-CN.md is intentionally Chinese).
+  language switcher at the top linking to the other. This rule is one of
+  two exceptions to "English only" (README.zh-CN.md is intentionally
+  Chinese; the changelog pair below is the other).
 - **No near-synonym command names.** `/session` was renamed to `/status`
   after colliding with `/sessions`; before adding a command, check the
   existing set and the official dsh command set for confusion risk.
+- **Changelog must be updated on every release (hard rule).** Any release
+  (a `chore: release vX.Y.Z` bump + `v*` tag) MUST update `CHANGELOG.md`
+  in the same commit, following
+  [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/): an
+  `[Unreleased]` section on top, versioned sections below ordered newest
+  first, each dated with the release day, grouped into the
+  `Added` / `Changed` / `Deprecated` / `Removed` / `Fixed` / `Security`
+  categories, and link references at the bottom. Entries must be written
+  for humans (what changed and why it matters), not a dump of commit
+  subjects — merge the review rounds and repeated fixes into their
+  user-facing outcome. Before tagging, move the accumulated `[Unreleased]`
+  entries into the new version section; afterwards, start a fresh
+  `[Unreleased]` for the next cycle. Semantic-versioning rules apply: any
+  breaking change is a major bump.
+- **Changelog bilingual sync (hard rule).** `CHANGELOG.md` (English) and
+  `CHANGELOG.zh-CN.md` (简体中文) must stay in sync, exactly like the
+  README pair: every release update to the English changelog must be
+  mirrored in the Chinese one in the same commit (same sections, same
+  entries, same dates and links), and vice versa. This is the second
+  sanctioned exception to "English only" (CHANGELOG.zh-CN.md is
+  intentionally Chinese). The root READMEs carry changelog links at the
+  top, each pointing at its own language version — keep those in sync
+  too.
 - **Reference, don't copy.** pi/kimi-code are appearance references; behavior
   is implemented in dsh-pi-tui itself.
 
@@ -187,6 +211,9 @@ The rules below must never be broken; the full contracts live in `docs/`.
 ## Docs
 
 - README.md — install and run instructions for humans.
+- CHANGELOG.md — release history (Keep a Changelog 1.1.0; see Working rules).
+- CHANGELOG.zh-CN.md — 简体中文 release history, kept in sync with
+  CHANGELOG.md on every release (see Working rules).
 - docs/README.md — index of the docs and how they evolve.
 - packages/pi-tui/AGENTS.md — the fork's divergence ledger (guarding tests per fix).
 - When you change behavior, record the decision or trap in its owning doc at the same time — a fix without a recorded reason is a trap waiting to be re-introduced.

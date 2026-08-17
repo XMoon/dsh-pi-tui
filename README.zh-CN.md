@@ -2,6 +2,8 @@
 
 [English](README.md) | **简体中文**
 
+发布历史:[CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md) · [English Changelog](CHANGELOG.md)
+
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`) 提供的第三方 TUI 模式,构建于 [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui) 的内置(vendored)fork 之上。
 
 运行 `dsh --profile pi-tui` 即可获得终端界面,替代浏览器界面(`dsh --profile web`)或一次性模式(`dsh --profile headless`)。
