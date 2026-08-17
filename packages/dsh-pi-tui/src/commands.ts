@@ -1230,12 +1230,14 @@ export function registerTuiCommands(
       if (jobs === undefined) return { kind: 'error', text: 'jobs service unavailable' }
       const snapshots = jobs.list(liveAgent)
       if (snapshots.length === 0) return { kind: 'error', text: 'no background jobs' }
-      const now = Date.now()
-      app.openPicker(
+      app.openTaskBrowser(
         snapshots.map(job => ({
           value: job.id,
           label: `${job.kind} · ${job.label}`,
-          description: `${job.status}${job.detail === undefined ? '' : ` — ${job.detail}`} · ${Math.max(0, Math.floor((now - job.startedAt) / 1000))}s`,
+          status: job.status,
+          detail: job.detail,
+          startedAt: job.startedAt,
+          group: 'jobs',
         })),
         // Enter on a row opens the SAME detail as the ↓ browser: the status
         // viewer for bash jobs, the child transcript for subagent jobs.
@@ -1243,6 +1245,7 @@ export function registerTuiCommands(
         // trigger only arms while a task is running.)
         (jobId) => runner.openJobView(jobId),
         () => {},
+        { header: 'tasks', enableSearch: true },
       )
       return { kind: 'success' }
     },

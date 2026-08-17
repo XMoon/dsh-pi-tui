@@ -291,6 +291,26 @@ export const selectListTheme: SelectListTheme = {
 }
 
 /**
+ * Status-dot colour for a background-job status (dsh-web StateDot parity:
+ * running = ongoing/primary, stopping = warning, completed = done/dim,
+ * failed/killed/timed-out/lost = error). Unknown statuses fall back to the
+ * muted token so a future wire status never crashes the renderer.
+ */
+export function taskStatusColor(status: string): (text: string) => string {
+  switch (status) {
+    case 'running': return color.primary
+    case 'stopping': return color.warning
+    case 'completed': return color.textDim
+    case 'failed':
+    case 'killed':
+    case 'timed_out':
+    case 'lost':
+      return color.error
+    default: return color.textMuted
+  }
+}
+
+/**
  * SettingsList palette from the semantic tokens. A FUNCTION, not a
  * module-level constant: `cursor` is a pre-rendered ANSI string, so a
  * constant would freeze the cursor colour at module load and never follow

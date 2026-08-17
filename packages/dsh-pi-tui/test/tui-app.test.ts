@@ -836,3 +836,81 @@ test('ctrl+o still folds the viewed transcript while the viewer is up', async ()
   app.setViewerMode(undefined)
   app.stop()
 })
+
+test('openTaskBrowser renders status dots and live counts in the overlay', async () => {
+  const { vt, app } = startApp()
+  app.openTaskBrowser(
+    [
+      { value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now() - 3_000, group: 'jobs' },
+      { value: 'job:2', label: 'bash · lint', status: 'completed', startedAt: Date.now() - 60_000, group: 'jobs' },
+      { value: 'agent:1', label: 'subagent · research', status: 'running', group: 'subagents' },
+    ],
+    () => {},
+    () => {},
+    { header: 'tasks · subagents', enableSearch: true },
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  const view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('tasks · subagents'), `header missing:\n${view}`)
+  assert.ok(view.includes('●'), `status dots missing:\n${view}`)
+  assert.ok(view.includes('running'), `running status missing:\n${view}`)
+  assert.ok(view.includes('3s'), `elapsed missing:\n${view}`)
+  assert.ok(view.includes('1m'), `completed elapsed missing:\n${view}`)
+  assert.ok(view.includes('── jobs ──') && view.includes('── subagents ──'), `group headers missing:\n${view}`)
+  app.stop()
+})
+
+test('openTaskBrowser: Enter selects the highlighted row; Esc closes', async () => {
+  const { vt, app } = startApp()
+  let selected: string | undefined
+  let cancelled = false
+  app.openTaskBrowser(
+    [
+      { value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' },
+      { value: 'job:2', label: 'bash · lint', status: 'completed', startedAt: Date.now(), group: 'jobs' },
+    ],
+    (value) => { selected = value },
+    () => { cancelled = true },
+    { header: 'tasks' },
+  )
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // move to the second row
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(selected, 'job:2', `Enter must select the highlighted row`)
+  // Re-open and cancel.
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
+    () => {},
+    () => { cancelled = true },
+    { header: 'tasks' },
+  )
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancelled, true, `Esc must cancel the browser`)
+  app.stop()
+})
+
+test('openTaskBrowser setItems replaces rows live', async () => {
+  const { vt, app } = startApp()
+  const handle = app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
+    () => {},
+    () => {},
+    { header: 'tasks' },
+  )
+  await vt.waitForRender()
+  handle.setItems([
+    { value: 'job:1', label: 'bash · build', status: 'completed', startedAt: Date.now(), group: 'jobs' },
+    { value: 'job:2', label: 'bash · deploy', status: 'failed', startedAt: Date.now(), group: 'jobs' },
+  ])
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  const view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('bash · deploy'), `replaced row missing:\n${view}`)
+  assert.ok(view.includes('failed'), `new status missing:\n${view}`)
+  app.stop()
+})

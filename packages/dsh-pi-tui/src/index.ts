@@ -77,7 +77,8 @@ import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type QueueItem, type TuiApp } from './tui-app.ts'
-import { buildTaskRows, describeTaskRow, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
+import { buildTaskRows, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
+import type { TaskPanelItem } from './task-panel.ts'
 import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
@@ -2123,7 +2124,6 @@ export function apply(ctx: Context, config: Config): void {
             // The registry read is best-effort; the jobs half stays empty.
           }
         }
-        const now = Date.now()
         // The trigger only fires while something is ACTIVE (jobs or live
         // children), so an empty jobs half is NOT an empty browser: the
         // children half enriches below. Never early-return on row count —
@@ -2142,18 +2142,28 @@ export function apply(ctx: Context, config: Config): void {
           }
           openJobView(row.jobId)
         }
-        const pickerItems = (target: readonly TaskBrowserRow[]): { value: string; label: string; description: string; group: string }[] =>
-          target.map(row => ({
-            value: row.value,
-            label: taskRowLabel(row),
-            description: describeTaskRow(row, now),
-            group: rowGroup(row),
-          }))
-        const handle = app.openPicker(
-          pickerItems(rows),
+        const taskPanelItems = (target: readonly TaskBrowserRow[]): TaskPanelItem[] =>
+          target.map(row => row.kind === 'job'
+            ? {
+                value: row.value,
+                label: taskRowLabel(row),
+                status: row.status,
+                detail: row.detail,
+                startedAt: row.startedAt,
+                group: rowGroup(row),
+              }
+            : {
+                value: row.value,
+                label: taskRowLabel(row),
+                status: row.activity,
+                detail: row.hasChildren ? 'has children' : undefined,
+                group: rowGroup(row),
+              })
+        const handle = app.openTaskBrowser(
+          taskPanelItems(rows),
           selectRow,
           () => {},
-          { header: 'tasks · subagents', enableSearch: true, showHint: true },
+          { header: 'tasks · subagents', enableSearch: true },
         )
         if (subagents !== undefined) {
           const sessionId = liveAgent.session.id
@@ -2166,7 +2176,7 @@ export function apply(ctx: Context, config: Config): void {
               // switch while the listing was in flight must not repaint it.
               if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
               rows = buildTaskRows(jobSnapshots, entries)
-              handle.setItems(pickerItems(rows))
+              handle.setItems(taskPanelItems(rows))
             },
           })
         }

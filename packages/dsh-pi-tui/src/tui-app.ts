@@ -54,6 +54,7 @@ import {
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
+import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
   firstLine,
@@ -641,12 +642,38 @@ export interface PickerOptions {
   showHint?: boolean
 }
 
+/** Options for {@link TuiApp.openTaskBrowser}. */
+export interface TaskBrowserOptions {
+  /** Show a search input; typing filters rows by value/label/status/detail. */
+  enableSearch?: boolean
+  /** Title line above the rows (carries live counts). */
+  header?: string
+  /** Text shown when no row matches the filter. */
+  noMatchText?: string
+  /** Pre-fill the search input. */
+  initialQuery?: string
+  /** Overlay width in cells (default 72). */
+  width?: number
+  /** Overlay max height in rows (default 24). */
+  maxHeight?: number
+  /** Rows visible before the list scrolls (default 10). */
+  maxVisible?: number
+}
+
 /** Live control of an open picker. */
 export interface PickerHandle {
   /** Close the picker without a selection. */
   close(): void
   /** Replace the rows while the picker is open; the active query re-applies. */
   setItems(items: readonly PickerItem[]): void
+}
+
+/** Live control of an open task browser (rows carry status/startedAt). */
+export interface TaskBrowserHandle {
+  /** Close the browser without a selection. */
+  close(): void
+  /** Replace the rows while the browser is open; the active query re-applies. */
+  setItems(items: readonly TaskPanelItem[]): void
 }
 
 /** Footer status data supplied by the runner. */
@@ -2767,6 +2794,65 @@ export class TuiApp {
       close: () => handle.hide(),
       setItems: (next) => {
         list.setItems(next.map(item => ({ ...item })))
+        this.requestRender()
+      },
+    }
+  }
+
+  /**
+   * Open the task browser overlay (the ↓ / Ctrl+J trigger with an empty
+   * editor, and /tasks). Unlike the generic {@link openPicker}, rows carry a
+   * status word + start timestamp so the panel can render status dots,
+   * right-aligned status/elapsed columns, live counts, and a 1s elapsed
+   * tick. Selection calls `onSelect` with the row value and closes; Esc
+   * calls `onCancel`.
+   * @param items - task rows (see TaskPanelItem).
+   * @param onSelect - confirmed row value.
+   * @param onCancel - dismissed without a choice.
+   * @param options - header/search/sizing configuration.
+   * @returns a handle to close the browser or replace its rows (e.g. when
+   * jobs change while it is open).
+   */
+  openTaskBrowser(
+    items: readonly TaskPanelItem[],
+    onSelect: (value: string) => void,
+    onCancel: () => void,
+    options: TaskBrowserOptions = {},
+  ): TaskBrowserHandle {
+    const panel = new TaskBrowserPanel(
+      items.map(item => ({ ...item })),
+      options.maxVisible ?? 10,
+      {
+        header: options.header,
+        noMatchText: options.noMatchText,
+        enableSearch: options.enableSearch,
+        initialQuery: options.initialQuery,
+      },
+      (value) => {
+        close()
+        onSelect(value)
+      },
+      () => {
+        close()
+        onCancel()
+      },
+      () => this.requestRender(),
+    )
+    const handle = this.showOverlayOnHost(new Frame(panel), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
+    // One close path: hide the overlay AND stop the panel's 1s elapsed tick
+    // (an unref'd interval must still be cleared — the panel is gone).
+    // `close` is a `let` declared before the panel callbacks above reference
+    // it; it is assigned here, after `handle` exists. The callbacks only
+    // fire on later user input, so the late assignment is safe.
+    let close: () => void = () => {}
+    close = (): void => {
+      panel.dispose()
+      handle.hide()
+    }
+    return {
+      close,
+      setItems: (next: readonly TaskPanelItem[]) => {
+        panel.setItems(next.map(item => ({ ...item })))
         this.requestRender()
       },
     }
