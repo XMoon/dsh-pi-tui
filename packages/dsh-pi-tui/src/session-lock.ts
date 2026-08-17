@@ -226,7 +226,11 @@ export function acquireSessionLock(
         // The lock vanished between the failed create and the read (a
         // concurrent taker removed it): retry the create instead of
         // refusing — the file is already gone, "delete the lock" advice
-        // would be wrong.
+        // would be wrong. Bounded like every other retry: a flapping lock
+        // (two takers ping-ponging unlink/create) must not spin forever.
+        if (attempt >= TAKEOVER_RETRIES) {
+          return { kind: 'unverifiable', owner }
+        }
         continue
       }
       // Unreadable lock file (permission, transient IO): treat as

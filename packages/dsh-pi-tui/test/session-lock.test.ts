@@ -321,3 +321,46 @@ test('serialize/parse round-trips and rejects malformed records', () => {
   assert.equal(parseLockInfo('{"pid":"x","starttime":1,"startedAt":1}'), undefined)
   assert.equal(parseLockInfo('{"pid":1.5,"starttime":1,"startedAt":1}'), undefined)
 })
+
+test('acquire: a stale owner replaced by another taker is never unlinked', () => {
+  // We probe owner A (stale), but between the read and the compare-and-delete
+  // another process takes the lock over (the file now holds owner B, alive).
+  // The takeover must NOT unlink B's fresh lock; the acquire gives up as held.
+  const fs = memFs({ [LOCK]: serializeLockInfo(OTHER) })
+  const ownerB = { pid: 300, starttime: 44, startedAt: 0 }
+  let reads = 0
+  const originalRead = fs.readFileSync.bind(fs)
+  const originalUnlink = fs.unlinkSync.bind(fs)
+  fs.readFileSync = ((path: string) => {
+    reads += 1
+    if (reads === 1) return originalRead(path) // first read: OTHER (stale)
+    // A concurrent taker replaced the lock on disk before our compare read.
+    fs.files.set(path, serializeLockInfo(ownerB))
+    return serializeLockInfo(ownerB)
+  }) as never
+  let unlinked = 0
+  fs.unlinkSync = ((path: string) => {
+    unlinked += 1
+    return originalUnlink(path)
+  }) as never
+  // The first probe sees OTHER (stale); every later probe sees the new owner
+  // which is ALIVE — so the takeover must stop at the compare-and-delete.
+  const proc = scriptedProc([{ kind: 'stale' }, { kind: 'alive' }])
+  const outcome = acquireSessionLock(deps(fs, proc), SESSION, SELF)
+  // The fresh owner's lock is never removed; the acquire gives up as held.
+  assert.equal(unlinked, 0)
+  assert.equal(outcome.kind, 'held')
+  // The on-disk lock is B's, untouched by our failed takeover.
+  assert.deepEqual(parseLockInfo(fs.files.get(LOCK)!), ownerB)
+})
+
+test('acquire: a flapping lock (repeated read-ENOENT) is bounded, never infinite', () => {
+  // Every create fails (file exists) and every read finds the file gone (a
+  // concurrent taker ping-pongs): the retry budget must stop the loop.
+  const fs = memFs({ [LOCK]: serializeLockInfo(OTHER) })
+  fs.readFileSync = (() => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  }) as never
+  const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
+  assert.equal(outcome.kind, 'unverifiable')
+})

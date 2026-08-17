@@ -968,6 +968,23 @@ export function apply(ctx: Context, config: Config): void {
       heldLock.release()
       heldLock = undefined
     }
+    /** Re-take the lock for the still-live current session after a failed
+     * switch (refusal, resume failure, or an internal swap failure). The
+     * lock was released before the target acquire, so another process may
+     * have taken it in the window — the re-take result is checked and a
+     * failed re-take surfaces as a notice (the write-path guard remains the
+     * backstop, but the user must know the session is no longer locked by
+     * this TUI). */
+    const reacquireCurrentLock = (from: string | undefined): void => {
+      if (from === undefined) return
+      const refusal = acquireOpenLock(from, liveAgent?.session.header)
+      if (refusal !== undefined) {
+        const message = `the current session ${from} is no longer locked by this TUI (${refusal})`
+        ctx.logger.warn(`tui-runner: ${message}`)
+        diag.warn('session lock lost on failed switch', { session: from })
+        app?.notify(message, 'error')
+      }
+    }
 
     // A stale --session id must not kill the TUI: resume falls back to a
     // fresh session and the failure is surfaced as a notify line.
@@ -1237,6 +1254,18 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error) {
         const message = safeErrorMessage(error)
         diag.error('swap failed', { from, error: message })
+        // Repair the lock tracker after an internal swap failure. When this
+        // swap came from switchSession, the tracker already holds the TARGET's
+        // lock (switchSession released `from` and acquired the target before
+        // calling us) and `liveAgent` still refers to `from` (the assignment
+        // below never ran). The target session we never entered must not stay
+        // locked, and the still-live current session must get its lock back.
+        // When the tracker holds `from` itself (/new, /fork — no pre-release),
+        // there is nothing to repair.
+        if (heldLock !== undefined && heldLock.sessionId !== from) {
+          releaseOpenLock(heldLock.sessionId)
+          reacquireCurrentLock(from)
+        }
         return `swap failed: ${message}`
       }
       // The old session is now fully flushed: release its lock. (A switch
@@ -1301,7 +1330,7 @@ export function apply(ctx: Context, config: Config): void {
           // The switch did not happen: the current session is still live and
           // must keep its lock (best-effort — an unavailable deployment has
           // no lock to re-take and the guard still protects the write path).
-          if (from !== undefined) acquireOpenLock(from, liveAgent?.session.header)
+          reacquireCurrentLock(from)
           return lockRefusal
         }
         // The target session's recorded preset, exactly like the resume path.
@@ -1324,7 +1353,7 @@ export function apply(ctx: Context, config: Config): void {
         // entered. The CURRENT session is still live (the switch failed):
         // re-take its lock, which was released before the target acquire.
         releaseOpenLock(sessionId)
-        if (liveAgent !== undefined) acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
+        reacquireCurrentLock(liveAgent?.session.id)
         return `switch failed: ${message}`
       }
     }
