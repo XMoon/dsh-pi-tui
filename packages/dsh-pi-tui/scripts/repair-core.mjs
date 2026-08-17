@@ -33,7 +33,7 @@
  * @module repair-core
  */
 
-import { constants } from 'node:zlib'
+import { constants, zstdDecompressSync } from 'node:zlib'
 
 /** Zstandard frame magic, little-endian (`\x28\xB5\x2F\xFD`). */
 export const ZSTD_MAGIC = 0xfd2fb528
@@ -247,6 +247,40 @@ export function compressLog(text, zstdCompressSync) {
     if (chunkBytes >= 16 * 1024) flushChunk()
   }
   flushChunk()
+  // Node's zstdCompressSync can emit a trailing EMPTY frame after the content
+  // frame (observed when the compressed output lands on a 16 KiB boundary,
+  // e.g. exactly 16384 bytes): the returned buffer is then two concatenated
+  // frames, the second a valid zero-content frame. The dsh reader tolerates
+  // it, but every non-first frame must end on a JSONL record boundary, so
+  // the layout gate flags it. The harness writer uses the async compressor,
+  // which never emits it. Strip such empty frames from each compressed
+  // output so a repaired artifact always matches the harness layout exactly.
+  if (frames.length > 0) {
+    const stripped = []
+    for (const frame of frames) {
+      const { frames: inner } = scanZstdFrames(frame)
+      if (inner.length === 1) {
+        stripped.push(frame)
+        continue
+      }
+      for (let i = 0; i < inner.length; i += 1) {
+        const segment = frame.subarray(inner[i].start, inner[i].end)
+        try {
+          if (zstdDecompressSync(segment).length === 0) continue // empty frame
+        } catch {
+          // A frame that fails to decompress is content — keep it so the
+          // post-write verify can report it instead of silently dropping it.
+        }
+        stripped.push(segment)
+      }
+    }
+    // Always use the stripped result: stripping is identity for single-frame
+    // chunks, and a chunk that expands to N segments with an empty frame
+    // dropped can end up with the same element count as before (e.g. one
+    // two-frame chunk -> one kept segment), so a length comparison would
+    // wrongly fall through to the unstripped concat below.
+    return Buffer.concat(stripped)
+  }
   return frames.length > 0 ? Buffer.concat(frames) : zstdCompressSync(Buffer.alloc(0), CHECKSUMMED_OPTIONS)
 }
 

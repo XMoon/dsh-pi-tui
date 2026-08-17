@@ -79,6 +79,21 @@ self-consistency. Any serializer test must assert the consumer's own
 invariants (first frame = exactly the header line; frames end on JSONL
 record boundaries), i.e. run the same layout gate the readers run.
 
+### `zstdCompressSync` can emit a trailing empty frame (trap)
+
+Node's synchronous `zstdCompressSync` occasionally returns TWO concatenated
+frames for one input: the content frame followed by a valid 13-byte
+zero-content frame. Observed when the compressed output lands exactly on a
+16 KiB boundary (16384 bytes); `zstdCompressAsync` (what the harness writer
+uses) never does this. The dsh reader tolerates the empty frame, but the
+layout gate rejects it (`frame N does not end on a JSONL record boundary`),
+so a repaired artifact would fail the post-write verify — exactly what
+happened on the first `--yes` run for `session-d0a3bd9a`. `compressLog`
+therefore scans every compressed output and strips zero-content frames, so
+repaired bytes always match the harness layout exactly. When re-verifying
+this behavior, craft a chunk whose compressed size is exactly 16384 bytes —
+no smaller or larger input reproduces it.
+
 ## File mode (trap)
 
 Repaired files are written `0600`, same as the harness: `writeFileSync` must

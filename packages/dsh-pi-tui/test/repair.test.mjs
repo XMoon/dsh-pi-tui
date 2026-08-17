@@ -178,6 +178,39 @@ test('compressLog chunks large logs into bounded frames, all but the first carry
   assert.deepEqual(scanZstdLayout(buffer, zstdDecompressSync), { ok: true })
 })
 
+test('compressLog strips the trailing empty frame zstdCompressSync can emit at a 16 KiB boundary', () => {
+  // Regression for the repair of session-d0a3bd9a: Node's zstdCompressSync
+  // returns TWO concatenated frames for one input when the compressed output
+  // lands exactly on 16384 bytes — a content frame plus a valid 13-byte
+  // zero-content frame. The fixture below (a real 21-row reasoning-delta
+  // chunk from that session) reproduces it deterministically. The dsh reader
+  // tolerates the empty frame, but the layout gate rejects it, so a repaired
+  // artifact would fail the post-write verify.
+  const fixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'compresslog-empty-frame-trigger.txt')
+  const plain = readFileSync(fixture, 'utf8')
+  // Precondition: this fixture really triggers the two-frame output.
+  const raw = zstdCompressSync(Buffer.from(plain, 'utf8'), { params: { [constants.ZSTD_c_checksumFlag]: 1 } })
+  const rawScanned = scanZstdFrames(raw)
+  assert.ok(rawScanned.frames.length > 1, `fixture must trigger the empty-frame bug (got ${rawScanned.frames.length} frame(s))`)
+  const emptyFrame = rawScanned.frames[rawScanned.frames.length - 1]
+  assert.equal(zstdDecompressSync(raw.subarray(emptyFrame.start, emptyFrame.end)).length, 0)
+
+  // compressLog must never emit a zero-content frame: the repaired artifact
+  // passes the reader's layout gate.
+  const text = encodeLog(HEADER, [{ type: 'assistant/chunk', seq: 0, time: 2000, data: { turn: 1, step: 1, text: plain.trimEnd() } }])
+  const buffer = compressLog(text, zstdCompressSync)
+  const scanned = scanZstdFrames(buffer)
+  assert.ok(scanned.frames.length >= 2, `expected at least a header frame and one chunk frame, got ${scanned.frames.length}`)
+  for (const frame of scanned.frames) {
+    const payload = zstdDecompressSync(buffer.subarray(frame.start, frame.end))
+    assert.ok(payload.length > 0, 'compressLog must not emit an empty frame')
+    assert.equal(payload[payload.length - 1], 0x0a)
+  }
+  assert.deepEqual(scanZstdLayout(buffer, zstdDecompressSync), { ok: true })
+  // The decompressed text round-trips (no bytes lost while stripping).
+  assert.equal(decompressFrames(buffer, zstdDecompressSync).text, text)
+})
+
 test('scanZstdLayout flags a whole-log single frame as layout-damaged', () => {
   const text = encodeLog(HEADER, buildEvents([0, 1, 2]))
   const singleFrame = zstdCompressSync(Buffer.from(text, 'utf8'))
