@@ -399,3 +399,102 @@ test('budget 38 expanded keeps the invariants (pointer, question, hint)', () => 
     assertPointerAfterDown(f, width, 38)
   }
 })
+
+// ── ↑↓ edge scrolling (the question overview must be reachable by ↑) ──────
+
+/** A page that overflows a 12-row budget at width 100: a long detail pushes
+ * every option (and the question) out of the initial viewport. */
+function overflowingFlow(): QuestionFlow {
+  return makeFlow([{ id: 'q1', question: 'Pick a side', detail: longDetail(60), options: [{ label: 'Alpha' }, { label: 'Beta' }] }], 12)
+}
+
+test('↑ at the first row scrolls the body UP until the question overview returns', () => {
+  for (const width of WIDTHS) {
+    const f = overflowingFlow()
+    render(f, width) // first render establishes the scrollport geometry
+    // ↓ twice: the cursor walks to the last row; the view follows it down.
+    f.handleInput('\x1b[B')
+    f.handleInput('\x1b[B')
+    const deep = render(f, width).join('\n')
+    assert.ok(!deep.includes('Pick a side'), `precondition — question must be scrolled away (${width}):\n${deep}`)
+    // ↑ at the first row must scroll the view up (never wrap to the last row).
+    // The cursor sits on the FIRST row after the walk-down (↑ from the last
+    // row wraps); press ↑ until the question text returns. The pointer may
+    // leave the viewport mid-scroll (like PageUp) — that is accepted; a ↓
+    // afterwards restores it (verified in the composition test below).
+    let guard = 40
+    while (guard-- > 0) {
+      f.handleInput('\x1b[A')
+      const next = render(f, width).join('\n')
+      if (next.includes('Pick a side')) break
+    }
+    assert.ok(render(f, width).join('\n').includes('Pick a side'), `↑ must scroll the question back (${width}):\n${render(f, width).join('\n')}`)
+  }
+})
+
+test('↓ at the last row scrolls the body DOWN instead of wrapping (overflow only)', () => {
+  for (const width of WIDTHS) {
+    // Deterministic pin for the ↓ edge-scroll branch:
+    //  1. walk the cursor to the LAST row ("Type something.") — the view
+    //     follows it to the page bottom;
+    //  2. PageUp once — the view scrolls UP a page, the cursor (still on
+    //     the last row) drops BELOW the viewport;
+    //  3. ↓ — with the cursor on the last row and MORE content below the
+    //     viewport (`lastContentRows > bodyScroll + lastVisibleRows` is
+    //     genuinely true), the edge-scroll branch must fire: the view
+    //     scrolls DOWN a page and the cursor STAYS on the last row.
+    const f = overflowingFlow()
+    render(f, width)
+    f.handleInput('\x1b[B') // Alpha
+    f.handleInput('\x1b[B') // Beta
+    f.handleInput('\x1b[B') // Type something. (LAST row)
+    render(f, width)
+    f.handleInput('\x1b[5~') // PageUp: view up a page, cursor below the viewport
+    const midPage = render(f, width).join('\n')
+    assert.ok(midPage.includes('↑ '), `precondition — view must be scrolled down (${width}):\n${midPage}`)
+    assert.ok(!midPage.includes('→'), `precondition — cursor must be off-screen after PageUp (${width}):\n${midPage}`)
+    // ↓ at the LAST row with more content below: edge-scroll fires — the
+    // view scrolls DOWN and the cursor STAYS on the last row (no wrap to
+    // the first row, which would yank the view back toward the top).
+    f.handleInput('\x1b[B')
+    const after = render(f, width).join('\n')
+    assert.ok(after !== midPage, `↓ at the last row must change the view (${width})`)
+    assert.ok(!after.includes('Pick a side'), `↓ at the last row must keep scrolling down (${width}):\n${after}`)
+    assert.ok(after.includes('→ [ ] Type something.'), `cursor must stay on the last row (edge scroll, no wrap) (${width}):\n${after}`)
+  }
+})
+
+test('↑↓ keep the wrap-around when the page fits (no overflow)', () => {
+  const f = makeFlow([{ id: 'q1', question: 'Short', options: [{ label: 'A' }, { label: 'B' }] }], 24)
+  render(f, 100)
+  // ↑ at the first row: no scroll to do, so the cursor wraps to the last row
+  // (the "Type something." free-text row).
+  f.handleInput('\x1b[A')
+  assert.ok(render(f, 100).join('\n').includes('→ [ ] Type something.'), `↑ must wrap to the last row when the page fits:\n${render(f, 100).join('\n')}`)
+  // ↓ at the last row: no overflow, so the cursor wraps back to the first.
+  f.handleInput('\x1b[B')
+  assert.ok(render(f, 100).join('\n').includes('→ [1] A'), `↓ must wrap to the first row when the page fits:\n${render(f, 100).join('\n')}`)
+})
+
+test('edge scrolling composes with cursor follow (pointer restored by the next cursor move)', () => {
+  for (const width of WIDTHS) {
+    const f = overflowingFlow()
+    render(f, width)
+    // Down-walk to the last row, then ↑ (edge scroll — pointer may leave the
+    // viewport), then ↓ again: the cursor-follow must restore the pointer.
+    f.handleInput('\x1b[B')
+    f.handleInput('\x1b[B')
+    f.handleInput('\x1b[A') // edge scroll up (pointer may leave the view)
+    f.handleInput('\x1b[B') // cursor move: the view follows the pointer back
+    const lines = render(f, width)
+    assert.ok(lines.length <= 12, `budget overflow (${width}):\n${lines.join('\n')}`)
+    assert.ok(lines.join('\n').includes('→'), `cursor follow must restore the pointer (${width}):\n${lines.join('\n')}`)
+    // And ↑ still reaches the question from anywhere (the headline fix).
+    let guard = 40
+    while (guard-- > 0) {
+      f.handleInput('\x1b[A')
+      if (render(f, width).join('\n').includes('Pick a side')) break
+    }
+    assert.ok(render(f, width).join('\n').includes('Pick a side'), `↑ must reach the question after interleaving (${width})`)
+  }
+})

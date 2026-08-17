@@ -687,12 +687,30 @@ export class QuestionFlow implements Component, Focusable {
       return
     }
     if (data === '\x1b[A' || data === 'k') {
-      if (rows.length > 0) this.cursor = (this.cursor - 1 + rows.length) % rows.length
+      if (rows.length === 0) return
+      if (this.cursor === 0 && this.bodyScroll > 0) {
+        // ↑ at the FIRST row with the page scrolled: scroll the body UP so
+        // the question overview comes back into view (the pointer stays on
+        // the first row — it is already visible, so no cursor follow).
+        this.scrollBody(-1)
+        return
+      }
+      this.cursor = (this.cursor - 1 + rows.length) % rows.length
       this.pendingCursorScroll = true
       return
     }
     if (data === '\x1b[B' || data === 'j') {
-      if (rows.length > 0) this.cursor = (this.cursor + 1) % rows.length
+      if (rows.length === 0) return
+      const atLastRow = this.cursor === rows.length - 1
+      const scrolled = this.lastExpandable && this.lastContentRows > this.bodyScroll + this.lastVisibleRows
+      if (atLastRow && scrolled) {
+        // ↓ at the LAST row with more page content below: scroll the body
+        // DOWN (the pointer stays on the last row). Only when the page
+        // actually overflows — otherwise ↓ keeps the wrap-around.
+        this.scrollBody(1)
+        return
+      }
+      this.cursor = (this.cursor + 1) % rows.length
       this.pendingCursorScroll = true
       return
     }
