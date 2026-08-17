@@ -344,7 +344,7 @@ test('review page stays inside the dialog: Submit and the hint survive long answ
   await assert.rejects(promise, /cancelled/)
 })
 
-test('a long unbroken question detail is row-budgeted so options and hints stay visible', async () => {
+test('a long unbroken question detail is row-budgeted so the hint stays visible and options stay reachable', async () => {
   const { vt, app } = startApp()
   // 3000 chars on ONE line: without a physical-row budget this wraps to
   // dozens of rows and pushes the options + hint out of the dialog.
@@ -355,10 +355,20 @@ test('a long unbroken question detail is row-budgeted so options and hints stay 
     detail: longDetail,
     options: [{ label: 'Alpha' }, { label: 'Beta' }],
   }])
-  const view = await viewport(vt)
-  assert.ok(view.includes('Alpha'), `option pushed out of the dialog:\n${view}`)
+  let view = await viewport(vt)
+  // The unified scrollport shows the TOP of the page: the wrapped detail
+  // fills the region and the options sit below the fold — but the hint stays
+  // pinned and the marker proves the content continues.
+  assert.ok(!view.includes('Alpha'), `options must sit below the fold while the detail fills the region:\n${view}`)
   assert.ok(view.includes('esc cancel'), `hint pushed out of the dialog:\n${view}`)
   assert.ok(view.includes('more lines') || view.includes('more content hidden'), `truncation marker missing:\n${view}`)
+  // PageDown reaches the options — nothing is unreachable on a small screen.
+  for (let page = 0; page < 6 && !view.includes('Alpha'); page++) {
+    vt.sendInput('\x1b[6~')
+    await vt.waitForRender()
+    view = await viewport(vt)
+  }
+  assert.ok(view.includes('Alpha'), `options unreachable by scrolling:\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)
 })
@@ -705,7 +715,7 @@ test('the question body scrolls with PageUp/PageDown', async () => {
   let view = await viewport(vt)
   assert.ok(view.includes('detail-00'), `top content missing:\n${view}`)
   assert.ok(view.includes('↓ '), `down marker missing:\n${view}`)
-  assert.ok(!view.includes('detail-05'), `deep content must be clipped compact:\n${view}`)
+  assert.ok(!view.includes('detail-09'), `deep content must be clipped compact:\n${view}`)
   vt.sendInput('\x1b[6~') // PageDown
   await vt.waitForRender()
   view = await viewport(vt)
@@ -730,15 +740,21 @@ test('e expands the question panel and collapses it back', async () => {
   let view = await viewport(vt)
   const compactSpan = questionFrameSpan(view)
   assert.ok(compactSpan <= 14, `compact panel must respect the 60% cap (span ${compactSpan}):\n${view}`)
-  assert.ok(!view.includes('detail-05'), `deep content must be clipped compact:\n${view}`)
+  assert.ok(!view.includes('detail-09'), `deep content must be clipped compact:\n${view}`)
   vt.sendInput('e')
   await vt.waitForRender()
   view = await viewport(vt)
   const expandedSpan = questionFrameSpan(view)
   assert.ok(expandedSpan > compactSpan, `expand must grow the panel (${compactSpan} -> ${expandedSpan}):\n${view}`)
   assert.ok(expandedSpan <= 20, `expanded panel must respect the 80% cap (span ${expandedSpan}):\n${view}`)
-  assert.ok(view.includes('detail-05'), `expand must reveal deeper content:\n${view}`)
-  assert.ok(view.includes('→'), `pointer must survive expand:\n${view}`)
+  assert.ok(view.includes('detail-09'), `expand must reveal deeper content:\n${view}`)
+  // The pointer follows the cursor: moving it scrolls the option (with its
+  // description) into the viewport — the pointer never gets stranded
+  // off-screen while paging the unified scrollport.
+  vt.sendInput('j')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('→'), `pointer must follow the cursor into view:\n${view}`)
   vt.sendInput('e')
   await vt.waitForRender()
   view = await viewport(vt)

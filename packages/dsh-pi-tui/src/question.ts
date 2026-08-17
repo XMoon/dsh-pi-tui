@@ -57,8 +57,9 @@ const OTHER_ROW = '\u0000other'
 /**
  * Default total physical-row budget of the question flow itself. The
  * QuestionFrame in tui-app.ts re-derives the budget from the terminal height
- * on every render (60% cap, 8..24 content rows) and pushes it through
- * {@link QuestionFlow.setMaxRows}; 24 is the fallback for direct renders.
+ * on every render (60% cap COLLAPSED, 8..24 content rows; up to 38 when
+ * expanded) and pushes it through {@link QuestionFlow.setMaxRows}; 24 is the
+ * fallback for direct renders.
  * The Frame wrapper adds its two border rows, and NOTHING clips the flow's
  * output in the editor-seat layout — so EVERYTHING (tabs, question, detail,
  * options with their descriptions, scroll marker, skipped note, hint) must
@@ -80,20 +81,16 @@ const MIN_SUPPORTED_BUDGET = 8
  */
 const MAX_BUDGET = 38
 /**
- * Total physical-row budget for the question body (question text + detail),
- * shared so a single unbroken long line cannot push the options and hints
- * out of the dialog's maxHeight (kimi MAX_BODY_LINES scale).
+ * Cap for the WRAPPED page scrollport content (question + detail + options
+ * with their descriptions). Beyond it the content ends in a `... more
+ * content hidden` note — wrapping an unbounded 100KB detail every frame
+ * would be wasteful. 256 rows keeps realistic questions AND all their
+ * answerable options reachable (7 options × ~19 wrapped description rows
+ * at 50 columns fits); the cap is a hard wall, so a page whose content
+ * alone exceeds 256 rows ends in the note — that page is unreachable in
+ * practice, and the note makes the cut non-silent.
  */
-const MAX_BODY_LINES = 12
-/**
- * Cap for the WRAPPED body scrollport content (question + detail rows).
- * Beyond it the content ends in a `... more content hidden` note — wrapping
- * an unbounded 100KB detail every frame would be wasteful; 64 rows covers
- * any realistic question and stays cheap.
- */
-const MAX_CONTENT_ROWS = 64
-/** Max visible option rows before the list windows around the cursor. */
-const MAX_VISIBLE_OPTIONS = 7
+const MAX_CONTENT_ROWS = 256
 
 /**
  * Budgeted push of `content` to `lines`, wrapping it to `width`: pushes at
@@ -217,7 +214,7 @@ export class QuestionFlow implements Component, Focusable {
   /** Review-page action highlight (0 = Submit, 1 = Cancel). */
   private submitIdx = 0
   /**
-   * Current content-row budget (8..24). The editor-seat QuestionFrame in
+   * Current content-row budget (8..38). The editor-seat QuestionFrame in
    * tui-app.ts re-derives it from the terminal height on every render and
    * pushes it through {@link setMaxRows}; nothing clips the flow's output
    * in that layout, so every render must fit the budget exactly.
@@ -225,36 +222,37 @@ export class QuestionFlow implements Component, Focusable {
   private budget = DEFAULT_BUDGET
   private _focused = false
   /**
-   * Scroll offset (content rows) into the body scrollport (question +
-   * detail). PageUp/PageDown move it when the content overflows the region.
+   * Scroll offset (content rows) into the UNIFIED page scrollport (question,
+   * detail, then every option with its description, then the free-text row).
+   * PageUp/PageDown move it; ↑↓/digits/click move the cursor and the render
+   * follows it into view (pendingCursorScroll).
    */
   private bodyScroll = 0
   /**
    * Expanded mode ('e' / marker click): the FRAME grows toward 80% (the
-   * QuestionFrame reads isBodyExpanded each render) and the extra rows flow
-   * to whoever needs them — the body scrollport when the question/detail
-   * overflows, otherwise the OPTION window (cut descriptions become
-   * readable).
+   * QuestionFrame reads isBodyExpanded each render), so the scrollport is
+   * taller and more of the page — including option descriptions — is visible
+   * at once. Everything stays reachable by scrolling either way.
    */
   private bodyExpanded = false
+  /** Cursor moved since the last render: the next render must scroll the
+   * cursor's rows into view. */
+  private pendingCursorScroll = false
   /** Hit map from the last render: content row -> option row key. Built each
    * render; drives fullscreen click-to-select. */
   private readonly hitMap = new Map<number, string>()
-  /** Content row of the body scroll marker in the last render (-1 = none);
-   * clicking it toggles the expanded body. */
+  /** Content row of the scroll marker in the last render (-1 = none);
+   * clicking it toggles the expanded panel. */
   private lastMarkerRow = -1
-  /** Body region height from the last render (scroll page math). */
+  /** Scrollport height from the last render (scroll page math). */
   private lastRegionHeight = 0
-  /** Wrapped body content length from the last render. */
+  /** Wrapped page content length from the last render. */
   private lastContentRows = 0
   /** Content rows visible in the region from the last render (region minus
    * the marker row when overflowing). */
   private lastVisibleRows = 0
-  /** Whether the last render cut OPTION content (window rows or label/
-   * description rows) — 'e' is available when this OR the body overflows. */
-  private lastOptionsCut = false
-  /** Whether 'e' would reveal something on the last render (body overflow or
-   * option content cut). */
+  /** Whether the page content overflows the scrollport on the last render —
+   * 'e' (and the scroll verbs) are available when true. */
   private lastExpandable = false
 
   constructor(
@@ -298,23 +296,24 @@ export class QuestionFlow implements Component, Focusable {
     this.budget = Math.max(MIN_SUPPORTED_BUDGET, Math.min(MAX_BUDGET, Math.floor(rows)))
   }
 
-  /** Whether the body region is expanded (the frame grows toward 80% of the
+  /** Whether the panel is expanded (the frame grows toward 80% of the
    * terminal — QuestionFrame reads this every render). */
   isBodyExpanded(): boolean {
     return this.bodyExpanded
   }
 
   /**
-   * Reset the body view (scroll + expanded) — called on every tab change so
-   * each question starts at its top, collapsed.
+   * Reset the view (scroll + expanded + pending cursor follow) — called on
+   * every tab change so each question starts at its top, collapsed.
    */
   private resetBodyView(): void {
     this.bodyScroll = 0
     this.bodyExpanded = false
+    this.pendingCursorScroll = false
   }
 
   /**
-   * Page the body scrollport. One page = the visible content rows. No-op
+   * Page the unified scrollport. One page = the visible content rows. No-op
    * when the content fits the region.
    */
   private scrollBody(direction: -1 | 1): void {
@@ -324,20 +323,23 @@ export class QuestionFlow implements Component, Focusable {
     this.bodyScroll = Math.max(0, Math.min(this.bodyScroll + direction * visible, maxScroll))
   }
 
-  /** Toggle the expanded body ('e' or a click on the scroll marker). Expanding
-   * is only meaningful when something was cut — the body overflowed or option
-   * content (window rows, labels, descriptions) was truncated. */
+  /** Toggle the expanded panel ('e' or a click on the scroll marker).
+   * Expanding is only meaningful when the page content overflows the
+   * scrollport (everything fits -> a taller panel shows nothing new). The
+   * SCROLL POSITION is kept: the taller region reveals MORE rows where the
+   * user is looking (e.g. the option descriptions they scrolled to), instead
+   * of jumping back to the top — the render clamps the offset to the new
+   * maxScroll. */
   private toggleExpanded(): void {
     if (!this.bodyExpanded && !this.lastExpandable) return
     this.bodyExpanded = !this.bodyExpanded
-    this.bodyScroll = 0
   }
 
   /**
    * Primary-click routing (fullscreen): an option row selects it (single-
    * select advances, multi-select toggles, the "Type something." row enters
-   * free-text), and the body scroll marker toggles the expanded body. The
-   * hit map reflects the LAST rendered frame, which is what the user sees.
+   * free-text), and the scroll marker toggles the expanded panel. The hit
+   * map reflects the LAST rendered frame, which is what the user sees.
    */
   clickRow(row: number): void {
     if (row < 0 || this.tab >= this.questions.length) return
@@ -349,12 +351,14 @@ export class QuestionFlow implements Component, Focusable {
       const index = this.rows().findIndex(candidate => candidate.key === OTHER_ROW)
       if (index >= 0) {
         this.cursor = index
+        this.pendingCursorScroll = true
         this.enterOther()
       }
       return
     }
     if (key !== undefined) {
       this.cursor = Number(key)
+      this.pendingCursorScroll = true
       this.confirm()
       return
     }
@@ -364,22 +368,33 @@ export class QuestionFlow implements Component, Focusable {
   }
 
   /**
-   * Wrap the FULL question + detail into the scrollport content (capped at
-   * MAX_CONTENT_ROWS with a trailing `... more content hidden` note). Row 0
-   * is always the question's first physical row (required-first).
+   * Build the UNIFIED page scrollport content: the question + detail first
+   * (required-first — row 0 is always the question's first physical row),
+   * a separator, then every option row (label + description), then the
+   * free-text row. Each option row maps to its key for click hit-testing.
+   * Capped at MAX_CONTENT_ROWS with a trailing `... more content hidden`
+   * note, so wrapping an unbounded detail/description stays cheap.
    */
-  private buildBodyContent(question: QuestionFlowQuestion, width: number): string[] {
+  private buildPageContent(
+    question: QuestionFlowQuestion,
+    rows: Row[],
+    draft: Draft,
+    multi: boolean,
+    width: number,
+  ): { lines: string[]; hits: Array<string | undefined> } {
     const lines: string[] = []
-    appendContentFirst(
+    const hits: Array<string | undefined> = []
+    let left = MAX_CONTENT_ROWS
+    left = appendContentFirst(
       lines,
       `${color.primary('?')}  `,
       '    ',
       color.textStrong(question.question),
       width,
-      MAX_CONTENT_ROWS,
+      left,
     )
+    hits.push(...new Array(lines.length).fill(undefined))
     if (question.detail !== undefined && question.detail !== '') {
-      let left = MAX_CONTENT_ROWS - lines.length
       for (const line of question.detail.split('\n')) {
         if (left <= 1) {
           // Keep ONE row inside the cap for the cut marker: a detail that
@@ -390,7 +405,66 @@ export class QuestionFlow implements Component, Focusable {
         left = appendWrappedBudgeted(lines, '   ', '   ', color.textDim(line), width, left)
       }
     }
-    return lines
+    hits.push(...new Array(lines.length - hits.length).fill(undefined))
+    lines.push('')
+    hits.push(undefined)
+    for (const row of rows) {
+      const isCursor = rows[this.cursor] === row
+      const selected = row.key === OTHER_ROW
+        ? draft.custom !== ''
+        : draft.selected.has(question.options?.[Number(row.key)]?.label ?? '')
+      const marker = multi || row.key === OTHER_ROW
+        ? selected ? color.success('[✓]') : color.textDim('[ ]')
+        : selected ? color.success(`[${Number(row.key) + 1}]`) : color.textDim(`[${Number(row.key) + 1}]`)
+      const pointer = isCursor ? color.primary('→') : ' '
+      const prefix = `${pointer} ${marker} `
+      const indent = ' '.repeat(visibleWidth(prefix))
+      const badge = row.recommended ? ` ${color.primary('[recommended]')}` : ''
+      const label = isCursor ? color.textStrong(row.label) : row.label
+      // The free-text row swaps its label for the live Input while editing.
+      // An EMPTY input renders only a subtle fake cursor — show the row's
+      // own label dimmed instead (a bare cursor block reads as a blank row).
+      if (row.key === OTHER_ROW && this.editingOther) {
+        const inputLines = this.otherInput.render(Math.max(1, width - visibleWidth(prefix)))
+        const inputLine = inputLines[0] ?? ''
+        const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
+        lines.push(prefix + (this.otherInput.getValue() === '' ? color.textDim(row.label) : stripped))
+        hits.push(OTHER_ROW)
+        continue
+      }
+      const labelWidth = Math.max(1, width - visibleWidth(prefix))
+      for (const wrapped of wrapTextWithAnsi(`${label}${badge}`, labelWidth)) {
+        if (!this.pushPageRow(lines, hits, prefix + wrapped, row.key)) return { lines, hits }
+      }
+      if (row.description !== undefined && row.description !== '' && !(row.key === OTHER_ROW && this.editingOther)) {
+        const descWidth = Math.max(1, width - visibleWidth(indent))
+        for (const wrapped of wrapTextWithAnsi(color.textDim(row.description), descWidth)) {
+          if (!this.pushPageRow(lines, hits, indent + wrapped, row.key)) return { lines, hits }
+        }
+      }
+    }
+    return { lines, hits }
+  }
+
+  /** Push one page-content row, capping at MAX_CONTENT_ROWS with a single
+   * `... more content hidden` note (never a second one after the detail's).
+   * @returns false when the cap was hit (callers stop building). */
+  private pushPageRow(
+    lines: string[],
+    hits: Array<string | undefined>,
+    line: string,
+    key: string,
+  ): boolean {
+    if (lines.length >= MAX_CONTENT_ROWS) {
+      if (lines[lines.length - 1]?.includes('more content hidden') !== true) {
+        lines.push(color.textDim('... more content hidden'))
+        hits.push(undefined)
+      }
+      return false
+    }
+    lines.push(line)
+    hits.push(key)
+    return true
   }
 
   /** The rows of the current question (options plus the free-text row). */
@@ -607,16 +681,19 @@ export class QuestionFlow implements Component, Focusable {
       const row = rows[Number(digit[0]) - 1]
       if (row !== undefined) {
         this.cursor = rows.indexOf(row)
+        this.pendingCursorScroll = true
         this.confirm()
       }
       return
     }
     if (data === '\x1b[A' || data === 'k') {
       if (rows.length > 0) this.cursor = (this.cursor - 1 + rows.length) % rows.length
+      this.pendingCursorScroll = true
       return
     }
     if (data === '\x1b[B' || data === 'j') {
       if (rows.length > 0) this.cursor = (this.cursor + 1) % rows.length
+      this.pendingCursorScroll = true
       return
     }
     if (data === '\x1b[5~' || data === '\x1b[6~') {
@@ -680,7 +757,6 @@ export class QuestionFlow implements Component, Focusable {
     // The hit map reflects THIS frame only (the review page populates none).
     this.hitMap.clear()
     this.lastMarkerRow = -1
-    this.lastOptionsCut = false
     // Tab strip: Q1(✓) Q2(○) … Submit — answered marks, current highlighted.
     // Tabs carry NO leading/trailing spaces of their own (the box border
     // provides the padding), so every content row starts at the same column.
@@ -763,49 +839,58 @@ export class QuestionFlow implements Component, Focusable {
     if (question === undefined || draft === undefined) return lines
     const rows = this.rows()
     const multi = question.multiSelect === true
-    const editingOther = this.editingOther && rows.some(row => row.key === OTHER_ROW)
     const skippedRow = draft.skipped ? 1 : 0
     const optionless = rows.length === 0 || (rows.length === 1 && rows[0]?.key === OTHER_ROW)
-    // Required tail — the rows that must render below the body:
-    //   choice page: separator blank + highlighted option + (skipped) note +
-    //                trailing blank + hint = 4 + skippedRow
+    // Required tail — the rows that must render below the scrollport:
+    //   choice page: (skipped) note + trailing blank + hint = 2 + skippedRow
     //   optionless:  input row + (skipped) note + trailing blank + hint =
     //                3 + skippedRow
-    const tail = optionless ? 3 + skippedRow : 4 + skippedRow
-    let bodyAllowance = this.budget - lines.length - tail
+    const tail = optionless ? 3 + skippedRow : 2 + skippedRow
     const header = question.header
-    // The header is decorative: it renders only when the question body still
+    // The header is decorative: it renders only when the scrollport still
     // gets at least one row (the required-first guarantee below).
-    const headerShown = header !== undefined && header !== '' && bodyAllowance >= 2
+    const headerShown = header !== undefined && header !== '' && this.budget - lines.length - tail >= 2
     if (headerShown) {
       lines.push(color.textDim(header))
-      bodyAllowance -= 1
     }
-    // Body SCROLLPORT: the full wrapped question + detail content is clipped
-    // to a fixed-height region; PageUp/PageDown page through it when it
-    // overflows. The compact region caps at MAX_BODY_LINES. Expanded ('e', or
-    // a click on the scroll marker) the region takes what its content NEEDS
-    // (up to the full allowance) — a long body keeps the room, a short body
-    // leaves it to the OPTION window, so cut descriptions become readable.
-    const content = this.buildBodyContent(question, safeWidth)
-    const regionMax = Math.max(1, bodyAllowance)
-    const regionHeight = this.bodyExpanded
-      ? Math.min(regionMax, content.length)
-      : Math.min(MAX_BODY_LINES, regionMax)
-    const overflow = content.length > regionHeight
+    // UNIFIED SCROLLPORT: the whole page — question, detail, then every
+    // option with its description, then the free-text row — is ONE region.
+    // PageUp/PageDown browse it; ↑↓/digits/click move the cursor and the
+    // view follows (pendingCursorScroll), so the pointer stays in view and
+    // every description is reachable by scrolling on any screen size.
+    const content = this.buildPageContent(question, rows, draft, multi, safeWidth)
+    const regionHeight = Math.max(1, this.budget - lines.length - tail)
+    const overflow = content.lines.length > regionHeight
     // The scroll marker reserves the region's last row (only when the region
     // has at least 2 rows — a 1-row region keeps its content, required-first).
     const visible = overflow && regionHeight >= 2 ? regionHeight - 1 : regionHeight
     this.lastRegionHeight = regionHeight
-    this.lastContentRows = content.length
+    this.lastContentRows = content.lines.length
     this.lastVisibleRows = visible
-    this.bodyScroll = Math.min(this.bodyScroll, Math.max(0, content.length - visible))
-    for (const line of content.slice(this.bodyScroll, this.bodyScroll + visible)) {
-      lines.push(line)
+    this.lastExpandable = overflow && regionHeight >= 2
+    const maxScroll = Math.max(0, content.lines.length - visible)
+    this.bodyScroll = Math.min(this.bodyScroll, maxScroll)
+    if (this.pendingCursorScroll) {
+      // Cursor follow: the cursor's first content row must be visible.
+      this.pendingCursorScroll = false
+      const cursorKey = rows[this.cursor]?.key
+      if (cursorKey !== undefined) {
+        const first = content.hits.indexOf(cursorKey)
+        if (first >= 0) {
+          if (first < this.bodyScroll) this.bodyScroll = first
+          else if (first >= this.bodyScroll + visible) this.bodyScroll = first - visible + 1
+          this.bodyScroll = Math.max(0, Math.min(this.bodyScroll, maxScroll))
+        }
+      }
+    }
+    for (let index = this.bodyScroll; index < this.bodyScroll + visible && index < content.lines.length; index++) {
+      const hit = content.hits[index]
+      if (hit !== undefined) this.hitMap.set(lines.length, hit)
+      lines.push(content.lines[index]!)
     }
     if (overflow && regionHeight >= 2) {
       const above = this.bodyScroll
-      const below = content.length - (this.bodyScroll + visible)
+      const below = content.lines.length - (this.bodyScroll + visible)
       const marker = above > 0 && below > 0
         ? `↑ ${above} up · ↓ ${below} more lines`
         : above > 0
@@ -816,168 +901,49 @@ export class QuestionFlow implements Component, Focusable {
     } else {
       this.lastMarkerRow = -1
     }
-    if (!optionless) {
-      lines.push('')
-      // The WHOLE dialog shares one physical-row budget (nothing clips the
-      // flow's output in the editor-seat layout): tabs, question/detail,
-      // option labels AND descriptions, the scroll marker, and the hint must
-      // all fit. The tail allocation above guarantees optionBudget >= 1, so
-      // the window never shrinks to zero — the CURRENT option's row is
-      // ANCHORED: its label rows are reserved before any neighbor renders,
-      // so long descriptions of rows above can never push the cursor's own
-      // `→` row off the page. The `showing X-Y of N` marker is optional and
-      // renders only when option rows leave space.
-      const optionBudget = this.budget - lines.length - skippedRow - 2
-      const maxWindow = Math.max(1, Math.min(MAX_VISIBLE_OPTIONS, optionBudget))
-      const visibleCount = Math.min(rows.length, maxWindow)
-      // Option content is cut when the window hides rows or a label/
-      // description ends in a `... N more lines` marker (checked per row
-      // below) — either makes 'e' available.
-      if (visibleCount < rows.length) this.lastOptionsCut = true
-      const half = Math.floor(maxWindow / 2)
-      const maxStart = Math.max(0, rows.length - visibleCount)
-      const start = Math.max(0, Math.min(this.cursor - half, maxStart))
-      const end = Math.min(rows.length, start + visibleCount)
-      {
-        // Reserved rows for the current option's label (capped so one absurd
-        // label cannot eat the whole dialog).
-        const cursorRow = rows[this.cursor]
-        let reserved = 1
-        if (cursorRow !== undefined && cursorRow.key !== OTHER_ROW) {
-          const marker = multi || cursorRow.key === OTHER_ROW
-            ? draft.selected.has(question.options?.[Number(cursorRow.key)]?.label ?? '') ? '[✓]' : '[ ]'
-            : draft.selected.has(question.options?.[Number(cursorRow.key)]?.label ?? '')
-              ? `[${Number(cursorRow.key) + 1}]`
-              : `[${Number(cursorRow.key) + 1}]`
-          const prefix = `→ ${marker} `
-          const badge = cursorRow.recommended ? ` ${color.primary('[recommended]')}` : ''
-          reserved = Math.min(
-            Math.max(
-              1,
-              wrapTextWithAnsi(
-                `${color.textStrong(cursorRow.label)}${badge}`,
-                Math.max(1, safeWidth - visibleWidth(prefix)),
-              ).length,
-            ),
-            maxWindow,
-          )
-        }
-        let left = optionBudget
-        let cursorRendered = false
-        for (let index = start; index < end; index++) {
-          const row = rows[index]
-          if (row === undefined) continue
-          const isCursor = index === this.cursor
-          // Neighbors may consume at most `left - reserved` until the cursor
-          // renders; after that they may use whatever is left.
-          if (!isCursor && (cursorRendered ? left <= 0 : left <= reserved)) continue
-          if (row.key === OTHER_ROW && this.editingOther) {
-            const prefix = `${color.primary('→')} ${color.textDim(`[${index + 1}]`)} `
-            const inputLines = this.otherInput.render(Math.max(1, safeWidth - visibleWidth(prefix)))
-            const inputLine = inputLines[0] ?? ''
-            const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
-            left -= 1
-            this.hitMap.set(lines.length, row.key)
-            lines.push(prefix + stripped)
-            if (isCursor) cursorRendered = true
-            continue
-          }
-          const selected = row.key === OTHER_ROW
-            ? draft.custom !== ''
-            : draft.selected.has(question.options?.[Number(row.key)]?.label ?? '')
-          const marker = multi || row.key === OTHER_ROW
-            ? selected ? color.success('[✓]') : color.textDim('[ ]')
-            : selected ? color.success(`[${Number(row.key) + 1}]`) : color.textDim(`[${Number(row.key) + 1}]`)
-          const pointer = isCursor ? color.primary('→') : ' '
-          const prefix = `${pointer} ${marker} `
-          const badge = row.recommended ? ` ${color.primary('[recommended]')}` : ''
-          const label = isCursor ? color.textStrong(row.label) : row.label
-          // Label and [recommended] badge share the row; the description gets
-          // its OWN wrapped dim lines, both drawing from the same budget so a
-          // wall of descriptions can never push the hint out of the dialog.
-          // Neighbors (before the cursor renders) may consume at most
-          // `left - reserved` — label AND description — so the anchored
-          // current option always keeps its label rows.
-          const indent = ' '.repeat(visibleWidth(prefix))
-          const available = isCursor || cursorRendered ? left : left - reserved
-          const beforeLabel = lines.length
-          if (isCursor) {
-            appendContentFirst(lines, prefix, indent, `${label}${badge}`, safeWidth, available)
-          } else {
-            appendWrappedBudgeted(lines, prefix, indent, `${label}${badge}`, safeWidth, available)
-          }
-          this.hitMap.set(beforeLabel, row.key)
-          // A cut label/description (its `... N more lines` marker is the
-          // last pushed row) means 'e' can reveal more.
-          if (lines[lines.length - 1]?.includes('more lines') === true) this.lastOptionsCut = true
-          // `available` may exclude rows reserved for the cursor. Helpers
-          // return the remainder of THAT restricted budget, not the dialog's
-          // total remainder, so only subtract rows actually emitted here.
-          left -= lines.length - beforeLabel
-          if (row.description !== undefined && row.description !== '' && left > 0) {
-            const descCap = isCursor || cursorRendered ? left : left - reserved
-            const beforeDescription = lines.length
-            appendWrappedBudgeted(
-              lines,
-              indent,
-              indent,
-              color.textDim(row.description),
-              safeWidth,
-              descCap,
-            )
-            if (lines[lines.length - 1]?.includes('more lines') === true) this.lastOptionsCut = true
-            left -= lines.length - beforeDescription
-          }
-          if (isCursor) cursorRendered = true
-        }
-        if (rows.length > MAX_VISIBLE_OPTIONS && left > 0) {
-          left = appendWrappedBudgeted(
-            lines,
-            '   ',
-            '   ',
-            `showing ${start + 1}-${end} of ${rows.length}`,
-            safeWidth,
-            left,
-          )
-        }
-      }
-    } else {
-      // Optionless question: the real Input owns the line (placeholder hint).
+    if (optionless) {
+      // The free-text input is pinned below the scrollport (always visible).
+      // An EMPTY input renders only a subtle fake cursor — on a small screen
+      // that row reads as blank, so show a dim placeholder instead (typing
+      // replaces it with the live value).
       const inputLines = this.otherInput.render(Math.max(1, safeWidth - 2))
       const inputLine = inputLines[0] ?? ''
       const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
-      lines.push(` ${stripped}`)
+      lines.push(this.otherInput.getValue() === '' ? color.textDim(' Type your answer…') : ` ${stripped}`)
     }
     if (draft.skipped) {
       lines.push(color.textDim('(skipped)'))
     }
     lines.push('')
     // The hint composes from the parts that FIT: low-priority verbs drop out
-    // instead of the whole line being ellipsized by the frame.
+    // instead of the whole line being ellipsized by the frame. 'esc cancel'
+    // is the escape hatch and ALWAYS survives (it is reserved first — the
+    // verbs drop from the end, so e.g. 's skip' goes before 'esc cancel').
+    // Scroll and expand are advertised only when the page overflows the
+    // scrollport; once expanded, 'e' always collapses (frame 80% -> 60%).
     const optionCount = Math.min(rows.length, 9)
-    const bodyScrollable = this.lastRegionHeight >= 2 && this.lastContentRows > this.lastVisibleRows
-    // 'e' is advertised whenever it can reveal something: body overflow or
-    // cut option content. Once expanded it always collapses (frame 80% -> 60%).
-    this.lastExpandable = bodyScrollable || this.lastOptionsCut
+    const scrollable = this.lastExpandable
     const hintParts = [
       '↑↓ select',
       optionCount > 0 ? `1-${optionCount} choose` : '',
       multi ? '↵ toggle' : '↵ confirm',
-      bodyScrollable ? 'pgup/pgdn scroll' : '',
+      scrollable ? 'pgup/pgdn scroll' : '',
       !this.editingOther
-        ? (this.bodyExpanded ? 'e collapse' : this.lastExpandable ? 'e expand' : '')
+        ? (this.bodyExpanded ? 'e collapse' : scrollable ? 'e expand' : '')
         : '',
       this.questions.length > 1 ? '←→ switch' : '',
       's skip',
       'esc cancel',
     ].filter(part => part !== '')
+    const cancel = 'esc cancel'
+    const verbs = hintParts.filter(part => part !== cancel)
     let hint = ''
-    for (const part of hintParts) {
+    for (const part of verbs) {
       const next = hint === '' ? part : `${hint} · ${part}`
-      if (visibleWidth(next) > safeWidth) break
+      if (visibleWidth(`${next} · ${cancel}`) > safeWidth) break
       hint = next
     }
-    lines.push(color.textDim(hint === '' ? 'esc cancel' : hint))
+    lines.push(color.textDim(hint === '' ? cancel : `${hint} · ${cancel}`))
     return lines
   }
 }
