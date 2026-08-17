@@ -2293,6 +2293,12 @@ test('genericRawInputLines structures todo/session/terminal payloads', () => {
       { content: 'b', status: 'completed' },
     ],
   }), ['● a', '✓ b'])
+  // The real todo_write presenter ships the todos ARRAY itself
+  // (presentCall: rawInput: args.todos), not a wrapped object.
+  assert.deepEqual(genericRawInputLines('todo_write', [
+    { content: 'a', status: 'in_progress' },
+    { content: 'b', status: 'completed' },
+  ]), ['● a', '✓ b'])
   assert.deepEqual(genericRawInputLines('session_event_read', { seq: 7, session_id: 's1' }), ['s1 · seq 7'])
   assert.deepEqual(genericRawInputLines('terminal_send', { sessionId: 'main', text: 'go' }), ['session main: go'])
   assert.deepEqual(genericRawInputLines('unknown_tool', { a: 1 }), ['{', '  "a": 1', '}'])

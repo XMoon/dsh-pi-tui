@@ -428,25 +428,32 @@ export function webCardLines(view: WebSearchResultView | WebFetchResultView): st
  * @param rawInput - the presenter's salient raw input.
  * @returns the display lines.
  */
+/** Checklist display lines for a todo list: `●` in progress, `○` pending,
+ * `✓` completed (Web TodoRow parity). Malformed items are skipped. */
+function todoChecklistLines(todos: readonly unknown[]): string[] {
+  const lines: string[] = []
+  for (const todo of todos) {
+    if (typeof todo !== 'object' || todo === null) continue
+    const item = todo as Record<string, unknown>
+    const content = typeof item.content === 'string' ? item.content : String(item.content ?? '')
+    const mark = item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '●' : '○'
+    lines.push(`${mark} ${content}`)
+  }
+  return lines
+}
+
 export function genericRawInputLines(name: string, rawInput: unknown): string[] {
   if (typeof rawInput === 'string') return rawInput === '' ? [] : [rawInput]
   if (typeof rawInput !== 'object' || rawInput === null) {
     return rawInput === undefined ? [] : [String(rawInput)]
   }
+  // The todo_write presenter ships the todos ARRAY itself (`rawInput:
+  // args.todos`); a wrapped `{ todos }` object is accepted defensively.
+  if (name === 'todo_write' && Array.isArray(rawInput)) return todoChecklistLines(rawInput)
   const args = rawInput as Record<string, unknown>
   if (name === 'todo_write') {
     const todos = args.todos
-    if (Array.isArray(todos)) {
-      const lines: string[] = []
-      for (const todo of todos) {
-        if (typeof todo !== 'object' || todo === null) continue
-        const item = todo as Record<string, unknown>
-        const content = typeof item.content === 'string' ? item.content : String(item.content ?? '')
-        const mark = item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '●' : '○'
-        lines.push(`${mark} ${content}`)
-      }
-      return lines
-    }
+    if (Array.isArray(todos)) return todoChecklistLines(todos)
   }
   if ((name === 'terminal_read' || name === 'terminal_signal' || name === 'terminal_send') && typeof args.sessionId === 'string') {
     const line = `session ${args.sessionId}`
