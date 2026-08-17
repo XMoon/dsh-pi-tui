@@ -11,7 +11,9 @@
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import type { FileDiff, ToolCallView, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
+import type {
+  FileDiff, ToolCallView, ToolResult, ToolResultView, WebFetchResultView, WebSearchResultView,
+} from '@deepseek-ai/dsh-tools'
 
 /** Figma row titles per variant (design literals, not translatable copy). */
 const VARIANT_TITLES = {
@@ -146,6 +148,42 @@ function deriveSummary(variant: ToolVariant, argsRaw: string): string {
     if (typeof value === 'string' && value !== '') return firstLine(value)
   }
   return firstLine(argsRaw)
+}
+
+/**
+ * Tool-specific args summaries for tools whose natural one-line identity is
+ * not a raw arg value (Web TodoRow/AskQuestionRow parity): `todo_write`
+ * reads `done/total done` plus the first active item, `ask_user_question`
+ * reads the first question text. Returns undefined for every other tool,
+ * letting the generic derivation own the summary.
+ * @param name - the tool name.
+ * @param argsRaw - the raw arguments JSON.
+ * @returns the tool-specific summary, or undefined when none applies.
+ */
+function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const args = parsed as Record<string, unknown>
+  if (name === 'ask_user_question') {
+    const questions = args.questions
+    if (!Array.isArray(questions) || questions.length === 0) return undefined
+    const first = questions[0]
+    if (typeof first !== 'object' || first === null) return undefined
+    const question = (first as Record<string, unknown>).question
+    if (typeof question !== 'string' || question === '') return undefined
+    return firstLine(question)
+  }
+  if (name !== 'todo_write') return undefined
+  const todos = args.todos
+  if (!Array.isArray(todos)) return undefined
+  const done = todos.filter(todo =>
+    typeof todo === 'object' && todo !== null && (todo as Record<string, unknown>).status === 'completed',
+  ).length
+  const active = todos.find(todo =>
+    typeof todo === 'object' && todo !== null && (todo as Record<string, unknown>).status !== 'completed',
+  )
+  const content = active === undefined ? '' : String((active as Record<string, unknown>).content ?? '')
+  return `${done}/${todos.length} done${content === '' ? '' : ` · ${firstLine(content)}`}`
 }
 
 /** Classify a tool name into its row variant; unknown names are `others`. */
@@ -318,7 +356,11 @@ export function readFoldedPreview(result: string): string {
 export function toolCardHeader(name: string, argsRaw: string, cwd?: string): ToolCardHeader {
   const variant = classifyTool(name)
   const toolTitle = TOOL_TITLES[name] ?? TUI_TOOL_TITLES[name]
-  const base = argsRaw === '' ? '' : relativizeToCwd(deriveSummary(variant, argsRaw), cwd)
+  // Tool-specific summaries replace the args-derived base before the
+  // generic derivation (Web TodoRow parity: `todo_write` reads
+  // `2/3 done` instead of a raw args dump).
+  const toolSummary = summarizeToolArgs(name, argsRaw)
+  const base = argsRaw === '' ? '' : toolSummary ?? relativizeToCwd(deriveSummary(variant, argsRaw), cwd)
   const summary = variant === 'others' && toolTitle === undefined
     ? base === '' ? '' : name + ' · ' + base
     : base
@@ -346,6 +388,134 @@ export interface ToolPresenter {
   call(name: string, argsRaw: string): ToolCallView | undefined
   /** The completed-call view for one tool result, or undefined. */
   result(name: string, argsRaw: string, result: ToolResultInput): ToolResultView | undefined
+}
+
+/**
+ * Render a completed web retrieval as display lines (Web WebBlock parity):
+ * a `search` shows the provider answer and the source list (title — url,
+ * snippet under each), a `fetch` shows the URL and HTTP status. Truncation
+ * is marked in the same place the Web marks it: under the list/status.
+ * Colors are the caller's (the render layer owns the palette).
+ * @param view - the web result view from presentResult.
+ * @returns the display lines; empty when the view carries nothing to show.
+ */
+export function webCardLines(view: WebSearchResultView | WebFetchResultView): string[] {
+  if (view.kind === 'search') {
+    const lines: string[] = []
+    if (view.answer !== undefined && view.answer !== '') lines.push(view.answer)
+    for (const source of view.sources) {
+      const head = source.title === undefined || source.title === ''
+        ? source.url
+        : `${source.title} — ${source.url}`
+      lines.push(`• ${head}`)
+      if (source.snippet !== undefined && source.snippet !== '') lines.push(`  ${source.snippet}`)
+    }
+    if (view.truncated) lines.push('… truncated — more sources omitted')
+    return lines
+  }
+  const lines = [`${view.url} — HTTP ${view.statusCode}`]
+  if (view.truncated) lines.push('… truncated — content capped')
+  return lines
+}
+
+/**
+ * Render a generic card's rawInput as display lines, structured per tool
+ * where the payload has a natural one-line shape (web TodoRow parity for
+ * `todo_write`, a session/terminal target line for the rest). Unknown
+ * object payloads fall back to pretty JSON — the same fallback the Web's
+ * generic body uses. A string rawInput renders verbatim.
+ * @param name - the tool name.
+ * @param rawInput - the presenter's salient raw input.
+ * @returns the display lines.
+ */
+export function genericRawInputLines(name: string, rawInput: unknown): string[] {
+  if (typeof rawInput === 'string') return rawInput === '' ? [] : [rawInput]
+  if (typeof rawInput !== 'object' || rawInput === null) {
+    return rawInput === undefined ? [] : [String(rawInput)]
+  }
+  const args = rawInput as Record<string, unknown>
+  if (name === 'todo_write') {
+    const todos = args.todos
+    if (Array.isArray(todos)) {
+      const lines: string[] = []
+      for (const todo of todos) {
+        if (typeof todo !== 'object' || todo === null) continue
+        const item = todo as Record<string, unknown>
+        const content = typeof item.content === 'string' ? item.content : String(item.content ?? '')
+        const mark = item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '●' : '○'
+        lines.push(`${mark} ${content}`)
+      }
+      return lines
+    }
+  }
+  if ((name === 'terminal_read' || name === 'terminal_signal' || name === 'terminal_send') && typeof args.sessionId === 'string') {
+    const line = `session ${args.sessionId}`
+    return name === 'terminal_send' && typeof args.text === 'string' ? [`${line}: ${args.text}`] : [line]
+  }
+  if (
+    (name === 'session_event_trace' || name === 'session_event_read' || name === 'session_trace')
+    && (args.seq !== undefined || args.session_id !== undefined)
+  ) {
+    const parts: string[] = []
+    if (args.session_id !== undefined) parts.push(String(args.session_id))
+    if (args.seq !== undefined) parts.push(`seq ${String(args.seq)}`)
+    return [parts.join(' · ')]
+  }
+  return JSON.stringify(rawInput, null, 2).split('\n')
+}
+
+/**
+ * Flatten a settled result's content blocks to display lines, with the Web's
+ * `resultText` semantics: text blocks verbatim, other block shapes as pretty
+ * JSON. Empty content on a failed call falls back to the structured error's
+ * `name: code` line (the Web's error summary).
+ * @param blocks - the result content blocks.
+ * @param error - the structured error, when the call failed.
+ * @returns the display lines (may be empty).
+ */
+export function resultTextLines(blocks: readonly ContentBlock[], error?: { name: string; code: string }): string[] {
+  const lines: string[] = []
+  for (const block of blocks) {
+    if (block.type === 'text') lines.push(...block.text.split('\n'))
+    else lines.push(JSON.stringify(block, null, 2))
+  }
+  if (lines.length === 0 && error !== undefined) lines.push(`${error.name}: ${error.code}`)
+  return lines
+}
+
+/**
+ * The folded-card call preview for tools whose args carry a one-line
+ * identity (Web TodoRow/WebRow folded parity): `todo_write` summarizes
+ * `done/total` plus the first active item, `web_search`/`web_fetch` show
+ * the query/URL. Empty for every other tool (their folded row keeps the
+ * header + result preview).
+ * @param name - the tool name.
+ * @param argsRaw - the raw arguments JSON.
+ * @returns the preview line, or '' when the tool has none.
+ */
+export function foldedCallPreview(name: string, argsRaw: string): string {
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null) return ''
+  const args = parsed as Record<string, unknown>
+  if (name === 'todo_write') {
+    // The header already carries the tool-specific count; the folded row
+    // only repeats it when the header lacks one (defensive: same derivation).
+    const summary = summarizeToolArgs(name, argsRaw)
+    return summary === undefined ? '' : ` — ${summary}`
+  }
+  if (name === 'web_search') {
+    const query = args.query
+    return typeof query === 'string' && query !== '' ? ` — ${firstLine(query)}` : ''
+  }
+  if (name === 'web_fetch') {
+    const url = args.url
+    return typeof url === 'string' && url !== '' ? ` — ${firstLine(url)}` : ''
+  }
+  if (name === 'skill') {
+    const skill = args.name
+    return typeof skill === 'string' && skill !== '' ? ` — ${firstLine(skill)}` : ''
+  }
+  return ''
 }
 
 /**
