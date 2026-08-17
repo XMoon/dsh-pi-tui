@@ -62,8 +62,12 @@ import {
   parseReadEnvelopes,
   readFoldedPreview,
   relativizeToCwd,
+  foldedCallPreview,
+  genericRawInputLines,
+  resultTextLines,
   toolCardHeader,
   toolEmoji,
+  webCardLines,
   type ToolPresenter,
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
@@ -2061,13 +2065,23 @@ export class TuiApp {
       // truncates to the terminal width, so a folded block never wraps.
       const rows: string[] = []
       const callPreview = parseCallPreview(message.name, message.args)
+      // The header already carries friendly summaries (todo counts, web
+      // query/url via SUMMARY_KEYS, skill name via the first string arg),
+      // so the folded preview only adds a tool identity when the header
+      // summary is empty (e.g. an arg shape the generic derivation cannot
+      // read). Web/skill/todo never need it — their headers are friendly.
+      const foldedCall = header.summary === '' ? foldedCallPreview(message.name, message.args) : ''
       const resultPreview = message.name === 'read'
         ? readFoldedPreview(message.result)
         : message.result === ''
           ? ''
           : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
+      const callHead = foldedCall === '' ? '' : foldedCall
+      const headWithPreview = `${head}${callHead}${resultPreview}`
       if (callPreview?.kind === 'bash' && callPreview.command !== '') {
-        rows.push(truncateToWidth(head, this.terminal.columns, '…'))
+        // The command row owns the result preview's separate line (kimi
+        // ShellExecution layout), so the head row carries no result text.
+        rows.push(truncateToWidth(`${head}${callHead}`, this.terminal.columns, '…'))
         const commandLines = callPreview.command.split('\n')
         const shown = commandLines.slice(0, FOLDED_COMMAND_LINES)
         const prompt = color.shellMode('$ ')
@@ -2086,7 +2100,7 @@ export class TuiApp {
           rows.push(color.textDim(`  ${resultPreview}`))
         }
       } else if (callPreview?.kind === 'diff' && callPreview.diffs.length > 0) {
-        rows.push(truncateToWidth(`${head}${resultPreview}`, this.terminal.columns, '…'))
+        rows.push(truncateToWidth(`${headWithPreview}`, this.terminal.columns, '…'))
         for (const line of renderDiffView(callPreview.diffs, this.workspaceRoot, {
           maxLines: FOLDED_DIFF_LINES,
           expandHint: 'ctrl+o to expand',
@@ -2094,7 +2108,7 @@ export class TuiApp {
           rows.push(`  ${line}`)
         }
       } else {
-        rows.push(truncateToWidth(`${head}${resultPreview}`, this.terminal.columns, '…'))
+        rows.push(truncateToWidth(headWithPreview, this.terminal.columns, '…'))
       }
       card.addChild(new Text(rows.join('\n'), 0, 0))
     }
@@ -2199,12 +2213,21 @@ export class TuiApp {
           this.addTerminalCommandRow(card, callView.title, this.shellPrompt(message.name))
           return
         }
-        if (callView.card === 'generic' && callView.rawInput !== undefined) {
+        if (callView.card === 'generic' && (callView.rawInput !== undefined || (callView.content?.length ?? 0) > 0)) {
           // Keep the command row above the presenter's raw input (a no-op
           // for non-terminal tools, so generic cards are unchanged).
           this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
-          const raw = typeof callView.rawInput === 'string' ? callView.rawInput : JSON.stringify(callView.rawInput, null, 2)
-          card.addChild(new Text(color.textDim(raw), 0, 0))
+          if (callView.rawInput !== undefined) {
+            for (const line of genericRawInputLines(message.name, callView.rawInput)) {
+              card.addChild(new Text(color.textDim(line), 0, 0))
+            }
+          }
+          // UI-facing content blocks (plan/exit_plan_mode carry the plan
+          // body here): text blocks render verbatim, others as pretty JSON.
+          for (const block of callView.content ?? []) {
+            if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
+            else card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+          }
           return
         }
       }
@@ -2273,6 +2296,27 @@ export class TuiApp {
           this.renderDiffBody(card, resultView.diffs, explicitlyExpanded)
           return
         }
+        case 'web': {
+          // Web WebBlock parity: the structured retrieval (search sources /
+          // fetch URL + status) replaces the raw result text.
+          for (const line of webCardLines(resultView)) {
+            card.addChild(new Text(color.textDim(line), 0, 0))
+          }
+          return
+        }
+        case 'generic': {
+          // A generic result view with UI-facing content (plan review) shows
+          // that content instead of the raw model-facing result text.
+          const content = resultView.content ?? []
+          if (content.length > 0) {
+            for (const block of content) {
+              if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
+              else card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+            }
+            return
+          }
+          break
+        }
         default:
           break
       }
@@ -2326,7 +2370,16 @@ export class TuiApp {
       // Bash/pwsh keep the `$ command` row above the raw output even
       // without a presenter (the folded card's preview source).
       this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
-      card.addChild(new Text(color.textDim(message.result), 0, 0))
+      // With result blocks available, render with the Web's resultText
+      // semantics (text verbatim, non-text as pretty JSON); otherwise the
+      // joined text is the only material.
+      const blocks = message.resultBlocks ?? []
+      const lines = blocks.length > 0
+        ? resultTextLines(blocks, message.status === 'error' ? { name: 'error', code: 'tool' } : undefined)
+        : [message.result]
+      for (const line of lines) {
+        card.addChild(new Text(color.textDim(line), 0, 0))
+      }
     }
   }
 

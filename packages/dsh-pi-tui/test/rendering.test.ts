@@ -8,7 +8,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
-import { parseReadEnvelopes, toolPresenterFrom } from '../src/present.ts'
+import {
+  foldedCallPreview, genericRawInputLines, parseReadEnvelopes, resultTextLines, toolPresenterFrom, webCardLines,
+} from '../src/present.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { TuiApp, BulletedComponent } from '../src/tui-app.ts'
 import { WorkingIndicator } from '../src/working.ts'
@@ -2097,12 +2099,220 @@ test('an aborted signal settles the question flow as cancelled', async () => {
   void vt
 })
 
-test('ask_user_question cards carry the Question identity instead of Tool call', async () => {
+test('ask_user_question cards carry the Question identity and a friendly summary', async () => {
   const { vt, app } = startApp()
   app.setTranscript([
     { kind: 'tool', turn: 0, name: 'ask_user_question', args: '{"questions":[{"id":"q","question":"Go?"}]}', result: '', status: 'running' },
   ])
   const view = await viewport(vt)
   assert.ok(view.includes('❓  Question'), `question card missing:\n${view}`)
+  assert.ok(view.includes('Go?'), `question text summary missing:\n${view}`)
   assert.ok(!view.includes('Tool call'), `generic card leaked:\n${view}`)
+  assert.ok(!view.includes('"questions"'), `raw args JSON leaked into the summary:\n${view}`)
+})
+
+test('web search result views render sources and the answer (WebBlock parity)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'web', kind: 'search', truncated: true,
+        answer: 'The harness renders cards.',
+        sources: [
+          { url: 'https://example.com/a', title: 'Card docs', snippet: 'How cards render.' },
+          { url: 'https://example.com/b' },
+        ],
+      }),
+    },
+  })
+  app.start()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'web_search',
+    args: '{"query":"dsh cards"}',
+    result: 'raw model-facing text must not appear',
+    status: 'ok',
+    resultBlocks: [{ type: 'text', text: 'raw model-facing text must not appear' }],
+  }])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('The harness renders cards.'), `answer missing:\n${view}`)
+  assert.ok(view.includes('• Card docs — https://example.com/a'), `source title-url missing:\n${view}`)
+  assert.ok(view.includes('  How cards render.'), `source snippet missing:\n${view}`)
+  assert.ok(view.includes('• https://example.com/b'), `untitled source missing:\n${view}`)
+  assert.ok(view.includes('… truncated — more sources omitted'), `truncation marker missing:\n${view}`)
+  assert.ok(!view.includes('raw model-facing text'), `raw result leaked:\n${view}`)
+  app.stop()
+})
+
+test('web fetch result views render the URL and HTTP status', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({ card: 'web', kind: 'fetch', url: 'https://example.com/page', statusCode: 200, truncated: false }),
+    },
+  })
+  app.start()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'web_fetch',
+    args: '{"url":"https://example.com/page"}',
+    result: 'raw body', status: 'ok', resultBlocks: [{ type: 'text', text: 'raw body' }],
+  }])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('https://example.com/page — HTTP 200'), `fetch summary missing:\n${view}`)
+  assert.ok(!view.includes('raw body'), `raw body leaked:\n${view}`)
+  app.stop()
+})
+
+test('todo_write rawInput renders as a checklist instead of pretty JSON', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'generic', title: 'Update todo list', kind: 'other', rawInput: {
+        todos: [
+          { content: 'fix tests', status: 'in_progress' },
+          { content: 'ship it', status: 'pending' },
+          { content: 'done thing', status: 'completed' },
+        ],
+      } }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'todo_write',
+    args: JSON.stringify({ todos: [
+      { content: 'fix tests', status: 'in_progress' },
+      { content: 'ship it', status: 'pending' },
+      { content: 'done thing', status: 'completed' },
+    ] }),
+    result: '', status: 'running',
+  }])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('● fix tests'), `active item missing:\n${view}`)
+  assert.ok(view.includes('○ ship it'), `pending item missing:\n${view}`)
+  assert.ok(view.includes('✓ done thing'), `completed item missing:\n${view}`)
+  assert.ok(!view.includes('"todos"'), `raw JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('exit_plan_mode renders its content plan body while running', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'generic', title: 'The Plan', kind: 'other',
+        content: [{ type: 'text', text: '# The Plan\nStep one.\nStep two.' }],
+      }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: JSON.stringify({ plan: '# The Plan\nStep one.\nStep two.' }),
+    result: '', status: 'running',
+  }])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('Step one.'), `plan body missing:\n${view}`)
+  assert.ok(view.includes('Step two.'), `plan body truncated:\n${view}`)
+  assert.ok(!view.includes('"plan"'), `raw JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('generic result content renders instead of the raw model-facing text', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({ card: 'generic', title: 'Plan review', content: [{ type: 'text', text: 'The plan was approved.' }] }),
+    },
+  })
+  app.start()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: '{"plan":"x"}', result: 'raw plan review', status: 'ok',
+    resultBlocks: [{ type: 'text', text: 'raw plan review' }],
+  }])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('The plan was approved.'), `generic result content missing:\n${view}`)
+  assert.ok(!view.includes('raw plan review'), `raw result text leaked:\n${view}`)
+  app.stop()
+})
+
+test('folded todo cards preview done/total counts', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'todo_write',
+    args: JSON.stringify({ todos: [
+      { content: 'one', status: 'completed' },
+      { content: 'two', status: 'completed' },
+      { content: 'three', status: 'pending' },
+    ] }),
+    result: '', status: 'ok',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('2/3 done'), `folded todo count missing:\n${view}`)
+  assert.ok(view.includes('three'), `first active item missing:\n${view}`)
+})
+
+test('folded web cards preview the query/url without repeating the header', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'web_search', args: '{"query":"dsh cards"}', result: 'x', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'web_fetch', args: '{"url":"https://example.com/p"}', result: 'x', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  // The header summary already carries the query/url (SUMMARY_KEYS), so the
+  // folded row shows it once — never duplicated by a preview suffix.
+  assert.ok(view.includes('Search dsh cards'), `folded web_search query missing:\n${view}`)
+  assert.ok(view.includes('https://example.com/p'), `folded web_fetch url missing:\n${view}`)
+  const searchRow = view.split('\n').find(line => line.includes('dsh cards'))
+  assert.ok(searchRow !== undefined && !searchRow.includes('— dsh cards'), `query duplicated on the folded row:\n${view}`)
+})
+
+test('webCardLines pure helper renders both search and fetch shapes', () => {
+  assert.deepEqual(webCardLines({
+    card: 'web', kind: 'search', truncated: true, answer: 'A.',
+    sources: [{ url: 'https://e.com', title: 'T', snippet: 'S.' }],
+  }), ['A.', '• T — https://e.com', '  S.', '… truncated — more sources omitted'])
+  assert.deepEqual(webCardLines({
+    card: 'web', kind: 'fetch', url: 'https://e.com', statusCode: 404, truncated: false,
+  }), ['https://e.com — HTTP 404'])
+})
+
+test('genericRawInputLines structures todo/session/terminal payloads', () => {
+  assert.deepEqual(genericRawInputLines('todo_write', {
+    todos: [
+      { content: 'a', status: 'in_progress' },
+      { content: 'b', status: 'completed' },
+    ],
+  }), ['● a', '✓ b'])
+  assert.deepEqual(genericRawInputLines('session_event_read', { seq: 7, session_id: 's1' }), ['s1 · seq 7'])
+  assert.deepEqual(genericRawInputLines('terminal_send', { sessionId: 'main', text: 'go' }), ['session main: go'])
+  assert.deepEqual(genericRawInputLines('unknown_tool', { a: 1 }), ['{', '  "a": 1', '}'])
+  assert.deepEqual(genericRawInputLines('skill', 'my-skill'), ['my-skill'])
+})
+
+test('foldedCallPreview pure helper derives todo/web/skill previews', () => {
+  assert.equal(foldedCallPreview('todo_write', JSON.stringify({ todos: [
+    { content: 'one', status: 'completed' },
+    { content: 'two', status: 'pending' },
+  ] })), ' — 1/2 done · two')
+  assert.equal(foldedCallPreview('web_search', '{"query":"dsh"}'), ' — dsh')
+  assert.equal(foldedCallPreview('web_fetch', '{"url":"https://e.com"}'), ' — https://e.com')
+  assert.equal(foldedCallPreview('skill', '{"name":"reclaim"}'), ' — reclaim')
+  assert.equal(foldedCallPreview('bash', '{"command":"ls"}'), '')
+})
+
+test('resultTextLines flattens blocks with the Web resultText semantics', () => {
+  assert.deepEqual(resultTextLines([{ type: 'text', text: 'one\ntwo' }]), ['one', 'two'])
+  assert.deepEqual(resultTextLines([{ type: 'reasoning', text: 'think' }]), ['{\n  "type": "reasoning",\n  "text": "think"\n}'])
+  assert.deepEqual(resultTextLines([], { name: 'Error', code: 'E_BAD' }), ['Error: E_BAD'])
+  assert.deepEqual(resultTextLines([]), [])
 })
