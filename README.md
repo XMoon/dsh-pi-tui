@@ -15,20 +15,12 @@ Run `dsh --profile pi-tui` for a terminal UI instead of the browser GUI (`dsh --
 
 ## Layout
 
-```
-packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork, rescoped to @xmoon76/pi-tui.
-                    The exact upstream version and commit live in ONE place:
-                    packages/pi-tui/package.json `repository.note` (kept in
-                    sync on every re-vendor). The local divergence fixes and
-                    their guarding tests are listed in packages/pi-tui/AGENTS.md;
-                    native/ prebuilds are deliberately not vendored (graceful
-                    fallback).
-packages/dsh-pi-tui/   The dsh bundle: @xmoon76/dsh-pi-tui (the only published
-                    package). cordis.patch.yml inserts the startup row
-                    (dsh --profile pi-tui flags) and the runner row (TUI glue).
-                    tsdown bundles the pi-tui fork into dist/, so the tarball
-                    is self-contained.
-```
+The full repository layout lives in [AGENTS.md](AGENTS.md) (the contributor
+operating manual). In one line: `packages/pi-tui/` is the vendored
+`@moonshot-ai/pi-tui` fork (rescoped to `@xmoon76/pi-tui`, private, never
+published — its divergence ledger lives in `packages/pi-tui/AGENTS.md`), and
+`packages/dsh-pi-tui/` is the dsh bundle (`@xmoon76/dsh-pi-tui`, the only
+published package) that bundles the fork into its build output.
 
 ## Prerequisites
 

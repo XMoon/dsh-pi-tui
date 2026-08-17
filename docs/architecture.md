@@ -1,5 +1,14 @@
 # Architecture: controller ownership
 
+> **Status: PLAN — no extraction has happened yet.** The "Target controllers"
+> below are a design for future commits, not a record of completed work: as of
+> 2026-08-17 no `RunnerLifecycle`/`SessionController`/`InputDispatcher`/
+> `OverlayController`/`CommandRegistry`/`StatusController` class exists in
+> `src/` (verified by grep), and both `src/tui-app.ts` (~3.2k lines) and
+> `src/index.ts` (~3.0k lines) keep growing. Mark an item DONE here in the
+> same commit that extracts it; until then treat the table below as the
+> extraction order, not the current state.
+
 The behavior work is complete; this document records the OWNERSHIP map for
 the large modules so future extractions follow it one responsibility at a
 time — each move in its own commit, no "god Context" with dozens of mutable

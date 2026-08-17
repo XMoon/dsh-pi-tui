@@ -9,7 +9,7 @@
  * @module naming-gate
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -91,6 +91,48 @@ for (const workflow of ['ci.yml', 'release.yml']) {
   const text = readFileSync(path, 'utf8')
   check(`workflow ${workflow} uses unscoped tarball globs`,
     !text.includes('@xmoon76-dsh-pi-tui-*.tgz') && text.includes('xmoon76-dsh-pi-tui-*.tgz'))
+}
+
+// 8. The bundle's dsh dependency contract is declared in ONE place and the
+//    gate enforces it against the actual source (AGENTS.md rule 7): every
+//    `@deepseek-ai/*` package imported by `src/` (value OR type) must be a
+//    peerDependency, and every peerDependency must be imported by `src/`.
+//    A peer that only appears in a comment or a test is not a runtime
+//    contract; an import with no peer breaks the in-box resolution rule and
+//    can duplicate `@deepseek-ai` copies in the profile (first tool call
+//    crashes). `dsh-session-query` was removed by this rule: the picker
+//    types it structurally (src/sessions.ts) and reads the service off the
+//    live context, so it never needed the package.
+const bundleSrc = join(ROOT, 'packages', 'dsh-pi-tui', 'src')
+const srcFiles = (() => {
+  const out = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) out.push(path)
+    }
+  }
+  walk(bundleSrc)
+  return out
+})()
+const srcImports = new Set()
+for (const file of srcFiles) {
+  const text = readFileSync(file, 'utf8')
+  for (const match of text.matchAll(/from\s+['"]@deepseek-ai\/([^'"\/]+)/g)) {
+    srcImports.add(`@deepseek-ai/${match[1]}`)
+  }
+  // Runtime service access via ctx.get('name') must stay structural: a
+  // package that is ONLY read this way (never imported) has no place in
+  // the peer list — same rule as dsh-session-query.
+}
+const peers = new Set(Object.keys(bundlePkg.peerDependencies ?? {}))
+for (const imported of [...srcImports].sort()) {
+  check(`peer declared for src import ${imported}`, peers.has(imported), peers.has(imported) ? '' : 'missing from peerDependencies')
+}
+for (const peer of [...peers].sort()) {
+  if (!peer.startsWith('@deepseek-ai/')) continue // chalk etc. are regular deps
+  check(`peer ${peer} is imported by src/`, srcImports.has(peer), srcImports.has(peer) ? '' : 'no import in src/ (dead peer)')
 }
 
 for (const line of checks) console.log(line)

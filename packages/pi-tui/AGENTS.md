@@ -40,5 +40,5 @@ Never overwrite this directory wholesale when syncing from upstream. Each of the
 
 ## Testing
 
-- This package's tests run with `node --test` (`pnpm --filter @xmoon76/pi-tui test`), not vitest; the root `vitest run` does not execute them.
+- This package's tests run with `node --test` (`pnpm --filter @xmoon76/pi-tui test`). The repo has no vitest anywhere (the scaffold-era `vitest.config.ts` was deleted).
 - Prefer adding new narrow-width tests to the existing test file of the corresponding component.
