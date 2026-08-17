@@ -157,6 +157,13 @@ export async function readSurfaceCatalog(
         signal,
       })
       skills = catalog.skills
+      // An INCOMPLETE live observation is never authoritative (plan
+      // §10.2): it carries a detached skills issue, so the install side
+      // (mergePartial / installSurfaceSnapshot) keeps the last-good
+      // skills instead of replacing them with a partial catalog.
+      if (catalog.complete !== true) {
+        issues.push({ provider: 'skills', message: 'incomplete skill observation' })
+      }
     } catch (error) {
       // Cancellation is a lifecycle signal, not a provider failure: the
       // whole read must propagate it, never degrade it into an issue.

@@ -2415,10 +2415,14 @@ export function apply(ctx: Context, config: Config): void {
         diag,
         sessionId: () => liveAgent?.session.id,
         onResult: (outcome) => {
-          skillsChangeGate.settled()
+          // NOTIFY BEFORE settled(): if app.notify throws, runOwned routes
+          // to onError, whose settled() is then the ONLY settle — a dirty
+          // follow-up cannot be double-settled (a second settle would clear
+          // the follow-up's in-flight flag while it is still running).
           if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
             app.notify(outcome.notice, 'error')
           }
+          skillsChangeGate.settled()
         },
         onCancel: () => { skillsChangeGate.settled() },
         onError: (error) => {

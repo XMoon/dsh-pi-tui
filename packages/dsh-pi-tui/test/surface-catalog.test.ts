@@ -35,7 +35,10 @@ function fakeSkills(list: (options: SkillViewOptions) => Promise<readonly SkillS
 /** Build a context surface from scripted services. */
 function contextOf(options: {
   commands?: { list: (agent: Agent) => readonly CommandDescriptor[] }
-  skills?: { list: (options: SkillViewOptions) => Promise<readonly SkillSummary[]> }
+  skills?: {
+    list?: (options: SkillViewOptions) => Promise<readonly SkillSummary[]>
+    snapshot?: (options: SkillViewOptions) => Promise<{ skills: readonly SkillSummary[]; complete: boolean }>
+  }
   agentPresets?: { serviceFor: (agent: { ctx: unknown }, name: 'skills') => unknown }
 }): SurfaceCatalogContext {
   return {
@@ -198,6 +201,23 @@ test('an ordinary commands failure empties commands with a detached issue while 
   assert.deepEqual(snapshot.scopedCommands, [])
   assert.deepEqual(snapshot.skills.map(item => item.name), ['ok'])
   assert.equal(snapshot.issues[0]?.provider, 'commands')
+})
+
+test('an incomplete LIVE observation carries a detached skills issue (never authoritative)', async () => {
+  const ctx = contextOf({
+    commands: { list: () => [] },
+    skills: {
+      snapshot: async () => ({
+        complete: false,
+        skills: [skill('partial', { modelInvocable: true, userInvocable: true })],
+      }),
+    },
+  })
+  const snapshot = await readSurfaceCatalog(fakeAgent(), new AbortController().signal, ctx)
+  assert.deepEqual(snapshot.skills.map(item => item.name), ['partial'])
+  assert.equal(snapshot.issues.length, 1)
+  assert.equal(snapshot.issues[0]?.provider, 'skills')
+  assert.match(snapshot.issues[0]?.message ?? '', /incomplete skill observation/)
 })
 
 test('cancellation propagates out of the whole read, never degrading into an issue', async () => {
