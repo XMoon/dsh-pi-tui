@@ -13,7 +13,7 @@
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { spawn } from 'node:child_process'
-import { readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -22,7 +22,7 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { CallId } from '@deepseek-ai/dsh-llm'
+import type { CallId, ContentBlock } from '@deepseek-ai/dsh-llm'
 // P7d: the subagent registry merge for ctx.subagents (listChildren/interrupt).
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { SubagentListEntry } from '@deepseek-ai/dsh-subagent'
@@ -76,12 +76,13 @@ import { textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
-import { startProcessTui, type TuiApp } from './tui-app.ts'
+import { startProcessTui, type QueueItem, type TuiApp } from './tui-app.ts'
 import { buildTaskRows, describeTaskRow, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
 import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
-import { diagFromEnv, type Diag } from './diag.ts'
+import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
+import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
@@ -324,6 +325,122 @@ export function subagentJobViewHint(status: string, detail: string | undefined):
     'run would be indistinguishable). Open /subagents and pick the child by',
     'its label to read the transcript.',
   ].join('\n')
+}
+
+/** The message-source projection the queue filter reads (a structural subset
+ * of dsh's message sources, so the helpers are testable without dsh types). */
+export interface QueueNoticeSource {
+  readonly form?: string
+  readonly kind?: string
+  readonly summary?: string
+}
+
+/**
+ * Whether a plain submitted draft is the quit word: exactly `exit` (trimmed,
+ * lowercase). The runner intercepts this BEFORE any session creation or
+ * submission (shell muscle memory); anything else — `exit!`, `Exit`, or a
+ * draft with a recalled entry still in it — is an ordinary message.
+ * @param text - the submitted draft.
+ */
+export function isPlainExitPrompt(text: string): boolean {
+  return text.trim() === 'exit'
+}
+
+/**
+ * Whether an inbox message is a BACKGROUND-SUBAGENT settlement notice — the
+ * runtime's account of a child ending, not steerable user input. Two dsh
+ * producers push these into the parent's inbox:
+ *  - continuable children: `source.kind === 'subagent-settled'` (the
+ *    continuation manager's settlement notice);
+ *  - one-shot background subagent jobs: tool-jobs completion notices whose
+ *    summary starts with the job kind (`subagent <label> [status: …]`).
+ * The queue pane mirrors the inbox, but these belong to the task browser
+ * (terminal job rows / inactive child rows), so the mirror drops them and
+ * only failures surface as a transient error notify.
+ * @param source - the message source projection, or undefined for a plain row.
+ */
+export function isSubagentSettlementNotice(source: QueueNoticeSource | undefined): boolean {
+  if (source === undefined || source.form !== 'notice') return false
+  if (source.kind === 'subagent-settled') return true
+  return source.kind === 'plugin' && typeof source.summary === 'string' && source.summary.startsWith('subagent ')
+}
+
+/**
+ * Whether a subagent settlement notice reports FAILURE, classified on the
+ * producers' own deterministic wording:
+ *  - `subagent-settled` summaries: "finished and will do no further work"
+ *    is the only success wording; aborted / max-tokens / refusal / error /
+ *    unknown endings all fail;
+ *  - tool-jobs subagent summaries carry the terminal status line, whose
+ *    failure statuses are `failed` and `killed` (dsh JobStatus).
+ * A notice that cannot be classified is treated as success (silent).
+ * @param source - the message source projection.
+ */
+export function subagentNoticeIsFailure(source: QueueNoticeSource | undefined): boolean {
+  if (source === undefined || source.form !== 'notice') return false
+  if (source.kind === 'subagent-settled') {
+    return typeof source.summary === 'string' && !source.summary.includes('finished and')
+  }
+  if (source.kind === 'plugin' && typeof source.summary === 'string' && source.summary.startsWith('subagent ')) {
+    return /\[status: (failed|killed)[,\]]/.test(source.summary)
+  }
+  return false
+}
+
+/** One inbox message as the queue mirror sees it (a structural projection). */
+export interface QueueInboxMessage {
+  readonly id: string
+  readonly content: readonly ContentBlock[]
+  readonly source?: QueueNoticeSource
+}
+
+/** The mirror result for one inbox batch: the rows to show plus the failed
+ * settlement summaries the caller should notify (each once). */
+export interface QueueFoldResult {
+  /** Queue rows (background-subagent settlement notices excluded). */
+  readonly rows: QueueItem[]
+  /** Failed settlement summaries not yet notified (the caller notifies). */
+  readonly failures: readonly string[]
+}
+
+/**
+ * Build the queue-pane rows for one inbox batch, dropping background-subagent
+ * settlement notices (the task browser is their surface) and reporting which
+ * FAILED settlements should notify. Pure and injectable so the filter +
+ * once-notify semantics are testable without the agent.
+ * @param messages - one inbox batch (next-turn or next-step), in order.
+ * @param mode - the delivery mode for surviving rows.
+ * @param notified - the notify-once guard; failed notices already in it are
+ *   skipped, and a newly-reported id is ADDED here so a re-render can never
+ *   double-notify.
+ */
+export function foldQueueRows(
+  messages: readonly QueueInboxMessage[],
+  mode: 'followup' | 'steer',
+  notified: Set<string>,
+): QueueFoldResult {
+  const rows: QueueItem[] = []
+  const failures: string[] = []
+  for (const message of messages) {
+    const source = message.source
+    if (isSubagentSettlementNotice(source)) {
+      if (source?.summary !== undefined && subagentNoticeIsFailure(source) && !notified.has(message.id)) {
+        notified.add(message.id)
+        failures.push(source.summary)
+      }
+      continue
+    }
+    rows.push({
+      id: message.id,
+      text: textOf(message.content),
+      mode,
+      // Plugin notices (background-job completions, plan-mode toasts) are
+      // NOT steerable user input: the queue pane marks them and drops the
+      // steer hints (see QueueItem.notice).
+      notice: source?.form === 'notice',
+    })
+  }
+  return { rows, failures }
 }
 
 /**
@@ -1731,6 +1848,12 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
     /**
+     * The newest input-history entry this process persisted (kimi's
+     * `lastHistoryContent` analogue): consecutive repeats are skipped per
+     * window, exactly like shell history.
+     */
+    let lastHistoryContent: string | undefined
+    /**
      * Dispatch one user submission end to end: the viewer guard, the input-
      * history persistence, `!` local shells, sessionless commands, the
      * busy-Enter preference, and the session dispatch. The Ctrl+Enter
@@ -1740,6 +1863,14 @@ export function apply(ctx: Context, config: Config): void {
      * @param forceQueue - the chord: never steer, queue instead.
      */
     const dispatchUserInput = (text: string, forceQueue = false): void => {
+      // Plain `exit` quits (shell muscle memory): the exact trimmed word
+      // intercepts BEFORE any session creation or submission, so typing
+      // `exit` with a deferred start never births a session. `/exit` remains
+      // the command form; any other prompt still goes to the model.
+      if (isPlainExitPrompt(text)) {
+        requestExit()
+        return
+      }
       // The subagent viewer is READ-ONLY: submitting while viewing would
       // silently send to the PARENT session. Refuse with a notice instead.
       if (viewing !== undefined) {
@@ -1752,20 +1883,23 @@ export function apply(ctx: Context, config: Config): void {
       // (context runs) or the next input takes over. Running cards survive
       // so a live stream is never dismissed by a concurrent submit.
       app.clearSettledLocalMessages()
-      // Persist the (newest-first) input history for the LIVE session's
-      // cwd (the editor already recorded the line through TuiApp's submit
-      // hook). A failed settings write is user-recoverable: notify instead
-      // of dropping it.
-      const history = app.getInputHistory()
-      if (history.length > 0) {
-        const settings = tuiSettings
-        if (settings !== undefined) {
-          runDetached('settings history write', () => settings.replace({ ...settings.get(), history: { ...settings.get().history, [sessionCwd()]: history } }), {
-            diag,
-            notify: (message) => app.notify(message, 'error'),
-            recoverable: () => true,
-          })
-        }
+      // Persist the submitted line to the LIVE session's cwd input-history
+      // file (kimi-style JSONL under $DSH_HOME/user-history — never the
+      // settings document). Consecutive repeats are skipped like shell
+      // history; a failed write is user-recoverable: notify instead of
+      // dropping it. `!` shell lines persist verbatim so ↑ recall re-runs
+      // the shell branch.
+      const trimmed = text.trim()
+      if (trimmed !== '' && trimmed !== lastHistoryContent) {
+        const file = historyFilePath(dshHome(process.env), sessionCwd())
+        runDetached('input history write', () => {
+          appendHistoryLine(file, trimmed, lastHistoryContent)
+          lastHistoryContent = trimmed
+        }, {
+          diag,
+          notify: (message) => app.notify(message, 'error'),
+          recoverable: () => true,
+        })
       }
       // `!` runs the command and submits the completed command+output to
       // the session (kimi parity); `!!` runs purely locally with no session
@@ -2042,8 +2176,7 @@ export function apply(ctx: Context, config: Config): void {
       workspaceRoot: cwd,
     })
     // Persisted TUI preferences: register the namespace and restore the
-    // theme + footer preset. `history` holds per-cwd input history for ↑/↓
-    // recall across restarts. Theme values: auto | dark | light | custom:<name>.
+    // theme + footer preset. Theme values: auto | dark | light | custom:<name>.
     const tuiSettings = ctx.get('settings')?.register(
       settingsNamespace('dsh-pi-tui'),
       z.object({
@@ -2053,9 +2186,12 @@ export function apply(ctx: Context, config: Config): void {
         // Busy-Enter delivery mode for plain Enter while the agent is
         // running (web busyEnter parity): 'queue' (default) or 'steer'.
         busyEnter: z.string(),
-        history: z.dict(z.array(z.string())),
       }),
-      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue', history: {} } },
+      // `history` used to live here (a per-cwd map in the settings
+      // document). It moved to $DSH_HOME/user-history/*.jsonl (see
+      // history.ts); the schema deliberately no longer carries it, so the
+      // stored section drops the key on the next settings write.
+      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue' } },
     )
     // Fullscreen is a persisted preference like the theme and the footer
     // (new installs default to 'on' — alt screen by default): boot applies
@@ -2090,9 +2226,73 @@ export function apply(ctx: Context, config: Config): void {
     }
     const storedFooter = tuiSettings?.get().footer
     if (storedFooter === 'compact') app.setFooterPreset('compact')
+    // One-time migration: per-cwd input history used to live inside this
+    // settings namespace. Move it to the JSONL history files (oldest-first
+    // file order; the stored arrays are newest-first) and drop the stale
+    // key from the stored section (the cleanup below deletes it explicitly —
+    // schemastery's z.object does NOT strip unknown keys, so a spread of the
+    // resolved doc would otherwise write the key right back).
+    let legacyHistory: Record<string, readonly string[]> | undefined
+    try {
+      const descriptor = ctx.get('settings')?.describe()
+        .find(d => d.ns === settingsNamespace('dsh-pi-tui'))
+      const user = descriptor?.user as Record<string, unknown> | undefined
+      const value = user?.history
+      if (typeof value === 'object' && value !== null) {
+        legacyHistory = value as Record<string, readonly string[]>
+      }
+    } catch {
+      // Best-effort; an unreadable settings document skips migration.
+    }
+    if (legacyHistory !== undefined) {
+      const home = dshHome(process.env)
+      for (const [cwd, entries] of Object.entries(legacyHistory)) {
+        if (!Array.isArray(entries) || entries.length === 0) continue
+        const file = historyFilePath(home, cwd)
+        // Idempotency: an existing file means this cwd was already migrated
+        // (a crash mid-migration leaves the file in place and the settings
+        // key intact, so the next boot resumes from the unwritten cwds and
+        // only deletes the key once every file exists).
+        if (existsSync(file)) continue
+        for (const entry of entries.slice().reverse()) {
+          try { appendHistoryLine(file, entry, undefined) } catch { /* best effort */ }
+        }
+      }
+      if (tuiSettings !== undefined) {
+        // Only drop the stale key once every legacy cwd has a file: a crash
+        // between the file writes and this cleanup would otherwise lose the
+        // unwritten entries on the next boot (the key would be gone).
+        const allMigrated = Object.entries(legacyHistory).every(([cwd, entries]) => {
+          if (!Array.isArray(entries) || entries.length === 0) return true
+          return existsSync(historyFilePath(home, cwd))
+        })
+        if (allMigrated) {
+          // The schema does NOT strip unknown keys (schemastery z.object keeps
+          // them), so the resolved doc still carries `history`: delete it
+          // explicitly, or the replace would write it right back.
+          runDetached('settings history cleanup', () => {
+            const doc = { ...tuiSettings.get() } as Record<string, unknown>
+            delete doc.history
+            tuiSettings.replace(doc)
+          }, {
+            diag,
+            notify: (message) => app.notify(message, 'error'),
+            recoverable: () => true,
+          })
+        }
+      }
+    }
     // Input history is loaded PER SESSION by initLiveSession (keyed on the
     // live session's cwd), never once at boot: a session switch to another
-    // workspace must replace the recall history, not keep the old one.
+    // workspace must replace the recall history, not keep the old one. With
+    // a DEFERRED start no session exists yet, so initLiveSession has not
+    // run: seed the recall history from the LAUNCH cwd now, so ↑ works
+    // immediately in a fresh window (the per-session reseed replaces it
+    // when the first session is born).
+    const bootHistoryEntries = loadHistoryFile(historyFilePath(dshHome(process.env), cwd))
+    lastHistoryContent = bootHistoryEntries.at(-1)
+    // File order is oldest-first; TuiApp's recall API takes newest-first.
+    app.resetInputHistory([...bootHistoryEntries].reverse())
 
     // The TUI-owned slash commands are registered by registerCommands()
     // inside initLiveSession, exactly once after the first session exists.
@@ -2253,30 +2453,22 @@ export function apply(ctx: Context, config: Config): void {
     // The queue pane mirrors the agent's durable inbox: next-turn followups
     // first, then next-step steers, in delivery order. The inbox is public on
     // the agent, and every mutation commits an agent/inbox/spliced session
-    // event, so the pane refreshes event-driven with no polling.
+    // event, so the pane refreshes event-driven with no polling. The mirror
+    // is a USER-INPUT surface: a background-subagent settlement notice (the
+    // runtime's account of a child ending) is dropped from it — the task
+    // browser (job rows / inactive child rows /subagents) is its surface —
+    // and a FAILED settlement additionally surfaces once as a transient
+    // error notify, so the failure is announced without polluting the queue.
+    const notifiedSubagentNotices = new Set<string>()
     const refreshQueue = (): void => {
       if (liveAgent === undefined) {
         app.setQueueItems([])
         return
       }
-      const queue = [
-        ...liveAgent.inbox.nextTurn.map(message => ({
-          id: message.id,
-          text: textOf(message.content),
-          mode: 'followup' as const,
-          // Plugin notices (background-job completions, plan-mode toasts)
-          // are NOT steerable user input: the queue pane marks them and
-          // drops the steer hints (see QueueItem.notice).
-          notice: (message as { source?: { form?: string } }).source?.form === 'notice',
-        })),
-        ...liveAgent.inbox.nextStep.map(message => ({
-          id: message.id,
-          text: textOf(message.content),
-          mode: 'steer' as const,
-          notice: (message as { source?: { form?: string } }).source?.form === 'notice',
-        })),
-      ]
-      app.setQueueItems(queue)
+      const turn = foldQueueRows(liveAgent.inbox.nextTurn as unknown as QueueInboxMessage[], 'followup', notifiedSubagentNotices)
+      const step = foldQueueRows(liveAgent.inbox.nextStep as unknown as QueueInboxMessage[], 'steer', notifiedSubagentNotices)
+      for (const summary of [...turn.failures, ...step.failures]) app.notify(summary, 'error')
+      app.setQueueItems([...turn.rows, ...step.rows])
     }
     refreshQueue()
     // The TUI-owned slash commands are registered as soon as the runner
@@ -2303,6 +2495,9 @@ export function apply(ctx: Context, config: Config): void {
       app.setSessionTitle(foldSessionTitle(agent.session.events)?.title)
       app.clearLocalMessages()
       app.clearNotify() // a notice from the previous session is stale here
+      // The subagent-notice notify guard is per-session: a new session's
+      // settlements must notify again.
+      notifiedSubagentNotices.clear()
       repaint(app, folder)
       refreshStatus()
       refreshQueue()
@@ -2312,10 +2507,15 @@ export function apply(ctx: Context, config: Config): void {
       refreshTasks()
       refreshAgents()
       // The recall history is per-workspace: REPLACE it with the live
-      // session's persisted entries (editor history AND the persistence
-      // mirror), so switching sessions never recalls the old workspace's
-      // inputs nor writes them back under the new cwd.
-      app.resetInputHistory(tuiSettings?.get().history[sessionCwd()] ?? [])
+      // session's persisted entries from the cwd's JSONL history file
+      // (editor history AND the persistence mirror), so switching sessions
+      // never recalls the old workspace's inputs nor writes them back
+      // under the new cwd. The file is oldest-first; TuiApp's recall API
+      // takes newest-first, so the loaded entries are reversed here.
+      const historyCwd = sessionCwd()
+      const historyEntries = loadHistoryFile(historyFilePath(dshHome(process.env), historyCwd))
+      lastHistoryContent = historyEntries.at(-1)
+      app.resetInputHistory([...historyEntries].reverse())
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())} · ${agent.session.id}`)
       updateWelcomeCard()
       registerCommands({ snapshot: initialSnapshot, skills: initialSkills })

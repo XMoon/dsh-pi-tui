@@ -126,10 +126,12 @@ export function presetDisplayText(preset: {
   }
 }
 
-/** The TUI settings document surface (theme/footer/fullscreen/busyEnter/history). */
+/** The TUI settings document surface (theme/footer/fullscreen/busyEnter).
+ * The old `history` field moved to $DSH_HOME/user-history/*.jsonl and is
+ * deliberately NOT part of the document anymore. */
 export interface TuiSettingsLike {
-  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string; history: Record<string, string[]> }
-  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; history: Record<string, string[]> }): unknown
+  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string }
+  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string }): unknown
 }
 
 /** The agents-service surface /new and /fork create sessions through. */
@@ -216,6 +218,71 @@ export interface TuiCommandRunner {
   openJobView(jobId: string): void
   enterView(childId: SessionId, label?: string): Promise<void>
   exit(code: number): void
+}
+
+/** One /login credential target: a human label plus the env-var ref to set. */
+export interface LoginCredentialOption {
+  readonly label: string
+  readonly ref: string
+}
+
+/** The credential-target options for /login and /logout: the deepseek
+ * official ref always first, then every llm-pi-ai provider route's
+ * apiKeyEnv (deduped by ref). `providers` is the llm-pi-ai settings
+ * section's `providers` dict, or undefined when the adapter or the settings
+ * service is absent — which degrades /login to the official target only.
+ */
+export function credentialOptionsFor(
+  providers: Record<string, { apiKeyEnv?: string } | undefined> | undefined,
+): LoginCredentialOption[] {
+  const options: LoginCredentialOption[] = [{ label: 'deepseek official', ref: 'DEEPSEEK_API_KEY' }]
+  if (providers === undefined) return options
+  const seen = new Set<string>(options.map(option => option.ref))
+  for (const [route, profile] of Object.entries(providers)) {
+    const ref = profile?.apiKeyEnv
+    if (ref === undefined || ref === '' || seen.has(ref)) continue
+    seen.add(ref)
+    options.push({ label: route, ref })
+  }
+  return options
+}
+
+/** Resolve a /login or /logout argument to a credential ref. A
+ * case-insensitive llm-pi-ai route name wins, then a literal env-var-looking
+ * name (any casing, uppercased like the old behavior — `/login my_key` sets
+ * `MY_KEY`); anything else is unknown and returns undefined so the caller
+ * can list the valid options.
+ */
+export function resolveCredentialArg(arg: string, options: readonly LoginCredentialOption[]): string | undefined {
+  const trimmed = arg.trim()
+  if (trimmed === '') return undefined
+  // A route name matches its label; a label's FIRST WORD is an alias, so
+  // `/login deepseek` reaches the "deepseek official" entry (the official
+  // adapter's route is deepseek).
+  const needle = trimmed.toLowerCase()
+  const route = options.find(option =>
+    option.label.toLowerCase() === needle
+    || option.label.split(' ')[0]!.toLowerCase() === needle)
+  if (route !== undefined) return route.ref
+  // Env-var-looking names are used verbatim (uppercased for convenience,
+  // preserving the old `/login <anything>` behavior).
+  if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(trimmed)) return trimmed.toUpperCase()
+  return undefined
+}
+
+/** Read the llm-pi-ai adapter's `providers` dict from its settings section,
+ * or undefined when the settings service or the section is absent. */
+function readLlmpiAiProviders(ctx: Context): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
+  const settings = ctx.get('settings')
+  if (settings === undefined) return undefined
+  try {
+    const section = settings.get(settingsNamespace('llm-pi-ai')) as
+      | { providers?: Record<string, { apiKeyEnv?: string } | undefined> }
+      | undefined
+    return section?.providers
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -579,7 +646,7 @@ export function registerTuiCommands(
                 }
               }
               // Spread the current doc: a replace is wholesale, so the
-              // persisted input history must ride along.
+              // other preference keys must ride along.
               const settings = tuiSettings
               if (settings !== undefined) {
                 detach('settings theme write', () => settings.replace({ ...settings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` }) as Promise<unknown>, { notify: true })
@@ -1642,12 +1709,35 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'login',
-    description: 'Set an API key credential for a provider (default DEEPSEEK_API_KEY)',
-    input: { hint: '[<env-var>]' },
+    description: 'Set an API key — deepseek official or an llm-pi-ai provider route',
+    input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
       const credentials = ctx.get('credentials')
       if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
-      const ref = (invocation.rawInput.trim() || 'DEEPSEEK_API_KEY').toUpperCase()
+      // One credential picker: deepseek official plus every llm-pi-ai route
+      // the section declares (each route carries its own apiKeyEnv ref).
+      const options = credentialOptionsFor(readLlmpiAiProviders(ctx))
+      const arg = invocation.rawInput.trim()
+      let ref: string
+      if (arg !== '') {
+        const resolved = resolveCredentialArg(arg, options)
+        if (resolved === undefined) {
+          return { kind: 'error', text: `unknown credential target "${arg}" — ${options.map(option => `${option.label} (${option.ref})`).join(', ')}` }
+        }
+        ref = resolved
+      } else if (options.length > 1) {
+        const picked = await new Promise<string | undefined>((resolve) => {
+          app.openPicker(
+            options.map(option => ({ value: option.ref, label: `${option.label} (${option.ref})` })),
+            (value) => resolve(value),
+            () => resolve(undefined),
+          )
+        })
+        if (picked === undefined) return { kind: 'error', text: 'login cancelled' }
+        ref = picked
+      } else {
+        ref = options[0]!.ref
+      }
       try {
         const answers = await app.askQuestions([
           { id: 'key', question: `Paste the API key for ${ref}:` },
@@ -1664,14 +1754,23 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'logout',
-    description: 'Clear a stored API key credential (default DEEPSEEK_API_KEY)',
-    input: { hint: '[<env-var>]' },
+    description: 'Clear a stored API key — deepseek official or an llm-pi-ai provider route',
+    input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
       const credentials = ctx.get('credentials')
       if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
-      const ref = (invocation.rawInput.trim() || 'DEEPSEEK_API_KEY').toUpperCase()
-      await credentials.unset(ref as CredentialRef)
-      return { kind: 'success', text: `${ref} cleared` }
+      const options = credentialOptionsFor(readLlmpiAiProviders(ctx))
+      const arg = invocation.rawInput.trim()
+      if (arg !== '') {
+        const resolved = resolveCredentialArg(arg, options)
+        if (resolved === undefined) {
+          return { kind: 'error', text: `unknown credential target "${arg}" — ${options.map(option => `${option.label} (${option.ref})`).join(', ')}` }
+        }
+        await credentials.unset(resolved as CredentialRef)
+        return { kind: 'success', text: `${resolved} cleared` }
+      }
+      await credentials.unset(options[0]!.ref as CredentialRef)
+      return { kind: 'success', text: `${options[0]!.ref} cleared` }
     },
   })
 

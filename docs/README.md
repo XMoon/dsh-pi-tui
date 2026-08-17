@@ -13,6 +13,8 @@ knows where the rest lives.
 | `architecture.md` | contributors | Which module owns which state, and the planned extraction order for the runner's remaining responsibilities |
 | `concurrency.md` | contributors | Why dsh sessions cannot be shared across processes, and the divergence guard that enforces it |
 | `failure-model.md` | contributors | The async failure & cancellation contract (`runDetached` / `runOwned`, error observation, lifecycle roots) — the rules that prevent unhandled rejections and misclassified cancellations |
+| `input-history.md` | contributors | Per-cwd input history: why it left the settings document, the JSONL file design, the recall-order contract, and the migration path |
+| `surface-decisions.md` | contributors | Plain-`exit` quitting, background-subagent notices in the queue pane, and the /login credential-target resolution |
 | `repair-session.md` | ops | `scripts/repair-session.mjs`: damage classes, the zstd frame-layout constraint, and the failure modes that broke real logs |
 | `surface-catalog.md` | contributors | The surface catalog design: resume prefetch + standing-scope cold skills; why composition probes are REMOVED (host `session/created` observers write durable knob events) and the standing-key path that replaces them; the coordinator invariants that keep snapshots detached and first submissions correctly routed |
 | `perf-baseline.md` | contributors | Measured rendering performance before/after the incremental read grouping + render-cache optimization, and how to re-run it |

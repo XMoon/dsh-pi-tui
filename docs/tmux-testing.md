@@ -97,6 +97,26 @@ private `/tmp/tui-demo.XXXXXX/` (`.txt` plain + `.html` colored).
    with the draft preserved; Esc returns.
 4. Finish with `/exit` to run the flush flow, then `tmux kill-session`.
 
+## Plain-exit and input-history verification
+
+1. **Plain `exit` quits**: with an EMPTY editor, type `exit` (paced
+   `send-keys -l 'exit'`, sleep, Enter — see trap 1). The TUI must quit to
+   the shell with the `To resume this session: …` hint. `exit` only quits
+   when the draft is EXACTLY `exit`: a non-empty draft (e.g. a recalled
+   entry still in the editor) makes it a normal message — clear the editor
+   first. Any other wording (`exit!`, `Exit`) still submits to the model.
+2. **Fresh-window ↑ recall**: submit a message, quit, relaunch in the same
+   directory, press ↑ once — the editor must recall the MOST RECENT
+   submission (newest first). The first cut of this feature recalled the
+   OLDEST entry because the JSONL file is oldest-first while TuiApp's
+   recall API takes newest-first — the runner must reverse before seeding
+   (see `docs/input-history.md`). Verify the file exists:
+   `ls $DSH_HOME/user-history/` (md5(cwd) filenames).
+3. **Migration**: with legacy history in `~/.dsh/settings.yaml`, the first
+   boot writes the entries to the JSONL file and removes the `history` key
+   from the settings document — `grep history ~/.dsh/settings.yaml` must
+   come up empty afterwards.
+
 Note: whether the model registers a subagent in the jobs registry depends on
 it passing `run_in_background: true` (both local runs took the continuable
 path). Since the task browser now merges RUNNING one-shot children too, a
