@@ -229,8 +229,13 @@ export class QuestionFlow implements Component, Focusable {
    * detail). PageUp/PageDown move it when the content overflows the region.
    */
   private bodyScroll = 0
-  /** Expanded body mode: the region takes the full allowance and the option
-   * window collapses to the anchored current option ('e' / marker click). */
+  /**
+   * Expanded mode ('e' / marker click): the FRAME grows toward 80% (the
+   * QuestionFrame reads isBodyExpanded each render) and the extra rows flow
+   * to whoever needs them — the body scrollport when the question/detail
+   * overflows, otherwise the OPTION window (cut descriptions become
+   * readable).
+   */
   private bodyExpanded = false
   /** Hit map from the last render: content row -> option row key. Built each
    * render; drives fullscreen click-to-select. */
@@ -245,6 +250,12 @@ export class QuestionFlow implements Component, Focusable {
   /** Content rows visible in the region from the last render (region minus
    * the marker row when overflowing). */
   private lastVisibleRows = 0
+  /** Whether the last render cut OPTION content (window rows or label/
+   * description rows) — 'e' is available when this OR the body overflows. */
+  private lastOptionsCut = false
+  /** Whether 'e' would reveal something on the last render (body overflow or
+   * option content cut). */
+  private lastExpandable = false
 
   constructor(
     questions: readonly QuestionFlowQuestion[],
@@ -313,9 +324,11 @@ export class QuestionFlow implements Component, Focusable {
     this.bodyScroll = Math.max(0, Math.min(this.bodyScroll + direction * visible, maxScroll))
   }
 
-  /** Toggle the expanded body ('e' or a click on the scroll marker). */
+  /** Toggle the expanded body ('e' or a click on the scroll marker). Expanding
+   * is only meaningful when something was cut — the body overflowed or option
+   * content (window rows, labels, descriptions) was truncated. */
   private toggleExpanded(): void {
-    if (this.lastContentRows <= this.lastRegionHeight) return // nothing to expand
+    if (!this.bodyExpanded && !this.lastExpandable) return
     this.bodyExpanded = !this.bodyExpanded
     this.bodyScroll = 0
   }
@@ -667,6 +680,7 @@ export class QuestionFlow implements Component, Focusable {
     // The hit map reflects THIS frame only (the review page populates none).
     this.hitMap.clear()
     this.lastMarkerRow = -1
+    this.lastOptionsCut = false
     // Tab strip: Q1(✓) Q2(○) … Submit — answered marks, current highlighted.
     // Tabs carry NO leading/trailing spaces of their own (the box border
     // provides the padding), so every content row starts at the same column.
@@ -769,12 +783,15 @@ export class QuestionFlow implements Component, Focusable {
     }
     // Body SCROLLPORT: the full wrapped question + detail content is clipped
     // to a fixed-height region; PageUp/PageDown page through it when it
-    // overflows. The compact region caps at MAX_BODY_LINES; the expanded
-    // mode ('e', or a click on the scroll marker) gives the region the full
-    // allowance, collapsing the option window to the anchored current row.
+    // overflows. The compact region caps at MAX_BODY_LINES. Expanded ('e', or
+    // a click on the scroll marker) the region takes what its content NEEDS
+    // (up to the full allowance) — a long body keeps the room, a short body
+    // leaves it to the OPTION window, so cut descriptions become readable.
     const content = this.buildBodyContent(question, safeWidth)
     const regionMax = Math.max(1, bodyAllowance)
-    const regionHeight = this.bodyExpanded ? regionMax : Math.min(MAX_BODY_LINES, regionMax)
+    const regionHeight = this.bodyExpanded
+      ? Math.min(regionMax, content.length)
+      : Math.min(MAX_BODY_LINES, regionMax)
     const overflow = content.length > regionHeight
     // The scroll marker reserves the region's last row (only when the region
     // has at least 2 rows — a 1-row region keeps its content, required-first).
@@ -813,6 +830,10 @@ export class QuestionFlow implements Component, Focusable {
       const optionBudget = this.budget - lines.length - skippedRow - 2
       const maxWindow = Math.max(1, Math.min(MAX_VISIBLE_OPTIONS, optionBudget))
       const visibleCount = Math.min(rows.length, maxWindow)
+      // Option content is cut when the window hides rows or a label/
+      // description ends in a `... N more lines` marker (checked per row
+      // below) — either makes 'e' available.
+      if (visibleCount < rows.length) this.lastOptionsCut = true
       const half = Math.floor(maxWindow / 2)
       const maxStart = Math.max(0, rows.length - visibleCount)
       const start = Math.max(0, Math.min(this.cursor - half, maxStart))
@@ -886,6 +907,9 @@ export class QuestionFlow implements Component, Focusable {
             appendWrappedBudgeted(lines, prefix, indent, `${label}${badge}`, safeWidth, available)
           }
           this.hitMap.set(beforeLabel, row.key)
+          // A cut label/description (its `... N more lines` marker is the
+          // last pushed row) means 'e' can reveal more.
+          if (lines[lines.length - 1]?.includes('more lines') === true) this.lastOptionsCut = true
           // `available` may exclude rows reserved for the cursor. Helpers
           // return the remainder of THAT restricted budget, not the dialog's
           // total remainder, so only subtract rows actually emitted here.
@@ -901,6 +925,7 @@ export class QuestionFlow implements Component, Focusable {
               safeWidth,
               descCap,
             )
+            if (lines[lines.length - 1]?.includes('more lines') === true) this.lastOptionsCut = true
             left -= lines.length - beforeDescription
           }
           if (isCursor) cursorRendered = true
@@ -931,12 +956,17 @@ export class QuestionFlow implements Component, Focusable {
     // instead of the whole line being ellipsized by the frame.
     const optionCount = Math.min(rows.length, 9)
     const bodyScrollable = this.lastRegionHeight >= 2 && this.lastContentRows > this.lastVisibleRows
+    // 'e' is advertised whenever it can reveal something: body overflow or
+    // cut option content. Once expanded it always collapses (frame 80% -> 60%).
+    this.lastExpandable = bodyScrollable || this.lastOptionsCut
     const hintParts = [
       '↑↓ select',
       optionCount > 0 ? `1-${optionCount} choose` : '',
       multi ? '↵ toggle' : '↵ confirm',
       bodyScrollable ? 'pgup/pgdn scroll' : '',
-      bodyScrollable && !this.editingOther ? (this.bodyExpanded ? 'e collapse' : 'e expand') : '',
+      !this.editingOther
+        ? (this.bodyExpanded ? 'e collapse' : this.lastExpandable ? 'e expand' : '')
+        : '',
       this.questions.length > 1 ? '←→ switch' : '',
       's skip',
       'esc cancel',

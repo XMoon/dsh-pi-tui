@@ -262,6 +262,29 @@ test('expand is a no-op when the body fits', () => {
   assert.equal(render(f, 100).join('\n'), before)
 })
 
+test('the hint advertises e-expand when option descriptions are cut', () => {
+  // Small-budget fixture: short body, long descriptions — the body does NOT
+  // overflow, so the old expand guard (body-only) would have no-oped.
+  const f = makeFlow([{
+    id: 'q1',
+    question: 'Pick',
+    options: Array.from({ length: 3 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(300) })),
+  }], 12)
+  const compact = render(f, 50).join('\n')
+  assert.ok(compact.includes('more lines'), `descriptions must be cut:\n${compact}`)
+  assert.ok(compact.includes('e expand'), `hint must advertise e-expand:\n${compact}`)
+  // 'e' toggles the expanded state (the frame growth is the app layer's job
+  // — QuestionFrame reads isBodyExpanded); the fixed-budget render keeps its
+  // invariants and the anchored option survives.
+  f.handleInput('e')
+  const expanded = render(f, 50).join('\n')
+  assert.ok(render(f, 50).length <= 12, `budget overflow expanded:\n${expanded}`)
+  assert.ok(expanded.includes('Option 1'), `anchored option must survive:\n${expanded}`)
+  assert.ok(expanded.includes('e collapse'), `hint must flip to e-collapse:\n${expanded}`)
+  f.handleInput('e')
+  assert.ok(render(f, 50).join('\n').includes('e expand'), `collapse must restore the hint:\n${render(f, 50).join('\n')}`)
+})
+
 test('scrolling resets when the question changes', () => {
   const f = makeFlow([
     { id: 'q1', question: 'First?', detail: longDetail(60), options: [{ label: 'A' }] },

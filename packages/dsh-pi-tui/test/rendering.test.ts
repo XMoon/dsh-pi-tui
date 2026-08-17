@@ -747,6 +747,39 @@ test('e expands the question panel and collapses it back', async () => {
   await assert.rejects(promise, /cancelled/)
 })
 
+test('e reveals cut option descriptions on a small screen', async () => {
+  // Regression: on a 24-row terminal with a SHORT body, option descriptions
+  // were cut by the window budget and 'e' no-oped (its guard only looked at
+  // the BODY overflow) — descriptions were unreachable. 'e' must now grow
+  // the panel and let the extra rows flow to the option window.
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    options: Array.from({ length: 4 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'x'.repeat(700) + `TAIL${i}`,
+    })),
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('more lines'), `descriptions must be cut compact:\n${view}`)
+  assert.ok(!view.includes('TAIL0'), `description tail must be hidden compact:\n${view}`)
+  const compactSpan = questionFrameSpan(view)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const expandedSpan = questionFrameSpan(view)
+  assert.ok(expandedSpan > compactSpan, `e must grow the panel (${compactSpan} -> ${expandedSpan}):\n${view}`)
+  assert.ok(view.includes('TAIL0'), `e must reveal the cut description:\n${view}`)
+  assert.ok(view.includes('→'), `pointer must survive expand:\n${view}`)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.equal(questionFrameSpan(view), compactSpan, `collapse must restore the panel size:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
 /** Send an SGR primary-button press+release (1-based coords) at a screen row. */
 function clickCell(vt: { sendInput: (data: string) => void }, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
