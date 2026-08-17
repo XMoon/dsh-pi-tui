@@ -59,10 +59,10 @@ function snapshotOf(overrides: Partial<SurfaceCatalogSnapshot> = {}): SurfaceCat
   })
 }
 
-function catalogOf(skills: string[]): HumanSkillCatalog {
+function catalogOf(skills: string[], complete = true): HumanSkillCatalog {
   return Object.freeze({
     skills: Object.freeze(skills.map(name => Object.freeze({ name, description: name }))),
-    complete: true,
+    complete,
   })
 }
 
@@ -448,4 +448,112 @@ test('the coalescing gate drops a burst that settles clean before the next notif
   gate.notify()
   gate.settled()
   assert.deepEqual(starts, [1, 2], 'clean settle then a new notification starts a fresh refresh')
+})
+
+test('an incomplete standing observation keeps the last-good catalog on a same-target reload', async () => {
+  let calls = 0
+  const { hooks, installed } = scriptedHooks({
+    standing: async () => {
+      calls += 1
+      return calls === 1
+        ? { catalog: catalogOf(['glab']) }
+        : { catalog: catalogOf([], false) }
+    },
+  })
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const first = await coordinator.refresh({
+    source: 'preset',
+    target: { kind: 'preset', presetId: 'code' },
+  })
+  assert.equal(first.kind, 'applied')
+  const outcome = await coordinator.refresh({
+    source: 'reload',
+    target: { kind: 'preset', presetId: 'code' },
+  })
+  assert.equal(outcome.kind, 'applied')
+  if (outcome.kind === 'applied') {
+    assert.equal(outcome.snapshot.issues[0]?.provider, 'skills',
+      'the incomplete observation must carry a detached skills issue')
+    assert.deepEqual(outcome.snapshot.skills.map(skill => skill.name), ['glab'],
+      'the last-good skills survive an incomplete observation (never a blank catalog)')
+  }
+  assert.equal(installed.length, 2)
+  assert.deepEqual(installed[1]?.skills, installed[0]?.skills, 'the merged install keeps the old skills')
+})
+
+test('an incomplete standing observation on a TARGET CHANGE keeps the transition wrappers', async () => {
+  const { hooks, installed } = scriptedHooks({
+    standing: async () => ({ catalog: catalogOf([], false) }),
+  })
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const outcome = await coordinator.refresh({
+    source: 'preset',
+    target: { kind: 'preset', presetId: 'code' },
+  })
+  assert.equal(outcome.kind, 'applied')
+  if (outcome.kind === 'applied') {
+    assert.equal(outcome.snapshot.issues[0]?.provider, 'skills')
+    // installSurfaceSnapshot's skillsFailed guard keeps the revalidating
+    // transition wrappers; the coordinator's job is to surface the issue.
+    assert.deepEqual(outcome.snapshot.skills, [])
+  }
+})
+
+test('a user preset literally named "default" transitions away from the deployment default', async () => {
+  const { hooks, calls, installed } = scriptedHooks({
+    standing: async (presetId) => ({ catalog: catalogOf([presetId ?? 'deployment-default']) }),
+  })
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const first = await coordinator.refresh({
+    source: 'preset',
+    target: { kind: 'preset', presetId: undefined },
+  })
+  assert.equal(first.kind, 'applied')
+  const transitionsBefore = calls.filter(call => call.kind === 'transition').length
+  const second = await coordinator.refresh({
+    source: 'preset',
+    target: { kind: 'preset', presetId: 'default' },
+  })
+  assert.equal(second.kind, 'applied')
+  const transitionsAfter = calls.filter(call => call.kind === 'transition').length
+  assert.equal(transitionsAfter, transitionsBefore + 1,
+    'the deployment default and a preset named "default" are DIFFERENT owners: a transition must fire')
+  assert.equal(installed.length, 2)
+})
+
+test('a throwing transition hook settles as failed — refresh never rejects', async () => {
+  const { hooks, installed } = scriptedHooks({
+    standing: async () => ({ catalog: catalogOf(['glab']) }),
+  })
+  // Make the transition hook throw for THIS coordinator.
+  const throwing = { ...hooks, enterCatalogTransition: (): never => { throw new Error('transition exploded') } }
+  const { diag, lines } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(throwing, new AbortController().signal, diag)
+  const outcome = await coordinator.refresh({
+    source: 'preset',
+    target: { kind: 'preset', presetId: 'code' },
+  })
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind === 'failed') assert.equal(outcome.error, 'transition exploded')
+  assert.deepEqual(installed, [])
+  assert.ok(lines.some(line => /WARN catalog unavailable/.test(line) && /transition exploded/.test(line)))
+})
+
+test('a double settled() is idempotent and cannot clear a follow-up refresh', async () => {
+  const starts: number[] = []
+  const gate = new CoalescingRefreshGate(() => { starts.push(starts.length + 1) })
+  gate.notify()
+  // The runOwned double-settle path: onResult settles, throws, and runOwned
+  // routes to onError which settles AGAIN before the follow-up starts.
+  gate.settled()
+  gate.settled()
+  assert.deepEqual(starts, [1], 'the second settle is a no-op (no dirty notification)')
+  gate.notify()
+  gate.settled()
+  assert.deepEqual(starts, [1, 2], 'a fresh notification still starts a refresh')
+  gate.settled()
+  assert.deepEqual(starts, [1, 2], 'the follow-up was not cleared by the stale settle')
 })

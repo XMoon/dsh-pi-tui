@@ -97,6 +97,7 @@ import {
 import {
   readHumanSkillCatalog,
   resolveColdSkillTarget,
+  subscribeSkillsChange,
   type HumanSkillCatalog,
   type SkillCatalogContext,
 } from './skill-catalog.ts'
@@ -2426,15 +2427,18 @@ export function apply(ctx: Context, config: Config): void {
         },
       })
     })
-    /** Subscribe to the dsh-skill invalidation notification once. The event
-     * carries no scope or cwd, so the refresh target follows the CURRENT
-     * ownership; an unavailable or throwing subscription degrades to no
-     * subscription — owner switches and /reload still refresh. */
-    const subscribeSkillsChange = (): void => {
+    /** Subscribe to the dsh-skill invalidation notification once, through
+     * the single-point adapter (plan appendix B.1). The event carries no
+     * scope or cwd, so the refresh target follows the CURRENT ownership; an
+     * unavailable or throwing subscription degrades to no subscription —
+     * owner switches and /reload still refresh. The flag is set only after
+     * a successful subscribe, so a throwing subscribe can retry on a later
+     * registration attempt. */
+    const subscribeSkillsChangeEvents = (): void => {
       if (skillsChangeSubscribed) return
-      skillsChangeSubscribed = true
       try {
-        ctx.on('skills/change', () => skillsChangeGate.notify())
+        subscribeSkillsChange(ctx as never, () => skillsChangeGate.notify())
+        skillsChangeSubscribed = true
       } catch (error) {
         diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
       }
@@ -2498,7 +2502,7 @@ export function apply(ctx: Context, config: Config): void {
           // — the capability-gated cold path (standing key → global →
           // degraded global with a notice), never an Agent probe: probes
           // emit durable session events in this deployment (see
-          // docs/surface-catalog.md, plan appendix A).
+          // docs/surface-catalog.md).
           readStanding: async (presetId, readSignal) => {
             const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
             if (target.target === undefined) throw new Error('skill service unavailable')
@@ -2513,7 +2517,7 @@ export function apply(ctx: Context, config: Config): void {
           enterCatalogTransition: () => installed.enterTransition(),
         }, lifecycleController.signal, diag)
         catalogRefreshRequest = (request) => catalogCoordinator!.refresh(request)
-        subscribeSkillsChange()
+        subscribeSkillsChangeEvents()
       } catch (error) {
         // A failed registration must not lock the surface forever (a locked
         // flag would leave every later command resolving to a plain message

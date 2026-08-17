@@ -50,11 +50,13 @@ export interface SkillCatalogReadOptions {
 }
 
 /** A summary-shaped entry the registry returns (structural; `snapshot()`
- * returns these with invocation metadata intact). */
+ * returns these with invocation metadata intact). `content` appears on
+ * loaded DEFINITIONS (`get()`), never on summaries. */
 export interface SkillSummaryLike {
   readonly name: unknown
   readonly description: unknown
   readonly whenToUse?: unknown
+  readonly content?: unknown
   readonly invocation?: { readonly modelInvocable?: unknown; readonly userInvocable?: unknown }
 }
 
@@ -78,6 +80,44 @@ export interface AgentPresetsLike {
 export interface SkillCatalogContext {
   get(name: 'skills'): SkillRegistryLike | undefined
   get(name: 'agentPresets'): AgentPresetsLike | undefined
+}
+
+/** The Cordis event surface the `skills/change` subscription needs
+ * (structural; an absent `on` degrades to no subscription). */
+export interface SkillCatalogEventsContext {
+  on?(event: 'skills/change', listener: () => void): unknown
+}
+
+/**
+ * Subscribe to the dsh-skill invalidation notification. The event carries
+ * no scope or cwd — consumers refetch for their own cwd and scope — and the
+ * subscription itself is optional: an unavailable `on` or a throwing
+ * subscribe degrades to NO subscription (owner switches and `/reload` still
+ * refresh). The CALLER owns the listener's failure totality (route the
+ * refresh through `runOwned`).
+ * @param ctx - the context surface exposing the event bus.
+ * @param listener - the notification listener (must be synchronous and
+ *   never throw).
+ */
+export function subscribeSkillsChange(ctx: SkillCatalogEventsContext, listener: () => void): void {
+  ctx.on?.('skills/change', listener)
+}
+
+/**
+ * Whether one summary passes the OFFICIAL user-invocation policy — the
+ * adapter's exported guard, used by every human entry point (direct
+ * wrappers, `/skill`, the picker, and final body loads). A malformed
+ * `invocation` (missing, non-object, non-boolean flag) is treated as NOT
+ * user-invocable: the policy defaults are never reinterpreted, and a
+ * hostile entry can neither throw nor sneak into a human surface.
+ */
+export function isUserInvocableSkill(skill: SkillSummaryLike): boolean {
+  const invocation = skill.invocation
+  if (typeof invocation !== 'object' || invocation === null) return false
+  if (typeof invocation.userInvocable !== 'boolean') return false
+  // The official policy function: the guards above already proved the
+  // invocation shape, so the cast crosses unknown deliberately.
+  return isUserInvocable(skill as unknown as { invocation: { modelInvocable: boolean; userInvocable: boolean } })
 }
 
 /** One readable catalog target. */
@@ -114,12 +154,7 @@ function toHumanSummary(skill: SkillSummaryLike): HumanSkillSummary | undefined 
  * as NOT user-invocable — the policy defaults are never reinterpreted, and
  * a hostile entry can neither throw nor sneak into the human catalog. */
 function userInvocable(skill: SkillSummaryLike): boolean {
-  const invocation = skill.invocation
-  if (typeof invocation !== 'object' || invocation === null) return false
-  if (typeof invocation.userInvocable !== 'boolean') return false
-  // The official policy function: the guards above already proved the
-  // invocation shape, so the cast crosses unknown deliberately.
-  return isUserInvocable(skill as unknown as { invocation: { modelInvocable: boolean; userInvocable: boolean } })
+  return isUserInvocableSkill(skill)
 }
 
 /**

@@ -86,18 +86,17 @@ export interface CatalogRefreshHooks {
   enterCatalogTransition(): void
 }
 
-/** The preset target's stable identity for owner comparison. */
-function presetKey(presetId: string | undefined): string {
-  return presetId ?? 'default'
-}
-
-/** Whether two targets are the same owner (no transition needed). */
+/** Whether two targets are the same owner (no transition needed). The
+ * preset identity is the caller-provided presetId compared EXACTLY —
+ * `undefined` (the deployment default) never conflates with a user preset
+ * literally named `'default'`, and a resolved id never conflates with the
+ * raw id it came from (the worst case is a benign extra transition). */
 function sameTarget(left: CatalogRefreshTarget | undefined, right: CatalogRefreshTarget): boolean {
   if (left === undefined) return false
   if (left.kind !== right.kind) return false
   return left.kind === 'agent'
     ? left.key === (right as { key: number }).key
-    : presetKey(left.presetId) === presetKey((right as { presetId: string | undefined }).presetId)
+    : left.presetId === (right as { presetId: string | undefined }).presetId
 }
 
 /**
@@ -106,7 +105,6 @@ function sameTarget(left: CatalogRefreshTarget | undefined, right: CatalogRefres
  */
 export class CatalogRefreshCoordinator {
   private epoch = 0
-  private appliedEpoch = 0
   private active: { epoch: number; controller: AbortController } | undefined
   private appliedTarget: CatalogRefreshTarget | undefined
   private snapshot: SurfaceCatalogSnapshot | undefined
@@ -141,10 +139,12 @@ export class CatalogRefreshCoordinator {
     const signal = AbortSignal.any([this.lifecycleSignal, controller.signal])
     this.active = { epoch, controller }
     const targetChanged = !sameTarget(this.appliedTarget, request.target)
-    // Target change: the revalidating transition is entered BEFORE the read
-    // so no new input can be served a stale scoped preview mid-flight.
-    if (targetChanged) this.hooks.enterCatalogTransition()
     try {
+      // Target change: the revalidating transition is entered BEFORE the
+      // read so no new input can be served a stale scoped preview
+      // mid-flight. It is INSIDE the try so a throwing transition hook
+      // still settles as a `failed` outcome — refresh() never rejects.
+      if (targetChanged) this.hooks.enterCatalogTransition()
       const committed = request.target.kind === 'agent'
         ? { snapshot: await this.hooks.readAgent(request.agent!, signal) }
         : await this.readStandingSnapshot(request.target.presetId, signal)
@@ -157,7 +157,6 @@ export class CatalogRefreshCoordinator {
       const merged = targetChanged ? committed.snapshot : this.mergePartial(committed.snapshot)
       this.hooks.installSnapshot(merged)
       this.snapshot = merged
-      this.appliedEpoch = epoch
       this.appliedTarget = request.target
       this.diag.info('catalog applied', {
         epoch,
@@ -205,17 +204,25 @@ export class CatalogRefreshCoordinator {
 
   /** One standing read wrapped into a skills-only surface snapshot: the
    * sessionless view has no agent-scoped commands, and the global commands
-   * layer is already registered — only the skill wrappers are installed. */
+   * layer is already registered — only the skill wrappers are installed.
+   * An INCOMPLETE observation (`complete !== true`) is never an
+   * authoritative blank catalog: it carries a detached skills issue, so a
+   * same-target reload keeps the last-good skills (mergePartial) and a
+   * target change keeps the revalidating transition wrappers
+   * (installSurfaceSnapshot's skillsFailed guard). */
   private async readStandingSnapshot(
     presetId: string | undefined,
     signal: AbortSignal,
   ): Promise<{ snapshot: SurfaceCatalogSnapshot; notice?: string }> {
     const read = await this.hooks.readStanding(presetId, signal)
+    const incomplete = read.catalog.complete !== true
     const snapshot: SurfaceCatalogSnapshot = Object.freeze({
       commands: Object.freeze([]),
       scopedCommands: Object.freeze([]),
       skills: read.catalog.skills,
-      issues: Object.freeze([]),
+      issues: Object.freeze(incomplete
+        ? [Object.freeze({ provider: 'skills', message: 'incomplete skill observation' })]
+        : []),
     })
     return { snapshot, ...read.notice === undefined ? {} : { notice: read.notice } }
   }
@@ -256,8 +263,12 @@ export class CoalescingRefreshGate {
 
   /** Terminal settle of the in-flight refresh (called from EVERY terminal
    * runOwned callback: onResult / onCancel / onError). Clears the in-flight
-   * flag; a dirty gate starts exactly one follow-up refresh. */
+   * flag; a dirty gate starts exactly one follow-up refresh. IDEMPOTENT: a
+   * second settle (e.g. onResult throws and runOwned routes to onError)
+   * must not clear the in-flight flag of a follow-up refresh it did not
+   * start. */
   settled(): void {
+    if (!this.inFlight) return
     this.inFlight = false
     if (this.dirty) {
       this.dirty = false

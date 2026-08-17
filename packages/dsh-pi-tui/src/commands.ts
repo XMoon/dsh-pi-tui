@@ -18,8 +18,6 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor } from '@deepseek-ai/dsh-commands'
-import type { SkillDefinition, SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
-import { isUserInvocable } from '@deepseek-ai/dsh-skill'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -48,11 +46,18 @@ import type { CatalogRefreshOutcome, CatalogRefreshRequest } from './skill-catal
 import {
   commandSummaryOf,
   listGlobalCommands,
-  type HumanSkillSummary,
   type SurfaceCatalogSnapshot,
   type SurfaceCommandSummary,
 } from './surface-catalog.ts'
-import type { HumanSkillCatalog } from './skill-catalog.ts'
+import {
+  isUserInvocableSkill,
+  readHumanSkillCatalog,
+  resolveLiveSkillTarget,
+  type HumanSkillCatalog,
+  type HumanSkillSummary,
+  type SkillCatalogContext,
+  type SkillCatalogTarget,
+} from './skill-catalog.ts'
 
 /** A balanced completed-turn prefix for forking: the log up to (and including)
  * the last `turn/end`. Undefined when no turn has completed yet.
@@ -710,35 +715,41 @@ export function registerTuiCommands(
     },
   })
 
-  // The skills registry the live agent actually sees: its preset's scoped
-  // instance when the preset mounts one (the web surface's serviceFor path),
-  // else the host registry. The scope passed to lookups is the AGENT itself,
-  // exactly like the host apiproxy's presenterScopeFor — an agent context
-  // object does not identity-match the preset's standing mount.
-  const skillService = (agent: Agent): { list: (options: SkillViewOptions) => Promise<readonly SkillSummary[]>; get: (name: string, options: SkillViewOptions) => Promise<SkillDefinition | undefined> } | undefined => {
-    const presets = ctx.get('agentPresets')
-    return presets?.serviceFor(agent, 'skills') ?? ctx.get('skills')
-  }
-
   /** The workspace the live session runs in; fallback to the TUI's cwd. */
   const sessionCwd = (agent: Agent): string => agent.session.header.cwd ?? cwd
+
+  // The skills registry the live agent actually sees — resolved through the
+  // single-point adapter (plan appendix B.1): its preset's scoped instance
+  // when the preset mounts one (the web surface's serviceFor path), else the
+  // host registry. The scope passed to lookups is the AGENT itself, exactly
+  // like the host apiproxy's presenterScopeFor — an agent context object
+  // does not identity-match the preset's standing mount.
+  const skillTarget = (agent: Agent): SkillCatalogTarget | undefined =>
+    resolveLiveSkillTarget(ctx as unknown as SkillCatalogContext, agent, sessionCwd(agent))
 
   /**
    * The execution boundary for loading one skill into the live session;
    * shared by /skill and the per-skill slash commands. The skill is fetched
-   * from the CURRENT agent's service and its invocation policy is RE-CHECKED
-   * here — a summary that passed the probe's filter is never execution
+   * from the CURRENT agent's registry and its invocation policy is RE-CHECKED
+   * here — a summary that passed the cold/live filter is never execution
    * authorization. A model-only skill is refused with an explicit error and
    * never injected.
    */
   const loadSkill = async (agent: Agent, name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
-    const skills = skillService(agent)
-    if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
-    const skill = await skills.get(name, { cwd: sessionCwd(agent), scope: agent })
+    const target = skillTarget(agent)
+    if (target === undefined) return { kind: 'error', text: 'skill service unavailable' }
+    const skill = await target.registry.get?.(name, { cwd: target.cwd, scope: target.scope })
     if (skill === undefined) return { kind: 'error', text: 'unknown skill "' + name + '"' }
-    if (!isUserInvocable(skill)) return { kind: 'error', text: `skill "${name}" is not invocable by the user` }
+    if (!isUserInvocableSkill(skill)) return { kind: 'error', text: `skill "${name}" is not invocable by the user` }
+    // Hostile-field guard on the LOADED definition too: only string display
+    // fields may cross into the injected body (the adapter's conservative
+    // rule — malformed entries are refused, never coerced or thrown on).
+    if (typeof skill.name !== 'string' || skill.name === '' || typeof skill.description !== 'string') {
+      return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
+    }
+    const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
     agent.inject(createUserMessage({
-      content: [{ type: 'text', text: 'Skill loaded by the user: **' + skill.name + '**\n\n' + (skill.content ?? skill.description) }],
+      content: [{ type: 'text', text: 'Skill loaded by the user: **' + skill.name + '**\n\n' + body }],
       source: { kind: 'plugin', plugin: 'tui-skill' },
     }))
     return { kind: 'success', text: 'skill ' + name + ' loaded' }
@@ -858,19 +869,18 @@ export function registerTuiCommands(
     input: { hint: '<name>' },
     handler: async (invocation) => {
       const liveAgent = await requireAgent()
-      const skills = skillService(liveAgent)
-      if (skills === undefined) return { kind: 'error', text: 'skill service unavailable' }
+      const target = skillTarget(liveAgent)
+      if (target === undefined) return { kind: 'error', text: 'skill service unavailable' }
       const name = invocation.rawInput.trim()
       if (name !== '') return loadSkill(liveAgent, name)
-      // No argument: pick from the catalog. Only human-invocable skills are
-      // offered — the same policy every other human entry enforces (the
-      // explicit-name path re-checks it in loadSkill).
-      const catalog = (await skills.list({ cwd: sessionCwd(liveAgent), scope: liveAgent }))
-        .filter(skill => isUserInvocable(skill))
-      if (catalog.length === 0) return { kind: 'error', text: 'no skills available' }
+      // No argument: pick from the catalog — the same validated, policy-
+      // filtered, sorted view the collector builds (readHumanSkillCatalog),
+      // so hostile or model-only entries never reach the picker.
+      const catalog = await readHumanSkillCatalog(target.registry, { cwd: target.cwd, scope: target.scope })
+      if (catalog.skills.length === 0) return { kind: 'error', text: 'no skills available' }
       // SettingsList rows: Enter cycles the value, which fires onChange.
       app.openSettings(
-        catalog.map(skill => ({
+        catalog.skills.map(skill => ({
           id: skill.name,
           label: skill.name,
           description: skill.description,
@@ -1235,7 +1245,11 @@ export function registerTuiCommands(
         // override (run-local pending or launch-time --preset) masks the
         // new default — the masked case must not re-read a preset the next
         // session will not compose on.
-        await settings.mutate(ns, [{ op: 'set', path: ['default'], value: rest }])
+        try {
+          await settings.mutate(ns, [{ op: 'set', path: ['default'], value: rest }])
+        } catch (error) {
+          return { kind: 'error', text: safeErrorMessage(error) }
+        }
         if (runner.effectivePresetId === undefined) {
           const outcome = await runner.refreshCatalog({
             source: 'preset',

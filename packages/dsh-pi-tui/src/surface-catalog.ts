@@ -14,15 +14,13 @@
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandDescriptor } from '@deepseek-ai/dsh-commands'
-import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
-import { isUserInvocable } from '@deepseek-ai/dsh-skill'
 import { safeErrorMessage } from './error-boundary.ts'
-
-/** The human-facing slice of one skill: name + routing description only. */
-export interface HumanSkillSummary {
-  readonly name: string
-  readonly description: string
-}
+import {
+  readHumanSkillCatalog,
+  resolveLiveSkillTarget,
+  type HumanSkillSummary,
+  type SkillCatalogContext,
+} from './skill-catalog.ts'
 
 /** One effective command's discovery metadata (the official descriptor's
  * display fields; never a handler or a definition). */
@@ -53,28 +51,17 @@ export interface SurfaceCatalogSnapshot {
   readonly issues: readonly SurfaceCatalogIssue[]
 }
 
-/** The skill-service surface the collector reads (structural; never a
- * package dependency — the same rule as every dsh context service read). */
-export interface SurfaceSkillService {
-  list(options: SkillViewOptions): Promise<readonly SkillSummary[]>
-}
-
 /** The commands-service surface the collector reads. */
 export interface SurfaceCommandsService {
   list(agent: Agent): readonly CommandDescriptor[]
 }
 
-/** The agent-presets surface used to resolve the agent's scoped skill
- * service (the web surface's `serviceFor` path). */
-export interface SurfaceAgentPresetsService {
-  serviceFor(agent: { ctx: unknown }, name: 'skills'): SurfaceSkillService | undefined
-}
-
-/** The narrow context surface {@link readSurfaceCatalog} consumes. */
+/** The narrow context surface {@link readSurfaceCatalog} consumes. The
+ * SKILL services are NOT reached here: every dsh skill/agent-presets
+ * access goes through `src/skill-catalog.ts` (the single-point adapter,
+ * plan appendix B.1). */
 export interface SurfaceCatalogContext {
   get(name: 'commands'): SurfaceCommandsService | undefined
-  get(name: 'agentPresets'): SurfaceAgentPresetsService | undefined
-  get(name: 'skills'): SurfaceSkillService | undefined
 }
 
 /**
@@ -109,13 +96,6 @@ function sameCommand(left: CommandDescriptor, right: CommandDescriptor): boolean
   return left.name === right.name
     && left.description === right.description
     && left.input?.hint === right.input?.hint
-}
-
-/** Resolve the skill service ONE agent actually sees: its preset's scoped
- * instance when the preset mounts one, else the host registry (apiproxy
- * parity — an agent CONTEXT does not identity-match a standing mount). */
-function resolveSkillService(ctx: SurfaceCatalogContext, agent: Agent): SurfaceSkillService | undefined {
-  return ctx.get('agentPresets')?.serviceFor(agent, 'skills') ?? ctx.get('skills')
 }
 
 /**
@@ -164,20 +144,19 @@ export async function readSurfaceCatalog(
     }
   }
   let skills: readonly HumanSkillSummary[] = []
-  const skillsService = resolveSkillService(ctx, agent)
-  if (skillsService !== undefined) {
+  // The skill read goes through the single-point adapter (plan appendix
+  // B.1): the agent's own registry (preset-scoped or host) and the AGENT
+  // OBJECT as scope, snapshot-first with the list() compatibility path.
+  const skillTarget = resolveLiveSkillTarget(ctx as unknown as SkillCatalogContext, agent, agent.session.header.cwd ?? process.cwd())
+  if (skillTarget !== undefined) {
     try {
       signal.throwIfAborted()
-      const catalog = await skillsService.list({
-        cwd: agent.session.header.cwd ?? process.cwd(),
-        scope: agent,
+      const catalog = await readHumanSkillCatalog(skillTarget.registry, {
+        cwd: skillTarget.cwd,
+        scope: skillTarget.scope,
         signal,
       })
-      skills = sortSkills(
-        catalog
-          .filter(skill => isUserInvocable(skill))
-          .map(skill => Object.freeze({ name: skill.name, description: skill.description })),
-      )
+      skills = catalog.skills
     } catch (error) {
       // Cancellation is a lifecycle signal, not a provider failure: the
       // whole read must propagate it, never degrade it into an issue.
@@ -196,9 +175,4 @@ export async function readSurfaceCatalog(
 /** Name-stable sort for command summaries (copies, never mutates input). */
 function sortCommands(commands: readonly SurfaceCommandSummary[]): readonly SurfaceCommandSummary[] {
   return Object.freeze([...commands].sort((left, right) => left.name < right.name ? -1 : 1))
-}
-
-/** Name-stable sort for skill summaries. */
-function sortSkills(skills: readonly HumanSkillSummary[]): readonly HumanSkillSummary[] {
-  return Object.freeze([...skills].sort((left, right) => left.name < right.name ? -1 : 1))
 }
