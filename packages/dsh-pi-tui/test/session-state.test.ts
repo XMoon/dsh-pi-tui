@@ -10,7 +10,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { TuiApp } from '../src/tui-app.ts'
-import { CatalogRefreshCoordinator } from '../src/catalog-refresh.ts'
+import { CatalogRefreshCoordinator } from '../src/skill-catalog-refresh.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { readSurfaceCatalog, type SurfaceCatalogContext } from '../src/surface-catalog.ts'
 import { createDiag } from '../src/diag.ts'
@@ -68,6 +68,7 @@ function stubRunner(
     swapTo: async () => undefined,
     currentPreset: () => undefined,
     pendingPreset: undefined,
+    effectivePresetId: undefined,
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},
@@ -209,7 +210,7 @@ test('a stale catalog refresh cannot install commands into a newer session', asy
   // A coordinator over the real surface hooks: the post-mount refresh owner.
   const coordinator = new CatalogRefreshCoordinator({
     readAgent: (agent, signal) => readSurfaceCatalog(agent, signal, ctx as unknown as SurfaceCatalogContext),
-    probeComposition: async () => { throw new Error('not used') },
+    readStanding: async () => { throw new Error('not used') },
     installSnapshot: installed.installSnapshot,
     enterCatalogTransition: installed.enterTransition,
   }, new AbortController().signal, createDiag({ filePath: undefined, stderrLevel: 'off' }))
@@ -445,7 +446,7 @@ test('a failing skill catalog refresh degrades to a detached issue, never an unh
     const installed = registerTuiCommands(stubRunner(ctx, app, state, diag))
     const coordinator = new CatalogRefreshCoordinator({
       readAgent: (agent, signal) => readSurfaceCatalog(agent, signal, ctx as unknown as SurfaceCatalogContext),
-      probeComposition: async () => { throw new Error('not used') },
+      readStanding: async () => { throw new Error('not used') },
       installSnapshot: installed.installSnapshot,
       enterCatalogTransition: installed.enterTransition,
     }, new AbortController().signal, diag)

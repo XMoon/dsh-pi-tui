@@ -88,8 +88,7 @@ import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './s
 import { formatShellSubmitText, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
-import { probeSurfaceCatalog, type ProbeAgentsService } from './catalog-probe.ts'
-import { CatalogRefreshCoordinator, type CatalogRefreshOutcome, type CatalogRefreshRequest } from './catalog-refresh.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from './skill-catalog-refresh.ts'
 import {
   readSurfaceCatalog,
   type SurfaceCatalogContext,
@@ -2395,6 +2394,51 @@ export function apply(ctx: Context, config: Config): void {
      * registerCommands once the surface hooks exist. */
     let catalogRefreshRequest: ((request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>) | undefined
     let catalogCoordinator: CatalogRefreshCoordinator | undefined
+    /** `skills/change` coalescing: bursts of invalidation notifications cost
+     * at most two reads, and the follow-up re-read observes the CURRENT
+     * ownership (live agent vs standing preset). */
+    let skillsChangeSubscribed = false
+    const skillsChangeGate = new CoalescingRefreshGate(() => {
+      runOwned('skills/change refresh', async () => {
+        const refresh = catalogRefreshRequest
+        if (refresh === undefined) return undefined
+        const target = liveAgent === undefined
+          ? { kind: 'preset', presetId: pendingPreset ?? launchPreset } as const
+          : { kind: 'agent', key: sessionGeneration } as const
+        return refresh({
+          source: 'invalidation',
+          target,
+          ...target.kind === 'agent' ? { agent: liveAgent } : {},
+        })
+      }, {
+        diag,
+        sessionId: () => liveAgent?.session.id,
+        onResult: (outcome) => {
+          skillsChangeGate.settled()
+          if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
+            app.notify(outcome.notice, 'error')
+          }
+        },
+        onCancel: () => { skillsChangeGate.settled() },
+        onError: (error) => {
+          skillsChangeGate.settled()
+          app.notify(`skill catalog refresh failed: ${safeErrorMessage(error)}`, 'error')
+        },
+      })
+    })
+    /** Subscribe to the dsh-skill invalidation notification once. The event
+     * carries no scope or cwd, so the refresh target follows the CURRENT
+     * ownership; an unavailable or throwing subscription degrades to no
+     * subscription — owner switches and /reload still refresh. */
+    const subscribeSkillsChange = (): void => {
+      if (skillsChangeSubscribed) return
+      skillsChangeSubscribed = true
+      try {
+        ctx.on('skills/change', () => skillsChangeGate.notify())
+      } catch (error) {
+        diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
+      }
+    }
     const runner: TuiCommandRunner = {
       ctx,
       app,
@@ -2416,6 +2460,11 @@ export function apply(ctx: Context, config: Config): void {
       compose,
       get pendingPreset() { return pendingPreset },
       set pendingPreset(id: string | undefined) { pendingPreset = id },
+      /** The effective preset id for COLD (sessionless) reads: the run-local
+       * pending override ahead of the launch-time --preset (the SAME
+       * precedence ensureSession uses); undefined = the saved/default
+       * preset applies. */
+      get effectivePresetId() { return pendingPreset ?? launchPreset },
       refreshCatalog: (request) => {
         const refresh = catalogRefreshRequest
         return refresh === undefined
@@ -2445,19 +2494,26 @@ export function apply(ctx: Context, config: Config): void {
         // the runner's refreshCatalog routes every post-mount refresh here.
         catalogCoordinator = new CatalogRefreshCoordinator({
           readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, ctx as unknown as SurfaceCatalogContext),
-          probeComposition: (composition, readSignal) => probeSurfaceCatalog({
-            agents: agents as unknown as ProbeAgentsService,
-            composition,
-            agentOptions,
-            cwd: process.cwd(),
-            signal: readSignal,
-            readCatalog: (agent, agentSignal) => readSurfaceCatalog(agent, agentSignal, ctx as unknown as SurfaceCatalogContext),
-            diag,
-          }),
+          // The sessionless (preset) target reads the STANDING skill catalog
+          // — the capability-gated cold path (standing key → global →
+          // degraded global with a notice), never an Agent probe: probes
+          // emit durable session events in this deployment (see
+          // docs/surface-catalog.md, plan appendix A).
+          readStanding: async (presetId, readSignal) => {
+            const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
+            if (target.target === undefined) throw new Error('skill service unavailable')
+            const catalog = await readHumanSkillCatalog(target.target.registry, {
+              cwd: target.target.cwd,
+              scope: target.target.scope,
+              signal: readSignal,
+            })
+            return { catalog, ...target.degraded === undefined ? {} : { notice: target.degraded } }
+          },
           installSnapshot: (next) => installed.installSnapshot(next),
           enterCatalogTransition: () => installed.enterTransition(),
         }, lifecycleController.signal, diag)
         catalogRefreshRequest = (request) => catalogCoordinator!.refresh(request)
+        subscribeSkillsChange()
       } catch (error) {
         // A failed registration must not lock the surface forever (a locked
         // flag would leave every later command resolving to a plain message

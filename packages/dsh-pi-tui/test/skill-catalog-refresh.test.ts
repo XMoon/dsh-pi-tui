@@ -1,16 +1,18 @@
 /**
- * Headless unit tests for the catalog refresh coordinator (M3): epoch
+ * Headless unit tests for the skill catalog refresh coordinator (M3): epoch
  * supersession, target-change transitions, latest-only commits, same-target
- * partial-field retention, read-failure and cancellation semantics, and the
- * composition probe path.
- * @module @xmoon76/dsh-pi-tui/catalog-refresh.test
+ * partial-field retention, read-failure and cancellation semantics, the
+ * STANDING preset path (skills-only installs, degradation notices, last-good
+ * on a failed same-target reload), and the CoalescingRefreshGate.
+ * @module @xmoon76/dsh-pi-tui/skill-catalog-refresh.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CatalogRefreshCoordinator, type CatalogRefreshHooks } from '../src/catalog-refresh.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshHooks } from '../src/skill-catalog-refresh.ts'
 import { createDiag } from '../src/diag.ts'
+import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
 import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
 
 /** A promise the test resolves manually, to stage late completions. */
@@ -57,10 +59,17 @@ function snapshotOf(overrides: Partial<SurfaceCatalogSnapshot> = {}): SurfaceCat
   })
 }
 
+function catalogOf(skills: string[]): HumanSkillCatalog {
+  return Object.freeze({
+    skills: Object.freeze(skills.map(name => Object.freeze({ name, description: name }))),
+    complete: true,
+  })
+}
+
 /** Scripted hooks recording every call. */
 function scriptedHooks(script: {
   read?: (agent: Agent, signal: AbortSignal) => Promise<SurfaceCatalogSnapshot> | never
-  probe?: (composition: unknown, signal: AbortSignal) => Promise<SurfaceCatalogSnapshot> | never
+  standing?: (presetId: string | undefined, signal: AbortSignal) => Promise<{ catalog: HumanSkillCatalog; notice?: string }> | never
 } = {}) {
   const calls: { kind: 'transition' | 'install' }[] = []
   const installed: SurfaceCatalogSnapshot[] = []
@@ -72,12 +81,12 @@ function scriptedHooks(script: {
       }
       throw new Error('unexpected read')
     },
-    probeComposition: async (composition, signal) => {
-      if (script.probe !== undefined) {
-        const result = script.probe(composition, signal)
+    readStanding: async (presetId, signal) => {
+      if (script.standing !== undefined) {
+        const result = script.standing(presetId, signal)
         return result instanceof Promise ? abortAware(result, signal) : result
       }
-      throw new Error('unexpected probe')
+      throw new Error('unexpected standing read')
     },
     installSnapshot: (snapshot) => {
       calls.push({ kind: 'install' })
@@ -259,56 +268,149 @@ test('dispose aborts the active refresh so no late install can land', async () =
   assert.deepEqual(installed, [])
 })
 
-test('a composition target probes the composition and installs its snapshot', async () => {
-  const probed: unknown[] = []
+test('a preset target reads the STANDING catalog and installs it as a skills-only snapshot', async () => {
+  const readPresets: (string | undefined)[] = []
   const { hooks, calls, installed } = scriptedHooks({
-    probe: async (composition) => {
-      probed.push(composition)
-      return snapshotA
+    standing: async (presetId) => {
+      readPresets.push(presetId)
+      return { catalog: catalogOf(['glab', 'find-skills']) }
+    },
+  })
+  const { diag, lines } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const outcome = await coordinator.refresh({
+    source: 'preset',
+    target: { kind: 'preset', presetId: 'code' },
+  })
+  assert.equal(outcome.kind, 'applied')
+  if (outcome.kind === 'applied') {
+    assert.deepEqual(outcome.snapshot.commands, [], 'the standing view installs no commands')
+    assert.deepEqual(outcome.snapshot.scopedCommands, [], 'the standing view installs no scoped commands')
+    assert.deepEqual(outcome.snapshot.skills.map(skill => skill.name), ['glab', 'find-skills'],
+      'the coordinator installs the catalog verbatim; the collector owns the sort')
+    assert.equal(outcome.notice, undefined)
+  }
+  assert.deepEqual(readPresets, ['code'], 'the standing read receives the preset id')
+  assert.deepEqual(calls, [{ kind: 'transition' }, { kind: 'install' }])
+  assert.equal(installed.length, 1)
+  assert.ok(lines.some(line => /INFO catalog applied/.test(line) && /source=preset/.test(line)))
+})
+
+test('a standing degradation notice rides the applied outcome', async () => {
+  const { hooks, installed } = scriptedHooks({
+    standing: async () => ({
+      catalog: catalogOf(['global-skill']),
+      notice: 'skill catalog unavailable for preset "code": preset exploded',
+    }),
+  })
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const outcome = await coordinator.refresh({
+    source: 'reload',
+    target: { kind: 'preset', presetId: 'code' },
+  })
+  assert.equal(outcome.kind, 'applied')
+  if (outcome.kind === 'applied') {
+    assert.match(outcome.notice ?? '', /preset exploded/)
+    assert.deepEqual(outcome.snapshot.skills.map(skill => skill.name), ['global-skill'])
+  }
+  assert.equal(installed.length, 1, 'a degraded read still installs the global layer')
+})
+
+test('a standing read failure keeps the last-good catalog on a same-target reload', async () => {
+  let calls = 0
+  const { hooks, installed } = scriptedHooks({
+    standing: async () => {
+      calls += 1
+      if (calls === 1) return { catalog: catalogOf(['glab']) }
+      throw new Error('registry down')
     },
   })
   const { diag } = capturingDiag()
   const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
-  const composition = { agentPreset: 'code', setup: () => {} }
-  const outcome = await coordinator.refresh({
+  const first = await coordinator.refresh({
     source: 'preset',
-    target: { kind: 'composition', key: 'code' },
-    composition,
+    target: { kind: 'preset', presetId: 'code' },
   })
-  assert.equal(outcome.kind, 'applied')
-  assert.equal(probed.length, 1)
-  assert.equal(probed[0], composition)
-  assert.equal(installed.length, 1)
-  assert.ok(calls.some(call => call.kind === 'transition'))
+  assert.equal(first.kind, 'applied')
+  const outcome = await coordinator.refresh({
+    source: 'reload',
+    target: { kind: 'preset', presetId: 'code' },
+  })
+  assert.equal(outcome.kind, 'failed')
+  assert.deepEqual(installed, [catalogSnapshotOf(['glab'])],
+    'a failed same-target reload installs nothing: the last-good catalog stays')
 })
 
-test('quick preset switches install only the last composition (A→B race)', async () => {
-  const gateA = deferred<SurfaceCatalogSnapshot>()
+/** The skills-only snapshot the coordinator wraps a standing catalog into. */
+function catalogSnapshotOf(names: string[]): SurfaceCatalogSnapshot {
+  return Object.freeze({
+    commands: Object.freeze([]),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze(names.map(name => Object.freeze({ name, description: name }))),
+    issues: Object.freeze([]),
+  })
+}
+
+test('quick preset switches install only the last preset (A→B race)', async () => {
+  const gateA = deferred<{ catalog: HumanSkillCatalog; notice?: string }>()
   const { hooks, installed } = scriptedHooks({
-    probe: (composition, signal) => {
-      const key = (composition as { agentPreset?: string }).agentPreset
-      return key === 'code' ? gateA.promise : Promise.resolve(snapshotB)
+    standing: (presetId, signal) => {
+      if (presetId === 'code') return gateA.promise
+      return Promise.resolve({ catalog: catalogOf(['beta']) })
     },
   })
   const { diag } = capturingDiag()
   const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
   const refreshA = coordinator.refresh({
     source: 'preset',
-    target: { kind: 'composition', key: 'code' },
-    composition: { agentPreset: 'code', setup: () => {} },
+    target: { kind: 'preset', presetId: 'code' },
   })
   const refreshB = coordinator.refresh({
     source: 'preset',
-    target: { kind: 'composition', key: 'standard' },
-    composition: { agentPreset: 'standard', setup: () => {} },
+    target: { kind: 'preset', presetId: 'standard' },
   })
   const outcomeB = await refreshB
   assert.equal(outcomeB.kind, 'applied')
-  // A's probe lands late: only B may install.
-  gateA.resolve(snapshotA)
+  // A's standing read lands late: only B may install.
+  gateA.resolve({ catalog: catalogOf(['alpha']) })
   const outcomeA = await refreshA
   assert.equal(outcomeA.kind, 'superseded')
-  assert.deepEqual(installed, [snapshotB], 'only the latest composition installs')
+  assert.deepEqual(installed, [catalogSnapshotOf(['beta'])], 'only the latest preset installs')
+})
+
+test('a late standing result never replaces a live-agent result', async () => {
+  const standingGate = deferred<{ catalog: HumanSkillCatalog; notice?: string }>()
+  const { hooks, installed } = scriptedHooks({
+    standing: async () => standingGate.promise,
+    read: async () => snapshotOf({
+      commands: Object.freeze([Object.freeze({ name: 'live-cmd', description: 'l' })]),
+      skills: Object.freeze([Object.freeze({ name: 'live-skill', description: 'l' })]),
+    }),
+  })
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  // A sessionless standing refresh starts (e.g. /preset), then the first
+  // real Agent is created and refreshes the LIVE surface.
+  const standing = coordinator.refresh({
+    source: 'preset',
+    target: { kind: 'preset', presetId: 'code' },
+  })
+  const live = await coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: 1 },
+    agent: fakeAgent(),
+  })
+  assert.equal(live.kind, 'applied')
+  // The standing result lands AFTER the live agent became the owner: dropped.
+  standingGate.resolve({ catalog: catalogOf(['standing-skill']) })
+  const standingOutcome = await standing
+  assert.equal(standingOutcome.kind, 'superseded')
+  assert.deepEqual(installed, [snapshotOf({
+    commands: Object.freeze([Object.freeze({ name: 'live-cmd', description: 'l' })]),
+    skills: Object.freeze([Object.freeze({ name: 'live-skill', description: 'l' })]),
+  })], 'only the live-agent snapshot installs')
+  assert.ok(!installed.some(snapshot => snapshot.skills.some(skill => skill.name === 'standing-skill')))
 })
 
 test('a refresh from an incomplete request fails soft without installing', async () => {
@@ -322,4 +424,28 @@ test('a refresh from an incomplete request fails soft without installing', async
   })
   assert.equal(outcome.kind, 'failed')
   assert.deepEqual(installed, [])
+})
+
+test('the coalescing gate runs one refresh per burst and one follow-up on settle', async () => {
+  const starts: number[] = []
+  const gate = new CoalescingRefreshGate(() => { starts.push(starts.length + 1) })
+  // A burst while idle starts ONE refresh.
+  gate.notify()
+  gate.notify()
+  gate.notify()
+  assert.deepEqual(starts, [1], 'notifications during flight only mark dirty')
+  gate.settled()
+  assert.deepEqual(starts, [1, 2], 'the dirty gate starts exactly one follow-up')
+  gate.settled()
+  assert.deepEqual(starts, [1, 2], 'a clean settle starts nothing')
+})
+
+test('the coalescing gate drops a burst that settles clean before the next notify', async () => {
+  const starts: number[] = []
+  const gate = new CoalescingRefreshGate(() => { starts.push(starts.length + 1) })
+  gate.notify()
+  gate.settled()
+  gate.notify()
+  gate.settled()
+  assert.deepEqual(starts, [1, 2], 'clean settle then a new notification starts a fresh refresh')
 })

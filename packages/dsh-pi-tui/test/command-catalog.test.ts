@@ -53,6 +53,7 @@ function stubRunner(
     swapTo: async () => undefined,
     currentPreset: () => undefined,
     pendingPreset: undefined,
+    effectivePresetId: undefined,
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},

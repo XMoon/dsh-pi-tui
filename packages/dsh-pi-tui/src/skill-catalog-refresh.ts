@@ -1,40 +1,54 @@
 /**
- * Catalog refresh coordinator: the single owner of post-mount surface
- * catalog refreshes. Every refresh is an explicit REQUEST (the caller names
- * the target — the coordinator never guesses from mutable runner state);
- * each request supersedes the previous one (abort + epoch), and only the
- * latest epoch may commit, so a stale probe, stale live session or stale
- * preset result can never overwrite a newer catalog.
+ * Skill catalog refresh coordinator: the single owner of post-mount
+ * surface catalog refreshes. Every refresh is an explicit REQUEST (the
+ * caller names the target — the coordinator never guesses from mutable
+ * runner state); each request supersedes the previous one (abort + epoch),
+ * and only the latest epoch may commit, so a stale live-session, stale
+ * preset or stale reload result can never overwrite a newer catalog.
  *
- * Lifecycle rules (see the plan §6.5):
- * - a TARGET CHANGE (composition ↔ live agent, or a different owner) enters
- *   the revalidating transition FIRST: scoped previews clear and the old
- *   skill wrappers become revalidating transition commands;
- * - a read failure keeps the transition commands and reports `failed`;
- * - a same-target refresh with a provider issue keeps the OLD field for the
- *   failed provider (partial failure), never a blank catalog;
+ * Targets (plan §6.4):
+ * - AGENT: the live agent's authoritative surface (commands + scoped
+ *   commands + skills through the agent-scoped services);
+ * - PRESET: the sessionless STANDING skill catalog of the effective preset
+ *   — a skills-only install (no Agent, no session, no turn; the standing
+ *   scope comes from `agentPresets.standingKeyFor`, never a probe).
+ *
+ * Lifecycle rules:
+ * - a TARGET CHANGE (agent ↔ preset, or a different owner) enters the
+ *   revalidating transition FIRST: scoped previews clear and the old skill
+ *   wrappers become revalidating transition commands;
+ * - a read failure keeps the transition commands and reports `failed` (a
+ *   same-target reload retains the last-good catalog);
+ * - a standing DEGRADE (the standing key could not be resolved; the read
+ *   fell back to the global layer) rides the applied outcome as a
+ *   one-shot `notice`;
  * - cancellation is debug-only, never clears a newer installed catalog;
  * - commit happens in one synchronous `installSnapshot` call.
  *
  * The coordinator never imports the runner or the command surface; every
  * dependency arrives as an injected hook.
- * @module @xmoon76/dsh-pi-tui/catalog-refresh
+ *
+ * Also exports {@link CoalescingRefreshGate}: the deterministic, timer-free
+ * coalescer for invalidation notifications (`skills/change`).
+ * @module @xmoon76/dsh-pi-tui/skill-catalog-refresh
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Diag } from './diag.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import type { HumanSkillCatalog } from './skill-catalog.ts'
 import type { SurfaceCatalogSnapshot } from './surface-catalog.ts'
 
 /** The source that issued one refresh request (diagnostics). */
-export type CatalogRefreshSource = 'live-session' | 'preset' | 'reload'
+export type CatalogRefreshSource = 'live-session' | 'preset' | 'reload' | 'invalidation'
 
 /** The refresh target: a live AGENT (key = the bumped chat session
- * generation) or a sessionless COMPOSITION (key = the resolved preset id or
- * `default`). The caller provides the target explicitly. */
+ * generation) or a sessionless PRESET (presetId = the effective preset id;
+ * undefined = the deployment default). The caller provides the target
+ * explicitly. */
 export type CatalogRefreshTarget =
-  | { readonly kind: 'composition'; readonly key: string }
   | { readonly kind: 'agent'; readonly key: number }
+  | { readonly kind: 'preset'; readonly presetId: string | undefined }
 
 /** One explicit refresh request. */
 export interface CatalogRefreshRequest {
@@ -42,22 +56,29 @@ export interface CatalogRefreshRequest {
   readonly target: CatalogRefreshTarget
   /** The live agent to read (agent target). */
   readonly agent?: Agent
-  /** The composition to probe (composition target). */
-  readonly composition?: { agentPreset?: string; setup(agentCtx: unknown): Promise<void> | void }
 }
 
 /** The settled outcome of one refresh request. */
 export type CatalogRefreshOutcome =
-  | { readonly kind: 'applied'; readonly snapshot: SurfaceCatalogSnapshot }
+  | { readonly kind: 'applied'; readonly snapshot: SurfaceCatalogSnapshot; readonly notice?: string }
   | { readonly kind: 'failed'; readonly error: string }
   | { readonly kind: 'superseded' }
 
+/** One standing (sessionless) skill read result. */
+export interface StandingSkillRead {
+  readonly catalog: HumanSkillCatalog
+  /** One-shot user notice when the standing path degraded to the global
+   * layer (absent when nothing degraded). */
+  readonly notice?: string
+}
+
 /** The surface hooks the coordinator drives (wired by the runner). */
 export interface CatalogRefreshHooks {
-  /** Read one live agent's effective catalog. */
+  /** Read one live agent's effective catalog (agent target). */
   readAgent(agent: Agent, signal: AbortSignal): Promise<SurfaceCatalogSnapshot>
-  /** Probe one composition (sessionless target). */
-  probeComposition(composition: NonNullable<CatalogRefreshRequest['composition']>, signal: AbortSignal): Promise<SurfaceCatalogSnapshot>
+  /** Read the standing skill catalog of one preset (preset target): the
+   * adapter's capability-gated cold read, never an Agent probe. */
+  readStanding(presetId: string | undefined, signal: AbortSignal): Promise<StandingSkillRead>
   /** One synchronous commit: replace wrappers + merge completions + claims. */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
   /** Target change: clear scoped previews, turn old skill wrappers into
@@ -65,10 +86,18 @@ export interface CatalogRefreshHooks {
   enterCatalogTransition(): void
 }
 
+/** The preset target's stable identity for owner comparison. */
+function presetKey(presetId: string | undefined): string {
+  return presetId ?? 'default'
+}
+
 /** Whether two targets are the same owner (no transition needed). */
 function sameTarget(left: CatalogRefreshTarget | undefined, right: CatalogRefreshTarget): boolean {
   if (left === undefined) return false
-  return left.kind === right.kind && left.key === right.key
+  if (left.kind !== right.kind) return false
+  return left.kind === 'agent'
+    ? left.key === (right as { key: number }).key
+    : presetKey(left.presetId) === presetKey((right as { presetId: string | undefined }).presetId)
 }
 
 /**
@@ -116,16 +145,16 @@ export class CatalogRefreshCoordinator {
     // so no new input can be served a stale scoped preview mid-flight.
     if (targetChanged) this.hooks.enterCatalogTransition()
     try {
-      const snapshot = request.target.kind === 'agent'
-        ? await this.hooks.readAgent(request.agent!, signal)
-        : await this.hooks.probeComposition(request.composition!, signal)
+      const committed = request.target.kind === 'agent'
+        ? { snapshot: await this.hooks.readAgent(request.agent!, signal) }
+        : await this.readStandingSnapshot(request.target.presetId, signal)
       // Latest-only commit: the lifecycle signal, the epoch and the target
       // owner must all still hold.
       if (signal.aborted || epoch !== this.epoch) {
         this.diag.debug('catalog refresh superseded', { epoch, source: request.source })
         return { kind: 'superseded' }
       }
-      const merged = targetChanged ? snapshot : this.mergePartial(snapshot)
+      const merged = targetChanged ? committed.snapshot : this.mergePartial(committed.snapshot)
       this.hooks.installSnapshot(merged)
       this.snapshot = merged
       this.appliedEpoch = epoch
@@ -138,7 +167,7 @@ export class CatalogRefreshCoordinator {
         skills: merged.skills.length,
         issues: merged.issues.length,
       })
-      return { kind: 'applied', snapshot: merged }
+      return { kind: 'applied', snapshot: merged, ...committed.notice === undefined ? {} : { notice: committed.notice } }
     } catch (error) {
       if (signal.aborted || epoch !== this.epoch) {
         this.diag.debug('catalog refresh superseded', { epoch, source: request.source })
@@ -172,5 +201,67 @@ export class CatalogRefreshCoordinator {
       skills: skillsFailed ? old.skills : snapshot.skills,
       issues: snapshot.issues,
     })
+  }
+
+  /** One standing read wrapped into a skills-only surface snapshot: the
+   * sessionless view has no agent-scoped commands, and the global commands
+   * layer is already registered — only the skill wrappers are installed. */
+  private async readStandingSnapshot(
+    presetId: string | undefined,
+    signal: AbortSignal,
+  ): Promise<{ snapshot: SurfaceCatalogSnapshot; notice?: string }> {
+    const read = await this.hooks.readStanding(presetId, signal)
+    const snapshot: SurfaceCatalogSnapshot = Object.freeze({
+      commands: Object.freeze([]),
+      scopedCommands: Object.freeze([]),
+      skills: read.catalog.skills,
+      issues: Object.freeze([]),
+    })
+    return { snapshot, ...read.notice === undefined ? {} : { notice: read.notice } }
+  }
+}
+
+/**
+ * The deterministic, timer-free coalescer for invalidation notifications
+ * (`skills/change`): while one refresh is in flight, further notifications
+ * mark the gate DIRTY; when the in-flight refresh settles, ONE more refresh
+ * runs if the gate is dirty. A burst therefore costs at most two reads, and
+ * the re-run always observes the CURRENT ownership because the runner's
+ * `start` callback reads live state at run time.
+ */
+export class CoalescingRefreshGate {
+  private inFlight = false
+  private dirty = false
+
+  // Explicit field, not a constructor parameter property: Node's strip-only
+  // mode rejects `constructor(private readonly x: T)`.
+  private readonly start: () => void
+
+  /** @param start - invoked synchronously to START one owned refresh. Must
+   * never throw and must not itself be re-entrant (the gate owns the
+   * in-flight bookkeeping; `start` only launches the owned task). */
+  constructor(start: () => void) {
+    this.start = start
+  }
+
+  /** One invalidation notification arrived. */
+  notify(): void {
+    if (this.inFlight) {
+      this.dirty = true
+      return
+    }
+    this.inFlight = true
+    this.start()
+  }
+
+  /** Terminal settle of the in-flight refresh (called from EVERY terminal
+   * runOwned callback: onResult / onCancel / onError). Clears the in-flight
+   * flag; a dirty gate starts exactly one follow-up refresh. */
+  settled(): void {
+    this.inFlight = false
+    if (this.dirty) {
+      this.dirty = false
+      this.notify()
+    }
   }
 }

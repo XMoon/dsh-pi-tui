@@ -44,7 +44,7 @@ import {
   type SessionQueryLike,
 } from './sessions.ts'
 import { customThemeNames } from './theme.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshRequest } from './catalog-refresh.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshRequest } from './skill-catalog-refresh.ts'
 import {
   commandSummaryOf,
   listGlobalCommands,
@@ -187,10 +187,16 @@ export interface TuiCommandRunner {
   /** The preset chosen with /preset while no session exists yet; the next
    * session composes on it (run-local, ahead of launchPreset/default). */
   pendingPreset: string | undefined
+  /** The effective preset id for COLD (sessionless) reads: the run-local
+   * pending override ahead of the launch-time --preset (the SAME precedence
+   * the runner's ensureSession uses); undefined = the saved/default preset
+   * applies. */
+  readonly effectivePresetId: string | undefined
   /** Run one catalog refresh through the coordinator (the surface's only
-   * post-mount refresh path; live-agent targets only — composition probes
-   * are disabled in this deployment, see docs/surface-catalog.md). Never
-   * rejects: outcomes are `applied`, `failed` or `superseded`. */
+   * post-mount refresh path: live-agent targets and sessionless standing
+   * preset targets — composition probes are disabled in this deployment,
+   * see docs/surface-catalog.md). Never rejects: outcomes are `applied`,
+   * `failed` or `superseded`. */
   refreshCatalog(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Re-compose a still-blank session onto another preset (see recomposeBlank). */
   recomposeBlank(presetId: string): Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
@@ -888,13 +894,15 @@ export function registerTuiCommands(
     name: 'reload',
     description: 'Reload TUI settings and refresh the live command/skill catalog',
     handler: async () => {
-      // 1. Refresh the surface catalog through the coordinator — LIVE agent
-      // only: a composition probe would emit durable events in this
-      // deployment (see docs/surface-catalog.md), so the sessionless state
-      // refreshes settings only and its catalog installs on the first real
-      // session. The handler awaits the attempt and reports the outcome
-      // (counts, partial issues, supersession).
-      let catalogText = 'no live session — catalog installs on the first session'
+      // 1. Refresh the surface catalog through the coordinator: a LIVE agent
+      // refreshes its authoritative surface; the sessionless state refreshes
+      // the STANDING skill catalog of the effective preset (no Agent, no
+      // session — the standing scope replaces the composition probe, which
+      // emits durable events in this deployment, see docs/surface-catalog.md).
+      // The handler awaits the attempt and reports the outcome (counts,
+      // degradation notice, partial issues, supersession); provider or
+      // composition failures never prevent the settings portion below.
+      let catalogText = ''
       const liveAgent = runner.liveAgent
       if (liveAgent !== undefined) {
         const outcome = await runner.refreshCatalog({
@@ -907,6 +915,19 @@ export function registerTuiCommands(
           if (outcome.snapshot.issues.length > 0) {
             catalogText += ` \u00b7 partial: ${outcome.snapshot.issues.map(issue => issue.provider).join(', ')} unavailable`
           }
+        } else if (outcome.kind === 'failed') {
+          catalogText = `catalog refresh failed: ${outcome.error}`
+        } else {
+          catalogText = 'catalog refresh superseded'
+        }
+      } else {
+        const outcome = await runner.refreshCatalog({
+          source: 'reload',
+          target: { kind: 'preset', presetId: runner.effectivePresetId },
+        })
+        if (outcome.kind === 'applied') {
+          catalogText = `${outcome.snapshot.skills.length} human skills`
+          if (outcome.notice !== undefined) catalogText += ` \u00b7 ${outcome.notice}`
         } else if (outcome.kind === 'failed') {
           catalogText = `catalog refresh failed: ${outcome.error}`
         } else {
@@ -1209,11 +1230,19 @@ export function registerTuiCommands(
           const doc = settings.get(ns) as { default?: string } | undefined
           return { kind: 'success', text: `default preset: ${doc?.default ?? presets.defaultId}` }
         }
-        // The saved default only affects sessions created from now on; the
-        // sessionless surface catalog is NOT re-probed (composition probes
-        // are disabled in this deployment — the next real session's
-        // coordinator refresh installs the catalog for its composition).
+        // The saved default only affects sessions created from now on. A
+        // standing catalog refresh follows ONLY when no higher-precedence
+        // override (run-local pending or launch-time --preset) masks the
+        // new default — the masked case must not re-read a preset the next
+        // session will not compose on.
         await settings.mutate(ns, [{ op: 'set', path: ['default'], value: rest }])
+        if (runner.effectivePresetId === undefined) {
+          const outcome = await runner.refreshCatalog({
+            source: 'preset',
+            target: { kind: 'preset', presetId: rest },
+          })
+          if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
+        }
         return { kind: 'success', text: `default preset set: ${rest}` }
       }
       // Selecting swaps the composition; only a blank session (no turn
@@ -1227,10 +1256,16 @@ export function registerTuiCommands(
         if (liveAgent === undefined) {
           const resolved = await presets.resolve(id)
           runner.pendingPreset = resolved.id
-          // The sessionless catalog is NOT re-probed: composition probes are
-          // disabled in this deployment (see docs/surface-catalog.md) — the
-          // next real session's coordinator refresh installs the catalog for
-          // the chosen composition.
+          // The sessionless catalog follows the choice through the STANDING
+          // scope of the new preset (no Agent, no session — composition
+          // probes are disabled in this deployment, see
+          // docs/surface-catalog.md). A failed read degrades inside the
+          // coordinator: the choice itself still applies.
+          const outcome = await runner.refreshCatalog({
+            source: 'preset',
+            target: { kind: 'preset', presetId: resolved.id },
+          })
+          if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
           return { kind: 'pending', preset: resolved.id }
         }
         const outcome = await runner.recomposeBlank(id)
