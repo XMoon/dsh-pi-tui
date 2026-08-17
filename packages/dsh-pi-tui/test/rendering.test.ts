@@ -63,16 +63,16 @@ test('ctrl+t toggles the todo panel with markers', async () => {
     { content: 'done thing', status: 'completed' },
   ])
   let view = await viewport(vt)
-  assert.ok(!view.includes('─ todo ─'), `panel visible by default:\n${view}`)
+  assert.ok(!view.includes('Todo'), `panel visible by default:\n${view}`)
   vt.sendInput('\x14') // ctrl+t
   view = await viewport(vt)
-  assert.ok(view.includes('─ todo ─'), `panel missing:\n${view}`)
+  assert.ok(view.includes('Todo'), `panel title missing:\n${view}`)
   // Only the first active item shows in the header; the rest prove the panel.
   assert.ok(view.includes('ship it'), `pending row missing:\n${view}`)
   assert.ok(view.includes('done thing'), `completed row missing:\n${view}`)
   vt.sendInput('\x14')
   view = await viewport(vt)
-  assert.ok(!view.includes('─ todo ─'), `panel still visible:\n${view}`)
+  assert.ok(!view.includes('Todo'), `panel still visible:\n${view}`)
 })
 
 test('alt+t hides thinking entries', async () => {
