@@ -776,19 +776,23 @@ export class TuiApp {
   /** The todo panel Text; empty when hidden. */
   private readonly todoPanel: Text
   /**
-   * The persistent dock strip directly above the todo panel: one line each
-   * for the current permission, the live goal, the todo summary, and running
-   * background tasks (kimi chrome parity). Empty lines drop out entirely.
+   * The persistent dock strip directly above the todo panel: the todo
+   * summary. Empty lines drop out entirely.
    */
   private readonly dock: Text
-  /** Active background tasks for the dock/footer lines (label + status). */
+  /**
+   * The goal line between the todo panel and the queue pane: `goal ● …`
+   * rendered only while a goal is set (display-only).
+   */
+  private readonly goalLine: Text
+  /** Active background tasks for the footer badge (label + status). */
   private dockTasks: readonly { id: string; label: string; status: string; kind?: string }[] = []
-  /** Live child subagents (continuable or running one-shot) for the dock/footer lines (never jobs records). */
+  /** Live child subagents (continuable or running one-shot) for the footer badge (never jobs records). */
   private dockAgents: readonly { id: string; label: string; activity: string }[] = []
   /**
-   * The queued-input pane below the todo panel (kimi QueuePane parity):
-   * a border rule plus one `❯ text` row per pending message and a dim hint.
-   * Renders nothing while the queue is empty.
+   * The queued-input pane below the todo panel: a border rule plus one
+   * `❯ text` row per pending message and a dim hint. Renders nothing while
+   * the queue is empty.
    */
   private readonly queuePane: Text
   /** The pending inbox messages (next-turn followups and next-step steers). */
@@ -837,8 +841,6 @@ export class TuiApp {
   private planMode = false
   /** The editor's normal border style, restored when plan mode ends. */
   private readonly editorBorder: (text: string) => string
-  /** Todo summary segment of the header (without the base or badges). */
-  private todoText = ''
   /** Welcome card shown above the transcript; renders nothing without facts. */
   private readonly welcomeCard = new WelcomeCard()
   /** Transient error line shown under the transcript; cleared by the next
@@ -922,6 +924,7 @@ export class TuiApp {
     this.messagesView = new Container()
     this.dock = new Text('', 0, 0)
     this.todoPanel = new Text('', 0, 0)
+    this.goalLine = new Text('', 0, 0)
     this.queuePane = new Text('', 0, 0)
     // The busy indicator repaints through a callback, not a captured screen:
     // the MAIN screen stops rendering while the alt screen (fullscreen) is
@@ -940,6 +943,7 @@ export class TuiApp {
     this.tui.addChild(this.messagesView)
     this.tui.addChild(this.dock)
     this.tui.addChild(this.todoPanel)
+    this.tui.addChild(this.goalLine)
     this.tui.addChild(this.queuePane)
     this.tui.addChild(this.working)
     this.tui.addChild(this.editorSeat)
@@ -1466,6 +1470,7 @@ export class TuiApp {
         { component: this.fullscreenScroll, grow: 1 },
         { component: this.dock, shrink: 0 },
         { component: this.todoPanel, shrink: 0 },
+        { component: this.goalLine, shrink: 0 },
         { component: this.queuePane, shrink: 0 },
         // The busy indicator row sits directly above the editor border
         // (pi's statusContainer placement); idle it renders zero rows.
@@ -2350,22 +2355,12 @@ export class TuiApp {
   }
 
   /**
-   * Reflect the todo list in the header line: active (non-completed) count
-   * and, when the list is non-empty, the first active item's text.
+   * Reflect the todo list in the dock summary line: active (non-completed)
+   * count and, when the list is non-empty, the first active item's text.
    * @param todos - the latest todo/write snapshot.
    */
   setTodoSummary(todos: readonly TodoItem[]): void {
     this.todoItems = todos
-    const active = todos.filter(todo => todo.status !== 'completed')
-    const done = todos.length - active.length
-    if (active.length === 0) {
-      this.todoText = done > 0 ? ` · ${done} todo done` : ''
-    } else {
-      const first = active[0]
-      const label = first === undefined ? '' : first.content.length > 30 ? `${first.content.slice(0, 30)}…` : first.content
-      this.todoText = ` · ${active.length} active · ${label}`
-    }
-    this.renderHeader()
     this.renderDock()
     if (this.todoPanelVisible) this.renderTodoPanel()
   }
@@ -2374,6 +2369,9 @@ export class TuiApp {
   toggleTodoPanel(): boolean {
     this.todoPanelVisible = !this.todoPanelVisible
     this.renderTodoPanel()
+    // The dock summary hides while the panel is expanded (it would sit on
+    // top of the full list); restore it on collapse.
+    this.renderDock()
     this.requestRender()
     return this.todoPanelVisible
   }
@@ -2384,8 +2382,9 @@ export class TuiApp {
   }
 
   /**
-   * Rebuild the todo panel text: a header line plus up to five rows,
-   * in_progress first, then pending, then completed (strikethrough).
+   * Rebuild the todo panel text: a border rule + `Todo` title (both indented
+   * one cell) plus up to five rows, in_progress first, then pending, then
+   * completed (strikethrough).
    */
   private renderTodoPanel(): void {
     if (!this.todoPanelVisible) {
@@ -2400,15 +2399,19 @@ export class TuiApp {
       ...this.todoItems.filter(todo => todo.status === 'pending'),
       ...this.todoItems.filter(todo => todo.status === 'completed'),
     ].slice(0, 5)
+    const width = Math.max(1, this.terminal.columns)
+    const border = color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)
+    // Title: bold, two-cell indent.
+    const title = color.textStrong('  Todo')
     if (ordered.length === 0) {
-      this.todoPanel.setText(color.border('─ todo ─'))
+      this.todoPanel.setText([border, title].join('\n'))
       return
     }
     const lines = ordered.map(todo => {
       const body = todo.status === 'completed' ? `\x1b[9m${todo.content}\x1b[29m` : todo.content
       return `${mark(todo)} ${body}`
     })
-    this.todoPanel.setText([color.border('─ todo ─'), ...lines].join('\n'))
+    this.todoPanel.setText([border, title, ...lines].join('\n'))
   }
 
   /** Hide/show thinking entries; the fold state is untouched. */
@@ -2423,17 +2426,17 @@ export class TuiApp {
     return this.hideThinking
   }
 
-  /** Rebuild the header from base + session title + todo summary + plan badge.
+  /** Rebuild the header from base + session title + plan badge.
    * Colours are applied AT RENDER TIME from the live palette — the semantic
-   * state (plan mode, title, todo text) is stored separately, so a theme
-   * switch only has to re-run this. */
+   * state (plan mode, title) is stored separately, so a theme switch only
+   * has to re-run this. */
   private renderHeader(): void {
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
     const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent('[viewing subagent]')}`
     const title = this.viewerMode !== undefined
       ? ` · ${color.textMuted(this.viewerMode.label)}`
       : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    this.header.setText(`🐋  dsh-pi-tui${title}${this.todoText}${badge}${viewerBadge}`)
+    this.header.setText(`🐋  dsh-pi-tui${title}${badge}${viewerBadge}`)
     this.requestRender()
   }
 
@@ -2447,31 +2450,29 @@ export class TuiApp {
     this.status = { ...this.status, ...status }
     this.renderFooter()
     this.renderDock()
+    this.renderGoalLine()
   }
 
   /**
-   * Replace the active background-task list for the dock lines and the
-   * footer badge. Non-empty sets arm the ↓/Ctrl+J task-browser trigger.
+   * Replace the active background-task list for the footer badge. Non-empty
+   * sets arm the ↓/Ctrl+J task-browser trigger.
    * @param tasks - active jobs (id + label + lifecycle status), empty to hide.
    */
   setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
     this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
-    this.renderDock()
     this.renderFooter()
   }
 
   /**
-   * Replace the live child-subagent list for the dock lines and the
-   * footer badge. Continuable children and foreground one-shot children
-   * never register jobs records (AGENTS.md), so they arm the ↓/Ctrl+J
-   * trigger through this channel.
+   * Replace the live child-subagent list for the footer badge. Continuable
+   * children and foreground one-shot children never register jobs records
+   * (AGENTS.md), so they arm the ↓/Ctrl+J trigger through this channel.
    * @param agents - live children (id + label + activity), empty to hide.
    */
   setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
     this.dockAgents = agents
     this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
-    this.renderDock()
     this.renderFooter()
   }
 
@@ -2481,9 +2482,9 @@ export class TuiApp {
   }
 
   /**
-   * Replace the pending inbox rows for the queue pane (kimi QueuePane
-   * parity): a border rule, one `❯ text` row per message, and a dim hint.
-   * An empty queue renders nothing at all.
+   * Replace the pending inbox rows for the queue pane: a border rule, one
+   * `❯ text` row per message, and a dim hint. An empty queue renders
+   * nothing at all.
    * @param items - pending followups/steers, in delivery order.
    */
   setQueueItems(items: readonly QueueItem[]): void {
@@ -2500,7 +2501,9 @@ export class TuiApp {
       return
     }
     const width = Math.max(1, this.terminal.columns)
-    const lines = [color.border('─'.repeat(width))]
+    // Panel border rules indent one cell on each side so the boundary never
+    // reads as the editor's full-width border.
+    const lines = [color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)]
     for (const item of items) {
       // Plugin notices (background-job completions etc.) are NOT steerable:
       // they carry their own ⏳ marker so they never read as user input, and
@@ -2559,54 +2562,41 @@ export class TuiApp {
   }
 
   /**
-   * Rebuild the persistent dock strip above the todo panel: todo summary and
-   * background tasks — one truncated line each, only while non-empty (kimi
-   * chrome parity). The dock is the "at a glance" surface under the
-   * transcript; the full todo list stays on Ctrl+T. The goal badge lives in
-   * the FOOTER ONLY (its one home — the dock previously duplicated it above
-   * the editor), and the permission preset badges in the footer only too, so
-   * every fact has exactly one home.
+   * Rebuild the persistent dock strip above the todo panel: the todo summary
+   * as a single dim info line, only while non-empty. No border rule — a full
+   * ─ line here visually collides with the editor's own full-width border
+   * (user feedback); the summary reads as an info line, and only the
+   * EXPANDED todo panel (Ctrl+T) carries a panel border. Background-task and
+   * subagent details live in the footer badge and the ↓/Ctrl+J browser ONLY
+   * — every fact has exactly one home.
    */
   private renderDock(): void {
-    const lines: string[] = []
-    if (this.todoItems.length > 0) {
-      const active = this.todoItems.filter(todo => todo.status !== 'completed')
-      const done = this.todoItems.length - active.length
-      const first = active[0]
-      const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
-      const summary = [
-        done > 0 ? `${done} done` : '',
-        active.length > 0 ? `${active.length} active` : '',
-        label,
-      ].filter(part => part !== '').join(' · ')
-      lines.push(color.textDim(`☑  ${summary}`))
+    // While the todo panel is expanded the summary would sit directly on
+    // top of the full list it summarizes — drop it so the panel's own
+    // border rule is the single boundary.
+    if (this.todoPanelVisible || this.todoItems.length === 0) {
+      this.dock.setText('')
+      this.requestRender()
+      return
     }
-    if (this.dockTasks.length > 0) {
-      // One line per active task (id + label), capped at three with a
-      // more-tasks marker — the "at a glance" list; the footer badge carries
-      // the count and the ↓ trigger opens the full browser.
-      const shown = this.dockTasks.slice(0, 3)
-      for (const task of shown) {
-        const label = task.label.length > 40 ? `${task.label.slice(0, 40)}…` : task.label
-        lines.push(color.textDim(`⏳  ${task.id} · ${label}`))
-      }
-      if (this.dockTasks.length > 3) {
-        lines.push(color.textDim(`   … ${this.dockTasks.length - 3} more`))
-      }
-    }
-    if (this.dockAgents.length > 0) {
-      // One line per live child subagent, same cap; a subagent has no
-      // job record, so the dock marks it with its own glyph.
-      const shown = this.dockAgents.slice(0, 3)
-      for (const agent of shown) {
-        const label = agent.label.length > 40 ? `${agent.label.slice(0, 40)}…` : agent.label
-        lines.push(color.textDim(`🤖  ${agent.id} · ${label}`))
-      }
-      if (this.dockAgents.length > 3) {
-        lines.push(color.textDim(`   … ${this.dockAgents.length - 3} more`))
-      }
-    }
-    this.dock.setText(lines.join('\n'))
+    const active = this.todoItems.filter(todo => todo.status !== 'completed')
+    const done = this.todoItems.length - active.length
+    const first = active[0]
+    const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
+    const summary = [
+      done > 0 ? `${done} todo done` : '',
+      active.length > 0 ? `${active.length} active` : '',
+      label,
+    ].filter(part => part !== '').join(' · ')
+    this.dock.setText(color.textDim(`☑  ${summary}`))
+    this.requestRender()
+  }
+
+  /** Rebuild the goal line: `goal ● <objective>` while a goal is set, hidden
+   * otherwise (display-only — no verbs yet). */
+  private renderGoalLine(): void {
+    const goal = this.status.goal
+    this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(goal))
     this.requestRender()
   }
 
@@ -2658,7 +2648,8 @@ export class TuiApp {
     const line1 = [
       permissionBadge,
       this.planMode ? color.warning('[plan]') : '',
-      this.status.goal === undefined || this.status.goal === '' ? '' : color.primary(this.status.goal),
+      // The goal badge moved OUT of the footer into its own line above the
+      // editor (goalLine) — the footer keeps only turn/step state.
       this.status.model === '' ? '' : `[${this.status.model}]`,
       taskBadge,
       this.status.cwd,
@@ -2827,6 +2818,7 @@ export class TuiApp {
     this.renderFooter()
     this.renderDock()
     this.renderTodoPanel()
+    this.renderGoalLine()
     this.renderQueuePane()
     this.working.refresh()
     this.editor.invalidate()

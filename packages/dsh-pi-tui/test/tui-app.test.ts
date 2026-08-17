@@ -271,22 +271,23 @@ test('shift+tab with no overlay cycles the permission through the host', async (
   app.stop()
 })
 
-test('the dock strip shows todo and task lines only while non-empty; goal lives in the footer only', async () => {
+test('the dock strip shows the todo summary only while non-empty; tasks live in the footer badge and goal on its own line', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(!view.includes('☑'), `empty dock must not render a todo line:\n${view}`)
-  // Everything present: goal (footer only — no dock duplication), todo
-  // summary, tasks.
+  // Everything present: goal (own line above the queue), todo summary, and
+  // the task count in the footer badge only.
   app.setStatus({ goal: 'goal ● fix the build' })
   app.setTodoSummary([{ content: 'write tests', status: 'in_progress' }, { content: 'ship', status: 'pending' }])
   app.setTasks([{ id: 'bash-1', label: 'audit repo', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('⚑'), `goal must not render in the dock:\n${view}`)
-  assert.ok(view.includes('goal ● fix the build'), `goal missing from the footer:\n${view}`)
+  assert.ok(view.includes('goal ● fix the build'), `goal missing from its own line:\n${view}`)
   assert.ok(view.includes('☑  2 active · write tests'), `todo summary missing:\n${view}`)
-  assert.ok(view.includes('⏳  bash-1 · audit repo'), `task line missing:\n${view}`)
+  // Task details are NOT in the dock anymore — only the footer badge count.
+  assert.ok(!view.includes('⏳  bash-1 · audit repo'), `task detail leaked into the dock:\n${view}`)
+  assert.ok(view.includes('[1 task running'), `footer task badge missing:\n${view}`)
   // Lines drop out as their data clears.
   app.setTasks([])
   app.setTodoSummary([])
@@ -294,7 +295,7 @@ test('the dock strip shows todo and task lines only while non-empty; goal lives 
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(!view.includes('☑'), `cleared todo line survived:\n${view}`)
-  assert.ok(!view.includes('⏳'), `cleared task line survived:\n${view}`)
+  assert.ok(!view.includes('goal ●'), `cleared goal line survived:\n${view}`)
 })
 
 test('the queue pane renders pending rows and hides when empty', async () => {
@@ -465,7 +466,7 @@ test('the footer badge combines tasks and live agents, hint only on an empty edi
   assert.ok(!vt.getViewport().join('\n').includes('agent ·'), `badge survived clearing:\n${view}`)
 })
 
-test('the dock renders live subagent lines with their own glyph', async () => {
+test('live subagents render as a footer badge only (no dock detail lines)', async () => {
   const { vt, app } = startApp()
   app.setAgents([
     { id: 'child-abc', label: 'research', activity: 'running' },
@@ -473,8 +474,8 @@ test('the dock renders live subagent lines with their own glyph', async () => {
   ])
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🤖  child-abc · research'), `dock agent line missing:\n${view}`)
-  assert.ok(view.includes('🤖  child-def · audit repo'), `second dock agent line missing:\n${view}`)
+  assert.ok(!view.includes('🤖'), `subagent detail must not render in the dock:\n${view}`)
+  assert.ok(view.includes('[2 agents'), `footer subagent badge missing:\n${view}`)
 })
 
 test('the output viewer refreshes on a timer, stops on s, and closes on esc', async () => {

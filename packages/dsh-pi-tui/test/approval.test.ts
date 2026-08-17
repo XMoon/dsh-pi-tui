@@ -191,15 +191,15 @@ test('editor input is blocked while a prompt is showing', async () => {
   assert.equal(await decision, 'allowed-once')
 })
 
-test('todo summary reflects active and completed items in the header', async () => {
+test('todo summary reflects active and completed items in the dock', async () => {
   const { vt, app } = startApp()
   app.setTodoSummary([{ content: 'fix the tests', status: 'in_progress' }, { content: 'ship it', status: 'pending' }])
   let view = await viewport(vt)
-  assert.ok(view.includes('2 active · fix the tests'), `header missing:
+  assert.ok(view.includes('2 active · fix the tests'), `dock missing:
 ${view}`)
   app.setTodoSummary([{ content: 'fix the tests', status: 'completed' }])
   view = await viewport(vt)
-  assert.ok(view.includes('1 todo done'), `header missing:
+  assert.ok(view.includes('1 todo done'), `dock missing:
 ${view}`)
   app.setTodoSummary([])
   view = await viewport(vt)
