@@ -148,6 +148,13 @@ export interface ActivitySnapshot {
   readonly todoCount: number
 }
 
+/** The store's three named slices (state subscriptions deliver these). */
+export interface SurfaceStateValues {
+  readonly surface: SurfaceSnapshot
+  readonly session: SessionSnapshot
+  readonly activity: ActivitySnapshot
+}
+
 // ── M2: the first chrome slots' contribution contracts ─────────────────────
 
 /** A header badge: short text with a semantic tone (plan §8.1). */

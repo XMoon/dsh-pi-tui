@@ -7,8 +7,23 @@
 
 ## [Unreleased]
 
+(暂无变更。)
+
+## [0.2.0] - 2026-08-19
+
 ### 新增
 
+- 扩展平台(早期,稳定化中):一个小的、带版本号的扩展面,让第三方
+  Cordis 插件无需接触 TUI 内部即可贡献 chrome。插件只导入
+  `@xmoon76/dsh-pi-tui/extensions` 并按能力特性检测(API 版本 1)。
+  首批三个 slot:`chrome.header.badge`(host 标题后的短徽标)、
+  `input.dock.item`(todo 面板上方的一行 dock)、`chrome.footer.status`
+  (一个 footer 段;宽度与截断由 host 负责)。注册是生命周期拥有的——
+  插件卸载(HMR、禁用)只移除该插件的贡献,provider 重启干净重挂载,
+  regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动
+  屏幕重渲染。`@xmoon76/dsh-pi-tui/builtins` 携带仅 Loader 使用的一方
+  贡献者(版本徽标 + 轮次/步骤计数器),用同一公开 API 自证。
+  编辑器替换、overlay、transcript 渲染器和原始终端访问明确不属于 v1。
 - `/login` 现在可以新增部署从未配置过的供应商。凭据选择器合并了 llm
   configurable-provider 目录(所有内置 pi-ai catalog 路由 + 手写 profile)
   与 settings section,按 已配置 / 可用 / 自定义 分组,并提供
@@ -24,6 +39,12 @@
 
 - `/preset` 选择器中 `code` 预设的英文名改为 `PTC mode`,与上游 dsh
   0.1.0-rc.7 的重命名保持一致(预设 id 未变,已有组合不受影响)。
+- 最终的 surface 生命周期显式化:一个 TUI surface 只有一个 GENERATION,
+  它跨越 `start()`/`stop()`、fullscreen 切换与外部编辑器往返;只有最终
+  `dispose()` 才递增它。dispose 之后所有交互能力都是良性 no-op
+  (approval 以 cancelled 结算、question flow 以 rejected 结算、进行中的
+  theme autodetect 与编辑器往返不应用任何结果)——扩展平台所依赖的
+  stale-generation 契约。
 
 ### 修复
 
@@ -265,7 +286,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6

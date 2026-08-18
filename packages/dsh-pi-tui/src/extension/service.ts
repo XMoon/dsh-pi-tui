@@ -23,8 +23,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { ExtensionLedger } from './internal/ledger.ts'
 import { InvalidateBatcher } from './internal/batcher.ts'
 import { isSlotName, slotSemantic } from './slot-map.ts'
-import type { PiTuiApiInfo, PiTuiCapability, RegistrationHandle, RegistrationSpec } from './public-types.ts'
-import type { SurfaceStateValues } from './internal/surface-state.ts'
+import type { PiTuiApiInfo, PiTuiCapability, PiTuiSlotName, RegistrationHandle, RegistrationSpec, SurfaceStateValues } from './public-types.ts'
 
 /** The service name plugins inject (`piTuiExtensions` in cordis.patch.yml). */
 export const PI_TUI_EXTENSIONS_SERVICE = 'piTuiExtensions'

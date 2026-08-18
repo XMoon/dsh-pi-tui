@@ -7,8 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+(No changes yet.)
+
+## [0.2.0] - 2026-08-19
+
 ### Added
 
+- The extension platform (early, stabilizing): a small, versioned extension
+  surface so a third-party Cordis plugin can contribute chrome without
+  touching TUI internals. Plugins import only
+  `@xmoon76/dsh-pi-tui/extensions` and feature-detect capabilities (API
+  version 1). Three slots ship: `chrome.header.badge` (a short badge after
+  the host title), `input.dock.item` (a dock line above the todo panel) and
+  `chrome.footer.status` (a footer segment; the host owns width and
+  truncation). Registrations are lifecycle-owned — plugin unload (HMR,
+  disable) removes exactly that plugin's contributions, provider restart
+  remounts cleanly, regular and fullscreen both refresh, and
+  `handle.invalidate()/replace()` re-render through the active screen.
+  `@xmoon76/dsh-pi-tui/builtins` carries the Loader-only first-party
+  contributor (version badge + turn/step counters), dogfooding the same
+  public API. Editor replacement, overlays, transcript renderers and raw
+  terminal access are explicitly NOT part of v1.
 - `/login` can now add a provider the deployment has never configured. The
   credential picker merges the llm configurable-provider directory (every
   installed pi-ai catalog route plus hand-declared profiles) with the
@@ -28,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `/preset` picker's English name for the `code` preset is now
   `PTC mode`, following the upstream dsh 0.1.0-rc.7 rename (the preset id
   is unchanged, so existing compositions keep working).
+- The final surface lifetime is explicit: a TUI surface has one GENERATION
+  that survives `start()`/`stop()`, fullscreen toggles and the
+  external-editor round-trip; only a final `dispose()` bumps it. After
+  disposal every interactive capability is a benign no-op (approvals settle
+  cancelled, question flows settle rejected, in-flight theme autodetect and
+  editor round-trips apply nothing) — the stale-generation contract the
+  extension platform builds on.
 
 ### Fixed
 
@@ -309,7 +335,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6

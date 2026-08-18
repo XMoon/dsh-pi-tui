@@ -44,15 +44,23 @@ export type { PiTuiExtensionService } from './extension/service.ts'
 
 export {
   API_VERSION,
+  type ActivitySnapshot,
   type ContributionHealth,
   type ContributionRecord,
   type ContributionState,
+  type DockItem,
+  type FooterSegment,
+  type HeaderBadge,
   type PiTuiApiInfo,
   type PiTuiCapability,
   type PiTuiSlotName,
   type PiTuiSlotSemantic,
   type RegistrationHandle,
   type RegistrationSpec,
+  type SessionSnapshot,
+  type StyledSpan,
+  type SurfaceSnapshot,
+  type SurfaceStateValues,
 } from './extension/public-types.ts'
 
 /**

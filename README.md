@@ -120,6 +120,50 @@ installed with Option B's `link:` specifier
 — a live symlink, so `pnpm build` is picked up without re-adding — while the
 `pi-tui` profile stays on the published registry package for real use.
 
+## Extensions (early, stabilizing)
+
+Since `0.2.0` the bundle ships a small, versioned extension surface so a
+third-party Cordis plugin can contribute chrome without touching the TUI
+internals. It is **early and stabilizing**: the capabilities below are the
+current set; the API version (`1`) is bumped only on breaking changes, and
+plugins must **feature-detect** capabilities instead of parsing the package
+version.
+
+A plugin imports only the public entry:
+
+```ts
+import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '@xmoon76/dsh-pi-tui/extensions'
+
+export const name = 'my-plugin'
+export const inject = ['tuiStartup', PI_TUI_EXTENSIONS_SERVICE]
+
+export function apply(ctx: Context): void {
+  const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService
+  if (!service.api().capabilities.has('slot.chrome.header.badge')) return
+  service.register<{ text: string; tone?: 'info' | 'warning' | 'error' | 'success' }>(
+    'chrome.header.badge',
+    { id: 'my-badge', order: 100, description: 'A header badge from my plugin.' },
+    { text: 'my-badge', tone: 'info' },
+  )
+}
+```
+
+Current extension points (v1):
+
+| Slot | Semantics | Contribution |
+|---|---|---|
+| `chrome.header.badge` | list | a short `[badge]` after the host title |
+| `input.dock.item` | list | a dock line above the todo panel |
+| `chrome.footer.status` | list | a footer segment (host owns width/truncation) |
+
+Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
+fiber unloads (HMR, disable), regular and fullscreen both refresh, and
+`handle.invalidate()/replace()` re-render through the active screen. The
+`@xmoon76/dsh-pi-tui/builtins` entry is the Loader-only first-party
+contributor (version badge + turn/step counters) — not a stable third-party
+SDK. Editor replacement, overlays, transcript renderers and raw terminal
+access are NOT part of v1.
+
 ## Slash commands (selection)
 
 - `/sessions [query]` — open the session picker: search-as-you-type over

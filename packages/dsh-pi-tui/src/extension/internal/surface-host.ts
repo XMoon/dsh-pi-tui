@@ -17,10 +17,10 @@
  */
 
 import type { Text } from '@xmoon76/pi-tui'
-import type { PiTuiCapability, SurfaceSnapshot } from '../public-types.ts'
+import type { PiTuiCapability, SurfaceSnapshot, SurfaceStateValues } from '../public-types.ts'
 import type { ExtensionLedger } from './ledger.ts'
 import { InvalidateBatcher } from './batcher.ts'
-import { SurfaceStateStore, type SurfaceStateValues } from './surface-state.ts'
+import { SurfaceStateStore } from './surface-state.ts'
 import { HeaderBadgeOutlet, DockItemOutlet, FooterSegmentOutlet } from './slot-outlet.ts'
 
 /** The surface host bound to one live surface. */

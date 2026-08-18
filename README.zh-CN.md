@@ -117,6 +117,46 @@ profile 上,使用方式 B 的 `link:` 说明符安装
 ——实时符号链接,`pnpm build` 后无需重新 add 即可生效——而 `pi-tui`
 profile 保持安装已发布的 registry 包用于真实使用。
 
+## 扩展(早期,稳定化中)
+
+自 `0.2.0` 起,该 bundle 携带一个小的、带版本号的扩展面,让第三方
+Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、稳定化中**:
+下面的能力是当前集合;API 版本(`1`)只在破坏性变更时递增,插件必须
+**按能力特性检测**,而不是解析包版本。
+
+插件只导入公开入口:
+
+```ts
+import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '@xmoon76/dsh-pi-tui/extensions'
+
+export const name = 'my-plugin'
+export const inject = ['tuiStartup', PI_TUI_EXTENSIONS_SERVICE]
+
+export function apply(ctx: Context): void {
+  const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService
+  if (!service.api().capabilities.has('slot.chrome.header.badge')) return
+  service.register<{ text: string; tone?: 'info' | 'warning' | 'error' | 'success' }>(
+    'chrome.header.badge',
+    { id: 'my-badge', order: 100, description: 'A header badge from my plugin.' },
+    { text: 'my-badge', tone: 'info' },
+  )
+}
+```
+
+当前扩展点(v1):
+
+| Slot | 语义 | 贡献 |
+|---|---|---|
+| `chrome.header.badge` | list | host 标题后的短 `[badge]` |
+| `input.dock.item` | list | todo 面板上方的一行 dock |
+| `chrome.footer.status` | list | 一个 footer 段(host 拥有宽度/截断) |
+
+生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
+regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕
+重渲染。`@xmoon76/dsh-pi-tui/builtins` 入口是仅 Loader 使用的一方贡献者
+(版本徽标 + 轮次/步骤计数器)——不是稳定的第三方 SDK。编辑器替换、
+overlay、transcript 渲染器和原始终端访问**不属于 v1**。
+
 ## 斜杠命令(节选)
 
 - `/sessions [query]` — 打开会话选择器:对会话 id、标题和工作区进行

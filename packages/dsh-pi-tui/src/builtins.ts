@@ -51,7 +51,8 @@ export function apply(ctx: Context): void {
   const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService | undefined
   if (service === undefined) return
 
-  // Version header badge: `[v0.1.8]` after the host title.
+  // Version header badge: `[vX.Y.Z]` after the host title (read live from
+  // the installed package.json — never hardcode the version here).
   service.register<HeaderBadge>('chrome.header.badge', {
     id: 'builtin-version',
     order: 1000,

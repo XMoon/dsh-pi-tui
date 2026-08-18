@@ -16,14 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/extension/surface-state
  */
 
-import type { ActivitySnapshot, SessionSnapshot, SurfaceSnapshot } from '../public-types.ts'
-
-/** The store's three named slices. */
-export interface SurfaceStateValues {
-  readonly surface: SurfaceSnapshot
-  readonly session: SessionSnapshot
-  readonly activity: ActivitySnapshot
-}
+import type { ActivitySnapshot, SessionSnapshot, SurfaceSnapshot, SurfaceStateValues } from '../public-types.ts'
 
 /** Mutable builder inputs; the store freezes every published snapshot. */
 export interface SurfaceStateInputs {
