@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor } from '@deepseek-ai/dsh-commands'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
@@ -795,6 +796,45 @@ export function registerTuiCommands(
     resolveLiveSkillTarget(ctx as unknown as SkillCatalogContext, agent, sessionCwd(agent))
 
   /**
+   * Split a skill invocation's trailing input into the skill name and its
+   * arguments: the first whitespace-bounded token is the name (the public
+   * skill-name grammar), everything after it the arguments. Used by the
+   * per-skill wrappers and `/skill`, so `/name args` never looks up a name
+   * containing the whole rest of the line.
+   * @param raw - the invocation's rawInput ('' for a bare command).
+   * @returns the name token ('' when the input is blank) plus the args.
+   */
+  const splitSkillLine = (raw: string): [string, ...string[]] => {
+    const trimmed = raw.trimStart()
+    const space = trimmed.search(/\s/)
+    if (space === -1) return [trimmed.trim(), ...[]]
+    return [trimmed.slice(0, space).trim(), trimmed.slice(space).trimStart()]
+  }
+
+  /**
+   * Structurally validate a skill's optional resource base, so a malformed
+   * provider-supplied value degrades to no hint instead of throwing inside
+   * the fallback rendering (the adapter's conservative rule — hostile
+   * entries are refused, never coerced or thrown on).
+   * @param value - the loaded skill's `resourceBase` (opaque from the adapter).
+   * @returns the validated resource base, or undefined when unreadable.
+   */
+  const readResourceBase = (value: unknown): { kind: 'directory'; path: string } | { kind: 'url'; url: string } | { kind: 'opaque'; description: string } | undefined => {
+    if (typeof value !== 'object' || value === null) return undefined
+    const record = value as Record<string, unknown>
+    switch (record.kind) {
+      case 'directory':
+        return typeof record.path === 'string' && record.path !== '' ? { kind: 'directory', path: record.path } : undefined
+      case 'url':
+        return typeof record.url === 'string' && record.url !== '' ? { kind: 'url', url: record.url } : undefined
+      case 'opaque':
+        return typeof record.description === 'string' && record.description !== '' ? { kind: 'opaque', description: record.description } : undefined
+      default:
+        return undefined
+    }
+  }
+
+  /**
    * The execution boundary for loading one skill into the live session;
    * shared by /skill and the per-skill slash commands. The skill is fetched
    * from the CURRENT agent's registry and its invocation policy is RE-CHECKED
@@ -802,7 +842,7 @@ export function registerTuiCommands(
    * authorization. A model-only skill is refused with an explicit error and
    * never injected.
    */
-  const loadSkill = async (agent: Agent, name: string): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+  const loadSkill = async (agent: Agent, name: string, args = ''): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
     const target = skillTarget(agent)
     if (target === undefined) return { kind: 'error', text: 'skill service unavailable' }
     const skill = await target.registry.get?.(name, { cwd: target.cwd, scope: target.scope })
@@ -814,26 +854,80 @@ export function registerTuiCommands(
     if (typeof skill.name !== 'string' || skill.name === '' || typeof skill.description !== 'string') {
       return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
     }
-    const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
-    const message = createUserMessage({
-      content: [{ type: 'text', text: 'Skill loaded by the user: **' + skill.name + '**\n\n' + body }],
-      source: { kind: 'plugin', plugin: 'tui-skill' },
+    // Web parity (the dsh-tool-skill pre-step boundary): a user-explicit
+    // skill invocation is a PLAIN user message whose leading `/name` line
+    // the host recognizes — the user's own words (including any `/name args`
+    // the wrapper was invoked with) always travel as the original text, and
+    // the rendered skill body follows as injected instructions context.
+    // Arguments are never carved out and never dropped: the bug this fixes
+    // was the wrapper discarding `rawInput` and injecting a hand-rolled body
+    // card that swallowed the user's request.
+    const line = args.trim() === '' ? '/' + skill.name : '/' + skill.name + ' ' + args.trimStart()
+    const userMessage = createUserMessage({
+      content: [{ type: 'text', text: line }],
+      source: { kind: 'user' },
     })
-    // Deliver the loaded body like the /queue steer action (and unlike
-    // agent.inject, which queues for the next pre-step WITHOUT waking the
-    // driver): a running turn takes it at the next step boundary, an idle
-    // agent starts a fresh turn with it — otherwise the load only ever
-    // parks in the inbox until some unrelated input wakes the driver.
-    if (agent.status === 'running') agent.steer(message)
-    else agent.followup(message)
+    // The host's pre-step listener (dsh-tool-skill) injects the rendered
+    // body only when ITS tool registration is visible to this agent — the
+    // same visibility test the listener itself uses. A composition without
+    // the loader (e.g. a stripped-down custom preset) never recognizes the
+    // gesture, so the TUI falls back to injecting the body itself with the
+    // OFFICIAL rendering and the OFFICIAL durable source, so transcript
+    // consumers present it exactly like a host injection (context.ts already
+    // projects skill-invocation rows). With the host present, the body is
+    // left to it: double injection would duplicate the skill body.
+    // The check is an existence probe shaped like the loader: the tool must
+    // be named `skill` and carry an execute function (the dsh-tool-skill
+    // definition always does). A scoped shadow merely named `skill` without
+    // a loader shape is treated as absent — the host's gesture listener
+    // would not inject for it either, so the TUI's fallback must cover it.
+    const tools = ctx.get('tools') as { get?(name: string, agent: Agent): { execute?: unknown; parameters?: unknown } | undefined } | undefined
+    const hostSkillLoader = tools?.get?.('skill', agent)
+    const hostLoadsSkillBody = hostSkillLoader !== undefined && typeof hostSkillLoader.execute === 'function'
+    // Deliver the batch like the /queue steer action (and unlike
+    // agent.inject alone, which queues for the next pre-step WITHOUT waking
+    // the driver): the ORIGINAL line is steered — a running turn takes it
+    // at the next step boundary, an idle agent's steer wakes the driver and
+    // opens the next turn with it (web parity, where the `/name` prompt is
+    // a plain session.prompt). The fallback body injection rides the SAME
+    // next-step batch via inject (no wake): a RUNNING agent's next step
+    // claim takes all next-step messages at once in insertion order, so the
+    // original line precedes the body in one step; an IDLE agent's steer
+    // wake claims the original line synchronously inside steer(), so the
+    // body lands as step 2 of the same turn (the loop only ends when
+    // next-step drains). Either way the original line reaches the model
+    // before the body, exactly like the web's message order.
+    // Never follow-up the original line here: followup parks the line in
+    // next-turn while the body sits in next-step, and the driver's first
+    // step boundary claims next-step FIRST — the body would arrive BEFORE
+    // the user's words, inverting the web's message order. (A second
+    // follow-up would not help either: a turn boundary claims ONE next-turn
+    // message, so the pair would split across two turns.)
+    agent.steer(userMessage)
+    if (!hostLoadsSkillBody) {
+      const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
+      // Forward the resource base too, so the fallback rendering matches
+      // what the host would render (directory/url/opaque hints).
+      const resourceBase = readResourceBase(skill.resourceBase)
+      agent.inject(createUserMessage({
+        content: [{ type: 'text', text: renderSkillContent({
+          name: skill.name,
+          provider: typeof skill.provider === 'string' && skill.provider !== '' ? skill.provider : 'tui',
+          ...resourceBase === undefined ? {} : { resourceBase },
+          content: body,
+        }) }],
+        source: { kind: 'skill-invocation', name: skill.name, form: 'instructions' },
+      }))
+    }
     return { kind: 'success', text: 'skill ' + name + ' loaded' }
   }
 
   // Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
   // human-invocable catalog skill is directly selectable from the editor
   // autocomplete and delivers its loaded body on Enter (through loadSkill,
-  // which steers a running agent or follows up an idle one). The description
-  // carries a [skill] tag so skill rows stand apart from built-in commands.
+  // which steers the original line and injects the body alongside it). The
+  // description carries a [skill] tag so skill rows stand apart from
+  // built-in commands.
   const skillDisposers = new Map<string, () => void>()
   /**
    * Synchronously replace every direct skill wrapper from a snapshot. Pure
@@ -869,10 +963,14 @@ export function registerTuiCommands(
           name: skill.name,
           description: '[skill] ' + skill.description,
           // The handler captures ONLY the skill name; execution re-fetches
-          // from the current live agent and re-checks the policy.
-          handler: async () => {
+          // from the current live agent and re-checks the policy. Trailing
+          // input (`/name args`) travels VERBATIM as the invocation's
+          // arguments (web parity: the user's words stay on the original
+          // line, never carved out or dropped — the wrapper's own name is
+          // the skill name, everything after it is args).
+          handler: async (invocation) => {
             const agent = await requireAgent()
-            return loadSkill(agent, skill.name)
+            return loadSkill(agent, skill.name, invocation?.rawInput ?? '')
           },
         })
         skillDisposers.set(skill.name, dispose)
@@ -921,9 +1019,9 @@ export function registerTuiCommands(
           const dispose = commands.register({
             name,
             description: `[skill: revalidating] ${name}`,
-            handler: async () => {
+            handler: async (invocation) => {
               const agent = await requireAgent()
-              return loadSkill(agent, name)
+              return loadSkill(agent, name, invocation?.rawInput ?? '')
             },
           })
           skillDisposers.set(name, dispose)
@@ -946,8 +1044,13 @@ export function registerTuiCommands(
       const liveAgent = await requireAgent()
       const target = skillTarget(liveAgent)
       if (target === undefined) return { kind: 'error', text: 'skill service unavailable' }
-      const name = invocation.rawInput.trim()
-      if (name !== '') return loadSkill(liveAgent, name)
+      // `/skill <name> [args...]`: the first whitespace token is the skill
+      // name, the remainder its arguments (forwarded verbatim on the
+      // original line, web parity — never carved out or dropped). The
+      // invocation line is normalized to `/name args` so the host's pre-step
+      // gesture (dsh-tool-skill) also recognizes it when visible.
+      const [name, ...args] = splitSkillLine(invocation.rawInput)
+      if (name !== '') return loadSkill(liveAgent, name, args.join(' '))
       // No argument: pick from the catalog — the same validated, policy-
       // filtered, sorted view the collector builds (readHumanSkillCatalog),
       // so hostile or model-only entries never reach the picker.

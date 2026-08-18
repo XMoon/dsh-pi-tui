@@ -57,6 +57,8 @@ export interface SkillSummaryLike {
   readonly description: unknown
   readonly whenToUse?: unknown
   readonly content?: unknown
+  readonly provider?: unknown
+  readonly resourceBase?: unknown
   readonly invocation?: { readonly modelInvocable?: unknown; readonly userInvocable?: unknown }
 }
 
