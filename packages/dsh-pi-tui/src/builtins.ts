@@ -1,0 +1,80 @@
+/**
+ * The first-party builtins contributor: `@xmoon76/dsh-pi-tui/builtins`.
+ *
+ * Loader-only (NOT a stable third-party SDK — the plan documents this):
+ * registers the bundle's own chrome contributions through the SAME public
+ * extension API a third-party plugin uses, so the first-party path is
+ * dogfooded (plan M3: builtins and third-party plugins share one service
+ * API; the host keeps no special builtin slot setters).
+ *
+ * M3 scope: the chrome that maps to the M2 slots — the version header badge
+ * and the turn/step footer segment. The turn/step counters were previously
+ * hardcoded in the host's renderFooter; they now flow through an extension
+ * footer segment that subscribes to the surface state (the host deleted its
+ * duplicated hardcoded path — headless parity preserved).
+ * @module @xmoon76/dsh-pi-tui/builtins
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
+import type { FooterSegment, HeaderBadge, StyledSpan } from './extension/public-types.ts'
+import { TUI_STARTUP_SERVICE } from './startup.ts'
+
+/** Stable Cordis plugin name for the builtins row. */
+export const name = 'pi-tui-builtins'
+
+/** The builtins mount only when the TUI startup flags were parsed. */
+export const inject = [TUI_STARTUP_SERVICE, PI_TUI_EXTENSIONS_SERVICE]
+
+/** The `@xmoon76/dsh-pi-tui` package version (dist/extensions.mjs → ../package.json). */
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
+    return pkg.version ?? '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+}
+
+/**
+ * Register the first-party chrome contributions. The turn/step footer
+ * segment subscribes to the surface state and re-bakes via handle.replace
+ * on every state change (the async-producer → cache → invalidate pattern
+ * from the plan §8.4, with replace() as the cache commit).
+ * @param ctx - the builtins plugin context (the extension service resolves
+ *   through it; the registration is owned by THIS fiber).
+ */
+export function apply(ctx: Context): void {
+  if (ctx.get(TUI_STARTUP_SERVICE) === undefined) return
+  const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService | undefined
+  if (service === undefined) return
+
+  // Version header badge: `[v0.1.8]` after the host title.
+  service.register<HeaderBadge>('chrome.header.badge', {
+    id: 'builtin-version',
+    order: 1000,
+    description: 'The bundle version (first-party builtin).',
+  }, {
+    text: `v${packageVersion()}`,
+    tone: 'info',
+  })
+
+  // Turn/step footer segment: `t3/s7` — migrated from the host's hardcoded
+  // renderFooter path (M3 dogfood). Subscribes to the session slice and
+  // replaces the segment on every turn/step change.
+  const counters = service.register<FooterSegment>('chrome.footer.status', {
+    id: 'builtin-turns-steps',
+    order: 1000,
+    description: 'Completed turns/steps counters (first-party builtin).',
+  }, { spans: [] })
+
+  const renderCounters = (state: { session: { turns: number; steps: number } }): void => {
+    const spans: StyledSpan[] = [{ text: `t${state.session.turns}/s${state.session.steps}` }]
+    counters.replace({ spans })
+  }
+  service.subscribeState(state => {
+    renderCounters(state)
+  })
+}

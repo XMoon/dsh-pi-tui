@@ -2667,6 +2667,8 @@ export class TuiApp {
       planMode: this.planMode,
       viewerMode: this.viewerMode !== undefined,
       busy: this.working.isActive(),
+      turns: this.status.turns,
+      steps: this.status.steps,
       ...this.status.model === '' ? {} : { model: this.status.model },
       ...this.status.cwd === '' ? {} : { cwd: this.status.cwd },
       ...this.status.branch === '' ? {} : { branch: this.status.branch },
@@ -2934,7 +2936,12 @@ export class TuiApp {
       this.status.cwd,
       this.status.branch === '' ? '' : this.status.branch,
       context,
-      `t${this.status.turns}/s${this.status.steps}`,
+      // Turn/step counters: the first-party builtin provides them through
+      // the extension footer segment (M3 dogfood). The host fallback stays
+      // on whenever NO footer segment provides them (F3: a host attached
+      // without the builtin — third-party-only or unloaded — must not lose
+      // the counters).
+      this.extensionHost?.hasFooterSegments() ? '' : `t${this.status.turns}/s${this.status.steps}`,
       // Extension footer segments append after the host status (M2); the
       // host owns ordering/truncation of its own parts, extensions join at
       // the end so host state always reads first.

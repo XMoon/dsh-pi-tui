@@ -77,6 +77,9 @@ import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type QueueItem, type TuiApp } from './tui-app.ts'
+import { Text } from '@xmoon76/pi-tui'
+import { SurfaceHost } from './extension/internal/surface-host.ts'
+import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import { buildTaskRows, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
 import type { TaskPanelItem } from './task-panel.ts'
 import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
@@ -1458,6 +1461,14 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     let app: TuiApp
+    // The extension service + surface host (M3 wiring); declared here so
+    // the cleanup closure can detach them.
+    let extensionService: (PiTuiExtensionService & {
+      _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
+      attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>): void
+      detachSurface(): void
+    }) | undefined
+    let extensionHost: SurfaceHost | undefined
     // Tool-card presentation bridge: the Web's render intents resolved from
     // the LIVE tool registry as the agent sees it (scoped lookup), so the
     // rendered card matches the definition that actually executed. The scope
@@ -1511,6 +1522,10 @@ export function apply(ctx: Context, config: Config): void {
       }
       shellTempFiles.clear()
       app?.dispose()
+      // Detach the extension service's surface bridge (its capability set
+      // and state listeners die with the surface).
+      extensionService?.detachSurface()
+      extensionHost = undefined
       diag.dispose()
     }
     // The ONE exit orchestration, shared by every exit entry (Ctrl+C, Ctrl+D,
@@ -2255,6 +2270,14 @@ export function apply(ctx: Context, config: Config): void {
       }
       dispatchViaSession(text)
     }
+    // M3 runner wiring (F-1): when the extension host service is mounted,
+    // the TUI surface attaches a SurfaceHost over its ledger — extensions
+    // (including the first-party builtins) render into the chrome. Without
+    // the service the surface runs exactly as before (host fallbacks).
+    extensionService = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
+    if (extensionService !== undefined) {
+      extensionHost = new SurfaceHost(extensionService._ledger(), () => app.requestRender())
+    }
     app = startProcessTui({
       onSubmit: (text) => dispatchUserInput(text),
       // The Ctrl+Enter opposite chord (web busyEnter parity): force the
@@ -2493,7 +2516,32 @@ export function apply(ctx: Context, config: Config): void {
     }, {
       present,
       workspaceRoot: cwd,
+      extensionHost,
     })
+    // M3: attach the extension host to the surface chrome once per
+    // generation (F-1): the header/dock/footer merge extension content, and
+    // the service's capability set + state bridge become live.
+    if (extensionHost !== undefined && extensionService !== undefined) {
+      extensionHost.attach(
+        { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
+        {
+          surfaceId: 'tui',
+          generation: app.getSurfaceGeneration(),
+          width: process.stdout.columns ?? 80,
+          height: process.stdout.rows ?? 24,
+          fullscreen: false,
+          focusedSeat: 'editor',
+          themeId: 'dark',
+          themeRevision: 0,
+        },
+      )
+      app.refreshChrome()
+      const attached = extensionHost
+      extensionService.attachSurface(
+        { subscribe: (listener) => attached.subscribeState(listener as never) },
+        extensionHost.capabilitiesOf() as ReadonlySet<string>,
+      )
+    }
     // Persisted TUI preferences: register the namespace and restore the
     // theme + footer preset. Theme values: auto | dark | light | custom:<name>.
     const tuiSettings = ctx.get('settings')?.register(

@@ -91,6 +91,8 @@ export class SurfaceStateStore {
         planMode: false,
         busy: false,
         viewerMode: false,
+        turns: 0,
+        steps: 0,
       }),
       activity: Object.freeze({
         working: false,

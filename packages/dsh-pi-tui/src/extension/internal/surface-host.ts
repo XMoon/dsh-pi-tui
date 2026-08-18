@@ -116,6 +116,19 @@ export class SurfaceHost {
     return this.store.subscribe(selector)
   }
 
+  /**
+   * Subscribe to the WHOLE state (listener form, for the extension service
+   * bridge): fires once with the current snapshot, then on every change.
+   * The store notifies only when a slice changed; a whole-state listener
+   * receives every changed snapshot.
+   */
+  subscribeState(listener: (state: SurfaceStateValues) => void): () => void {
+    return this.store.subscribe({
+      select: state => state,
+      notify: (state) => listener(state as SurfaceStateValues),
+    })
+  }
+
   /** The capability set this surface currently supports. */
   capabilitiesOf(): ReadonlySet<PiTuiCapability> {
     return this.capabilities
@@ -156,6 +169,14 @@ export class SurfaceHost {
   /** The footer extension segments (host merges into its status line). */
   footerText(): string {
     return this.footerSegments.text()
+  }
+
+  /** Whether any footer extension segment is registered AND baking content
+   * (F3: the host's t/s fallback turns off only when a segment actually
+   * PROVIDES the counters — a registered-but-empty segment, e.g. the
+   * builtin before its first state delivery, must not hide them). */
+  hasFooterSegments(): boolean {
+    return this.ledger.hasAny('chrome.footer.status') && this.footerSegments.text() !== ''
   }
 
   /** Update the surface slice (resize, fullscreen, theme). */

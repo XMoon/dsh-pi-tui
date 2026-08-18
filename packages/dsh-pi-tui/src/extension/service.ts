@@ -23,7 +23,8 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { ExtensionLedger } from './internal/ledger.ts'
 import { InvalidateBatcher } from './internal/batcher.ts'
 import { isSlotName, slotSemantic } from './slot-map.ts'
-import type { PiTuiApiInfo, RegistrationHandle, RegistrationSpec } from './public-types.ts'
+import type { PiTuiApiInfo, PiTuiCapability, RegistrationHandle, RegistrationSpec } from './public-types.ts'
+import type { SurfaceStateValues } from './internal/surface-state.ts'
 
 /** The service name plugins inject (`piTuiExtensions` in cordis.patch.yml). */
 export const PI_TUI_EXTENSIONS_SERVICE = 'piTuiExtensions'
@@ -42,6 +43,13 @@ export interface PiTuiExtensionService {
   register<T>(slot: string, spec: RegistrationSpec, contribution: T): RegistrationHandle<T>
   /** The semantic of one slot ('list' | 'single'), or undefined when unknown. */
   slotSemantics(slot: string): string | undefined
+  /**
+   * Subscribe to the live surface state snapshots (first-party builtins and
+   * state-driven contributions). Fires once synchronously with the current
+   * state, then on every change (batched). Returns a disposer.
+   * @param listener - receives the immutable snapshot values.
+   */
+  subscribeState(listener: (state: SurfaceStateValues) => void): () => void
 }
 
 /**
@@ -53,6 +61,19 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   private readonly ledger: ExtensionLedger
   private readonly batcher: InvalidateBatcher
   private readonly hostVersion: string
+  /** The attached SurfaceHost's state bridge, wired by the runner (M3). */
+  private stateBridge: {
+    subscribe(listener: (state: SurfaceStateValues) => void): () => void
+  } | undefined
+  /** The capability set reported while a surface is attached (F-10). */
+  private liveCapabilities = new Set<PiTuiCapability>()
+  /** State listeners registered before any surface attached (builtins that
+   * register during boot); delivered on attachSurface. */
+  private readonly pendingStateListeners = new Set<(state: SurfaceStateValues) => void>()
+  /** Listener → current teardown (pending removal or live bridge
+   * subscription). Kept so a pending listener upgraded by attachSurface
+   * releases the LIVE subscription on unload (F1). */
+  private readonly listenerUnsubscribers = new Map<(state: SurfaceStateValues) => void, () => void>()
 
   constructor(ctx: Context, hostVersion: string, requestRender: () => void) {
     super(ctx, PI_TUI_EXTENSIONS_SERVICE)
@@ -62,12 +83,106 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   }
 
   api(): PiTuiApiInfo {
-    // M1: the capability set is populated by the SurfaceHost when it
-    // attaches (M2). Until then it is empty — plugins must feature-detect.
+    // The capability set is LIVE: populated when the SurfaceHost attaches
+    // (F-10), empty before/after. Plugins must feature-detect.
     return {
       apiVersion: 1,
       hostVersion: this.hostVersion,
-      capabilities: new Set(),
+      capabilities: new Set(this.liveCapabilities),
+    }
+  }
+
+  /** Subscribe to the live surface state (first-party builtins). Like
+   * register(), the subscription is owned by the CALLING fiber: it is torn
+   * down automatically when that fiber unloads (F1 — no listener leak on
+   * HMR/unload). */
+  subscribeState(listener: (state: SurfaceStateValues) => void): () => void {
+    const caller = this.ctx
+    // Re-resolve the teardown at call time: a pending listener may have
+    // been upgraded to a live bridge subscription by attachSurface.
+    const release = (): void => {
+      this.bridgeUnsubscribeFor(listener)()
+    }
+    // The initial pending/bridge registration.
+    this.bridgeUnsubscribeFor(listener)
+    // Fiber-bound teardown (same pattern as register()): unload runs the
+    // disposer, so a stale listener never survives its owner.
+    const dispose = caller.fiber.effect(() => () => {
+      release()
+    }, 'piTuiExtensions.subscribeState()')
+    return () => {
+      release()
+      dispose()
+    }
+  }
+
+  /** The current teardown for one listener: the live bridge subscription
+   * when one exists, else the pending-list removal. Idempotent: the first
+   * invocation releases the subscription AND drops the map entry, so a
+   * second release (fiber disposer after an explicit unsubscribe) is a
+   * no-op. */
+  private bridgeUnsubscribeFor(listener: (state: SurfaceStateValues) => void): () => void {
+    const existing = this.listenerUnsubscribers.get(listener)
+    if (existing !== undefined) return existing
+    const bridge = this.stateBridge
+    if (bridge === undefined) {
+      this.pendingStateListeners.add(listener)
+      const unsubscribe = (): void => {
+        this.pendingStateListeners.delete(listener)
+        this.listenerUnsubscribers.delete(listener)
+      }
+      this.listenerUnsubscribers.set(listener, unsubscribe)
+      return unsubscribe
+    }
+    const unsubscribe = bridge.subscribe(listener)
+    const release = (): void => {
+      // Idempotence guard (round-3 P3): once released, the map entry is
+      // gone; a second release must NOT re-enter bridgeUnsubscribeFor
+      // (which would transiently re-subscribe). The has() check makes the
+      // "idempotent release" contract exactly true.
+      if (!this.listenerUnsubscribers.has(listener)) return
+      unsubscribe()
+      this.listenerUnsubscribers.delete(listener)
+    }
+    this.listenerUnsubscribers.set(listener, release)
+    return release
+  }
+
+  /** Runner-only: attach the live surface host's state bridge and capability
+   * set (called once per surface generation). */
+  attachSurface(bridge: {
+    subscribe(listener: (state: SurfaceStateValues) => void): () => void
+  }, capabilities: ReadonlySet<PiTuiCapability>): void {
+    this.stateBridge = bridge
+    this.liveCapabilities = new Set(capabilities)
+    // Upgrade every pending listener to a live bridge subscription; the
+    // listener's teardown now unsubscribes from the BRIDGE (not just the
+    // pending set) — F1: an unload after attach must release the live
+    // subscription. The stored teardown is the SAME map-deleting wrapper
+    // shape the direct path uses, so upgrade + unload + second release is
+    // idempotent and never leaks the map entry (round-2 finding 1).
+    for (const listener of [...this.pendingStateListeners]) {
+      this.listenerUnsubscribers.delete(listener) // drop the pending-removal entry
+      const unsubscribe = bridge.subscribe(listener)
+      const release = (): void => {
+        unsubscribe()
+        this.listenerUnsubscribers.delete(listener)
+      }
+      this.listenerUnsubscribers.set(listener, release)
+    }
+    this.pendingStateListeners.clear()
+  }
+
+  /** Runner-only: detach the surface (final dispose). */
+  detachSurface(): void {
+    this.stateBridge = undefined
+    this.liveCapabilities.clear()
+    // Every live listener subscription dies with the surface: their
+    // teardown falls back to a no-op (the bridge is gone; the fiber
+    // disposer is idempotent).
+    for (const [listener, unsubscribe] of [...this.listenerUnsubscribers]) {
+      unsubscribe()
+      this.listenerUnsubscribers.delete(listener)
     }
   }
 
@@ -119,5 +234,11 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** The ledger behind the service (SurfaceHost access in M2). */
   _ledger(): ExtensionLedger {
     return this.ledger
+  }
+
+  /** Test hook: the number of live listener subscriptions (F1/F5 — an
+   * owner unload must leave this at 0). */
+  _listenerUnsubscribersSize(): number {
+    return this.listenerUnsubscribers.size
   }
 }

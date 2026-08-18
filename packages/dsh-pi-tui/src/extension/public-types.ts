@@ -133,6 +133,9 @@ export interface SessionSnapshot {
   readonly planMode: boolean
   readonly busy: boolean
   readonly viewerMode: boolean
+  /** Completed turns and steps (footer t/s counters). */
+  readonly turns: number
+  readonly steps: number
 }
 
 /** Background activity counts (plan §7.3). */
