@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A user-loaded skill (`/skill <name>` or a per-skill slash command like
+  `/opip-ip-query`) now actually runs: the loaded body was delivered with
+  `agent.inject()`, which queues for the next pre-step WITHOUT waking the
+  driver — with an idle agent the skill content just sat in the queue pane
+  until some unrelated input woke the turn. The load now delivers like the
+  `/queue` steer action: a running agent takes it at the next step boundary,
+  an idle agent starts a fresh turn with it (web parity — the web surface
+  submits the `/name` prompt as a plain follow-up/steer and the host's
+  pre-step listener injects the body).
+
 ## [0.1.6] - 2026-08-18
 
 ### Added

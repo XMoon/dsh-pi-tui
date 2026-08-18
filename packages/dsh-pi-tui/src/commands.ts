@@ -815,17 +815,25 @@ export function registerTuiCommands(
       return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
     }
     const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
-    agent.inject(createUserMessage({
+    const message = createUserMessage({
       content: [{ type: 'text', text: 'Skill loaded by the user: **' + skill.name + '**\n\n' + body }],
       source: { kind: 'plugin', plugin: 'tui-skill' },
-    }))
+    })
+    // Deliver the loaded body like the /queue steer action (and unlike
+    // agent.inject, which queues for the next pre-step WITHOUT waking the
+    // driver): a running turn takes it at the next step boundary, an idle
+    // agent starts a fresh turn with it — otherwise the load only ever
+    // parks in the inbox until some unrelated input wakes the driver.
+    if (agent.status === 'running') agent.steer(message)
+    else agent.followup(message)
     return { kind: 'success', text: 'skill ' + name + ' loaded' }
   }
 
   // Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
   // human-invocable catalog skill is directly selectable from the editor
-  // autocomplete and injects on Enter. The description carries a [skill] tag
-  // so skill rows stand apart from built-in commands.
+  // autocomplete and delivers its loaded body on Enter (through loadSkill,
+  // which steers a running agent or follows up an idle one). The description
+  // carries a [skill] tag so skill rows stand apart from built-in commands.
   const skillDisposers = new Map<string, () => void>()
   /**
    * Synchronously replace every direct skill wrapper from a snapshot. Pure

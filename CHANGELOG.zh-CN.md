@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+### 修复
+
+- 用户加载的 skill(`/skill <名称>` 或 `/opip-ip-query` 这类 per-skill 斜杠
+  命令)现在会真正执行了:此前加载内容用 `agent.inject()` 投递,它只进
+  next-step 队列而**不唤醒 driver**——agent 空闲时 skill 内容就一直躺在
+  队列面板里,直到有无关输入唤醒回合。现在加载与 `/queue` 的 steer 动作
+  一致:运行中的 agent 在下一个 step 边界接收,空闲的 agent 用它开启新
+  回合(与 web 对齐——web 端把 `/name` 提示作为普通 follow-up/steer 提交,
+  由宿主 pre-step 监听器注入正文)。
+
 ## [0.1.6] - 2026-08-18
 
 ### 新增

@@ -19,12 +19,21 @@ import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A minimal fake agent whose identity marks which session a refresh ran for. */
-function fakeAgent(sessionId: string, injected: string[] = []): Agent {
-  return {
+function fakeAgent(sessionId: string, delivered: { kind: 'steer' | 'followup'; text: string }[] = [], status: 'idle' | 'running' = 'idle'): Agent {
+  const agent = {
     session: { id: sessionId, header: { cwd: '/ws' }, events: [] },
     options: { provider: 'p', model: 'm' },
-    inject: (message: { content: { text: string }[] }) => { injected.push(message.content[0]?.text ?? '') },
+    status,
   } as unknown as Agent
+  Object.assign(agent, {
+    steer: (message: { content: { text: string }[] }) => {
+      delivered.push({ kind: 'steer', text: message.content[0]?.text ?? '' })
+    },
+    followup: (message: { content: { text: string }[] }) => {
+      delivered.push({ kind: 'followup', text: message.content[0]?.text ?? '' })
+    },
+  })
+  return agent
 }
 
 /** A stub runner with a MUTABLE live agent (the test plays session state). */
@@ -210,8 +219,8 @@ test('the revalidating transition keeps skill names as revalidating handlers and
   app.start()
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  const injected: string[] = []
-  const agent = fakeAgent('session-a', injected)
+  const delivered: { kind: 'steer' | 'followup'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
   ctx.provide('skills', {
     list: async () => [],
     get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
@@ -230,10 +239,94 @@ test('the revalidating transition keeps skill names as revalidating handlers and
   assert.equal(wasAdvertised('glab'), true,
     'the transition wrapper stays advertised: submitting /glab resolves through the revalidating handler')
   // The transition handler still executes against the CURRENT agent with a
-  // fresh get + policy recheck (the same execution boundary).
+  // fresh get + policy recheck (the same execution boundary). An idle agent
+  // receives the loaded body as a follow-up — a turn that wakes the driver.
   const result = await (wrapper!.handler as () => Promise<{ kind: string }>)()
   assert.equal(result.kind, 'success')
-  assert.equal(injected.length, 1, 'the transition executes through loadSkill on the current agent')
+  assert.equal(delivered.length, 1, 'the transition executes through loadSkill on the current agent')
+  assert.equal(delivered[0]?.kind, 'followup', 'an idle agent wakes with a follow-up turn')
+  assert.match(delivered[0]?.text ?? '', /Skill loaded by the user: \*\*glab\*\*/, 'the loaded skill body is delivered')
+  app.stop()
+})
+
+test('loadSkill steers a RUNNING agent at the next step boundary instead of parking in the inbox', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered, 'running')
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  const { defs } = services
+  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+    skills: [{ name: 'glab', description: 'GitLab CLI' }],
+  }) })
+  const wrapper = defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  const result = await (wrapper!.handler as () => Promise<{ kind: string }>)()
+  assert.equal(result.kind, 'success')
+  assert.equal(delivered.length, 1, 'the load executes through loadSkill on the current agent')
+  assert.equal(delivered[0]?.kind, 'steer', 'a running agent receives the loaded body as a steer, not an inject')
+  assert.match(delivered[0]?.text ?? '', /Skill loaded by the user: \*\*glab\*\*/, 'the loaded skill body is delivered')
+  app.stop()
+})
+
+test('the explicit /skill <name> path delivers the loaded body via followup on an idle agent', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => name === 'glab'
+      ? { name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
+      : undefined,
+  } as never)
+  const { defs } = services
+  registerTuiCommands(stubRunner(ctx, app, { agent }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab' })
+  assert.equal(result.kind, 'success')
+  assert.equal(delivered.length, 1, 'the explicit /skill path delivers the loaded skill')
+  assert.equal(delivered[0]?.kind, 'followup', 'an idle agent receives the body as a follow-up turn')
+  assert.match(delivered[0]?.text ?? '', /Skill loaded by the user: \*\*glab\*\*/, 'the loaded skill body is delivered')
+  app.stop()
+})
+
+test('a missing agent status degrades to followup so the load still wakes the driver', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
+  delete (agent as { status?: unknown }).status
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  const { defs } = services
+  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+    skills: [{ name: 'glab', description: 'GitLab CLI' }],
+  }) })
+  const wrapper = defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  const result = await (wrapper!.handler as () => Promise<{ kind: string }>)()
+  assert.equal(result.kind, 'success')
+  assert.equal(delivered.length, 1, 'the load still delivers')
+  assert.equal(delivered[0]?.kind, 'followup', 'an absent status falls back to the waking follow-up')
   app.stop()
 })
 
@@ -248,15 +341,15 @@ test('the advertised-miss dispatch decision consumes advertised misses and keeps
     'an executed error is a command outcome, not a miss')
 })
 
-test('a model-only skill is refused by the explicit /skill <name> path and never injected', async () => {
+test('a model-only skill is refused by the explicit /skill <name> path and never delivered', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  const injected: string[] = []
-  const agent = fakeAgent('session-a', injected)
+  const delivered: { kind: 'steer' | 'followup'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
   ctx.provide('skills', {
     list: async () => [],
     get: async (name: string) => name === 'model-only'
@@ -270,7 +363,7 @@ test('a model-only skill is refused by the explicit /skill <name> path and never
   const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'model-only' })
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /not invocable by the user/)
-  assert.deepEqual(injected, [], 'a model-only skill must never be injected')
+  assert.deepEqual(delivered, [], 'a model-only skill must never be delivered')
   app.stop()
 })
 
@@ -307,8 +400,8 @@ test('a direct skill wrapper re-checks the policy on the CURRENT agent at execut
   app.start()
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  const injected: string[] = []
-  const agent = fakeAgent('session-a', injected)
+  const delivered: { kind: 'steer' | 'followup'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
   // The probe summary said user-invocable; the CURRENT agent's definition
   // has since flipped to model-only.
   ctx.provide('skills', {
@@ -325,6 +418,6 @@ test('a direct skill wrapper re-checks the policy on the CURRENT agent at execut
   const result = await (wrapper!.handler as () => Promise<{ kind: string; text?: string }>)()
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /not invocable by the user/)
-  assert.deepEqual(injected, [], 'the flipped skill must not be injected')
+  assert.deepEqual(delivered, [], 'the flipped skill must not be delivered')
   app.stop()
 })
