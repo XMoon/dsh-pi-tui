@@ -2036,15 +2036,15 @@ test('askQuestions skip pages through and preserves drafts', async () => {
     { id: 'q2', question: 'Second?' },
   ])
   await viewport(vt)
-  vt.sendInput('s') // skip Q1 (empty answer)
+  vt.sendInput('\x1b[C') // → skip Q1 (empty answer)
   await viewport(vt)
   let view = await viewport(vt)
   assert.ok(view.includes('Second?'), `skipped past the first question:\n${view}`)
   vt.sendInput('hello')
   vt.sendInput('\r') // commit the typed answer → review page
   await viewport(vt)
-  // b returns from the review page; drafts survive the round trip.
-  vt.sendInput('b')
+  // ← returns from the review page; drafts survive the round trip.
+  vt.sendInput('\x1b[D')
   await viewport(vt)
   view = await viewport(vt)
   assert.ok(view.includes('Second?'), `back to the second question:\n${view}`)

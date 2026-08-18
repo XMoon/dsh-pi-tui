@@ -590,8 +590,13 @@ export class QuestionFlow implements Component, Focusable {
     const text = value.trim()
     draft.custom = text
     if (text === '') {
-      // An empty "type something" answer counts as skipped (Web semantics).
-      draft.skipped = true
+      // An empty "type something" answer counts as skipped (Web semantics) —
+      // but NEVER when an earlier selection is still on the draft: the
+      // skipped mark wins at submit time (`skipped` returns `selected: []`),
+      // so committing empty text over a selection would silently wipe it
+      // (the arrow-key move-on must keep an answered draft, list-mode
+      // parity). With a selection, empty text just keeps the selection.
+      if (draft.selected.size === 0) draft.skipped = true
     } else {
       // A custom answer replaces a single-select choice; multi-select keeps
       // its checked labels (Web draftCustom parity).
@@ -646,16 +651,10 @@ export class QuestionFlow implements Component, Focusable {
           this.syncEditMode()
         }
       } else if (matchesKey(data, 'right')) {
-        if (this.tab < this.questions.length - 1) {
-          this.tab += 1
-          this.cursor = 0
-          this.submitIdx = 0
-          this.syncEditMode()
-        } else {
-          this.tab = this.questions.length
-          this.submitIdx = 0
-          this.syncEditMode()
-        }
+        // → in text mode: same "move on" verb as in list mode — commit the
+        // typed answer (an empty one counts as skipped) and advance. Enter
+        // stays the primary save key; → never discards in-progress text.
+        this.commitOther(this.otherInput.getValue())
       } else {
         this.otherInput.handleInput(data)
       }
@@ -663,22 +662,28 @@ export class QuestionFlow implements Component, Focusable {
     }
     const rows = this.rows()
     if (this.tab >= this.questions.length) {
-      // Review page: ←/→ choose Submit/Cancel, Enter executes, Esc cancels.
+      // Review page: ↑↓ choose Submit/Cancel, Enter executes, ← goes back
+      // to the last question (drafts survive), Esc cancels. The action
+      // highlight uses ↑↓ (kimi's question dialog); ← is the back verb
+      // (it replaced the old 'b' key — the arrows own back/skip now).
+      // `h` stays as the vim alias for ← (as in list mode); `l` has no
+      // mapping because the review page binds no action to → (the arrows
+      // no longer select Submit/Cancel — ↑↓ do).
       if (matchesKey(data, 'enter')) {
         if (this.submitIdx === 0) this.submit()
         else this.onCancel()
       } else if (matchesKey(data, 'escape')) {
         this.onCancel()
       } else if (matchesKey(data, 'left') || data === 'h') {
-        this.submitIdx = 0
-      } else if (matchesKey(data, 'right') || data === 'l') {
-        this.submitIdx = 1
-      } else if (data === 'b') {
-        // Back to the last question (drafts survive).
+        // ← back to the last question (drafts survive).
         this.tab = Math.max(0, this.questions.length - 1)
         this.cursor = 0
         this.submitIdx = 0
         this.syncEditMode()
+      } else if (matchesKey(data, 'up') || data === 'k') {
+        this.submitIdx = 0
+      } else if (matchesKey(data, 'down') || data === 'j') {
+        this.submitIdx = 1
       }
       return
     }
@@ -735,7 +740,7 @@ export class QuestionFlow implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'left') || data === 'h') {
-      // ←: previous question (keeps the draft).
+      // ← back: previous question (keeps the draft).
       if (this.tab > 0) {
         this.tab -= 1
         this.cursor = 0
@@ -745,9 +750,16 @@ export class QuestionFlow implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'right') || data === 'l') {
-      // →: next question (or review page). syncEditMode resets the body view
-      // (scroll/expand) on EVERY tab change — forward included — so a
-      // scrolled/expanded question never leaks its view into the next one.
+      // → move on (the arrows own back/skip now, replacing the old 's'
+      // skip key): an UNANSWERED question is marked skipped and advances
+      // (web QuestionComposer skip parity); an ANSWERED one keeps its draft
+      // and just advances. syncEditMode resets the body view (scroll/expand)
+      // on EVERY tab change — forward included — so a scrolled/expanded
+      // question never leaks its view into the next one.
+      if (!this.answered()) {
+        this.skip()
+        return
+      }
       if (this.tab < this.questions.length - 1) {
         this.tab += 1
         this.cursor = 0
@@ -759,11 +771,6 @@ export class QuestionFlow implements Component, Focusable {
         this.submitIdx = 0
         this.syncEditMode()
       }
-      return
-    }
-    if (data === 's') {
-      // Skip the current question (only meaningful outside text mode).
-      this.skip()
       return
     }
     if (matchesKey(data, 'escape')) {
@@ -855,7 +862,7 @@ export class QuestionFlow implements Component, Focusable {
       const submit = this.submitIdx === 0 ? color.textStrong('Submit') : color.textDim('Submit')
       const cancel = this.submitIdx === 1 ? color.textStrong('Cancel') : color.textDim('Cancel')
       lines.push(`${this.submitIdx === 0 ? color.primary('→ ') : '  '}${submit}   ${cancel}`)
-      lines.push(color.textDim('← → choose · b back · ↵ confirm · esc cancel'))
+      lines.push(color.textDim('↑↓ choose · ← back · ↵ confirm · esc cancel'))
       return lines
     }
     const question = this.questions[this.tab]
@@ -942,11 +949,14 @@ export class QuestionFlow implements Component, Focusable {
     // The hint composes from the parts that FIT: low-priority verbs drop out
     // instead of the whole line being ellipsized by the frame. 'esc cancel'
     // is the escape hatch and ALWAYS survives (it is reserved first — the
-    // verbs drop from the end, so e.g. 's skip' goes before 'esc cancel').
+    // verbs drop from the end, so e.g. '→ skip' goes before 'esc cancel').
     // Scroll and expand are advertised only when the page overflows the
     // scrollport; once expanded, 'e' always collapses (frame 80% -> 60%).
     const optionCount = Math.min(rows.length, 9)
     const scrollable = this.lastExpandable
+    // Text mode commits on → (empty = skipped), list mode skips/moves on —
+    // the verb is advertised per mode ('→ next' vs '→ skip').
+    const arrowVerb = this.editingOther ? '→ next' : '→ skip'
     const hintParts = [
       '↑↓ select',
       optionCount > 0 ? `1-${optionCount} choose` : '',
@@ -955,8 +965,7 @@ export class QuestionFlow implements Component, Focusable {
       !this.editingOther
         ? (this.bodyExpanded ? 'e collapse' : scrollable ? 'e expand' : '')
         : '',
-      this.questions.length > 1 ? '←→ switch' : '',
-      's skip',
+      this.questions.length > 1 ? `← back · ${arrowVerb}` : arrowVerb,
       'esc cancel',
     ].filter(part => part !== '')
     const cancel = 'esc cancel'

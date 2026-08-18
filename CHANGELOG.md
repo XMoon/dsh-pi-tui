@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-18
+
+### Changed
+
+- The question dialog's back/skip verbs are now the arrow keys: `→` moves on
+  (an unanswered question is marked skipped, an answered one keeps its
+  draft), `←` goes back to the previous question, and the review page uses
+  `↑↓` to choose Submit/Cancel with `←` to return to the questions. The
+  letter keys (`s` skip, `b` back) are gone — left/right now match the
+  direction of travel.
+
+### Fixed
+
+- Arrow/Esc/Tab now work in the question card and the task browser on
+  terminals that answer the Kitty keyboard-protocol query (zellij, WezTerm,
+  Windows Terminal, kitty): these components compared raw legacy sequences
+  (`\x1b[A`, `\x1b`, `\t`), so on CSI-u terminals every such key arrived
+  as `\x1b[1;1B` / `\x1b[27;1u` / `\x1b[9;1u` and was silently dropped —
+  the question card and task browser froze for arrows/Esc/Tab while letters
+  and Enter kept working. Key matching now routes through `matchesKey`
+  (legacy + CSI-u + modifyOtherKeys, including the super-modifier bit 128
+  zellij reports).
+- Skill slash commands (`/name` and `/skill <name>`) no longer swallow the
+  user's arguments: the per-skill wrapper discarded `invocation.rawInput`
+  and injected only a hand-rolled body card, so `/glab open issue 123`
+  reached the model as the bare skill instructions with the request lost.
+  Invocation now follows web parity — the user's original line (with any
+  `/name args`) ships as a plain user message, and the loaded body follows
+  as injected instructions context using the official `<skill_content>`
+  rendering and `skill-invocation` source (rendered by the host's
+  dsh-tool-skill pre-step listener when its loader tool is visible; the TUI
+  injects it itself only as a fallback for compositions without the host
+  loader, so the body is never duplicated).
+
 ## [0.1.7] - 2026-08-18
 
 ### Fixed
@@ -243,7 +277,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.4...v0.1.5

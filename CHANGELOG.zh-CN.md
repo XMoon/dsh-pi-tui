@@ -7,6 +7,33 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-18
+
+### 变更
+
+- 问题卡片的 back/skip 动词改为方向键:`→` 前进(未答题标记为 skipped,
+  已答题保留 draft),`←` 回到上一题,复核页用 `↑↓` 在 Submit/Cancel
+  之间切换、`←` 返回问题列表。字母键(`s` skip、`b` back)已移除——
+  左右方向键现在与行进方向一致。
+
+### 修复
+
+- 在应答 Kitty 键盘协议查询的终端(zellij、WezTerm、Windows Terminal、
+  kitty)上,问题卡片和任务浏览器的方向键/Esc/Tab 恢复正常:这两个组件
+  此前直接比较原始 legacy 序列(`\x1b[A`、`\x1b`、`\t`),CSI-u 终端上
+  这些按键以 `\x1b[1;1B` / `\x1b[27;1u` / `\x1b[9;1u` 到达后被静默丢弃——
+  方向键/Esc/Tab 全部失灵,而字母和 Enter 正常(字母经 StdinBuffer
+  可打印去重保持原始字节)。按键匹配现在统一走 `matchesKey`
+  (legacy + CSI-u + modifyOtherKeys,含 zellij 上报的 super 修饰位 128)。
+- Skill 斜杠命令(`/name` 和 `/skill <名称>`)不再吞掉用户的参数:此前
+  per-skill wrapper 丢弃了 `invocation.rawInput`,只注入一张手工拼装的
+  body 卡片,导致 `/glab open issue 123` 到达模型时只剩裸的 skill 说明,
+  请求本身丢失。现在调用与 web 对齐——用户的原始行(含任何
+  `/name args`)以普通用户消息发出,加载的 body 作为注入的指令上下文
+  紧随其后,使用官方的 `<skill_content>` 渲染和 `skill-invocation` source
+  (宿主 dsh-tool-skill 的 pre-step 监听器可见时由其渲染;TUI 只在
+  没有宿主 loader 的组合里自行注入兜底,因此 body 永远不会重复)。
+
 ## [0.1.7] - 2026-08-18
 
 ### 修复
@@ -212,7 +239,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.4...v0.1.5

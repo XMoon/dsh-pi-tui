@@ -42,7 +42,7 @@ function assertPage(
   const joined = lines.join('\n')
   assert.ok(lines.some(l => l.includes(questionStart)), `question first row missing (${width}x${budget}):\n${joined}`)
   if (expect.pointer === true) {
-    assert.ok(joined.includes('→'), `pointer missing (${width}x${budget}):\n${joined}`)
+    assert.ok(joined.includes('→ ['), `pointer missing (${width}x${budget}):\n${joined}`)
   }
   // A hint row always exists (the last row); 'esc cancel' always survives
   // (it is reserved in the fit loop), while the other verbs drop out at
@@ -84,7 +84,7 @@ function assertPointerAfterDown(f: QuestionFlow, width: number, budget: number):
   f.handleInput('\x1b[B')
   const lines = render(f, width)
   assert.ok(lines.length <= budget, `budget overflow after cursor move:\n${lines.join('\n')}`)
-  assert.ok(lines.join('\n').includes('→'), `pointer missing after cursor move:\n${lines.join('\n')}`)
+  assert.ok(lines.join('\n').includes('→ ['), `pointer missing after cursor move:\n${lines.join('\n')}`)
 }
 
 test('budget matrix: rich choice page keeps required rows', () => {
@@ -111,7 +111,7 @@ test('budget matrix: cursor movement keeps the pointer in view', () => {
         f.handleInput('\x1b[B') // Down — the view follows the cursor
         const lines = render(f, width)
         assert.ok(lines.length <= budget, `budget overflow at step ${step}:\n${lines.join('\n')}`)
-        assert.ok(lines.join('\n').includes('→'), `pointer missing at step ${step}:\n${lines.join('\n')}`)
+        assert.ok(lines.join('\n').includes('→ ['), `pointer missing at step ${step}:\n${lines.join('\n')}`)
       }
     }
   }
@@ -121,7 +121,7 @@ test('budget matrix: a skipped question revisited keeps the skipped note', () =>
   for (const budget of BUDGETS) {
     for (const width of WIDTHS) {
       const f = makeFlow([RICH_QUESTION, { id: 'q2', question: 'Second question', options: [{ label: 'B' }] }], budget)
-      f.handleInput('s') // skip q1
+      f.handleInput('\x1b[C') // → skip q1 (unanswered → skipped + advance)
       f.handleInput('\x1b[D') // back to q1 (drafts survive)
       assertPage(render(f, width), budget, width, 'Which approach', {
         hint: 'esc cancel',
@@ -139,6 +139,201 @@ test('budget matrix: optionless free-text question keeps the question and hint',
       assertPage(render(f, width), budget, width, 'Type your answer', { hint: 'esc cancel' })
     }
   }
+})
+
+test('→ skips only unanswered questions; answered drafts advance untouched', () => {
+  // Web QuestionComposer skip parity: → on an UNANSWERED question marks it
+  // skipped and advances; on an ANSWERED one the draft survives untouched.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('1') // answer q1 (single-select advances)
+  render(f, 100)
+  // q2 is now shown; → skips it (unanswered) and lands on the review page.
+  f.handleInput('\x1b[C')
+  assert.ok(render(f, 100).join('\n').includes('Submit'), `→ must reach the review page:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [
+    { id: 'q1', selected: ['A'] },
+    { id: 'q2', selected: [] },
+  ])
+  // The unanswered question must be visibly marked skipped when reviewed
+  // (this is what distinguishes →-skip from plain →-paging — the old code
+  // just advanced without marking).
+  let done3: unknown
+  const h = new QuestionFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
+  ], (answers) => { done3 = answers }, () => {})
+  h.setMaxRows(24)
+  render(h, 100)
+  h.handleInput('1') // answer q1 → q2
+  render(h, 100)
+  h.handleInput('\x1b[C') // → on UNANSWERED q2: skipped + review
+  const skippedReview = render(h, 100).join('\n')
+  assert.ok(skippedReview.includes('(skipped)'), `the unanswered question must show (skipped):\n${skippedReview}`)
+  h.handleInput('\r') // submit
+  assert.deepEqual(done3, [
+    { id: 'q1', selected: ['A'] },
+    { id: 'q2', selected: [] },
+  ])
+  // And an ANSWERED question's draft is preserved by → (no skip note).
+  let done2: unknown
+  const g = new QuestionFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
+  ], (answers) => { done2 = answers }, () => {})
+  g.setMaxRows(24)
+  render(g, 100)
+  g.handleInput('1') // q1 answered → advances to q2
+  render(g, 100)
+  g.handleInput('1') // q2 answered → review
+  render(g, 100)
+  g.handleInput('\x1b[D') // ← back to q2 (answered)
+  render(g, 100)
+  g.handleInput('\x1b[C') // → on ANSWERED q2: draft kept, advance to review
+  const review = render(g, 100).join('\n')
+  assert.ok(review.includes('Submit'), `→ must reach the review page:\n${review}`)
+  assert.ok(!review.includes('(skipped)'), `an answered question must not be marked skipped:\n${review}`)
+  g.handleInput('\r') // submit
+  assert.deepEqual(done2, [
+    { id: 'q1', selected: ['A'] },
+    { id: 'q2', selected: ['B'] },
+  ])
+})
+
+test('text-mode → with an empty input never wipes an existing selection', () => {
+  // Regression for the arrow-key move-on invariant: entering the "Type
+  // something." row and pressing → with EMPTY text used to set skipped=true,
+  // and the skipped mark wins at submit (returns selected: []) — the
+  // selection was silently destroyed. An answered draft must survive.
+  // Single-select case.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('1') // select A → advances to the review page
+  render(f, 100)
+  f.handleInput('\x1b[D') // ← back to q1 (answered)
+  render(f, 100)
+  // Walk the cursor to the "Type something." row and enter text mode.
+  f.handleInput('\x1b[B')
+  f.handleInput('\x1b[B')
+  render(f, 100)
+  f.handleInput('\r') // enter the free-text row
+  render(f, 100)
+  f.handleInput('\x1b[C') // → with EMPTY text: must NOT wipe the selection
+  const review = render(f, 100).join('\n')
+  assert.ok(review.includes('Submit'), `→ must reach the review page:\n${review}`)
+  assert.ok(!review.includes('(skipped)'), `the answered question must not become (skipped):\n${review}`)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
+  // Multi-select case: X checked, empty → keeps the selection.
+  let done2: unknown
+  const g = new QuestionFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'X' }, { label: 'Y' }] },
+  ], (answers) => { done2 = answers }, () => {})
+  g.setMaxRows(24)
+  render(g, 100)
+  g.handleInput('\r') // toggle X (multi-select stays on the question)
+  render(g, 100)
+  // Cursor onto "Type something." (last row), enter text mode, → empty.
+  g.handleInput('\x1b[B')
+  g.handleInput('\x1b[B')
+  render(g, 100)
+  g.handleInput('\r')
+  render(g, 100)
+  g.handleInput('\x1b[C') // → with EMPTY text on the answered multi-select
+  // Single-question flow: commitOther advances straight to the review page.
+  const review2 = render(g, 100).join('\n')
+  assert.ok(review2.includes('Submit'), `→ must reach the review page:\n${review2}`)
+  assert.ok(!review2.includes('(skipped)'), `the multi-select answer must not become (skipped):\n${review2}`)
+  g.handleInput('\r') // submit
+  assert.deepEqual(done2, [{ id: 'q1', selected: ['X'] }])
+})
+
+test('review page: ↑↓ choose the action, ← goes back to the last question', () => {
+  // The review highlight moved from ←/→ to ↑↓ (kimi's question dialog);
+  // ← is now the back verb (replacing the old 'b' key).
+  let cancelled = 0
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
+  ], () => {}, () => { cancelled += 1 })
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('1') // answer q1 → q2
+  render(f, 100)
+  f.handleInput('1') // answer q2 → review
+  let review = render(f, 100).join('\n')
+  assert.ok(review.includes('Submit'), `review page missing:\n${review}`)
+  // ↓ moves the highlight to Cancel; Enter then cancels the flow.
+  f.handleInput('\x1b[B')
+  review = render(f, 100).join('\n')
+  assert.ok(review.includes('Cancel'), `Cancel must be reachable:\n${review}`)
+  f.handleInput('\r')
+  assert.equal(cancelled, 1, `↓ + Enter must cancel`)
+  // ← back to the last question (drafts survive) — the old 'b' verb.
+  const g = new QuestionFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  g.setMaxRows(24)
+  render(g, 100)
+  g.handleInput('1')
+  render(g, 100)
+  g.handleInput('1') // → review
+  g.handleInput('\x1b[D') // ← back
+  assert.ok(render(g, 100).join('\n').includes('Two?'), `← must return to the last question:\n${render(g, 100).join('\n')}`)
+})
+
+test('→ in text mode commits the typed answer (empty counts as skipped)', () => {
+  // Text mode (optionless): → is the same "move on" verb — it commits the
+  // typed text and advances; an empty input counts as skipped (Enter parity).
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('alice')
+  f.handleInput('\x1b[C') // → commits the typed answer
+  assert.ok(render(f, 100).join('\n').includes('Second?'), `→ must advance from text mode:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x1b[C') // → on unanswered q2 → review (skipped)
+  render(f, 100)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [
+    { id: 'q1', selected: [], custom: 'alice' },
+    { id: 'q2', selected: [] },
+  ])
+})
+
+test('the hint advertises ← back · → skip instead of the old letters', () => {
+  const f = makeFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
+  ], 24)
+  const questionPage = render(f, 100).join('\n')
+  assert.ok(questionPage.includes('← back · → skip'), `hint must advertise the arrow verbs:\n${questionPage}`)
+  assert.ok(!questionPage.includes('s skip'), `the old 's skip' verb must be gone:\n${questionPage}`)
+  // Text mode commits on → (empty = skipped), so the verb is '→ next' there.
+  const g = makeFlow([{ id: 'q1', question: 'Your name?' }], 24)
+  const textMode = render(g, 100).join('\n')
+  assert.ok(textMode.includes('→ next'), `text-mode hint must advertise → next:\n${textMode}`)
+  assert.ok(!textMode.includes('→ skip'), `text-mode hint must not say → skip:\n${textMode}`)
+  f.handleInput('1')
+  render(f, 100)
+  f.handleInput('1') // → review
+  const review = render(f, 100).join('\n')
+  assert.ok(review.includes('↑↓ choose · ← back'), `review hint must advertise ↑↓ choose · ← back:\n${review}`)
+  assert.ok(!review.includes('b back'), `the old 'b back' verb must be gone:\n${review}`)
 })
 
 test('budget matrix: review page keeps Submit/Cancel and the hint', () => {
@@ -164,7 +359,7 @@ test('budget 8 with header and skipped state keeps the required rows', () => {
   // decorative header may keep its row (the scrollport scrolls).
   for (const width of WIDTHS) {
     const f = makeFlow([RICH_QUESTION, { id: 'q2', question: 'Second?', options: [{ label: 'B' }] }], 8)
-    f.handleInput('s') // skip q1
+    f.handleInput('\x1b[C') // → skip q1
     f.handleInput('\x1b[D') // back to q1
     assertPage(render(f, width), 8, width, 'Which approach', {
       hint: 'esc cancel',
@@ -452,7 +647,7 @@ test('↓ at the last row scrolls the body DOWN instead of wrapping (overflow on
     f.handleInput('\x1b[5~') // PageUp: view up a page, cursor below the viewport
     const midPage = render(f, width).join('\n')
     assert.ok(midPage.includes('↑ '), `precondition — view must be scrolled down (${width}):\n${midPage}`)
-    assert.ok(!midPage.includes('→'), `precondition — cursor must be off-screen after PageUp (${width}):\n${midPage}`)
+    assert.ok(!midPage.includes('→ ['), `precondition — cursor must be off-screen after PageUp (${width}):\n${midPage}`)
     // ↓ at the LAST row with more content below: edge-scroll fires — the
     // view scrolls DOWN and the cursor STAYS on the last row (no wrap to
     // the first row, which would yank the view back toward the top).
@@ -488,7 +683,7 @@ test('edge scrolling composes with cursor follow (pointer restored by the next c
     f.handleInput('\x1b[B') // cursor move: the view follows the pointer back
     const lines = render(f, width)
     assert.ok(lines.length <= 12, `budget overflow (${width}):\n${lines.join('\n')}`)
-    assert.ok(lines.join('\n').includes('→'), `cursor follow must restore the pointer (${width}):\n${lines.join('\n')}`)
+    assert.ok(lines.join('\n').includes('→ ['), `cursor follow must restore the pointer (${width}):\n${lines.join('\n')}`)
     // And ↑ still reaches the question from anywhere (the headline fix).
     let guard = 40
     while (guard-- > 0) {
