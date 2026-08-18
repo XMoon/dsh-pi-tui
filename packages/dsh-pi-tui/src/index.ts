@@ -13,7 +13,7 @@
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -115,6 +115,13 @@ import {
   type GuardSessionLike,
   type GuardState,
 } from './guard.ts'
+import {
+  acquireSessionLock,
+  swapFailureLockRepair,
+  type SessionLockInfo,
+  type SessionLockPersistence,
+} from './session-lock.ts'
+import { createProcProbe, parseProcStat } from './session-lock-proc.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -599,6 +606,60 @@ export function resumeCommand(profile: string, sessionId: string): string | unde
   return `dsh --profile ${profile} --session ${id}`
 }
 
+/** The lock identity of THIS process: pid + boot-relative starttime. */
+// The lock identity of THIS process, computed once: pid + starttime are
+// boot-constants, so re-reading /proc/self/stat per acquire is pure waste.
+let cachedSelfLockInfo: SessionLockInfo | undefined
+function selfLockInfo(): SessionLockInfo {
+  if (cachedSelfLockInfo !== undefined) return cachedSelfLockInfo
+  const info: SessionLockInfo = {
+    pid: process.pid,
+    starttime: 0,
+    startedAt: Date.now(),
+    profile: runningProfile(),
+  }
+  try {
+    info.starttime = parseProcStat(readFileSync(`/proc/self/stat`, 'utf8'))?.starttime ?? 0
+  } catch {
+    // No /proc (non-Linux): starttime 0 is still a valid unique marker for
+    // this process's own lock record (the same-process shortcut compares
+    // pid AND starttime, so 0 is fine for self-consistency).
+  }
+  cachedSelfLockInfo = info
+  return info
+}
+/** Human-readable lock owner description for the refusal notice. */
+function lockOwnerText(owner: SessionLockInfo): string {
+  const parts = [`pid ${owner.pid}`]
+  if (owner.profile !== undefined) parts.push(`profile ${owner.profile}`)
+  if (owner.startedAt > 0) {
+    const started = new Date(owner.startedAt)
+    parts.push(`started ${started.toLocaleTimeString()}`)
+  }
+  if (owner.tty !== undefined) parts.push(`tty ${owner.tty}`)
+  return parts.join(', ')
+}
+
+/** The refusal notice for a session held by another live dsh process. */
+function lockHeldNotice(sessionId: string, owner: SessionLockInfo): string {
+  return `Session ${sessionId} is open in another dsh process (${lockOwnerText(owner)}); opening it here could corrupt the log. Close it there first, or restart that process.`
+}
+
+/**
+ * A launch-time open-lock refusal: the requested session is held by another
+ * live dsh process (or its lock cannot be verified). Unlike a stale/missing
+ * session id, this is NOT recoverable by falling back to a fresh session —
+ * the user asked for a specific session and must resolve the holder first.
+ * Thrown from the resume path and re-thrown past the resume catch so the
+ * runner exits with the refusal as the error message.
+ */
+export class SessionLockRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SessionLockRefusedError'
+  }
+}
+
 /**
  * The active goal badge text from the session log, or undefined. The latest
  * `goal/change` wins; a clear or completed goal hides the badge.
@@ -855,12 +916,108 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
+    // Open-time session lock: the ONE session this process currently holds
+    // (acquired at resume/switch, released on switch-away and at exit).
+    // `undefined` means either no session yet (deferred start) or no lock
+    // (deployment cannot lock — the guard still protects the write path).
+    let heldLock: { sessionId: string; release: () => void } | undefined
+    // The /proc probe for stale-lock takeover, created once per mount.
+    const lockProc = createProcProbe()
+    /** Try to take the open-time lock for a session. Returns the refusal text
+     * when the session is held by another live dsh process (or unverifiable);
+     * undefined when the lock is now ours (or the deployment cannot lock —
+     * proceed as before). Never throws. */
+    const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): string | undefined => {
+      const persistence = ctx.get('sessionPersistence') as SessionLockPersistence | undefined
+      const outcome = acquireSessionLock(
+        {
+          persistence,
+          fs: {
+            readFileSync: (path) => readFileSync(path, 'utf8'),
+            writeFileSync: (path, content, options) => writeFileSync(path, content, options),
+            unlinkSync,
+          },
+          proc: lockProc,
+        },
+        { id: sessionId, header },
+        selfLockInfo(),
+      )
+      switch (outcome.kind) {
+        case 'acquired':
+        case 'taken-over-stale':
+          heldLock = { sessionId, release: outcome.release }
+          if (outcome.kind === 'taken-over-stale') {
+            diag.warn('session lock stale taken over', { session: sessionId })
+          }
+          return undefined
+        case 'held':
+          diag.warn('session lock held', { session: sessionId, pid: outcome.owner.pid })
+          return lockHeldNotice(sessionId, outcome.owner)
+        case 'unverifiable':
+          diag.warn('session lock unverifiable', { session: sessionId, pid: outcome.owner?.pid })
+          return outcome.owner === undefined
+            ? `Session ${sessionId} has an unreadable or malformed lock file; refusing to open it here. If no other dsh process is using it, delete the owner.lock file next to the session log and retry.`
+            : `Session ${sessionId} has a lock file whose owner (pid ${outcome.owner.pid}) cannot be verified; refusing to open it here. If that process is gone, delete the owner.lock file next to the session log and retry.`
+        case 'unavailable':
+          // No persistence/artifact/write access: proceed without a lock
+          // (the divergence guard remains the write-path backstop).
+          return undefined
+      }
+    }
+    /** Release the open-time lock for a session (idempotent). */
+    const releaseOpenLock = (sessionId: string): void => {
+      if (heldLock === undefined || heldLock.sessionId !== sessionId) return
+      heldLock.release()
+      heldLock = undefined
+    }
+    /** Re-take the lock for the still-live current session after a failed
+     * switch (refusal, resume failure, or an internal swap failure). The
+     * lock was released before the target acquire, so another process may
+     * have taken it in the window — the re-take result is checked and a
+     * failed re-take surfaces as a notice (the write-path guard remains the
+     * backstop, but the user must know the session is no longer locked by
+     * this TUI). */
+    const reacquireCurrentLock = (from: string | undefined, fromHeader?: { cwd?: string }): void => {
+      if (from === undefined) return
+      // The header determines the lock path: prefer the caller-supplied
+      // from-header (correct even after `liveAgent` was reassigned), falling
+      // back to the live header (the switchSession refusal/failure paths run
+      // before any reassignment, so the live header is still from's).
+      const refusal = acquireOpenLock(from, fromHeader ?? liveAgent?.session.header)
+      if (refusal !== undefined) {
+        const message = `the current session ${from} is no longer locked by this TUI (${refusal})`
+        ctx.logger.warn(`tui-runner: ${message}`)
+        diag.warn('session lock lost on failed switch', { session: from })
+        app?.notify(message, 'error')
+      }
+    }
+
     // A stale --session id must not kill the TUI: resume falls back to a
     // fresh session and the failure is surfaced as a notify line.
     let resumeFailure: string | undefined
     let handle: Awaited<ReturnType<typeof agents.resume>> | undefined
     if (sessionId !== undefined) {
       try {
+        // The lock file lives next to the session log, whose path needs the
+        // session's stored cwd: resolve the header first (best-effort — an
+        // unresolvable header still proceeds to the normal resume path).
+        let lockHeader: { cwd?: string } | undefined
+        try {
+          const persistence = ctx.get('sessionPersistence')
+          lockHeader = (await persistence?.list())?.find(candidate => candidate.id === sessionId)
+        } catch {
+          // Header lookup is best-effort; the resume path reports failures.
+        }
+        // Refuse to resume a session another live dsh process holds: the
+        // second open makes persistence synthesize interrupted-turn closers
+        // into the shared log while the first process keeps appending from
+        // its own in-memory seq — the classic seq-collision corruption the
+        // write-path guard cannot catch (the second opener's memory matches
+        // the file). Refusing here avoids the collision entirely.
+        const lockRefusal = acquireOpenLock(sessionId, lockHeader)
+        if (lockRefusal !== undefined) {
+          throw new SessionLockRefusedError(lockRefusal)
+        }
         // The stored session's recorded preset wins (resolved from the log,
         // not the header): a session that switched while blank ran every turn
         // under the newer composition, and rebuilding it differently would
@@ -894,10 +1051,19 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       } catch (error) {
+        // A lock refusal is NOT recoverable by falling back to a fresh
+        // session: the user asked for a specific held session. Re-throw so
+        // the runner exits with the refusal as the message.
+        if (error instanceof SessionLockRefusedError) {
+          throw error
+        }
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
         diag.error('resume failed', { session: sessionId, error: message })
         resumeFailure = `session ${sessionId} could not be resumed; started a fresh session`
+        // The failed target's lock (if we took one) must not leak: we are
+        // about to hand the surface to a different session.
+        releaseOpenLock(sessionId)
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
         handle = await agents.create({
@@ -906,6 +1072,9 @@ export function apply(ctx: Context, config: Config): void {
           agentOptions,
           setup: launched.composition.setup,
         })
+        // The fallback session is now a real persisted artifact: take its
+        // open lock like any other created session.
+        acquireOpenLock(handle.agent.session.id, handle.agent.session.header)
       }
     } else {
       // Deferred session creation: without --session the TUI opens with NO
@@ -1074,8 +1243,20 @@ export function apply(ctx: Context, config: Config): void {
     /** Swap the live agent to a new handle, repainting for its session. */
     const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>): Promise<string | undefined> => {
       const from = liveAgent?.session.id
+      // The from-session's header, captured BEFORE the swap: the repair path
+      // must re-acquire from's lock with FROM's cwd even when the failure
+      // happens after `liveAgent` was reassigned to the incoming session
+      // (a whenIdle throw) — the live header would then be the wrong one for
+      // a cross-cwd switch.
+      const fromHeader = liveAgent?.session.header
       try {
         if (liveAgent !== undefined) {
+          // Flush BEFORE releasing the old session's open lock: the lock must
+          // cover the old session's last durable write, so a racing opener
+          // cannot resume the session while our flush is still appending from
+          // our in-memory seq (dsh's prepare would synthesize closers into
+          // the shared log and collide with our flush — the exact corruption
+          // the lock exists to prevent).
           await sessions.flush(liveAgent.session)
           await liveHandle?.dispose()
         }
@@ -1085,7 +1266,31 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error) {
         const message = safeErrorMessage(error)
         diag.error('swap failed', { from, error: message })
+        // Repair the lock tracker after an internal swap failure — the
+        // decision matrix lives in swapFailureLockRepair (pure, headless-
+        // tested) so the three shapes (/new-/fork holding from, switchSession
+        // holding the target, switchSession with an unavailable target
+        // acquire) cannot silently regress.
+        const repair = swapFailureLockRepair(heldLock, from)
+        if (repair.release !== undefined) releaseOpenLock(repair.release)
+        if (repair.reacquire !== undefined) reacquireCurrentLock(repair.reacquire, fromHeader)
         return `swap failed: ${message}`
+      }
+      // The old session is now fully flushed: release its lock. (A switch
+      // that never acquired one is a no-op; a switch that already released
+      // via switchSession is idempotent by session id.)
+      if (from !== undefined) releaseOpenLock(from)
+      // The new session is now ours: take its open lock. This covers EVERY
+      // swapTo caller — /resume, /sessions, /new and /fork — so a session
+      // created or resumed by this TUI always carries a lock. A caller that
+      // already acquired it (switchSession) hits the same-process shortcut
+      // and is a no-op. A refusal here is defensive-only (a fresh UUID or a
+      // pre-checked switch cannot be held); the write-path guard still
+      // protects the session.
+      const swapLockRefusal = acquireOpenLock(next.agent.session.id, next.agent.session.header)
+      if (swapLockRefusal !== undefined) {
+        ctx.logger.warn(`tui-runner: lock refused on swap to ${next.agent.session.id}: ${swapLockRefusal}`)
+        diag.warn('session lock refused on swap', { session: next.agent.session.id })
       }
       guardState = freshGuardState()
       guardToken = undefined
@@ -1108,6 +1313,34 @@ export function apply(ctx: Context, config: Config): void {
      * string so callers' `.then(error => ...)` need no rejection path. */
     const switchSession = async (sessionId: string): Promise<string | undefined> => {
       try {
+        // The tracker is a single slot: acquiring the target first would
+        // overwrite it, leaving the current session's lock leaked for the
+        // whole TUI lifetime (swapTo's release-by-id would then be a no-op).
+        // So release the current lock BEFORE taking the target's. If the
+        // target is refused, re-take the current lock — the current session
+        // stays live and must stay protected. (Flushing happens inside
+        // swapTo, which runs after this acquire.)
+        const from = liveAgent?.session.id
+        if (from !== undefined) releaseOpenLock(from)
+        // Refuse to switch into a session another live dsh process holds —
+        // same corruption risk as the --session launch path.
+        let lockHeader: { cwd?: string } | undefined
+        try {
+          const persistence = ctx.get('sessionPersistence')
+          lockHeader = (await persistence?.list())?.find(candidate => candidate.id === sessionId)
+        } catch {
+          // Best-effort; the resume path reports failures.
+        }
+        const lockRefusal = acquireOpenLock(sessionId, lockHeader)
+        if (lockRefusal !== undefined) {
+          ctx.logger.warn(`tui-runner: switch to ${sessionId} refused: ${lockRefusal}`)
+          diag.warn('session lock held on switch', { session: sessionId })
+          // The switch did not happen: the current session is still live and
+          // must keep its lock (best-effort — an unavailable deployment has
+          // no lock to re-take and the guard still protects the write path).
+          reacquireCurrentLock(from)
+          return lockRefusal
+        }
         // The target session's recorded preset, exactly like the resume path.
         const composition = await compose(await recordedPreset(ctx, sessionId))
         const next = await agents.resume({
@@ -1123,6 +1356,12 @@ export function apply(ctx: Context, config: Config): void {
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
         diag.error('switch failed', { session: sessionId, error: message })
+        // If the resume failed after we took the target's lock, release it so
+        // the target session is not left locked for a session we never
+        // entered. The CURRENT session is still live (the switch failed):
+        // re-take its lock, which was released before the target acquire.
+        releaseOpenLock(sessionId)
+        reacquireCurrentLock(liveAgent?.session.id)
         return `switch failed: ${message}`
       }
     }
@@ -1213,6 +1452,13 @@ export function apply(ctx: Context, config: Config): void {
       cleanedUp = true
       // A pending force token is stale once the process tears down.
       guardToken = undefined
+      // Release the open-time lock for the session we hold: a clean exit
+      // must leave the session openable immediately. (A crash skips this —
+      // the stale-lock takeover on the next open handles that.)
+      if (heldLock !== undefined) {
+        heldLock.release()
+        heldLock = undefined
+      }
       lifecycleController.abort()
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
@@ -2551,6 +2797,13 @@ export function apply(ctx: Context, config: Config): void {
           })
           liveHandle = created
           liveAgent = created.agent
+          // A freshly created session is now a real persisted artifact: take
+          // the open-time lock so another dsh process cannot open it while we
+          // hold it. The lock is best-effort (unavailable deployments skip it
+          // and rely on the write-path guard). A refusal cannot happen here:
+          // the id is a brand-new UUID, so no other process can hold it —
+          // the return value is deliberately ignored (it is not a fatal path).
+          acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
           await liveAgent.whenIdle()
           bumpSessionGeneration()
           await initLiveSession(liveAgent)
@@ -2577,6 +2830,13 @@ export function apply(ctx: Context, config: Config): void {
           })
           liveHandle = created
           liveAgent = created.agent
+          // A freshly created session is now a real persisted artifact: take
+          // the open-time lock so another dsh process cannot open it while we
+          // hold it. The lock is best-effort (unavailable deployments skip it
+          // and rely on the write-path guard). A refusal cannot happen here:
+          // the id is a brand-new UUID, so no other process can hold it —
+          // the return value is deliberately ignored (it is not a fatal path).
+          acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
           await liveAgent.whenIdle()
           bumpSessionGeneration()
           await initLiveSession(liveAgent)

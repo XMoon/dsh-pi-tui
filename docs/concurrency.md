@@ -1,4 +1,4 @@
-# Cross-process safety: the divergence guard
+# Cross-process safety: the divergence guard and the open-time lock
 
 ## Why the guard exists
 
@@ -15,6 +15,81 @@ Why not file locking? Because dsh's persistence `open(path, "a")` → write →
 an fd-based lock or `lsof` check has nothing to detect. Comparing committed
 event counts against the live log is the only reliable external-writer
 signal.
+
+## The open-time lock (why the guard alone is not enough)
+
+The guard protects the WRITE path, but the guard alone cannot prevent the
+worst corruption shape, observed in the field:
+
+1. Process A resumes session S and is mid-turn (an open `step/start` is the
+   last event, A's in-memory seq is `n+1`).
+2. Process B resumes S. dsh's persistence `prepare` sees the open turn and
+   **synthesizes interrupted-turn closers into the shared log** (`step/end`,
+   `turn/end interrupted`, then the constructor's `session/end-seed`), all
+   appended to the file at seqs `n+1…n+3`.
+3. B's in-memory log is now `n+4` — which MATCHES the file, so B's guard
+   checks pass. A, meanwhile, still holds seq `n+1` in memory and keeps
+   appending `assistant/chunk` at seq `n+1` — colliding with B's synthesized
+   events and corrupting the log. A's guard then reports `unreadable`
+   (the file is damaged) while B sails through.
+
+The write-path guard cannot catch this: at B's first write, B's memory equals
+the file. The open-time lock (`src/session-lock.ts`) closes the OPEN path so
+the scenario never starts: whoever opens a session first records a tiny lock
+file next to the log; a second opener verifies the owner is still a live dsh
+process and REFUSES the open.
+
+## How the lock works (the decision)
+
+- **Lock file**: `owner.lock` next to `session.jsonl[.zstd]` in the session
+  directory (`locate()` path + `.owner.lock`). Content: the owner's pid,
+  `/proc/<pid>/stat` starttime (the pid-reuse guard), start time, and profile.
+  Written 0600 via `writeFileSync` with the **`wx` flag** — a plain `w` write
+  would silently overwrite a live owner's lock and the whole exclusion
+  collapses (a regression that shipped once and was caught only by a real
+  two-terminal test, not the memFs unit tests).
+- **Acquire**: `O_CREAT|O_EXCL` semantics. First opener wins. A second opener
+  reads the lock and probes the recorded pid against `/proc`:
+  - process gone (`ESRCH`) / zombie (`Z`) / pid reused (starttime mismatch) /
+    not a dsh invocation ⇒ **stale** ⇒ unlink + retry the atomic create
+    (bounded retries; a lock that keeps reappearing is treated as held).
+  - process alive and matches ⇒ **held** ⇒ refuse the open.
+  - probe cannot verify (no /proc, permissions, unparsable stat) ⇒
+    **unverifiable** ⇒ refuse (never take over a lock we cannot inspect).
+- **Release**: clean exit and session switch away unlink the lock
+  (idempotent). A crash leaves it behind; the next open's stale check takes
+  it over — no TTL, no heartbeat, no manual cleanup.
+- **No heartbeat, deliberately**: the lock means "this process holds the
+  session", not "this process is currently writing". A live matching owner is
+  a valid lock even while idle (SIGSTOP, long GC, laptop sleep); expiring it
+  early would create the exact double-writer window the lock exists to
+  prevent.
+- **Same process**: a re-open of one's own session (e.g. `/sessions` back to
+  the current session) short-circuits on pid + starttime match.
+
+## Lock lifecycle in the TUI
+
+| Entry | Behavior |
+|---|---|
+| `--session <id>` launch | acquire before `agents.resume()`; refusal is fatal (the runner exits with the refusal message — the user asked for a specific session, there is no safe fallback) |
+| `/resume` / `/sessions` switch | release the CURRENT lock, then acquire the target before `agents.resume()`; a refusal re-takes the current lock (the switch did not happen) and returns an error text to the picker |
+| `/new` / `/fork` | acquire in `swapTo` for the incoming session (covers every swapTo caller) |
+| first deferred message | acquire after the session is created |
+| switch away / clean exit | release (idempotent), AFTER the final flush |
+| crash / kill -9 | lock stays; the next open's stale check takes it over |
+
+Two orderings are load-bearing and were both bug-fixed in review:
+
+- **Flush before release.** `swapTo` flushes the outgoing session, THEN
+  releases its lock. Releasing first would open a window where a racing
+  opener's resume synthesizes closers into the shared log while our flush
+  still appends from our in-memory seq — the exact corruption the lock
+  exists to prevent.
+- **Release old before acquire new.** The lock tracker is a single slot;
+  acquiring the target first overwrites it and the outgoing session's lock
+  leaks for the whole TUI lifetime (a later release-by-id is a no-op). The
+  switch therefore releases the current lock first; a refused or failed
+  switch re-takes it because the current session stays live.
 
 ## How the guard works (the decision)
 
@@ -45,6 +120,15 @@ Guard state is per-session and resets on switch. `readFrom` throws on a
 corrupt committed prefix — that is the unreadable case: the file is damaged
 and the guard refuses rather than guessing. (Repair is a separate,
 deliberate act — see `repair-session.md`.)
+
+## Guard vs lock: the division of labor
+
+- The **lock** prevents TUI-vs-TUI double opens — the common corruption
+  source. It is best-effort: unavailable deployments (no persistence, no
+  write access) proceed unlocked.
+- The **guard** remains the backstop for everything the lock cannot see:
+  the web surface, older TUIs that know nothing about the lock, a force-open
+  after the refusal, or a lock file lost to manual deletion.
 
 ## Counting events in a session file (trap)
 

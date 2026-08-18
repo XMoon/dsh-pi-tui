@@ -203,11 +203,15 @@ runs without needing a session.
 
 - **One surface per session.** dsh has no cross-process session coordination:
   a session open in TWO dsh processes (TUI + web, or two TUIs) can corrupt its
-  log. The TUI detects the other writer and blocks the send; the SAME action
-  pressed again (Enter for a submit, Ctrl+S for a steer, unchanged draft)
-  forces through — an edited draft, a swapped key, a new file revision, or a
-  session switch invalidates the force. Never run two surfaces on one session
-  (the guard's full contract: `docs/concurrency.md`).
+  log. The TUI refuses to open a session already held by another live dsh
+  process (an `owner.lock` file next to the log, with a pid/starttime probe
+  for stale locks left by crashes — so the second surface is stopped at
+  OPEN time, not after the damage). For writes, the TUI detects the other
+  writer and blocks the send; the SAME action pressed again (Enter for a
+  submit, Ctrl+S for a steer, unchanged draft) forces through — an edited
+  draft, a swapped key, a new file revision, or a session switch invalidates
+  the force. Never run two surfaces on one session (full contract:
+  `docs/concurrency.md`).
 - **Session repair.** `node_modules/@xmoon76/dsh-pi-tui/scripts/repair-session.mjs`
   repairs corrupted logs (`--scan` lists damage read-only; `--yes` applies with
   a mandatory backup). A torn (truncated) tail is truncated at the last
