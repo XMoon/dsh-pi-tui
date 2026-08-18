@@ -975,9 +975,13 @@ export function apply(ctx: Context, config: Config): void {
      * failed re-take surfaces as a notice (the write-path guard remains the
      * backstop, but the user must know the session is no longer locked by
      * this TUI). */
-    const reacquireCurrentLock = (from: string | undefined): void => {
+    const reacquireCurrentLock = (from: string | undefined, fromHeader?: { cwd?: string }): void => {
       if (from === undefined) return
-      const refusal = acquireOpenLock(from, liveAgent?.session.header)
+      // The header determines the lock path: prefer the caller-supplied
+      // from-header (correct even after `liveAgent` was reassigned), falling
+      // back to the live header (the switchSession refusal/failure paths run
+      // before any reassignment, so the live header is still from's).
+      const refusal = acquireOpenLock(from, fromHeader ?? liveAgent?.session.header)
       if (refusal !== undefined) {
         const message = `the current session ${from} is no longer locked by this TUI (${refusal})`
         ctx.logger.warn(`tui-runner: ${message}`)
@@ -1237,6 +1241,12 @@ export function apply(ctx: Context, config: Config): void {
     /** Swap the live agent to a new handle, repainting for its session. */
     const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>): Promise<string | undefined> => {
       const from = liveAgent?.session.id
+      // The from-session's header, captured BEFORE the swap: the repair path
+      // must re-acquire from's lock with FROM's cwd even when the failure
+      // happens after `liveAgent` was reassigned to the incoming session
+      // (a whenIdle throw) — the live header would then be the wrong one for
+      // a cross-cwd switch.
+      const fromHeader = liveAgent?.session.header
       try {
         if (liveAgent !== undefined) {
           // Flush BEFORE releasing the old session's open lock: the lock must
@@ -1254,17 +1264,18 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error) {
         const message = safeErrorMessage(error)
         diag.error('swap failed', { from, error: message })
-        // Repair the lock tracker after an internal swap failure. When this
-        // swap came from switchSession, the tracker already holds the TARGET's
-        // lock (switchSession released `from` and acquired the target before
-        // calling us) and `liveAgent` still refers to `from` (the assignment
-        // below never ran). The target session we never entered must not stay
-        // locked, and the still-live current session must get its lock back.
-        // When the tracker holds `from` itself (/new, /fork — no pre-release),
-        // there is nothing to repair.
-        if (heldLock !== undefined && heldLock.sessionId !== from) {
-          releaseOpenLock(heldLock.sessionId)
-          reacquireCurrentLock(from)
+        // Repair the lock tracker after an internal swap failure. Two shapes:
+        // - switchSession pre-released `from` and acquired the TARGET before
+        //   calling us: the tracker holds the target (or nothing, when the
+        //   target acquire was `unavailable`) and `from`'s lock is gone. The
+        //   target session we never entered must not stay locked, and the
+        //   still-live current session must get its lock back.
+        // - /new, /fork — no pre-release: the tracker still holds `from`
+        //   itself; nothing to repair (re-acquiring would be a same-process
+        //   shortcut no-op anyway).
+        if (heldLock === undefined || heldLock.sessionId !== from) {
+          if (heldLock !== undefined) releaseOpenLock(heldLock.sessionId)
+          reacquireCurrentLock(from, fromHeader)
         }
         return `swap failed: ${message}`
       }
