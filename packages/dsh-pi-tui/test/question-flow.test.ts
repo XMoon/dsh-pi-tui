@@ -498,3 +498,69 @@ test('edge scrolling composes with cursor follow (pointer restored by the next c
     assert.ok(render(f, width).join('\n').includes('Pick a side'), `↑ must reach the question after interleaving (${width})`)
   }
 })
+
+// Kitty CSI-u / modifyOtherKeys encodings: terminals that answer the Kitty
+// keyboard-protocol query (zellij, Windows Terminal, WezTerm, kitty…) report
+// arrows/Esc/Tab as CSI-u sequences (`\x1b[1;1B`, `\x1b[27;1u`, `\x1b[9;1u`)
+// instead of the legacy `\x1b[B`/`\x1b`/`\t`. The flow previously compared
+// raw sequences, silently dropping every such key (the zellij repro: arrows
+// and Esc dead while letters/Enter worked — letters stay raw bytes). All
+// matching goes through matchesKey now; these tests pin the CSI-u forms.
+test('Kitty CSI-u arrow keys navigate (zellij/WezTerm/Windows Terminal)', () => {
+  const f = makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] }], 24)
+  render(f, 100)
+  // CSI-u ↓ with modifier 0 (`\x1b[1;1B`) and the user's exact sequence with
+  // super reported (`\x1b[1;129B` — the zellij repro) must both move down.
+  f.handleInput('\x1b[1;1B')
+  assert.ok(render(f, 100).join('\n').includes('→ [2] B'), `CSI-u down must move the cursor:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x1b[1;129B')
+  assert.ok(render(f, 100).join('\n').includes('→ [ ] Type something.'), `CSI-u down (super mod) must move the cursor:\n${render(f, 100).join('\n')}`)
+  // CSI-u ↑ (`\x1b[1;1A`) back up.
+  f.handleInput('\x1b[1;1A')
+  assert.ok(render(f, 100).join('\n').includes('→ [2] B'), `CSI-u up must move the cursor:\n${render(f, 100).join('\n')}`)
+  // CSI-u ←/→ page between questions (q1 → q2 → review).
+  const f2 = makeFlow([
+    { id: 'q1', question: 'One', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two', options: [{ label: 'B' }] },
+  ], 24)
+  render(f2, 100)
+  f2.handleInput('\x1b[1;1C') // CSI-u right
+  assert.ok(render(f2, 100).join('\n').includes('Two'), `CSI-u right must page to q2:\n${render(f2, 100).join('\n')}`)
+  f2.handleInput('\x1b[1;1D') // CSI-u left
+  assert.ok(render(f2, 100).join('\n').includes('One'), `CSI-u left must page back to q1:\n${render(f2, 100).join('\n')}`)
+})
+
+test('Kitty CSI-u Esc cancels and CSI-u Tab/Enter work', () => {
+  // Esc as `\x1b[27;1u` and the repro's `\x1b[27;129u` must cancel the flow.
+  let cancelled = 0
+  const f = makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], 24)
+  const g = new QuestionFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], () => {}, () => { cancelled += 1 })
+  g.setMaxRows(24)
+  render(g, 100)
+  g.handleInput('\x1b[27;1u')
+  assert.equal(cancelled, 1, `CSI-u Esc must cancel (plain mod): got ${cancelled}`)
+  const h = new QuestionFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], () => {}, () => { cancelled += 1 })
+  h.setMaxRows(24)
+  render(h, 100)
+  h.handleInput('\x1b[27;129u')
+  assert.equal(cancelled, 2, `CSI-u Esc must cancel (super mod, the zellij repro): got ${cancelled}`)
+  // CSI-u Enter (`\x1b[13;1u`) confirms the highlighted option → review page;
+  // a second Enter submits the batch (single-select advances, then the
+  // review page owns the final submit — Web QuestionComposer semantics).
+  let done: unknown
+  const k = new QuestionFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], (answers) => { done = answers }, () => {})
+  k.setMaxRows(24)
+  render(k, 100)
+  k.handleInput('\x1b[13;1u')
+  assert.ok(done === undefined, `first CSI-u Enter must land on the review page, not submit`)
+  assert.ok(render(k, 100).join('\n').includes('Submit'), `review page must show after CSI-u Enter:\n${render(k, 100).join('\n')}`)
+  k.handleInput('\x1b[13;1u')
+  assert.ok(done !== undefined, `second CSI-u Enter must submit:\n${JSON.stringify(done)}`)
+  assert.deepEqual((done as { id: string; selected: string[] }[])[0]?.selected, ['A'])
+  // Legacy Esc must still cancel (regression guard for the old path).
+  const legacy = new QuestionFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], () => {}, () => { cancelled += 1 })
+  legacy.setMaxRows(24)
+  render(legacy, 100)
+  legacy.handleInput('\x1b')
+  assert.equal(cancelled, 3, `legacy Esc must still cancel: got ${cancelled}`)
+})

@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/task-panel
  */
 
-import { Input, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { color, taskStatusColor } from './theme.ts'
 
@@ -183,14 +183,20 @@ export class TaskBrowserPanel implements Component, Focusable {
     // the SelectList pattern: a filter box must be editable, not just
     // typeable.
     //
+    // All key matches go through matchesKey (never raw sequence compares):
+    // it recognizes legacy AND Kitty CSI-u / modifyOtherKeys encodings, so
+    // terminals that report CSI-u (zellij + Kitty-protocol, Windows
+    // Terminal, WezTerm, kitty…) keep the panel navigable — the raw
+    // compares ('\x1b[A' etc.) silently dropped every arrow/page key there.
+    //
     // The `k`/`j` vim aliases for ↑/↓ apply ONLY when search is OFF: with a
     // search box up, `k`/`j` are ordinary letters a query may contain
     // ("task", "jq") — routing them as navigation would make those queries
     // untruncatable.
-    const isNavUp = data === '\x1b[A' || (!this.searchEnabled && data === 'k')
-    const isNavDown = data === '\x1b[B' || (!this.searchEnabled && data === 'j')
-    const isPage = data === '\x1b[5~' || data === '\x1b[6~'
-    if (!isNavUp && !isNavDown && !isPage && data !== '\r' && data !== '\n' && data !== '\x1b' && this.searchEnabled) {
+    const isNavUp = matchesKey(data, 'up') || (!this.searchEnabled && data === 'k')
+    const isNavDown = matchesKey(data, 'down') || (!this.searchEnabled && data === 'j')
+    const isPage = matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')
+    if (!isNavUp && !isNavDown && !isPage && !matchesKey(data, 'enter') && !matchesKey(data, 'escape') && this.searchEnabled) {
       this.searchInput.handleInput(data)
       this.applyFilter(this.searchInput.getValue() ?? '')
       return
@@ -209,17 +215,17 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
     if (isPage) {
       if (this.filtered.length === 0) return
-      if (data === '\x1b[5~') this.selected = Math.max(0, this.selected - this.maxVisible)
+      if (matchesKey(data, 'pageUp')) this.selected = Math.max(0, this.selected - this.maxVisible)
       else this.selected = Math.min(this.filtered.length - 1, this.selected + this.maxVisible)
       this.ensureVisible()
       return
     }
-    if (data === '\r' || data === '\n') {
+    if (matchesKey(data, 'enter')) {
       const item = this.filtered[this.selected]
       if (item !== undefined) this.onSelect(item.value)
       return
     }
-    if (data === '\x1b') {
+    if (matchesKey(data, 'escape')) {
       this.onCancel()
     }
   }

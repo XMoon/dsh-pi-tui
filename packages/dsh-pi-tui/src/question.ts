@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/question
  */
 
-import { Input } from '@xmoon76/pi-tui'
+import { Input, matchesKey, type KeyId } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
@@ -625,21 +625,27 @@ export class QuestionFlow implements Component, Focusable {
     // Text mode: printable/cursor keys go to the real Input; Enter/Esc are
     // the flow's own verbs. PageUp/PageDown scroll the body even while
     // typing ('e' stays a letter here — expand is a list-mode verb).
+    // All matches go through matchesKey so Kitty CSI-u (and modifyOtherKeys)
+    // sequences are recognized alongside legacy ones — the flow previously
+    // compared raw sequences ('\x1b[A' etc.), which silently dropped every
+    // key on terminals that report CSI-u (the zellij + Kitty-protocol case).
     if (this.editingOther) {
-      if (data === '\r' || data === '\n') {
+      if (matchesKey(data, 'enter')) {
         this.commitOther(this.otherInput.getValue())
-      } else if (data === '\x1b') {
+      } else if (matchesKey(data, 'escape')) {
         this.exitOther()
-      } else if (data === '\x1b[5~' || data === '\x1b[6~') {
-        this.scrollBody(data === '\x1b[5~' ? -1 : 1)
-      } else if (data === '\x1b[D') {
+      } else if (matchesKey(data, 'pageUp')) {
+        this.scrollBody(-1)
+      } else if (matchesKey(data, 'pageDown')) {
+        this.scrollBody(1)
+      } else if (matchesKey(data, 'left')) {
         if (this.tab > 0) {
           this.tab -= 1
           this.cursor = 0
           this.submitIdx = 0
           this.syncEditMode()
         }
-      } else if (data === '\x1b[C') {
+      } else if (matchesKey(data, 'right')) {
         if (this.tab < this.questions.length - 1) {
           this.tab += 1
           this.cursor = 0
@@ -658,14 +664,14 @@ export class QuestionFlow implements Component, Focusable {
     const rows = this.rows()
     if (this.tab >= this.questions.length) {
       // Review page: ←/→ choose Submit/Cancel, Enter executes, Esc cancels.
-      if (data === '\r' || data === '\n') {
+      if (matchesKey(data, 'enter')) {
         if (this.submitIdx === 0) this.submit()
         else this.onCancel()
-      } else if (data === '\x1b') {
+      } else if (matchesKey(data, 'escape')) {
         this.onCancel()
-      } else if (data === '\x1b[D' || data === 'h') {
+      } else if (matchesKey(data, 'left') || data === 'h') {
         this.submitIdx = 0
-      } else if (data === '\x1b[C' || data === 'l') {
+      } else if (matchesKey(data, 'right') || data === 'l') {
         this.submitIdx = 1
       } else if (data === 'b') {
         // Back to the last question (drafts survive).
@@ -686,7 +692,7 @@ export class QuestionFlow implements Component, Focusable {
       }
       return
     }
-    if (data === '\x1b[A' || data === 'k') {
+    if (matchesKey(data, 'up') || data === 'k') {
       if (rows.length === 0) return
       if (this.cursor === 0 && this.bodyScroll > 0) {
         // ↑ at the FIRST row with the page scrolled: scroll the body UP so
@@ -699,7 +705,7 @@ export class QuestionFlow implements Component, Focusable {
       this.pendingCursorScroll = true
       return
     }
-    if (data === '\x1b[B' || data === 'j') {
+    if (matchesKey(data, 'down') || data === 'j') {
       if (rows.length === 0) return
       const atLastRow = this.cursor === rows.length - 1
       const scrolled = this.lastExpandable && this.lastContentRows > this.bodyScroll + this.lastVisibleRows
@@ -714,9 +720,9 @@ export class QuestionFlow implements Component, Focusable {
       this.pendingCursorScroll = true
       return
     }
-    if (data === '\x1b[5~' || data === '\x1b[6~') {
+    if (matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')) {
       // PageUp/PageDown: scroll the body scrollport (no-op when it fits).
-      this.scrollBody(data === '\x1b[5~' ? -1 : 1)
+      this.scrollBody(matchesKey(data, 'pageUp') ? -1 : 1)
       return
     }
     if (data === 'e') {
@@ -724,11 +730,11 @@ export class QuestionFlow implements Component, Focusable {
       this.toggleExpanded()
       return
     }
-    if (data === '\r' || data === '\n') {
+    if (matchesKey(data, 'enter')) {
       this.confirm()
       return
     }
-    if (data === '\x1b[D' || data === 'h') {
+    if (matchesKey(data, 'left') || data === 'h') {
       // ←: previous question (keeps the draft).
       if (this.tab > 0) {
         this.tab -= 1
@@ -738,7 +744,7 @@ export class QuestionFlow implements Component, Focusable {
       }
       return
     }
-    if (data === '\x1b[C' || data === 'l') {
+    if (matchesKey(data, 'right') || data === 'l') {
       // →: next question (or review page). syncEditMode resets the body view
       // (scroll/expand) on EVERY tab change — forward included — so a
       // scrolled/expanded question never leaks its view into the next one.
@@ -760,7 +766,7 @@ export class QuestionFlow implements Component, Focusable {
       this.skip()
       return
     }
-    if (data === '\x1b') {
+    if (matchesKey(data, 'escape')) {
       this.onCancel()
     }
   }

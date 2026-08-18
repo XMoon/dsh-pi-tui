@@ -260,3 +260,71 @@ test('search-disabled: k/j keep their vim navigation aliases', () => {
   panel.handleInput('k')
   assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'), `k must move the selection up:\n${rendered().map(strip).join('\n')}`)
 })
+
+test('Kitty CSI-u arrow keys navigate the panel (zellij/WezTerm/Windows Terminal)', () => {
+  const { panel, rendered } = makePanel([runningJob(), doneJob()])
+  // CSI-u ↓ (`\x1b[1;1B`) and the zellij repro's super-mod form (`\x1b[1;129B`)
+  // must both move the selection down; legacy `\x1b[B` still works.
+  panel.handleInput('\x1b[1;1B')
+  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · lint'), `CSI-u down must move the selection:\n${rendered().map(strip).join('\n')}`)
+  panel.handleInput('\x1b[1;129B') // at the bottom (2 rows): stays
+  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · lint'), `CSI-u down (super mod) must keep the selection at the bottom:\n${rendered().map(strip).join('\n')}`)
+  panel.handleInput('\x1b[1;1A')
+  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'), `CSI-u up must move the selection back:\n${rendered().map(strip).join('\n')}`)
+  // CSI-u pageUp/pageDown (`\x1b[5;1~` / `\x1b[6;1~`) page the list.
+  const { panel: p2, rendered: r2 } = makePanel(Array.from({ length: 15 }, (_, i) => runningJob({ value: `job:b${i}`, label: `bash · job ${i}` })), { maxVisible: 10 })
+  p2.handleInput('\x1b[6;1~')
+  assert.ok(r2().map(strip).join('\n').includes('→ ● bash · job 10'), `CSI-u pageDown must page the list:\n${r2().map(strip).join('\n')}`)
+  p2.handleInput('\x1b[5;1~')
+  assert.ok(r2().map(strip).join('\n').includes('→ ● bash · job 0'), `CSI-u pageUp must page back:\n${r2().map(strip).join('\n')}`)
+})
+
+test('Kitty CSI-u Esc cancels and CSI-u Enter confirms', () => {
+  let selected: string | undefined
+  let cancelled = 0
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    (value) => { selected = value },
+    () => { cancelled += 1 },
+    () => {},
+  )
+  panel.render(100)
+  panel.handleInput('\x1b[27;1u') // CSI-u Esc (plain mod)
+  assert.equal(cancelled, 1, `CSI-u Esc must cancel: got ${cancelled}`)
+  const panel2 = new TaskBrowserPanel(
+    [runningJob(), doneJob()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    (value) => { selected = value },
+    () => { cancelled += 1 },
+    () => {},
+  )
+  panel2.render(100)
+  panel2.handleInput('\x1b[27;129u') // CSI-u Esc (super mod, zellij repro)
+  assert.equal(cancelled, 2, `CSI-u Esc (super mod) must cancel: got ${cancelled}`)
+  const panel3 = new TaskBrowserPanel(
+    [runningJob(), doneJob()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    (value) => { selected = value },
+    () => { cancelled += 1 },
+    () => {},
+  )
+  panel3.render(100)
+  panel3.handleInput('\x1b[13;1u') // CSI-u Enter confirms the first row
+  assert.equal(selected, 'job:bash-1', `CSI-u Enter must confirm the selected row: got ${selected}`)
+  // Legacy Esc still cancels.
+  const panel4 = new TaskBrowserPanel(
+    [runningJob()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    () => {},
+    () => { cancelled += 1 },
+    () => {},
+  )
+  panel4.render(100)
+  panel4.handleInput('\x1b')
+  assert.equal(cancelled, 3, `legacy Esc must still cancel: got ${cancelled}`)
+})
