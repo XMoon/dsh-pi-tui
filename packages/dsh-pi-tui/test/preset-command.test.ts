@@ -197,7 +197,7 @@ test('/preset with no session opens the English roster and creates nothing', asy
   assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
   const view = await t.view()
   assert.ok(view.includes('Standard mode (standard)'), `roster row missing:\n${view}`)
-  assert.ok(view.includes('Code mode (code)'), `roster row missing:\n${view}`)
+  assert.ok(view.includes('PTC mode (code)'), `roster row missing:\n${view}`)
   assert.ok(view.includes('Minimal mode (minimal)'), `roster row missing:\n${view}`)
   assert.ok(view.includes('Creator mode (cordis)'), `roster row missing:\n${view}`)
   assert.ok(!view.includes('标准模式'), `Chinese preset name leaked:\n${view}`)

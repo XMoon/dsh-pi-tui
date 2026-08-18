@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The `/preset` picker's English name for the `code` preset is now
+  `PTC mode`, following the upstream dsh 0.1.0-rc.7 rename (the preset id
+  is unchanged, so existing compositions keep working).
+
 ## [0.1.8] - 2026-08-18
 
 ### Changed

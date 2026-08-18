@@ -90,7 +90,9 @@ function metaOf(cwd: string, presetId: string | undefined): Record<string, unkno
  * bundle's shipped root with that one at boot (the `composeProfile`
  * agent-presets overlay), and its preset.yml language is not ours to
  * control. Mapping the known ids keeps the picker English regardless of
- * what the files say; everything else renders file metadata.
+ * what the files say; everything else renders file metadata. Names follow
+ * the upstream English locale (`presetCodeName` is 'PTC mode' since dsh
+ * 0.1.0-rc.7, renamed from 'Code mode').
  */
 const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description: string }>> = {
   standard: {
@@ -98,7 +100,7 @@ const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description:
     description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
   },
   code: {
-    name: 'Code mode',
+    name: 'PTC mode',
     description: 'All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program.',
   },
   minimal: {

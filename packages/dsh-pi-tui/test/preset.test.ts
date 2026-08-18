@@ -201,7 +201,7 @@ test('presetDisplayText maps the four shipped presets to fixed English copy', ()
     name: 'Standard mode',
     description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
   })
-  assert.equal(presetDisplayText({ id: 'code', trust: 'system' }).name, 'Code mode')
+  assert.equal(presetDisplayText({ id: 'code', trust: 'system' }).name, 'PTC mode')
   assert.equal(presetDisplayText({ id: 'minimal', trust: 'system' }).name, 'Minimal mode')
   assert.equal(presetDisplayText({ id: 'cordis', trust: 'system' }).name, 'Creator mode')
 })
