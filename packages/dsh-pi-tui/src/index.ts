@@ -1510,7 +1510,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       shellTempFiles.clear()
-      app?.stop()
+      app?.dispose()
       diag.dispose()
     }
     // The ONE exit orchestration, shared by every exit entry (Ctrl+C, Ctrl+D,

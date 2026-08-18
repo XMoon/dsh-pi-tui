@@ -772,6 +772,18 @@ export class TuiApp {
   private readonly tui: TuiMainScreen
   private readonly editor: Editor
   /**
+   * The surface GENERATION: incremented only when a genuinely NEW surface
+   * attaches (a fresh TuiApp / SurfaceHost), never by start/stop, fullscreen
+   * toggles, or the external-editor stop/start round-trip. Async work that
+   * outlives the surface (extension callbacks, pending promises) captures
+   * the generation at dispatch time and becomes a benign no-op when it no
+   * longer matches — the stale-generation contract (M0).
+   */
+  private generation = 1
+  /** Latched by dispose(): after the final teardown, interactive
+   * capabilities fail benignly instead of touching a dead terminal. */
+  private disposed = false
+  /**
    * The editor's SEAT (kimi's editorContainer): holds the editor normally,
    * the QuestionFrame while a question flow is active — so the dialog
    * renders in the editor's row position (full width, above the footer)
@@ -1034,6 +1046,59 @@ export class TuiApp {
     this.fullscreen = undefined
   }
 
+  /**
+   * FINAL surface disposal: the last lifecycle boundary (M0). Idempotent;
+   * detaches the surface so old-generation callbacks become benign no-ops;
+   * cancels every still-owned interactive resource (question flows, notify
+   * timer, overlay graph, terminal-theme tracking). An ordinary `stop()`
+   * (external-editor round-trip, mode switches) is NOT disposal — the
+   * surface generation survives stop/start, so extension registrations stay
+   * valid across the round-trip.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    // Settle every pending approval BEFORE stop(): settling hides overlay
+    // handles (hideCursor), and stop() ends with showCursor — the reverse
+    // order would leave the user's cursor hidden after exit. Iterate a COPY:
+    // settleApproval splices the item out of approvalQueue, so walking the
+    // live array would skip every other queued prompt and leave its promise
+    // hanging forever (the round-2 review catch — same defect class the
+    // cancelQuestionFlows sibling already avoided with its own copy).
+    for (const pending of [...this.approvalQueue]) this.settleApproval(pending, 'cancelled')
+    this.approvalQueue.length = 0
+    if (this.activeApproval !== undefined) this.settleApproval(this.activeApproval, 'cancelled')
+    this.stop()
+    this.generation += 1
+    this.clearNotify()
+    if (this.notifyTimer !== undefined) {
+      clearTimeout(this.notifyTimer)
+      this.notifyTimer = undefined
+    }
+    this.terminalSchemeListeners.clear()
+    this.expandedOverride.clear()
+    this.messageComponents.clear()
+    this.localMessages.length = 0
+    this.overlayHandles.clear()
+    this.overlayDependents.clear()
+    // The transcript-search overlay dies with the surface: stale handles
+    // must never focus() or repaint a dead component.
+    this.searchOverlay = undefined
+    this.searchComponent = undefined
+    this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
+  }
+
+  /** The surface generation (M0): stable across start/stop/fullscreen/
+   * external-editor round-trips, bumped only by a final dispose. */
+  getSurfaceGeneration(): number {
+    return this.generation
+  }
+
+  /** Whether this surface has been finally disposed (M0). */
+  isDisposed(): boolean {
+    return this.disposed
+  }
+
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
     // Kitty-protocol terminals report press, repeat, and release events as
@@ -1053,7 +1118,7 @@ export class TuiApp {
     // Esc (exit) and Ctrl+O (fold toggle — the viewed transcript still
     // folds) is inert — no typing into the placeholder bar, no Enter
     // submit, no Ctrl+S steer, no ↓ browser. Overlays keep their keys.
-    if (this.viewerMode !== undefined && !this.overlayHost.hasOverlayEntries
+    if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries
       && !matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
       return { consume: true }
     }
@@ -1085,14 +1150,14 @@ export class TuiApp {
     }
     if (matchesKey(data, 'shift+tab')) {
       // Cycle the permission preset; overlays keep Shift+Tab for themselves.
-      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.activeScreen.hasOverlayEntries) return undefined
       this.events.onCyclePermission?.()
       return { consume: true }
     }
     if (matchesKey(data, 'alt+up')) {
       // Dequeue (Alt+↑): pull queued input back into the editor; overlays
       // keep the key for themselves.
-      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.activeScreen.hasOverlayEntries) return undefined
       this.events.onDequeue?.()
       return { consume: true }
     }
@@ -1107,7 +1172,7 @@ export class TuiApp {
       // dropping the draft; an EMPTY draft falls through too — plain Enter
       // on an empty editor does not submit, and an empty chord would
       // otherwise dispatch a session-creating empty followup.
-      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.activeScreen.hasOverlayEntries) return undefined
       if (this.events.onQueueSubmit === undefined) return undefined
       const text = this.editor.getText()
       if (text.trim() === '') return undefined
@@ -1119,7 +1184,7 @@ export class TuiApp {
     }
     if (matchesKey(data, 'escape')) {
       // Overlays (pickers, settings) own Esc while they are up.
-      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.activeScreen.hasOverlayEntries) return undefined
       // The host may consume the first Esc (runner-owned modes like the
       // subagent viewer); otherwise it arms the double-Esc cancel.
       if (this.events.onSingleEscape?.() === true) return { consume: true }
@@ -1152,7 +1217,7 @@ export class TuiApp {
       // An empty draft still fires the event — the runner steers every
       // queued message when the queue is non-empty, and only ignores the
       // key when there is nothing to send at all.
-      if (this.overlayHost.hasOverlayEntries) return { consume: true }
+      if (this.activeScreen.hasOverlayEntries) return { consume: true }
       const draft = this.editor.getText()
       this.editor.setText('')
       this.events.onSteer?.(draft)
@@ -1162,7 +1227,7 @@ export class TuiApp {
       // Task browser: with active background tasks and an EMPTY editor, ↓ /
       // Ctrl+J open the task list (nothing to move the cursor through). With
       // text present the keys keep their editing meaning; overlays own them.
-      if (this.tasksActive && !this.overlayHost.hasOverlayEntries && this.editor.getText().trim() === '') {
+      if (this.tasksActive && !this.activeScreen.hasOverlayEntries && this.editor.getText().trim() === '') {
         this.events.onOpenTasks?.()
         return { consume: true }
       }
@@ -1177,7 +1242,7 @@ export class TuiApp {
       // Single-flight: while one launch is pending (the latch inside
       // launchExternalEditor is set synchronously), further Ctrl+G presses
       // are consumed without starting another editor.
-      if (this.overlayHost.hasOverlayEntries) return { consume: true }
+      if (this.activeScreen.hasOverlayEntries) return { consume: true }
       if (this.events.openExternalEditor !== undefined && !this.externalEditorInFlight) {
         this.events.runOwned('external editor', () => this.launchExternalEditor(), {
           onError: (error: unknown) => {
@@ -1200,8 +1265,13 @@ export class TuiApp {
     return undefined
   }
 
-  /** The screen currently rendering: the alt screen in fullscreen mode. */
-  private get overlayHost(): TuiMainScreen | TuiAltScreen {
+  /**
+   * The screen currently rendering: the alt screen in fullscreen mode, the
+   * main screen otherwise. Every render request, terminal query and overlay
+   * mount routes through this accessor so regular and fullscreen modes
+   * always target the ACTIVE screen (M0 naming; previously overlayHost).
+   */
+  private get activeScreen(): TuiMainScreen | TuiAltScreen {
     return this.fullscreen ?? this.tui
   }
 
@@ -1226,7 +1296,7 @@ export class TuiApp {
    * @returns the handle; hide() also forgets the handle.
    */
   private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
-    const handle = this.overlayHost.showOverlay(component, options)
+    const handle = this.activeScreen.showOverlay(component, options)
     this.overlayHandles.add(handle)
     const question = this.activeQuestions
     if (question !== undefined) {
@@ -1310,18 +1380,19 @@ export class TuiApp {
    */
   async launchExternalEditor(): Promise<void> {
     const open = this.events.openExternalEditor
-    if (open === undefined || this.externalEditorInFlight) return
+    if (open === undefined || this.externalEditorInFlight || this.disposed) return
     this.externalEditorInFlight = true
     try {
       const draft = this.editor.getText()
       this.stop()
       try {
         const next = await open(draft)
+        if (this.disposed) return
         // No redundant editor update when the editor saved the draft
         // unchanged (an update would bump history/undo and repaint).
         if (next !== '' && next !== draft) this.editor.setText(next)
       } finally {
-        this.start()
+        if (!this.disposed) this.start()
       }
     } finally {
       this.externalEditorInFlight = false
@@ -1448,6 +1519,7 @@ export class TuiApp {
    * overlay; a pending approval prompt is re-rendered on the new screen.
    */
   toggleFullscreen(): void {
+    if (this.disposed) return
     this.setFullscreen(this.fullscreen === undefined)
   }
 
@@ -1462,6 +1534,7 @@ export class TuiApp {
    * @param enabled - true renders the alt screen, false returns to the main screen.
    */
   setFullscreen(enabled: boolean): void {
+    if (this.disposed) return
     const active = this.fullscreen !== undefined
     if (enabled === active) return
     const pending = this.activeApproval
@@ -1557,6 +1630,7 @@ export class TuiApp {
    * surface only collects the query and reports navigation keys.
    */
   startTranscriptSearch(): void {
+    if (this.disposed) return
     if (this.searchOverlay !== undefined) {
       this.searchOverlay.focus()
       return
@@ -2467,8 +2541,10 @@ export class TuiApp {
   /** Request a render on the active screen. Public so in-place submenu
    * components (async content swaps) can trigger the next frame. `force`
    * bypasses the render throttle (used to repaint the autocomplete list on
-   * the keystroke's own frame). */
+   * the keystroke's own frame). After a final dispose the request is a
+   * benign no-op (M0 stale-generation contract). */
   requestRender(force = false): void {
+    if (this.disposed) return
     ;(this.fullscreen ?? this.tui).requestRender(force)
   }
 
@@ -3023,7 +3099,7 @@ export class TuiApp {
    *   instead of applying it (default: always apply).
    */
   async autoDetectTheme(options?: { shouldApply?: () => boolean }): Promise<void> {
-    if (themeOptOut()) return
+    if (themeOptOut() || this.disposed) return
     if (options?.shouldApply !== undefined) this.autoDetectGuard = options.shouldApply
     if (this.autoDetectInFlight === undefined) {
       this.autoDetectInFlight = this.runAutoDetect().finally(() => {
@@ -3035,7 +3111,8 @@ export class TuiApp {
   }
 
   private async runAutoDetect(): Promise<void> {
-    const rgb = await this.overlayHost.queryTerminalBackgroundColor({ timeoutMs: 800 })
+    const rgb = await this.activeScreen.queryTerminalBackgroundColor({ timeoutMs: 800 })
+    if (this.disposed) return
     const guard = this.autoDetectGuard
     const apply = (): boolean => guard === undefined || guard()
     if (rgb !== undefined) {
@@ -3059,7 +3136,7 @@ export class TuiApp {
     if (following === this.followingTerminalTheme) return
     this.followingTerminalTheme = following
     if (!following) return
-    this.overlayHost.queryTerminalColorScheme({ timeoutMs: 800 })
+    this.activeScreen.queryTerminalColorScheme({ timeoutMs: 800 })
       .then((scheme) => {
         if (scheme === undefined || !this.followingTerminalTheme) return
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
@@ -3107,6 +3184,10 @@ export class TuiApp {
    * @returns the user's decision.
    */
   showApprovalPrompt(request: ApprovalPromptRequest): Promise<ApprovalOutcome> {
+    // A disposed surface must never leave the caller hanging: settle
+    // cancelled immediately (M0 stale-generation contract — the runner's
+    // approval handler may fire during exit teardown).
+    if (this.disposed) return Promise.resolve('cancelled')
     return new Promise<ApprovalOutcome>((resolve) => {
       const pending: PendingApproval = { request, resolve }
       if (request.signal !== undefined) {
@@ -3220,7 +3301,7 @@ export class TuiApp {
     if (this.activeApproval === pending) {
       this.activeApproval = undefined
       pending.handle?.hide()
-      this.overlayHost.setFocus(this.editor)
+      this.activeScreen.setFocus(this.editor)
     } else {
       const queued = this.approvalQueue.indexOf(pending)
       if (queued !== -1) this.approvalQueue.splice(queued, 1)
@@ -3242,6 +3323,12 @@ export class TuiApp {
    * @returns the answers, in question order.
    */
   askQuestions(questions: readonly TuiQuestion[], signal?: AbortSignal): Promise<TuiQuestionAnswer[]> {
+    // A disposed surface must never leave the caller hanging: settle
+    // rejected immediately (M0 stale-generation contract — the runner's
+    // questions provider may fire during exit teardown).
+    if (this.disposed) {
+      return Promise.reject(cancellationError('question flow cancelled'))
+    }
     return new Promise<TuiQuestionAnswer[]>((resolve, reject) => {
       if (questions.length === 0) {
         resolve([])
