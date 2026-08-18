@@ -61,6 +61,11 @@ export class WorkingIndicator extends Text {
     this.clearTimer()
   }
 
+  /** Whether the indicator is currently animating (extension activity state). */
+  isActive(): boolean {
+    return this.active
+  }
+
   /** Re-render the current frame with the LIVE palette (theme switches). */
   refresh(): void {
     if (this.active) this.updateDisplay()

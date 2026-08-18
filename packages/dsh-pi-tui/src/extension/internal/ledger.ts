@@ -48,7 +48,7 @@ export interface LedgerSlotSnapshot<T> {
   readonly records: readonly ContributionRecord<T>[]
   /** The winning record for `single` slots (undefined for `list`). */
   readonly winner: ContributionRecord<T> | undefined
-  /** Monotonic revision; bumped on every structural change. */
+  /** Monotonic revision; bumped on every content change (structural: register/dispose; in-place: invalidate/replace). */
   readonly revision: number
 }
 
@@ -60,12 +60,21 @@ export class ExtensionLedger {
   private readonly registrations = new Map<string, Registration<unknown>>()
   private readonly health = new ExtensionHealth()
   private revision = 0
-  /** Batched-invalidation sink, wired by the SurfaceHost in M2. Until then
-   * invalidate() just coalesces (batcher without a sink is a no-op flush). */
-  private readonly onInvalidate: () => void
+  /**
+   * Invalidation sink, invoked on every content change (register/replace/
+   * dispose). The service wires the batcher; the SurfaceHost re-sinks it to
+   * "refresh outlets + repaint" when it attaches (F-17 — an invalidation
+   * must reach the screen, not just the batcher).
+   */
+  private onInvalidate: () => void
 
   constructor(onInvalidate: () => void = () => {}) {
     this.onInvalidate = onInvalidate
+  }
+
+  /** Replace the invalidation sink (the SurfaceHost re-sinks on attach). */
+  setInvalidateSink(sink: () => void): void {
+    this.onInvalidate = sink
   }
 
   /** Whether a (slot, id) pair is already registered. */
@@ -117,6 +126,9 @@ export class ExtensionLedger {
     this.registrations.set(key, registration as Registration<unknown>)
     this.health.track(slot, spec.id, owner)
     this.revision += 1
+    // A registration is a content change: notify the sink so the surface
+    // re-bakes (F-17 — a post-attach register must reach the screen).
+    this.onInvalidate()
     return this.handleFor(registration)
   }
 
@@ -192,11 +204,22 @@ export class ExtensionLedger {
       },
       invalidate(): void {
         if (registration.disposed) return
+        // An invalidate is a "content changed in place" signal: bump the
+        // revision so the outlets re-bake even though the ledger's record
+        // is structurally unchanged (round-4 finding 2 — a plugin that
+        // mutates its contribution and calls invalidate() must reach the
+        // screen).
+        ledger.revision += 1
         ledger.onInvalidate()
       },
       replace(next: T): void {
         if (registration.disposed) return
         registration.value = next
+        // A replacement IS a content change: bump the revision so the
+        // outlets re-bake (F-16 — a replace must reach the screen even
+        // when the theme revision is unchanged). `ledger`, not `this`:
+        // method shorthand binds `this` to the handle object.
+        ledger.revision += 1
         ledger.onInvalidate()
       },
       dispose(): void {

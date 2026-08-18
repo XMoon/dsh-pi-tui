@@ -79,6 +79,7 @@ import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import type { SurfaceHost } from './extension/internal/surface-host.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
@@ -734,6 +735,13 @@ export interface TuiAppOptions {
   present?: ToolPresenter
   /** Working-indicator frame interval in ms; injectable so tests stay fast. */
   workingIntervalMs?: number
+  /**
+   * The extension surface host (M2). When attached, the header/dock/footer
+   * renders merge the extension outlets' content (header badges, dock
+   * items, footer segments) into the host chrome. Optional — the surface
+   * works identically without extensions.
+   */
+  extensionHost?: SurfaceHost
 }
 
 /**
@@ -769,6 +777,8 @@ interface MessageComponentEntry {
 
 export class TuiApp {
   private readonly terminal: Terminal
+  /** The extension surface host (M2), when the runner attached one. */
+  private readonly extensionHost: SurfaceHost | undefined
   private readonly tui: TuiMainScreen
   private readonly editor: Editor
   /**
@@ -945,6 +955,10 @@ export class TuiApp {
     }
     this.terminal = terminal
     this.events = events
+    this.extensionHost = options.extensionHost
+    // F-17: an invalidation batch re-bakes the outlets; the host then
+    // re-merges its chrome rows so the new content reaches the screen.
+    this.extensionHost?.setChromeRefresher(() => this.refreshChrome())
     this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS
     this.workspaceRoot = options.workspaceRoot
     this.present = options.present
@@ -1086,6 +1100,9 @@ export class TuiApp {
     this.searchOverlay = undefined
     this.searchComponent = undefined
     this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
+    // Detach the extension surface host: its subscriptions and capability
+    // set die with the surface (M2 stale-generation contract).
+    this.extensionHost?.dispose()
   }
 
   /** The surface generation (M0): stable across start/stop/fullscreen/
@@ -1622,6 +1639,8 @@ export class TuiApp {
     if (question?.frame !== undefined) {
       (this.fullscreen ?? this.tui).setFocus(question.frame)
     }
+    // The surface slice tracks the mode switch (plan §7.1).
+    this.extensionHost?.updateSurface({ fullscreen: enabled })
   }
 
   /**
@@ -1770,6 +1789,7 @@ export class TuiApp {
       this.working.setText('')
     }
     this.requestRender()
+    this.syncExtensionState()
   }
 
   /**
@@ -1794,6 +1814,7 @@ export class TuiApp {
   setSessionTitle(title: string | undefined): void {
     this.sessionTitleText = title ?? ''
     this.renderHeader()
+    this.extensionHost?.updateSession({ title: title ?? '' })
   }
 
   /**
@@ -1879,6 +1900,7 @@ export class TuiApp {
     this.editor.borderColor = active ? color.warning : this.editorBorder
     this.editor.invalidate()
     this.requestRender()
+    this.syncExtensionState()
   }
 
   /**
@@ -1948,6 +1970,7 @@ export class TuiApp {
       this.editor.invalidate()
       this.renderHeader()
       this.requestRender()
+      this.syncExtensionState()
       return
     }
     if (this.viewerMode === undefined) {
@@ -1959,6 +1982,7 @@ export class TuiApp {
     this.editor.invalidate()
     this.renderHeader()
     this.requestRender()
+    this.syncExtensionState()
   }
 
   /**
@@ -1970,6 +1994,12 @@ export class TuiApp {
   setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
     this.welcomeCard.setFacts(facts)
     this.rebuildMessages()
+    // Session identity mirrors into the extension snapshot (plan §7.2).
+    this.extensionHost?.updateSession({
+      sessionId: facts.sessionId,
+      workspaceRoot: facts.cwd,
+      ...facts.model === '' ? {} : { model: facts.model },
+    })
   }
 
   /**
@@ -2557,6 +2587,7 @@ export class TuiApp {
     this.todoItems = todos
     this.renderDock()
     if (this.todoPanelVisible) this.renderTodoPanel()
+    this.syncExtensionState()
   }
 
   /** Toggle the todo panel between the transcript and the editor. */
@@ -2615,22 +2646,67 @@ export class TuiApp {
     return this.hideThinking
   }
 
+  /**
+   * Mirror the host's live state into the extension SurfaceStateStore (M2):
+   * activity counts (working, queue, tasks, agents, todos) and session mode
+   * (plan mode, viewer). Called from the setters so extension outlets and
+   * subscribers see the same truth the host chrome renders. No-ops without
+   * an attached extension host; batch delivery coalesces within a tick.
+   */
+  private syncExtensionState(): void {
+    const host = this.extensionHost
+    if (host === undefined) return
+    host.updateActivity({
+      working: this.working.isActive(),
+      queuedCount: this.queueItems.length,
+      taskCount: this.dockTasks.length,
+      childAgentCount: this.dockAgents.length,
+      todoCount: this.todoItems.length,
+    })
+    host.updateSession({
+      planMode: this.planMode,
+      viewerMode: this.viewerMode !== undefined,
+      busy: this.working.isActive(),
+      ...this.status.model === '' ? {} : { model: this.status.model },
+      ...this.status.cwd === '' ? {} : { cwd: this.status.cwd },
+      ...this.status.branch === '' ? {} : { branch: this.status.branch },
+      ...this.status.permission === undefined ? {} : { permission: this.status.permission },
+    })
+  }
+
+  /**
+   * Rebuild the chrome rows from the CURRENT semantic state (M2). The
+   * runner calls this after attaching an extension host, so extension
+   * badges/dock/footer content renders immediately; also called after
+   * extension invalidations that changed chrome content.
+   */
+  refreshChrome(): void {
+    this.renderHeader()
+    this.renderFooter()
+    this.renderDock()
+    this.renderGoalLine()
+    this.requestRender()
+  }
+
   /** Whether thinking entries are currently hidden. */
   isThinkingHidden(): boolean {
     return this.hideThinking
   }
 
-  /** Rebuild the header from base + session title + plan badge.
-   * Colours are applied AT RENDER TIME from the live palette — the semantic
-   * state (plan mode, title) is stored separately, so a theme switch only
-   * has to re-run this. */
+  /** Rebuild the header from base + session title + plan badge + extension
+   * badges. Colours are applied AT RENDER TIME from the live palette — the
+   * semantic state (plan mode, title) is stored separately, so a theme
+   * switch only has to re-run this. */
   private renderHeader(): void {
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
     const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent('[viewing subagent]')}`
     const title = this.viewerMode !== undefined
       ? ` · ${color.textMuted(this.viewerMode.label)}`
       : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    this.header.setText(`🐋  dsh-pi-tui${title}${badge}${viewerBadge}`)
+    // Extension header badges append after the host chrome (M2): the host
+    // title stays host-owned; badges add semantics like `[plan]`.
+    const extensionBadges = this.extensionHost?.headerBadgeText() ?? ''
+    this.header.setText(`🐋  dsh-pi-tui${title}${badge}${viewerBadge}${extensionBadges}`)
     this.requestRender()
   }
 
@@ -2645,6 +2721,7 @@ export class TuiApp {
     this.renderFooter()
     this.renderDock()
     this.renderGoalLine()
+    this.syncExtensionState()
   }
 
   /**
@@ -2656,6 +2733,7 @@ export class TuiApp {
     this.dockTasks = tasks
     this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
     this.renderFooter()
+    this.syncExtensionState()
   }
 
   /**
@@ -2668,6 +2746,7 @@ export class TuiApp {
     this.dockAgents = agents
     this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
     this.renderFooter()
+    this.syncExtensionState()
   }
 
   /** Whether background tasks are active (drives the ↓/Ctrl+J trigger). */
@@ -2684,6 +2763,7 @@ export class TuiApp {
   setQueueItems(items: readonly QueueItem[]): void {
     this.queueItems = items
     this.renderQueuePane()
+    this.syncExtensionState()
   }
 
   /** Rebuild the queue pane text from the current inbox rows. */
@@ -2768,8 +2848,9 @@ export class TuiApp {
     // While the todo panel is expanded the summary would sit directly on
     // top of the full list it summarizes — drop it so the panel's own
     // border rule is the single boundary.
+    const extensionDock = this.extensionHost?.dockText() ?? ''
     if (this.todoPanelVisible || this.todoItems.length === 0) {
-      this.dock.setText('')
+      this.dock.setText(extensionDock)
       this.requestRender()
       return
     }
@@ -2782,7 +2863,8 @@ export class TuiApp {
       active.length > 0 ? `${active.length} active` : '',
       label,
     ].filter(part => part !== '').join(' · ')
-    this.dock.setText(color.textDim(`☑  ${summary}`))
+    const hostLine = color.textDim(`☑  ${summary}`)
+    this.dock.setText(extensionDock === '' ? hostLine : `${hostLine}\n${extensionDock}`)
     this.requestRender()
   }
 
@@ -2800,6 +2882,9 @@ export class TuiApp {
   /** Set the footer density preset and repaint. */
   setFooterPreset(preset: 'full' | 'compact'): void {
     this.footerPreset = preset
+    // Extension footer segments honor the density preset (F-18): low-
+    // importance segments drop in compact mode.
+    this.extensionHost?.setFooterCompact(preset === 'compact')
     this.renderFooter()
   }
 
@@ -2850,6 +2935,10 @@ export class TuiApp {
       this.status.branch === '' ? '' : this.status.branch,
       context,
       `t${this.status.turns}/s${this.status.steps}`,
+      // Extension footer segments append after the host status (M2); the
+      // host owns ordering/truncation of its own parts, extensions join at
+      // the end so host state always reads first.
+      this.extensionHost?.footerText() ?? '',
     ].filter(part => part !== '')
     // Line 2: the stats line only; context pressure is the bar on line 1.
     const line2 = this.footerPreset === 'compact' ? '' : this.status.statsLine
@@ -3049,6 +3138,10 @@ export class TuiApp {
     // Rendered ANSI is baked into cached components: bump the revision so
     // the per-message render cache rebuilds on the next paint.
     this.themeRevision += 1
+    // Publish the theme into the surface slice BEFORE the repaint: the
+    // outlet refresh reads the revision from the store, so the order
+    // matters (F-14 — a theme switch must re-bake extension ANSI).
+    this.extensionHost?.updateSurface({ themeId: theme, themeRevision: this.themeRevision })
     this.repaintAllSurfaces()
   }
 
@@ -3056,6 +3149,8 @@ export class TuiApp {
   applyPalette(palette: ColorPalette): void {
     setTheme('custom', palette)
     this.themeRevision += 1
+    // Same ordering as applyTheme (F-14).
+    this.extensionHost?.updateSurface({ themeId: 'custom', themeRevision: this.themeRevision })
     this.repaintAllSurfaces()
   }
 
@@ -3067,6 +3162,8 @@ export class TuiApp {
     // OLD palette. Drop the cache here.
     this.welcomeCard.invalidate()
     this.rebuildMessages()
+    // Extension outlets re-render with the live palette (theme revision).
+    this.extensionHost?.refreshOutlets()
     this.renderHeader()
     this.renderFooter()
     this.renderDock()
