@@ -15,11 +15,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import {
-  credentialOptionsFor,
   registerTuiCommands,
-  resolveCredentialArg,
   type TuiCommandRunner,
 } from '../src/commands.ts'
+import { credentialOptionsFor, resolveCredentialArg } from '../src/provider-catalog.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -55,11 +54,14 @@ function fakeCredentials() {
   }
 }
 
-/** A fake settings service serving the llm-pi-ai section. */
+/** A fake settings service serving the llm-pi-ai section, recording writes. */
 function fakeSettings() {
+  const mutations: { ns: string; ops: unknown[] }[] = []
   return {
+    mutations,
     service: {
       get: (ns: string): unknown => (ns === 'llm-pi-ai' ? LLM_PI_AI_SECTION : undefined),
+      mutate: async (ns: string, ops: unknown[]): Promise<void> => { mutations.push({ ns, ops }) },
     },
   }
 }
@@ -109,8 +111,17 @@ function invoke(rawInput: string): CommandInvocation {
 
 /** Register the TUI commands and return the /login and /logout handlers.
  * `withLlmpiAi: false` omits the settings service, so /login sees only the
- * official deepseek target (the no-settings degradation path). */
-function setup(options: { key?: string; pick?: (items: readonly { value: string }[]) => string; withLlmpiAi?: boolean } = {}) {
+ * official deepseek target (the no-settings degradation path).
+ * `questions` replaces the key-entry question stub with a full answer list
+ * (used by the add-provider wizard tests).
+ * `llm` provides a fake llm service with a configurable-provider directory. */
+function setup(options: {
+  key?: string
+  pick?: (items: readonly { value: string; label?: string }[]) => string
+  withLlmpiAi?: boolean
+  questions?: () => { id: string; selected: string[]; custom?: string }[]
+  llm?: ReturnType<typeof fakeLlm>
+} = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -127,13 +138,21 @@ function setup(options: { key?: string; pick?: (items: readonly { value: string 
   ctx.provide('commands', commands.service as never)
   const credentials = fakeCredentials()
   ctx.provide('credentials', credentials.service as never)
+  let settings: ReturnType<typeof fakeSettings> | undefined
   if (options.withLlmpiAi !== false) {
-    ctx.provide('settings', fakeSettings().service as never)
+    settings = fakeSettings()
+    ctx.provide('settings', settings.service as never)
   }
-  registerTuiCommands(stubRunner(ctx, app))
+  if (options.llm !== undefined) {
+    ctx.provide('llm', options.llm.service as never)
+  }
+  const runner = stubRunner(ctx, app)
+  registerTuiCommands(runner)
   // Stub the interactive surfaces: the key-entry question returns the fixed
   // key; the credential picker resolves to the stub's choice.
-  app.askQuestions = async () => [{ id: 'key', selected: [], custom: options.key ?? 'sk-test' }] as never
+  app.askQuestions = async () => (options.questions?.() ?? [
+    { id: 'key', selected: [], custom: options.key ?? 'sk-test' },
+  ]) as never
   app.openPicker = ((items: readonly { value: string }[], onSelect: (value: string) => void) => {
     onSelect((options.pick ?? ((rows) => rows[0]!.value))(items))
     return { close: () => {}, setItems: () => {} }
@@ -144,7 +163,7 @@ function setup(options: { key?: string; pick?: (items: readonly { value: string 
   assert.ok(logout?.handler !== undefined, 'logout handler missing')
   const run = async <T>(def: { handler?: unknown }, rawInput: string): Promise<T> =>
     (def!.handler as (inv: CommandInvocation) => Promise<T>)(invoke(rawInput))
-  return { app, credentials, run, login, logout }
+  return { app, credentials, settings, llm: options.llm, signal: runner.signal, run, login, logout }
 }
 
 test('credentialOptionsFor lists deepseek official plus deduped llm-pi-ai routes', () => {
@@ -194,9 +213,11 @@ test('/login <env-name> sets the named env credential directly', async () => {
   t.app.stop()
 })
 
-test('/login with an unknown target lists the valid options', async () => {
+test('/login with a malformed unknown target lists the valid options', async () => {
   const t = setup()
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'no-such-route')
+  // `No-Such-Route` is not a valid route pattern (uppercase) and not an
+  // env-var-looking name: the old "list the valid options" error path.
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'No-Such-Route')
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /deepseek official \(DEEPSEEK_API_KEY\)/)
   assert.match(result.text ?? '', /acme \(ACME_GATEWAY_API_KEY\)/)
@@ -205,7 +226,8 @@ test('/login with an unknown target lists the valid options', async () => {
 })
 
 test('/login with no argument and multiple targets opens the picker', async () => {
-  const t = setup({ pick: rows => rows.find(row => row.value === 'OPENAI_API_KEY')!.value })
+  // Picker rows now carry the ROUTE as value (openai), not the ref.
+  const t = setup({ pick: rows => rows.find(row => row.value === 'openai')!.value })
   const result = await t.run<{ kind: string; text?: string }>(t.login, '')
   assert.equal(result.kind, 'success')
   assert.deepEqual(t.credentials.sets, ['OPENAI_API_KEY=sk-test'])
@@ -240,7 +262,99 @@ test('/logout resolves the same targets and unsets', async () => {
   const defaultRun = await t.run<{ kind: string; text?: string }>(t.logout, '')
   assert.equal(defaultRun.kind, 'success')
   assert.deepEqual(t.credentials.unsets, ['ACME_GATEWAY_API_KEY', 'MY_CUSTOM_KEY', 'DEEPSEEK_API_KEY'])
-  const unknown = await t.run<{ kind: string; text?: string }>(t.logout, 'no-such-route')
+  const unknown = await t.run<{ kind: string; text?: string }>(t.logout, 'No-Such-Route')
   assert.equal(unknown.kind, 'error')
+  t.app.stop()
+})
+
+/** A fake llm service with a configurable-provider directory. */
+function fakeLlm(directory: { provider: string; displayName: string; settingsNs: string; settingsPath: string[]; declared?: boolean }[]) {
+  const probes: { settingsNs: string; request: unknown }[] = []
+  return {
+    probes,
+    service: {
+      listConfigurableProviders: () => directory,
+      discoverModels: async (settingsNs: string, request: unknown) => {
+        probes.push({ settingsNs, request })
+        return [{ id: 'acme-large' }, { id: 'acme-think' }]
+      },
+    },
+  }
+}
+
+test('/login with the llm directory offers unconfigured catalog routes', async () => {
+  const t = setup({
+    llm: fakeLlm([
+      { provider: 'anthropic', displayName: 'anthropic', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'anthropic'] },
+    ]),
+    key: 'sk-ant',
+  })
+  // anthropic is in the directory (unconfigured) → /login anthropic sets the
+  // DERIVED ref (ANTHROPIC_API_KEY), not a settings-section listing.
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(t.credentials.sets, ['ANTHROPIC_API_KEY=sk-ant'])
+  t.app.stop()
+})
+
+test('/login <new-route> runs the add-provider wizard and persists the profile', async () => {
+  const t = setup({
+    llm: fakeLlm([]),
+    questions: () => [
+      // Wizard answers: (route pre-filled) api → baseURL → displayName →
+      // key, then the models question (multi-select, selected acme-large).
+      { id: 'api', selected: ['openai-completions'], custom: '' },
+      { id: 'baseURL', selected: [], custom: 'https://gateway.acme.example/v1' },
+      { id: 'displayName', selected: [], custom: 'Acme Gateway' },
+      { id: 'key', selected: [], custom: 'sk-acme' },
+      { id: 'models', selected: ['acme-large'], custom: '' },
+    ],
+  })
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme-gateway')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text ?? '', /ACME_GATEWAY_API_KEY set · provider acme-gateway added/)
+  // The endpoint was probed with the draft fields (signal is the runner's).
+  assert.equal(t.llm!.probes.length, 1)
+  assert.deepEqual(t.llm!.probes[0]?.request, {
+    baseURL: 'https://gateway.acme.example/v1',
+    api: 'openai-completions',
+    apiKey: 'sk-acme',
+    signal: t.signal,
+  })
+  // The profile was persisted through settings.mutate + the key stored.
+  assert.equal(t.settings!.mutations.length, 1)
+  assert.equal(t.settings!.mutations[0]?.ns, 'llm-pi-ai')
+  assert.deepEqual(t.settings!.mutations[0]?.ops, [{
+    op: 'set',
+    path: ['providers', 'acme-gateway'],
+    value: {
+      displayName: 'Acme Gateway',
+      api: 'openai-completions',
+      baseURL: 'https://gateway.acme.example/v1',
+      models: [{ id: 'acme-large' }],
+      apiKeyEnv: 'ACME_GATEWAY_API_KEY',
+    },
+  }])
+  assert.deepEqual(t.credentials.sets, ['ACME_GATEWAY_API_KEY=sk-acme'])
+  t.app.stop()
+})
+
+test('/login Add New Platform rejects a malformed route id', async () => {
+  // Picker selects the Add New Platform row; the wizard's route question is
+  // answered with a digit-leading id, which fails ROUTE_PATTERN.
+  const t = setup({
+    pick: rows => rows.find(row => row.label === '[ Add New Platform ]')!.value,
+    questions: () => [
+      { id: 'route', selected: [], custom: '1acme' },
+      { id: 'api', selected: ['openai-completions'], custom: '' },
+      { id: 'baseURL', selected: [], custom: 'https://x' },
+      { id: 'displayName', selected: [], custom: '' },
+      { id: 'key', selected: [], custom: '' },
+    ],
+  })
+  const result = await t.run<{ kind: string; text?: string }>(t.login, '')
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /invalid provider route/)
+  assert.deepEqual(t.credentials.sets, [])
   t.app.stop()
 })

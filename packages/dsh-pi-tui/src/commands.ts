@@ -25,10 +25,11 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { TuiApp } from './tui-app.ts'
+import type { PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
-import { color, loadCustomTheme, settingsListTheme } from './theme.ts'
+import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
 import { resolveFdPath } from './mentions.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
@@ -42,7 +43,17 @@ import {
   type SessionPickerRow,
   type SessionQueryLike,
 } from './sessions.ts'
-import { customThemeNames } from './theme.ts'
+import {
+  credentialOptionsFor,
+  deriveKeyRef,
+  providerOptionsFor,
+  resolveCredentialArg,
+  ROUTE_PATTERN,
+  PROTOCOL_CHOICES,
+  type ProviderCatalogLlm,
+  type ProviderCatalogSettings,
+  type ProviderOption,
+} from './provider-catalog.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from './skill-catalog-refresh.ts'
 import {
   commandSummaryOf,
@@ -223,54 +234,20 @@ export interface TuiCommandRunner {
   exit(code: number): void
 }
 
-/** One /login credential target: a human label plus the env-var ref to set. */
-export interface LoginCredentialOption {
-  readonly label: string
-  readonly ref: string
+/** The sentinel picker value for the "add a brand-new provider" action row. */
+const ADD_PROVIDER_VALUE = '\u0000add-provider'
+
+/** The structural llm model-discovery surface /login probes. */
+interface ProviderCatalogDiscovery {
+  discoverModels(
+    settingsNs: string,
+    request: { provider?: string; baseURL?: string; api?: string; apiKey?: string; signal?: AbortSignal },
+  ): Promise<readonly { id: string; name?: string }[]>
 }
 
-/** The credential-target options for /login and /logout: the deepseek
- * official ref always first, then every llm-pi-ai provider route's
- * apiKeyEnv (deduped by ref). `providers` is the llm-pi-ai settings
- * section's `providers` dict, or undefined when the adapter or the settings
- * service is absent — which degrades /login to the official target only.
- */
-export function credentialOptionsFor(
-  providers: Record<string, { apiKeyEnv?: string } | undefined> | undefined,
-): LoginCredentialOption[] {
-  const options: LoginCredentialOption[] = [{ label: 'deepseek official', ref: 'DEEPSEEK_API_KEY' }]
-  if (providers === undefined) return options
-  const seen = new Set<string>(options.map(option => option.ref))
-  for (const [route, profile] of Object.entries(providers)) {
-    const ref = profile?.apiKeyEnv
-    if (ref === undefined || ref === '' || seen.has(ref)) continue
-    seen.add(ref)
-    options.push({ label: route, ref })
-  }
-  return options
-}
-
-/** Resolve a /login or /logout argument to a credential ref. A
- * case-insensitive llm-pi-ai route name wins, then a literal env-var-looking
- * name (any casing, uppercased like the old behavior — `/login my_key` sets
- * `MY_KEY`); anything else is unknown and returns undefined so the caller
- * can list the valid options.
- */
-export function resolveCredentialArg(arg: string, options: readonly LoginCredentialOption[]): string | undefined {
-  const trimmed = arg.trim()
-  if (trimmed === '') return undefined
-  // A route name matches its label; a label's FIRST WORD is an alias, so
-  // `/login deepseek` reaches the "deepseek official" entry (the official
-  // adapter's route is deepseek).
-  const needle = trimmed.toLowerCase()
-  const route = options.find(option =>
-    option.label.toLowerCase() === needle
-    || option.label.split(' ')[0]!.toLowerCase() === needle)
-  if (route !== undefined) return route.ref
-  // Env-var-looking names are used verbatim (uppercased for convenience,
-  // preserving the old `/login <anything>` behavior).
-  if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(trimmed)) return trimmed.toUpperCase()
-  return undefined
+/** The structural settings write surface the add wizard persists through. */
+interface ProviderCatalogSettingsWrite {
+  mutate(ns: string, ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[]): Promise<unknown>
 }
 
 /** Read the llm-pi-ai adapter's `providers` dict from its settings section,
@@ -285,6 +262,189 @@ function readLlmpiAiProviders(ctx: Context): Record<string, { apiKeyEnv?: string
     return section?.providers
   } catch {
     return undefined
+  }
+}
+
+/** Read the merged /login option list: the llm configurable-provider
+ * directory when the llm service is present, the settings-only fallback
+ * otherwise. */
+function readProviderOptions(ctx: Context): ProviderOption[] {
+  const llm = ctx.get('llm') as ProviderCatalogLlm | undefined
+  const settings = ctx.get('settings') as ProviderCatalogSettings | undefined
+  const readSection = (ns: string): unknown => {
+    if (settings === undefined) return undefined
+    try {
+      return settings.get(ns)
+    } catch {
+      return undefined
+    }
+  }
+  if (llm !== undefined) {
+    try {
+      return providerOptionsFor(llm.listConfigurableProviders(), readSection)
+    } catch {
+      // A throwing directory read degrades to the settings-only fallback.
+    }
+  }
+  // Settings-only fallback (old behavior): deepseek official plus every
+  // llm-pi-ai route the section declares.
+  const settingsOnly = credentialOptionsFor(readLlmpiAiProviders(ctx))
+  return settingsOnly.map((option, index) => index === 0 ? {
+    ...option,
+    route: 'deepseek-official',
+    configured: true,
+    declared: false,
+    group: 'configured' as const,
+    settingsNs: '',
+    settingsPath: [],
+  } : {
+    ...option,
+    route: option.label,
+    configured: true,
+    declared: false,
+    group: 'configured' as const,
+    settingsNs: 'llm-pi-ai',
+    settingsPath: ['providers', option.label],
+  })
+}
+
+/** Build the picker rows from the merged options: grouped by configured /
+ * available / custom, with the Add New Platform action row pinned last. */
+function providerPickerRows(options: readonly ProviderOption[]): PickerItem[] {
+  const rows: PickerItem[] = []
+  const groups: ReadonlyArray<readonly [ProviderOption['group'], string]> = [
+    ['configured', 'configured'],
+    ['available', 'available · catalog'],
+    ['custom', 'custom'],
+  ]
+  for (const [group, label] of groups) {
+    const members = options.filter(option => option.group === group)
+    if (members.length === 0) continue
+    rows.push({ value: `\u0000group-${group}`, label: `── ${label} (${members.length}) ──`, group })
+    for (const option of members) {
+      rows.push({ value: option.route, label: `${option.label} (${option.ref})`, group })
+    }
+  }
+  rows.push({ value: ADD_PROVIDER_VALUE, label: '[ Add New Platform ]' })
+  return rows
+}
+
+/** The add-provider wizard outcome. */
+type AddProviderOutcome =
+  | { kind: 'ok'; text: string }
+  | { kind: 'cancelled' }
+  | { kind: 'error'; text: string }
+
+/** Run the add-provider wizard: collect route/api/baseURL/displayName/key
+ * through question flows, probe the endpoint for its models (falling back to
+ * hand entry), review, then persist the profile + credential.
+ * @param ctx - the command context.
+ * @param app - the TUI surface (question flows / pickers).
+ * @param signal - the runner's abort signal (probe cancellation).
+ * @param prefilledRoute - route pre-filled from `/login <route>`.
+ * @returns the outcome: ok (persisted), cancelled (user aborted), or error
+ *   (a validation or persistence failure with a user-facing message).
+ */
+async function askAddProvider(
+  ctx: Context,
+  app: TuiApp,
+  signal: AbortSignal,
+  prefilledRoute?: string,
+): Promise<AddProviderOutcome> {
+  const credentials = ctx.get('credentials')
+  const settings = ctx.get('settings') as ProviderCatalogSettingsWrite | undefined
+  if (credentials === undefined || settings === undefined) {
+    // The settings service and the llm-pi-ai namespace must exist to persist a
+    // hand-declared profile; without them the add cannot complete.
+    return { kind: 'cancelled' }
+  }
+
+  const route = prefilledRoute ?? ''
+  const questions = [
+    ...(route === '' ? [{ id: 'route', question: 'Provider route (lowercase letters, digits and dashes; e.g. acme-gateway)' }] : []),
+    { id: 'api', question: 'Wire protocol', options: PROTOCOL_CHOICES.map(choice => ({ label: choice })) },
+    { id: 'baseURL', question: 'Base URL (required for a hand-declared route)' },
+    { id: 'displayName', question: 'Display name (optional; defaults to the route)' },
+    { id: 'key', question: 'API key (leave empty to keep provider-native authentication)' },
+  ]
+  const answers = await app.askQuestions(questions)
+  const routeValue = (answers.find(answer => answer.id === 'route')?.custom ?? route).trim().toLowerCase()
+  if (!ROUTE_PATTERN.test(routeValue)) {
+    return { kind: 'error', text: `invalid provider route "${routeValue}" — lowercase letters, digits and dashes only, no leading digit` }
+  }
+  const api = answers.find(answer => answer.id === 'api')?.selected[0] ?? PROTOCOL_CHOICES[0]
+  const baseURL = (answers.find(answer => answer.id === 'baseURL')?.custom ?? '').trim()
+  if (baseURL === '') return { kind: 'error', text: 'base URL is required for a hand-declared provider route' }
+  const displayName = (answers.find(answer => answer.id === 'displayName')?.custom ?? '').trim() || routeValue
+  const key = (answers.find(answer => answer.id === 'key')?.custom ?? '').trim()
+
+  // Probe the endpoint for its advertised models (pi custom-registry fetch
+  // equivalent): a discovery success fills the models list; any failure is a
+  // hint and falls back to hand entry.
+  let discovered: readonly { id: string }[] = []
+  let discoveryNote: string | undefined
+  const llm = ctx.get('llm') as ProviderCatalogDiscovery | undefined
+  if (llm !== undefined) {
+    try {
+      discovered = await llm.discoverModels('llm-pi-ai', {
+        baseURL,
+        api,
+        ...key === '' ? {} : { apiKey: key },
+        signal,
+      })
+      if (discovered.length > 0) {
+        discoveryNote = `probed ${discovered.length} model${discovered.length > 1 ? 's' : ''}`
+      }
+    } catch {
+      discoveryNote = 'model probe failed — enter model ids by hand'
+    }
+  }
+  const modelAnswers = await app.askQuestions([
+    {
+      id: 'models',
+      question: discoveryNote === undefined
+        ? 'Model ids this route serves (one per line)'
+        : `Models advertised by the endpoint (${discoveryNote})`,
+      ...(discovered.length > 0
+        ? { options: discovered.map(model => ({ label: model.id })), multiSelect: true }
+        : {}),
+    },
+  ])
+  const modelAnswer = modelAnswers.find(answer => answer.id === 'models')
+  const models = modelAnswer?.selected ?? []
+  const customModels = (modelAnswer?.custom ?? '')
+    .split('\n').map(line => line.trim()).filter(line => line !== '')
+  const allModels = [...new Set([...models, ...customModels])]
+  if (allModels.length === 0) {
+    return { kind: 'error', text: 'at least one model id is required for a hand-declared route' }
+  }
+
+  // Persist the profile (settings.mutate) and, when a key was entered, the
+  // credential. apiKeyEnv is written ONLY when a key is stored (web Models
+  // parity: a keyless route keeps provider-native auth).
+  const ref = deriveKeyRef(routeValue)
+  const profile: Record<string, unknown> = {
+    ...displayName === routeValue ? {} : { displayName },
+    api,
+    baseURL,
+    models: allModels.map(id => ({ id })),
+    ...key === '' ? {} : { apiKeyEnv: ref },
+  }
+  try {
+    await settings.mutate('llm-pi-ai', [
+      { op: 'set', path: ['providers', routeValue], value: profile },
+    ])
+    if (key !== '') {
+      await credentials.set(ref as CredentialRef, key)
+    }
+  } catch (error) {
+    return { kind: 'error', text: `could not add provider: ${safeErrorMessage(error)}` }
+  }
+  return {
+    kind: 'ok',
+    text: key === ''
+      ? `provider ${routeValue} added (no key; provider-native authentication)`
+      : `${ref} set · provider ${routeValue} added`,
   }
 }
 
@@ -1830,33 +1990,65 @@ export function registerTuiCommands(
     handler: async (invocation) => {
       const credentials = ctx.get('credentials')
       if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
-      // One credential picker: deepseek official plus every llm-pi-ai route
-      // the section declares (each route carries its own apiKeyEnv ref).
-      const options = credentialOptionsFor(readLlmpiAiProviders(ctx))
+      // One merged credential catalog: deepseek official plus every
+      // configurable-provider directory route (the installed catalog, dormant
+      // or not, plus hand-declared profiles), each carrying its apiKeyEnv ref
+      // (or the derived conventional one). The llm directory is the primary
+      // source; the settings-only read is the fallback when the llm service
+      // is absent.
+      const options = readProviderOptions(ctx)
       const arg = invocation.rawInput.trim()
-      let ref: string
+      let route: string | undefined
       if (arg !== '') {
-        const resolved = resolveCredentialArg(arg, options)
-        if (resolved === undefined) {
+        // A route name that resolves to a known target sets that target's key;
+        // an env-var-looking name is used verbatim (the old escape hatch); a
+        // NEW route name (valid route pattern, not in the catalog) starts the
+        // add wizard with the route pre-filled.
+        const known = resolveCredentialArg(arg, options)
+        if (known !== undefined) {
+          route = options.find(option => option.ref === known)?.route ?? arg
+        } else if (ROUTE_PATTERN.test(arg)) {
+          const outcome = await askAddProvider(ctx, app, runner.signal, arg)
+          if (outcome.kind === 'cancelled') return { kind: 'error', text: 'add provider cancelled' }
+          if (outcome.kind === 'error') return { kind: 'error', text: outcome.text }
+          return { kind: 'success', text: outcome.text }
+        } else {
           return { kind: 'error', text: `unknown credential target "${arg}" — ${options.map(option => `${option.label} (${option.ref})`).join(', ')}` }
         }
-        ref = resolved
       } else if (options.length > 1) {
+        // Picker with search + grouping + the Add New Platform action row.
         const picked = await new Promise<string | undefined>((resolve) => {
           app.openPicker(
-            options.map(option => ({ value: option.ref, label: `${option.label} (${option.ref})` })),
+            providerPickerRows(options),
             (value) => resolve(value),
             () => resolve(undefined),
+            {
+              enableSearch: true,
+              header: 'login · providers',
+              noMatchText: '  no matching providers',
+              width: 76,
+              maxHeight: 26,
+              showHint: true,
+            },
           )
         })
         if (picked === undefined) return { kind: 'error', text: 'login cancelled' }
-        ref = picked
+        if (picked === ADD_PROVIDER_VALUE) {
+          const outcome = await askAddProvider(ctx, app, runner.signal)
+          if (outcome.kind === 'cancelled') return { kind: 'error', text: 'add provider cancelled' }
+          if (outcome.kind === 'error') return { kind: 'error', text: outcome.text }
+          return { kind: 'success', text: outcome.text }
+        }
+        route = picked
       } else {
-        ref = options[0]!.ref
+        route = options[0]?.route
       }
+      if (route === undefined) return { kind: 'error', text: 'no credential targets available' }
+      const option = options.find(candidate => candidate.route === route)
+      const ref = option?.ref ?? deriveKeyRef(route)
       try {
         const answers = await app.askQuestions([
-          { id: 'key', question: `Paste the API key for ${ref}:` },
+          { id: 'key', question: `Paste the API key for ${option?.label ?? route}:` },
         ])
         const key = answers[0]?.custom ?? ''
         if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
@@ -1875,7 +2067,7 @@ export function registerTuiCommands(
     handler: async (invocation) => {
       const credentials = ctx.get('credentials')
       if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
-      const options = credentialOptionsFor(readLlmpiAiProviders(ctx))
+      const options = readProviderOptions(ctx)
       const arg = invocation.rawInput.trim()
       if (arg !== '') {
         const resolved = resolveCredentialArg(arg, options)

@@ -7,10 +7,31 @@
 
 ## [Unreleased]
 
+### 新增
+
+- `/login` 现在可以新增部署从未配置过的供应商。凭据选择器合并了 llm
+  configurable-provider 目录(所有内置 pi-ai catalog 路由 + 手写 profile)
+  与 settings section,按 已配置 / 可用 / 自定义 分组,并提供
+  `[ Add New Platform ]` 动作行:进入引导向导——route、线协议、Base URL、
+  显示名与 API key——自动探测端点公布的模型(失败可手填),通过
+  `settings.mutate` 落盘 profile 并存储凭据。`/login <route>` 对全新
+  route 直接进入同一向导并预填 route。catalog 路由保持一步到位:
+  `/login anthropic` 仍只询问 key。供应商拓扑、llm-pi-ai/llm-deepseek
+  settings 或任何凭据变化时(包括外部编辑 `settings.yaml` /
+  `.credentials.yaml`),footer 模型行与欢迎卡片即时刷新。
+
 ### 变更
 
 - `/preset` 选择器中 `code` 预设的英文名改为 `PTC mode`,与上游 dsh
   0.1.0-rc.7 的重命名保持一致(预设 id 未变,已有组合不受影响)。
+
+### 修复
+
+- 已结算的 `ask_user_question` 卡片不再显示原始 `{"answers":[…]}` JSON:
+  改为显示已答计数摘要(`2/3 answered`,跳过的题目不计入),取消或中断的
+  流程显示结构化错误标识(`UserQuestionError: ASK_CANCELLED` /
+  `ASK_ABORTED`),而不是空白或 JSON 正文——与 web AskQuestionRow 对齐,
+  因为问题本身已在对话框中展示过。
 
 ## [0.1.8] - 2026-08-18
 

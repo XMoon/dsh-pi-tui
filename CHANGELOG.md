@@ -7,11 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/login` can now add a provider the deployment has never configured. The
+  credential picker merges the llm configurable-provider directory (every
+  installed pi-ai catalog route plus hand-declared profiles) with the
+  settings section, groups rows by configured / available / custom, and
+  offers an `[ Add New Platform ]` action that runs a guided wizard — route,
+  wire protocol, base URL, display name and API key — probes the endpoint
+  for its advertised models (falling back to hand entry), and persists the
+  profile through `settings.mutate` plus the credential. `/login <route>`
+  for a brand-new route starts the same wizard with the route pre-filled.
+  Catalog routes stay one-step: `/login anthropic` still just asks for the
+  key. The footer model row and welcome card refresh when the provider
+  topology, the llm-pi-ai/llm-deepseek settings, or any credential changes
+  (including external `settings.yaml` / `.credentials.yaml` edits).
+
 ### Changed
 
 - The `/preset` picker's English name for the `code` preset is now
   `PTC mode`, following the upstream dsh 0.1.0-rc.7 rename (the preset id
   is unchanged, so existing compositions keep working).
+
+### Fixed
+
+- A settled `ask_user_question` card no longer shows the raw
+  `{"answers":[…]}` JSON: it renders an answered-count summary
+  (`2/3 answered`, skipped questions excluded), and a cancelled or aborted
+  flow shows the structured error identity (`UserQuestionError:
+  ASK_CANCELLED` / `ASK_ABORTED`) instead of an empty or JSON body — web
+  AskQuestionRow parity, since the questions themselves were already shown
+  in the dialog.
 
 ## [0.1.8] - 2026-08-18
 

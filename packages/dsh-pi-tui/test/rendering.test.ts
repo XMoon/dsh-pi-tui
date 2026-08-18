@@ -2111,6 +2111,66 @@ test('ask_user_question cards carry the Question identity and a friendly summary
   assert.ok(!view.includes('"questions"'), `raw args JSON leaked into the summary:\n${view}`)
 })
 
+test('settled ask_user_question cards show the answered count, never raw JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    {
+      kind: 'tool', turn: 0, name: 'ask_user_question',
+      args: '{"questions":[{"id":"q1","question":"A?"},{"id":"q2","question":"B?"},{"id":"q3","question":"C?"}]}',
+      result: JSON.stringify({ answers: [
+        { id: 'q1', selected: ['x'] },
+        { id: 'q2', selected: [], custom: 'freeform' },
+        { id: 'q3', selected: [], custom: '' },
+      ] }),
+      status: 'ok',
+    },
+  ])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('2/3 answered'), `answered count missing:\n${view}`)
+  assert.ok(!view.includes('"answers"'), `raw answers JSON leaked:\n${view}`)
+  assert.ok(!view.includes('"selected"'), `raw selected JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('cancelled ask_user_question cards show the structured error identity', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    {
+      kind: 'tool', turn: 0, name: 'ask_user_question',
+      args: '{"questions":[{"id":"q","question":"Go?"}]}',
+      result: '',
+      status: 'error',
+      error: { name: 'UserQuestionError', code: 'ASK_CANCELLED' },
+    },
+  ])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('UserQuestionError: ASK_CANCELLED'), `error identity missing:\n${view}`)
+  assert.ok(!view.includes('"answers"'), `raw answers JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('askAnswersSummary counts answered entries and skips skipped ones', async () => {
+  const { askAnswersSummary } = await import('../src/present.ts')
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [
+    { id: 'a', selected: ['x'] },
+    { id: 'b', selected: [], custom: 'freeform' },
+    { id: 'c', selected: [], custom: '' },
+  ] })), '2/3 answered')
+  // All skipped.
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [
+    { id: 'a', selected: [] },
+    { id: 'b' },
+  ] })), '0/2 answered')
+  // Malformed / non-answer text: undefined.
+  assert.equal(askAnswersSummary('oops'), undefined)
+  assert.equal(askAnswersSummary('"str"'), undefined)
+  assert.equal(askAnswersSummary('null'), undefined)
+  assert.equal(askAnswersSummary('{"other":1}'), undefined)
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [null] })), '0/1 answered')
+})
+
 test('web search result views render sources and the answer (WebBlock parity)', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {

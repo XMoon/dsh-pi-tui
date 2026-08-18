@@ -3241,6 +3241,21 @@ export function apply(ctx: Context, config: Config): void {
     // tool/call fallback above still arms the badge.
     ctx.on('subagent/start', () => refreshAgents())
     ctx.on('subagent/end', () => refreshAgents())
+    // Provider-topology and credential events refresh the footer model row
+    // and the welcome card: a /login /logout /add-provider (or an external
+    // settings.yaml / .credentials.yaml edit) changes the live provider /
+    // model surface, and the status line must not keep showing a stale
+    // selection. All three events are capability-optional: an absent llm /
+    // settings / credentials service never mounts them, and a throwing
+    // listener is contained by the event bus (the refresh is best-effort).
+    ctx.on('llm/adapters-updated', () => { refreshStatus(); updateWelcomeCard() })
+    ctx.on('settings/document-updated', (ns) => {
+      if (ns === settingsNamespace('llm-pi-ai') || ns === settingsNamespace('llm-deepseek')) {
+        refreshStatus()
+        updateWelcomeCard()
+      }
+    })
+    ctx.on('credentials/updated', () => { refreshStatus(); updateWelcomeCard() })
     // Initial plan badge, busy indicator, and auto title from the log (a
     // resumed session may be persisted mid-turn). Without a session the
     // surfaces stay at their idle defaults.

@@ -66,6 +66,7 @@ import {
   foldedCallPreview,
   genericRawInputLines,
   resultTextLines,
+  askAnswersSummary,
   toolCardHeader,
   toolEmoji,
   webCardLines,
@@ -763,6 +764,7 @@ interface MessageComponentEntry {
   result?: string
   meta?: unknown
   members?: unknown
+  error?: { name: string; code: string }
 }
 
 export class TuiApp {
@@ -1973,6 +1975,7 @@ export class TuiApp {
         entry.result = message.result
         entry.meta = message.meta
         entry.members = message.members
+        entry.error = message.error
         break
       case 'summary':
         break
@@ -1992,6 +1995,7 @@ export class TuiApp {
       case 'tool':
         return entry.status !== message.status || entry.args !== message.args
           || entry.result !== message.result || entry.meta !== message.meta || entry.members !== message.members
+          || entry.error !== message.error
       case 'summary':
         return false
     }
@@ -2278,6 +2282,25 @@ export class TuiApp {
       // source), so the expanded card keeps the command row in every wiring.
       this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
       return
+    }
+    // A settled ask_user_question renders its answered-count summary, never
+    // the raw `{"answers":[…]}` JSON the tool's render text carries (Web
+    // AskQuestionRow parity — the questions themselves were already shown in
+    // the question flow, so the card only summarizes the outcome). A
+    // cancelled/aborted flow shows the structured error identity instead.
+    // This branch precedes the empty-result early return so a cancelled flow
+    // (which carries an error and an empty result) still renders its verdict.
+    if (message.name === 'ask_user_question') {
+      if (message.error !== undefined) {
+        card.addChild(new Text(color.textDim(`${message.error.name}: ${message.error.code}`), 0, 0))
+        return
+      }
+      const summary = message.status === 'ok' ? askAnswersSummary(message.result) : undefined
+      if (summary !== undefined) {
+        card.addChild(new Text(color.textDim(summary), 0, 0))
+        return
+      }
+      // Unparseable or failed: fall through to the generic presentation.
     }
     if (message.result === '' && (message.resultBlocks?.length ?? 0) === 0) return
     const resultView = this.present?.result(message.name, message.args, {

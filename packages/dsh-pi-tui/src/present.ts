@@ -491,6 +491,37 @@ export function resultTextLines(blocks: readonly ContentBlock[], error?: { name:
 }
 
 /**
+ * The answered-count summary for a settled `ask_user_question` result
+ * (Web AskQuestionRow parity): parses the tool's `{"answers":[…]}` render
+ * text and counts the entries that actually carry an answer — a non-empty
+ * `selected` list or a non-empty `custom` string (a skipped question has
+ * neither and stays out of the count). Returns `N/M answered`, or undefined
+ * when the text is not the expected answer JSON (the caller then falls back
+ * to the generic presentation instead of inventing a count).
+ * @param text - the settled result text.
+ * @returns the answered-count summary, or undefined when unparseable.
+ */
+export function askAnswersSummary(text: string): string | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const answers = (parsed as { answers?: unknown }).answers
+  if (!Array.isArray(answers)) return undefined
+  const total = answers.length
+  const answered = answers.filter((entry): boolean => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const candidate = entry as { selected?: unknown; custom?: unknown }
+    return (Array.isArray(candidate.selected) && candidate.selected.length > 0)
+      || (typeof candidate.custom === 'string' && candidate.custom !== '')
+  }).length
+  return `${answered}/${total} answered`
+}
+
+/**
  * The folded-card call preview for tools whose args carry a one-line
  * identity (Web TodoRow/WebRow folded parity): `todo_write` summarizes
  * `done/total` plus the first active item, `web_search`/`web_fetch` show

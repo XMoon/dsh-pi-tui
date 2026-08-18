@@ -51,6 +51,10 @@ export type TranscriptMessage =
     resultBlocks?: readonly ContentBlock[]
     /** The tool-private presentation payload from the tool/result event. */
     meta?: JsonValue
+    /** The structured internal failure identity (`{name, code}`), when the
+     * tool/result event carried one (e.g. `UserQuestionError` with
+     * `ASK_CANCELLED` / `ASK_ABORTED` for a cancelled question flow). */
+    error?: { name: string; code: string }
     /**
      * Workflow run cards only: the run's member rows, folded into the card
      * (Web WorkflowRunPanel parity) instead of standalone member cards.
@@ -596,6 +600,7 @@ export class TranscriptFolder {
           // Raw result data for the tool-owned presentation (presentResult).
           card.resultBlocks = block?.content
           card.meta = event.data.meta
+          card.error = event.data.error
           // A settled read may now be groupable: reflow the run it belongs
           // to (bounded by the nearest non-read cards).
           this.reflowGrouping(pending.index)
@@ -612,10 +617,11 @@ export class TranscriptFolder {
               running.turn = turn
               running.resultBlocks = block?.content
               running.meta = event.data.meta
+              running.error = event.data.error
               this.reflowGrouping(runningIndex)
             }
           } else {
-            this.appendItem({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta })
+            this.appendItem({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta, error: event.data.error })
             this.reflowGrouping(this.items.length - 1)
           }
         }
