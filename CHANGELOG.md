@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-18
+
 ### Fixed
 
 - A user-loaded skill (`/skill <name>` or a per-skill slash command like
@@ -18,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an idle agent starts a fresh turn with it (web parity — the web surface
   submits the `/name` prompt as a plain follow-up/steer and the host's
   pre-step listener injects the body).
+- The subagent transcript viewer no longer freezes the main transcript:
+  while viewing a child session, main-agent events were being dropped, so
+  the main transcript stopped updating (subagent cards stuck at
+  `[running]`) and the working indicator never turned off. Main-session
+  events now keep routing to the main folder while the viewer is open. The
+  viewer also pops back to the main transcript automatically when the
+  viewed child's result lands (matched by the delegation's description),
+  and the view anchors to the latest content on return (fullscreen
+  scrolls to end; the regular surface forces a clean full repaint).
 
 ## [0.1.6] - 2026-08-18
 
@@ -232,7 +243,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.3...v0.1.4

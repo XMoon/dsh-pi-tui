@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-18
+
 ### 修复
 
 - 用户加载的 skill(`/skill <名称>` 或 `/opip-ip-query` 这类 per-skill 斜杠
@@ -16,6 +18,12 @@
   一致:运行中的 agent 在下一个 step 边界接收,空闲的 agent 用它开启新
   回合(与 web 对齐——web 端把 `/name` 提示作为普通 follow-up/steer 提交,
   由宿主 pre-step 监听器注入正文)。
+- subagent transcript 查看器不再冻结主 transcript:查看子会话期间,主
+  agent 的事件此前会被丢弃,导致主 transcript 停止更新(subagent 卡片
+  一直停在 `[running]`)且 working 指示器永不熄灭。现在查看器打开时,
+  主会话事件照常进入主 folder。当被查看的子代理结果返回时(按委托的
+  description 匹配),查看器还会自动弹回主 transcript,并锚定到最新内容
+  (全屏模式滚动到底;普通模式强制一次干净的全量重绘)。
 
 ## [0.1.6] - 2026-08-18
 
@@ -204,7 +212,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.3...v0.1.4
