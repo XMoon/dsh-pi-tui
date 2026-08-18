@@ -224,6 +224,44 @@ export function shouldConsumeAdvertisedMiss(
   return execution === undefined && wasAdvertised
 }
 
+/** One unsettled subagent delegation, in tool/call order. */
+export interface PendingSubagentCall {
+  readonly callId: string
+  readonly description: string
+}
+
+/**
+ * Match the child a user is about to view against the unsettled subagent
+ * calls (pure, exported for the headless suite). The child's durable label
+ * is the delegation's `description`; duplicate descriptions take the MOST
+ * RECENT call (the one the user is most likely watching), an empty/absent
+ * label falls back to a LONE pending call, and no match disables the
+ * auto-pop (the user exits the viewer with Esc as before — never a wrong
+ * pop). Mutates `pending` by removing the matched call.
+ * @param pending - the unsettled calls, in order (oldest first).
+ * @param label - the child's durable label; '' or undefined = no description.
+ * @returns the matched call, or undefined when nothing matches.
+ */
+export function matchPendingSubagentCall(
+  pending: PendingSubagentCall[],
+  label: string | undefined,
+): PendingSubagentCall | undefined {
+  if (label !== undefined && label !== '') {
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      if (pending[index]!.description === label) {
+        return pending.splice(index, 1)[0]
+      }
+    }
+    // No description match: a lone pending call is the only remaining
+    // candidate (the user can only be viewing the one unsettled child).
+    if (pending.length === 1) return pending.splice(0, 1)[0]
+    return undefined
+  }
+  // No usable label: only a lone pending call can be tied unambiguously.
+  if (pending.length === 1) return pending.splice(0, 1)[0]
+  return undefined
+}
+
 /**
  * The pre-mount surface catalog resolution:
  * - an explicit `--session` start PREFETCHES the resumed agent's effective
@@ -1741,6 +1779,13 @@ export function apply(ctx: Context, config: Config): void {
     // P7d: subagent viewer — while set, the transcript shows another live
     // session's log read-only and Esc returns to the parent session.
     let viewing: { id: SessionId; folder: TranscriptFolder } | undefined
+    // Unsettled subagent delegations in the live session, in tool/call order.
+    // The viewer matches one of these by description when the user opens a
+    // child transcript, so the child's tool/result can pop the viewer back.
+    const pendingSubagentCalls: { callId: string; description: string }[] = []
+    // callId → child session id, established when the user opens a child's
+    // transcript (see enterView). Consumed on the matching tool/result.
+    const viewCallToChild = new Map<string, SessionId>()
     const activeFolder = (): TranscriptFolder => viewing?.folder ?? folder
     const paintNow = (): void => {
       if (repaintTimer !== undefined) {
@@ -1774,6 +1819,11 @@ export function apply(ctx: Context, config: Config): void {
     const bumpSessionGeneration = (): number => {
       sessionGeneration += 1
       callArgs.clear()
+      // The new session's subagent delegations are a fresh namespace: stale
+      // pending calls from the old session would consume viewer match slots,
+      // and dead callId→child maps would silently disable the auto-pop.
+      pendingSubagentCalls.length = 0
+      viewCallToChild.clear()
       searchMatches = []
       searchCurrent = -1
       app.setSearchResult(0, 0)
@@ -1807,6 +1857,15 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       }
+      // The user's deliberate look is the anchor for the auto-pop: match the
+      // child's durable label (the delegation's description) against the
+      // unsettled subagent calls so this child's tool/result can pop the
+      // viewer back. Duplicate labels take the MOST RECENT call (the one the
+      // user is most likely watching); an empty/absent label falls back to a
+      // lone pending call, and no match simply disables the auto-pop (the
+      // user exits with Esc as before).
+      const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
+      if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
       viewing = { id: childId, folder: childFolder }
       repaint(app, childFolder)
       // The viewer bar covers the editor (read-only placeholder, accent
@@ -1822,6 +1881,10 @@ export function apply(ctx: Context, config: Config): void {
       app.clearNotify() // a viewer notify (if any) is stale now
       app.setViewerMode(undefined)
       repaint(app, folder)
+      // The main transcript may have grown while the viewer covered it (the
+      // child's result, the parent's streaming): anchor the view to the end
+      // so the pop lands on the latest content, not a stale scroll position.
+      app.scrollToBottom()
       refreshStatus()
       return true
     }
@@ -3049,11 +3112,14 @@ export function apply(ctx: Context, config: Config): void {
       // session (deferred start) there is nothing to route to.
       if (liveAgent === undefined) return
       if (viewing !== undefined) {
-        if (session.id !== viewing.id) return
-        viewing.folder.apply([event])
-        schedulePaint()
-        if (event.type === 'turn/end') paintNow()
-        return
+        if (session.id === viewing.id) {
+          viewing.folder.apply([event])
+          schedulePaint()
+          if (event.type === 'turn/end') paintNow()
+          return
+        }
+        // Any OTHER session's events (the live agent's) keep routing to the
+        // main folder below — the viewer never starves the main transcript.
       }
       if (session.id !== liveAgent.session.id) return
       // Pair approval previews: remember each tool call's arguments by callId.
@@ -3067,9 +3133,40 @@ export function apply(ctx: Context, config: Config): void {
         // badge-arming signal.
         if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
           refreshAgents()
+          // Remember the pending delegation: the viewer matches one of these
+          // by description when the user opens a child transcript, so the
+          // child's tool/result can pop the viewer back automatically.
+          let description = ''
+          try {
+            const parsed = JSON.parse(event.data.arguments)
+            if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { description?: unknown }).description === 'string') {
+              description = (parsed as { description: string }).description
+            }
+          } catch {
+            // A non-JSON arguments payload carries no matchable description.
+          }
+          pendingSubagentCalls.push({ callId: event.data.callId, description })
         }
       } else if (event.type === 'tool/result') {
-        callArgs.delete(event.data.message.content[0]?.toolCallId ?? ('' as CallId))
+        const callId = event.data.message.content[0]?.toolCallId
+        callArgs.delete(callId ?? ('' as CallId))
+        // The delegation settled: drop it from the pending list and remember
+        // whether the user is viewing the child this call spawned, so after
+        // the event lands in the main folder we can pop back to the main
+        // transcript (the result is visible there).
+        const callIndex = pendingSubagentCalls.findIndex(call => call.callId === callId)
+        if (callIndex !== -1) pendingSubagentCalls.splice(callIndex, 1)
+        const childId = callId === undefined ? undefined : viewCallToChild.get(callId)
+        if (childId !== undefined) viewCallToChild.delete(callId)
+        const popAfterApply = childId !== undefined && viewing !== undefined && viewing.id === childId
+        if (popAfterApply) {
+          // The event below lands in the main folder FIRST so the pop shows
+          // the settled card, not the running one.
+          folder.apply([event])
+          statsFolder.apply([event])
+          exitView()
+          return
+        }
       }
       folder.apply([event])
       statsFolder.apply([event])

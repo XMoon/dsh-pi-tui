@@ -1697,6 +1697,21 @@ export class TuiApp {
   }
 
   /**
+   * Anchor the transcript view to its END (the latest content). Fullscreen
+   * scrolls its ScrollView; the regular surface has no scroll view (it draws
+   * into the terminal scrollback), so a forced full repaint re-renders from
+   * row 0 and the main screen's viewport tracking lands on the bottom — the
+   * same mechanism the fullscreen-toggle path uses to redraw cleanly.
+   */
+  scrollToBottom(): void {
+    if (this.fullscreenScroll !== undefined) {
+      this.fullscreenScroll.scrollToEnd()
+    } else {
+      this.tui.requestRender(true)
+    }
+  }
+
+  /**
    * Set the live session's auto-generated title (from the session/title
    * log) for the header; undefined clears it.
    */
