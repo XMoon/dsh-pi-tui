@@ -116,6 +116,7 @@ import {
 } from './guard.ts'
 import {
   acquireSessionLock,
+  swapFailureLockRepair,
   type SessionLockInfo,
   type SessionLockPersistence,
 } from './session-lock.ts'
@@ -1264,19 +1265,14 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error) {
         const message = safeErrorMessage(error)
         diag.error('swap failed', { from, error: message })
-        // Repair the lock tracker after an internal swap failure. Two shapes:
-        // - switchSession pre-released `from` and acquired the TARGET before
-        //   calling us: the tracker holds the target (or nothing, when the
-        //   target acquire was `unavailable`) and `from`'s lock is gone. The
-        //   target session we never entered must not stay locked, and the
-        //   still-live current session must get its lock back.
-        // - /new, /fork — no pre-release: the tracker still holds `from`
-        //   itself; nothing to repair (re-acquiring would be a same-process
-        //   shortcut no-op anyway).
-        if (heldLock === undefined || heldLock.sessionId !== from) {
-          if (heldLock !== undefined) releaseOpenLock(heldLock.sessionId)
-          reacquireCurrentLock(from, fromHeader)
-        }
+        // Repair the lock tracker after an internal swap failure — the
+        // decision matrix lives in swapFailureLockRepair (pure, headless-
+        // tested) so the three shapes (/new-/fork holding from, switchSession
+        // holding the target, switchSession with an unavailable target
+        // acquire) cannot silently regress.
+        const repair = swapFailureLockRepair(heldLock, from)
+        if (repair.release !== undefined) releaseOpenLock(repair.release)
+        if (repair.reacquire !== undefined) reacquireCurrentLock(repair.reacquire, fromHeader)
         return `swap failed: ${message}`
       }
       // The old session is now fully flushed: release its lock. (A switch

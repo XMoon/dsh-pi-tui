@@ -13,6 +13,7 @@ import {
   lockPathOf,
   parseLockInfo,
   serializeLockInfo,
+  swapFailureLockRepair,
   TAKEOVER_RETRIES,
   type SessionLockFs,
   type SessionLockInfo,
@@ -363,4 +364,29 @@ test('acquire: a flapping lock (repeated read-ENOENT) is bounded, never infinite
   }) as never
   const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
   assert.equal(outcome.kind, 'unverifiable')
+})
+
+test('swapFailureLockRepair: /new-/fork shape (tracker holds from) repairs nothing', () => {
+  const repair = swapFailureLockRepair({ sessionId: 'session-a' }, 'session-a')
+  assert.deepEqual(repair, { release: undefined, reacquire: undefined })
+})
+
+test('swapFailureLockRepair: switchSession shape (tracker holds target) releases target and re-acquires from', () => {
+  const repair = swapFailureLockRepair({ sessionId: 'session-b' }, 'session-a')
+  assert.deepEqual(repair, { release: 'session-b', reacquire: 'session-a' })
+})
+
+test('swapFailureLockRepair: switchSession with unavailable target acquire (tracker empty) re-acquires from', () => {
+  const repair = swapFailureLockRepair(undefined, 'session-a')
+  assert.deepEqual(repair, { release: undefined, reacquire: 'session-a' })
+})
+
+test('swapFailureLockRepair: no current session releases a tracked target and re-acquires nothing', () => {
+  const repair = swapFailureLockRepair({ sessionId: 'session-b' }, undefined)
+  assert.deepEqual(repair, { release: 'session-b', reacquire: undefined })
+})
+
+test('swapFailureLockRepair: no tracker and no current session repairs nothing', () => {
+  const repair = swapFailureLockRepair(undefined, undefined)
+  assert.deepEqual(repair, { release: undefined, reacquire: undefined })
 })
