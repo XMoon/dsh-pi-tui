@@ -41,14 +41,17 @@ const LLM_PI_AI_SECTION = {
 }
 
 /** A fake credentials service recording every set/unset. */
-function fakeCredentials() {
+function fakeCredentials(options: { failSet?: boolean } = {}) {
   const sets: string[] = []
   const unsets: string[] = []
   return {
     sets,
     unsets,
     service: {
-      set: async (ref: string, key: string): Promise<void> => { sets.push(`${ref}=${key}`) },
+      set: async (ref: string, key: string): Promise<void> => {
+        if (options.failSet === true) throw new Error('ref is shadowed read-only by the environment')
+        sets.push(`${ref}=${key}`)
+      },
       unset: async (ref: string): Promise<void> => { unsets.push(ref) },
     },
   }
@@ -119,6 +122,7 @@ function setup(options: {
   key?: string
   pick?: (items: readonly { value: string; label?: string }[]) => string
   withLlmpiAi?: boolean
+  failSet?: boolean
   questions?: () => { id: string; selected: string[]; custom?: string }[]
   llm?: ReturnType<typeof fakeLlm>
 } = {}) {
@@ -136,7 +140,7 @@ function setup(options: {
     },
   }
   ctx.provide('commands', commands.service as never)
-  const credentials = fakeCredentials()
+  const credentials = fakeCredentials({ failSet: options.failSet })
   ctx.provide('credentials', credentials.service as never)
   let settings: ReturnType<typeof fakeSettings> | undefined
   if (options.withLlmpiAi !== false) {
@@ -153,7 +157,9 @@ function setup(options: {
   app.askQuestions = async () => (options.questions?.() ?? [
     { id: 'key', selected: [], custom: options.key ?? 'sk-test' },
   ]) as never
-  app.openPicker = ((items: readonly { value: string }[], onSelect: (value: string) => void) => {
+  const pickerRows: { value: string; label?: string; group?: string }[] = []
+  app.openPicker = ((items: readonly { value: string; label?: string; group?: string }[], onSelect: (value: string) => void) => {
+    pickerRows.push(...items.map(item => ({ ...item })))
     onSelect((options.pick ?? ((rows) => rows[0]!.value))(items))
     return { close: () => {}, setItems: () => {} }
   }) as never
@@ -163,7 +169,7 @@ function setup(options: {
   assert.ok(logout?.handler !== undefined, 'logout handler missing')
   const run = async <T>(def: { handler?: unknown }, rawInput: string): Promise<T> =>
     (def!.handler as (inv: CommandInvocation) => Promise<T>)(invoke(rawInput))
-  return { app, credentials, settings, llm: options.llm, signal: runner.signal, run, login, logout }
+  return { app, credentials, settings, llm: options.llm, signal: runner.signal, pickerRows, run, login, logout }
 }
 
 test('credentialOptionsFor lists deepseek official plus deduped llm-pi-ai routes', () => {
@@ -210,6 +216,18 @@ test('/login <env-name> sets the named env credential directly', async () => {
   const result = await t.run<{ kind: string; text?: string }>(t.login, 'OPENAI_API_KEY')
   assert.equal(result.kind, 'success')
   assert.deepEqual(t.credentials.sets, ['OPENAI_API_KEY=sk-test'])
+  t.app.stop()
+})
+
+test('/login <novel-env-name> sets that name verbatim, never re-derived', async () => {
+  // The documented escape hatch: a name that matches NO catalog option ref
+  // must be stored under exactly that name — re-deriving it through
+  // deriveKeyRef would corrupt `MY_CUSTOM_KEY` into `MY_CUSTOM_KEY_API_KEY`.
+  const t = setup()
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'MY_CUSTOM_KEY')
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(t.credentials.sets, ['MY_CUSTOM_KEY=sk-test'])
+  assert.match(result.text ?? '', /MY_CUSTOM_KEY set/)
   t.app.stop()
 })
 
@@ -297,6 +315,32 @@ test('/login with the llm directory offers unconfigured catalog routes', async (
   t.app.stop()
 })
 
+test('/login picker rows are grouped via the group field with the Add row last', async () => {
+  const t = setup({
+    llm: fakeLlm([
+      { provider: 'anthropic', displayName: 'anthropic', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'anthropic'] },
+      // A hand-declared route with no profile yet.
+      { provider: 'acme-gateway', displayName: 'Acme Gateway', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme-gateway'], declared: true },
+    ]),
+    pick: rows => rows[0]!.value,
+  })
+  const result = await t.run<{ kind: string; text?: string }>(t.login, '')
+  assert.equal(result.kind, 'success')
+  // Every provider row carries a group label; no synthetic header row value
+  // may be selectable; the Add New Platform row is last and ungrouped.
+  // anthropic has a stored profile in the section (apiKeyEnv undefined →
+  // derived ref) so it is configured; acme-gateway has no profile → custom.
+  assert.equal(t.pickerRows[0]?.group, 'configured') // deepseek official
+  assert.equal(t.pickerRows[1]?.group, 'configured') // anthropic
+  assert.equal(t.pickerRows[2]?.group, 'custom') // acme-gateway
+  const add = t.pickerRows.at(-1)
+  assert.equal(add?.label, '[ Add New Platform ]')
+  assert.equal(add?.group, undefined)
+  assert.equal(t.pickerRows.some(row => row.value.startsWith('\u0000group-')), false,
+    'no synthetic group-header row may be a selectable picker item')
+  t.app.stop()
+})
+
 test('/login <new-route> runs the add-provider wizard and persists the profile', async () => {
   const t = setup({
     llm: fakeLlm([]),
@@ -336,6 +380,27 @@ test('/login <new-route> runs the add-provider wizard and persists the profile',
     },
   }])
   assert.deepEqual(t.credentials.sets, ['ACME_GATEWAY_API_KEY=sk-acme'])
+  t.app.stop()
+})
+
+test('/login wizard reports a profile that persisted but whose key write failed', async () => {
+  const t = setup({
+    llm: fakeLlm([]),
+    failSet: true,
+    questions: () => [
+      { id: 'api', selected: ['openai-completions'], custom: '' },
+      { id: 'baseURL', selected: [], custom: 'https://gateway.acme.example/v1' },
+      { id: 'displayName', selected: [], custom: '' },
+      { id: 'key', selected: [], custom: 'sk-acme' },
+      { id: 'models', selected: ['acme-large'], custom: '' },
+    ],
+  })
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme-gateway')
+  // The profile was persisted; only the key write failed, and the message
+  // must say so honestly instead of claiming the whole add failed.
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /provider acme-gateway added, but storing the key failed/)
+  assert.equal(t.settings!.mutations.length, 1)
   t.app.stop()
 })
 

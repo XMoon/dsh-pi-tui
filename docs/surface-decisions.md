@@ -82,19 +82,53 @@ The official deepseek adapter authenticates through `DEEPSEEK_API_KEY`;
 the llm-pi-ai adapter (a multi-provider seam) declares one route per
 provider, each carrying its own `apiKeyEnv` credential ref in the
 `llm-pi-ai` settings section (`providers.<route>.apiKeyEnv`). /login and
-/logout resolve their argument against that set:
+/logout resolve their argument against the MERGED credential catalog: the
+llm configurable-provider directory (`ctx.llm.listConfigurableProviders()` —
+every installed pi-ai catalog route, dormant or not, plus hand-declared
+profiles) overlaid on the settings section. A route with a stored profile
+carries its `apiKeyEnv`; a route without one falls back to the conventional
+derived reference (`<ROUTE>_API_KEY`, the web Models page derivation). The
+set is deduped by ref, deepseek official first. The settings-only read is
+the fallback when the llm service is absent.
 
-- no argument → a picker of `deepseek official (DEEPSEEK_API_KEY)` plus
-  every llm-pi-ai route (deduped by ref), then the key-entry question;
+- no argument → a searchable picker grouped by configured / available ·
+  catalog / custom (the fork's SelectList renders the group headers from
+  the `group` field — never synthetic selectable header rows), with an
+  `[ Add New Platform ]` action row last, then the key-entry question;
 - an argument matching a route name (or its first word, so `/login
   deepseek` reaches the official entry) → that route's `apiKeyEnv`;
 - an env-var-looking argument (`OPENAI_API_KEY`, `MY_CUSTOM_KEY`) → used
   verbatim, uppercased when typed lowercase (the original escape hatch —
   `/login my_custom_key` sets `MY_CUSTOM_KEY` exactly like the old
-  `.toUpperCase()` did);
+  `.toUpperCase()` did). The typed name is NEVER re-derived through
+  `deriveKeyRef` — that would silently corrupt the target into
+  `MY_CUSTOM_KEY_API_KEY` (a wrong-ref regression, guarded by a test);
+- a valid route pattern that names NO catalog entry (e.g.
+  `/login acme-gateway`) → the add-provider wizard with the route
+  pre-filled: wire protocol, base URL, display name, API key, then
+  `llm.discoverModels` probes the endpoint for its advertised models
+  (failure falls back to hand entry; at least one model is required), and
+  the profile persists through `settings.mutate` + the credential. The
+  base URL and models are required ONLY for hand-declared routes — a
+  catalog route has both from the installed catalog, so `/login
+  anthropic` still just asks for the key. `apiKeyEnv` is written into the
+  profile only when a key was stored (web parity: a keyless route keeps
+  provider-native auth). The profile write and the key write are reported
+  separately, so a persisted profile with a failed key write says
+  "provider added, but storing the key failed" instead of claiming the
+  whole add failed;
 - anything else → an error listing the valid options.
 
 Without the settings service (or the llm-pi-ai section) the option set
 degrades to the official target only, preserving the old behavior.
-Resolution helpers: `src/commands.ts` (`credentialOptionsFor`,
-`resolveCredentialArg`), pinned by `test/login-credentials.test.ts`.
+
+The `/login`/`/logout` surface refreshes the footer model row and the
+welcome card on `llm/adapters-updated`, `settings/document-updated`
+(llm-pi-ai/llm-deepseek namespaces only) and `credentials/updated`, so a
+provider added here — or edited externally in `settings.yaml` /
+`.credentials.yaml` — shows up without a restart.
+
+Resolution helpers: `src/provider-catalog.ts` (`providerOptionsFor`,
+`credentialOptionsFor`, `resolveCredentialArg`, `deriveKeyRef`,
+`ROUTE_PATTERN`), pinned by `test/provider-catalog.test.ts` and
+`test/login-credentials.test.ts`.

@@ -309,21 +309,22 @@ function readProviderOptions(ctx: Context): ProviderOption[] {
 }
 
 /** Build the picker rows from the merged options: grouped by configured /
- * available / custom, with the Add New Platform action row pinned last. */
+ * available / custom via the SelectList group extension (the fork renders a
+ * non-interactive header row per group automatically), with the Add New
+ * Platform action row pinned last. */
 function providerPickerRows(options: readonly ProviderOption[]): PickerItem[] {
   const rows: PickerItem[] = []
-  const groups: ReadonlyArray<readonly [ProviderOption['group'], string]> = [
-    ['configured', 'configured'],
-    ['available', 'available · catalog'],
-    ['custom', 'custom'],
-  ]
-  for (const [group, label] of groups) {
-    const members = options.filter(option => option.group === group)
-    if (members.length === 0) continue
-    rows.push({ value: `\u0000group-${group}`, label: `── ${label} (${members.length}) ──`, group })
-    for (const option of members) {
-      rows.push({ value: option.route, label: `${option.label} (${option.ref})`, group })
-    }
+  const groupLabels: Record<ProviderOption['group'], string> = {
+    configured: 'configured',
+    available: 'available · catalog',
+    custom: 'custom',
+  }
+  for (const option of options) {
+    rows.push({
+      value: option.route,
+      label: `${option.label} (${option.ref})`,
+      group: groupLabels[option.group],
+    })
   }
   rows.push({ value: ADD_PROVIDER_VALUE, label: '[ Add New Platform ]' })
   return rows
@@ -355,8 +356,9 @@ async function askAddProvider(
   const settings = ctx.get('settings') as ProviderCatalogSettingsWrite | undefined
   if (credentials === undefined || settings === undefined) {
     // The settings service and the llm-pi-ai namespace must exist to persist a
-    // hand-declared profile; without them the add cannot complete.
-    return { kind: 'cancelled' }
+    // hand-declared profile; without them the add cannot complete. This is a
+    // capability failure, not a user cancellation.
+    return { kind: 'error', text: 'adding a provider needs the settings service, which is unavailable' }
   }
 
   const route = prefilledRoute ?? ''
@@ -421,7 +423,11 @@ async function askAddProvider(
 
   // Persist the profile (settings.mutate) and, when a key was entered, the
   // credential. apiKeyEnv is written ONLY when a key is stored (web Models
-  // parity: a keyless route keeps provider-native auth).
+  // parity: a keyless route keeps provider-native auth). The two writes are
+  // reported separately: a persisted profile with a failed key write (e.g.
+  // the reference is shadowed read-only by the environment) must say the
+  // provider WAS added and only the key failed, not claim the whole add
+  // failed.
   const ref = deriveKeyRef(routeValue)
   const profile: Record<string, unknown> = {
     ...displayName === routeValue ? {} : { displayName },
@@ -434,11 +440,15 @@ async function askAddProvider(
     await settings.mutate('llm-pi-ai', [
       { op: 'set', path: ['providers', routeValue], value: profile },
     ])
-    if (key !== '') {
-      await credentials.set(ref as CredentialRef, key)
-    }
   } catch (error) {
     return { kind: 'error', text: `could not add provider: ${safeErrorMessage(error)}` }
+  }
+  if (key !== '') {
+    try {
+      await credentials.set(ref as CredentialRef, key)
+    } catch (error) {
+      return { kind: 'error', text: `provider ${routeValue} added, but storing the key failed: ${safeErrorMessage(error)}` }
+    }
   }
   return {
     kind: 'ok',
@@ -1999,6 +2009,12 @@ export function registerTuiCommands(
       const options = readProviderOptions(ctx)
       const arg = invocation.rawInput.trim()
       let route: string | undefined
+      // The credential ref to set. Resolved once, verbatim: for a known
+      // target it is the option's ref; for a novel env-var name (the old
+      // escape hatch) it IS the typed name — never re-derived through
+      // deriveKeyRef, which would corrupt `MY_CUSTOM_KEY` into
+      // `MY_CUSTOM_KEY_API_KEY` (a silent wrong-target write).
+      let ref: string | undefined
       if (arg !== '') {
         // A route name that resolves to a known target sets that target's key;
         // an env-var-looking name is used verbatim (the old escape hatch); a
@@ -2006,7 +2022,14 @@ export function registerTuiCommands(
         // add wizard with the route pre-filled.
         const known = resolveCredentialArg(arg, options)
         if (known !== undefined) {
-          route = options.find(option => option.ref === known)?.route ?? arg
+          const option = options.find(candidate => candidate.ref === known)
+          if (option !== undefined) {
+            route = option.route
+            ref = option.ref
+          } else {
+            // Novel env-var name: use it verbatim (no route to map to).
+            ref = known
+          }
         } else if (ROUTE_PATTERN.test(arg)) {
           const outcome = await askAddProvider(ctx, app, runner.signal, arg)
           if (outcome.kind === 'cancelled') return { kind: 'error', text: 'add provider cancelled' }
@@ -2043,17 +2066,18 @@ export function registerTuiCommands(
       } else {
         route = options[0]?.route
       }
-      if (route === undefined) return { kind: 'error', text: 'no credential targets available' }
-      const option = options.find(candidate => candidate.route === route)
-      const ref = option?.ref ?? deriveKeyRef(route)
+      if (route === undefined && ref === undefined) return { kind: 'error', text: 'no credential targets available' }
+      const option = route === undefined ? undefined : options.find(candidate => candidate.route === route)
+      const targetRef = ref ?? option?.ref ?? deriveKeyRef(route ?? '')
+      const label = option?.label ?? route ?? targetRef
       try {
         const answers = await app.askQuestions([
-          { id: 'key', question: `Paste the API key for ${option?.label ?? route}:` },
+          { id: 'key', question: `Paste the API key for ${label}:` },
         ])
         const key = answers[0]?.custom ?? ''
         if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
-        await credentials.set(ref as CredentialRef, key)
-        return { kind: 'success', text: `${ref} set` }
+        await credentials.set(targetRef as CredentialRef, key)
+        return { kind: 'success', text: `${targetRef} set` }
       } catch {
         return { kind: 'error', text: 'login cancelled' }
       }

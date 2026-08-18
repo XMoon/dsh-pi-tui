@@ -149,8 +149,12 @@ export function providerOptionsFor(
     const profile = entry.settingsPath.length === 0
       ? section
       : getPath(section, entry.settingsPath)
-    const configured = typeof profile === 'object' && profile !== null
-    const namedRef = configured && typeof (profile as { apiKeyEnv?: unknown }).apiKeyEnv === 'string'
+    // A present profile value — object or primitive — marks the route
+    // configured; only an absent one is unconfigured (a `providers.x = true`
+    // or a bare string is still a declared profile).
+    const configured = profile !== undefined
+    const namedRef = configured && typeof profile === 'object' && profile !== null
+      && typeof (profile as { apiKeyEnv?: unknown }).apiKeyEnv === 'string'
       ? (profile as { apiKeyEnv: string }).apiKeyEnv
       : undefined
     const ref = namedRef !== undefined && namedRef !== '' ? namedRef : deriveKeyRef(entry.provider)
