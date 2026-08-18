@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-18
+
 ### Added
 
 - Open-time session lock: opening a session (`--session`, `/resume`,
@@ -33,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline skill autocomplete in the editor (`/` after whitespace or on later
   lines triggers; Enter applies `data.inlineSkill`-marked completions without
   submitting) — from the vendored fork sync to kimi-code 44a6c70e6.
+- Web-parity tool cards: `card:'web'` result views (answer + source list for
+  a search, URL + HTTP status for a fetch), per-tool one-line shapes for
+  object rawInput (todo_write checklist, terminal session target, session
+  event seq) instead of pretty JSON, and content-block rendering for plan
+  review cards in both pending and completed states.
+- Task browser panel with status dots, aligned columns, and live ticking:
+  the ↓/Ctrl+J and `/tasks` lists render job state (running/stopping/
+  completed/failed), elapsed time updating every second, and group headers
+  with live counts — web JobListAction parity.
 
 ### Changed
 
@@ -45,6 +56,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the footer; panel borders indent one cell per side.
 - Vendored fork synced to kimi-code 44a6c70e6; the two new upstream
   divergences are registered in `packages/pi-tui/AGENTS.md`.
+
+### Fixed
+
+- Question dialog arrow keys scroll at the scrollport edges, so walking the
+  cursor into the options can never strand the question overview off-screen
+  on small terminals.
+- `todo_write` with an array `rawInput` renders as a checklist, not a pretty
+  JSON dump.
+- Session repair strips the trailing empty zstd frame that
+  `zstdCompressSync` can emit, so repaired logs stay valid for every reader.
+- Session-lock hardening from review rounds: lease leak on takeover paths,
+  swap-failure repair gaps (re-take checks, ordering), and probe fixes — the
+  swap-repair logic is extracted into a pure headless-tested function.
 
 ### Removed
 
@@ -196,7 +220,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.2...v0.1.3

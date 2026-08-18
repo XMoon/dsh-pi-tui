@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-18
+
 ### 新增
 
 - 打开时会话锁:打开会话(`--session`、`/resume`、`/sessions`)时,若另一
@@ -29,6 +31,13 @@
 - 编辑器内联技能自动补全(`/` 在空白后或后续行触发;Enter 应用带
   `data.inlineSkill` 标记的补全而不提交)——来自 vendored fork
   同步到 kimi-code 44a6c70e6。
+- Web 对齐的工具卡片:`card:'web'` 结果视图(搜索的答案 + 来源列表、
+  fetch 的 URL + HTTP 状态);对象型 rawInput 的逐工具单行形态
+  (todo_write 清单、terminal 会话目标、session_event seq)取代
+  格式化 JSON;计划评审卡片在待调用与已完成两条路径都渲染内容块。
+- 任务浏览器面板:状态圆点、对齐列与实时跳动——↓/Ctrl+J 与 `/tasks`
+  列表渲染任务状态(running/stopping/completed/failed)、每秒更新的
+  已耗时、带实时计数的分组标题——web JobListAction 对齐。
 
 ### 变更
 
@@ -39,6 +48,17 @@
   浏览器);目标槽位移出页脚;面板边框每侧缩进一格。
 - Vendored fork 同步到 kimi-code 44a6c70e6;两条新上游分叉修改
   已登记在 `packages/pi-tui/AGENTS.md`。
+
+### 修复
+
+- 问题对话框方向键在滚动视口边缘滚动,因此把光标走进选项永远不会
+  在小终端上把问题概览挤出屏幕。
+- `todo_write` 的数组型 `rawInput` 渲染为清单,而非格式化 JSON 转储。
+- 会话修复剥离 `zstdCompressSync` 可能产生的尾部空 zstd 帧,
+  修复后的日志对所有读取者保持有效。
+- 评审轮次的会话锁加固:接管路径上的租约泄漏、swap 失败修复缺口
+  (重取检查、顺序)与探针修复——swap 修复逻辑被提取为纯的、
+  无头测试的函数。
 
 ### 移除
 
@@ -174,7 +194,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.2...v0.1.3
