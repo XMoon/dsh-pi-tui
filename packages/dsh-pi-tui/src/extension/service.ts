@@ -57,13 +57,14 @@ export interface PiTuiExtensionService {
  * batch (nothing renders yet — M1 has no UI integration).
  */
 export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtensionService {
-  /** Capabilities advertised from service-provide time (P0-1): the three
-   * chrome slots work before any surface exists (registrations are simply
-   * rendered once the surface attaches). */
+  /** Capabilities advertised from service-provide time (P0-1): the chrome
+   * slots + widget slots work before any surface exists (registrations are
+   * simply rendered once the surface attaches). */
   static readonly ADVERTISED_CAPABILITIES: readonly PiTuiCapability[] = [
     'slot.chrome.header.badge',
     'slot.input.dock.item',
     'slot.chrome.footer.status',
+    'slot.input.widget',
   ]
 
   private readonly ledger: ExtensionLedger
@@ -293,7 +294,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   register<T>(slot: string, spec: RegistrationSpec, contribution: T): RegistrationHandle<T> {
     if (!isSlotName(slot)) {
       throw new Error(
-        `unknown extension slot "${slot}" (known: ${['chrome.header.badge', 'input.dock.item', 'chrome.footer.status'].join(', ')})`,
+        `unknown extension slot "${slot}" (known: ${['chrome.header.badge', 'input.dock.item', 'chrome.footer.status', 'input.widget.above', 'input.widget.below'].join(', ')})`,
       )
     }
     // Generation-lease design (round-3 review finding 3, deliberately NOT

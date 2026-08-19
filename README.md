@@ -155,13 +155,36 @@ Current extension points (v1):
 | `chrome.header.badge` | list | a short `[badge]` after the host title |
 | `input.dock.item` | list | a dock line above the todo panel |
 | `chrome.footer.status` | list | a footer segment (host owns width/truncation) |
+| `input.widget.above` / `input.widget.below` | list | a bounded widget around the editor (M4 component kit) |
 
 Contributions are **plain data**, not render functions: a plugin supplies
-`HeaderBadge` / `DockItem` / `FooterSegment` values (text + semantic tone
-spans) and the host owns rendering, ANSI compilation, width budgets and
-truncation. There is deliberately no `render(context)` callback in v1 —
-plugins never hold a rendering context, so a contribution can never capture
-or mutate host internals.
+`HeaderBadge` / `DockItem` / `FooterSegment` / `InputWidget` values (text +
+semantic tone spans, or a structured `ExtensionView` tree for widgets) and
+the host owns rendering, ANSI compilation, width budgets and truncation.
+There is deliberately no `render(context)` callback in v1 — plugins never
+hold a rendering context, so a contribution can never capture or mutate
+host internals.
+
+Since `0.2.0` the widget slots (`input.widget.above` / `input.widget.below`)
+accept a bounded component kit: `ExtensionView` is a structured view tree
+(`text` / `markdown` / `spacer` / `stack` / `frame` / `rows` views with
+semantic style tokens) that the host compiles into private components. A
+plugin can add helper rows above or below the editor — for example a status
+widget or a quick-reference line — without touching the root layout, the
+editor, or focus. The host owns the row budgets: under height pressure the
+lowest-importance widgets collapse first, and the editor always survives.
+
+```ts
+service.register<InputWidget>('input.widget.below', {
+  id: 'my-widget',
+  order: 100,
+}, {
+  view: {
+    kind: 'text',
+    spans: [{ text: 'my-plugin ready', tone: 'success' }],
+  },
+})
+```
 
 Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
 fiber unloads (HMR, disable), regular and fullscreen both refresh, and

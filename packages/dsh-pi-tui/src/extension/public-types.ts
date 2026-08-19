@@ -6,10 +6,10 @@
  * private pi-tui types, `TuiApp`, terminal types, and repository paths — the
  * packed `.d.mts` leak gate enforces that.
  *
- * M1–M2 scope: registry primitives plus the first chrome slots and the
- * immutable surface/session/activity snapshots. Contributions are plain
- * data (rendered by the host); plugins never touch components, terminals,
- * or the TuiApp.
+ * M1–M4 scope: registry primitives, the chrome slots, the immutable
+ * surface/session/activity snapshots, and the structured component kit
+ * (`ExtensionView`). Contributions are plain data (rendered by the host);
+ * plugins never touch components, terminals, or the TuiApp.
  * @module @xmoon76/dsh-pi-tui/extensions
  */
 
@@ -21,6 +21,7 @@ export type PiTuiCapability =
   | 'slot.chrome.header.badge'
   | 'slot.input.dock.item'
   | 'slot.chrome.footer.status'
+  | 'slot.input.widget'
   | 'surface.snapshot'
 
 /** Slot identities this package knows; unknown names are rejected at registration. */
@@ -28,6 +29,8 @@ export type PiTuiSlotName =
   | 'chrome.header.badge'
   | 'input.dock.item'
   | 'chrome.footer.status'
+  | 'input.widget.above'
+  | 'input.widget.below'
 
 /** Slot semantics: how competing contributions resolve. */
 export type PiTuiSlotSemantic = 'list' | 'single'
@@ -187,4 +190,98 @@ export interface StyledSpan {
   readonly tone?: 'primary' | 'accent' | 'text' | 'textStrong' | 'textDim' | 'textMuted'
     | 'border' | 'success' | 'warning' | 'error' | 'roleUser' | 'shellMode'
   readonly emphasis?: 'normal' | 'strong' | 'dim' | 'italic'
+}
+
+// ── M4: the structured component kit (plan §9) ────────────────────────────
+
+/**
+ * A structured view tree a plugin may contribute to widget slots. Plugins
+ * describe WHAT to render with semantic tokens; the host compiles it into
+ * private components and owns layout, ANSI compilation, wrapping, width
+ * measurement and error isolation. Raw ANSI and terminal escapes are never
+ * accepted (the host's render contract, plan §19).
+ *
+ * The tree is immutable and rebuilt on every contribution change; the host
+ * keeps the compiled component LIVE across resizes (the fork's per-frame
+ * processed-line reuse, AGENTS.md), so a width change re-wraps instead of
+ * freezing the baked lines.
+ */
+export type ExtensionView =
+  | TextView
+  | MarkdownView
+  | SpacerView
+  | StackView
+  | FrameView
+  | RowsView
+
+/** One line of text: styled spans, optionally wrapped at the view width. */
+export interface TextView {
+  readonly kind: 'text'
+  readonly spans: readonly StyledSpan[]
+  /** Whether long content wraps onto further rows (default true). */
+  readonly wrap?: boolean
+}
+
+/** One block of Markdown, rendered with the host's markdown palette. */
+export interface MarkdownView {
+  readonly kind: 'markdown'
+  readonly markdown: string
+}
+
+/** A run of empty rows (vertical spacing). */
+export interface SpacerView {
+  readonly kind: 'spacer'
+  readonly rows: number
+}
+
+/**
+ * A vertical or horizontal stack of views. Vertical stacks distribute the
+ * available height between children (basis/grow/shrink semantics like the
+ * fork's VStack); horizontal stacks place children side by side. Empty
+ * children render nothing.
+ */
+export interface StackView {
+  readonly kind: 'stack'
+  readonly direction: 'vertical' | 'horizontal'
+  readonly children: readonly ExtensionView[]
+  readonly gap?: number
+  /** Stack-layout hints (vertical direction): basis/grow/shrink. */
+  readonly basis?: number
+  readonly grow?: number
+  readonly shrink?: number
+}
+
+/**
+ * A bordered frame around one child view (padding 1, the host's border
+ * token). An absent child renders nothing (abdication).
+ */
+export interface FrameView {
+  readonly kind: 'frame'
+  readonly child?: ExtensionView
+  /** The child's content width budget (cells); defaults to the host budget. */
+  readonly width?: number
+}
+
+/** A fixed set of rows, each rendered at the current view width. */
+export interface RowsView {
+  readonly kind: 'rows'
+  readonly rows: readonly ExtensionView[]
+  /** Max rows to render (budget); excess rows are dropped. */
+  readonly maxRows?: number
+}
+
+/**
+ * A widget contribution for the `input.widget.above` / `input.widget.below`
+ * slots: one structured view with layout hints. The host owns the row
+ * budget (plan §19 — minimum editor usability always wins) and truncates or
+ * collapses low-importance widgets first; a widget can never push the
+ * editor off-screen.
+ */
+export interface InputWidget {
+  /** The view tree to render. */
+  readonly view: ExtensionView
+  /** Layout weight: lower importance widgets collapse first under pressure. */
+  readonly importance?: number
+  /** Preferred max rows (budget); the host may grant fewer. */
+  readonly maxHeight?: number
 }

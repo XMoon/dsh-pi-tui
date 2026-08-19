@@ -22,6 +22,7 @@ import type { ExtensionLedger } from './ledger.ts'
 import { InvalidateBatcher } from './batcher.ts'
 import { SurfaceStateStore } from './surface-state.ts'
 import { HeaderBadgeOutlet, DockItemOutlet, FooterSegmentOutlet } from './slot-outlet.ts'
+import { WidgetOutlet } from './widget-outlet.ts'
 
 /** The surface host bound to one live surface. */
 export class SurfaceHost {
@@ -30,6 +31,8 @@ export class SurfaceHost {
   private readonly headerBadges: HeaderBadgeOutlet
   private readonly dockItems: DockItemOutlet
   private readonly footerSegments: FooterSegmentOutlet
+  private readonly widgetsAbove: WidgetOutlet
+  private readonly widgetsBelow: WidgetOutlet
   private readonly requestRender: (force?: boolean) => void
   private readonly invalidateBatcher: InvalidateBatcher
   /** The TuiApp's chrome re-merge (refreshChrome), set at construction. */
@@ -72,6 +75,8 @@ export class SurfaceHost {
     this.headerBadges = new HeaderBadgeOutlet(ledger, { requestRender: () => this.requestRender() })
     this.dockItems = new DockItemOutlet(ledger, { requestRender: () => this.requestRender() })
     this.footerSegments = new FooterSegmentOutlet(ledger, { requestRender: () => this.requestRender() })
+    this.widgetsAbove = new WidgetOutlet(ledger, { requestRender: () => this.requestRender() }, 'input.widget.above')
+    this.widgetsBelow = new WidgetOutlet(ledger, { requestRender: () => this.requestRender() }, 'input.widget.below')
   }
 
   /**
@@ -128,6 +133,7 @@ export class SurfaceHost {
     this.capabilities.add('slot.chrome.header.badge')
     this.capabilities.add('slot.input.dock.item')
     this.capabilities.add('slot.chrome.footer.status')
+    this.capabilities.add('slot.input.widget')
     this.capabilities.add('surface.snapshot')
     // F-17: every ledger content change re-bakes the outlets and repaints,
     // coalesced through the host's batcher (one flush per tick). The sink
@@ -193,6 +199,11 @@ export class SurfaceHost {
     // wrapping into extra rows.
     this.dockItems.refresh(themeRevision, this.dockMaxRows, width)
     this.footerSegments.refresh(this.footerSegmentsCompact, themeRevision, width)
+    // Widgets (M4): bounded rows in the editor zone, width + row budgets
+    // host-owned. The above/below row budgets are separate so a widget can
+    // never push the editor off-screen (plan §19 height priority).
+    this.widgetsAbove.refresh(themeRevision, width, this.widgetRowsAbove)
+    this.widgetsBelow.refresh(themeRevision, width, this.widgetRowsBelow)
     this.requestRender()
   }
 
@@ -234,6 +245,28 @@ export class SurfaceHost {
     this.footerSegments.refresh(compact, state.themeRevision, width)
   }
 
+  /** The host-owned row budget for the above-editor widget zone (plan §19:
+   * minimum editor usability always wins — the host shrinks widgets before
+   * the editor). */
+  private widgetRowsAbove = 3
+  setWidgetRowsAbove(rows: number): void {
+    if (this.disposed) return
+    this.widgetRowsAbove = Math.max(1, Math.floor(rows))
+    const state = this.store.get().surface
+    const width = state.width > 0 ? Math.max(1, state.width) : 80
+    this.widgetsAbove.refresh(state.themeRevision, width, this.widgetRowsAbove)
+  }
+
+  /** The host-owned row budget for the below-editor widget zone. */
+  private widgetRowsBelow = 3
+  setWidgetRowsBelow(rows: number): void {
+    if (this.disposed) return
+    this.widgetRowsBelow = Math.max(1, Math.floor(rows))
+    const state = this.store.get().surface
+    const width = state.width > 0 ? Math.max(1, state.width) : 80
+    this.widgetsBelow.refresh(state.themeRevision, width, this.widgetRowsBelow)
+  }
+
   /** The header-badge content the host should append to its own title. */
   headerBadgeText(): string {
     return this.headerBadges.text()
@@ -247,6 +280,28 @@ export class SurfaceHost {
   /** The footer extension segments (host merges into its status line). */
   footerText(): string {
     return this.footerSegments.text()
+  }
+
+  /** The above-editor widget rows (host merges into its editor zone). */
+  widgetsAboveText(): string {
+    return this.widgetsAbove.text()
+  }
+
+  /** The below-editor widget rows (host merges into its editor zone). */
+  widgetsBelowText(): string {
+    return this.widgetsBelow.text()
+  }
+
+  /** Whether any widget currently renders above the editor (the host
+   * inserts the row only when there is content — an emptied zone must
+   * clear its painted rows, plan §19). */
+  hasWidgetsAbove(): boolean {
+    return this.widgetsAbove.hasContent()
+  }
+
+  /** Whether any widget currently renders below the editor. */
+  hasWidgetsBelow(): boolean {
+    return this.widgetsBelow.hasContent()
   }
 
   /** Whether any footer extension segment is registered AND baking content
@@ -299,6 +354,12 @@ export class SurfaceHost {
     // stop()/fullscreen round-trips never reach here — only the final
     // surface dispose.
     this.ledger.freezeLeases(this.ownGeneration)
+    // Clear every outlet's baked text (M4): a disposed surface must not
+    // leave stale widget rows (or chrome text) behind — the host's zone
+    // Texts would otherwise keep painting them (the fork's emptied-pane
+    // quirk).
+    this.widgetsAbove.dispose()
+    this.widgetsBelow.dispose()
     this.store.clearSubscribers()
     this.capabilities.clear()
   }

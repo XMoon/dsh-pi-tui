@@ -150,11 +150,32 @@ export function apply(ctx: Context): void {
 | `chrome.header.badge` | list | host 标题后的短 `[badge]` |
 | `input.dock.item` | list | todo 面板上方的一行 dock |
 | `chrome.footer.status` | list | 一个 footer 段(host 拥有宽度/截断) |
+| `input.widget.above` / `input.widget.below` | list | 编辑器周围的有界 widget(M4 组件套件) |
 
 贡献是**纯数据**,不是 render 函数:插件提供 `HeaderBadge` / `DockItem` /
-`FooterSegment` 值(文本 + 语义 tone spans),渲染、ANSI 编译、宽度预算与
-截断全部由 host 负责。v1 刻意没有 `render(context)` 回调——插件从不持有
-渲染上下文,贡献永远无法捕获或修改 host 内部。
+`FooterSegment` / `InputWidget` 值(文本 + 语义 tone spans,或 widget 的
+结构化 `ExtensionView` 树),渲染、ANSI 编译、宽度预算与截断全部由 host
+负责。v1 刻意没有 `render(context)` 回调——插件从不持有渲染上下文,
+贡献永远无法捕获或修改 host 内部。
+
+自 `0.2.0` 起,`input.widget.above` / `input.widget.below` 两个 widget slot
+接受有界组件套件:`ExtensionView` 是结构化视图树(`text` / `markdown` /
+`spacer` / `stack` / `frame` / `rows` 视图 + 语义样式 token),由 host 编译
+成私有组件。插件可以在编辑器上方或下方添加辅助行——例如状态 widget
+或快捷参考行——而不接触根布局、编辑器或焦点。行预算由 host 拥有:
+高度不足时先折叠低 importance 的 widget,编辑器永远存活。
+
+```ts
+service.register<InputWidget>('input.widget.below', {
+  id: 'my-widget',
+  order: 100,
+}, {
+  view: {
+    kind: 'text',
+    spans: [{ text: 'my-plugin ready', tone: 'success' }],
+  },
+})
+```
 
 生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
 regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕

@@ -10,11 +10,14 @@ import type { PiTuiSlotName, PiTuiSlotSemantic } from './public-types.ts'
 
 /** The semantic of every known slot. M1 implements `list` only; `single`
  * is declared for the ledger's conflict rules and becomes reachable when the
- * first single-winner slot lands (M2+). */
+ * first single-winner slot lands (M2+). M4 adds the two widget slots as
+ * `list` (multiple widgets stack in deterministic order). */
 const SLOT_SEMANTICS: Readonly<Record<PiTuiSlotName, PiTuiSlotSemantic>> = {
   'chrome.header.badge': 'list',
   'input.dock.item': 'list',
   'chrome.footer.status': 'list',
+  'input.widget.above': 'list',
+  'input.widget.below': 'list',
 }
 
 /** Whether a string names a known slot. `Object.hasOwn`, never `in` — a

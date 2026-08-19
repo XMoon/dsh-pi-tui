@@ -803,6 +803,9 @@ export class TuiApp {
   private readonly header: Text
   private readonly messagesView: Container
   private readonly footer: Text
+  /** The M4 widget zones (extension widgets around the editor seat). */
+  private readonly widgetsAbove: Text
+  private readonly widgetsBelow: Text
   private readonly events: TuiAppEvents
   /** Prompts awaiting the user's decision; one is shown at a time. */
   private readonly approvalQueue: PendingApproval[] = []
@@ -1041,11 +1044,18 @@ export class TuiApp {
       ? {}
       : { intervalMs: options.workingIntervalMs })
     this.footer = new Text('', 0, 0)
+    // The M4 widget zones: bounded rows above and below the editor seat,
+    // fed by the extension widget outlets. Host-owned Text components — a
+    // plugin can never touch the editor seat or the root layout.
+    this.widgetsAbove = new Text('', 0, 0)
+    this.widgetsBelow = new Text('', 0, 0)
     this.editorSeat = new Container()
     this.editorSeat.addChild(this.editor)
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
-    // statusContainer).
+    // statusContainer). The widget zones sit directly around the editor
+    // seat: above between the working row and the seat, below between the
+    // seat and the footer.
     this.tui.addChild(this.header)
     this.tui.addChild(this.messagesView)
     this.tui.addChild(this.dock)
@@ -1053,7 +1063,9 @@ export class TuiApp {
     this.tui.addChild(this.goalLine)
     this.tui.addChild(this.queuePane)
     this.tui.addChild(this.working)
+    this.tui.addChild(this.widgetsAbove)
     this.tui.addChild(this.editorSeat)
+    this.tui.addChild(this.widgetsBelow)
     this.tui.addChild(this.footer)
     this.tui.setFocus(this.editor)
     // Input routes through routeInput (see its doc): the autocomplete
@@ -2867,6 +2879,7 @@ export class TuiApp {
     this.renderFooter()
     this.renderDock()
     this.renderGoalLine()
+    this.renderWidgets()
     this.requestRender()
   }
 
@@ -3064,6 +3077,38 @@ export class TuiApp {
   private renderGoalLine(): void {
     const goal = this.status.goal
     this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(goal))
+    this.requestRender()
+  }
+
+  /**
+   * Rebuild the M4 widget zones around the editor seat. The host owns the
+   * row budget (plan §19 — minimum editor usability always wins): the above
+   * zone gets a fixed budget, the below zone gets the remaining rows before
+   * the footer. An empty zone renders NOTHING (the fork's emptied-pane quirk
+   * means an empty Text would keep its old rows — the outlet text is
+   * rewrittten wholesale on every refresh, and an empty text hides the
+   * zone).
+   */
+  private renderWidgets(): void {
+    const host = this.extensionHost
+    if (host === undefined) {
+      this.widgetsAbove.setText('')
+      this.widgetsBelow.setText('')
+      this.requestRender()
+      return
+    }
+    // Host-owned budgets (plan §19): the above zone gets a fixed 3 rows,
+    // the below zone the rows between the seat and the footer (a footer
+    // recovery/status line always survives — the plan's height priority).
+    const width = Math.max(1, this.terminal.columns)
+    const belowBudget = Math.max(1, Math.min(3, Math.max(1, Math.floor(this.terminal.rows / 4))))
+    host.setWidgetRowsAbove(3)
+    host.setWidgetRowsBelow(belowBudget)
+    const above = host.widgetsAboveText()
+    const below = host.widgetsBelowText()
+    this.widgetsAbove.setText(above)
+    this.widgetsBelow.setText(below)
+    void width
     this.requestRender()
   }
 
