@@ -32,37 +32,59 @@ export const inject = ['tuiStartup', PI_TUI_EXTENSIONS_SERVICE]
 // ── A minimal vim-mode editor built on the SDK ────────────────────────────
 
 /**
- * A tiny modal editor: `Esc` is handled by the HOST's keybinding path
- * (the fixture registers a keybinding for it through the registry — the
- * plugin never sees raw input); the editor itself is a plain text
- * surface with normal/insert state tracked PLUGIN-locally (the host owns
- * focus and submission; the plugin owns its own mode state).
+ * A modal editor that follows the ExtensionEditor protocol: the host
+ * snapshot subscription is DISPOSED with the editor, host-driven state
+ * is adopted through a single update + host.invalidate(), and the view
+ * is rebuilt from the CURRENT plugin state (never a captured snapshot).
+ * The plugin owns its mode state; the host owns focus, submission and
+ * session safety.
  */
 function createVimEditor(host: EditorHost, mode: { current: string }): ExtensionEditor {
   let text = ''
   let cursor = 0
-  const state = {
-    getText: () => text,
-    setText: (next: string) => { text = next },
-    getCursor: () => cursor,
-    setCursor: (next: number) => { cursor = next },
-    dispose: () => {},
-    component: {
-      kind: 'text' as const,
-      spans: [
-        { text: `vim-mode [${mode.current}] `, tone: 'accent' as const },
-        { text: text === '' ? '(empty)' : text, tone: 'text' as const },
-      ],
-    },
-  }
-  // The host hands the plugin a snapshot subscription: the fixture proves
-  // the subscribe/replaceText contract (a real vim plugin would drive its
-  // buffer from these).
-  host.subscribe((snapshot: EditorSnapshot) => {
-    if (snapshot.text !== text) text = snapshot.text
+  let disposed = false
+  // The subscription is kept and released on dispose (no stale listener
+  // after the handoff — round-1 finding 6).
+  const unsubscribe = host.subscribe((snapshot: EditorSnapshot) => {
+    if (disposed) return
+    // Adopt host-driven state; a single update, then invalidate so the
+    // live view re-renders with the fresh text.
+    if (snapshot.text !== text) {
+      text = snapshot.text
+      host.invalidate()
+    }
     if (snapshot.cursor !== cursor) cursor = snapshot.cursor
   })
-  return state
+  return {
+    // The view reads the CURRENT plugin state at compile time (the host
+    // compiles it on mount; a state change calls host.invalidate() which
+    // repaints — the M4 compiler keeps the child live across resizes).
+    component: {
+      kind: 'text',
+      spans: [
+        { text: `vim-mode [${mode.current}] `, tone: 'accent' },
+        { text: text === '' ? '(empty)' : text, tone: 'text' },
+      ],
+    },
+    getText: () => text,
+    setText: (next: string) => {
+      if (disposed) return
+      text = next
+      host.invalidate()
+    },
+    getCursor: () => cursor,
+    setCursor: (next: number) => {
+      if (disposed) return
+      cursor = next
+      host.invalidate()
+    },
+    get focused() { return false },
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      unsubscribe()
+    },
+  }
 }
 
 // ── The plugin entry ───────────────────────────────────────────────────────
@@ -82,8 +104,7 @@ export function apply(ctx: Context): void {
   })
 
   // 2. KEYBINDINGS (normalized keys → semantic actions — the host routes;
-  //    the plugin never sees raw terminal data). Alt+Space toggles the
-  //    plugin's OWN mode through a settings row below; Ctrl+Alt+V submits.
+  //    the plugin never sees raw terminal data). Ctrl+Alt+V submits.
   service.registerKeybinding({
     id: 'vim-submit',
     key: { key: 'v', ctrl: true, alt: true, shift: false, super: false },
@@ -92,7 +113,9 @@ export function apply(ctx: Context): void {
   })
 
   // 3. WIDGET: a bounded status line above the editor (the M4 component
-  //    kit — the host owns the row budgets).
+  //    kit — the host owns the row budgets). The widget text follows the
+  //    CURRENT mode through handle.replace (the async-producer → cache →
+  //    replace pattern from the plan §8.4).
   const widgetHandle = service.register<InputWidget>('input.widget.below', {
     id: 'vim-status',
     order: 100,
@@ -109,19 +132,56 @@ export function apply(ctx: Context): void {
     importance: 5,
     maxHeight: 1,
   })
-  void widgetHandle
+  const refreshWidget = (): void => {
+    widgetHandle.replace({
+      view: {
+        kind: 'text',
+        spans: [
+          { text: 'vim fixture', tone: 'success' },
+          { text: ' · mode: ', tone: 'textDim' },
+          { text: mode.current, tone: 'accent' },
+        ],
+      },
+      importance: 5,
+      maxHeight: 1,
+    })
+  }
 
   // 4. COMMAND: a TUI-owned local command (execution ownership metadata —
-  //    the bridge never executes; the commands service does).
+  //    the bridge never executes; the commands service does). The command
+  //    ALSO exposes the managed-overlay trigger (round-1 finding 4: the
+  //    overlay must be actually reachable, not dead code). The overlay
+  //    timer is CLEARED on close (round-1 finding 5: no leaked timer
+  //    survives unload/HMR).
+  let overlayTimer: ReturnType<typeof setTimeout> | undefined
+  const closeOverlay = (lease: { close(): void }): void => {
+    lease.close()
+    if (overlayTimer !== undefined) {
+      clearTimeout(overlayTimer)
+      overlayTimer = undefined
+    }
+  }
   service.registerCommand({
     id: 'vim-mode-cmd',
     name: 'vimmode',
-    description: 'Vim fixture: show the current mode.',
+    description: 'Vim fixture: show the mode and open the fixture overlay.',
     execution: 'local',
     sessionless: true,
     handler: (invocation) => {
       void invocation
-      return { kind: 'success', text: `vim mode: ${mode.current}` }
+      // The managed-overlay path is REAL and triggerable: the command
+      // opens the overlay (the host mounts it through the broker) and
+      // auto-closes it after 5s.
+      const lease = service.showOverlay({
+        kind: 'frame',
+        child: {
+          kind: 'text',
+          spans: [{ text: 'vim fixture overlay — /vimmode closes', tone: 'textDim' }],
+        },
+      }, { width: 40 })
+      if (overlayTimer !== undefined) clearTimeout(overlayTimer)
+      overlayTimer = setTimeout(() => closeOverlay(lease), 5000)
+      return { kind: 'success', text: `vim mode: ${mode.current} (overlay opened)` }
     },
   })
 
@@ -136,19 +196,7 @@ export function apply(ctx: Context): void {
     onChange: (value) => {
       if (value !== 'normal' && value !== 'insert') return false
       mode.current = value
-      // Refresh the status widget through the public handle API.
-      widgetHandle.replace({
-        view: {
-          kind: 'text',
-          spans: [
-            { text: 'vim fixture', tone: 'success' },
-            { text: ' · mode: ', tone: 'textDim' },
-            { text: mode.current, tone: 'accent' },
-          ],
-        },
-        importance: 5,
-        maxHeight: 1,
-      })
+      refreshWidget()
       return true
     },
   }
@@ -175,24 +223,8 @@ export function apply(ctx: Context): void {
   const rendererHandle = service.registerToolRenderer(toolRenderer)
   void rendererHandle
 
-  // 7. MANAGED OVERLAY: the plugin can open a bounded overlay (the host
-  //    mounts it through the broker; the lease is generation-scoped).
-  const openOverlay = (): void => {
-    const lease = service.showOverlay({
-      kind: 'frame',
-      child: {
-        kind: 'text',
-        spans: [{ text: 'vim fixture overlay — Esc closes', tone: 'textDim' }],
-      },
-    }, { width: 40 })
-    // Auto-close after 5s (a real plugin would close on its own key).
-    setTimeout(() => lease.close(), 5000)
-  }
-  void openOverlay
-
-  // 8. CLEANUP: the registrations are FIBER-BOUND — the host disposes
-  //    them when this plugin's fiber unloads (HMR, disable). The fixture
-  //    proves explicit disposal is idempotent through the returned
-  //    handles (no ctx event needed — the service owns the lifecycle).
+  // 7. CLEANUP: the registrations are FIBER-BOUND — the host disposes
+  //    them when this plugin's fiber unloads (HMR, disable). Explicit
+  //    disposal is idempotent through the returned handles.
   void editorHandle
 }
