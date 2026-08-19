@@ -119,24 +119,39 @@ export class AutocompleteRegistry {
     this.activeController?.abort()
     const controller = new AbortController()
     this.activeController = controller
-    const combined: TuiAutocompleteQuery = query.signal.aborted
-      ? { ...query, signal: controller.signal }
-      : { ...query, signal: AbortSignal.any([query.signal, controller.signal]) }
+    // COMBINED signal: the caller's abort AND the registry's supersede-
+    // abort must both reach providers. When the caller's signal is ALREADY
+    // aborted, AbortSignal.any still yields an aborted signal (the already-
+    // aborted caller state is never lost — round-2 P1).
+    const combined: TuiAutocompleteQuery = {
+      ...query,
+      signal: AbortSignal.any([query.signal, controller.signal]),
+    }
     const records = [...this.records.values()].filter(record => !record.disposed)
-    for (const record of records) {
-      try {
-        const result = await record.provider.getSuggestions(combined)
-        // Latest-only commit: a result that arrives after a newer request
-        // is stale for the current cursor — drop it.
-        if (requestEpoch !== this.epoch) return null
-        if (result !== null) return result
-      } catch (error) {
-        // Per-provider isolation: a throwing provider never aborts the
-        // chain. The error is recorded (health) and the next provider runs.
-        onError?.(record.id, error)
+    try {
+      for (const record of records) {
+        try {
+          const result = await record.provider.getSuggestions(combined)
+          // Latest-only commit: a result that arrives after a newer request
+          // is stale for the current cursor — drop it.
+          if (requestEpoch !== this.epoch) return null
+          if (result !== null) return result
+        } catch (error) {
+          // Per-provider isolation: a throwing provider never aborts the
+          // chain. The error is recorded (health) and the next provider runs.
+          onError?.(record.id, error)
+        }
+      }
+      return null
+    } finally {
+      // Clean up the active controller when THIS request is the current
+      // one (a newer request already replaced it — never clear a newer
+      // request's controller). The settled controller is released so it
+      // cannot extend provider/resource lifetimes (round-2 P2).
+      if (this.activeController === controller) {
+        this.activeController = undefined
       }
     }
-    return null
   }
 
   /** Whether any provider is live (health /status). */

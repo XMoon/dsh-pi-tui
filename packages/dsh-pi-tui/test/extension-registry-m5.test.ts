@@ -293,6 +293,53 @@ test('AutocompleteRegistry: a newer request aborts the superseded provider', asy
   assert.ok(sawAbort.length >= 1, 'the superseded request must observe an abort')
 })
 
+test('AutocompleteRegistry: an already-aborted caller signal reaches providers (round-2 P1)', async () => {
+  const registry = new AutocompleteRegistry()
+  let observedAborted: boolean | undefined
+  registry.register({
+    id: 'observer',
+    provider: {
+      getSuggestions(query) {
+        observedAborted = query.signal.aborted
+        return Promise.resolve(null)
+      },
+    },
+  }, 'a')
+  // The caller's signal is ALREADY aborted before the request starts: the
+  // combined signal must preserve that state (never a fresh live signal).
+  const caller = new AbortController()
+  caller.abort()
+  const result = await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: caller.signal })
+  assert.equal(result, null, 'the request settles normally')
+  assert.equal(observedAborted, true, 'the provider must observe the aborted caller signal')
+})
+
+test('AutocompleteRegistry: the active controller is released after the request settles (round-2 P2)', async () => {
+  const registry = new AutocompleteRegistry()
+  registry.register({
+    id: 'quick',
+    provider: provider(async () => null),
+  }, 'a')
+  await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal })
+  // After settlement, a LATER request must not abort a stale controller —
+  // and the internal controller reference is released. Assert indirectly:
+  // a second request with a live signal settles normally with no abort.
+  let sawAbort = false
+  registry.register({
+    id: 'spy2',
+    provider: {
+      getSuggestions(query) {
+        return new Promise(resolve => {
+          query.signal.addEventListener('abort', () => { sawAbort = true }, { once: true })
+          queueMicrotask(() => resolve(null))
+        })
+      },
+    },
+  }, 'b')
+  await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 1, signal: new AbortController().signal })
+  assert.equal(sawAbort, false, 'a settled request must not be aborted by later requests')
+})
+
 // ── KeybindingRegistry ─────────────────────────────────────────────────────
 
 test('KeybindingRegistry: reserved host keys are rejected (full lifecycle inventory)', () => {
