@@ -345,3 +345,53 @@ test('TuiApp: a broken plugin view (compile throw) keeps the old editor working 
   assert.equal(app.getDraft(), 'still alive', 'the old editor survives a broken plugin view')
   app.stop()
 })
+
+test('TuiApp: a plugin editor view REPAINTS after setText + invalidate (round-2 P1 live view)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  // A plugin editor whose VIEW reads the CURRENT state (a getter-backed
+  // component) — the fixture pattern: the view object re-reads state.
+  // The host draft transfers in at the handoff (never the plugin's own
+  // initial value).
+  app.setDraft('initial')
+  const state = { text: 'initial' }
+  registry.register({
+    id: 'live-view', priority: 0,
+    create: (host: import('../src/extension/public-types.ts').EditorHost) => ({
+      get component(): import('../src/extension/public-types.ts').ExtensionView {
+        // A FRESH view object per compile — the compiler reads spans at
+        // construction; the seat recompiles on invalidate.
+        return { kind: 'text', spans: [{ text: state.text }] }
+      },
+      getText: () => state.text,
+      setText: (text) => {
+        state.text = text
+        // The fixture pattern: the plugin editor requests a repaint
+        // through the host (the seat recompiles the live view).
+        host.invalidate()
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  const before = app.seatTextForTest()
+  assert.equal(before, 'initial')
+  // Change the text through the seat + invalidate (the fixture's editor
+  // calls host.invalidate() after setText).
+  app.setDraft('changed text')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // The seat's invalidate recompiled the view: the seat's component now
+  // renders the NEW text (probe via a fresh compile of the current view).
+  const seat = app.seatEditorForTest()
+  const compiled = seat.component.render(80).join('\n')
+  assert.ok(compiled.includes('changed text'), `the view must repaint the new text:\n${compiled}`)
+  app.stop()
+})

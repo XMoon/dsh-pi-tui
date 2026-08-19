@@ -72,6 +72,11 @@ export interface SeatActionSink {
   (action: 'submit' | 'queue-submit' | 'steer' | 'open-external-editor'): boolean
 }
 
+/** The host's view-swap callback: the seat re-mounts a newly compiled
+ * plugin view (round-2 P1 — a live plugin editor view must be recompiled
+ * on invalidate, never a compile-time snapshot). */
+export type SeatViewSwap = (component: Component) => void
+
 /**
  * The editor seat holder. One instance per TuiApp. The host drives the
  * CURRENT occupant through the {@link SeatEditor} surface; the holder
@@ -92,6 +97,8 @@ export class EditorSeatHolder {
   private readonly generation: () => number
   private readonly actionSink: SeatActionSink
   private readonly notifyError: (message: string) => void
+  /** The host's view-swap callback (re-mounts a recompiled plugin view). */
+  private readonly viewSwap: SeatViewSwap
 
   constructor(options: {
     hostAdapter: () => HostEditorAdapter
@@ -99,12 +106,14 @@ export class EditorSeatHolder {
     generation: () => number
     actionSink: SeatActionSink
     notifyError: (message: string) => void
+    viewSwap: SeatViewSwap
   }) {
     this.hostAdapter = options.hostAdapter
     this.surfaceId = options.surfaceId
     this.generation = options.generation
     this.actionSink = options.actionSink
     this.notifyError = options.notifyError
+    this.viewSwap = options.viewSwap
     this.current = this.adaptHost()
   }
 
@@ -220,9 +229,14 @@ export class EditorSeatHolder {
     }
   }
 
-  /** Adapt a plugin editor to the seat surface. */
+  /** Adapt a plugin editor to the seat surface. The component is compiled
+   * FRESH on every invalidate (round-2 P1): the M4 compiler caches the
+   * styled content at construction, so a plugin view that changed its
+   * state must be recompiled + re-mounted to repaint — the seat's
+   * invalidate() does exactly that through the host's view-swap. */
   private adaptPlugin(id: string, editor: ExtensionEditor): SeatEditor {
     const holder = this
+    let component = this.compileView(editor.component)
     return {
       id,
       getText: () => editor.getText(),
@@ -231,10 +245,17 @@ export class EditorSeatHolder {
       setCursor: (offset) => editor.setCursor?.(offset),
       get focused() { return editor.focused ?? false },
       borderColor: editor.borderColor ?? ((value: string) => value),
-      invalidate: () => {},
+      invalidate: () => {
+        // Recompile the CURRENT view + swap it into the seat (the host's
+        // viewSwap re-mounts the child without a handoff).
+        component = holder.compileView(editor.component)
+        holder.viewSwap(component)
+      },
       addToHistory: () => {}, // the host default owns history recall
       clearHistory: () => {},
-      component: this.compileView(editor.component),
+      // A GETTER (round-2 P1): invalidate() recompiles the view; the
+      // seat's component always reflects the CURRENT compiled view.
+      get component() { return component },
       dispose: () => editor.dispose(),
     }
   }

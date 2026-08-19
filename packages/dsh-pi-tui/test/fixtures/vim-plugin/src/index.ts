@@ -150,37 +150,35 @@ export function apply(ctx: Context): void {
   // 4. COMMAND: a TUI-owned local command (execution ownership metadata —
   //    the bridge never executes; the commands service does). The command
   //    ALSO exposes the managed-overlay trigger (round-1 finding 4: the
-  //    overlay must be actually reachable, not dead code). The overlay
-  //    timer is CLEARED on close (round-1 finding 5: no leaked timer
-  //    survives unload/HMR).
-  let overlayTimer: ReturnType<typeof setTimeout> | undefined
-  const closeOverlay = (lease: { close(): void }): void => {
-    lease.close()
-    if (overlayTimer !== undefined) {
-      clearTimeout(overlayTimer)
-      overlayTimer = undefined
-    }
-  }
+  //    overlay must be actually reachable, not dead code). The overlay is
+  //    a TOGGLE (round-2 finding 3: no timer at all — nothing can leak
+  //    after unload; the second /vimmode closes the current overlay, and
+  //    the host's generation-scoped lease closes it on surface dispose).
+  let activeOverlay: { close(): void } | undefined
   service.registerCommand({
     id: 'vim-mode-cmd',
     name: 'vimmode',
-    description: 'Vim fixture: show the mode and open the fixture overlay.',
+    description: 'Vim fixture: show the mode and toggle the fixture overlay.',
     execution: 'local',
     sessionless: true,
     handler: (invocation) => {
       void invocation
       // The managed-overlay path is REAL and triggerable: the command
-      // opens the overlay (the host mounts it through the broker) and
-      // auto-closes it after 5s.
-      const lease = service.showOverlay({
+      // opens the overlay (the host mounts it through the broker); the
+      // NEXT invocation closes it. No timer — the lease is generation-
+      // scoped and the host closes it on surface dispose.
+      if (activeOverlay !== undefined) {
+        activeOverlay.close()
+        activeOverlay = undefined
+        return { kind: 'success', text: `vim mode: ${mode.current} (overlay closed)` }
+      }
+      activeOverlay = service.showOverlay({
         kind: 'frame',
         child: {
           kind: 'text',
-          spans: [{ text: 'vim fixture overlay — /vimmode closes', tone: 'textDim' }],
+          spans: [{ text: 'vim fixture overlay — /vimmode toggles', tone: 'textDim' }],
         },
       }, { width: 40 })
-      if (overlayTimer !== undefined) clearTimeout(overlayTimer)
-      overlayTimer = setTimeout(() => closeOverlay(lease), 5000)
       return { kind: 'success', text: `vim mode: ${mode.current} (overlay opened)` }
     },
   })

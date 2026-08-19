@@ -30,6 +30,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   lstatSync,
@@ -241,31 +242,49 @@ function main() {
         runtime.status === 0 ? '' : (runtime.stderr || runtime.stdout).split('\n').slice(-8).join(' '))
     }
 
-    // 8. No duplicate dsh runtime: the @deepseek-ai entries in the
-    //    fixture tree must be SYMLINKS to the host modules (the packed
-    //    tarball itself carries no node_modules — the scaffolding above
-    //    symlinks them, exactly like a real profile resolves in-box
-    //    packages from the dsh installation).
-    const nm = join(pkgDir, 'node_modules', '@deepseek-ai')
-    const runtimeEntries = existsSync(nm) ? readdirSync(nm) : []
-    const realCopies = runtimeEntries.filter(name => {
-      const entry = join(nm, name)
-      try {
-        return !symlinkSync && statSync(entry).isSymbolicLink() === false
-      } catch {
-        return true
+    // 8. No duplicate dsh runtime: every @deepseek-ai entry in BOTH the
+    //    packed package tree AND the fixture tree must be a SYMLINK whose
+    //    realpath resolves into the host module tree (the packed tarball
+    //    itself carries no node_modules — the scaffolding symlinks them,
+    //    exactly like a real profile resolves in-box packages from the
+    //    dsh installation). A REAL directory is a duplicate runtime copy.
+    // The symlinks point into the HOST's modules (pnpm's virtual store
+    // under node_modules/.pnpm, itself linking to the pnpm store — a
+    // REAL host install). The defect class is a COPY: a real directory,
+    // or a symlink resolving back INTO the packed/fixture tree (a
+    // self-contained duplicate). A symlink resolving OUTSIDE the probe
+    // (host node_modules / pnpm store) is exactly the host resolution a
+    // real profile uses.
+    const probeReal = resolve(workDir)
+    const auditTrees = [
+      ['packed package', join(pkgDir, 'node_modules', '@deepseek-ai')],
+      ['fixture tree', join(fixtureDir, 'node_modules', '@deepseek-ai')],
+    ]
+    const realDirs = []
+    for (const [label, nm] of auditTrees) {
+      const entries = existsSync(nm) ? readdirSync(nm) : []
+      for (const name of entries) {
+        const entry = join(nm, name)
+        let isSymlink = false
+        try { isSymlink = lstatSync(entry).isSymbolicLink() } catch { /* missing */ }
+        if (!isSymlink) {
+          realDirs.push(`${label}:${name} (real dir)`)
+          continue
+        }
+        // A symlink whose target resolves INSIDE the probe is a duplicate
+        // copy; a dangling link is a defect. Anything else (host modules,
+        // the pnpm store) is the intended host resolution.
+        try {
+          const target = resolve(realpathSync(entry))
+          if (target.startsWith(probeReal)) realDirs.push(`${label}:${name}->${target}`)
+        } catch {
+          realDirs.push(`${label}:${name} (dangling)`)
+        }
       }
-    })
-    const realDirs = runtimeEntries.filter(name => {
-      try {
-        return !lstatSync(join(nm, name)).isSymbolicLink()
-      } catch {
-        return false
-      }
-    })
-    check('no duplicate @deepseek-ai dsh-runtime copy (symlinks only)',
+    }
+    check('no duplicate @deepseek-ai dsh-runtime copy (symlinks only, both trees)',
       realDirs.length === 0,
-      realDirs.length === 0 ? '' : realDirs.join(', '))
+      realDirs.join(', '))
   } finally {
     if (process.env.VIM_SMOKE_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })
   }

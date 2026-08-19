@@ -1135,6 +1135,15 @@ export class TuiApp {
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
       generation: () => this.generation,
+      // Round-2 P1: a plugin editor's invalidate() recompiles its view and
+      // swaps the child in the seat (the M4 compiler caches at
+      // construction — a live plugin view needs a recompile to repaint).
+      viewSwap: (component) => {
+        if (this.disposed) return
+        this.editorSeat.clear()
+        this.editorSeat.addChild(component)
+        this.requestRender()
+      },
       actionSink: (action) => {
         // The sink routes through the HOST-OWNED paths (round-1 finding
         // 2): submit/queue-submit go through submitDraft (history +
@@ -2459,6 +2468,11 @@ export class TuiApp {
    * seat actually renders — getDraft preserves the viewer draft). */
   seatTextForTest(): string {
     return this.seatEditor().getText()
+  }
+
+  /** M9 test hook: the CURRENT seat occupant (component rendering probe). */
+  seatEditorForTest(): import('./editor-seat-holder.ts').SeatEditor {
+    return this.seatEditor()
   }
 
   /** M7 test hook: build (or fetch) the cached component entry for one
