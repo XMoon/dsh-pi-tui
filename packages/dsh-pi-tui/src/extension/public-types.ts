@@ -571,3 +571,101 @@ export interface TuiKeybindingRegistrySnapshot {
   }[]
   readonly revision: number
 }
+
+// ── M7: transcript / tool renderers (plan §12) ─────────────────────────────
+
+/** The semantic snapshot of one TOOL call a renderer may present (plan
+ * §12). Immutable, readonly; secrets/credentials/raw Context/live Agent
+ * are NEVER included. */
+export interface ToolPresentationSnapshot {
+  readonly callId: string
+  readonly toolName: string
+  readonly status: 'ok' | 'error' | 'running'
+  readonly arguments?: unknown
+  readonly result?: unknown
+  /** Whether the card is currently expanded (fold boundary + click
+   * override). A renderer may present differently per expansion. */
+  readonly expanded: boolean
+}
+
+/** The semantic snapshot of one TRANSCRIPT message a renderer may present
+ * (plan §12). Kind-specific fields are present only for their kind. */
+export interface MessagePresentationSnapshot {
+  readonly kind: 'user' | 'assistant' | 'thinking' | 'system' | 'tool' | 'summary'
+  readonly turn: number
+  /** Present for text-bearing kinds. */
+  readonly text?: string
+  /** Present for thinking (still streaming). */
+  readonly running?: boolean
+  /** Present for system (producer label/summary). */
+  readonly label?: string
+  readonly summary?: string
+  /** Present for tool. */
+  readonly tool?: ToolPresentationSnapshot
+}
+
+/** One registered message renderer (chain slot): may present ANY message;
+ * returning undefined abdicates (the chain continues to the next renderer,
+ * then the host fallback). */
+export interface TuiMessageRendererContribution {
+  readonly id: string
+  /** Optional scope: only render this message kind (undefined = all). */
+  readonly kind?: MessagePresentationSnapshot['kind']
+  readonly render: (snapshot: MessagePresentationSnapshot) => ExtensionView | undefined
+  readonly description?: string
+  /** Chain ordering (ASC); ties break by id ASC. */
+  readonly order?: number
+}
+
+/** One registered tool renderer (keyed slot): presents the tool card for
+ * ONE tool name; undefined abdicates to the next renderer / host fallback.
+ * Registered via `transcript.tool.renderer.<toolName>` keys. */
+export interface TuiToolRendererContribution {
+  readonly id: string
+  /** The tool name this renderer presents (the keyed slot's domain key). */
+  readonly toolName: string
+  readonly render: (snapshot: ToolPresentationSnapshot) => ExtensionView | undefined
+  readonly description?: string
+  /** Winner selection for the tool name: lowest priority wins (a tie is
+   * an error). */
+  readonly priority?: number
+}
+
+/** A live handle on one renderer contribution. */
+export interface TuiRendererHandle {
+  readonly id: string
+  /** Remove the renderer (idempotent; owner unload also disposes). */
+  dispose(): void
+}
+
+/** The read-side of the renderer registry (M7): the host's message cache
+ * asks it to present a message/tool through the plugin chain. The
+ * concrete registry is host-internal. */
+export interface TuiRendererRegistryView {
+  renderMessage(
+    snapshot: MessagePresentationSnapshot,
+    onError: (id: string, error: unknown) => void,
+  ): { view: ExtensionView; rendererId: string } | undefined
+  renderTool(
+    snapshot: ToolPresentationSnapshot,
+    onError: (id: string, error: unknown) => void,
+  ): { view: ExtensionView; rendererId: string } | undefined
+  snapshot(): TuiRendererRegistrySnapshot
+}
+
+/** The renderer registry's observable snapshot. */
+export interface TuiRendererRegistrySnapshot {
+  readonly messageRenderers: readonly {
+    readonly id: string
+    readonly kind: MessagePresentationSnapshot['kind'] | undefined
+    readonly description: string | undefined
+    readonly owner: string
+  }[]
+  readonly toolRenderers: readonly {
+    readonly id: string
+    readonly toolName: string
+    readonly description: string | undefined
+    readonly owner: string
+  }[]
+  readonly revision: number
+}

@@ -203,6 +203,17 @@ service.register<InputWidget>('input.widget.below', {
   永远优先);绑定是非捕获的,在优先级梯子的最后触发(question、approval、
   overlay、编辑器之后)。动作通过 host 自己的路径执行——提交/会话安全
   永不被绕过。
+- `registerMessageRenderer(contribution)` — TRANSCRIPT 消息渲染器(M7,
+  chain slot):接收语义 `MessagePresentationSnapshot`(不可变;绝不是可变
+  message 或容器),返回 `ExtensionView` 或 `undefined`(弃权 → 下一个
+  渲染器 → host 回退)。按 kind 限定的渲染器只作用于对应消息类型。
+- `registerToolRenderer(contribution)` — 工具卡片渲染器(M7,keyed slot):
+  从 `ToolPresentationSnapshot`(callId、toolName、status、arguments、
+  result、expanded)呈现一个工具名的卡片;winner(最低 priority)弃权后
+  落到下一个渲染器,再到 host 回退。同一工具名的 priority 平局是显式
+  错误。渲染器绝不会卡住 transcript:抛错的渲染器被隔离、链继续,
+  消息缓存内嵌渲染器身份 + 注册表 revision,因此 HMR/unload 只重建
+  受影响的组件。
 
 生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
 regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕

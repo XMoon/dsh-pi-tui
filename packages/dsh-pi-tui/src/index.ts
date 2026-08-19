@@ -1478,6 +1478,7 @@ export function apply(ctx: Context, config: Config): void {
       readonly autocomplete: import('./autocomplete-registry.ts').AutocompleteRegistry
       readonly settings: import('./settings-registry.ts').SettingsRegistry
       readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
+      readonly renderers: import('./renderer-registry.ts').RendererRegistry
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
       attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
       detachSurface(surfaceId?: string): void
@@ -2606,6 +2607,10 @@ export function apply(ctx: Context, config: Config): void {
       present,
       workspaceRoot: cwd,
       extensionHost,
+      // M7: the transcript/tool renderer registry. Renderer failures are
+      // isolated per contribution (the registry catches throws and the
+      // host falls back); the health sink records them for /status.
+      renderers: extensionService?.renderers,
       // M6: non-capturing plugin keybindings. The resolver reads the
       // extensionService LAZILY (it is fetched below the app construction)
       // and normalizes through the InputRouter — a plugin binding resolves

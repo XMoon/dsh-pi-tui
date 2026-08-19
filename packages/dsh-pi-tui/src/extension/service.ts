@@ -29,9 +29,12 @@ import { ThemeRegistry } from '../theme-registry.ts'
 import { AutocompleteRegistry } from '../autocomplete-registry.ts'
 import { SettingsRegistry } from '../settings-registry.ts'
 import { KeybindingRegistry } from '../keybinding-registry.ts'
+import { RendererRegistry } from '../renderer-registry.ts'
 import type {
   AutocompleteHandle,
   AutocompleteProviderContribution,
+  MessagePresentationSnapshot,
+  ToolPresentationSnapshot,
   TuiAutocompleteRegistryView,
   TuiCommandBridgeView,
   TuiCommandContribution,
@@ -42,9 +45,13 @@ import type {
   TuiSettingContribution,
   TuiSettingHandle,
   TuiSettingsRegistryView,
+  TuiMessageRendererContribution,
+  TuiRendererHandle,
+  TuiRendererRegistryView,
   TuiThemeContribution,
   TuiThemeHandle,
   TuiThemeRegistryView,
+  TuiToolRendererContribution,
 } from './public-types.ts'
 
 /** The service name plugins inject (`piTuiExtensions` in cordis.patch.yml). */
@@ -106,6 +113,19 @@ export interface PiTuiExtensionService {
    * @param contribution - the binding contribution.
    */
   registerKeybinding(contribution: TuiKeybindingContribution): TuiKeybindingHandle
+  /**
+   * Register a transcript MESSAGE renderer (M7, chain slot): receives a
+   * semantic snapshot; returns an ExtensionView or undefined (abdicate →
+   * next renderer → host fallback). A throwing renderer is isolated.
+   * Owned by the calling fiber.
+   */
+  registerMessageRenderer(contribution: TuiMessageRendererContribution): TuiRendererHandle
+  /**
+   * Register a TOOL renderer (M7, keyed slot): presents the tool card for
+   * ONE tool name; undefined abdicates. Priority ties on the same tool
+   * name are an explicit error. Owned by the calling fiber.
+   */
+  registerToolRenderer(contribution: TuiToolRendererContribution): TuiRendererHandle
   /** M5 registries, exposed for the runner's dispatch/pickers (narrow
    * read-side views — the concrete classes are host-internal, so the
    * public declarations stay free of internal modules). */
@@ -114,6 +134,10 @@ export interface PiTuiExtensionService {
   readonly autocomplete: TuiAutocompleteRegistryView
   readonly settings: TuiSettingsRegistryView
   readonly keybindings: TuiKeybindingRegistryView
+  /** M7: the transcript/tool renderer registry (the runner wires it into
+   * the surface's message cache; the narrow read-side view keeps the
+   * public declarations free of internal modules). */
+  readonly renderers: TuiRendererRegistryView
 }
 
 /**
@@ -142,6 +166,8 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   readonly autocomplete: AutocompleteRegistry
   readonly settings: SettingsRegistry
   readonly keybindings: KeybindingRegistry
+  /** M7: the transcript/tool renderer registry. */
+  readonly renderers: RendererRegistry
   /** The attached SurfaceHost's state bridge, wired by the runner (M3). */
   private stateBridge: {
     subscribe(listener: (state: SurfaceStateValues) => void): () => void
@@ -170,6 +196,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.autocomplete = new AutocompleteRegistry(() => this.batcher.invalidate())
     this.settings = new SettingsRegistry(() => this.batcher.invalidate())
     this.keybindings = new KeybindingRegistry(() => this.batcher.invalidate())
+    this.renderers = new RendererRegistry(() => this.batcher.invalidate())
   }
 
   api(): PiTuiApiInfo {
@@ -550,6 +577,59 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
       }, 'piTuiExtensions.registerKeybinding()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /**
+   * Register a message renderer (M7). Fiber-bound; owner unload removes
+   * it and bumps the registry revision (the host's message cache
+   * rebuilds the affected components — plan §12.1).
+   */
+  registerMessageRenderer(contribution: TuiMessageRendererContribution): TuiRendererHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.renderers.registerMessageRenderer(contribution, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.registerMessageRenderer()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /**
+   * Register a tool renderer (M7). Fiber-bound; owner unload removes it
+   * and bumps the registry revision.
+   */
+  registerToolRenderer(contribution: TuiToolRendererContribution): TuiRendererHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.renderers.registerToolRenderer(contribution, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.registerToolRenderer()')
     } catch (error) {
       handle.dispose()
       throw error

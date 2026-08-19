@@ -216,6 +216,21 @@ Since M5 the extension surface also covers registries (plan §10):
   fire LAST in the precedence ladder (after questions, approvals,
   overlays and the editor). The action executes through the host's own
   paths — submission/session safety is never bypassed.
+- `registerMessageRenderer(contribution)` — a TRANSCRIPT message renderer
+  (M7, chain slot): receives a semantic `MessagePresentationSnapshot`
+  (immutable; never the mutable message or the container) and returns an
+  `ExtensionView` or `undefined` (abdicate → the next renderer → the host
+  fallback). Kind-scoped renderers apply to one message kind.
+- `registerToolRenderer(contribution)` — a TOOL card renderer (M7, keyed
+  slot): presents the card for ONE tool name from a
+  `ToolPresentationSnapshot` (callId, toolName, status, arguments,
+  result, expanded); the winner (lowest priority) abdicates to the next
+  renderer, then the host fallback. A priority tie on the same tool name
+  is an explicit error.
+  Renderers never stall the transcript: a throwing renderer is isolated
+  and the chain continues, and the message cache embeds the renderer
+  identity + registry revision, so an HMR/unload rebuilds exactly the
+  affected components.
 
 Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
 fiber unloads (HMR, disable), regular and fullscreen both refresh, and

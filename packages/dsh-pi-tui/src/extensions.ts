@@ -57,6 +57,7 @@ export {
   type HeaderBadge,
   type InputWidget,
   type MarkdownView,
+  type MessagePresentationSnapshot,
   type NormalizedKey,
   type PiTuiApiInfo,
   type PiTuiCapability,
@@ -94,8 +95,13 @@ export {
   type TuiSettingsRegistryView,
   type TuiThemeContribution,
   type TuiThemeHandle,
+  type TuiMessageRendererContribution,
+  type TuiRendererHandle,
+  type TuiRendererRegistrySnapshot,
   type TuiThemeRegistrySnapshot,
   type TuiThemeRegistryView,
+  type TuiToolRendererContribution,
+  type ToolPresentationSnapshot,
 } from './extension/public-types.ts'
 export { describeKey } from './extension/public-types.ts'
 
