@@ -2630,6 +2630,14 @@ export function apply(ctx: Context, config: Config): void {
     // generation (F-1): the header/dock/footer merge extension content, and
     // the service's capability set + state bridge become live.
     if (extensionHost !== undefined && extensionService !== undefined) {
+      // M7 (round-1 finding 3): renderer failures land in the extension
+      // health ledger — observable via /status diagnostics, never
+      // swallowed. Safe single-line message (no stack traces, hostile
+      // toString handled — the plan's error policy §18).
+      app.setRendererErrorSink(({ id, error }) => {
+        const message = safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200)
+        extensionService._ledger().recordError('transcript.renderer', id, message)
+      })
       extensionHost.attach(
         { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
         {

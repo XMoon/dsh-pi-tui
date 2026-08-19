@@ -788,6 +788,22 @@ function safeParseArgs(raw: string): unknown {
   }
 }
 
+/** Deep-freeze a parsed JSON value (round-1 finding 4: the public
+ * snapshot contract is deeply immutable — a renderer must never mutate
+ * the arguments/result it received, and a mutation must never leak into
+ * a later renderer in the same chain). */
+function deepFreeze(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) return value
+  if (Array.isArray(value)) {
+    for (const item of value) deepFreeze(item)
+    return Object.freeze(value)
+  }
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    deepFreeze((value as Record<string, unknown>)[key])
+  }
+  return Object.freeze(value)
+}
+
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
@@ -2213,51 +2229,17 @@ export class TuiApp {
   /** Persistent components per transcript message (stage J cache). */
   private readonly messageComponents = new Map<TranscriptMessage, MessageComponentEntry>()
 
-  /**
-   * M7: the renderer identity for one message — which renderer (id) would
-   * produce it at the CURRENT registry revision. The message cache embeds
-   * this in its staleness check (plan §12.1: a renderer HMR/unload must
-   * rebuild the affected components).
-   *
-   * Perf contract (plan §23): the registry REVISION is the cheap gate —
-   * when it is unchanged since the entry was built, the renderers are
-   * NOT re-run (a renderer function runs only when the cache needs a
-   * rebuild). Renderers never run in the frame loop for unchanged
-   * content.
-   * @param message - the transcript message.
-   * @param knownRevision - the revision the existing entry was built at
-   *   (undefined = no entry — always evaluate).
-   * @returns the renderer id + revision, or undefined when no renderer
-   *   applies (the host fallback renders).
-   */
-  private rendererIdentityOf(
-    message: TranscriptMessage,
-    knownRevision: number | undefined,
-  ): { id: string; revision: number } | undefined {
-    const registry = this.renderers
-    if (registry === undefined) return undefined
-    const currentRevision = registry.snapshot().revision
-    // Cheap gate: the registry is unchanged since the entry was built —
-    // the renderer outcome is unchanged by construction (renderers are
-    // pure over the snapshot; a content change is caught by
-    // componentStale separately).
-    if (knownRevision !== undefined && knownRevision === currentRevision) return undefined
-    const snapshot = this.semanticSnapshotOf(message)
-    if (snapshot === undefined) return undefined
-    const onError = (id: string, error: unknown): void => {
-      // A throwing renderer is isolated (plan §18): recorded via the
-      // runner's diag through the extension service's health when wired.
-      this.rendererError?.({ id, error })
-    }
-    const rendered = message.kind === 'tool'
-      ? registry.renderTool(snapshot.tool!, onError)
-      : registry.renderMessage(snapshot, onError)
-    return rendered === undefined ? undefined : { id: rendered.rendererId, revision: currentRevision }
-  }
 
   /** M7: a renderer failure sink (the runner wires the extension
-   * service's health ledger). Optional. */
+   * service's health ledger — round-1 finding 3: failures must be
+   * observable, never swallowed). Optional. */
   private rendererError: ((record: { id: string; error: unknown }) => void) | undefined
+
+  /** M7: wire the renderer-failure sink (the runner calls this with the
+   * extension service's health recording). */
+  setRendererErrorSink(sink: (record: { id: string; error: unknown }) => void): void {
+    this.rendererError = sink
+  }
 
   /** M7 test hook: build (or fetch) the cached component entry for one
    * message at a fold boundary, exposing the renderer identity. */
@@ -2285,14 +2267,14 @@ export class TuiApp {
         return {
           kind: 'tool',
           turn: message.turn,
-          tool: {
+          tool: Object.freeze({
             callId: `${message.turn}:${message.name}:${message.args.slice(0, 32)}`,
             toolName: message.name,
             status: message.status,
-            arguments: message.args === '' ? undefined : safeParseArgs(message.args),
-            result: message.result === '' ? undefined : safeParseArgs(message.result),
+            arguments: message.args === '' ? undefined : deepFreeze(safeParseArgs(message.args)),
+            result: message.result === '' ? undefined : deepFreeze(safeParseArgs(message.result)),
             expanded: message.turn >= 0,
-          },
+          }),
         }
       }
       case 'summary':
@@ -2315,37 +2297,59 @@ export class TuiApp {
       && (message.turn >= boundary || this.expandedOverride.get(message) === true)
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
-    // affected components (an HMR must never hit an old component). The
-    // existing entry's revision is the cheap gate (plan §23): renderers
-    // re-run only when the registry changed since the entry was built.
+    // affected components (an HMR must never hit an old component).
     const entry = this.messageComponents.get(message)
-    const rendererIdentity = this.rendererIdentityOf(message, entry?.rendererRevision)
     if (entry === undefined) {
-      const built: MessageComponentEntry = {
-        component: this.renderMessage(message, boundary),
-        boundary,
-        themeRev: this.themeRevision,
-        expanded,
-        rendererId: rendererIdentity?.id,
-        rendererRevision: rendererIdentity?.revision,
-      }
+      const built = this.buildMessage(message, boundary, expanded)
       this.captureComponentState(built, message)
       this.messageComponents.set(message, built)
       return built.component
     }
+    // Staleness: fold boundary, theme revision, expansion, the RENDERER
+    // identity (registry revision changed → the winner may differ), or
+    // the message's own content. The registry revision comparison is the
+    // CHEAP gate (plan §23): renderer functions run only inside
+    // buildMessage, never for unchanged content.
+    const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
     if (entry.boundary !== boundary || entry.themeRev !== this.themeRevision
-      || entry.expanded !== expanded || entry.rendererId !== rendererIdentity?.id
-      || entry.rendererRevision !== rendererIdentity?.revision
+      || entry.expanded !== expanded || rendererRevisionChanged
       || this.componentStale(entry, message)) {
-      entry.component = this.renderMessage(message, boundary)
-      entry.boundary = boundary
-      entry.themeRev = this.themeRevision
-      entry.expanded = expanded
-      entry.rendererId = rendererIdentity?.id
-      entry.rendererRevision = rendererIdentity?.revision
+      const rebuilt = this.buildMessage(message, boundary, expanded)
+      entry.component = rebuilt.component
+      entry.boundary = rebuilt.boundary
+      entry.themeRev = rebuilt.themeRev
+      entry.expanded = rebuilt.expanded
+      entry.rendererId = rebuilt.rendererId
+      entry.rendererRevision = rebuilt.rendererRevision
       this.captureComponentState(entry, message)
     }
     return entry.component
+  }
+
+  /**
+   * Build one message's component + renderer identity in a SINGLE pass
+   * (round-1 finding 1: the recorded identity always matches the view
+   * actually built). When the renderer registry is present, the plugin
+   * chain runs ONCE here and its result — view + rendererId + the
+   * registry revision (even for a HOST-fallback entry — round-1 finding
+   * 2) — is what the cache stores. Renderers never run in the frame loop
+   * for unchanged content (plan §23).
+   */
+  private buildMessage(
+    message: TranscriptMessage,
+    boundary: number,
+    expanded: boolean,
+  ): MessageComponentEntry {
+    const registry = this.renderers
+    const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, boundary)
+    return {
+      component: rendered === undefined ? this.renderMessage(message, boundary) : rendered.component,
+      boundary,
+      themeRev: this.themeRevision,
+      expanded,
+      rendererId: rendered?.rendererId,
+      rendererRevision: registry === undefined ? undefined : registry.snapshot().revision,
+    }
   }
 
   /** Record the message values a component was built from. */
@@ -2392,14 +2396,14 @@ export class TuiApp {
     }
   }
 
-  /** Render one transcript message as a pi-tui component. */
+  /**
+   * Render one transcript message as a pi-tui component — the HOST
+   * renderer (M7: extensions are consulted by buildMessage, which owns
+   * the plugin chain + identity; renderMessage itself never re-runs a
+   * renderer, so a throwing renderer is invoked exactly once per build
+   * and the host fallback is single-path).
+   */
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
-    // M7 (plan §12): a plugin renderer may present the message FIRST —
-    // the host fallback stays when no renderer produces a view or a
-    // renderer throws (the registry isolates throws; the semantic
-    // snapshot never leaks mutable messages or containers).
-    const rendered = this.renderThroughExtensions(message, boundary)
-    if (rendered !== undefined) return rendered
     if (message.kind === 'user') {
       // Terminal-prompt style: the user's line reads like a shell command.
       // The ❯ leads the FIRST line; wrapped continuation lines indent under
@@ -2565,7 +2569,10 @@ export class TuiApp {
    * @param message - the transcript message.
    * @param boundary - the fold boundary (the snapshot's expanded state).
    */
-  private renderThroughExtensions(message: TranscriptMessage, boundary: number): Component | undefined {
+  private renderThroughExtensions(
+    message: TranscriptMessage,
+    boundary: number,
+  ): { component: Component; rendererId: string } | undefined {
     const registry = this.renderers
     if (registry === undefined) return undefined
     const snapshot = this.semanticSnapshotOf(message)
@@ -2576,11 +2583,11 @@ export class TuiApp {
       const tool = { ...snapshot.tool, expanded: snapshot.turn >= boundary || this.expandedOverride.get(message) === true }
       const rendered = registry.renderTool(tool, (id, error) => this.rendererError?.({ id, error }))
       if (rendered === undefined) return undefined
-      return this.compileExtensionView(rendered.view)
+      return { component: this.compileExtensionView(rendered.view), rendererId: rendered.rendererId }
     }
     const rendered = registry.renderMessage(snapshot, (id, error) => this.rendererError?.({ id, error }))
     if (rendered === undefined) return undefined
-    return this.compileExtensionView(rendered.view)
+    return { component: this.compileExtensionView(rendered.view), rendererId: rendered.rendererId }
   }
 
   /** M7: compile a plugin ExtensionView into a private component (the

@@ -202,3 +202,116 @@ test('TuiApp: a throwing tool renderer falls back to the host card (no stall)', 
   assert.equal(entry?.rendererId, undefined, 'a throwing renderer must not claim the card')
   app.stop()
 })
+
+// ── Round-1 regression tests ───────────────────────────────────────────────
+
+test('TuiApp: the recorded rendererId matches the view actually built on content change (round-1 P1)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  let renderCalls = 0
+  registry.registerToolRenderer({
+    id: 'counter', toolName: 'bash',
+    render: () => { renderCalls += 1; return textView('CUSTOM') },
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  await vt.waitForRender()
+  // First build: the renderer runs and the identity is recorded.
+  const m1 = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{"a":1}', result: '', status: 'running' as const }
+  const e1 = app.messageCacheEntryForTest?.(m1, 0)
+  assert.equal(e1?.rendererId, 'counter')
+  const callsAfterFirst = renderCalls
+  assert.ok(callsAfterFirst >= 1)
+  // Content changes (streaming result) but the registry revision does NOT.
+  const m2 = { ...m1, result: 'streaming output' }
+  const e2 = app.messageCacheEntryForTest?.(m2, 0)
+  assert.equal(e2?.rendererId, 'counter', 'the rebuilt entry must keep the ACTUAL renderer id')
+  // The renderer ran again for the content change.
+  assert.ok(renderCalls > callsAfterFirst)
+  app.stop()
+})
+
+test('TuiApp: a host-fallback entry records the revision so renderers do NOT re-run (round-1 P2)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  let renderCalls = 0
+  // A message renderer for 'system' only — user messages have NO renderer
+  // (host fallback), but the registry exists.
+  registry.registerMessageRenderer({
+    id: 'sys-only', kind: 'system',
+    render: () => { renderCalls += 1; return textView('SYS') },
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  await vt.waitForRender()
+  const user = { kind: 'user' as const, turn: 0, text: 'hello' }
+  const e1 = app.messageCacheEntryForTest?.(user, 0)
+  // Host fallback: no rendererId, but the REVISION is recorded.
+  assert.equal(e1?.rendererId, undefined)
+  assert.ok(e1?.rendererRevision !== undefined, 'a host-fallback entry must record the revision')
+  const callsAfterFirst = renderCalls
+  // Access again with UNCHANGED content + revision: the renderer chain
+  // must NOT re-run (the sys-only renderer is not for user, but the cheap
+  // gate must skip the chain entirely — plan §23).
+  app.messageCacheEntryForTest?.(user, 0)
+  assert.equal(renderCalls, callsAfterFirst, 'unchanged content + revision must not re-run renderers')
+  app.stop()
+})
+
+test('TuiApp: renderer failures reach the health ledger sink (round-1 P3)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerToolRenderer({
+    id: 'exploder', toolName: 'bash',
+    render: () => { throw new Error('kaboom renderer') },
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  const failures: { id: string; error: unknown }[] = []
+  app.setRendererErrorSink((record) => failures.push(record))
+  app.start()
+  await vt.waitForRender()
+  const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: '', status: 'running' as const }
+  app.messageCacheEntryForTest?.(tool, 0)
+  assert.equal(failures.length, 1, 'the throw must reach the sink (never swallowed)')
+  assert.equal(failures[0]?.id, 'exploder')
+  app.stop()
+})
+
+test('TuiApp: the tool snapshot arguments/result are deeply frozen (round-1 P4)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  let snapshotArgs: unknown
+  registry.registerToolRenderer({
+    id: 'peeker', toolName: 'bash',
+    render: (snapshot) => {
+      snapshotArgs = snapshot.arguments
+      return textView('peek')
+    },
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  await vt.waitForRender()
+  const tool = {
+    kind: 'tool' as const, turn: 0, name: 'bash',
+    args: JSON.stringify({ command: 'echo', nested: { deep: [1, 2] } }),
+    result: '',
+    status: 'running' as const,
+  }
+  app.messageCacheEntryForTest?.(tool, 0)
+  assert.ok(Object.isFrozen(snapshotArgs as object), 'the arguments object must be frozen')
+  assert.ok(Object.isFrozen((snapshotArgs as { nested: unknown }).nested as object), 'nested objects must be frozen')
+  assert.ok(Object.isFrozen((snapshotArgs as { nested: { deep: unknown[] } }).nested.deep), 'nested arrays must be frozen')
+  app.stop()
+})
