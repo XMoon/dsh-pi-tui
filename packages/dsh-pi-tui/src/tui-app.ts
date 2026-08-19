@@ -1787,6 +1787,10 @@ export class TuiApp {
       this.refreshSchemeRegistrations()
     }
     this.events.onFullscreenChange?.(enabled)
+    // M8 (round-1 finding 2): still-open plugin overlay leases re-mount on
+    // the CURRENT active screen (their raw handles died with the old
+    // screen's teardown above).
+    this.remountExtensionOverlays()
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -2213,9 +2217,60 @@ export class TuiApp {
     view: import('./extension/public-types.ts').ExtensionView,
     options: import('./extension/public-types.ts').TuiOverlayOptions = {},
   ): import('./extension/public-types.ts').TuiOverlayHandle {
-    const compiled = compileView(view)
-    const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
-    const handle = this.showOverlayOnHost(component, {
+    const mountOptions = this.overlayOptionsOf(options)
+    // The lease KEEPS the view + options so a fullscreen screen swap can
+    // RE-MOUNT it on the new active screen (round-1 finding 2 — a plugin
+    // overlay must survive a fullscreen toggle, not become a stale handle
+    // on the dead screen). The raw handle dies with the old screen; the
+    // lease re-creates it after the swap.
+    let raw: OverlayHandle | undefined
+    let hiddenByLease = false
+    let closed = false
+    const mount = (): void => {
+      if (closed || raw !== undefined) return
+      const compiled = compileView(view)
+      const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
+      raw = this.showOverlayOnHost(component, mountOptions)
+      if (hiddenByLease) raw.setHidden(true)
+    }
+    mount()
+    const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void } = {
+      close: () => {
+        if (closed) return
+        closed = true
+        // Drop the lease from the owned set (round-1 finding 1: a closed
+        // lease must not leak until dispose).
+        this.extensionOverlayLeases.delete(lease)
+        raw?.hide()
+        raw = undefined
+      },
+      hide: () => {
+        if (closed) return
+        hiddenByLease = true
+        raw?.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+      },
+      // Host-internal: re-create the raw handle on the CURRENT active
+      // screen after a fullscreen swap (the old raw handle died with the
+      // old screen). Idempotent (a live raw handle skips).
+      _remount: () => {
+        if (closed) return
+        raw = undefined
+        mount()
+      },
+    }
+    // The surface's dispose closes every still-owned lease: track it.
+    this.extensionOverlayLeases.add(lease)
+    return lease
+  }
+
+  /** Map the public overlay options onto the host's mount options. */
+  private overlayOptionsOf(options: import('./extension/public-types.ts').TuiOverlayOptions): OverlayOptions {
+    return {
       ...(options.width === undefined ? {} : { width: options.width }),
       ...(options.minWidth === undefined ? {} : { minWidth: options.minWidth }),
       ...(options.maxHeight === undefined ? {} : { maxHeight: options.maxHeight }),
@@ -2226,30 +2281,25 @@ export class TuiApp {
       ...(options.col === undefined ? {} : { col: options.col }),
       ...(options.margin === undefined ? {} : { margin: options.margin }),
       nonCapturing: options.nonCapturing === true,
-    })
-    // The raw handle's hide() PERMANENTLY removes the overlay; the lease's
-    // hide()/show() are temporary visibility toggles (the broker tracks
-    // the raw handle, so the lease hides/show must go through the same
-    // handle).
-    let closed = false
-    const lease: import('./extension/public-types.ts').TuiOverlayHandle = {
-      close: () => {
-        if (closed) return
-        closed = true
-        handle.hide()
-      },
-      hide: () => {
-        if (closed) return
-        handle.setHidden(true)
-      },
-      show: () => {
-        if (closed) return
-        handle.setHidden(false)
-      },
     }
-    // The surface's dispose closes every still-owned lease: track it.
-    this.extensionOverlayLeases.add(lease)
-    return lease
+  }
+
+  /**
+   * M8: re-mount every still-open plugin lease on the CURRENT active
+   * screen. Called by the host after a fullscreen toggle (the old screen's
+   * overlays died with it — plan §13.3: a managed lease survives the
+   * screen migration).
+   */
+  private remountExtensionOverlays(): void {
+    for (const lease of this.extensionOverlayLeases) {
+      ;(lease as unknown as { _remount(): void })._remount()
+    }
+  }
+
+  /** M8 test hook: the number of still-owned plugin overlay leases
+   * (asserts a closed lease is dropped and dispose clears the set). */
+  ownedExtensionOverlayLeasesForTest(): number {
+    return this.extensionOverlayLeases.size
   }
 
   /** M7 test hook: build (or fetch) the cached component entry for one

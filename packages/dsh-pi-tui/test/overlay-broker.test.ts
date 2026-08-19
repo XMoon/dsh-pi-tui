@@ -153,15 +153,71 @@ test('TuiApp: the surface dispose closes every still-owned plugin overlay lease'
     spans: [{ text: 'lease overlay' }],
   })
   await vt.waitForRender()
-  // Final dispose closes the still-owned lease (generation-scoped).
+  // After dispose every lease API must be INERT (round-1 finding 4: the
+  // lease was closed by the dispose path — hide/show/close cannot touch a
+  // dead surface).
   app.dispose()
-  let closed = false
-  const original = lease.close.bind(lease)
-  // The dispose path calls close() on every tracked lease — the lease is
-  // in the set; assert via the graph (the surface is disposed so the
-  // overlay graph is cleared).
-  void original
-  void closed
-  // The broker graph is cleared by dispose (the underlying screen died).
+  lease.show()
+  lease.hide()
+  lease.close() // must not throw
   assert.equal(app.overlayGraphState().handles, 0)
+  assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'dispose must drop every owned lease')
+})
+
+test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 finding 2)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+  const lease = app.showExtensionOverlay({
+    kind: 'text',
+    spans: [{ text: 'fs overlay' }],
+  })
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('fs overlay'), 'the overlay renders in regular mode')
+  // Enter fullscreen: the overlay must be re-mounted on the alt screen.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('fs overlay'), `the overlay must survive into fullscreen:\n${view}`)
+  // The lease still works in fullscreen.
+  lease.hide()
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('fs overlay'), 'the lease hide must work in fullscreen')
+  lease.show()
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('fs overlay'), 'the lease show must restore it in fullscreen')
+  // Back to regular: the overlay re-mounts again.
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('fs overlay'), `the overlay must survive back into regular:\n${view}`)
+  // Close removes it.
+  lease.close()
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('fs overlay'), 'close must remove the overlay')
+  app.stop()
+})
+
+test('TuiApp: an explicitly closed lease is dropped from the owned set (round-1 finding 1)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+  const lease = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'x' }] })
+  assert.equal(app.ownedExtensionOverlayLeasesForTest(), 1)
+  lease.close()
+  assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'a closed lease must not leak until dispose')
+  lease.close() // idempotent
+  assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0)
+  app.stop()
 })

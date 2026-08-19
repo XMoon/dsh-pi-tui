@@ -107,9 +107,24 @@ export class OverlayBroker {
     return this.wrapClose(handle)
   }
 
-  /** The tracked close wrapper for one handle. */
+  /**
+   * The tracked close wrapper for one handle. An EXPLICIT proxy (round-1
+   * finding 3 — never a spread: the raw handle's methods are closures over
+   * private state and may gain non-enumerable members; the wrapper must
+   * forward every API surface verbatim). The ONLY difference from the raw
+   * handle: hide() becomes the tracked close (question-aware, graph-
+   * cleaning), while setHidden/isHidden/focus/unfocus/isFocused forward.
+   */
   private wrapClose(handle: OverlayHandle): OverlayHandle {
-    return { ...handle, hide: () => this.closeForHost(handle) }
+    const broker = this
+    return {
+      hide: () => broker.closeForHost(handle),
+      setHidden: (hidden: boolean) => handle.setHidden(hidden),
+      isHidden: () => handle.isHidden(),
+      focus: () => handle.focus(),
+      unfocus: (options?: Parameters<OverlayHandle['unfocus']>[0]) => handle.unfocus(options),
+      isFocused: () => handle.isFocused(),
+    }
   }
 
   /**
