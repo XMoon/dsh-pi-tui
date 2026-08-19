@@ -285,9 +285,12 @@ async function main(): Promise<void> {
   console.log(rows.join('\n'))
 }
 
-try {
-  main()
-} catch (error) {
+// Round-1 finding 2 (fixed in round 2 — the previous attempt silently
+// failed to write): main() is async — dynamic imports and awaited stages
+// reject ASYNCHRONOUSLY. A try/catch cannot observe a rejection; catch
+// the PROMISE explicitly so any async failure exits non-zero (never an
+// unhandled rejection with a zero exit code).
+main().catch((error) => {
   console.error(`bench: ${error instanceof Error ? error.message : String(error)}`)
   process.exit(1)
-}
+})
