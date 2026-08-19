@@ -316,28 +316,27 @@ test('AutocompleteRegistry: an already-aborted caller signal reaches providers (
 
 test('AutocompleteRegistry: the active controller is released after the request settles (round-2 P2)', async () => {
   const registry = new AutocompleteRegistry()
+  // Capture the FIRST request's combined signal directly: after it settles,
+  // a LATER request must not abort it (the controller was released).
+  let firstSignal: AbortSignal | undefined
   registry.register({
     id: 'quick',
-    provider: provider(async () => null),
-  }, 'a')
-  await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal })
-  // After settlement, a LATER request must not abort a stale controller —
-  // and the internal controller reference is released. Assert indirectly:
-  // a second request with a live signal settles normally with no abort.
-  let sawAbort = false
-  registry.register({
-    id: 'spy2',
     provider: {
       getSuggestions(query) {
-        return new Promise(resolve => {
-          query.signal.addEventListener('abort', () => { sawAbort = true }, { once: true })
-          queueMicrotask(() => resolve(null))
-        })
+        firstSignal = query.signal
+        return Promise.resolve(null)
       },
     },
-  }, 'b')
+  }, 'a')
+  await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal })
+  assert.ok(firstSignal !== undefined, 'the first request reached the provider')
+  let firstWasAborted = false
+  firstSignal.addEventListener('abort', () => { firstWasAborted = true }, { once: true })
+  // A second request runs; the FIRST request's controller was released in
+  // the first request's finally, so the second request's supersede-abort
+  // has nothing to abort.
   await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 1, signal: new AbortController().signal })
-  assert.equal(sawAbort, false, 'a settled request must not be aborted by later requests')
+  assert.equal(firstWasAborted, false, 'a settled request must not be aborted by later requests')
 })
 
 // ── KeybindingRegistry ─────────────────────────────────────────────────────
