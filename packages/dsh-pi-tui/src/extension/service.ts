@@ -57,6 +57,15 @@ export interface PiTuiExtensionService {
  * batch (nothing renders yet — M1 has no UI integration).
  */
 export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtensionService {
+  /** Capabilities advertised from service-provide time (P0-1): the three
+   * chrome slots work before any surface exists (registrations are simply
+   * rendered once the surface attaches). */
+  static readonly ADVERTISED_CAPABILITIES: readonly PiTuiCapability[] = [
+    'slot.chrome.header.badge',
+    'slot.input.dock.item',
+    'slot.chrome.footer.status',
+  ]
+
   private readonly ledger: ExtensionLedger
   private readonly batcher: InvalidateBatcher
   private readonly hostVersion: string
@@ -82,12 +91,17 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   }
 
   api(): PiTuiApiInfo {
-    // The capability set is LIVE: populated when the SurfaceHost attaches
-    // (F-10), empty before/after. Plugins must feature-detect.
+    // ADVERTISED vs LIVE capabilities (P0-1): the three slot capabilities
+    // are advertised as soon as the service is provided, so a plugin can
+    // feature-detect and register BEFORE any surface exists (the plan's
+    // registration-before-surface contract — the README example checks the
+    // slot capability before register()). `surface.snapshot` stays
+    // attachment-gated: the snapshot contract only holds while a surface
+    // is attached. The runner's attachSurface() adds the live set.
     return {
       apiVersion: 1,
       hostVersion: this.hostVersion,
-      capabilities: new Set(this.liveCapabilities),
+      capabilities: new Set([...PiTuiExtensionServiceImpl.ADVERTISED_CAPABILITIES, ...this.liveCapabilities]),
     }
   }
 

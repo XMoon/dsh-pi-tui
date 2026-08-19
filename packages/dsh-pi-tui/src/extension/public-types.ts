@@ -146,6 +146,9 @@ export interface ActivitySnapshot {
   readonly taskCount: number
   readonly childAgentCount: number
   readonly todoCount: number
+  /** The rendered todo summary line (`☑ N active · first`), when the host
+   * provides one (the first-party builtin dock item renders it). */
+  readonly todoSummary?: string
 }
 
 /** The store's three named slices (state subscriptions deliver these). */

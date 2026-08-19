@@ -105,9 +105,21 @@ function main() {
       }
     }
     mkdirSync(join(fixtureDir, 'src'), { recursive: true })
-    // Copy the fixture sources (keep the repo fixture as the source of truth).
-    const copy = run('cp', ['-r', join(FIXTURE_ROOT, 'src'), fixtureDir])
-    check('fixture sources copied', copy.status === 0)
+    // Copy the fixture sources explicitly into the fixture's src/ (keep
+    // the repo fixture as the source of truth). Copying each file avoids
+    // the `cp -r src dst` behavior differences across platforms when dst
+    // already contains src/ (GNU cp merges into dst/src, BSD may nest).
+    const sourceDir = join(FIXTURE_ROOT, 'src')
+    for (const file of readdirSync(sourceDir)) {
+      const from = join(sourceDir, file)
+      const to = join(fixtureDir, 'src', file)
+      if (statSync(from).isDirectory()) {
+        run('cp', ['-r', from, to])
+      } else {
+        writeFileSync(to, readFileSync(from))
+      }
+    }
+    check('fixture sources copied', existsSync(join(fixtureDir, 'src', 'index.ts')))
     writeFileSync(join(fixtureDir, 'tsconfig.json'), readFileSync(join(FIXTURE_ROOT, 'tsconfig.json')))
     writeFileSync(join(fixtureDir, 'package.json'), JSON.stringify({
       name: 'dsh-pi-extension-fixture',
@@ -145,8 +157,10 @@ function main() {
 
     // 6. No duplicate @deepseek-ai runtime: the packed package declares
     //    @deepseek-ai/* as PEER dependencies only (resolved from the dsh
-    //    install), the TARBALL carries no nested node_modules, and the
-    //    fixture imports no dsh runtime path itself.
+    //    install), the TARBALL carries no nested node_modules, the fixture
+    //    imports no dsh runtime path itself, and the smoke scaffolding's
+    //    host-module links in the extracted package are SYMLINKS only —
+    //    never real copies (P2-3: an explicit recursive audit).
     const packedPkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'))
     const deepseekDeps = Object.keys(packedPkg.dependencies ?? {})
       .filter(name => name.startsWith('@deepseek-ai'))
@@ -161,6 +175,29 @@ function main() {
     // duplicate the host install.
     check('fixture imports no dsh runtime @deepseek-ai path',
       !/@deepseek-ai\/(?!cordis)/.test(fixtureSource))
+    // Recursive nested-package audit (P2-3): every @deepseek-ai entry in
+    // the EXTRACTED package's scaffolding node_modules must be a symlink
+    // to the host install (a real directory would be a duplicate copy).
+    const scaffoldingModules = join(pkgDir, 'node_modules')
+    let realDeepseekDirs = 0
+    const audit = (dir, depth) => {
+      if (depth > 4) return
+      let entries = []
+      try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const entry of entries) {
+        const full = join(dir, entry.name)
+        if (entry.isSymbolicLink()) continue // host links are fine
+        if (entry.isDirectory()) {
+          if (entry.name.startsWith('@deepseek-ai') || /deepseek/.test(entry.name)) {
+            realDeepseekDirs += 1
+          }
+          if (entry.name !== '.bin') audit(full, depth + 1)
+        }
+      }
+    }
+    audit(scaffoldingModules, 0)
+    check('extracted-package scaffolding has no REAL @deepseek-ai directory (symlinks only)', realDeepseekDirs === 0,
+      realDeepseekDirs === 0 ? '' : `${realDeepseekDirs} real @deepseek-ai director(ies)`)
   } finally {
     rmSync(workDir, { recursive: true, force: true })
   }

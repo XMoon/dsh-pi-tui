@@ -151,11 +151,16 @@ export function apply(ctx: Context): void {
 | `input.dock.item` | list | todo 面板上方的一行 dock |
 | `chrome.footer.status` | list | 一个 footer 段(host 拥有宽度/截断) |
 
+贡献是**纯数据**,不是 render 函数:插件提供 `HeaderBadge` / `DockItem` /
+`FooterSegment` 值(文本 + 语义 tone spans),渲染、ANSI 编译、宽度预算与
+截断全部由 host 负责。v1 刻意没有 `render(context)` 回调——插件从不持有
+渲染上下文,贡献永远无法捕获或修改 host 内部。
+
 生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
 regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕
 重渲染。`@xmoon76/dsh-pi-tui/builtins` 入口是仅 Loader 使用的一方贡献者
-(版本徽标 + 轮次/步骤计数器)——不是稳定的第三方 SDK。编辑器替换、
-overlay、transcript 渲染器和原始终端访问**不属于 v1**。
+(版本徽标、轮次/步骤计数器、todo 摘要 dock 项)——不是稳定的第三方
+SDK。编辑器替换、overlay、transcript 渲染器和原始终端访问**不属于 v1**。
 
 ## 斜杠命令(节选)
 

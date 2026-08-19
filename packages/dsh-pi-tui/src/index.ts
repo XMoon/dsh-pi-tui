@@ -2525,7 +2525,7 @@ export function apply(ctx: Context, config: Config): void {
       extensionHost.attach(
         { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
         {
-          surfaceId: 'tui',
+          surfaceId: extensionHost.surfaceId,
           generation: app.getSurfaceGeneration(),
           width: process.stdout.columns ?? 80,
           height: process.stdout.rows ?? 24,

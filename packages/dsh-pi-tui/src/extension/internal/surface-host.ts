@@ -37,6 +37,9 @@ export class SurfaceHost {
   /** The capability set reported while this surface is attached. */
   private readonly capabilities = new Set<PiTuiCapability>()
   private disposed = false
+  /** Unique identity for this surface instance (P1-2: the allocator).
+   * Stable for the host's lifetime; a NEW SurfaceHost gets a NEW id. */
+  readonly surfaceId: string
 
   constructor(
     ledger: ExtensionLedger,
@@ -44,6 +47,7 @@ export class SurfaceHost {
   ) {
     this.ledger = ledger
     this.requestRender = requestRender
+    this.surfaceId = `tui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     this.store = new SurfaceStateStore({ requestRender: () => this.requestRender() })
     // The host's own invalidation batcher: a burst of ledger changes in one
     // tick coalesces into ONE outlet re-bake + chrome merge + ONE repaint

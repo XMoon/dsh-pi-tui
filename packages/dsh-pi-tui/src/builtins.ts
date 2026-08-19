@@ -19,7 +19,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
-import type { FooterSegment, HeaderBadge, StyledSpan } from './extension/public-types.ts'
+import type { DockItem, FooterSegment, HeaderBadge, StyledSpan } from './extension/public-types.ts'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 
 /** Stable Cordis plugin name for the builtins row. */
@@ -77,5 +77,32 @@ export function apply(ctx: Context): void {
   }
   service.subscribeState(state => {
     renderCounters(state)
+  })
+
+  // Todo summary dock item (P1-5): the todo summary — previously hardcoded
+  // in the host's renderDock — flows through the public dock slot. The host
+  // provides the summary TEXT in the activity snapshot; this builtin owns
+  // the presentation (`☑  summary` dim line). An empty summary hides the
+  // item (the host panel-expanded / empty-list cases render nothing).
+  const todoDock = service.register<DockItem>('input.dock.item', {
+    id: 'builtin-todo-summary',
+    order: 1000,
+    description: 'The todo summary line (first-party builtin).',
+  }, { label: [] })
+
+  const renderTodoDock = (state: { activity: { todoSummary?: string } }): void => {
+    const summary = state.activity.todoSummary
+    if (summary === undefined || summary === '') {
+      todoDock.replace({ label: [] })
+      return
+    }
+    const label: StyledSpan[] = [
+      { text: '☑  ', tone: 'textDim' },
+      { text: summary, tone: 'textDim' },
+    ]
+    todoDock.replace({ label })
+  }
+  service.subscribeState(state => {
+    renderTodoDock(state)
   })
 }

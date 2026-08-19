@@ -76,6 +76,35 @@ test('list slots project every record and no winner (structural)', () => {
   assert.equal(snapshot.winner, undefined)
 })
 
+test('single slots: lowest priority wins, ties are rejected, and the winner projects (P2-2)', () => {
+  // The shipped slot map is all-list; the test-only semantic override
+  // exercises the ledger's single-winner branch (priority tie error +
+  // priority-ASC winner sort) so it is not dead code.
+  const single = new ExtensionLedger(() => {}, new Map([['chrome.header.badge', 'single']]))
+  single.register('chrome.header.badge', { id: 'a', priority: 10 }, V('a'), 'p1')
+  single.register('chrome.header.badge', { id: 'b', priority: 2 }, V('b'), 'p2')
+  single.register('chrome.header.badge', { id: 'c', priority: 7 }, V('c'), 'p3')
+  const snapshot = single.snapshot<{ label: string }>('chrome.header.badge')
+  assert.equal(snapshot.semantic, 'single')
+  assert.equal(snapshot.winner?.id, 'b', 'lowest priority must win')
+  assert.equal(snapshot.records.length, 1, 'single slots project the winner only')
+  assert.equal(snapshot.records[0]?.value.label, 'b')
+  // A priority TIE is an explicit error (never a registration-time guess).
+  assert.throws(
+    () => single.register('chrome.header.badge', { id: 'd', priority: 2 }, V('d'), 'p4'),
+    /single-slot priority tie/,
+  )
+})
+
+test('single slots: disposing the winner promotes the next lowest (P2-2)', () => {
+  const single = new ExtensionLedger(() => {}, new Map([['chrome.header.badge', 'single']]))
+  const hb = single.register('chrome.header.badge', { id: 'b', priority: 2 }, V('b'), 'p2')
+  single.register('chrome.header.badge', { id: 'a', priority: 10 }, V('a'), 'p1')
+  assert.equal(single.snapshot('chrome.header.badge').winner?.id, 'b')
+  hb.dispose()
+  assert.equal(single.snapshot('chrome.header.badge').winner?.id, 'a', 'next-lowest priority must become the winner')
+})
+
 test('dispose is idempotent and removes the contribution; a disposed handle is inert', () => {
   const { ledger } = makeLedger()
   const handle = ledger.register('chrome.header.badge', { id: 'gone' }, V('g'), 'p1')

@@ -41,17 +41,23 @@ export class HeaderBadgeOutlet {
   }
 
   /** Rebuild the badge text from the ledger (cheap: skipped when neither
-   * the ledger revision nor the theme revision changed). */
+   * the ledger revision nor the theme revision changed). Per-contribution
+   * error isolation (P1-4): a throwing contribution is recorded in the
+   * health ledger and OMITTED — it can never abort the chrome refresh. */
   refresh(themeRevision = 0): void {
     const snapshot = this.ledger.snapshot<HeaderBadge>('chrome.header.badge')
     if (snapshot.revision === this.revision && themeRevision === this.themeRevision) return
     this.revision = snapshot.revision
     this.themeRevision = themeRevision
-    const parts = snapshot.records.map(record => {
-      const badge = record.value
-      const styled = styleBadge(badge)
-      return styled === '' ? '' : ` ${styled}`
-    }).filter(part => part !== '')
+    const parts: string[] = []
+    for (const record of snapshot.records) {
+      try {
+        const styled = styleBadge(record.value)
+        if (styled !== '') parts.push(` ${styled}`)
+      } catch (error) {
+        this.ledger.recordError('chrome.header.badge', record.id, safeMessage(error))
+      }
+    }
     this.textValue = parts.join('')
     this.sink.requestRender()
   }
@@ -95,13 +101,20 @@ export class DockItemOutlet {
     if (snapshot.revision === this.revision && themeRevision === this.themeRevision) return
     this.revision = snapshot.revision
     this.themeRevision = themeRevision
-    const lines = snapshot.records.flatMap(record => {
-      const item = record.value as { label?: readonly StyledSpan[]; detail?: readonly StyledSpan[] }
-      const label = item.label === undefined ? '' : renderSpans(item.label)
-      if (label === '') return []
-      const detail = item.detail === undefined ? '' : renderSpans(item.detail)
-      return detail === '' ? [label] : [label, detail]
-    })
+    const lines: string[] = []
+    for (const record of snapshot.records) {
+      try {
+        const item = record.value as { label?: readonly StyledSpan[]; detail?: readonly StyledSpan[] }
+        const label = item.label === undefined ? '' : renderSpans(item.label)
+        if (label === '') continue
+        lines.push(label)
+        const detail = item.detail === undefined ? '' : renderSpans(item.detail)
+        if (detail !== '') lines.push(detail)
+      } catch (error) {
+        // Per-contribution error isolation (P1-4).
+        this.ledger.recordError('input.dock.item', record.id, safeMessage(error))
+      }
+    }
     this.textValue = lines.join('\n')
     this.sink.requestRender()
   }
@@ -138,15 +151,18 @@ export class FooterSegmentOutlet {
     this.revision = snapshot.revision
     this.themeRevision = themeRevision
     this.compact = compact
-    const segments = snapshot.records
-      .map(record => {
+    const parts: string[] = []
+    for (const record of snapshot.records) {
+      try {
         const segment = record.value as { spans?: readonly StyledSpan[]; importance?: number }
-        return { ...segment, importance: segment.importance ?? 0 }
-      })
-      .filter(segment => !(compact && (segment.importance ?? 0) < 0))
-    const parts = segments
-      .map(segment => renderSpans(segment.spans ?? []))
-      .filter(part => part !== '')
+        if (compact && (segment.importance ?? 0) < 0) continue
+        const rendered = renderSpans(segment.spans ?? [])
+        if (rendered !== '') parts.push(rendered)
+      } catch (error) {
+        // Per-contribution error isolation (P1-4).
+        this.ledger.recordError('chrome.footer.status', record.id, safeMessage(error))
+      }
+    }
     this.textValue = parts.join('  ')
     this.sink.requestRender()
   }
@@ -181,5 +197,16 @@ function styleTone(text: string, tone: StyledSpan['tone']): string {
     case 'shellMode': return color.shellMode(text)
     case 'text':
     default: return color.text(text)
+  }
+}
+
+/** A safe single-line error message for the health ledger (no stack
+ * traces — the plan's error policy; hostile toString is handled). */
+function safeMessage(error: unknown): string {
+  try {
+    const message = error instanceof Error ? error.message : String(error)
+    return message.replace(/\s+/g, ' ').slice(0, 200)
+  } catch {
+    return 'unknown contribution error'
   }
 }

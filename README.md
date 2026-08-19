@@ -156,13 +156,20 @@ Current extension points (v1):
 | `input.dock.item` | list | a dock line above the todo panel |
 | `chrome.footer.status` | list | a footer segment (host owns width/truncation) |
 
+Contributions are **plain data**, not render functions: a plugin supplies
+`HeaderBadge` / `DockItem` / `FooterSegment` values (text + semantic tone
+spans) and the host owns rendering, ANSI compilation, width budgets and
+truncation. There is deliberately no `render(context)` callback in v1 —
+plugins never hold a rendering context, so a contribution can never capture
+or mutate host internals.
+
 Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
 fiber unloads (HMR, disable), regular and fullscreen both refresh, and
 `handle.invalidate()/replace()` re-render through the active screen. The
 `@xmoon76/dsh-pi-tui/builtins` entry is the Loader-only first-party
-contributor (version badge + turn/step counters) — not a stable third-party
-SDK. Editor replacement, overlays, transcript renderers and raw terminal
-access are NOT part of v1.
+contributor (version badge, turn/step counters, todo-summary dock item) —
+not a stable third-party SDK. Editor replacement, overlays, transcript
+renderers and raw terminal access are NOT part of v1.
 
 ## Slash commands (selection)
 

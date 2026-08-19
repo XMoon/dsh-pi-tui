@@ -67,9 +67,23 @@ export class ExtensionLedger {
    * must reach the screen, not just the batcher).
    */
   private onInvalidate: () => void
+  /**
+   * Test-only semantic overrides (P2-2): lets a test declare a slot as
+   * `single` even though the shipped slot map is all-`list` today, so the
+   * single-winner branch (priority tie error + priority-ASC winner sort)
+   * is exercised instead of being dead code. Never used in production.
+   */
+  private readonly semanticsOverrides: ReadonlyMap<string, 'single'>
 
-  constructor(onInvalidate: () => void = () => {}) {
+  constructor(onInvalidate: () => void = () => {}, semanticsOverrides: ReadonlyMap<string, 'single'> = new Map()) {
     this.onInvalidate = onInvalidate
+    this.semanticsOverrides = semanticsOverrides
+  }
+
+  /** The semantic of one slot: the test override when present, else the
+   * shipped slot map. */
+  private semanticOf(slot: string): 'list' | 'single' {
+    return this.semanticsOverrides.get(slot) ?? slotSemantic(slot as PiTuiSlotName)
   }
 
   /** Replace the invalidation sink (the SurfaceHost re-sinks on attach). */
@@ -100,7 +114,7 @@ export class ExtensionLedger {
         `(owner "${this.registrations.get(key)?.owner ?? 'unknown'}" already holds it)`,
       )
     }
-    const semantic = slotSemantic(slot)
+    const semantic = this.semanticOf(slot)
     const registration: Registration<T> = {
       slot,
       id: spec.id,
@@ -139,7 +153,7 @@ export class ExtensionLedger {
     if (!isSlotName(slot)) {
       throw new Error(`unknown extension slot "${slot}"`)
     }
-    const semantic = slotSemantic(slot)
+    const semantic = this.semanticOf(slot)
     const live = [...this.registrations.values()]
       .filter(registration => registration.slot === slot && !registration.disposed)
     // list: order ASC then id ASC (deterministic, load-order independent).

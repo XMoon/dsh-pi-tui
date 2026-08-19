@@ -17,7 +17,9 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { Text } from '@xmoon76/pi-tui'
 import { apply as applyExtensionHost } from '../src/extensions.ts'
+import type { PiTuiExtensionService } from '../src/extensions.ts'
 import { apply as applyBuiltins } from '../src/builtins.ts'
+import type { HeaderBadge } from '../src/extension/public-types.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
@@ -106,6 +108,24 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
     assert.ok(view.includes('t3/s7'), `turn/step counter did not track state:\n${view}`)
     assert.ok(!view.includes('t0/s0'), `stale counter survived:\n${view}`)
 
+    // P1-5: the todo summary flows through the builtin DOCK item (the host
+    // renders it directly only WITHOUT an extension host). setTodoSummary
+    // mirrors the summary text into the activity snapshot; the builtin
+    // dock item renders it.
+    app.setTodoSummary([
+      { content: 'write tests', status: 'in_progress' },
+      { content: 'ship', status: 'pending' },
+    ])
+    await settle()
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+    assert.ok(view.includes('2 active · write tests'), `todo summary dock item missing (P1-5):\n${view}`)
+    // Clearing the list hides the dock item.
+    app.setTodoSummary([])
+    await settle()
+    await vt.waitForRender()
+    assert.ok(!vt.getViewport().join('\n').includes('write tests'), `cleared todo dock item survived (P1-5)`)
+
     app.stop()
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
@@ -122,12 +142,14 @@ test('builtins unload with their owner fiber (HMR parity)', async () => {
       _ledger(): { snapshot(slot: string): { records: Array<{ id: string }> } }
       attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>): void
     }
-    // Attach a state bridge so the builtin's subscribeState goes live; its
-    // disposer must be fiber-bound (F1 — no listener leak on unload).
+    // Attach a state bridge so the builtin's subscribeState calls go live;
+    // their disposers must be fiber-bound (F1 — no listener leak on
+    // unload). Two builtin subscriptions exist: turn/step counters and the
+    // todo-summary dock item (P1-5).
     let subscribed = 0
     const fakeBridge = { subscribe: () => { subscribed += 1; return () => { subscribed -= 1 } } }
     service.attachSurface(fakeBridge as never, new Set())
-    assert.equal(subscribed, 1, 'the builtin state listener must be live after attach')
+    assert.equal(subscribed, 2, 'both builtin state listeners must be live after attach')
     // Unload the builtins fiber: its registrations AND its state
     // subscription must disappear.
     await (builtinsFiber as { dispose(): Promise<void> }).dispose()
@@ -140,6 +162,60 @@ test('builtins unload with their owner fiber (HMR parity)', async () => {
       0,
       'the listenerUnsubscribers map must be empty after owner unload (round-2 finding 1)',
     )
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('P0-1: a plugin following the README example registers BEFORE any surface exists (advertised capabilities)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startupFiber = ctx.plugin((c) => {
+      c.provide('tuiStartup', { shippedPresetRoot: '/ws' })
+    })
+    await startupFiber
+    const hostFiber = ctx.plugin(applyExtensionHost)
+    await hostFiber
+
+    // A THIRD-PARTY-shaped plugin exactly like the README example: it
+    // feature-detects the slot capability and registers. It runs BEFORE
+    // any surface is attached — the service is provided, the runner has
+    // not created the TUI yet. The advertised capabilities (P0-1) make the
+    // feature-detect succeed in this window.
+    let registered = false
+    const pluginFiber = ctx.plugin((c) => {
+      const service = c.get('piTuiExtensions') as PiTuiExtensionService
+      if (!service.api().capabilities.has('slot.chrome.header.badge')) return
+      service.register<HeaderBadge>('chrome.header.badge', { id: 'pre-surface' }, { text: 'pre-surface' })
+      registered = true
+    })
+    await pluginFiber
+
+    // The plugin must have registered even though no surface exists yet.
+    assert.equal(registered, true, 'the plugin must feature-detect the slot capability BEFORE any surface (P0-1)')
+
+    // Attach a surface afterwards: the contribution renders.
+    const service = ctx.get('piTuiExtensions') as {
+      _ledger(): import('../src/extension/internal/ledger.ts').ExtensionLedger
+    }
+    const vt = new VirtualTerminal(80, 24)
+    const host = new SurfaceHost(service._ledger(), () => app.requestRender())
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
+    app.start()
+    await vt.waitForRender()
+    host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+      surfaceId: host.surfaceId, generation: 1, width: 80, height: 24, fullscreen: false,
+      focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+    })
+    app.refreshChrome()
+    await settle()
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(view.includes('pre-surface'), `pre-surface registration must render after attach (P0-1):\n${view}`)
+    app.stop()
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

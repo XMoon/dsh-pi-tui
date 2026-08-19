@@ -2575,7 +2575,33 @@ export class TuiApp {
    * benign no-op (M0 stale-generation contract). */
   requestRender(force = false): void {
     if (this.disposed) return
+    // Live surface geometry (P1-1): the fork consumes the terminal resize
+    // callback internally, so the extension surface slice is refreshed
+    // from the CURRENT terminal geometry on every render — a resize lands
+    // here on the first repaint after the event.
+    this.syncSurfaceGeometry()
     ;(this.fullscreen ?? this.tui).requestRender(force)
+  }
+
+  /** Mirror the live terminal geometry into the extension surface slice
+   * (width/height) when it changed; also refreshes focusedSeat from the
+   * current mode. Cheap: no-op unless a value differs. */
+  private syncSurfaceGeometry(): void {
+    const host = this.extensionHost
+    if (host === undefined) return
+    const current = host.state().surface
+    const width = this.terminal.columns
+    const height = this.terminal.rows
+    const focusedSeat = this.fullscreen !== undefined
+      ? this.activeQuestions !== undefined || this.activeApproval !== undefined
+        ? 'overlay'
+        : 'editor'
+      : this.activeQuestions !== undefined || this.activeApproval !== undefined
+        ? 'overlay'
+        : 'editor'
+    if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
+      host.updateSurface({ width, height, focusedSeat })
+    }
   }
 
   /**
@@ -2646,6 +2672,23 @@ export class TuiApp {
     return this.hideThinking
   }
 
+  /** The todo summary line text (`☑ N active · first`), or '' when the
+   * list is empty or the panel is expanded (the summary would sit on the
+   * full list). Shared by renderDock and the extension state mirror
+   * (P1-5). */
+  private todoSummaryText(): string {
+    if (this.todoPanelVisible || this.todoItems.length === 0) return ''
+    const active = this.todoItems.filter(todo => todo.status !== 'completed')
+    const done = this.todoItems.length - active.length
+    const first = active[0]
+    const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
+    return [
+      done > 0 ? `${done} todo done` : '',
+      active.length > 0 ? `${active.length} active` : '',
+      label,
+    ].filter(part => part !== '').join(' · ')
+  }
+
   /**
    * Mirror the host's live state into the extension SurfaceStateStore (M2):
    * activity counts (working, queue, tasks, agents, todos) and session mode
@@ -2662,6 +2705,12 @@ export class TuiApp {
       taskCount: this.dockTasks.length,
       childAgentCount: this.dockAgents.length,
       todoCount: this.todoItems.length,
+      // The rendered todo summary (P1-5: the first-party builtin dock item
+      // renders it through the public slot API; the host provides the
+      // TEXT, the extension owns the presentation). Always written — an
+      // empty string CLEARS a previous summary (the store merge is
+      // per-field monotonic, so omitting it would leave the stale text).
+      todoSummary: this.todoSummaryText(),
     })
     host.updateSession({
       planMode: this.planMode,
@@ -2851,22 +2900,18 @@ export class TuiApp {
     // top of the full list it summarizes — drop it so the panel's own
     // border rule is the single boundary.
     const extensionDock = this.extensionHost?.dockText() ?? ''
-    if (this.todoPanelVisible || this.todoItems.length === 0) {
+    const summary = this.todoSummaryText()
+    const hostLine = summary === '' ? '' : color.textDim(`☑  ${summary}`)
+    // With an extension host the FIRST-PARTY builtin dock item renders the
+    // todo summary through the public slot API (P1-5); the host renders it
+    // directly only when no host is attached (fallback, not a competing
+    // registration).
+    if (this.extensionHost !== undefined) {
       this.dock.setText(extensionDock)
       this.requestRender()
       return
     }
-    const active = this.todoItems.filter(todo => todo.status !== 'completed')
-    const done = this.todoItems.length - active.length
-    const first = active[0]
-    const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
-    const summary = [
-      done > 0 ? `${done} todo done` : '',
-      active.length > 0 ? `${active.length} active` : '',
-      label,
-    ].filter(part => part !== '').join(' · ')
-    const hostLine = color.textDim(`☑  ${summary}`)
-    this.dock.setText(extensionDock === '' ? hostLine : `${hostLine}\n${extensionDock}`)
+    this.dock.setText(hostLine)
     this.requestRender()
   }
 
@@ -2949,7 +2994,13 @@ export class TuiApp {
     ].filter(part => part !== '')
     // Line 2: the stats line only; context pressure is the bar on line 1.
     const line2 = this.footerPreset === 'compact' ? '' : this.status.statsLine
-    this.footer.setText([dim(line1.join('  ')), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n'))
+    // Host-owned width budget (plan §8.3): the assembled line-1 is
+    // truncated to the terminal width so extension segments can never
+    // overflow the footer (truncateToWidth is ANSI-safe — it strips
+    // styling, measures the visible width, and re-applies the style).
+    const width = Math.max(1, this.terminal.columns)
+    const line1Text = truncateToWidth(line1.join('  '), width, '…')
+    this.footer.setText([dim(line1Text), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n'))
     this.requestRender()
   }
 
