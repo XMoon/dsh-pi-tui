@@ -245,3 +245,103 @@ test('TuiApp: the editor host dispatch clears the plugin draft through the host 
   assert.equal(app.getDraft(), '', 'the seat draft was cleared like a normal submit')
   app.stop()
 })
+
+// ── Round-2 regression tests ───────────────────────────────────────────────
+
+test('TuiApp: the subagent viewer covers a PLUGIN editor and restores its draft (round-2 finding 1)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('plugin viewer draft')
+  registry.register({ id: 'viewer-editor', priority: 0, create: () => pluginEditor() }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'plugin viewer draft')
+  // Enter the viewer: the SEAT shows the placeholder; the preserved
+  // draft stays in draftBeforeViewer (getDraft returns it — the real
+  // draft must never be lost while viewing).
+  app.setViewerMode({ id: 'child-1', label: 'child' })
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'plugin viewer draft',
+    'getDraft preserves the real draft while viewing (never the placeholder)')
+  // The seat text is the placeholder (the plugin editor's component was
+  // covered). Probe via the holder's current editor:
+  const seatText = app.seatTextForTest()
+  assert.equal(seatText, 'viewing subagent: child — read-only · Esc returns',
+    'the placeholder covers the CURRENT seat occupant')
+  // Exit: the draft returns to the PLUGIN editor (the current occupant).
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'plugin viewer draft', 'the draft restores into the plugin editor')
+  app.stop()
+})
+
+test('TuiApp: a plugin editor survives a fullscreen toggle with focus intact (round-2 finding 2)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('fs plugin draft')
+  registry.register({ id: 'fs-editor', priority: 0, create: () => pluginEditor() }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // Fullscreen in: the plugin editor's component receives focus (text
+  // input works — a submit after the toggle reads the plugin draft).
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['fs plugin draft'], 'submit works in fullscreen with a plugin occupant')
+  // Fullscreen out: focus returns to the seat occupant.
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  app.setDraft('after fs')
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['fs plugin draft', 'after fs'], 'submit works after returning to regular')
+  app.stop()
+})
+
+test('TuiApp: a broken plugin view (compile throw) keeps the old editor working (round-2 finding 3)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('still alive')
+  // A plugin whose component view THROWS during compilation (the view's
+  // spans getter explodes — the compiler's renderSpans path throws).
+  registry.register({
+    id: 'broken-view', priority: 0,
+    create: () => ({
+      component: {
+        kind: 'text',
+        get spans(): never { throw new Error('view compile boom') },
+      } as never,
+      getText: () => 'broken',
+      setText: () => {},
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // The old editor keeps working (the compile throw was atomic).
+  assert.equal(app.getDraft(), 'still alive', 'the old editor survives a broken plugin view')
+  app.stop()
+})

@@ -183,9 +183,21 @@ export class EditorSeatHolder {
     const cursor = previous.getCursor()
     created.setText(draft)
     created.setCursor?.(cursor)
-    // Mount + dispose old.
+    // Compile the plugin component BEFORE disposing the old editor
+    // (round-2 finding 3): adaptPlugin's compileView can throw — a broken
+    // view must keep the OLD editor working, exactly like a creation
+    // throw. Nothing is disposed until every throwing step succeeded.
+    let adapted: SeatEditor
+    try {
+      adapted = this.adaptPlugin(target.id, created)
+    } catch (error) {
+      this.failedTarget = { id: target.id, revision: registryRevision }
+      this.notifyError(error instanceof Error ? error.message : String(error))
+      return
+    }
+    // Mount + dispose old (atomic: everything succeeded).
     previous.dispose()
-    this.current = this.adaptPlugin(target.id, created)
+    this.current = adapted
   }
 
   /** Build the EditorHost handed to a plugin editor. */

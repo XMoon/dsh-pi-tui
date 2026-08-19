@@ -1829,8 +1829,9 @@ export class TuiApp {
       alt.start()
       // The alt screen starts with NO focused component: without this, every
       // key after Ctrl+F is dropped (the app-level listener still sees
-      // shortcuts, but the editor never receives text or Enter).
-      alt.setFocus(this.editor)
+      // shortcuts, but the editor never receives text or Enter). M9: focus
+      // the CURRENT seat occupant (round-2 finding 2).
+      alt.setFocus(this.seatEditor().component)
       this.fullscreen = alt
       // The alt screen now owns the terminal input handler: scheme reports
       // arrive THERE, so re-register the fan-out on both screens.
@@ -1843,9 +1844,9 @@ export class TuiApp {
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
       // the terminal buffer. Force a full repaint so the regular surface
-      // redraws cleanly from row 0.
+      // redraws cleanly from row 0. M9: focus the current seat occupant.
       this.tui.requestRender(true)
-      this.tui.setFocus(this.editor)
+      this.tui.setFocus(this.seatEditor().component)
       // The main screen owns the terminal input handler again.
       this.refreshSchemeRegistrations()
     }
@@ -2127,8 +2128,9 @@ export class TuiApp {
     this.planMode = active
     this.renderHeader()
     this.renderFooter()
-    this.editor.borderColor = active ? color.warning : this.editorBorder
-    this.editor.invalidate()
+    const seat = this.seatEditor()
+    seat.borderColor = active ? color.warning : this.editorBorder
+    seat.invalidate()
     this.requestRender()
     this.syncExtensionState()
   }
@@ -2194,10 +2196,14 @@ export class TuiApp {
     if (mode === undefined) {
       if (this.viewerMode === undefined) return
       this.viewerMode = undefined
-      this.editor.borderColor = this.editorBorder
-      this.editor.setText(this.draftBeforeViewer ?? '')
+      // M9 (round-2 finding 1): the viewer restore writes the preserved
+      // draft to the CURRENT seat occupant (a plugin editor's draft
+      // returns to the plugin, never to a hidden host editor).
+      const seat = this.seatEditor()
+      seat.borderColor = this.editorBorder
+      seat.setText(this.draftBeforeViewer ?? '')
       this.draftBeforeViewer = undefined
-      this.editor.invalidate()
+      seat.invalidate()
       this.renderHeader()
       this.requestRender()
       this.syncExtensionState()
@@ -2207,9 +2213,13 @@ export class TuiApp {
       this.draftBeforeViewer = this.seatEditor().getText()
     }
     this.viewerMode = mode
-    this.editor.borderColor = color.accent
-    this.editor.setText(`viewing subagent: ${mode.label} — read-only · Esc returns`)
-    this.editor.invalidate()
+    // M9: cover the CURRENT seat occupant with the placeholder (a plugin
+    // editor's component receives the placeholder; the preserved draft
+    // stays in draftBeforeViewer).
+    const seat = this.seatEditor()
+    seat.borderColor = color.accent
+    seat.setText(`viewing subagent: ${mode.label} — read-only · Esc returns`)
+    seat.invalidate()
     this.renderHeader()
     this.requestRender()
     this.syncExtensionState()
@@ -2443,6 +2453,12 @@ export class TuiApp {
    * reconcile is the live fallback). */
   reconcileEditorNow(): void {
     this.reconcileEditorWinner()
+  }
+
+  /** M9 test hook: the CURRENT seat occupant's text (probes what the
+   * seat actually renders — getDraft preserves the viewer draft). */
+  seatTextForTest(): string {
+    return this.seatEditor().getText()
   }
 
   /** M7 test hook: build (or fetch) the cached component entry for one
