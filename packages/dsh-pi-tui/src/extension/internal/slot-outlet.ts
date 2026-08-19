@@ -331,7 +331,12 @@ export class FooterSegmentOutlet {
  * - C0 controls (except tab/newline/CR which are legal layout whitespace,
  *   and except ESC 0x1b which the ESC branch below handles as a sequence
  *   start);
- * - 8-bit CSI (0x9b) sequences and the remaining C1 controls (0x80-0x9f);
+ * - 8-bit control sequences consumed as FULL sequences: CSI (0x9b) to its
+ *   final byte, OSC (0x9d) / DCS (0x90) / PM (0x9e) / APC (0x9f) to ST
+ *   (0x9c) or BEL (0x07); a TRUNCATED 8-bit sequence (no terminator) is
+ *   consumed as just the starter byte — the payload is not reliably a
+ *   control sequence, so visible text is never eaten. The remaining C1
+ *   controls (0x80-0x9f) as singles;
  * - ESC-led sequences: CSI `ESC [ params intermediate final`, OSC `ESC ]`
  *   to ST/BEL, DCS/PM/APC `ESC P/^/_/X` to ST/BEL. A lone ESC (or a
  *   truncated sequence) is consumed as JUST the ESC byte — never the next
@@ -341,7 +346,7 @@ export class FooterSegmentOutlet {
  * The host's OWN styling (applied AFTER this pass) is the only ANSI in the
  * output.
  */
-const CONTROL_SEQUENCE = /[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]|\u009b[0-?]*[ -\/]*[@-~]|[\u0080-\u009f]|\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[P^_X][^\x07\x1b]*(?:\x07|\x1b\\))?/g
+const CONTROL_SEQUENCE = /[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]|\u009b[0-?]*[ -\/]*[@-~]|[\u0090\u009d\u009e\u009f](?:[^\u009c\u0007\u0080-\u009f\u0000-\u001f]*[\u009c\u0007])?|[\u0080-\u009f]|\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[P^_X][^\x07\x1b]*(?:\x07|\x1b\\))?/g
 
 export function sanitizeSpanText(text: string): string {
   return text.replace(CONTROL_SEQUENCE, '')

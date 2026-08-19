@@ -420,7 +420,7 @@ test('chrome slots strip terminal control sequences from plugin text (plan §19 
   // Hostile payloads in every chrome slot: badge text, dock spans, footer
   // spans, and widget spans. The choke points (styleBadge / renderSpans)
   // must leave NO ESC byte in the baked chrome text.
-  const payloads = ['\x1b[2J', '\x1b]0;x\x07', '\x1b[?1049h', '\x1b[1;5H']
+  const payloads = ['\x1b[2J', '\x1b]0;x\x07', '\x1b[?1049h', '\x1b[1;5H', '\u009d0;x\u009c', '\u009b2J']
   for (let index = 0; index < payloads.length; index++) {
     const payload = payloads[index]
     ledger.register('chrome.header.badge', { id: `b${index}` }, { text: `pre${payload}post` }, 'p1')

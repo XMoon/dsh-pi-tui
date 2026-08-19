@@ -23,7 +23,7 @@ import { Container, Markdown, Spacer, VStack, type Component } from '@xmoon76/pi
 import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { color, markdownTheme } from '../../theme.ts'
 import type { ExtensionView, StyledSpan, TextView } from '../public-types.ts'
-import { renderSpans } from './slot-outlet.ts'
+import { renderSpans, sanitizeSpanText } from './slot-outlet.ts'
 
 /** A compiled view tree node. */
 interface CompiledNode {
@@ -113,14 +113,19 @@ function compileText(view: TextView): CompiledNode {
 
 /** One markdown block: the fork's Markdown caches per (text, width), so
  * unchanged content is O(1) per frame and a resize re-wraps (a live child,
- * never frozen lines). */
+ * never frozen lines). The plugin-supplied markdown string is SANITIZED at
+ * compile time (plan §19 item 10: no terminal control sequence may reach
+ * the terminal from plugin content — the markdown path bypasses
+ * renderSpans, so it needs its own choke point). */
 class CompiledMarkdown implements Component {
+  /** The SANITIZED markdown (the compiled identity — a replacement
+   * contribution compiles a new instance). */
   private readonly markdown: string
   private cachedWidth = -1
   private cached: string[] | undefined
 
   constructor(markdown: string) {
-    this.markdown = markdown
+    this.markdown = sanitizeSpanText(markdown)
   }
 
   invalidate(): void {
@@ -139,9 +144,10 @@ class CompiledMarkdown implements Component {
 }
 
 function compileMarkdown(view: { markdown: string }): CompiledNode {
-  const empty = view.markdown.trim() === ''
+  const sanitized = sanitizeSpanText(view.markdown)
+  const empty = sanitized.trim() === ''
   return {
-    component: empty ? new Container() : new CompiledMarkdown(view.markdown),
+    component: empty ? new Container() : new CompiledMarkdown(sanitized),
     isEmpty: empty,
   }
 }
