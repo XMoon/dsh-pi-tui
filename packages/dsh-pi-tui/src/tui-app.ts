@@ -84,6 +84,8 @@ import { InputRouter } from './input-router.ts'
 import { RESERVED_HOST_KEYS } from './keybinding-registry.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
+import { EditorSeatHolder } from './editor-seat-holder.ts'
+import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
 
@@ -771,6 +773,13 @@ export interface TuiAppOptions {
    * it.
    */
   renderers?: RendererRegistry
+  /**
+   * M9: the editor registry (single-winner). When present, a plugin
+   * editor may occupy the editor seat through the atomic handoff; the
+   * host default editor is the fallback. Optional — the surface works
+   * identically without it.
+   */
+  editorRegistry?: EditorRegistry
 }
 
 /**
@@ -1017,6 +1026,10 @@ export class TuiApp {
   private readonly inputRouter: InputRouter
   /** M7: the transcript/tool renderer registry (optional). */
   private readonly renderers: RendererRegistry | undefined
+  /** M9: the editor registry (optional). */
+  private readonly editorRegistry: EditorRegistry | undefined
+  /** M9: the editor seat holder (the atomic handoff + current occupant). */
+  private readonly editorSeatHolder: EditorSeatHolder
   /** The busy indicator row directly above the editor border; idle renders nothing. */
   private readonly working: WorkingIndicator
   /** The fullscreen transcript ScrollView, for click hit-testing offsets. */
@@ -1093,6 +1106,7 @@ export class TuiApp {
     this.pluginActionFor = options.pluginActionFor
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
     this.renderers = options.renderers
+    this.editorRegistry = options.editorRegistry
     this.overlayBroker = new OverlayBroker({
       question: () => this.activeQuestions,
       setFocusSeat: (seat) => this.setFocusSeat(seat),
@@ -1114,6 +1128,48 @@ export class TuiApp {
       // setStatus, so keep the badge truthful while tasks are active.
       if (this.tasksActive) this.renderFooter()
     }
+    // M9: the editor seat holder — the atomic handoff + current occupant.
+    // The host default editor is the adapter source; a plugin editor
+    // (single-winner from the editor registry) can replace it.
+    this.editorSeatHolder = new EditorSeatHolder({
+      hostAdapter: () => this.hostEditorAdapter(),
+      surfaceId: `tui-${Date.now().toString(36)}`,
+      generation: () => this.generation,
+      actionSink: (action) => {
+        // The sink reads the CURRENT SEAT occupant (the host editor or a
+        // plugin editor — the dispatch never bypasses the seat).
+        const text = this.seatEditor().getText()
+        switch (action) {
+          case 'submit': {
+            if (text.trim() === '') return false
+            this.events.onSubmit(text)
+            return true
+          }
+          case 'queue-submit': {
+            if (text.trim() === '') return false
+            this.events.onQueueSubmit?.(text)
+            return true
+          }
+          case 'steer': {
+            this.events.onSteer?.(text)
+            return true
+          }
+          case 'open-external-editor': {
+            if (this.events.openExternalEditor === undefined || this.externalEditorInFlight) return false
+            this.events.runOwned('external editor', () => this.launchExternalEditor(), {
+              onError: (error: unknown) => {
+                this.notify(`external editor failed: ${safeErrorMessage(error)}`, 'error')
+              },
+            })
+            return true
+          }
+        }
+      },
+      notifyError: (message) => this.notify(`editor failed: ${message}`, 'error'),
+    })
+    // If a plugin editor already won the registry (registration before
+    // the surface), hand off immediately.
+    this.reconcileEditorWinner()
     this.header = new Text('🐋  dsh-pi-tui', 0, 0)
     this.messagesView = new Container()
     this.dock = new Text('', 0, 0)
@@ -2302,6 +2358,84 @@ export class TuiApp {
     return this.extensionOverlayLeases.size
   }
 
+  /** M9: the host default editor adapted to the seat surface. The fork's
+   * cursor is `{line, col}`; the seat uses a flat OFFSET (line lengths
+   * summed + col), so plugin editors and the host agree on one shape. */
+  private hostEditorAdapter(): import('./editor-seat-holder.ts').HostEditorAdapter {
+    // Capture the editor so object-literal getters keep the right `this`.
+    const editor = this.editor
+    return {
+      getText: () => editor.getText(),
+      setText: (text) => editor.setText(text),
+      getCursor: () => {
+        const cursor = editor.getCursor()
+        const lines = editor.getText().split('\n')
+        let offset = 0
+        for (let line = 0; line < cursor.line && line < lines.length; line++) {
+          offset += lines[line]!.length + 1
+        }
+        return offset + cursor.col
+      },
+      // The fork editor has no public cursor setter: the seat's cursor
+      // transfer is a no-op for the host default (plugin editors carry
+      // their own setCursor).
+      get focused() { return editor.focused },
+      borderColor: (text) => editor.borderColor(text),
+      invalidate: () => editor.invalidate(),
+      addToHistory: (text) => editor.addToHistory(text),
+      clearHistory: () => editor.clearHistory(),
+      component: editor,
+    }
+  }
+
+  /**
+   * M9: reconcile the seat with the editor registry's current winner —
+   * perform the atomic handoff when the winner changed. Called after the
+   * registry revision changes (the runner wires it) and at construction.
+   */
+  reconcileEditorWinner(): void {
+    const registry = this.editorRegistry
+    if (registry === undefined) return
+    const winner = registry.winner()
+    const current = this.editorSeatHolder.currentEditor()
+    const targetId = winner?.id
+    if (current.id === (targetId ?? 'host')) return
+    // Perform the atomic handoff (create → transfer → mount → dispose).
+    this.editorSeatHolder.handoff(winner === undefined ? undefined : {
+      id: winner.id,
+      create: (host) => winner.create(host),
+    })
+    // Re-mount the seat child: the editor seat now holds the new
+    // occupant's component (the host default editor or the plugin's).
+    this.mountSeatChild()
+  }
+
+  /**
+   * M9: mount the CURRENT seat occupant's component into the editor seat
+   * (the host default editor or the plugin winner's compiled view). The
+   * question flow's seat restore uses the same path, so a plugin editor
+   * survives a question round-trip.
+   */
+  private mountSeatChild(): void {
+    this.editorSeat.clear()
+    this.editorSeat.addChild(this.seatEditor().component)
+  }
+
+  /**
+   * M9: the CURRENT seat editor (all host editor access routes through
+   * this — plan §14: business code stops scattering this.editor.*).
+   */
+  private seatEditor(): import('./editor-seat-holder.ts').SeatEditor {
+    return this.editorSeatHolder.currentEditor()
+  }
+
+  /** M9 public hook: reconcile the seat with the registry's winner NOW
+   * (tests + the runner call it after a winner change; the render-path
+   * reconcile is the live fallback). */
+  reconcileEditorNow(): void {
+    this.reconcileEditorWinner()
+  }
+
   /** M7 test hook: build (or fetch) the cached component entry for one
    * message at a fold boundary, exposing the renderer identity. */
   messageCacheEntryForTest(message: TranscriptMessage, boundary = 0): MessageComponentEntry | undefined {
@@ -2967,6 +3101,12 @@ export class TuiApp {
    * benign no-op (M0 stale-generation contract). */
   requestRender(force = false): void {
     if (this.disposed) return
+    // M9: a cheap editor-winner reconciliation on every render request —
+    // the registry's invalidation (register/unload) funnels here through
+    // the service batcher → SurfaceHost sink. The compare is O(1) when
+    // unchanged (id comparison), so the frame loop cost is negligible
+    // (plan §23).
+    this.reconcileEditorWinner()
     // Live surface geometry (P1-1): the fork consumes the terminal resize
     // callback internally, so the extension surface slice is refreshed
     // from the CURRENT terminal geometry on every render — a resize lands
@@ -4207,9 +4347,9 @@ export class TuiApp {
     }
     // Final restoration: the editor FIRST, then the suspended overlays — a
     // restored capturing overlay focuses itself through setHidden(false),
-    // so the editor must not be re-focused afterwards.
-    this.editorSeat.clear()
-    this.editorSeat.addChild(this.editor)
+    // so the editor must not be re-focused afterwards. M9: restore the
+    // CURRENT seat occupant (host default or plugin editor).
+    this.mountSeatChild()
     this.activeQuestions = undefined
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(this.editor)

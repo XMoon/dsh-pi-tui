@@ -239,6 +239,18 @@ Since M5 the extension surface also covers registries (plan §10):
   toggle visibility without closing. A plugin can never mount a raw
   component or steal focus — the host owns the terminal and the overlay
   stack.
+- `registerEditor(contribution)` — the EDITOR SDK (M9, plan §14):
+  single-winner by priority (a tie is an explicit error); the winner
+  occupies the editor seat through the host's ATOMIC handoff (create →
+  transfer draft/cursor → mount → focus → dispose old). A creation throw
+  keeps the current editor working; winner unload restores the next
+  winner / the host default editor WITH the draft preserved. The plugin
+  editor receives an `EditorHost` (surfaceId, generation, getSnapshot,
+  replaceText, dispatch of semantic actions submit/queue-submit/steer/
+  open-external-editor, subscribe, invalidate) — but the host still owns
+  busy-Enter, Ctrl+Enter, local-command classification, paste protection,
+  approval/question capture, session guard/lock, external editor and
+  exit: a plugin editor can never bypass those.
 
 Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
 fiber unloads (HMR, disable), regular and fullscreen both refresh, and

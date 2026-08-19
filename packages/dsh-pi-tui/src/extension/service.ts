@@ -30,8 +30,11 @@ import { AutocompleteRegistry } from '../autocomplete-registry.ts'
 import { SettingsRegistry } from '../settings-registry.ts'
 import { KeybindingRegistry } from '../keybinding-registry.ts'
 import { RendererRegistry } from '../renderer-registry.ts'
+import { EditorRegistry } from '../editor-registry.ts'
 import type {
   AutocompleteHandle,
+  EditorContribution,
+  EditorHandle,
   ExtensionView,
   AutocompleteProviderContribution,
   MessagePresentationSnapshot,
@@ -156,6 +159,14 @@ export interface PiTuiExtensionService {
   readonly renderers: TuiRendererRegistryView
   /** Runner-only: wire the host's managed-overlay mount seam (M8). */
   setOverlayMount(mount: (view: ExtensionView, options?: TuiOverlayOptions) => TuiOverlayHandle): void
+  /**
+   * Register an EDITOR contribution (M9, plan §14): single-winner by
+   * priority; a tie is an explicit error. The winner occupies the editor
+   * seat through the host's atomic handoff; the host default editor is
+   * the fallback (never a competing registration). Creation is atomic —
+   * a throw keeps the current editor working. Owned by the calling fiber.
+   */
+  registerEditor(contribution: EditorContribution): EditorHandle
 }
 
 /**
@@ -189,6 +200,8 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** M8: the host's overlay mount seam (wired by the runner; the host
    * owns the screen + broker). */
   private overlayMount: ((view: ExtensionView, options?: TuiOverlayOptions) => TuiOverlayHandle) | undefined
+  /** M9: the editor registry (single-winner). */
+  readonly editors: EditorRegistry
   /** The attached SurfaceHost's state bridge, wired by the runner (M3). */
   private stateBridge: {
     subscribe(listener: (state: SurfaceStateValues) => void): () => void
@@ -218,6 +231,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.settings = new SettingsRegistry(() => this.batcher.invalidate())
     this.keybindings = new KeybindingRegistry(() => this.batcher.invalidate())
     this.renderers = new RendererRegistry(() => this.batcher.invalidate())
+    this.editors = new EditorRegistry(() => this.batcher.invalidate())
   }
 
   api(): PiTuiApiInfo {
@@ -678,6 +692,31 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       return { close: () => {}, hide: () => {}, show: () => {} }
     }
     return mount(view, options)
+  }
+
+  /** Register an editor contribution (M9). Fiber-bound; owner unload
+   * removes it (the host restores the next winner / the host default,
+   * preserving the draft). */
+  registerEditor(contribution: EditorContribution): EditorHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.editors.register(contribution, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.registerEditor()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
   }
 
   /** The ledger behind the service (SurfaceHost access in M2). */

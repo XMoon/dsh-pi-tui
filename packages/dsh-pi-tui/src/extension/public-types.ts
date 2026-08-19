@@ -702,3 +702,87 @@ export interface TuiOverlayHandle {
   /** Show again after hide(). */
   show(): void
 }
+
+// ── M9: the Editor SDK (plan §14) ──────────────────────────────────────────
+
+/** The editor's runtime state a plugin editor may read (immutable
+ * snapshot — never the live component, never the terminal). */
+export interface EditorSnapshot {
+  readonly text: string
+  readonly cursor: number
+  readonly focused: boolean
+  /** The active replacement id, when a plugin editor occupies the seat. */
+  readonly replacementId?: string
+  /** Whether an editor-seat flow (question) currently covers the editor. */
+  readonly composing: boolean
+}
+
+/** A semantic action a plugin editor may dispatch through the host (the
+ * host executes — submission/session safety is never bypassed). */
+export type EditorHostAction =
+  | 'submit'
+  | 'queue-submit'
+  | 'steer'
+  | 'open-external-editor'
+
+/** The result of a host-action dispatch. */
+export type EditorHostActionResult =
+  | { kind: 'accepted' }
+  | { kind: 'ignored' }
+
+/** The editor host a plugin editor receives at creation (plan §14.1). */
+export interface EditorHost {
+  readonly surfaceId: string
+  readonly generation: number
+  /** The current immutable editor snapshot. */
+  getSnapshot(): EditorSnapshot
+  /** Replace the draft (and optionally move the cursor). */
+  replaceText(text: string, cursor?: number): void
+  /** Dispatch a semantic action through the host's own paths. */
+  dispatch(action: EditorHostAction): EditorHostActionResult
+  /** Subscribe to snapshot changes; returns a disposer. */
+  subscribe(listener: (snapshot: EditorSnapshot) => void): () => void
+  /** Request a repaint of the active screen. */
+  invalidate(): void
+}
+
+/** A live handle on one editor contribution. */
+export interface EditorHandle {
+  readonly id: string
+  dispose(): void
+}
+
+/** One editor contribution (single-winner: lowest priority wins; a tie is
+ * an error — plan §14.1). */
+export interface EditorContribution {
+  readonly id: string
+  /** Winner selection: lowest priority wins; a tie is an explicit error. */
+  readonly priority?: number
+  readonly description?: string
+  /** Create the plugin editor component. A throw here keeps the CURRENT
+   * editor working (plan §14.2 — creation failure falls back). */
+  create(host: EditorHost): ExtensionEditor
+}
+
+/** The plugin editor surface (plan §14.1): the component to mount in the
+ * seat + the state hooks the host reads/writes. */
+export interface ExtensionEditor {
+  /** The component mounted in the editor seat (the M4 component kit or a
+   * host-compiled view — NEVER a raw pi-tui component). */
+  readonly component: ExtensionView
+  /** Read the current draft. */
+  getText(): string
+  /** Replace the draft (the host's transfer/fallback path). */
+  setText(text: string): void
+  /** Read the cursor offset. */
+  getCursor?(): number
+  /** Move the cursor. */
+  setCursor?(offset: number): void
+  /** Whether this editor owns focus. */
+  readonly focused?: boolean
+  /** The editor's own border color hook (optional; the host theme
+   * default applies otherwise). */
+  borderColor?: (text: string) => string
+  /** Dispose the editor (the host calls it after the handoff). */
+  dispose(): void
+}

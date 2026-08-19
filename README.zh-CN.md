@@ -220,6 +220,16 @@ service.register<InputWidget>('input.widget.below', {
   dispose 会关闭所有仍在持有的租约),close() 幂等,hide()/show() 切换
   可见性而不关闭。插件永远不能挂载原始组件或抢焦点——终端和 overlay
   栈由 host 拥有。
+- `registerEditor(contribution)` — 编辑器 SDK(M9,计划 §14):按 priority
+  单选(平局是显式错误);winner 通过 host 的**原子交接**占据编辑器座席
+  (create → 转移 draft/cursor → mount → focus → dispose 旧编辑器)。
+  create 抛错时当前编辑器继续工作;winner 卸载恢复下一个 winner / host
+  默认编辑器,**保留 draft**。插件编辑器收到 `EditorHost`(surfaceId、
+  generation、getSnapshot、replaceText、语义动作 dispatch submit/
+  queue-submit/steer/open-external-editor、subscribe、invalidate)——但
+  host 仍然拥有 busy-Enter、Ctrl+Enter、local 命令分类、粘贴保护、
+  approval/question 捕获、会话 guard/lock、外部编辑器和退出:插件编辑器
+  永远不能绕过这些。
 
 生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
 regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕
