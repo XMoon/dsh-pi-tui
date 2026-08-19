@@ -80,9 +80,11 @@ export class HeaderBadgeOutlet {
   }
 }
 
-/** Style one header badge by its semantic tone. */
+/** Style one header badge by its semantic tone. Plugin text is sanitized
+ * at this choke point too (a badge text with a control sequence must never
+ * reach the terminal — plan §19 item 10). */
 function styleBadge(badge: HeaderBadge): string {
-  const text = badge.text
+  const text = sanitizeSpanText(badge.text)
   if (text === '') return ''
   switch (badge.tone) {
     case 'warning': return color.warning(`[${text}]`)
@@ -319,15 +321,44 @@ export class FooterSegmentOutlet {
   }
 }
 
+/**
+ * Strip terminal control sequences from plugin-supplied text. The public
+ * contract (plan §19 item 10) forbids raw ANSI/OSC/DCS/cursor movement/
+ * raw-mode escapes from reaching the terminal; `StyledSpan.text` is the
+ * ONLY text channel a plugin controls, so this choke point enforces the
+ * rule at render time:
+ *
+ * - C0 controls (except tab/newline/CR which are legal layout whitespace,
+ *   and except ESC 0x1b which the ESC branch below handles as a sequence
+ *   start);
+ * - 8-bit CSI (0x9b) sequences and the remaining C1 controls (0x80-0x9f);
+ * - ESC-led sequences: CSI `ESC [ params intermediate final`, OSC `ESC ]`
+ *   to ST/BEL, DCS/PM/APC `ESC P/^/_/X` to ST/BEL. A lone ESC (or a
+ *   truncated sequence) is consumed as JUST the ESC byte — never the next
+ *   character — so a bare ESC can never leave an escape byte in the output
+ *   and never eats a visible character.
+ *
+ * The host's OWN styling (applied AFTER this pass) is the only ANSI in the
+ * output.
+ */
+const CONTROL_SEQUENCE = /[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]|\u009b[0-?]*[ -\/]*[@-~]|[\u0080-\u009f]|\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[P^_X][^\x07\x1b]*(?:\x07|\x1b\\))?/g
+
+export function sanitizeSpanText(text: string): string {
+  return text.replace(CONTROL_SEQUENCE, '')
+}
+
 /** Render styled spans through the host's semantic color helpers. Plugins
- * provide tokens only — the host owns ANSI compilation. */
+ * provide tokens only — the host owns ANSI compilation. Plugin-supplied
+ * text is sanitized at this single choke point (no ESC/CSI/OSC can reach
+ * the terminal). */
 export function renderSpans(spans: readonly StyledSpan[]): string {
   return spans.map(span => {
-    const base = styleTone(span.text, span.tone)
+    const text = sanitizeSpanText(span.text)
+    const base = styleTone(text, span.tone)
     switch (span.emphasis) {
-      case 'strong': return color.textStrong(span.text)
-      case 'dim': return color.textDim(span.text)
-      case 'italic': return color.italic(span.text)
+      case 'strong': return color.textStrong(text)
+      case 'dim': return color.textDim(text)
+      case 'italic': return color.italic(text)
       default: return base
     }
   }).join('')

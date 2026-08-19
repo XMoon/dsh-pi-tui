@@ -411,3 +411,39 @@ test('a footer segment with minWidth is never truncated below it (round-3 findin
   assert.ok(!text2.includes('x'), `a minWidth segment must be dropped, never truncated:\n${text2}`)
   assert.ok(visibleWidth(text2) <= 20, `footer must fit the budget:\n${text2}`)
 })
+
+test('chrome slots strip terminal control sequences from plugin text (plan §19 item 10)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  // Hostile payloads in every chrome slot: badge text, dock spans, footer
+  // spans, and widget spans. The choke points (styleBadge / renderSpans)
+  // must leave NO ESC byte in the baked chrome text.
+  const payloads = ['\x1b[2J', '\x1b]0;x\x07', '\x1b[?1049h', '\x1b[1;5H']
+  for (let index = 0; index < payloads.length; index++) {
+    const payload = payloads[index]
+    ledger.register('chrome.header.badge', { id: `b${index}` }, { text: `pre${payload}post` }, 'p1')
+    ledger.register('input.dock.item', { id: `d${index}` }, {
+      label: [{ text: `pre${payload}post` }],
+    }, 'p1')
+    ledger.register('chrome.footer.status', { id: `f${index}` }, {
+      spans: [{ text: `pre${payload}post` }],
+    }, 'p1')
+    ledger.register('input.widget.above', { id: `w${index}` }, {
+      view: { kind: 'text', spans: [{ text: `pre${payload}post` }] },
+    }, 'p1')
+  }
+  host.refreshOutlets()
+  await settle()
+  const combined = host.headerBadgeText() + host.dockText() + host.footerText() + host.widgetsAboveText()
+  // The host's own SGR styling is the only allowed ANSI.
+  const withoutSgr = combined.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(!withoutSgr.includes('\x1b'), `chrome text leaked an ESC byte:\n${JSON.stringify(withoutSgr)}`)
+  assert.ok(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(withoutSgr),
+    `chrome text leaked a control byte:\n${JSON.stringify(withoutSgr)}`)
+  // Visible content survives.
+  assert.ok(combined.includes('pre'), 'prefix content must survive sanitization')
+  assert.ok(combined.includes('post'), 'suffix content must survive sanitization')
+  app.stop()
+})
