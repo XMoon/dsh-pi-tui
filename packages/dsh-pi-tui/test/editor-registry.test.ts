@@ -405,24 +405,30 @@ test('TuiApp: a compile throw inside invalidate() is isolated — the host keeps
   const { EditorRegistry } = await import('../src/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
+  const notices: string[] = []
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
   await vt.waitForRender()
   app.setDraft('before')
+  let writes = 0
   let explode = false
+  let text = 'before'
   registry.register({
     id: 'exploding-view', priority: 0,
     create: (host: import('../src/extension/public-types.ts').EditorHost) => ({
       get component(): import('../src/extension/public-types.ts').ExtensionView {
         if (explode) throw new Error('view compile boom')
-        return { kind: 'text', spans: [{ text: 'before' }] }
+        return { kind: 'text', spans: [{ text }] }
       },
-      getText: () => 'before',
-      setText: (text) => {
-        void text
-        // The plugin's state changed; the host invalidate recompiles and
+      getText: () => text,
+      setText: (next) => {
+        text = next
+        // The FIRST write is the handoff transfer (must succeed — the
+        // view compiles with explode still false). The SECOND write is a
+        // POST-MOUNT state change: the host invalidate recompiles and
         // THROWS — the exception must not escape into the host path.
-        explode = true
+        writes += 1
+        if (writes >= 2) explode = true
         host.invalidate()
       },
       dispose: () => {},
@@ -430,13 +436,25 @@ test('TuiApp: a compile throw inside invalidate() is isolated — the host keeps
   }, 'plugin')
   app.reconcileEditorNow()
   await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
   // A post-mount setText triggers the throwing recompile: the host must
-  // survive (no unhandled exception, the previous view stays).
+  // survive (no unhandled exception escaping the input path), the failure
+  // is surfaced through the host notify path, and the seat's state stays
+  // consistent.
   app.setDraft('after')
   await vt.waitForRender()
-  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
   const screen = vt.getViewport().map(strip).join('\n')
-  assert.ok(app.getDraft() === 'after', 'the host editor state stays consistent')
-  void screen
+  assert.equal(app.getDraft(), 'after', 'the host editor state stays consistent')
+  // The notifyError → notify path surfaced the failure (round-4
+  // follow-up 1): the notice line carries 'editor failed'.
+  assert.ok(screen.includes('editor failed'), `the failure must surface via notify:\n${screen}`)
+  // The OLD compiled component is still mounted (no swap happened — the
+  // throwing recompile kept the previous component): the seat's component
+  // renders the PRE-failure view.
+  const seat = app.seatEditorForTest()
+  const compiled = seat.component.render(80).join('\n')
+  assert.ok(compiled.includes('before'), 'the previous compiled view must be retained (no swap)')
+  // No infinite reconcile/render loop: one more settle completes.
+  await vt.waitForRender()
   app.stop()
 })
