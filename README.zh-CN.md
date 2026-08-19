@@ -220,6 +220,13 @@ service.register<InputWidget>('input.widget.below', {
   dispose 会关闭所有仍在持有的租约),close() 幂等,hide()/show() 切换
   可见性而不关闭。插件永远不能挂载原始组件或抢焦点——终端和 overlay
   栈由 host 拥有。
+M10 验收插件(计划 §15):仓库附带一个 vim-mode fixture
+(`test/fixtures/vim-plugin/`),用**完整**公开 SDK 练习——编辑器替换、
+keybinding、widget、command、settings、tool renderer、managed overlay——
+只导入 `@xmoon76/dsh-pi-tui/extensions`。它的 CI 门禁禁止
+`@xmoon76/pi-tui`、`src/tui-app` 和仓库相对内部路径:如果该插件需要
+私有导入,说明 SDK 缺 capability(没有 `unsafeGetTuiApp()` 逃生舱)。
+
 - `registerEditor(contribution)` — 编辑器 SDK(M9,计划 §14):按 priority
   单选(平局是显式错误);winner 通过 host 的**原子交接**占据编辑器座席
   (create → 转移 draft/cursor → mount → focus → dispose 旧编辑器)。

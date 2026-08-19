@@ -239,6 +239,14 @@ Since M5 the extension surface also covers registries (plan §10):
   toggle visibility without closing. A plugin can never mount a raw
   component or steal focus — the host owns the terminal and the overlay
   stack.
+The M10 acceptance plugin (plan §15): the repo ships a vim-mode fixture
+(`test/fixtures/vim-plugin/`) that exercises the FULL public SDK — editor
+replacement, keybindings, widgets, commands, settings, tool renderers and
+managed overlays — importing ONLY `@xmoon76/dsh-pi-tui/extensions`. Its
+CI gate forbids `@xmoon76/pi-tui`, `src/tui-app` and repository-relative
+internal paths: if the plugin ever needs a private import, the SDK is
+missing a capability (there is no `unsafeGetTuiApp()` escape hatch).
+
 - `registerEditor(contribution)` — the EDITOR SDK (M9, plan §14):
   single-winner by priority (a tie is an explicit error); the winner
   occupies the editor seat through the host's ATOMIC handoff (create →
