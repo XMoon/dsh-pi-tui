@@ -143,6 +143,7 @@ function setup(options: { busyEnter?: string } = {}) {
     openJobView: () => {},
     enterView: async () => {},
     requestExit: () => {},
+    extensions: undefined,
     exit: () => {},
   }
   registerTuiCommands(runner)

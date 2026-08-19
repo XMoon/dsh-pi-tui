@@ -130,6 +130,7 @@ function stubRunner(options: {
     openJobView: () => {},
     enterView: async () => {},
     requestExit: () => {},
+    extensions: undefined,
     exit: () => {},
   }
   return { runner, pending, refreshes }

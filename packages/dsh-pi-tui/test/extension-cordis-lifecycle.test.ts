@@ -524,3 +524,76 @@ test('a duplicate subscribeState listener is rejected loudly (round-4 finding)',
     }
   }
 })
+
+// ── M5: fiber-bound registries (commands/themes/settings/autocomplete/ ─────
+// ── keybindings) ───────────────────────────────────────────────────────────
+
+test('M5: command/theme/setting registrations are fiber-bound (owner unload cleans up)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      registerCommand(contribution: {
+        id: string
+        name: string
+        description: string
+        execution: 'local' | 'submission'
+      }): { id: string; dispose(): void }
+      registerTheme(contribution: { id: string; name: string; palette: object }): { id: string; dispose(): void }
+      registerSetting(contribution: { id: string; label: string; currentValue: string }): { id: string; dispose(): void }
+      registerAutocomplete(contribution: { id: string; provider: object }): { id: string; dispose(): void }
+      registerKeybinding(contribution: {
+        id: string
+        key: { key: string; ctrl: boolean; alt: boolean; shift: boolean; super: boolean }
+        action: string
+      }): { id: string; dispose(): void }
+      commands: { isLocal(name: string, statics: ReadonlySet<string>): boolean; hasAny(): boolean }
+      themes: { names(): string[]; hasAny(): boolean }
+      settings: { rows(): unknown[]; hasAny(): boolean }
+      autocomplete: { hasAny(): boolean }
+      keybindings: { hasAny(): boolean }
+    }
+    assert.ok(service !== undefined)
+    // Plugin A registers one contribution in every M5 registry.
+    const disposer = await mount(ctx, (pluginCtx) => {
+      const svc = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof service
+      svc.registerCommand({ id: 'cmd-a', name: 'acmd', description: 'a', execution: 'local' })
+      svc.registerTheme({ id: 'theme-a', name: 'A Theme', palette: { text: '#fff' } })
+      svc.registerSetting({ id: 'set-a', label: 'A Setting', currentValue: 'v' })
+      svc.registerAutocomplete({ id: 'auto-a', provider: { getSuggestions: async () => null } })
+      svc.registerKeybinding({
+        id: 'key-a',
+        key: { key: 'k', ctrl: false, alt: false, shift: false, super: false },
+        action: 'open-search',
+      })
+    })
+    await settle()
+    assert.equal(service.commands.isLocal('acmd', new Set()), true)
+    assert.deepEqual(service.themes.names(), ['A Theme'])
+    assert.equal(service.settings.rows().length, 1)
+    assert.equal(service.commands.hasAny(), true)
+    assert.equal(service.themes.hasAny(), true)
+    assert.equal(service.settings.hasAny(), true)
+    assert.equal(service.autocomplete.hasAny(), true)
+    assert.equal(service.keybindings.hasAny(), true)
+    // Unload plugin A: every contribution disappears.
+    await disposer()
+    await settle()
+    assert.equal(service.commands.isLocal('acmd', new Set()), false)
+    assert.deepEqual(service.themes.names(), [])
+    assert.equal(service.settings.rows().length, 0)
+    assert.equal(service.commands.hasAny(), false)
+    assert.equal(service.themes.hasAny(), false)
+    assert.equal(service.settings.hasAny(), false)
+    assert.equal(service.autocomplete.hasAny(), false)
+    assert.equal(service.keybindings.hasAny(), false)
+    await host()
+    await startup()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})

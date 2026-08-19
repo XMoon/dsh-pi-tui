@@ -13,6 +13,63 @@
  * @module @xmoon76/dsh-pi-tui/extensions
  */
 
+
+/** The semantic color palette shape a theme contribution may supply. The
+ * host maps it onto its own palette at apply time; a plugin supplies hex
+ * colours only (never ANSI, never terminal escapes). */
+export interface TuiColorPalette {
+  primary: string
+  accent: string
+  text: string
+  textStrong: string
+  textDim: string
+  textMuted: string
+  border: string
+  borderFocus: string
+  success: string
+  warning: string
+  error: string
+  diffAdded: string
+  diffRemoved: string
+  diffAddedStrong: string
+  diffRemovedStrong: string
+  diffGutter: string
+  diffMeta: string
+  roleUser: string
+  shellMode: string
+}
+
+/** One autocomplete suggestion item (structural — the host maps it onto
+ * its editor's item shape). */
+export interface TuiAutocompleteItem {
+  value: string
+  label: string
+  description?: string
+}
+
+/** One suggestion batch from a plugin provider. */
+export interface TuiAutocompleteSuggestions {
+  items: readonly TuiAutocompleteItem[]
+  prefix: string
+}
+
+/** The editor's suggestion query a plugin provider answers. */
+export interface TuiAutocompleteQuery {
+  lines: readonly string[]
+  cursorLine: number
+  cursorCol: number
+  signal: AbortSignal
+  force?: boolean
+}
+
+/**
+ * A plugin autocomplete provider (structural — NEVER the fork's interface,
+ * so the public declarations stay free of private pi-tui types).
+ */
+export interface TuiAutocompleteProvider {
+  getSuggestions(query: TuiAutocompleteQuery): Promise<TuiAutocompleteSuggestions | null>
+}
+
 /** API version of the extension surface (bumped only on breaking changes). */
 export const API_VERSION = 1 as const
 
@@ -284,4 +341,233 @@ export interface InputWidget {
   readonly importance?: number
   /** Preferred max rows (budget); the host may grant fewer. */
   readonly maxHeight?: number
+}
+
+// ── M5: commands / themes / autocomplete / settings / keybindings ──────────
+
+/** One command contribution (plan §10): ownership metadata over an
+ * existing command. The bridge does NOT execute — the commands service
+ * does. `/name args...` ALWAYS keeps `invocation.rawInput` verbatim. */
+export interface TuiCommandContribution {
+  readonly id: string
+  /** The slash-command name WITHOUT the leading slash. */
+  readonly name: string
+  readonly description: string
+  /** Execution ownership: local (never steered) vs submission (session
+   * policy). Busy Enter classifies by the EFFECTIVE ownership. */
+  readonly execution: 'local' | 'submission'
+  /** Whether the command may run without a live session. */
+  readonly sessionless?: boolean
+  /** Optional autocomplete provider for this command's arguments
+   * (the structural {@link TuiAutocompleteProvider}). */
+  readonly argumentProvider?: TuiAutocompleteProvider
+  /** Optional local handler; absent = metadata-only ownership (the
+   * commands service handler runs). */
+  readonly handler?: TuiLocalCommandHandler
+}
+
+/** The local command handler signature (invocation carries the VERBATIM
+ * raw input — never re-parsed or rewritten). Returns the commands
+ * service's result shape (`{ kind: 'success' }` / `{ kind: 'error',
+ * text }`) so the runner's notify path is shared. */
+export interface TuiLocalCommandHandler {
+  (invocation: { commandId: string; rawInput: string; signal: AbortSignal }):
+    | { readonly kind: 'success'; readonly text?: string; readonly sourceEventSeq?: number }
+    | { readonly kind: 'error'; readonly text: string }
+    | Promise<{ readonly kind: 'success'; readonly text?: string; readonly sourceEventSeq?: number } | { readonly kind: 'error'; readonly text: string }>
+}
+
+/** A live handle on one command contribution. */
+export interface TuiCommandHandle {
+  readonly id: string
+  dispose(): void
+}
+
+/** The command bridge's observable snapshot. */
+export interface TuiCommandBridgeSnapshot {
+  readonly entries: readonly {
+    readonly id: string
+    readonly name: string
+    readonly description: string
+    readonly execution: 'local' | 'submission'
+    readonly sessionless: boolean
+    readonly owner: string
+  }[]
+  readonly revision: number
+}
+
+/** One registered theme contribution (M5). */
+export interface TuiThemeContribution {
+  readonly id: string
+  /** The SELECTABLE name (shown in the theme picker). */
+  readonly name: string
+  /** The semantic palette (hex colours; the host maps it at apply time). */
+  readonly palette: TuiColorPalette
+  readonly description?: string
+}
+
+/** A live handle on one theme contribution. */
+export interface TuiThemeHandle {
+  readonly id: string
+  dispose(): void
+}
+
+/** The theme registry's observable snapshot. */
+export interface TuiThemeRegistrySnapshot {
+  readonly themes: readonly {
+    readonly id: string
+    readonly name: string
+    readonly description: string | undefined
+    readonly owner: string
+  }[]
+  readonly revision: number
+}
+
+/** One registered autocomplete provider (M5). `owner` is stamped by the
+ * service (the calling fiber) — a plugin never supplies it. */
+export interface AutocompleteProviderContribution {
+  readonly id: string
+  /** The provider (the structural {@link TuiAutocompleteProvider} — never
+   * the fork's interface, so the public declarations stay free of private
+   * types). */
+  readonly provider: TuiAutocompleteProvider
+  readonly description?: string
+  readonly owner?: string
+}
+
+/** A live handle on one autocomplete provider. */
+export interface AutocompleteHandle {
+  readonly id: string
+  dispose(): void
+}
+
+/** One registered settings row (M5). */
+export interface TuiSettingContribution {
+  readonly id: string
+  readonly label: string
+  readonly description?: string
+  readonly currentValue: string
+  readonly values?: readonly string[]
+  /** Return false to keep the old value (rejection). */
+  readonly onChange?: (value: string) => boolean | void | Promise<boolean | void>
+  readonly order?: number
+}
+
+/** A live handle on one settings row. */
+export interface TuiSettingHandle {
+  readonly id: string
+  setValue(value: string): void
+  dispose(): void
+}
+
+/** The settings registry's observable snapshot. */
+export interface TuiSettingsRegistrySnapshot {
+  readonly rows: readonly {
+    readonly id: string
+    readonly label: string
+    readonly description: string | undefined
+    readonly currentValue: string
+    readonly values: readonly string[]
+    readonly order: number
+    readonly owner: string
+  }[]
+  readonly revision: number
+}
+
+/** The read-side of the command bridge a plugin may consult (M5). The
+ * concrete bridge is host-internal; this narrow surface keeps the public
+ * declarations free of internal modules. */
+export interface TuiCommandBridgeView {
+  isLocal(name: string, staticLocal: ReadonlySet<string>): boolean
+  snapshot(): TuiCommandBridgeSnapshot
+}
+
+/** The read-side of the theme registry (M5). */
+export interface TuiThemeRegistryView {
+  names(): string[]
+  paletteFor(name: string): TuiColorPalette | undefined
+  snapshot(): TuiThemeRegistrySnapshot
+}
+
+/** The read-side of the settings registry (M5). */
+export interface TuiSettingsRegistryView {
+  rows(): readonly {
+    readonly id: string
+    readonly label: string
+    readonly description: string | undefined
+    readonly currentValue: string
+    readonly values: readonly string[]
+    readonly order: number
+    readonly owner: string
+  }[]
+  apply(id: string, value: string): Promise<boolean>
+  snapshot(): TuiSettingsRegistrySnapshot
+}
+
+/** The read-side of the autocomplete registry (M5). */
+export interface TuiAutocompleteRegistryView {
+  suggest(query: TuiAutocompleteQuery, onError?: (id: string, error: unknown) => void): Promise<TuiAutocompleteSuggestions | null>
+  snapshot(): { providers: readonly AutocompleteProviderContribution[]; revision: number }
+}
+
+/** The read-side of the keybinding registry (M5). */
+export interface TuiKeybindingRegistryView {
+  actionFor(key: NormalizedKey): TuiAction | undefined
+  snapshot(): TuiKeybindingRegistrySnapshot
+}
+
+/** A normalized key identity (the host's normalization, plan §11.2). */
+export interface NormalizedKey {
+  readonly key: string
+  readonly ctrl: boolean
+  readonly alt: boolean
+  readonly shift: boolean
+  readonly super: boolean
+}
+
+/** The semantic actions a plugin may bind (plan §2.2 / §11). */
+export type TuiAction =
+  | 'submit-draft'
+  | 'queue-draft'
+  | 'steer-draft'
+  | 'cancel-activity'
+  | 'open-search'
+  | 'toggle-fullscreen'
+  | 'cycle-permission'
+
+/** One keybinding contribution (M5 metadata only; routing in M6). */
+export interface TuiKeybindingContribution {
+  readonly id: string
+  readonly key: NormalizedKey
+  readonly action: TuiAction
+  readonly description?: string
+}
+
+/** A live handle on one keybinding. */
+export interface TuiKeybindingHandle {
+  readonly id: string
+  dispose(): void
+}
+
+/** Human-readable key description (diagnostics). */
+export function describeKey(key: NormalizedKey): string {
+  const parts: string[] = []
+  if (key.ctrl) parts.push('Ctrl')
+  if (key.alt) parts.push('Alt')
+  if (key.shift) parts.push('Shift')
+  if (key.super) parts.push('Super')
+  parts.push(key.key.length === 1 ? key.key.toUpperCase() : key.key)
+  return parts.join('+')
+}
+
+/** The keybinding registry's observable snapshot. */
+export interface TuiKeybindingRegistrySnapshot {
+  readonly bindings: readonly {
+    readonly id: string
+    readonly key: NormalizedKey
+    readonly action: TuiAction
+    readonly description: string | undefined
+    readonly owner: string
+  }[]
+  readonly revision: number
 }

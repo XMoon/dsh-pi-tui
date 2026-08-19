@@ -186,6 +186,27 @@ service.register<InputWidget>('input.widget.below', {
 })
 ```
 
+Since M5 the extension surface also covers registries (plan §10):
+
+- `registerCommand(contribution)` — slash-command OWNERSHIP metadata
+  (`execution: 'local' | 'submission'`): a plugin-declared local command
+  always executes directly (never steered by the busy-Enter preference);
+  a submission command flows through the session policy. Actual execution
+  stays in the host's commands service; `/name args...` keeps
+  `rawInput` verbatim. Name conflicts are reported, never guessed.
+- `registerTheme(contribution)` — a named semantic palette selectable
+  from the /settings theme picker; the owner's unload falls back to the
+  built-in palette (a selected plugin theme never dangles).
+- `registerSetting(contribution)` — a settings row appended to the
+  /settings panel (label + current value + choices + optional rejection);
+  the host owns the panel.
+- `registerAutocomplete(contribution)` — an autocomplete provider
+  consulted after the host's own provider returns null (deterministic
+  order, per-provider isolation, latest-only commit).
+- `registerKeybinding(contribution)` — normalized-key → semantic-action
+  METADATA (routing lands with the InputRouter, M6). Reserved host
+  lifecycle keys cannot be claimed.
+
 Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
 fiber unloads (HMR, disable), regular and fullscreen both refresh, and
 `handle.invalidate()/replace()` re-render through the active screen. The

@@ -3197,9 +3197,43 @@ export class TuiApp {
    * Install slash-command + file-path autocompletion on the editor, plus
    * `@`-file mentions (fd-backed when `fdPath` is provided; a bounded
    * recursive fallback otherwise — see mentions.ts).
+   * @param extensionSuggest - M5: consulted AFTER the host provider returns
+   *   null (the plugin autocomplete chain). Receives the same editor
+   *   position; returns suggestions or null.
    */
-  setCommandCompletions(commands: readonly SlashCommand[], cwd: string, fdPath: string | null = null): void {
-    this.editor.setAutocompleteProvider(new MentionProvider([...commands], cwd, fdPath))
+  setCommandCompletions(
+    commands: readonly SlashCommand[],
+    cwd: string,
+    fdPath: string | null = null,
+    extensionSuggest?: (query: {
+      lines: readonly string[]
+      cursorLine: number
+      cursorCol: number
+      signal: AbortSignal
+      force?: boolean
+    }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
+  ): void {
+    const base = new MentionProvider([...commands], cwd, fdPath)
+    if (extensionSuggest === undefined) {
+      this.editor.setAutocompleteProvider(base)
+      return
+    }
+    // A delegating provider: the host's own completions run FIRST; the
+    // plugin chain (M5 AutocompleteRegistry) is consulted only when the
+    // host provider has nothing. applyCompletion always delegates to the
+    // host provider (the fork's completion semantics own the editor).
+    const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
+      async getSuggestions(lines, cursorLine, cursorCol, options) {
+        const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
+        if (host !== null) return host
+        return extensionSuggest({ lines, cursorLine, cursorCol, signal: options.signal, force: options.force })
+      },
+      applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
+        base.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+      shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
+        base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol),
+    }
+    this.editor.setAutocompleteProvider(delegated)
   }
 
   /**

@@ -99,6 +99,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     openJobView: () => {},
     enterView: async () => {},
     requestExit: () => {},
+    extensions: undefined,
     exit: () => {},
   }
 }

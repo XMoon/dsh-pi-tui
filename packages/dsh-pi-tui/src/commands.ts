@@ -232,6 +232,18 @@ export interface TuiCommandRunner {
   openJobView(jobId: string): void
   enterView(childId: SessionId, label?: string): Promise<void>
   exit(code: number): void
+  /**
+   * The M5 extension registries (commands/themes/settings/autocomplete/
+   * keybindings), when the extension service is mounted. Undefined
+   * degrades to the host-only surface.
+   */
+  readonly extensions: {
+    readonly commands: import('./command-bridge.ts').CommandBridge
+    readonly themes: import('./theme-registry.ts').ThemeRegistry
+    readonly settings: import('./settings-registry.ts').SettingsRegistry
+    readonly autocomplete: import('./autocomplete-registry.ts').AutocompleteRegistry
+    readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
+  } | undefined
 }
 
 /** The sentinel picker value for the "add a brand-new provider" action row. */
@@ -567,6 +579,10 @@ export function registerTuiCommands(
    */
   const installCompletions = (entries: readonly SurfaceCommandSummary[]): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
+    // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
+    // after the host's own provider returns null. The registry's suggest()
+    // handles cancellation (latest-only commit) and per-provider isolation.
+    const extensionAutocomplete = runner.extensions?.autocomplete
     app.setCommandCompletions(
       sorted.map(command => ({
         name: command.name,
@@ -575,6 +591,19 @@ export function registerTuiCommands(
       })),
       runner.sessionCwd(),
       fdPath,
+      extensionAutocomplete === undefined
+        ? undefined
+        : async (query) => {
+            const result = await extensionAutocomplete.suggest(query, (id, error) => {
+              try {
+                ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
+              } catch {
+                // The cordis logger must not block completion.
+              }
+            })
+            if (result === null) return null
+            return { items: [...result.items], prefix: result.prefix }
+          },
     )
     claims = new Set(sorted.map(command => command.name))
   }
@@ -708,7 +737,9 @@ export function registerTuiCommands(
             label: 'Theme',
             description: 'Palette: auto follows the terminal; custom from ~/.dsh-pi-tui/themes',
             currentValue: themeValue,
-            values: ['auto', 'dark', 'light', ...customThemeNames()],
+            // M5: plugin-registered themes (ThemeRegistry) join the
+            // picker's built-in auto/dark/light + custom list.
+            values: ['auto', 'dark', 'light', ...customThemeNames(), ...(runner.extensions?.themes.names() ?? [])],
           },
           {
             id: 'expand',
@@ -777,6 +808,14 @@ export function registerTuiCommands(
             description: color.textDim('The live session workspace (follows session switches)'),
             currentValue: color.textDim(runner.sessionCwd()),
           },
+          // ── M5: plugin-registered settings rows ───────────────────
+          ...(runner.extensions?.settings.rows() ?? []).map(row => ({
+            id: `ext-setting:${row.id}`,
+            label: row.label,
+            description: row.description,
+            currentValue: row.currentValue,
+            ...(row.values.length > 0 ? { values: [...row.values] } : {}),
+          })),
         ],
         (id, value) => {
           if (id === 'approval') {
@@ -792,7 +831,8 @@ export function registerTuiCommands(
               detach('permission default write', () => settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }]) as Promise<unknown>, { notify: true })
             }
           } else if (id === 'theme') {
-            if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)) {
+            if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)
+              || runner.extensions?.themes.byName(value) !== undefined) {
               lastThemeChoice = value
               if (value === 'auto') {
                 // The settled detection applies only while the preference is
@@ -809,7 +849,11 @@ export function registerTuiCommands(
                 app.applyTheme(value)
                 app.trackTerminalTheme(false)
               } else {
-                const palette = loadCustomTheme(value)
+                // M5: a plugin-registered theme applies through the host's
+                // applyPalette (the ONLY application path — the registry
+                // never applies itself). Custom files resolve as before.
+                const pluginPalette = runner.extensions?.themes.paletteFor(value)
+                const palette = pluginPalette ?? loadCustomTheme(value)
                 if (palette !== undefined) {
                   app.applyPalette(palette)
                   app.trackTerminalTheme(false)
@@ -824,6 +868,16 @@ export function registerTuiCommands(
               if (settings !== undefined) {
                 detach('settings theme write', () => settings.replace({ ...settings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` }) as Promise<unknown>, { notify: true })
               }
+            }
+          } else if (id.startsWith('ext-setting:')) {
+            // M5: a plugin-registered settings row change. The row's own
+            // onChange decides acceptance; the panel value follows the
+            // accepted value. Detached (AGENTS.md — never a bare void).
+            const extSettings = runner.extensions?.settings
+            if (extSettings !== undefined) {
+              detach('extension setting apply', () => extSettings.apply(id.slice('ext-setting:'.length), value).then(accepted => {
+                if (!accepted) app.notify('setting rejected', 'error')
+              }))
             }
           } else if (id === 'expand') {
             app.setToolOutputExpanded(value === 'expanded')

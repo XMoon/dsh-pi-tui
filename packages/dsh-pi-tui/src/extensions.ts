@@ -45,6 +45,8 @@ export type { PiTuiExtensionService } from './extension/service.ts'
 export {
   API_VERSION,
   type ActivitySnapshot,
+  type AutocompleteHandle,
+  type AutocompleteProviderContribution,
   type ContributionHealth,
   type ContributionRecord,
   type ContributionState,
@@ -55,6 +57,7 @@ export {
   type HeaderBadge,
   type InputWidget,
   type MarkdownView,
+  type NormalizedKey,
   type PiTuiApiInfo,
   type PiTuiCapability,
   type PiTuiSlotName,
@@ -69,7 +72,22 @@ export {
   type SurfaceSnapshot,
   type SurfaceStateValues,
   type TextView,
+  type TuiAction,
+  type TuiCommandContribution,
+  type TuiCommandHandle,
+  type TuiCommandBridgeSnapshot,
+  type TuiKeybindingContribution,
+  type TuiKeybindingHandle,
+  type TuiKeybindingRegistrySnapshot,
+  type TuiLocalCommandHandler,
+  type TuiSettingContribution,
+  type TuiSettingHandle,
+  type TuiSettingsRegistrySnapshot,
+  type TuiThemeContribution,
+  type TuiThemeHandle,
+  type TuiThemeRegistrySnapshot,
 } from './extension/public-types.ts'
+export { describeKey } from './extension/public-types.ts'
 
 /**
  * Provide the extension service. The Service base class registers the

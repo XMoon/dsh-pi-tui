@@ -177,6 +177,25 @@ service.register<InputWidget>('input.widget.below', {
 })
 ```
 
+自 M5 起,扩展面还覆盖注册表(计划 §10):
+
+- `registerCommand(contribution)` — 斜杠命令的**所有权**元数据
+  (`execution: 'local' | 'submission'`):插件声明的 local 命令始终直接
+  执行(永不被 busy-Enter 偏好 steer);submission 命令走会话投递策略。
+  实际执行仍在 host 的 commands 服务中;`/name args...` 保持 `rawInput`
+  原样。名称冲突被报告,绝不猜测。
+- `registerTheme(contribution)` — 一个具名语义调色板,可在 /settings
+  主题选择器中选择;owner 卸载时回退到内置调色板(选中的插件主题
+  绝不悬空)。
+- `registerSetting(contribution)` — 追加到 /settings 面板的设置行
+  (标签 + 当前值 + 选项 + 可选拒绝);面板由 host 拥有。
+- `registerAutocomplete(contribution)` — 自动补全 provider,在 host 自身
+  provider 返回 null 之后按确定性顺序咨询(逐 provider 隔离、
+  latest-only commit)。
+- `registerKeybinding(contribution)` — 归一化按键 → 语义动作的**元数据**
+  (路由随 M6 的 InputRouter 落地)。保留的 host 生命周期按键不可被
+  插件占用。
+
 生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
 regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕
 重渲染。`@xmoon76/dsh-pi-tui/builtins` 入口是仅 Loader 使用的一方贡献者

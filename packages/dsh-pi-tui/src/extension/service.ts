@@ -24,6 +24,28 @@ import { ExtensionLedger } from './internal/ledger.ts'
 import { InvalidateBatcher } from './internal/batcher.ts'
 import { isSlotName, slotSemantic } from './slot-map.ts'
 import type { PiTuiApiInfo, PiTuiCapability, PiTuiSlotName, RegistrationHandle, RegistrationSpec, SurfaceStateValues } from './public-types.ts'
+import { CommandBridge } from '../command-bridge.ts'
+import { ThemeRegistry } from '../theme-registry.ts'
+import { AutocompleteRegistry } from '../autocomplete-registry.ts'
+import { SettingsRegistry } from '../settings-registry.ts'
+import { KeybindingRegistry } from '../keybinding-registry.ts'
+import type {
+  AutocompleteHandle,
+  AutocompleteProviderContribution,
+  TuiAutocompleteRegistryView,
+  TuiCommandBridgeView,
+  TuiCommandContribution,
+  TuiCommandHandle,
+  TuiKeybindingContribution,
+  TuiKeybindingHandle,
+  TuiKeybindingRegistryView,
+  TuiSettingContribution,
+  TuiSettingHandle,
+  TuiSettingsRegistryView,
+  TuiThemeContribution,
+  TuiThemeHandle,
+  TuiThemeRegistryView,
+} from './public-types.ts'
 
 /** The service name plugins inject (`piTuiExtensions` in cordis.patch.yml). */
 export const PI_TUI_EXTENSIONS_SERVICE = 'piTuiExtensions'
@@ -49,6 +71,49 @@ export interface PiTuiExtensionService {
    * @param listener - receives the immutable snapshot values.
    */
   subscribeState(listener: (state: SurfaceStateValues) => void): () => void
+  /**
+   * Register a TUI command contribution (M5): execution ownership metadata
+   * over an existing command. The bridge does NOT execute — actual
+   * execution stays in the commands service. Owned by the calling fiber.
+   * @param contribution - the command contribution.
+   */
+  registerCommand(contribution: TuiCommandContribution): TuiCommandHandle
+  /**
+   * Register a named theme palette (M5): selectable from the host's theme
+   * picker; owner unload removes it (a selected plugin theme falls back to
+   * the built-in palette). Owned by the calling fiber.
+   * @param contribution - the theme contribution.
+   */
+  registerTheme(contribution: TuiThemeContribution): TuiThemeHandle
+  /**
+   * Register an autocomplete provider (M5): consulted after the host's own
+   * provider returns null, in registration order. Owned by the calling
+   * fiber.
+   * @param contribution - the provider contribution.
+   */
+  registerAutocomplete(contribution: AutocompleteProviderContribution): AutocompleteHandle
+  /**
+   * Register a settings row (M5): appended to the host's /settings panel.
+   * Owned by the calling fiber.
+   * @param contribution - the row contribution.
+   */
+  registerSetting(contribution: TuiSettingContribution): TuiSettingHandle
+  /**
+   * Register a keybinding (M5, metadata only): normalized key → semantic
+   * action. Routing is Host-owned (the InputRouter lands in M6); until
+   * then the binding is recorded and reported. Reserved host keys are
+   * rejected. Owned by the calling fiber.
+   * @param contribution - the binding contribution.
+   */
+  registerKeybinding(contribution: TuiKeybindingContribution): TuiKeybindingHandle
+  /** M5 registries, exposed for the runner's dispatch/pickers (narrow
+   * read-side views — the concrete classes are host-internal, so the
+   * public declarations stay free of internal modules). */
+  readonly commands: TuiCommandBridgeView
+  readonly themes: TuiThemeRegistryView
+  readonly autocomplete: TuiAutocompleteRegistryView
+  readonly settings: TuiSettingsRegistryView
+  readonly keybindings: TuiKeybindingRegistryView
 }
 
 /**
@@ -70,6 +135,13 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   private readonly ledger: ExtensionLedger
   private readonly batcher: InvalidateBatcher
   private readonly hostVersion: string
+  /** M5 registries (command/themes/autocomplete/settings/keybindings).
+   * Provided by the host; the runner wires them into dispatch/pickers. */
+  readonly commands: CommandBridge
+  readonly themes: ThemeRegistry
+  readonly autocomplete: AutocompleteRegistry
+  readonly settings: SettingsRegistry
+  readonly keybindings: KeybindingRegistry
   /** The attached SurfaceHost's state bridge, wired by the runner (M3). */
   private stateBridge: {
     subscribe(listener: (state: SurfaceStateValues) => void): () => void
@@ -93,6 +165,11 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.hostVersion = hostVersion
     this.batcher = new InvalidateBatcher({ requestRender })
     this.ledger = new ExtensionLedger(() => this.batcher.invalidate())
+    this.commands = new CommandBridge(() => this.batcher.invalidate())
+    this.themes = new ThemeRegistry(() => this.batcher.invalidate())
+    this.autocomplete = new AutocompleteRegistry(() => this.batcher.invalidate())
+    this.settings = new SettingsRegistry(() => this.batcher.invalidate())
+    this.keybindings = new KeybindingRegistry(() => this.batcher.invalidate())
   }
 
   api(): PiTuiApiInfo {
@@ -344,6 +421,145 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   slotSemantics(slot: string): string | undefined {
     if (!isSlotName(slot)) return undefined
     return slotSemantic(slot)
+  }
+
+  /**
+   * Register a command contribution (M5). Fiber-bound: the calling
+   * fiber's unload disposes the contribution. A name conflict returns an
+   * outcome (never a silent override); a stale fiber (INACTIVE_EFFECT)
+   * rolls the registration back.
+   */
+  registerCommand(contribution: TuiCommandContribution): TuiCommandHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const outcome = this.commands.register(contribution, owner)
+    if (outcome.kind === 'conflict') {
+      throw new Error(
+        `command contribution "${contribution.name}" conflicts with owner "${outcome.existingOwner}" — resolve the conflict before registering`,
+      )
+    }
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        outcome.handle.dispose()
+      }, 'piTuiExtensions.registerCommand()')
+    } catch (error) {
+      outcome.handle.dispose()
+      throw error
+    }
+    return {
+      id: outcome.handle.id,
+      dispose: () => {
+        outcome.handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /**
+   * Register a theme (M5). Fiber-bound; owner unload removes the theme
+   * (a selected plugin theme falls back to the built-in palette).
+   */
+  registerTheme(contribution: TuiThemeContribution): TuiThemeHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.themes.register(contribution, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.registerTheme()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /**
+   * Register an autocomplete provider (M5). Fiber-bound; owner unload
+   * removes the provider from the suggestion chain.
+   */
+  registerAutocomplete(contribution: AutocompleteProviderContribution): AutocompleteHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.autocomplete.register(contribution, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.registerAutocomplete()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /**
+   * Register a settings row (M5). Fiber-bound; owner unload removes the
+   * row from the /settings panel.
+   */
+  registerSetting(contribution: TuiSettingContribution): TuiSettingHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.settings.register(contribution, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.registerSetting()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      setValue: (value: string) => handle.setValue(value),
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /**
+   * Register a keybinding (M5, metadata only — routing lands in M6).
+   * Fiber-bound; owner unload removes the binding. Reserved host keys are
+   * rejected.
+   */
+  registerKeybinding(contribution: TuiKeybindingContribution): TuiKeybindingHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.keybindings.register(contribution, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.registerKeybinding()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
   }
 
   /** The ledger behind the service (SurfaceHost access in M2). */

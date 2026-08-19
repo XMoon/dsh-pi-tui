@@ -80,6 +80,7 @@ function stubRunner(
     openJobView: () => {},
     enterView: async () => {},
     requestExit: () => {},
+    extensions: undefined,
     exit: () => {},
   }
 }

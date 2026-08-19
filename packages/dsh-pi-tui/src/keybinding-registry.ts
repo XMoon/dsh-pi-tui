@@ -1,0 +1,165 @@
+/**
+ * The keybinding registry (M5, plan §10 item 5): plugin keybinding
+ * METADATA only — the actual routing is Host-owned (the InputRouter, M6).
+ * A plugin declares a normalized key + a semantic ACTION; the host maps
+ * actions to its own execution paths. The registry stores the declared
+ * bindings; the InputRouter (M6) resolves them against the fixed
+ * precedence ladder.
+ *
+ * Contract (plan §11):
+ * - keys are NORMALIZED (the host's key identity — never raw escape
+ *   sequences; a plugin can never interpret terminal bytes);
+ * - actions are SEMANTIC (the plan's action list: submit-draft,
+ *   queue-draft, steer-draft, cancel-activity, open-search,
+ *   toggle-fullscreen, cycle-permission, ...) — the host executes;
+ * - reserved Host lifecycle keys cannot be claimed by a plugin (the
+ *   registry REJECTS a reserved key loudly);
+ * - unload removes the bindings (fiber-bound);
+ * - duplicates are an explicit conflict error.
+ * @module @xmoon76/dsh-pi-tui/keybinding-registry
+ */
+
+import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
+
+
+
+
+
+
+
+
+
+
+
+/** Internal registration record. */
+interface BindingRecord {
+  readonly id: string
+  readonly key: NormalizedKey
+  readonly action: TuiAction
+  readonly description: string | undefined
+  readonly owner: string
+  disposed: boolean
+}
+
+/**
+ * The keys the HOST reserves for its own lifecycle: a plugin can never
+ * claim them (plan §11.3 — reserved lifecycle key cannot be preempted).
+ */
+const RESERVED_KEYS: readonly NormalizedKey[] = [
+  { key: 'c', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+C exit
+  { key: 'd', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+D exit
+  { key: 's', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+S steer all
+  { key: 'f', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+F fullscreen
+  { key: 'o', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+O expand
+  { key: 't', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+T todo panel
+  { key: 'enter', ctrl: false, alt: false, shift: false, super: false }, // Enter submit
+  { key: 'escape', ctrl: false, alt: false, shift: false, super: false }, // Esc cancel
+]
+
+function keyEquals(left: NormalizedKey, right: NormalizedKey): boolean {
+  return left.key === right.key && left.ctrl === right.ctrl && left.alt === right.alt
+    && left.shift === right.shift && left.super === right.super
+}
+
+/**
+ * The keybinding registry (metadata only until the InputRouter lands in
+ * M6). One instance backs the runner; the extension service exposes
+ * registration; the InputRouter consults {@link actionFor}.
+ */
+export class KeybindingRegistry {
+  private readonly records = new Map<string, BindingRecord>()
+  private revision = 0
+  private readonly onInvalidate: () => void
+
+  constructor(onInvalidate: () => void = () => {}) {
+    this.onInvalidate = onInvalidate
+  }
+
+  /**
+   * Register one binding. A duplicate id is an error; a RESERVED host key
+   * is rejected loudly (plan §11.3); a duplicate (key) is a conflict error.
+   * @param contribution - the binding.
+   * @param owner - the Cordis fiber name.
+   */
+  register(contribution: TuiKeybindingContribution, owner: string): TuiKeybindingHandle {
+    if (this.records.has(contribution.id)) {
+      throw new Error(`duplicate keybinding id "${contribution.id}"`)
+    }
+    if (contribution.key.key === '') throw new Error('keybinding key must not be empty')
+    if (RESERVED_KEYS.some(reserved => keyEquals(reserved, contribution.key))) {
+      throw new Error(
+        `keybinding for "${describeKey(contribution.key)}" is reserved by the host and cannot be claimed by a plugin`,
+      )
+    }
+    for (const record of this.records.values()) {
+      if (record.disposed) continue
+      if (keyEquals(record.key, contribution.key)) {
+        throw new Error(`duplicate keybinding for "${describeKey(contribution.key)}" (owner "${record.owner}")`)
+      }
+    }
+    this.records.set(contribution.id, {
+      id: contribution.id,
+      key: contribution.key,
+      action: contribution.action,
+      description: contribution.description,
+      owner,
+      disposed: false,
+    })
+    this.revision += 1
+    this.onInvalidate()
+    return {
+      id: contribution.id,
+      dispose: () => this.dispose(contribution.id),
+    }
+  }
+
+  /** Remove one binding by id (idempotent). */
+  dispose(id: string): void {
+    const record = this.records.get(id)
+    if (record === undefined || record.disposed) return
+    record.disposed = true
+    this.records.delete(id)
+    this.revision += 1
+    this.onInvalidate()
+  }
+
+  /** Dispose every binding owned by one fiber (owner unload). */
+  disposeOwner(owner: string): void {
+    for (const [id, record] of [...this.records]) {
+      if (record.owner === owner) this.dispose(id)
+    }
+  }
+
+  /** The action bound to one normalized key, or undefined. */
+  actionFor(key: NormalizedKey): TuiAction | undefined {
+    for (const record of this.records.values()) {
+      if (record.disposed) continue
+      if (keyEquals(record.key, key)) return record.action
+    }
+    return undefined
+  }
+
+  /** An immutable snapshot (diagnostics + /status). */
+  snapshot(): TuiKeybindingRegistrySnapshot {
+    const bindings = [...this.records.values()]
+      .filter(record => !record.disposed)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(record => ({
+        id: record.id,
+        key: record.key,
+        action: record.action,
+        description: record.description,
+        owner: record.owner,
+      }))
+    return { bindings, revision: this.revision }
+  }
+
+  /** Whether any binding is live (health /status). */
+  hasAny(): boolean {
+    for (const record of this.records.values()) {
+      if (!record.disposed) return true
+    }
+    return false
+  }
+}
+

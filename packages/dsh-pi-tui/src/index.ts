@@ -197,15 +197,21 @@ export const LOCAL_COMMANDS = new Set([
  * @param running - whether the live agent reports running.
  * @param busyEnter - the persisted preference value (''/undefined = queue).
  * @param forceQueue - the Ctrl+Enter chord: always queue, never steer.
+ * @param isDynamicLocal - M5: the CommandBridge's effective-local check for
+ *   plugin-declared local commands (absent = static set only).
  */
 export function shouldSteerOnEnter(
   parsed: { name: string } | undefined,
   running: boolean,
   busyEnter: string | undefined,
   forceQueue: boolean,
+  isDynamicLocal?: (name: string) => boolean,
 ): boolean {
   if (forceQueue) return false
-  if (parsed !== undefined && LOCAL_COMMANDS.has(parsed.name)) return false
+  if (parsed !== undefined) {
+    if (LOCAL_COMMANDS.has(parsed.name)) return false
+    if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return false
+  }
   return running && busyEnter === 'steer'
 }
 
@@ -1464,6 +1470,14 @@ export function apply(ctx: Context, config: Config): void {
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
+      /** The CONCRETE registries (the runner's dispatch/pickers need the
+       * full read methods — handlerFor, isSessionless, etc. — beyond the
+       * public narrow views). */
+      readonly commands: import('./command-bridge.ts').CommandBridge
+      readonly themes: import('./theme-registry.ts').ThemeRegistry
+      readonly autocomplete: import('./autocomplete-registry.ts').AutocompleteRegistry
+      readonly settings: import('./settings-registry.ts').SettingsRegistry
+      readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
       attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
       detachSurface(surfaceId?: string): void
@@ -2053,9 +2067,14 @@ export function apply(ctx: Context, config: Config): void {
      * to the session dispatch, which reports unknown commands as messages.
      */
     const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string): void => {
+      // M5: a plugin-declared local command with a bridge handler routes
+      // to the bridge FIRST (its rawInput is passed verbatim — never
+      // re-parsed or rewritten, the skill rawInput regression gate); the
+      // commands service is the fallback for core commands.
+      const bridgeHandler = extensionService?.commands.handlerFor(parsed.name)
       const commands = ctx.get('commands')
       const definition = commands?.find(undefined as unknown as Agent, parsed.name)
-      if (commands === undefined || definition === undefined) {
+      if (bridgeHandler === undefined && (commands === undefined || definition === undefined)) {
         dispatchViaSession(text)
         return
       }
@@ -2065,11 +2084,16 @@ export function apply(ctx: Context, config: Config): void {
         rawInput: parsed.rawInput,
         signal,
       } as CommandInvocation
+      const handler = bridgeHandler ?? definition?.handler
+      if (handler === undefined) {
+        dispatchViaSession(text)
+        return
+      }
       // An owned workflow: the result decides the notify, the failure lands
       // in diagnostics — runOwned (AGENTS.md), never a bare void. The
       // handler may be a SYNC implementation, so the factory must run inside
       // runOwned (a sync throw would otherwise escape before the entry).
-      runOwned('local command', () => definition.handler(invocation), {
+      runOwned('local command', () => handler(invocation), {
         diag,
         sessionId: () => liveAgent?.session.id,
         onResult: (result) => {
@@ -2250,9 +2274,14 @@ export function apply(ctx: Context, config: Config): void {
       // A sessionless slash command runs locally BEFORE any session exists:
       // typing /exit, /settings, /help, ... must not create one (deferred
       // start). Everything else — session-backed commands, core commands
-      // like /plan, and plain prompts — creates the session lazily.
+      // like /plan, and plain prompts — creates the session lazily. M5: a
+      // plugin-declared sessionless command (CommandBridge) joins the set.
       const parsed = parseCommand(text)
-      if (parsed !== undefined && liveAgent === undefined && SESSIONLESS_COMMANDS.has(parsed.name)) {
+      const isSessionless = parsed !== undefined && (
+        SESSIONLESS_COMMANDS.has(parsed.name)
+        || (extensionService?.commands.isSessionless(parsed.name, SESSIONLESS_COMMANDS) ?? false)
+      )
+      if (parsed !== undefined && liveAgent === undefined && isSessionless) {
         runLocalCommand(parsed, text)
         return
       }
@@ -2263,9 +2292,13 @@ export function apply(ctx: Context, config: Config): void {
       // host's pre-step listener resolves into the injected skill body
       // (dsh-tool-skill) — exactly like the web's `session.prompt`, which
       // has no command-execution wire for skills. TUI-owned LOCAL commands
-      // (/status, /settings, ...) always execute directly; `!` shells and
+      // (/status, /settings, ...) always execute directly; plugin-declared
+      // local commands (M5 CommandBridge) join the same set; `!` shells and
       // sessionless commands returned before this gate.
-      if (shouldSteerOnEnter(parsed, liveAgent?.status === 'running', tuiSettings?.get().busyEnter, forceQueue)) {
+      if (shouldSteerOnEnter(parsed, liveAgent?.status === 'running', tuiSettings?.get().busyEnter, forceQueue,
+        // M5: the CommandBridge's effective-local check (dynamic plugin
+        // local commands are local while registered).
+        name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)) {
         steerNow(text, true)
         return
       }
@@ -2591,8 +2624,21 @@ export function apply(ctx: Context, config: Config): void {
       app.applyTheme(storedTheme)
       app.trackTerminalTheme(false)
     } else if (storedTheme?.startsWith('custom:')) {
-      const palette = loadCustomTheme(storedTheme.slice('custom:'.length))
-      if (palette !== undefined) app.applyPalette(palette)
+      const name = storedTheme.slice('custom:'.length)
+      // M5: a plugin-registered theme resolves through the ThemeRegistry
+      // FIRST; custom files are the fallback. A selected plugin theme whose
+      // owner unloaded resolves undefined and falls back to the built-in
+      // palette (the M5 gate: selected theme unload → built-in fallback).
+      const pluginPalette = extensionService?.themes.paletteFor(name)
+      const customPalette = loadCustomTheme(name)
+      const palette = pluginPalette ?? customPalette
+      if (palette !== undefined) {
+        app.applyPalette(palette)
+      } else {
+        // Neither a plugin theme nor a custom file: the selection is gone
+        // (unloaded plugin) — fall back to the built-in dark palette.
+        app.applyTheme('dark')
+      }
       app.trackTerminalTheme(false)
     }
     const storedFooter = tuiSettings?.get().footer
@@ -3043,6 +3089,19 @@ export function apply(ctx: Context, config: Config): void {
       agents: agents as unknown as TuiCommandRunner['agents'],
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       cwd,
+      // M5: the extension registries (commands/themes/settings/autocomplete/
+      // keybindings), when the extension service is mounted. The /settings
+      // and /theme pickers read them; undefined degrades to the host-only
+      // panel.
+      get extensions() {
+        return extensionService === undefined ? undefined : {
+          commands: extensionService.commands,
+          themes: extensionService.themes,
+          settings: extensionService.settings,
+          autocomplete: extensionService.autocomplete,
+          keybindings: extensionService.keybindings,
+        }
+      },
       /** The live session's workspace cwd (header), falling back to the
        * process cwd before any session exists; the footer/welcome/
        * completions/history follow it so a session switch updates the
