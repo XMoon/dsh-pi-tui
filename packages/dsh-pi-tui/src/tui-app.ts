@@ -80,6 +80,8 @@ import { WorkingIndicator } from './working.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
+import { InputRouter } from './input-router.ts'
+import { RESERVED_HOST_KEYS } from './keybinding-registry.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
@@ -525,6 +527,13 @@ export interface TuiAppEventsBase {
    * draft lands via {@link TuiApp.setDraft}. Optional.
    */
   onDequeue?: () => void
+  /**
+   * M6: a plugin keybinding fired (the InputRouter mapped a normalized
+   * key to a SEMANTIC action). The host executes the action through its
+   * own paths — the plugin never receives raw input or a live object.
+   * Optional.
+   */
+  onExtensionAction?: (action: import('./extension/public-types.ts').TuiAction) => void
 }
 
 /**
@@ -742,6 +751,13 @@ export interface TuiAppOptions {
    * works identically without extensions.
    */
   extensionHost?: SurfaceHost
+  /**
+   * M6: the plugin keybinding resolver (wired by the runner from the M5
+   * KeybindingRegistry). Maps raw input → a plugin SEMANTIC action via
+   * the InputRouter's normalization — plugins never see raw terminal
+   * data. Optional — the surface works identically without it.
+   */
+  pluginActionFor?: (data: string) => import('./extension/public-types.ts').TuiAction | undefined
 }
 
 /**
@@ -940,6 +956,16 @@ export class TuiApp {
   private readonly workspaceRoot: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
   private readonly present: ToolPresenter | undefined
+  /**
+   * M6: the plugin keybinding resolver. Maps a RAW input sequence to a
+   * plugin SEMANTIC action via the InputRouter's normalization — a plugin
+   * never sees raw terminal data, only the normalized key → action. Wired
+   * by the runner from the M5 KeybindingRegistry; undefined = no plugin
+   * keybindings (the surface runs exactly as before).
+   */
+  private readonly pluginActionFor: ((data: string) => import('./extension/public-types.ts').TuiAction | undefined) | undefined
+  /** M6: the host-owned input precedence router (normalization + rules). */
+  private readonly inputRouter: InputRouter
   /** The busy indicator row directly above the editor border; idle renders nothing. */
   private readonly working: WorkingIndicator
   /** The fullscreen transcript ScrollView, for click hit-testing offsets. */
@@ -1013,6 +1039,8 @@ export class TuiApp {
     this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS
     this.workspaceRoot = options.workspaceRoot
     this.present = options.present
+    this.pluginActionFor = options.pluginActionFor
+    this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
 
     this.tui = new TuiMainScreen(resizeAware)
     this.editor = new Editor(this.tui, editorTheme)
@@ -1174,6 +1202,21 @@ export class TuiApp {
   /** Whether this surface has been finally disposed (M0). */
   isDisposed(): boolean {
     return this.disposed
+  }
+
+  /**
+   * M6: normalize raw terminal input to the public key identity (the ONLY
+   * key shape a plugin ever sees). Returns undefined for protocol
+   * artifacts (Kitty press/repeat/release), paste bursts and multi-char
+   * input. The runner wires this through the KeybindingRegistry so a
+   * plugin binding resolves against normalized keys only.
+   * @param data - the raw terminal data.
+   */
+  normalizeKey(data: string): import('./extension/public-types.ts').NormalizedKey | undefined {
+    // Protocol artifacts are filtered by the router FIRST (plan §11.2):
+    // press/repeat/release events never reach plugin code.
+    if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
+    return this.inputRouter.normalize(data)
   }
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
@@ -1338,6 +1381,19 @@ export class TuiApp {
       // forward remains on the Delete key.
       this.events.onExit()
       return { consume: true }
+    }
+    // M6: non-capturing plugin keybindings, LAST in the ladder (plan
+    // §11.1). Only reachable when nothing earlier consumed the input AND
+    // no overlay owns the key AND the input is a single normalized key
+    // that is not a plain printable (typing always wins). The plugin
+    // receives ONLY the normalized key → SEMANTIC action mapping — never
+    // raw terminal data (the InputRouter owns the normalization).
+    if (this.pluginActionFor !== undefined && !this.activeScreen.hasOverlayEntries) {
+      const action = this.pluginActionFor(data)
+      if (action !== undefined) {
+        this.events.onExtensionAction?.(action)
+        return { consume: true }
+      }
     }
     return undefined
   }

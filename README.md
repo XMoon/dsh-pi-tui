@@ -204,8 +204,18 @@ Since M5 the extension surface also covers registries (plan §10):
   consulted after the host's own provider returns null (deterministic
   order, per-provider isolation, latest-only commit).
 - `registerKeybinding(contribution)` — normalized-key → semantic-action
-  METADATA (routing lands with the InputRouter, M6). Reserved host
-  lifecycle keys cannot be claimed.
+  binding, routed by the host's InputRouter (M6). A plugin declares a key
+  with the public `NormalizedKey` shape (key + ctrl/alt/shift/super) and
+  a semantic action from the host's list (`submit-draft`, `queue-draft`,
+  `steer-draft`, `cancel-activity`, `open-search`, `toggle-fullscreen`,
+  `cycle-permission`). The host normalizes ALL terminal input (Kitty
+  CSI-u, modifyOtherKeys, legacy sequences) — a plugin never sees raw
+  escape data. Reserved host lifecycle keys (Ctrl+C/D/S/F/O/T/G/J,
+  Ctrl+Enter, Enter, Esc) cannot be claimed; plain printable keys never
+  fire a binding (typing always wins); bindings are non-capturing and
+  fire LAST in the precedence ladder (after questions, approvals,
+  overlays and the editor). The action executes through the host's own
+  paths — submission/session safety is never bypassed.
 
 Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
 fiber unloads (HMR, disable), regular and fullscreen both refresh, and

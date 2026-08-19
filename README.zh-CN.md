@@ -192,9 +192,17 @@ service.register<InputWidget>('input.widget.below', {
 - `registerAutocomplete(contribution)` — 自动补全 provider,在 host 自身
   provider 返回 null 之后按确定性顺序咨询(逐 provider 隔离、
   latest-only commit)。
-- `registerKeybinding(contribution)` — 归一化按键 → 语义动作的**元数据**
-  (路由随 M6 的 InputRouter 落地)。保留的 host 生命周期按键不可被
-  插件占用。
+- `registerKeybinding(contribution)` — 归一化按键 → 语义动作的绑定,
+  由 host 的 InputRouter(M6)路由。插件用公开的 `NormalizedKey` 形状
+  (key + ctrl/alt/shift/super)声明按键和 host 动作列表中的语义动作
+  (`submit-draft`、`queue-draft`、`steer-draft`、`cancel-activity`、
+  `open-search`、`toggle-fullscreen`、`cycle-permission`)。host 统一归一化
+  所有终端输入(Kitty CSI-u、modifyOtherKeys、legacy 序列)——插件永远
+  看不到原始 escape 数据。保留的 host 生命周期按键(Ctrl+C/D/S/F/O/T/G/J、
+  Ctrl+Enter、Enter、Esc)不可被占用;纯可打印按键永不触发绑定(输入
+  永远优先);绑定是非捕获的,在优先级梯子的最后触发(question、approval、
+  overlay、编辑器之后)。动作通过 host 自己的路径执行——提交/会话安全
+  永不被绕过。
 
 生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
 regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕

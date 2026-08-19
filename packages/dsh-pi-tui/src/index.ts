@@ -2336,6 +2336,61 @@ export function apply(ctx: Context, config: Config): void {
         localShellController?.abort()
         liveAgent?.cancel({ kind: 'user' })
       },
+      // M6: execute a plugin keybinding's SEMANTIC action through the
+      // host's own paths (plan §2.2 — the host never lets a plugin bypass
+      // submission/session safety).
+      onExtensionAction: (action) => {
+        switch (action) {
+          case 'submit-draft': {
+            const text = app.getDraft()
+            if (text.trim() !== '') dispatchUserInput(text)
+            break
+          }
+          case 'queue-draft': {
+            const text = app.getDraft()
+            if (text.trim() !== '') dispatchUserInput(text, true)
+            break
+          }
+          case 'steer-draft': {
+            const text = app.getDraft()
+            app.setDraft('')
+            steerNow(text)
+            break
+          }
+          case 'cancel-activity': {
+            guardToken = undefined
+            localShellController?.abort()
+            liveAgent?.cancel({ kind: 'user' })
+            break
+          }
+          case 'open-search': {
+            app.startTranscriptSearch()
+            break
+          }
+          case 'toggle-fullscreen': {
+            app.setFullscreen(!app.isFullscreen())
+            break
+          }
+          case 'cycle-permission': {
+            if (liveAgent === undefined) break
+            const permission = ctx.get('permissionPresets')
+            if (permission === undefined) break
+            const names = permission.names
+            if (names.length === 0) break
+            const current = permission.current(liveAgent.session.events)
+            const index = names.indexOf(current)
+            const next = names[(index + 1) % names.length] ?? names[0]
+            if (next === undefined || next === current) break
+            permission.set(liveAgent.session, next)
+            app.notify(next === 'danger-full-access'
+              ? `⚠ ${next} — no approvals`
+              : `permission: ${next}`,
+            next === 'danger-full-access' ? 'error' : 'info')
+            refreshStatus()
+            break
+          }
+        }
+      },
       onSteer: (text) => steerNow(text),
       openExternalEditor: async (draft) => {
         // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
@@ -2551,6 +2606,23 @@ export function apply(ctx: Context, config: Config): void {
       present,
       workspaceRoot: cwd,
       extensionHost,
+      // M6: non-capturing plugin keybindings. The resolver reads the
+      // extensionService LAZILY (it is fetched below the app construction)
+      // and normalizes through the InputRouter — a plugin binding resolves
+      // against normalized keys only, never raw terminal data. Reserved
+      // host lifecycle keys are rejected by the registry at register time
+      // and handled by the host ladder before this stage.
+      pluginActionFor: (data) => {
+        const service = extensionService
+        const keybindings = service?.keybindings
+        if (keybindings === undefined) return undefined
+        const normalized = app.normalizeKey(data)
+        if (normalized === undefined) return undefined
+        // A plain printable key never fires a plugin binding (typing
+        // always wins — the InputRouter's printable guard).
+        if (normalized.key.length === 1 && !normalized.ctrl && !normalized.alt && !normalized.super) return undefined
+        return keybindings.actionFor(normalized)
+      },
     })
     // M3: attach the extension host to the surface chrome once per
     // generation (F-1): the header/dock/footer merge extension content, and
