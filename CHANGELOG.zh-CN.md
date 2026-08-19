@@ -7,7 +7,21 @@
 
 ## [Unreleased]
 
-(暂无变更。)
+### 修复
+
+- **扩展平台加固**(M0–M3 基础之上的多轮评审):扩展平台的第二轮评审发现
+  并关闭了生命周期与布局缺口。surface generation 现在端到端隔离——final
+  disposal 边界只冻结并移除**本代** host 的注册 handle(旧的过期代
+  `replace()`/`invalidate()` 再也无法改动新 surface 渲染的内容,新 host
+  自己的注册保持存活);同一 host 重复 `attach()` 幂等。`subscribeState()`
+  对过期 service handle 可回滚,其释放跨显式退订与 fiber 卸载幂等,重复
+  listener 会明确报错,迁移/分离时抛错的 bridge unsubscribe 不再泄漏
+  listener 或中断清理。slot 布局现在端到端遵循当前 cell 宽度: dock 行
+  截断而不是换行成额外行,footer 段在 resize 时重新折叠(通过
+  resize-aware terminal 包装),header 徽标预算按真实 host 标题/徽标计算,
+  声明了 `minWidth` 的 footer 段绝不被截断到其最小值以下。快照深度冻结
+  (包含外层 state 对象),空/视觉为空的 dock 贡献恢复健康记录,
+  `freezeLeases()` 仅在确实移除内容时触发 invalidate。
 
 ## [0.2.0] - 2026-08-19
 

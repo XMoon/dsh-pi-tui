@@ -13,7 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { Text } from '@xmoon76/pi-tui'
 import { setTheme } from '../src/theme.ts'
-import type { HeaderBadge } from '../src/extension/public-types.ts'
+import type { DockItem, HeaderBadge } from '../src/extension/public-types.ts'
 import { apply as applyExtensionHost } from '../src/extensions.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
@@ -180,6 +180,75 @@ test('dispose detaches the extension host (stale outlets are inert)', async () =
   assert.equal(host.capabilitiesOf().size, 0)
 })
 
+test('a throwing contribution recovers after a successful replace (P2: health recovery)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  // A badge whose text getter THROWS (a hostile contribution): the outlet
+  // must isolate it (P1-4) and record the failure.
+  const handle = ledger.register('chrome.header.badge', { id: 'fragile' }, {
+    get text(): string { throw new Error('badge exploded') },
+  } as unknown as HeaderBadge, 'plugin-a')
+  host.refreshOutlets()
+  await settle()
+  let health = ledger.healthSnapshot().find(record => record.id === 'fragile')
+  assert.equal(health?.state, 'failed', 'a throwing contribution must be recorded failed')
+  assert.ok(health?.lastError?.includes('badge exploded'))
+
+  // Replace with a VALID badge: the outlet renders it successfully and
+  // clears the failure (P2: recovery — the record is active again).
+  handle.replace({ text: 'recovered' })
+  host.refreshOutlets()
+  await settle()
+  health = ledger.healthSnapshot().find(record => record.id === 'fragile')
+  assert.equal(health?.state, 'active', 'a successful render must clear the failure (P2)')
+  assert.equal(health?.errorGeneration, undefined)
+  assert.equal(health?.lastError, undefined)
+  assert.ok(host.headerBadgeText().includes('recovered'), 'the recovered badge must render')
+
+  // A NEW failure after recovery starts a NEW generation.
+  handle.replace({ get text(): string { throw new Error('second boom') } } as unknown as HeaderBadge)
+  host.refreshOutlets()
+  await settle()
+  health = ledger.healthSnapshot().find(record => record.id === 'fragile')
+  assert.equal(health?.state, 'failed')
+  assert.equal(health?.errorGeneration, 2, 'a post-recovery failure must start a NEW generation (P2)')
+  app.stop()
+})
+
+test('an EMPTY dock contribution recovers health too (P2-2: abdication is a successful render)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  const handle = ledger.register('input.dock.item', { id: 'empty-rec' }, {
+    get label(): never { throw new Error('dock exploded') },
+  } as unknown as DockItem, 'plugin-a')
+  host.refreshOutlets()
+  await settle()
+  let health = ledger.healthSnapshot().find(record => record.id === 'empty-rec')
+  assert.equal(health?.state, 'failed', 'a throwing dock contribution must be recorded failed')
+
+  // Replace with a VALID EMPTY label: `{ label: [] }` is a legitimate
+  // no-display abdication — the outlet must treat it as a successful
+  // render and clear the failure (P2-2).
+  handle.replace({ label: [] } satisfies DockItem)
+  host.refreshOutlets()
+  await settle()
+  health = ledger.healthSnapshot().find(record => record.id === 'empty-rec')
+  assert.equal(health?.state, 'active', 'an empty dock render must clear the failure (P2-2)')
+  assert.equal(health?.errorGeneration, undefined)
+  assert.equal(host.dockText(), '', 'an empty dock renders nothing')
+  app.stop()
+})
+
 test('a Cordis plugin registering through the real service renders into the surface', async () => {
   const ctx = new Context()
   try {
@@ -224,6 +293,51 @@ test('a Cordis plugin registering through the real service renders into the surf
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
     }
   }
+})
+
+test('disposing an OLD host freezes ONLY its generation; a NEWER host\'s handles stay live (P1)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host: hostA } = makeApp(ledger)
+  await vt.waitForRender()
+  hostA.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 'a', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  app.refreshChrome()
+  // Generation 1 (host A) registers a badge.
+  const handleA = ledger.register('chrome.header.badge', { id: 'gen-a' }, { text: 'A' }, 'plugin-a')
+  hostA.refreshOutlets()
+  app.refreshChrome()
+  await settle()
+  assert.ok(hostA.headerBadgeText().includes('A'))
+
+  // Host B attaches (a NEW generation) and registers its own badge.
+  const hostB = new SurfaceHost(ledger, () => app.requestRender())
+  hostB.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 'b', generation: 2, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  const handleB = ledger.register('chrome.header.badge', { id: 'gen-b' }, { text: 'B' }, 'plugin-b')
+  hostB.refreshOutlets()
+  await settle()
+  assert.ok(hostB.headerBadgeText().includes('B'))
+
+  // Dispose the OLD host A: only generation ≤ A's must freeze. A's handle
+  // becomes inert AND its record is removed (it must not render as live
+  // content on B), while B's handle stays fully live.
+  hostA.dispose()
+  await settle()
+  handleA.replace({ text: 'A-mutated' } as HeaderBadge)
+  await settle()
+  assert.ok(!hostB.headerBadgeText().includes('A-mutated'), `a frozen old-generation handle must not mutate the newer surface (P1):\n${hostB.headerBadgeText()}`)
+  assert.ok(!hostB.headerBadgeText().includes('A'), `the old record must not render as live content on the newer surface (P1):\n${hostB.headerBadgeText()}`)
+  // B's own handle is STILL live (the review's gap: a global freeze would
+  // have killed it).
+  handleB.replace({ text: 'B-mutated' } as HeaderBadge)
+  hostB.refreshOutlets()
+  await settle()
+  assert.ok(hostB.headerBadgeText().includes('B-mutated'), `a NEWER generation's handle must stay live after an OLD host disposes (P1):\n${hostB.headerBadgeText()}`)
+  app.stop()
 })
 
 test('a plugin invalidate after attach reaches the screen WITHOUT a manual refreshChrome (F-17)', async () => {
@@ -356,4 +470,34 @@ test('a Cordis plugin registering BEFORE attach renders once the surface attache
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
     }
   }
+})
+
+test('a repeated attach on the SAME host is idempotent (round-3 finding 1)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  // A second attach must NOT mint a new generation: the host keeps its
+  // FIRST lease (ownGeneration unchanged), so a later dispose freezes the
+  // registrations of THAT generation.
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  const handle = ledger.register('chrome.header.badge', { id: 'repeat-attach' }, { text: 'R' }, 'plugin-a')
+  host.refreshOutlets()
+  await settle()
+  assert.ok(host.headerBadgeText().includes('R'))
+  // Dispose: the registration (created under the FIRST attach's generation)
+  // must be frozen+removed — if the second attach had minted a new
+  // generation, the dispose would use the NEW one and miss it.
+  host.dispose()
+  await settle()
+  handle.replace({ text: 'R-mutated' } as HeaderBadge)
+  await settle()
+  assert.ok(!host.headerBadgeText().includes('R-mutated'), 'a repeated attach must not leak a stale generation (round-3 finding 1)')
+  app.stop()
 })

@@ -67,7 +67,10 @@ export class SurfaceStateStore {
     this.sink = sink
     // Initial snapshots: a surface always exists (the store is created by
     // the host when the surface attaches); session/activity start empty.
-    this.values = {
+    // The OUTER state object is frozen too (P2-1: the public contract is
+    // "deeply frozen snapshots" — `store.get()` itself must be immutable,
+    // not just its slices).
+    this.values = Object.freeze({
       surface: Object.freeze({
         surfaceId: '',
         generation: 0,
@@ -94,7 +97,7 @@ export class SurfaceStateStore {
         childAgentCount: 0,
         todoCount: 0,
       }),
-    }
+    })
   }
 
   /** The current immutable snapshot values (never mutate them). */
@@ -102,10 +105,10 @@ export class SurfaceStateStore {
     return this.values
   }
 
-  /** Replace one or more slices. Every published snapshot is deep-frozen;
-   * a slice whose fields are ALL unchanged is a no-op (the old frozen
-   * object stays current, so subscribers comparing identities see no
-   * change). */
+  /** Replace one or more slices. Every published snapshot is deep-frozen —
+   * the OUTER state object as well as each slice (P2-1); a slice whose
+   * fields are ALL unchanged is a no-op (the old frozen object stays
+   * current, so subscribers comparing identities see no change). */
   set(next: Partial<SurfaceStateInputs>): void {
     let changed = false
     const merged = { ...this.values }
@@ -122,7 +125,7 @@ export class SurfaceStateStore {
       changed = true
     }
     if (!changed) return
-    this.values = merged
+    this.values = Object.freeze(merged)
     this.schedule()
   }
 

@@ -150,6 +150,81 @@ test('disposeAll clears every slot', () => {
   assert.equal(ledger.snapshot('input.dock.item').records.length, 0)
 })
 
+test('freezeLeases freezes only the disposing generation and removes its records (plan §6.2)', () => {
+  const { ledger, invalidates } = makeLedger()
+  // Attachment generation 1; a pre-attach registration belongs to it.
+  const tokenA = {}
+  const genA = ledger.markAttachment(tokenA)
+  const handleA = ledger.register('chrome.header.badge', { id: 'old' }, V('before'), 'p1')
+  // Attachment generation 2 (host B); its registrations must stay live.
+  const tokenB = {}
+  const genB = ledger.markAttachment(tokenB)
+  const handleB = ledger.register('chrome.header.badge', { id: 'new' }, V('new'), 'p2')
+  assert.ok(genB > genA)
+
+  // A's dispose (gen A) freezes + removes ONLY generations ≤ A: A's own
+  // record goes, B's record (gen B > A) stays live.
+  const before = invalidates.length
+  ledger.freezeLeases(genA)
+  // A's handle is inert: no mutation, no invalidation, no re-registration.
+  handleA.replace(V('after'))
+  handleA.invalidate()
+  handleA.dispose()
+  assert.equal(invalidates.length, before + 1, 'the freeze itself invalidates once; a frozen handle must not')
+  const snapA = new Map(ledger.snapshot<{ label: string }>('chrome.header.badge').records.map(r => [r.id, r.value.label]))
+  assert.equal(snapA.size, 1, 'only the disposing generation\'s record is removed')
+  assert.equal(snapA.get('new'), 'new', 'a NEWER generation\'s record stays (B renders it)')
+  // B's handle is STILL live (the review's gap: a global freeze would have
+  // killed it).
+  handleB.replace(V('new2'))
+  assert.equal(ledger.snapshot<{ label: string }>('chrome.header.badge').records[0]?.value.label, 'new2', 'the newer generation\'s handle stays live after an old dispose')
+
+  // B's OWN final dispose (gen B) removes the rest.
+  ledger.freezeLeases(genB)
+  handleB.replace(V('mutated'))
+  assert.equal(ledger.snapshot('chrome.header.badge').records.length, 0)
+  // A FRESH registration after the freeze is a normal live handle.
+  const fresh = ledger.register('chrome.header.badge', { id: 'post' }, V('post'), 'p3')
+  fresh.replace(V('post2'))
+  assert.equal(ledger.snapshot<{ label: string }>('chrome.header.badge').records[0]?.value.label, 'post2', 'post-freeze handles stay live')
+})
+
+test('freezeLeases from an old host never touches a newer host\'s registrations (P1)', () => {
+  const { ledger } = makeLedger()
+  // attach A (gen 1) → register → attach B (gen 2) → register → dispose A.
+  const tokenA = {}
+  const genA = ledger.markAttachment(tokenA)
+  const handleA = ledger.register('chrome.header.badge', { id: 'a' }, V('a'), 'p1')
+  const tokenB = {}
+  ledger.markAttachment(tokenB)
+  const handleB = ledger.register('chrome.header.badge', { id: 'b' }, V('b'), 'p2')
+  // A's dispose arrives late: it freezes/removes ONLY its own generation's
+  // registrations — B's record (gen 2 > 1) and B's handle stay untouched.
+  ledger.freezeLeases(genA)
+  handleA.replace(V('a-mutated'))
+  handleB.replace(V('b2'))
+  const byId = new Map(ledger.snapshot<{ label: string }>('chrome.header.badge').records.map(r => [r.id, r.value.label]))
+  assert.equal(byId.has('a'), false, 'the disposing generation\'s record is removed')
+  assert.equal(byId.get('b'), 'b2', 'the newer host\'s handle stays live after a stale dispose (P1)')
+})
+
+test('freezeLeases with nothing to freeze does NOT invalidate (round-3 finding 2)', () => {
+  const { ledger, invalidates } = makeLedger()
+  const before = invalidates.length
+  // No registration, generation 0: a no-op freeze must not refresh.
+  ledger.freezeLeases(0)
+  assert.equal(invalidates.length, before, 'a no-op freeze must not invalidate')
+  // After a real freeze removed everything, a repeated freeze is a no-op.
+  const token = {}
+  const gen = ledger.markAttachment(token)
+  ledger.register('chrome.header.badge', { id: 'x' }, V('x'), 'p1')
+  ledger.freezeLeases(gen)
+  const afterFirst = invalidates.length
+  assert.ok(afterFirst > before, 'a real freeze invalidates once')
+  ledger.freezeLeases(gen)
+  assert.equal(invalidates.length, afterFirst, 'a repeated freeze with nothing left must not invalidate again')
+})
+
 test('the revision bumps on every structural change and is stable on reads', () => {
   const { ledger } = makeLedger()
   const before = ledger.snapshot('chrome.header.badge').revision
@@ -182,6 +257,29 @@ test('health records track lifecycle states and deduplicate error generations', 
   handle.dispose()
   health = ledger.healthSnapshot()
   assert.equal(health.length, 1)
+})
+
+test('a contribution recovers after a successful render and a NEW failure starts a NEW generation (P2)', () => {
+  const { ledger } = makeLedger()
+  ledger.register('chrome.header.badge', { id: 'r' }, V('r'), 'p1')
+  // Failure 1: generation 1.
+  ledger.recordError('chrome.header.badge', 'r', 'first boom')
+  let health = ledger.healthSnapshot()
+  assert.equal(health[0]?.state, 'failed')
+  assert.equal(health[0]?.errorGeneration, 1)
+  // Recovery: the outlet's success path calls clearError — the record is
+  // active again and the error generation is dropped.
+  ledger.clearError('chrome.header.badge', 'r')
+  health = ledger.healthSnapshot()
+  assert.equal(health[0]?.state, 'active')
+  assert.equal(health[0]?.errorGeneration, undefined)
+  assert.equal(health[0]?.lastError, undefined)
+  // Failure 2: a NEW generation (the old failure must not be conflated).
+  ledger.recordError('chrome.header.badge', 'r', 'second boom')
+  health = ledger.healthSnapshot()
+  assert.equal(health[0]?.state, 'failed')
+  assert.equal(health[0]?.errorGeneration, 2, 'a post-recovery failure must start a NEW generation (P2)')
+  assert.equal(health[0]?.lastError, 'second boom')
 })
 
 test('invalidation coalesces into one batched sink call per tick', async () => {

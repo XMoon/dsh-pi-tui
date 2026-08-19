@@ -37,6 +37,14 @@ export class SurfaceHost {
   /** The capability set reported while this surface is attached. */
   private readonly capabilities = new Set<PiTuiCapability>()
   private disposed = false
+  /** THIS host's attachment lease token (P1): created at attach, captured
+   * so dispose() can ask the LEDGER whether it is still the current owner.
+   * The ledger, not the host, decides who may restore the no-op sink. */
+  private ownToken: object | undefined
+  /** THIS host's attachment generation (plan §6.2): assigned by the ledger
+   * at attach; a final dispose freezes/removes exactly the registrations
+   * of generations up to this one (never a newer host's). */
+  private ownGeneration = 0
   /** Unique identity for this surface instance (P1-2: the allocator).
    * Stable for the host's lifetime; a NEW SurfaceHost gets a NEW id. */
   readonly surfaceId: string
@@ -89,18 +97,44 @@ export class SurfaceHost {
     footer: Text
   }, surface: SurfaceSnapshot): void {
     if (this.disposed) return
+    // Idempotent attach (review round-3 finding 1): a repeated attach on
+    // the SAME host must not mint a new generation — that would leak the
+    // old attachment's generation (a later dispose would freeze only the
+    // latest one) and leave a dead sink. The first attach owns the lease
+    // for this host's lifetime; repeat calls only refresh the snapshot.
+    if (this.ownToken !== undefined) {
+      this.store.set({ surface })
+      this.refreshOutlets()
+      this.onChromeRefresh?.()
+      this.requestRender()
+      return
+    }
     // The chrome Texts are the host's own components; the outlets produce
     // TEXT (headerBadgeText/dockText/footerText) that the host merges into
     // them at render time — nothing is stored here (round-4 finding 3).
     void chrome
+    // The attachment lease (P1): one host's attach CREATES a fresh token;
+    // its dispose must not invalidate a LATER host attached to the same
+    // ledger. The token is captured before the re-sink so the ledger's
+    // sink is owned by THIS attachment from the moment it is installed.
+    const token = {}
+    this.ownToken = token
+    // The ledger assigns each attachment a generation (plan §6.2): this
+    // host records its OWN generation so a final dispose can freeze/remove
+    // exactly the registrations of generations up to its own — never a
+    // newer host's.
+    this.ownGeneration = this.ledger.markAttachment(token)
     this.store.set({ surface })
     this.capabilities.add('slot.chrome.header.badge')
     this.capabilities.add('slot.input.dock.item')
     this.capabilities.add('slot.chrome.footer.status')
     this.capabilities.add('surface.snapshot')
     // F-17: every ledger content change re-bakes the outlets and repaints,
-    // coalesced through the host's batcher (one flush per tick).
+    // coalesced through the host's batcher (one flush per tick). The sink
+    // checks THIS host's own token: a stale host whose sink was replaced
+    // by a newer attachment must not flush its dead batcher.
     this.ledger.setInvalidateSink(() => {
+      if (this.disposed || this.ownToken !== token) return
       this.invalidateBatcher.invalidate()
     })
     this.refreshOutlets()
@@ -141,14 +175,49 @@ export class SurfaceHost {
   /** Re-render every outlet from the ledger + the host chrome. The host
    * calls this after any extension invalidate burst or theme switch; the
    * theme revision rides along so a palette change re-bakes the ANSI even
-   * when the ledger revision is unchanged (F-14). */
+   * when the ledger revision is unchanged (F-14). The layout budgets are
+   * host-owned (plan §19): the header/footer get the CURRENT terminal
+   * width, the dock gets its row budget — so a plugin can never overflow
+   * the chrome. */
   refreshOutlets(): void {
     if (this.disposed) return
-    const themeRevision = this.store.get().surface.themeRevision
-    this.headerBadges.refresh(themeRevision)
-    this.dockItems.refresh(themeRevision)
-    this.footerSegments.refresh(this.footerSegmentsCompact, themeRevision)
+    const state = this.store.get()
+    const themeRevision = state.surface.themeRevision
+    // The width budget only applies once the surface has REAL geometry
+    // (attach publishes width/height); a pre-attach host (width 0) keeps
+    // the outlet defaults so early bakes are never squeezed into 1 column.
+    const width = state.surface.width > 0 ? Math.max(1, state.surface.width) : 80
+    this.headerBadges.refresh(themeRevision, this.headerBudget)
+    // The dock gets BOTH budgets (plan §19, follow-up P1): the row budget
+    // AND the current cell width, so a long label is truncated instead of
+    // wrapping into extra rows.
+    this.dockItems.refresh(themeRevision, this.dockMaxRows, width)
+    this.footerSegments.refresh(this.footerSegmentsCompact, themeRevision, width)
     this.requestRender()
+  }
+
+  /** The dock row budget (host-owned; plan §19): how many rows the dock
+   * strip may occupy before low-importance items are collapsed. */
+  private dockMaxRows = 2
+
+  /** Set the dock row budget and re-bake. */
+  setDockMaxRows(rows: number): void {
+    if (this.disposed) return
+    this.dockMaxRows = Math.max(1, Math.floor(rows))
+    const state = this.store.get().surface
+    const width = state.width > 0 ? Math.max(1, state.width) : 80
+    this.dockItems.refresh(state.themeRevision, this.dockMaxRows, width)
+  }
+
+  /** The header badge run budget (host-owned; plan §19): the cell width the
+   * badge run may occupy after the host title. */
+  private headerBudget = 80
+
+  /** Set the header badge run budget and re-bake. */
+  setHeaderBudget(width: number): void {
+    if (this.disposed) return
+    this.headerBudget = Math.max(1, Math.floor(width))
+    this.headerBadges.refresh(this.store.get().surface.themeRevision, this.headerBudget)
   }
 
   /** The footer compact flag the outlet should bake with (host sets it via
@@ -157,7 +226,12 @@ export class SurfaceHost {
   setFooterCompact(compact: boolean): void {
     if (this.disposed) return
     this.footerSegmentsCompact = compact
-    this.footerSegments.refresh(compact, this.store.get().surface.themeRevision)
+    // Pass the CURRENT width too (follow-up P1 finding 5): a compact toggle
+    // after a narrow resize must re-bake at the new width — the outlet's
+    // stored default would otherwise keep the stale budget.
+    const state = this.store.get().surface
+    const width = state.width > 0 ? Math.max(1, state.width) : 80
+    this.footerSegments.refresh(compact, state.themeRevision, width)
   }
 
   /** The header-badge content the host should append to its own title. */
@@ -205,9 +279,26 @@ export class SurfaceHost {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    // A disposed host must not receive ledger invalidations: restore the
-    // ledger's sink to a no-op (a NEW host re-sinks on its own attach).
-    this.ledger.setInvalidateSink(() => {})
+    // The attachment lease (P1): only dispose the LEDGER SINK when this
+    // host still OWNS the current attachment — a late old-generation
+    // dispose must never disable invalidation for a newer host that
+    // attached to the same ledger (the review repro: attach A, attach B,
+    // dispose A => B must keep receiving invalidations). The ledger
+    // decides ownership, not this host.
+    if (this.ownToken !== undefined) {
+      this.ledger.restoreSinkIfCurrent(this.ownToken)
+      this.ownToken = undefined
+    }
+    // Final-disposal generation lease (plan §6.2, follow-up P1): freeze
+    // and remove the registrations of generations up to THIS host's. The
+    // generation bound is the isolation — a late old-generation dispose
+    // freezes exactly its own era's handles/records and never touches a
+    // newer host's registrations (the ledger enforces this, not the host).
+    // A late old-generation replace/invalidate/dispose is a benign no-op,
+    // and the old records no longer render on a newer surface. Ordinary
+    // stop()/fullscreen round-trips never reach here — only the final
+    // surface dispose.
+    this.ledger.freezeLeases(this.ownGeneration)
     this.store.clearSubscribers()
     this.capabilities.clear()
   }

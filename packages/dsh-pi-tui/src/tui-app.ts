@@ -856,6 +856,25 @@ export class TuiApp {
   /** Whether any background task is running/stopping. */
   private tasksActive = false
 
+  /**
+   * The seat currently owning keyboard focus, derived from the ACTUAL
+   * focused capturing surface (follow-up P1): any capturing overlay — not
+   * just question/approval — reports 'overlay' while it owns the screen.
+   * `none` means nothing captures input (a stopped surface or a focus
+   * that belongs to no seat).
+   */
+  private focusSeat: 'editor' | 'overlay' | 'editor-panel' | 'none' = 'editor'
+  /** The seat value the snapshot last published (mutation guard for the
+   * microtask-coalesced publish below). */
+  private publishedFocusSeat: 'editor' | 'overlay' | 'editor-panel' | 'none' = 'editor'
+  /** A focus-seat change publishes through one coalesced microtask so a
+   * burst of mount/close calls in one tick delivers ONE snapshot update. */
+  private focusSeatPublishScheduled = false
+  /** Re-entrancy guard for syncSurfaceGeometry (review finding 4): a
+   * resize callback can fire while a width change is already being
+   * applied; the nested call is dropped. */
+  private syncingSurfaceGeometry = false
+
   /** Whether the Ctrl+O expansion master switch is on. */
   isToolOutputExpanded(): boolean {
     return this.toolOutputExpanded
@@ -953,7 +972,36 @@ export class TuiApp {
     if (events.openExternalEditor !== undefined && events.runOwned === undefined) {
       throw new Error('openExternalEditor requires runOwned (the owned-task entry — AGENTS.md)')
     }
-    this.terminal = terminal
+    // Resize-aware terminal wrapper (follow-up P1): the fork consumes the
+    // terminal's resize callback INTERNALLY (its own requestRender), so
+    // `app.requestRender` — where syncSurfaceGeometry lives — never fires
+    // on a resize. The wrapper captures the onResize hook at start() and
+    // funnels it through the app's geometry mirror, so a width change
+    // re-bakes the width-budgeted outlets (dock/footer) and re-merges the
+    // chrome immediately instead of keeping the old segment set baked at
+    // the stale width.
+    //
+    // Receiver fidelity (review finding 3): callable members are bound to
+    // the TARGET — `this.terminal` consumers (both TuiMainScreen and
+    // TuiAltScreen) and any captured-method callback must observe the
+    // implementation's own `this`, never the Proxy receiver. Getter-only
+    // members (columns/rows) read through the target.
+    const resizeAware: Terminal = new Proxy(terminal, {
+      get: (target, prop, receiver) => {
+        if (prop === 'start') {
+          return (onInput: (data: string) => void, onResize: () => void): void => {
+            target.start(onInput, () => {
+              // The app may be disposed before the terminal stops.
+              if (!this.disposed) this.syncSurfaceGeometry()
+              onResize()
+            })
+          }
+        }
+        const value = Reflect.get(target, prop, receiver)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    this.terminal = resizeAware
     this.events = events
     this.extensionHost = options.extensionHost
     // F-17: an invalidation batch re-bakes the outlets; the host then
@@ -963,7 +1011,7 @@ export class TuiApp {
     this.workspaceRoot = options.workspaceRoot
     this.present = options.present
 
-    this.tui = new TuiMainScreen(terminal)
+    this.tui = new TuiMainScreen(resizeAware)
     this.editor = new Editor(this.tui, editorTheme)
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
@@ -1315,6 +1363,9 @@ export class TuiApp {
   private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
     const handle = this.activeScreen.showOverlay(component, options)
     this.overlayHandles.add(handle)
+    // A capturing overlay owns input: report the overlay seat immediately
+    // (follow-up P1 — search/picker/settings all land here).
+    if (options?.nonCapturing !== true) this.setFocusSeat('overlay')
     const question = this.activeQuestions
     if (question !== undefined) {
       // Sweep: any tracked overlay still visible (normally none — the
@@ -1380,6 +1431,11 @@ export class TuiApp {
     }
     this.overlayHandles.delete(handle)
     handle.hide()
+    // The seat may have returned to the editor (or to another capturing
+    // overlay that was restored underneath); recompute from the live state
+    // (follow-up P1).
+    this.setFocusSeat('editor')
+    this.publishFocusSeat()
   }
 
   /**
@@ -1641,6 +1697,10 @@ export class TuiApp {
     }
     // The surface slice tracks the mode switch (plan §7.1).
     this.extensionHost?.updateSurface({ fullscreen: enabled })
+    // The screen swap re-established focus (or re-mounted the approval
+    // dialog): re-derive the seat from the live state (follow-up P1).
+    this.setFocusSeat('editor')
+    this.publishFocusSeat()
   }
 
   /**
@@ -2585,23 +2645,90 @@ export class TuiApp {
 
   /** Mirror the live terminal geometry into the extension surface slice
    * (width/height) when it changed; also refreshes focusedSeat from the
-   * current mode. Cheap: no-op unless a value differs. */
+   * current mode. Cheap: no-op unless a value differs. A WIDTH change
+   * re-bakes the width-budgeted outlets (dock/footer) and re-merges the
+   * chrome on the spot, so a resize lands on the first repaint after the
+   * event (follow-up P1: the footer must not keep the old segment set at
+   * the new width). */
   private syncSurfaceGeometry(): void {
-    const host = this.extensionHost
-    if (host === undefined) return
-    const current = host.state().surface
-    const width = this.terminal.columns
-    const height = this.terminal.rows
-    const focusedSeat = this.fullscreen !== undefined
-      ? this.activeQuestions !== undefined || this.activeApproval !== undefined
-        ? 'overlay'
-        : 'editor'
-      : this.activeQuestions !== undefined || this.activeApproval !== undefined
-        ? 'overlay'
-        : 'editor'
-    if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
-      host.updateSurface({ width, height, focusedSeat })
+    // Re-entrancy guard (review finding 4): the resize callback can fire
+    // while a width change is already being applied (a terminal that
+    // re-reports size during start/restart, or refreshChrome's own render
+    // request). A nested call would re-bake the outlets and re-merge the
+    // chrome mid-pass; the outer pass already reads the CURRENT geometry,
+    // so the nested call has nothing new to add — drop it.
+    if (this.syncingSurfaceGeometry) return
+    this.syncingSurfaceGeometry = true
+    try {
+      const host = this.extensionHost
+      if (host === undefined) return
+      const current = host.state().surface
+      const width = this.terminal.columns
+      const height = this.terminal.rows
+      // focusedSeat derives from the actual focus state (follow-up P1): the
+      // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
+      // question/approval/fullscreen entry; the requestRender mirror only
+      // publishes it here (plus the stale-frame safety net below). The LIVE
+      // focusSeat (not the microtask-published copy) is authoritative — a
+      // publish that changed nothing must still mirror the real seat.
+      this.publishFocusSeat()
+      const focusedSeat = this.focusSeat
+      if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
+        host.updateSurface({ width, height, focusedSeat })
+        if (current.width !== width) {
+          // The outlet budgets are baked from the snapshot width: re-bake
+          // the width-budgeted outlets (dock + footer) and re-merge the
+          // chrome rows NOW, so the new width takes effect immediately —
+          // waiting for the next extension invalidation would keep the old
+          // low/high segment set baked at the stale width (follow-up P1).
+          host.refreshOutlets()
+          this.refreshChrome()
+        }
+      }
+    } finally {
+      this.syncingSurfaceGeometry = false
     }
+  }
+
+  /**
+   * Recompute the focused seat from the live focus state and publish it
+   * through one coalesced microtask. The seat is derived from the ACTUAL
+   * focused capturing surface (follow-up P1): the search input, a picker,
+   * settings, the task browser, an approval dialog or a question flow all
+   * report 'overlay' while they own input — never a stale 'editor'.
+   */
+  private publishFocusSeat(): void {
+    const question = this.activeQuestions
+    if (question !== undefined) {
+      this.setFocusSeat('overlay')
+      return
+    }
+    if (this.activeApproval !== undefined) {
+      this.setFocusSeat('overlay')
+      return
+    }
+    const screen = this.activeScreen
+    if (!this.disposed && screen.hasOverlayEntries && screen.getFocusedComponent() !== null) {
+      this.setFocusSeat('overlay')
+      return
+    }
+    this.setFocusSeat('editor')
+  }
+
+  /** Set the current focus seat and schedule one coalesced snapshot publish
+   * when it changed (a burst of mount/close calls in one tick delivers ONE
+   * update — same batching contract as the state store). */
+  private setFocusSeat(seat: 'editor' | 'overlay' | 'editor-panel' | 'none'): void {
+    if (this.focusSeat === seat) return
+    this.focusSeat = seat
+    if (this.focusSeatPublishScheduled || this.disposed) return
+    this.focusSeatPublishScheduled = true
+    queueMicrotask(() => {
+      this.focusSeatPublishScheduled = false
+      if (this.disposed) return
+      this.publishedFocusSeat = this.focusSeat
+      this.extensionHost?.updateSurface({ focusedSeat: this.publishedFocusSeat })
+    })
   }
 
   /**
@@ -2732,6 +2859,10 @@ export class TuiApp {
    * extension invalidations that changed chrome content.
    */
   refreshChrome(): void {
+    // Layout budgets are host-owned (plan §19, follow-up P1): renderHeader
+    // derives the header badge budget from the CURRENT terminal width on
+    // every render, renderDock owns the dock row budget, and the footer
+    // outlet is bounded by the terminal width inside its own refresh.
     this.renderHeader()
     this.renderFooter()
     this.renderDock()
@@ -2749,15 +2880,25 @@ export class TuiApp {
    * semantic state (plan mode, title) is stored separately, so a theme
    * switch only has to re-run this. */
   private renderHeader(): void {
+    // Host-owned header budget (plan §19, follow-up P1): the badge run gets
+    // the width the HOST'S OWN header content leaves free — the fixed
+    // prefix PLUS the session/viewer title and the plan/viewer badges
+    // (a long title would otherwise consume the row and make the final
+    // header wrap even though the badge run fits its own budget). Re-derived
+    // on EVERY render so a resize or a title change re-bakes the budget.
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
     const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent('[viewing subagent]')}`
     const title = this.viewerMode !== undefined
       ? ` · ${color.textMuted(this.viewerMode.label)}`
       : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
+    const hostOwned = `🐋  dsh-pi-tui${title}${badge}${viewerBadge}`
+    // The badge run gets what the host chrome leaves; -2 reserves the
+    // trailing space + a safety cell so the composed row never wraps.
+    this.extensionHost?.setHeaderBudget(Math.max(1, this.terminal.columns - visibleWidth(hostOwned) - 2))
     // Extension header badges append after the host chrome (M2): the host
     // title stays host-owned; badges add semantics like `[plan]`.
     const extensionBadges = this.extensionHost?.headerBadgeText() ?? ''
-    this.header.setText(`🐋  dsh-pi-tui${title}${badge}${viewerBadge}${extensionBadges}`)
+    this.header.setText(`${hostOwned}${extensionBadges}`)
     this.requestRender()
   }
 
@@ -2902,6 +3043,9 @@ export class TuiApp {
     const extensionDock = this.extensionHost?.dockText() ?? ''
     const summary = this.todoSummaryText()
     const hostLine = summary === '' ? '' : color.textDim(`☑  ${summary}`)
+    // The dock strip is ONE summary row zone (label + at most one detail
+    // line): host-owned row budget (plan §19).
+    this.extensionHost?.setDockMaxRows(2)
     // With an extension host the FIRST-PARTY builtin dock item renders the
     // todo summary through the public slot API (P1-5); the host renders it
     // directly only when no host is attached (fallback, not a competing
@@ -3457,6 +3601,9 @@ export class TuiApp {
       this.activeApproval = undefined
       pending.handle?.hide()
       this.activeScreen.setFocus(this.editor)
+      // The approval dialog is gone: the seat is the editor again (or the
+      // next queued prompt's — showNextApproval re-derives it) (follow-up P1).
+      this.setFocusSeat('editor')
     } else {
       const queued = this.approvalQueue.indexOf(pending)
       if (queued !== -1) this.approvalQueue.splice(queued, 1)
@@ -3548,6 +3695,8 @@ export class TuiApp {
     this.editorSeat.addChild(frame)
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(frame)
+    // The question flow owns the seat (follow-up P1).
+    this.setFocusSeat('overlay')
     screen.requestRender()
   }
 
@@ -3609,6 +3758,8 @@ export class TuiApp {
       this.activeQuestions = next
       const screen = this.fullscreen ?? this.tui
       screen.setFocus(frame)
+      // The next queued flow owns the seat (follow-up P1).
+      this.setFocusSeat('overlay')
       screen.requestRender()
       this.settle(state, answers)
       return
@@ -3625,6 +3776,11 @@ export class TuiApp {
       if (this.overlayHandles.has(handle)) handle.setHidden(false)
     }
     state.suspendedOverlays.clear()
+    // The flow released the seat: re-derive it from the live focus AFTER
+    // the overlays were restored (a restored capturing overlay owns the
+    // seat again) (follow-up P1).
+    this.setFocusSeat('editor')
+    this.publishFocusSeat()
     screen.requestRender()
     this.settle(state, answers)
   }

@@ -68,7 +68,7 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
     await mountTree(ctx)
     const service = ctx.get('piTuiExtensions') as {
       _ledger(): import('../src/extension/internal/ledger.ts').ExtensionLedger
-      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>): void
+      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
     }
     const vt = new VirtualTerminal(80, 24)
     const host = new SurfaceHost(service._ledger(), () => app.requestRender())
@@ -85,6 +85,7 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
     service.attachSurface(
       { subscribe: (listener) => host.subscribeState(listener as never) },
       host.capabilitiesOf() as ReadonlySet<string>,
+      host.surfaceId,
     )
     // F-10 (F8): the capability set is LIVE after attachSurface.
     const apiService = service as unknown as { api(): { capabilities: Set<string> } }
@@ -140,7 +141,7 @@ test('builtins unload with their owner fiber (HMR parity)', async () => {
     const { builtinsFiber } = await mountTree(ctx)
     const service = ctx.get('piTuiExtensions') as {
       _ledger(): { snapshot(slot: string): { records: Array<{ id: string }> } }
-      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>): void
+      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
     }
     // Attach a state bridge so the builtin's subscribeState calls go live;
     // their disposers must be fiber-bound (F1 — no listener leak on
@@ -148,7 +149,7 @@ test('builtins unload with their owner fiber (HMR parity)', async () => {
     // todo-summary dock item (P1-5).
     let subscribed = 0
     const fakeBridge = { subscribe: () => { subscribed += 1; return () => { subscribed -= 1 } } }
-    service.attachSurface(fakeBridge as never, new Set())
+    service.attachSurface(fakeBridge as never, new Set(), 'fake-surface')
     assert.equal(subscribed, 2, 'both builtin state listeners must be live after attach')
     // Unload the builtins fiber: its registrations AND its state
     // subscription must disappear.

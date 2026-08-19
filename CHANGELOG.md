@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(No changes yet.)
+### Fixed
+
+- **Extension platform hardening** (review rounds over the M0–M3
+  foundation): a second review pass on the extension surface found and
+  closed lifecycle and layout gaps. Surface generations are now scoped
+  end-to-end — a final-disposal boundary freezes and removes exactly the
+  disposing generation's registration handles (a stale old-generation
+  `replace()`/`invalidate()` can no longer mutate what a newer surface
+  renders, and a newer host's own registrations stay live); repeated
+  `attach()` on the same host is idempotent. `subscribeState()` is
+  rollback-safe on stale service handles, its release is idempotent across
+  explicit unsubscribe and fiber unload, duplicate listeners are rejected
+  loudly, and a throwing bridge unsubscribe during migration/detach can no
+  longer leak a listener or abort the cleanup. Slot layout now honors the
+  current cell width end-to-end: dock lines are truncated instead of
+  wrapping into extra rows, footer segments re-fold on resize (via a
+  resize-aware terminal wrapper), header badge budgets account for the
+  real host-owned title/badges, and a footer segment declaring `minWidth`
+  is never truncated below it. Snapshots are deeply frozen (the outer
+  state object included), empty/visually-empty dock contributions recover
+  their health record, and `freezeLeases()` only invalidates when it
+  actually removed something.
 
 ## [0.2.0] - 2026-08-19
 

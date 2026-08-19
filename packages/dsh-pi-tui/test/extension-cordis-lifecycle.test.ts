@@ -247,6 +247,47 @@ test('the (slot, id) pair is free again after its owner fiber unloads', async ()
   }
 })
 
+test('a stale service detachSurface does not tear down a newer generation bridge (P1)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
+      detachSurface(surfaceId?: string): void
+      subscribeState(listener: (state: unknown) => void): () => void
+      _listenerUnsubscribersSize(): number
+    }
+
+    // Generation 1 attaches; a listener goes live on its bridge.
+    let bridge1Subscribed = 0
+    service.attachSurface({ subscribe: () => { bridge1Subscribed += 1; return () => { bridge1Subscribed -= 1 } } }, new Set(), 'gen-a')
+    assert.equal(bridge1Subscribed, 0, 'no listeners yet — the attach itself subscribes nothing')
+    const listener = (): void => {}
+    service.subscribeState(listener)
+    assert.equal(bridge1Subscribed, 1, 'the listener must subscribe to the LIVE bridge')
+
+    // Generation 2 attaches to a NEW bridge; the old detach arrives late.
+    let bridge2Subscribed = 0
+    service.attachSurface({ subscribe: () => { bridge2Subscribed += 1; return () => { bridge2Subscribed -= 1 } } }, new Set(), 'gen-b')
+    // A stale detachSurface from generation 1 must be a NO-OP: generation 2
+    // keeps its bridge and its live listener (the review's "dispose A after
+    // attach B" repro through the service bridge).
+    service.detachSurface('gen-a')
+    assert.equal(bridge2Subscribed, 1, 'the newer generation must keep its bridge after a stale detach (P1)')
+
+    // The REAL current detach tears down the newer generation.
+    service.detachSurface('gen-b')
+    assert.equal(bridge2Subscribed, 0, 'the current detach must release the live bridge (P1)')
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'no listener map entries may survive (P1)')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
 test('registering through a stale service handle after its owner fiber died throws and leaves NO ghost', async () => {
   const ctx = new Context()
   try {
@@ -278,6 +319,205 @@ test('registering through a stale service handle after its owner fiber died thro
     await settle()
     assert.equal(badges(ctx)?.['stale'], 'S2', 'the failed stale registration must not block the pair')
     await plugin2()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('a stale subscribeState throws and leaves NO live listener (rollback, follow-up P1)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+
+    // A plugin captures the service handle and subscribes WHILE ALIVE, then
+    // unloads. The bridge is live (attached below), so the subscription is
+    // a real bridge subscription.
+    let stale: { subscribeState(listener: (state: unknown) => void): () => void; _listenerUnsubscribersSize(): number } | undefined
+    const plugin = await mount(ctx, (c) => {
+      stale = c.get(PI_TUI_EXTENSIONS_SERVICE) as typeof stale
+    })
+    // Attach a fake bridge: the subscription goes live.
+    let bridgeSubscribed = 0
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
+      _listenerUnsubscribersSize(): number
+    }
+    service.attachSurface({ subscribe: () => { bridgeSubscribed += 1; return () => { bridgeSubscribed -= 1 } } }, new Set(), 'gen-1')
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'no listeners yet')
+
+    // The plugin subscribes through its own (live) handle.
+    let subscribed = false
+    const plugin2 = await mount(ctx, (c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as NonNullable<typeof stale>
+      svc.subscribeState(() => { subscribed = true })
+    })
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 1, 'the live subscription exists')
+    assert.equal(bridgeSubscribed, 1, 'the listener must subscribe to the bridge')
+
+    // The plugin unloads: its fiber disposer releases the subscription.
+    await plugin2()
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'unload must release the live subscription (F1)')
+    assert.equal(bridgeSubscribed, 0, 'the bridge subscription must be gone')
+
+    // The STALE handle's subscribeState must throw AND roll back: the
+    // bridge subscription is installed first, then the fiber effect fails —
+    // the subscription must be released again, leaving NO live listener.
+    await plugin() // unload the stale handle's owner
+    await settle()
+    assert.throws(
+      () => stale?.subscribeState(() => {}),
+      /inactive context|INACTIVE_EFFECT|already disposed/i,
+      'a stale subscribeState must fail loudly',
+    )
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'a failed stale subscribeState must leave NO listener (rollback)')
+    assert.equal(bridgeSubscribed, 0, 'a failed stale subscribeState must leave NO bridge subscription (rollback)')
+
+    // Idempotence: an EXPLICIT unsubscribe after the fiber already unloaded
+    // (the disposer ran) must not re-subscribe or re-invoke the listener.
+    // With a LIVE bridge the initial delivery is synchronous: exactly one
+    // invocation, and double release must not re-subscribe/re-invoke.
+    let bridge2Subscribed = 0
+    service.attachSurface({
+      subscribe: (listener) => {
+        bridge2Subscribed += 1
+        listener({ surface: { surfaceId: 's', generation: 1, width: 80, height: 24, fullscreen: false, focusedSeat: 'editor', themeId: 'dark', themeRevision: 0 }, session: {}, activity: {} } as never)
+        return () => { bridge2Subscribed -= 1 }
+      },
+    }, new Set(), 'gen-2')
+    let invoked = 0
+    const plugin3 = await mount(ctx, (c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as NonNullable<typeof stale>
+      const release = svc.subscribeState(() => { invoked += 1 })
+      // The fiber's disposer AND the explicit release share one teardown.
+      release()
+      release()
+    })
+    await settle()
+    assert.equal(invoked, 1, 'the initial synchronous delivery fires once; double release must not re-invoke')
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'double release must not leave a listener')
+    await plugin3()
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 0)
+    assert.equal(bridge2Subscribed, 0, 'the explicit release must unsubscribe from the bridge')
+
+    // The reverse order (review finding 9): UNLOAD the fiber first (the
+    // fiber disposer runs the shared teardown), THEN call the returned
+    // public disposer — it must be a no-op: no re-subscribe, no re-invoke,
+    // no map entry.
+    let releaseAfterUnload: (() => void) | undefined
+    let invokedAfterUnload = 0
+    const plugin4 = await mount(ctx, (c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as NonNullable<typeof stale>
+      releaseAfterUnload = svc.subscribeState(() => { invokedAfterUnload += 1 })
+    })
+    await settle()
+    assert.equal(invokedAfterUnload, 1, 'the initial synchronous delivery fires once')
+    await plugin4() // unload: the fiber disposer releases the subscription
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'unload must release the subscription')
+    assert.equal(bridge2Subscribed, 0, 'unload must unsubscribe from the bridge')
+    releaseAfterUnload?.() // the public disposer after unload: must be a no-op
+    releaseAfterUnload?.()
+    await settle()
+    assert.equal(invokedAfterUnload, 1, 'a post-unload public release must not re-invoke')
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'a post-unload public release must not leave/re-create a listener')
+    assert.equal(bridge2Subscribed, 0, 'a post-unload public release must not re-subscribe')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('a throwing bridge unsubscribe during migration/detach does not leak or abort (round-3 finding 1)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
+      detachSurface(surfaceId?: string): void
+      subscribeState(listener: (state: unknown) => void): () => void
+      _listenerUnsubscribersSize(): number
+    }
+
+    // Two listeners on bridge 1; bridge 1's unsubscribe THROWS.
+    let bridge1Subscribed = 0
+    service.attachSurface({
+      subscribe: () => { bridge1Subscribed += 1; return () => { bridge1Subscribed -= 1; throw new Error('bridge1 unsubscribe boom') } },
+    }, new Set(), 'gen-1')
+    const l1 = (): void => {}
+    const l2 = (): void => {}
+    service.subscribeState(l1)
+    service.subscribeState(l2)
+    assert.equal(service._listenerUnsubscribersSize(), 2)
+
+    // Migration to bridge 2: the throwing old unsubscribe must not abort —
+    // both listeners land on bridge 2 and can be released.
+    let bridge2Subscribed = 0
+    service.attachSurface({
+      subscribe: () => { bridge2Subscribed += 1; return () => { bridge2Subscribed -= 1 } },
+    }, new Set(), 'gen-2')
+    assert.equal(bridge2Subscribed, 2, 'both listeners must migrate to the new bridge despite the throwing old unsubscribe')
+    assert.equal(service._listenerUnsubscribersSize(), 2, 'both listeners stay tracked on the new bridge')
+
+    // Detach: the throwing bridge-2 teardown (here non-throwing) releases;
+    // simulate a throwing teardown on a fresh attach.
+    service.detachSurface('gen-2')
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'detach must clear every listener')
+    assert.equal(bridge2Subscribed, 0)
+
+    // A detach where the teardown itself throws must still clear the map.
+    service.attachSurface({
+      subscribe: () => { return () => { throw new Error('detach boom') } },
+    }, new Set(), 'gen-3')
+    service.subscribeState(l1)
+    assert.equal(service._listenerUnsubscribersSize(), 1)
+    service.detachSurface('gen-3')
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'a throwing teardown must not leave a map entry')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('a duplicate subscribeState listener is rejected loudly (round-4 finding)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      subscribeState(listener: (state: unknown) => void): () => void
+      _listenerUnsubscribersSize(): number
+    }
+    const listener = (): void => {}
+    const release = service.subscribeState(listener)
+    assert.equal(service._listenerUnsubscribersSize(), 1)
+    // The SAME listener function again: rejected, and the FIRST
+    // subscription stays intact (its teardown is not overwritten).
+    assert.throws(
+      () => service.subscribeState(listener),
+      /already subscribed/i,
+      'a duplicate listener must be rejected loudly (round-4 finding)',
+    )
+    assert.equal(service._listenerUnsubscribersSize(), 1, 'the first subscription must survive the rejected duplicate')
+    release()
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'the first subscription releases cleanly')
+    // After release, the SAME listener can subscribe again.
+    const release2 = service.subscribeState(listener)
+    assert.equal(service._listenerUnsubscribersSize(), 1)
+    release2()
+    assert.equal(service._listenerUnsubscribersSize(), 0)
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

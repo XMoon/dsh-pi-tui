@@ -1465,8 +1465,8 @@ export function apply(ctx: Context, config: Config): void {
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
-      attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>): void
-      detachSurface(): void
+      attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
+      detachSurface(surfaceId?: string): void
     }) | undefined
     let extensionHost: SurfaceHost | undefined
     // Tool-card presentation bridge: the Web's render intents resolved from
@@ -1523,8 +1523,9 @@ export function apply(ctx: Context, config: Config): void {
       shellTempFiles.clear()
       app?.dispose()
       // Detach the extension service's surface bridge (its capability set
-      // and state listeners die with the surface).
-      extensionService?.detachSurface()
+      // and state listeners die with the surface). The surfaceId lease
+      // makes a stale detach a no-op (P1).
+      extensionService?.detachSurface(extensionHost?.surfaceId)
       extensionHost = undefined
       diag.dispose()
     }
@@ -2540,6 +2541,9 @@ export function apply(ctx: Context, config: Config): void {
       extensionService.attachSurface(
         { subscribe: (listener) => attached.subscribeState(listener as never) },
         extensionHost.capabilitiesOf() as ReadonlySet<string>,
+        // The attachment lease (P1): a stale detachSurface from an older
+        // generation must not tear down THIS surface's bridge.
+        attached.surfaceId,
       )
     }
     // Persisted TUI preferences: register the namespace and restore the

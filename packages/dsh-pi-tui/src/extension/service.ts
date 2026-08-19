@@ -73,6 +73,10 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   private stateBridge: {
     subscribe(listener: (state: SurfaceStateValues) => void): () => void
   } | undefined
+  /** The CURRENT attachment's surface id (P1: generation-scoped isolation).
+   * A stale detachSurface from an OLD generation (different id) is a
+   * no-op — it must never tear down a NEWER surface's bridge. */
+  private attachedSurfaceId: string | undefined
   /** The capability set reported while a surface is attached (F-10). */
   private liveCapabilities = new Set<PiTuiCapability>()
   /** State listeners registered before any surface attached (builtins that
@@ -108,23 +112,61 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** Subscribe to the live surface state (first-party builtins). Like
    * register(), the subscription is owned by the CALLING fiber: it is torn
    * down automatically when that fiber unloads (F1 — no listener leak on
-   * HMR/unload). */
+   * HMR/unload).
+   *
+   * Two follow-up gates:
+   * - ROLLBACK: the subscription is installed BEFORE the caller-fiber
+   *   effect. When `fiber.effect()` throws INACTIVE_EFFECT (a stale service
+   *   handle — the calling fiber already died), the just-installed
+   *   subscription is released again, so a stale call can never leave a
+   *   live listener or a listener-map entry behind (the register() rollback
+   *   sibling).
+   * - IDEMPOTENT RELEASE: the public disposer AND the fiber disposer share
+   *   ONE `teardown` guarded by a `released` flag. The first release
+   *   resolves the CURRENT map entry (attachSurface migration replaces the
+   *   entry, so the map — not a captured closure — is the source of truth)
+   *   and drops it; every later release — the fiber disposer after an
+   *   explicit unsubscribe, or the explicit unsubscribe after an unload —
+   *   is a no-op and can never re-enter bridgeUnsubscribeFor (which would
+   *   transiently re-subscribe and synchronously re-invoke the listener).
+   * - DUPLICATE REJECTION (round-4 finding): the listener map is keyed by
+   *   the listener FUNCTION identity, so a second subscribeState() with the
+   *   SAME listener would overwrite the first subscription's teardown and
+   *   make the first one unreleasable. A duplicate listener is rejected
+   *   loudly — a plugin must use distinct listener functions (or one
+   *   subscription that fans out). */
   subscribeState(listener: (state: SurfaceStateValues) => void): () => void {
     const caller = this.ctx
-    // Re-resolve the teardown at call time: a pending listener may have
-    // been upgraded to a live bridge subscription by attachSurface.
-    const release = (): void => {
-      this.bridgeUnsubscribeFor(listener)()
+    if (this.listenerUnsubscribers.has(listener)) {
+      throw new Error(
+        'piTuiExtensions.subscribeState(): this listener function is already subscribed — ' +
+        'use a distinct listener per subscription (the listener map is keyed by function identity)',
+      )
     }
     // The initial pending/bridge registration.
     this.bridgeUnsubscribeFor(listener)
+    let released = false
+    const teardown = (): void => {
+      if (released) return
+      released = true
+      // Resolve the CURRENT teardown at release time: a pending listener
+      // may have been upgraded to a live bridge subscription (or migrated
+      // to a newer bridge) by attachSurface, so the map entry — not a
+      // closure captured at subscribe time — is the source of truth.
+      this.bridgeUnsubscribeFor(listener)()
+    }
     // Fiber-bound teardown (same pattern as register()): unload runs the
-    // disposer, so a stale listener never survives its owner.
-    const dispose = caller.fiber.effect(() => () => {
-      release()
-    }, 'piTuiExtensions.subscribeState()')
+    // disposer, so a stale listener never survives its owner. A failed
+    // effect creation (inactive caller) ROLLS BACK the subscription.
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => teardown, 'piTuiExtensions.subscribeState()')
+    } catch (error) {
+      teardown()
+      throw error
+    }
     return () => {
-      release()
+      teardown()
       dispose()
     }
   }
@@ -162,12 +204,42 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   }
 
   /** Runner-only: attach the live surface host's state bridge and capability
-   * set (called once per surface generation). */
+   * set (called once per surface generation). `surfaceId` is the attachment
+   * lease (P1): a later attach replaces the lease, and a stale
+   * detachSurface from an OLD generation is a no-op for the NEW one.
+   * Existing LIVE listeners migrate to the new bridge (their old bridge
+   * belongs to a previous generation). */
   attachSurface(bridge: {
     subscribe(listener: (state: SurfaceStateValues) => void): () => void
-  }, capabilities: ReadonlySet<PiTuiCapability>): void {
+  }, capabilities: ReadonlySet<PiTuiCapability>, surfaceId: string): void {
+    this.attachedSurfaceId = surfaceId
     this.stateBridge = bridge
     this.liveCapabilities = new Set(capabilities)
+    // Migrate every EXISTING live listener to the new bridge: without the
+    // migration, a listener subscribed on a PREVIOUS generation's bridge
+    // would keep delivering from the dead bridge after the swap (P1 — the
+    // attach-A/attach-B sequence must leave B's listeners on B's bridge).
+    // Per-listener isolation (round-3 finding 1): a throwing OLD-bridge
+    // unsubscribe must not abort the migration AND must not leak the old
+    // subscription — the map entry is dropped FIRST (so a later release
+    // cannot re-enter), the old teardown runs best-effort, and the
+    // listener is subscribed to the new bridge regardless.
+    for (const [listener, unsubscribe] of [...this.listenerUnsubscribers]) {
+      this.listenerUnsubscribers.delete(listener)
+      try {
+        unsubscribe()
+      } catch {
+        // Best effort: the old teardown failed. The map entry is already
+        // gone, so a later release is a no-op rather than a re-subscribe;
+        // the listener still migrates to the new bridge below.
+      }
+      const next = bridge.subscribe(listener)
+      const release = (): void => {
+        next()
+        this.listenerUnsubscribers.delete(listener)
+      }
+      this.listenerUnsubscribers.set(listener, release)
+    }
     // Upgrade every pending listener to a live bridge subscription; the
     // listener's teardown now unsubscribes from the BRIDGE (not just the
     // pending set) — F1: an unload after attach must release the live
@@ -186,16 +258,35 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.pendingStateListeners.clear()
   }
 
-  /** Runner-only: detach the surface (final dispose). */
-  detachSurface(): void {
+  /** Runner-only: detach the surface (final dispose). `surfaceId` is the
+   * detaching generation's lease: a STALE detach (a different id than the
+   * current attachment) is a no-op, so an old generation's cleanup can
+   * never tear down a newer surface's bridge (P1). */
+  detachSurface(surfaceId?: string): void {
+    // The generation-scoped lease (P1): a stale detach from an OLD surface
+    // generation must not tear down the NEWER generation's bridge — the
+    // runner's cleanup only detaches the generation it owns.
+    if (surfaceId !== undefined && this.attachedSurfaceId !== undefined
+      && surfaceId !== this.attachedSurfaceId) {
+      return
+    }
+    this.attachedSurfaceId = undefined
     this.stateBridge = undefined
     this.liveCapabilities.clear()
     // Every live listener subscription dies with the surface: their
     // teardown falls back to a no-op (the bridge is gone; the fiber
-    // disposer is idempotent).
+    // disposer is idempotent). Per-listener isolation (round-3 finding 1):
+    // a throwing unsubscribe must not abort the loop — the map entry is
+    // dropped FIRST so no listener is left registered after the surface is
+    // gone.
     for (const [listener, unsubscribe] of [...this.listenerUnsubscribers]) {
-      unsubscribe()
       this.listenerUnsubscribers.delete(listener)
+      try {
+        unsubscribe()
+      } catch {
+        // Best effort: the old teardown failed; the map entry is already
+        // gone so a later release is a no-op.
+      }
     }
   }
 
@@ -205,6 +296,16 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
         `unknown extension slot "${slot}" (known: ${['chrome.header.badge', 'input.dock.item', 'chrome.footer.status'].join(', ')})`,
       )
     }
+    // Generation-lease design (round-3 review finding 3, deliberately NOT
+    // changed): a registration is bound to the CALLER's fiber, not to the
+    // current surface attachment. A stale service handle's register() is
+    // rejected by the fiber check below (INACTIVE_EFFECT), so the only
+    // "stale surface" registration path is a LIVE fiber registering after
+    // a surface swap — and that is a NEW registration belonging to the
+    // NEW generation by construction (the ledger stamps the current
+    // attachmentGeneration). Freezing old-generation HANDLES covers the
+    // old surface's existing contributions; a live fiber's fresh
+    // registration is intentionally current-generation.
     // `this.ctx` is the CALLER's context (Cordis Service tracing); its fiber
     // owns this registration's lifetime. The ledger keys ownership by the
     // fiber UID (unique per fiber — anonymous sibling plugins share the

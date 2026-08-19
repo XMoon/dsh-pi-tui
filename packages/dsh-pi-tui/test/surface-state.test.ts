@@ -29,10 +29,15 @@ const settle = async (): Promise<void> => {
 test('snapshots are immutable and deep-frozen', () => {
   const { store } = makeStore()
   store.set({ activity: { working: true, queuedCount: 2, taskCount: 0, childAgentCount: 0, todoCount: 0 } })
-  const activity = store.get().activity
+  const state = store.get()
+  const activity = state.activity
   assert.equal(activity.working, true)
   assert.throws(() => { (activity as { working: boolean }).working = false }, TypeError)
   assert.ok(Object.isFrozen(activity))
+  // P2-1: the OUTER state object is frozen too, not just its slices — the
+  // public contract is "deeply frozen snapshots".
+  assert.ok(Object.isFrozen(state), 'the outer SurfaceStateValues must be frozen (P2-1)')
+  assert.throws(() => { (state as { surface: unknown }).surface = {} }, TypeError)
 })
 
 test('selectors fire only on slice CHANGE and delivery is batched', async () => {
