@@ -245,6 +245,8 @@ export interface TuiCommandRunner {
     readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
     readonly renderers: import('./renderer-registry.ts').RendererRegistry
     readonly editors: import('./editor-registry.ts').EditorRegistry
+    /** The live extension API info (capabilities + deprecations — M11). */
+    readonly api: (() => import('./extension/public-types.ts').PiTuiApiInfo) | undefined
   } | undefined
 }
 
@@ -280,11 +282,34 @@ export function extensionHealthRows(runner: TuiCommandRunner): { id: string; lab
       `cmd ${commandCount} · theme ${themeCount} · set ${settingCount} · ac ${autocompleteCount} · kb ${bindingCount} · ren ${rendererCount} · ed ${editorCount}`,
     ),
   })
+  // The capability row must reflect the REAL capability set (round-1
+  // finding 1): the live PiTuiApiInfo.capabilities — never a hardcoded
+  // or count-inferred list (the registry presence is a separate
+  // diagnostic, not a capability claim).
+  const api = extensions.api
+  const capabilities = api === undefined ? [] : [...api().capabilities].sort()
   rows.push({
     id: 'ext-capabilities',
     label: color.textDim('Capabilities'),
     description: 'The host extension capabilities (feature-detect, never parse versions)',
-    currentValue: color.textDim([...extensions.commands.snapshot().entries.length > 0 ? ['commands'] : [], 'slots', 'renderers', 'overlays', 'editor-sdk'].join(' · ')),
+    currentValue: color.textDim(capabilities.length === 0 ? 'none' : capabilities.join(' · ')),
+  })
+  // The registry-type diagnostic (separate from capabilities — a
+  // registry with live contributions is a FACT, not a capability).
+  const registryTypes = [
+    commandCount > 0 ? 'commands' : '',
+    themeCount > 0 ? 'themes' : '',
+    settingCount > 0 ? 'settings' : '',
+    autocompleteCount > 0 ? 'autocomplete' : '',
+    bindingCount > 0 ? 'keybindings' : '',
+    rendererCount > 0 ? 'renderers' : '',
+    editorCount > 0 ? 'editors' : '',
+  ].filter(Boolean)
+  rows.push({
+    id: 'ext-registries',
+    label: color.textDim('Registries'),
+    description: 'Live registries with contributions (diagnostic, not capabilities)',
+    currentValue: color.textDim(registryTypes.length === 0 ? 'none' : registryTypes.join(' · ')),
   })
   return rows
 }

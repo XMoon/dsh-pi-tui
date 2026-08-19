@@ -54,13 +54,55 @@ test('M11: extensionHealthRows reports the live registry counts', async () => {
   const editors = new EditorRegistry()
   const runner = { extensions: { commands, themes, settings, autocomplete, keybindings, renderers, editors } }
   const rows = extensionHealthRows(runner as never)
-  assert.ok(rows.length >= 2, 'the health section renders')
+  assert.ok(rows.length >= 3, 'the health section renders')
   const counts = rows.find(row => row.id === 'ext-registry-counts')
   assert.ok(counts !== undefined)
   assert.ok(counts.currentValue.includes('cmd 1'), 'the command count is reported')
   assert.ok(counts.currentValue.includes('ren 1'), 'the renderer count is reported')
+  // The capability row reflects the REAL api() set (round-1 finding 1):
+  // fake ids ('slots'/'overlays'/'editor-sdk') must never appear; the
+  // registry-type row is a separate diagnostic.
+  const capabilities = rows.find(row => row.id === 'ext-capabilities')
+  assert.ok(capabilities !== undefined)
+  assert.ok(!capabilities.currentValue.includes('editor-sdk'), 'no fake capability ids')
+  assert.ok(!capabilities.currentValue.includes('overlays'), 'no fake capability ids')
+  const registries = rows.find(row => row.id === 'ext-registries')
+  assert.ok(registries !== undefined)
+  assert.ok(registries.currentValue.includes('commands'), 'live registry types are a diagnostic')
+  assert.ok(registries.currentValue.includes('renderers'), 'live registry types are a diagnostic')
   // Without the extension service the rows vanish (no crash).
   assert.deepEqual(extensionHealthRows({ extensions: undefined } as never), [])
+})
+
+test('M11: the capability row reflects the real capability set across states (round-1 finding 1)', async () => {
+  const { extensionHealthRows } = await import('../src/commands.ts')
+  const { CommandBridge } = await import('../src/command-bridge.ts')
+  const { ThemeRegistry } = await import('../src/theme-registry.ts')
+  const { SettingsRegistry } = await import('../src/settings-registry.ts')
+  const { AutocompleteRegistry } = await import('../src/autocomplete-registry.ts')
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  // EMPTY registries + a real capability set (the api() source of truth).
+  const base = {
+    commands: new CommandBridge(),
+    themes: new ThemeRegistry(),
+    settings: new SettingsRegistry(),
+    autocomplete: new AutocompleteRegistry(),
+    keybindings: new KeybindingRegistry(),
+    renderers: new RendererRegistry(),
+    editors: new EditorRegistry(),
+    api: () => ({ apiVersion: 1 as const, hostVersion: '0.2.0', capabilities: new Set(['slot.input.widget', 'surface.snapshot']), deprecations: new Map() }),
+  }
+  const rows = extensionHealthRows({ extensions: base } as never)
+  const capabilities = rows.find(row => row.id === 'ext-capabilities')
+  assert.ok(capabilities !== undefined)
+  assert.ok(capabilities.currentValue.includes('slot.input.widget'), 'real capability ids render')
+  assert.ok(capabilities.currentValue.includes('surface.snapshot'), 'real capability ids render')
+  assert.ok(!capabilities.currentValue.includes('commands'), 'a registry with zero contributions is not a capability')
+  const registries = rows.find(row => row.id === 'ext-registries')
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.equal(strip(registries?.currentValue ?? ''), 'none', 'empty registries report none')
 })
 
 test('M11: a large transcript with extension renderers stays healthy (plan §23)', async () => {
