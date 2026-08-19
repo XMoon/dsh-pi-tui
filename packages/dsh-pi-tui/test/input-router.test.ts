@@ -164,10 +164,9 @@ test('TuiApp: a plugin keybinding fires the semantic action (headless)', async (
     onExtensionAction: (action) => { actions.push(action) },
   }, {
     // A minimal pluginActionFor emulating the runner's registry resolver:
-    // normalize via the app's InputRouter, then map the key.
-    pluginActionFor: (data) => {
-      const key = app.normalizeKey(data)
-      if (key === undefined) return undefined
+    // it receives the NORMALIZED key (the InputRouter decoded the raw
+    // input — the plugin never sees raw data).
+    pluginActionFor: (key) => {
       if (key.key === 'x' && key.ctrl && key.alt) return 'open-search'
       return undefined
     },
@@ -188,5 +187,66 @@ test('TuiApp: a plugin keybinding fires the semantic action (headless)', async (
   vt.sendInput('\x03') // Ctrl+C
   await vt.waitForRender()
   assert.deepEqual(actions, ['open-search'], 'reserved keys must not fire a binding')
+  app.stop()
+})
+
+// ── TuiApp integration: reserved keys never fire through the real path ─────
+
+test('TuiApp: Enter / Ctrl+J / Ctrl+Enter never fire a plugin binding (round-1 P1)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const actions: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onExtensionAction: (action) => { actions.push(action) },
+  }, {
+    // A resolver that would claim EVERY key — the router must stop the
+    // reserved ones before it is consulted.
+    pluginActionFor: (key) => `open-search` as const,
+  })
+  app.start()
+  await vt.waitForRender()
+  // Plain Enter (reserved): must NOT fire — the editor consumes it.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(actions, [], 'Enter must never fire a plugin binding')
+  // Ctrl+J with no tasks (the host handler falls through): the reserved
+  // gate must still stop it.
+  vt.sendInput('\x1b[106;5u') // kitty ctrl+j — check normalization
+  await vt.waitForRender()
+  // Ctrl+Enter without an onQueueSubmit handler: reserved, must not fire.
+  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
+  await vt.waitForRender()
+  // Ctrl+O (reserved host fold toggle). Kitty ctrl+o = modifier 5.
+  vt.sendInput('\x1b[111;5u')
+  await vt.waitForRender()
+  assert.deepEqual(actions, [], 'reserved keys must never fire a plugin binding')
+  app.stop()
+})
+
+test('TuiApp: submitDraft clears the draft like a normal submit (round-1 P2)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  })
+  app.start()
+  await vt.waitForRender()
+  // Type a draft, then submit via the host-owned path.
+  app.setDraft('hello from a plugin action')
+  await vt.waitForRender()
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['hello from a plugin action'])
+  assert.equal(app.getDraft(), '', 'the draft must be cleared like a normal submit')
+  // An empty draft submits nothing.
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['hello from a plugin action'])
   app.stop()
 })

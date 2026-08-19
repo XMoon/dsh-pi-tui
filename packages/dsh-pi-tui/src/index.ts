@@ -2342,13 +2342,13 @@ export function apply(ctx: Context, config: Config): void {
       onExtensionAction: (action) => {
         switch (action) {
           case 'submit-draft': {
-            const text = app.getDraft()
-            if (text.trim() !== '') dispatchUserInput(text)
+            // Host-owned submit path: history + notify clear + draft
+            // clear, exactly like a normal Enter (round-1 P2).
+            app.submitDraft(false)
             break
           }
           case 'queue-draft': {
-            const text = app.getDraft()
-            if (text.trim() !== '') dispatchUserInput(text, true)
+            app.submitDraft(true)
             break
           }
           case 'steer-draft': {
@@ -2612,15 +2612,12 @@ export function apply(ctx: Context, config: Config): void {
       // against normalized keys only, never raw terminal data. Reserved
       // host lifecycle keys are rejected by the registry at register time
       // and handled by the host ladder before this stage.
-      pluginActionFor: (data) => {
-        const service = extensionService
-        const keybindings = service?.keybindings
+      pluginActionFor: (normalized) => {
+        // The InputRouter has already normalized the raw input and applied
+        // the reserved-key + printable guards; this resolver only maps the
+        // NORMALIZED key to a plugin semantic action.
+        const keybindings = extensionService?.keybindings
         if (keybindings === undefined) return undefined
-        const normalized = app.normalizeKey(data)
-        if (normalized === undefined) return undefined
-        // A plain printable key never fires a plugin binding (typing
-        // always wins — the InputRouter's printable guard).
-        if (normalized.key.length === 1 && !normalized.ctrl && !normalized.alt && !normalized.super) return undefined
         return keybindings.actionFor(normalized)
       },
     })

@@ -753,11 +753,12 @@ export interface TuiAppOptions {
   extensionHost?: SurfaceHost
   /**
    * M6: the plugin keybinding resolver (wired by the runner from the M5
-   * KeybindingRegistry). Maps raw input → a plugin SEMANTIC action via
-   * the InputRouter's normalization — plugins never see raw terminal
-   * data. Optional — the surface works identically without it.
+   * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
+   * already decoded raw terminal input) → a plugin SEMANTIC action —
+   * plugins never see raw terminal data. Optional — the surface works
+   * identically without it.
    */
-  pluginActionFor?: (data: string) => import('./extension/public-types.ts').TuiAction | undefined
+  pluginActionFor?: (key: import('./extension/public-types.ts').NormalizedKey) => import('./extension/public-types.ts').TuiAction | undefined
 }
 
 /**
@@ -963,7 +964,7 @@ export class TuiApp {
    * by the runner from the M5 KeybindingRegistry; undefined = no plugin
    * keybindings (the surface runs exactly as before).
    */
-  private readonly pluginActionFor: ((data: string) => import('./extension/public-types.ts').TuiAction | undefined) | undefined
+  private readonly pluginActionFor: ((key: import('./extension/public-types.ts').NormalizedKey) => import('./extension/public-types.ts').TuiAction | undefined) | undefined
   /** M6: the host-owned input precedence router (normalization + rules). */
   private readonly inputRouter: InputRouter
   /** The busy indicator row directly above the editor border; idle renders nothing. */
@@ -1208,8 +1209,7 @@ export class TuiApp {
    * M6: normalize raw terminal input to the public key identity (the ONLY
    * key shape a plugin ever sees). Returns undefined for protocol
    * artifacts (Kitty press/repeat/release), paste bursts and multi-char
-   * input. The runner wires this through the KeybindingRegistry so a
-   * plugin binding resolves against normalized keys only.
+   * input.
    * @param data - the raw terminal data.
    */
   normalizeKey(data: string): import('./extension/public-types.ts').NormalizedKey | undefined {
@@ -1217,6 +1217,11 @@ export class TuiApp {
     // press/repeat/release events never reach plugin code.
     if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
     return this.inputRouter.normalize(data)
+  }
+
+  /** Resolve a normalized key through the runner's resolver (M6). */
+  private pluginActionForFor(key: import('./extension/public-types.ts').NormalizedKey): import('./extension/public-types.ts').TuiAction | undefined {
+    return this.pluginActionFor?.(key)
   }
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
@@ -1383,19 +1388,45 @@ export class TuiApp {
       return { consume: true }
     }
     // M6: non-capturing plugin keybindings, LAST in the ladder (plan
-    // §11.1). Only reachable when nothing earlier consumed the input AND
-    // no overlay owns the key AND the input is a single normalized key
-    // that is not a plain printable (typing always wins). The plugin
-    // receives ONLY the normalized key → SEMANTIC action mapping — never
-    // raw terminal data (the InputRouter owns the normalization).
-    if (this.pluginActionFor !== undefined && !this.activeScreen.hasOverlayEntries) {
-      const action = this.pluginActionFor(data)
-      if (action !== undefined) {
-        this.events.onExtensionAction?.(action)
+    // §11.1). The InputRouter is the SINGLE gate: it filters protocol
+    // artifacts, capturing flows (question/approval/viewer/search), the
+    // reserved Host lifecycle keys (a reserved key NEVER reaches a plugin
+    // resolver, even when the host handler above fell through on state —
+    // e.g. Enter with no submit, Ctrl+J with no tasks, Ctrl+Enter without
+    // onQueueSubmit), and plain printable keys (typing always wins). The
+    // plugin receives ONLY the normalized key → SEMANTIC action mapping —
+    // never raw terminal data.
+    if (this.pluginActionFor !== undefined) {
+      const route = this.inputRouter.route(data, this.inputRouterContext(), (key) => {
+        // The router already normalized the input; the runner's resolver
+        // maps the normalized key → semantic action via the keybinding
+        // registry (the plugin never sees raw data).
+        return this.pluginActionForFor(key)
+      })
+      if (route.kind === 'plugin-action') {
+        this.events.onExtensionAction?.(route.action)
         return { consume: true }
       }
+      if (route.kind === 'protocol') return undefined
+      if (route.kind === 'consumed') return { consume: true }
+      // 'editor' falls through to the editor.
     }
     return undefined
+  }
+
+  /** The live surface context the InputRouter reads (M6). */
+  private inputRouterContext(): Parameters<InputRouter['route']>[1] {
+    return {
+      questionActive: this.activeQuestions !== undefined,
+      approvalActive: this.activeApproval !== undefined,
+      viewerLocked: this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries,
+      hasOverlay: this.activeScreen.hasOverlayEntries,
+      searchActive: this.searchOverlay !== undefined,
+      tasksActive: this.tasksActive,
+      editorText: this.editor.getText(),
+      externalEditorInFlight: this.externalEditorInFlight,
+      editorReceivesText: true,
+    }
   }
 
   /**
@@ -3079,6 +3110,32 @@ export class TuiApp {
     return this.viewerMode !== undefined && this.draftBeforeViewer !== undefined
       ? this.draftBeforeViewer
       : this.editor.getText()
+  }
+
+  /**
+   * M6 host-owned draft submission (the semantic actions submit-draft /
+   * queue-draft route through this, NOT a raw dispatch): mirrors the
+   * editor's Enter-submit path exactly — history, notify clear and draft
+   * clear — then fires the submit/queue event through the runner. The
+   * plugin never touches the editor directly.
+   * @param forceQueue - Ctrl+Enter parity: queue delivery regardless of
+   *   the busyEnter preference.
+   */
+  submitDraft(forceQueue = false): void {
+    const text = this.getDraft()
+    if (text.trim() === '') return
+    this.rememberInput(text)
+    this.clearNotify()
+    // Clear the draft like a normal Enter submit (the runner's dispatch
+    // owns the session/guard path).
+    if (this.viewerMode === undefined) this.editor.setText('')
+    else this.draftBeforeViewer = ''
+    if (forceQueue) {
+      this.events.onQueueSubmit?.(text)
+    } else {
+      this.events.onSubmit(text)
+    }
+    this.requestRender()
   }
 
   /**
