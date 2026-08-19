@@ -161,13 +161,87 @@ test('TuiApp: the editor host dispatch routes semantic actions through host path
   app.reconcileEditorNow()
   await vt.waitForRender()
   assert.ok(host !== undefined)
-  // The plugin dispatches 'submit': the host's onSubmit fires.
+  // The snapshot contract (BEFORE the submit — a submit clears the draft).
+  const before = host.getSnapshot()
+  assert.equal(before.text, 'draft from plugin')
+  assert.equal(before.replacementId, 'dispatchy')
+  // The plugin dispatches 'submit': the host's onSubmit fires AND the
+  // seat draft is cleared like a normal submit (round-1 finding 2).
   const result = host.dispatch('submit')
   assert.equal(result.kind, 'accepted')
   assert.deepEqual(submitted, ['draft from plugin'])
-  // The snapshot contract.
-  const snapshot = host.getSnapshot()
-  assert.equal(snapshot.text, 'draft from plugin')
-  assert.equal(snapshot.replacementId, 'dispatchy')
+  assert.equal(app.getDraft(), '', 'the submit cleared the seat draft')
+  app.stop()
+})
+
+// ── Round-1 regression tests ───────────────────────────────────────────────
+
+test('TuiApp: a failed editor creation is retried after a same-id re-registration (round-1 finding 4)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  // First registration: create() throws → the guard makes it inert.
+  let failing = true
+  const handle1 = registry.register({
+    id: 'retry-editor', priority: 0,
+    create: (host: EditorHost) => {
+      if (failing) throw new Error('first attempt fails')
+      return pluginEditor()
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'the host editor still works after the failed creation')
+  // Dispose the failing registration and re-register the SAME id now
+  // successful: the registry revision bumps → the guard clears.
+  handle1.dispose()
+  failing = false
+  registry.register({
+    id: 'retry-editor', priority: 0,
+    create: (host: EditorHost) => pluginEditor(),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // The successful same-id editor now occupies the seat.
+  app.setDraft('retried draft')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'retried draft')
+  app.stop()
+})
+
+test('TuiApp: the editor host dispatch clears the plugin draft through the host submit path (round-1 finding 2)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('plugin draft')
+  let host: EditorHost | undefined
+  registry.register({
+    id: 'submitter', priority: 0,
+    create: (editorHost: EditorHost) => {
+      host = editorHost
+      return pluginEditor()
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.ok(host !== undefined)
+  const result = host.dispatch('submit')
+  assert.equal(result.kind, 'accepted')
+  assert.deepEqual(submitted, ['plugin draft'], 'the draft submitted through the host path')
+  assert.equal(app.getDraft(), '', 'the seat draft was cleared like a normal submit')
   app.stop()
 })

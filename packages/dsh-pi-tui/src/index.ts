@@ -1479,6 +1479,7 @@ export function apply(ctx: Context, config: Config): void {
       readonly settings: import('./settings-registry.ts').SettingsRegistry
       readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
       readonly renderers: import('./renderer-registry.ts').RendererRegistry
+      readonly editors: import('./editor-registry.ts').EditorRegistry
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
       attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
       detachSurface(surfaceId?: string): void
@@ -2611,6 +2612,9 @@ export function apply(ctx: Context, config: Config): void {
       // isolated per contribution (the registry catches throws and the
       // host falls back); the health sink records them for /status.
       renderers: extensionService?.renderers,
+      // M9 (round-1 finding 1): the editor registry MUST reach TuiApp —
+      // without it the SDK is inert (reconcileEditorWinner never fires).
+      editorRegistry: extensionService?.editors,
       // M6: non-capturing plugin keybindings. The resolver reads the
       // extensionService LAZILY (it is fetched below the app construction)
       // and normalizes through the InputRouter — a plugin binding resolves

@@ -81,10 +81,12 @@ export class EditorSeatHolder {
   /** The current occupant (always defined — the host default is the
    * fallback, never removed). */
   private current: SeatEditor
-  /** The id of the LAST target whose creation threw (round-1: the failure
-   * notify triggers a render → reconcile → re-create → re-throw loop; the
-   * guard makes a failed target inert until the registry changes). */
-  private failedTargetId: string | undefined
+  /** The id + registry REVISION of the LAST target whose creation threw
+   * (round-1: the failure notify triggers a render → reconcile →
+   * re-create → re-throw loop; the guard makes a failed target inert
+   * UNTIL the registry changes — a same-id re-registration bumps the
+   * revision, so the guard clears and the new editor is tried again). */
+  private failedTarget: { id: string; revision: number } | undefined
   private readonly hostAdapter: () => HostEditorAdapter
   private readonly surfaceId: string
   private readonly generation: () => number
@@ -138,19 +140,29 @@ export class EditorSeatHolder {
    * transfer draft/cursor → mount → focus → dispose the old editor.
    * @param target - the new winner (undefined = restore the host default).
    */
-  handoff(target: PluginEditorTarget | undefined): void {
+  handoff(target: PluginEditorTarget | undefined, registryRevision = 0): void {
     const previous = this.current
-    // A target whose creation failed is INERT (its notify triggered a
-    // render → reconcile → re-create loop otherwise).
-    if (target !== undefined && target.id === this.failedTargetId) return
+    // A target whose creation failed is INERT while the registry is
+    // UNCHANGED (its notify triggered a render → reconcile → re-create
+    // loop otherwise). A same-id re-registration bumps the revision →
+    // the guard clears and the new editor is tried again.
+    if (target !== undefined && this.failedTarget !== undefined
+      && target.id === this.failedTarget.id && registryRevision === this.failedTarget.revision) return
     if (target === undefined || target.id === 'host') {
-      this.failedTargetId = undefined
+      this.failedTarget = undefined
       // Restore the host default, preserving the draft.
       const draft = previous.getText()
       const cursor = previous.getCursor()
       previous.dispose()
       const host = this.adaptHost()
       host.setText(draft)
+      // CURSOR RESTORE IS BEST-EFFORT (round-1 finding 6): the vendored
+      // fork's Editor exposes no public cursor setter, so the host
+      // adapter's setCursor is a documented no-op — the draft survives
+      // the unload handoff, the cursor lands at the fork's default
+      // position. This is an explicit SDK contract limit (a plugin
+      // editor's OWN cursor transfers through ExtensionEditor.setCursor;
+      // only the host-default restore is best-effort).
       host.setCursor(cursor)
       this.current = host
       return
@@ -160,9 +172,9 @@ export class EditorSeatHolder {
     let created: ExtensionEditor
     try {
       created = target.create(this.hostFor(target.id))
-      this.failedTargetId = undefined
+      this.failedTarget = undefined
     } catch (error) {
-      this.failedTargetId = target.id
+      this.failedTarget = { id: target.id, revision: registryRevision }
       this.notifyError(error instanceof Error ? error.message : String(error))
       return
     }
@@ -251,5 +263,3 @@ export class EditorSeatHolder {
     for (const listener of this.changeListeners) listener(snapshot)
   }
 }
-
-

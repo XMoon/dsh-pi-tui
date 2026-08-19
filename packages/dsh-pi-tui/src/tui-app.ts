@@ -1136,21 +1136,28 @@ export class TuiApp {
       surfaceId: `tui-${Date.now().toString(36)}`,
       generation: () => this.generation,
       actionSink: (action) => {
-        // The sink reads the CURRENT SEAT occupant (the host editor or a
-        // plugin editor — the dispatch never bypasses the seat).
-        const text = this.seatEditor().getText()
+        // The sink routes through the HOST-OWNED paths (round-1 finding
+        // 2): submit/queue-submit go through submitDraft (history +
+        // notify clear + seat draft clear, exactly like a normal Enter),
+        // steer through the host steer, external editor through the
+        // owned entry. The plugin never bypasses submission/session
+        // safety.
         switch (action) {
           case 'submit': {
+            const text = this.seatEditor().getText()
             if (text.trim() === '') return false
-            this.events.onSubmit(text)
+            this.submitDraft(false)
             return true
           }
           case 'queue-submit': {
+            const text = this.seatEditor().getText()
             if (text.trim() === '') return false
-            this.events.onQueueSubmit?.(text)
+            this.submitDraft(true)
             return true
           }
           case 'steer': {
+            const text = this.seatEditor().getText()
+            this.seatEditor().setText('')
             this.events.onSteer?.(text)
             return true
           }
@@ -1411,11 +1418,11 @@ export class TuiApp {
       // otherwise dispatch a session-creating empty followup.
       if (this.activeScreen.hasOverlayEntries) return undefined
       if (this.events.onQueueSubmit === undefined) return undefined
-      const text = this.editor.getText()
+      const text = this.seatEditor().getText()
       if (text.trim() === '') return undefined
       this.rememberInput(text)
       this.clearNotify()
-      this.editor.setText('')
+      this.seatEditor().setText('')
       this.events.onQueueSubmit(text)
       return { consume: true }
     }
@@ -1455,8 +1462,8 @@ export class TuiApp {
       // queued message when the queue is non-empty, and only ignores the
       // key when there is nothing to send at all.
       if (this.activeScreen.hasOverlayEntries) return { consume: true }
-      const draft = this.editor.getText()
-      this.editor.setText('')
+      const draft = this.seatEditor().getText()
+      this.seatEditor().setText('')
       this.events.onSteer?.(draft)
       return { consume: true }
     }
@@ -1464,7 +1471,7 @@ export class TuiApp {
       // Task browser: with active background tasks and an EMPTY editor, ↓ /
       // Ctrl+J open the task list (nothing to move the cursor through). With
       // text present the keys keep their editing meaning; overlays own them.
-      if (this.tasksActive && !this.activeScreen.hasOverlayEntries && this.editor.getText().trim() === '') {
+      if (this.tasksActive && !this.activeScreen.hasOverlayEntries && this.seatEditor().getText().trim() === '') {
         this.events.onOpenTasks?.()
         return { consume: true }
       }
@@ -1535,7 +1542,7 @@ export class TuiApp {
       hasOverlay: this.activeScreen.hasOverlayEntries,
       searchActive: this.searchOverlay !== undefined,
       tasksActive: this.tasksActive,
-      editorText: this.editor.getText(),
+      editorText: this.seatEditor().getText(),
       externalEditorInFlight: this.externalEditorInFlight,
       editorReceivesText: true,
     }
@@ -1616,14 +1623,14 @@ export class TuiApp {
     if (open === undefined || this.externalEditorInFlight || this.disposed) return
     this.externalEditorInFlight = true
     try {
-      const draft = this.editor.getText()
+      const draft = this.seatEditor().getText()
       this.stop()
       try {
         const next = await open(draft)
         if (this.disposed) return
         // No redundant editor update when the editor saved the draft
         // unchanged (an update would bump history/undo and repaint).
-        if (next !== '' && next !== draft) this.editor.setText(next)
+        if (next !== '' && next !== draft) this.seatEditor().setText(next)
       } finally {
         if (!this.disposed) this.start()
       }
@@ -2197,7 +2204,7 @@ export class TuiApp {
       return
     }
     if (this.viewerMode === undefined) {
-      this.draftBeforeViewer = this.editor.getText()
+      this.draftBeforeViewer = this.seatEditor().getText()
     }
     this.viewerMode = mode
     this.editor.borderColor = color.accent
@@ -2401,10 +2408,12 @@ export class TuiApp {
     const targetId = winner?.id
     if (current.id === (targetId ?? 'host')) return
     // Perform the atomic handoff (create → transfer → mount → dispose).
+    // The registry revision rides along so a failed target's guard clears
+    // on a same-id re-registration (round-1 finding 4).
     this.editorSeatHolder.handoff(winner === undefined ? undefined : {
       id: winner.id,
       create: (host) => winner.create(host),
-    })
+    }, registry.snapshot().revision)
     // Re-mount the seat child: the editor seat now holds the new
     // occupant's component (the host default editor or the plugin's).
     this.mountSeatChild()
@@ -3473,7 +3482,8 @@ export class TuiApp {
       this.draftBeforeViewer = text
       return
     }
-    this.editor.setText(text)
+    // M9: write the CURRENT seat occupant (host default or plugin editor).
+    this.seatEditor().setText(text)
     this.requestRender()
   }
 
@@ -3482,7 +3492,7 @@ export class TuiApp {
   getDraft(): string {
     return this.viewerMode !== undefined && this.draftBeforeViewer !== undefined
       ? this.draftBeforeViewer
-      : this.editor.getText()
+      : this.seatEditor().getText()
   }
 
   /**
@@ -3500,8 +3510,8 @@ export class TuiApp {
     this.rememberInput(text)
     this.clearNotify()
     // Clear the draft like a normal Enter submit (the runner's dispatch
-    // owns the session/guard path).
-    if (this.viewerMode === undefined) this.editor.setText('')
+    // owns the session/guard path). M9: clear the CURRENT seat occupant.
+    if (this.viewerMode === undefined) this.seatEditor().setText('')
     else this.draftBeforeViewer = ''
     if (forceQueue) {
       this.events.onQueueSubmit?.(text)
@@ -4181,7 +4191,7 @@ export class TuiApp {
     if (this.activeApproval === pending) {
       this.activeApproval = undefined
       pending.handle?.hide()
-      this.activeScreen.setFocus(this.editor)
+      this.activeScreen.setFocus(this.seatEditor().component)
       // The approval dialog is gone: the seat is the editor again (or the
       // next queued prompt's — showNextApproval re-derives it) (follow-up P1).
       this.setFocusSeat('editor')
@@ -4352,7 +4362,10 @@ export class TuiApp {
     this.mountSeatChild()
     this.activeQuestions = undefined
     const screen = this.fullscreen ?? this.tui
-    screen.setFocus(this.editor)
+    // M9 (round-1 finding 5): focus the CURRENT seat occupant (the host
+    // default or the plugin editor's component) — never a hardcoded host
+    // editor.
+    screen.setFocus(this.seatEditor().component)
     for (const handle of state.suspendedOverlays) {
       if (this.overlayBroker.isTracked(handle)) handle.setHidden(false)
     }
