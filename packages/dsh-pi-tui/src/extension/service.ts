@@ -32,6 +32,7 @@ import { KeybindingRegistry } from '../keybinding-registry.ts'
 import { RendererRegistry } from '../renderer-registry.ts'
 import type {
   AutocompleteHandle,
+  ExtensionView,
   AutocompleteProviderContribution,
   MessagePresentationSnapshot,
   ToolPresentationSnapshot,
@@ -46,6 +47,8 @@ import type {
   TuiSettingHandle,
   TuiSettingsRegistryView,
   TuiMessageRendererContribution,
+  TuiOverlayHandle,
+  TuiOverlayOptions,
   TuiRendererHandle,
   TuiRendererRegistryView,
   TuiThemeContribution,
@@ -126,6 +129,19 @@ export interface PiTuiExtensionService {
    * name are an explicit error. Owned by the calling fiber.
    */
   registerToolRenderer(contribution: TuiToolRendererContribution): TuiRendererHandle
+  /**
+   * Open a MANAGED OVERLAY (M8, plan §13.3): the plugin supplies an
+   * ExtensionView + sizing hints; the host mounts it through its overlay
+   * broker (modal stacking, focus, fullscreen migration, teardown). The
+   * returned lease is generation-scoped (a stale surface's lease closes
+   * with the surface) and its close() is idempotent. The overlay content
+   * is the M4 component kit — a plugin can never mount a raw component
+   * or steal focus.
+   * @param view - the ExtensionView to present.
+   * @param options - sizing/positioning hints.
+   * @returns the overlay lease.
+   */
+  showOverlay(view: ExtensionView, options?: TuiOverlayOptions): TuiOverlayHandle
   /** M5 registries, exposed for the runner's dispatch/pickers (narrow
    * read-side views — the concrete classes are host-internal, so the
    * public declarations stay free of internal modules). */
@@ -138,6 +154,8 @@ export interface PiTuiExtensionService {
    * the surface's message cache; the narrow read-side view keeps the
    * public declarations free of internal modules). */
   readonly renderers: TuiRendererRegistryView
+  /** Runner-only: wire the host's managed-overlay mount seam (M8). */
+  setOverlayMount(mount: (view: ExtensionView, options?: TuiOverlayOptions) => TuiOverlayHandle): void
 }
 
 /**
@@ -168,6 +186,9 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   readonly keybindings: KeybindingRegistry
   /** M7: the transcript/tool renderer registry. */
   readonly renderers: RendererRegistry
+  /** M8: the host's overlay mount seam (wired by the runner; the host
+   * owns the screen + broker). */
+  private overlayMount: ((view: ExtensionView, options?: TuiOverlayOptions) => TuiOverlayHandle) | undefined
   /** The attached SurfaceHost's state bridge, wired by the runner (M3). */
   private stateBridge: {
     subscribe(listener: (state: SurfaceStateValues) => void): () => void
@@ -641,6 +662,22 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
         dispose()
       },
     }
+  }
+
+  /** Runner-only: wire the host's overlay mount seam (M8). */
+  setOverlayMount(mount: (view: ExtensionView, options?: TuiOverlayOptions) => TuiOverlayHandle): void {
+    this.overlayMount = mount
+  }
+
+  /** Open a managed overlay through the host seam (M8). A lease without a
+   * mounted host surface is inert (close is a no-op) — the surface may
+   * not exist yet (registration-before-surface). */
+  showOverlay(view: ExtensionView, options?: TuiOverlayOptions): TuiOverlayHandle {
+    const mount = this.overlayMount
+    if (mount === undefined) {
+      return { close: () => {}, hide: () => {}, show: () => {} }
+    }
+    return mount(view, options)
   }
 
   /** The ledger behind the service (SurfaceHost access in M2). */

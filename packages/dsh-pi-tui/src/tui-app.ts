@@ -83,6 +83,7 @@ import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './input-router.ts'
 import { RESERVED_HOST_KEYS } from './keybinding-registry.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
+import { OverlayBroker } from './overlay-broker.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
 
@@ -966,11 +967,16 @@ export class TuiApp {
   private searchOverlay: OverlayHandle | undefined
   /** The search input component, while one is open (for match counts). */
   private searchComponent: TranscriptSearchComponent | undefined
-  /** Overlay handles currently mounted on the active screen, for mode switches. */
-  private readonly overlayHandles = new Set<OverlayHandle>()
-  /** Capturing overlays hidden beneath a newer one (modal stacking), keyed by
-   * the newer overlay's handle; restored when it hides. */
-  private readonly overlayDependents = new Map<OverlayHandle, Set<OverlayHandle>>()
+  /** M8: the overlay stacking graph (extracted from TuiApp — plan §13).
+   * The broker owns the modal-stacking + question-suspension rules; the
+   * host keeps the physical screen mounts. */
+  private readonly overlayBroker: OverlayBroker
+  /** M8: still-owned plugin overlay leases (closed by the final dispose —
+   * plan §13.3: leases are generation-scoped). */
+  private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle>()
+  // M8: the overlay graph (handles/dependents) lives in the broker — the
+  // host reads it through the accessors below. The old private sets were
+  // removed; every use now goes through this.overlayBroker.
   /** Footer state. */
   private status: StatusData = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
   /** Plan-mode badge state; appended to the header and footer when active. */
@@ -1087,6 +1093,10 @@ export class TuiApp {
     this.pluginActionFor = options.pluginActionFor
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
     this.renderers = options.renderers
+    this.overlayBroker = new OverlayBroker({
+      question: () => this.activeQuestions,
+      setFocusSeat: (seat) => this.setFocusSeat(seat),
+    })
 
     this.tui = new TuiMainScreen(resizeAware)
     this.editor = new Editor(this.tui, editorTheme)
@@ -1227,8 +1237,9 @@ export class TuiApp {
     this.expandedOverride.clear()
     this.messageComponents.clear()
     this.localMessages.length = 0
-    this.overlayHandles.clear()
-    this.overlayDependents.clear()
+    for (const lease of this.extensionOverlayLeases) lease.close()
+    this.extensionOverlayLeases.clear()
+    this.overlayBroker.clear()
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
@@ -1506,48 +1517,10 @@ export class TuiApp {
    */
   private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
     const handle = this.activeScreen.showOverlay(component, options)
-    this.overlayHandles.add(handle)
-    // A capturing overlay owns input: report the overlay seat immediately
-    // (follow-up P1 — search/picker/settings all land here).
-    if (options?.nonCapturing !== true) this.setFocusSeat('overlay')
-    const question = this.activeQuestions
-    if (question !== undefined) {
-      // Sweep: any tracked overlay still visible (normally none — the
-      // question suspended every visible one at present) joins the
-      // suspension alongside the new overlay.
-      for (const other of this.overlayHandles) {
-        if (other !== handle && !other.isHidden()) {
-          other.setHidden(true)
-          question.suspendedOverlays.add(other)
-        }
-      }
-      if (options?.nonCapturing !== true) {
-        // The new capturing overlay takes the modal front: the question's
-        // directly suspended handles become its dependents (kept hidden),
-        // so settling the question reveals IT, and settling it reveals the
-        // overlays beneath — in reverse arrival order.
-        const dependents = new Set<OverlayHandle>()
-        for (const other of question.suspendedOverlays) dependents.add(other)
-        if (dependents.size > 0) {
-          for (const other of dependents) question.suspendedOverlays.delete(other)
-          this.overlayDependents.set(handle, dependents)
-        }
-      }
-      handle.setHidden(true)
-      question.suspendedOverlays.add(handle)
-      return { ...handle, hide: () => this.closeOverlayHandle(handle) }
-    }
-    if (options?.nonCapturing !== true) {
-      const hidden = new Set<OverlayHandle>()
-      for (const other of this.overlayHandles) {
-        if (other !== handle && !other.isHidden()) {
-          other.setHidden(true)
-          hidden.add(other)
-        }
-      }
-      if (hidden.size > 0) this.overlayDependents.set(handle, hidden)
-    }
-    return { ...handle, hide: () => this.closeOverlayHandle(handle) }
+    // M8: the stacking graph + suspension rules live in the broker (plan
+    // §13 — behavior identical; the existing modal-stacking tests gate
+    // the extraction).
+    return this.overlayBroker.track(handle, { nonCapturing: options?.nonCapturing === true })
   }
 
   /**
@@ -1561,24 +1534,11 @@ export class TuiApp {
    * while the question is still up.
    */
   private closeOverlayHandle(handle: OverlayHandle): void {
-    const question = this.activeQuestions
-    if (question !== undefined) question.suspendedOverlays.delete(handle)
-    for (const dependents of this.overlayDependents.values()) dependents.delete(handle)
-    const owned = this.overlayDependents.get(handle)
-    if (owned !== undefined) {
-      this.overlayDependents.delete(handle)
-      if (question !== undefined) {
-        for (const dependent of owned) question.suspendedOverlays.add(dependent)
-      } else {
-        for (const dependent of owned) dependent.setHidden(false)
-      }
-    }
-    this.overlayHandles.delete(handle)
-    handle.hide()
-    // The seat may have returned to the editor (or to another capturing
-    // overlay that was restored underneath); recompute from the live state
-    // (follow-up P1).
-    this.setFocusSeat('editor')
+    // M8: the broker owns the graph + question-aware close; the host
+    // recomputes the focused seat from the live state after (follow-up
+    // P1 — the broker's editor-seat report is a coarse signal, the host
+    // re-derives the truth).
+    this.overlayBroker.closeForHost(handle)
     this.publishFocusSeat()
   }
 
@@ -1763,9 +1723,8 @@ export class TuiApp {
     // is then cleared wholesale — every one of those handles is dead, and
     // the pending-approval rebuild re-suspends a fresh handle on the new
     // screen.
-    for (const handle of this.overlayHandles) handle.hide()
-    this.overlayHandles.clear()
-    this.overlayDependents.clear()
+    for (const handle of this.overlayBroker.handles()) handle.hide()
+    this.overlayBroker.clear()
     if (this.activeQuestions !== undefined) this.activeQuestions.suspendedOverlays.clear()
     if (enabled) {
       // The alt screen owns mouse handling (wheel scroll, drag selection,
@@ -2239,6 +2198,58 @@ export class TuiApp {
    * extension service's health recording). */
   setRendererErrorSink(sink: (record: { id: string; error: unknown }) => void): void {
     this.rendererError = sink
+  }
+
+  /**
+   * M8: mount a MANAGED overlay for a plugin (plan §13.3). The view is the
+   * M4 component kit — the host compiles it, mounts it through the overlay
+   * broker (modal stacking, focus, fullscreen migration, teardown) and
+   * returns a generation-scoped lease whose close() is idempotent. The
+   * surface's final dispose closes every still-owned lease.
+   * @param view - the ExtensionView to present.
+   * @param options - sizing/positioning hints.
+   */
+  showExtensionOverlay(
+    view: import('./extension/public-types.ts').ExtensionView,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): import('./extension/public-types.ts').TuiOverlayHandle {
+    const compiled = compileView(view)
+    const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
+    const handle = this.showOverlayOnHost(component, {
+      ...(options.width === undefined ? {} : { width: options.width }),
+      ...(options.minWidth === undefined ? {} : { minWidth: options.minWidth }),
+      ...(options.maxHeight === undefined ? {} : { maxHeight: options.maxHeight }),
+      ...(options.anchor === undefined ? {} : { anchor: options.anchor }),
+      ...(options.offsetX === undefined ? {} : { offsetX: options.offsetX }),
+      ...(options.offsetY === undefined ? {} : { offsetY: options.offsetY }),
+      ...(options.row === undefined ? {} : { row: options.row }),
+      ...(options.col === undefined ? {} : { col: options.col }),
+      ...(options.margin === undefined ? {} : { margin: options.margin }),
+      nonCapturing: options.nonCapturing === true,
+    })
+    // The raw handle's hide() PERMANENTLY removes the overlay; the lease's
+    // hide()/show() are temporary visibility toggles (the broker tracks
+    // the raw handle, so the lease hides/show must go through the same
+    // handle).
+    let closed = false
+    const lease: import('./extension/public-types.ts').TuiOverlayHandle = {
+      close: () => {
+        if (closed) return
+        closed = true
+        handle.hide()
+      },
+      hide: () => {
+        if (closed) return
+        handle.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        handle.setHidden(false)
+      },
+    }
+    // The surface's dispose closes every still-owned lease: track it.
+    this.extensionOverlayLeases.add(lease)
+    return lease
   }
 
   /** M7 test hook: build (or fetch) the cached component entry for one
@@ -3319,8 +3330,8 @@ export class TuiApp {
    */
   overlayGraphState(): { handles: number; dependents: number; suspended: number } {
     return {
-      handles: this.overlayHandles.size,
-      dependents: this.overlayDependents.size,
+      handles: this.overlayBroker.graphState().handles,
+      dependents: this.overlayBroker.graphState().dependents,
       suspended: this.activeQuestions?.suspendedOverlays.size ?? 0,
     }
   }
@@ -4063,7 +4074,7 @@ export class TuiApp {
     // A question is a logical capturing modal: every visible overlay is
     // suspended (hidden, state intact) until the flow settles — the same
     // stacking rule showOverlayOnHost applies to a new overlay.
-    for (const handle of this.overlayHandles) {
+    for (const handle of this.overlayBroker.handles()) {
       if (!handle.isHidden()) {
         handle.setHidden(true)
         state.suspendedOverlays.add(handle)
@@ -4153,7 +4164,7 @@ export class TuiApp {
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(this.editor)
     for (const handle of state.suspendedOverlays) {
-      if (this.overlayHandles.has(handle)) handle.setHidden(false)
+      if (this.overlayBroker.isTracked(handle)) handle.setHidden(false)
     }
     state.suspendedOverlays.clear()
     // The flow released the seat: re-derive it from the live focus AFTER

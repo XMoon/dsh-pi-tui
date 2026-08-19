@@ -2638,6 +2638,10 @@ export function apply(ctx: Context, config: Config): void {
         const message = safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200)
         extensionService._ledger().recordError('transcript.renderer', id, message)
       })
+      // M8: the managed-overlay mount seam (plan §13.3) — the plugin
+      // supplies an ExtensionView; the host compiles + mounts it through
+      // its overlay broker (modal stacking, focus, migration, teardown).
+      extensionService.setOverlayMount((view, options) => app.showExtensionOverlay(view, options))
       extensionHost.attach(
         { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
         {

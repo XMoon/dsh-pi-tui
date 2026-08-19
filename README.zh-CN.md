@@ -214,6 +214,12 @@ service.register<InputWidget>('input.widget.below', {
   错误。渲染器绝不会卡住 transcript:抛错的渲染器被隔离、链继续,
   消息缓存内嵌渲染器身份 + 注册表 revision,因此 HMR/unload 只重建
   受影响的组件。
+- `showOverlay(view, options)` — 受管 overlay 租约(M8):插件提供
+  `ExtensionView` + 尺寸提示;host 通过其 overlay broker 挂载(模态堆叠、
+  焦点、fullscreen 迁移)。返回的租约是 generation 限定的(表面最终
+  dispose 会关闭所有仍在持有的租约),close() 幂等,hide()/show() 切换
+  可见性而不关闭。插件永远不能挂载原始组件或抢焦点——终端和 overlay
+  栈由 host 拥有。
 
 生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
 regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕

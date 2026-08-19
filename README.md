@@ -231,6 +231,14 @@ Since M5 the extension surface also covers registries (plan §10):
   and the chain continues, and the message cache embeds the renderer
   identity + registry revision, so an HMR/unload rebuilds exactly the
   affected components.
+- `showOverlay(view, options)` — a MANAGED overlay lease (M8): the plugin
+  supplies an `ExtensionView` + sizing hints; the host mounts it through
+  its overlay broker (modal stacking, focus, fullscreen migration). The
+  returned lease is generation-scoped (the surface's final dispose closes
+  every still-owned lease), close() is idempotent, and hide()/show()
+  toggle visibility without closing. A plugin can never mount a raw
+  component or steal focus — the host owns the terminal and the overlay
+  stack.
 
 Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
 fiber unloads (HMR, disable), regular and fullscreen both refresh, and

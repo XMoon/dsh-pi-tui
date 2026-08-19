@@ -96,11 +96,14 @@ export {
   type TuiThemeContribution,
   type TuiThemeHandle,
   type TuiMessageRendererContribution,
+  type TuiOverlayHandle,
+  type TuiOverlayOptions,
   type TuiRendererHandle,
   type TuiRendererRegistrySnapshot,
   type TuiThemeRegistrySnapshot,
   type TuiThemeRegistryView,
   type TuiToolRendererContribution,
+  type TuiSizeValue,
   type ToolPresentationSnapshot,
 } from './extension/public-types.ts'
 export { describeKey } from './extension/public-types.ts'

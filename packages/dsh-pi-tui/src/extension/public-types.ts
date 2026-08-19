@@ -669,3 +669,36 @@ export interface TuiRendererRegistrySnapshot {
   }[]
   readonly revision: number
 }
+
+// ── M8: managed overlay leases (plan §13.3) ────────────────────────────────
+
+/** A size hint: an absolute column/row count or a percentage string. */
+export type TuiSizeValue = number | `${number}%`
+
+/** The sizing/positioning hints for a managed overlay (structural — the
+ * host maps them onto its overlay options at mount time). */
+export interface TuiOverlayOptions {
+  readonly width?: TuiSizeValue
+  readonly minWidth?: number
+  readonly maxHeight?: TuiSizeValue
+  readonly anchor?: 'center' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'top-center' | 'bottom-center'
+  readonly offsetX?: number
+  readonly offsetY?: number
+  readonly row?: TuiSizeValue
+  readonly col?: TuiSizeValue
+  readonly margin?: number | { top?: number; right?: number; bottom?: number; left?: number }
+  /** Non-capturing overlays never steal keyboard focus. */
+  readonly nonCapturing?: boolean
+}
+
+/** A managed overlay lease: the plugin controls the overlay through this
+ * handle; the host owns mounting, stacking, focus and teardown. */
+export interface TuiOverlayHandle {
+  /** Close the overlay (idempotent; the surface's final dispose also
+   * closes every still-owned lease). */
+  close(): void
+  /** Temporarily hide (the plugin keeps the lease). */
+  hide(): void
+  /** Show again after hide(). */
+  show(): void
+}
