@@ -21,9 +21,6 @@
 import type { AutocompleteHandle, AutocompleteProviderContribution, TuiAutocompleteProvider, TuiAutocompleteQuery, TuiAutocompleteSuggestions } from './extension/public-types.ts'
 
 
-
-
-
 /** Internal registration record. */
 interface ProviderRecord {
   readonly id: string
@@ -42,6 +39,9 @@ export class AutocompleteRegistry {
   private readonly records = new Map<string, ProviderRecord>()
   /** The latest suggestion request's epoch (latest-only commit). */
   private epoch = 0
+  /** The in-flight request's abort controller (supersede-abort: a newer
+   * request aborts the previous one). */
+  private activeController: AbortController | undefined
   private readonly onInvalidate: () => void
 
   constructor(onInvalidate: () => void = () => {}) {
@@ -96,12 +96,14 @@ export class AutocompleteRegistry {
    * Ask the plugin providers for suggestions, in registration order. The
    * FIRST non-null result wins (deterministic; the host's own provider
    * runs before this). Cancellation + latest-only commit: each call bumps
-   * the epoch; a provider that resolves after a NEWER call has started is
-   * dropped (its suggestions would be stale for the current cursor).
-   * @param lines - the editor lines.
-   * @param cursorLine - the cursor line.
-   * @param cursorCol - the cursor column.
-   * @param options - signal + force.
+   * the epoch AND aborts the previous request's internal controller, so a
+   * provider that ignores the editor's signal still receives an abort for
+   * the superseded request; a provider that resolves after a NEWER call
+   * started is dropped (its suggestions would be stale for the current
+   * cursor).
+   * @param query - the editor's suggestion query (the signal is COMBINED
+   *   with the registry's own per-request controller — the caller's abort
+   *   and the registry's supersede-abort both reach providers).
    * @param onError - records a provider failure (the chain continues).
    * @returns the first non-null suggestions, or null.
    */
@@ -111,10 +113,19 @@ export class AutocompleteRegistry {
   ): Promise<TuiAutocompleteSuggestions | null> {
     this.epoch += 1
     const requestEpoch = this.epoch
+    // Supersede-abort: a NEWER request aborts THIS request's controller,
+    // so providers still awaiting their promise observe the abort even
+    // when the editor's own signal has not fired.
+    this.activeController?.abort()
+    const controller = new AbortController()
+    this.activeController = controller
+    const combined: TuiAutocompleteQuery = query.signal.aborted
+      ? { ...query, signal: controller.signal }
+      : { ...query, signal: AbortSignal.any([query.signal, controller.signal]) }
     const records = [...this.records.values()].filter(record => !record.disposed)
     for (const record of records) {
       try {
-        const result = await record.provider.getSuggestions(query)
+        const result = await record.provider.getSuggestions(combined)
         // Latest-only commit: a result that arrives after a newer request
         // is stale for the current cursor — drop it.
         if (requestEpoch !== this.epoch) return null

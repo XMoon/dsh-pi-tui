@@ -20,11 +20,6 @@
 import type { TuiSettingContribution, TuiSettingHandle, TuiSettingsRegistrySnapshot } from './extension/public-types.ts'
 
 
-
-
-
-
-
 /** Internal registration record. */
 interface SettingRecord {
   readonly id: string

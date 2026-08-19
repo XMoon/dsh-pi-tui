@@ -434,9 +434,10 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const outcome = this.commands.register(contribution, owner)
     if (outcome.kind === 'conflict') {
-      throw new Error(
-        `command contribution "${contribution.name}" conflicts with owner "${outcome.existingOwner}" — resolve the conflict before registering`,
-      )
+      const detail = outcome.nearSynonym === undefined
+        ? `owner "${outcome.existingOwner}" already holds it`
+        : `a near-synonym of "${contribution.name}" (${outcome.nearSynonym}, owned by "${outcome.existingOwner}") — the AGENTS near-synonym rule forbids the ambiguity`
+      throw new Error(`command contribution "${contribution.name}" conflicts: ${detail} — resolve the conflict before registering`)
     }
     let dispose: () => void
     try {

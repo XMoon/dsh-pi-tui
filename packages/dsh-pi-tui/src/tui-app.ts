@@ -3349,18 +3349,34 @@ export class TuiApp {
    * dismiss itself after the action — without it the list stays mounted as
    * a ghost overlay that eats every later key (the /subagents trap).
    * @param items - setting rows.
-   * @param onChange - called with (id, newValue) on confirm.
+   * @param onChange - called with (id, newValue) on confirm. The third
+   *   argument `revert` restores a row's DISPLAYED value (used by the M5
+   *   plugin-settings path when the row's onChange rejects — the fork
+   *   optimistically mutates the row before the callback runs).
    * @param onCancel - called when the user closes without applying.
    * @returns a function that closes the overlay.
    */
-  openSettings(items: SettingItem[], onChange: (id: string, value: string) => void, onCancel: () => void): () => void {
+  openSettings(
+    items: SettingItem[],
+    onChange: (id: string, value: string, revert: (previousValue: string) => void) => void,
+    onCancel: () => void,
+  ): () => void {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
     // so the cancel callback closes the handle captured after mounting.
     let handle: OverlayHandle | undefined
     // The settings theme is constructed PER OPEN: its cursor is a rendered
     // ANSI string, so a module-level constant would freeze the cursor
     // colour at import time and never follow a live theme switch.
-    const settings = new SettingsList(items, 6, settingsListTheme(), onChange, () => {
+    const settings = new SettingsList(items, 6, settingsListTheme(), (id, value) => {
+      // The fork has ALREADY mutated the row's currentValue before calling
+      // onChange. The revert callback restores a row's DISPLAYED value
+      // through the SettingsList's own updateValue (used by the M5
+      // plugin-settings path when the row's onChange rejects — the open
+      // panel must not keep the rejected value). The CALLER supplies the
+      // previous value (the registry still holds it before apply commits).
+      const revert = (previousValue: string): void => settings.updateValue(id, previousValue)
+      onChange(id, value, revert)
+    }, () => {
       handle?.hide()
       onCancel()
     }, { enableSearch: true })

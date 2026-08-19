@@ -914,3 +914,31 @@ test('openTaskBrowser setItems replaces rows live', async () => {
   assert.ok(view.includes('failed'), `new status missing:\n${view}`)
   app.stop()
 })
+
+test('openSettings revert() restores a rejected row display (M5 gate)', async () => {
+  const { vt, app } = startApp()
+  let revertedValue = ''
+  app.openSettings(
+    [{ id: 'ext', label: 'Plugin setting', currentValue: 'old', values: ['old', 'new'] }],
+    (id, value, revert) => {
+      assert.equal(id, 'ext')
+      // The fork already mutated the row to 'new' before calling onChange;
+      // the host calls revert('old') to restore the rejected value.
+      revert('old')
+      revertedValue = value
+    },
+    () => {},
+  )
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Plugin setting'), `settings list missing:\n${view}`)
+  // Activate the row: Enter cycles the value.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(revertedValue, 'new', 'the onChange received the new value')
+  // The displayed row shows the REVERTED (old) value, not the rejected new.
+  const stripped = view.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(stripped.includes('old'), `rejected row must show the previous value:\n${stripped}`)
+  app.stop()
+})

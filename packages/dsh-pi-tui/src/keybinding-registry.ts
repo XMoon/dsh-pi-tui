@@ -22,15 +22,6 @@
 import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
 
 
-
-
-
-
-
-
-
-
-
 /** Internal registration record. */
 interface BindingRecord {
   readonly id: string
@@ -44,17 +35,34 @@ interface BindingRecord {
 /**
  * The keys the HOST reserves for its own lifecycle: a plugin can never
  * claim them (plan §11.3 — reserved lifecycle key cannot be preempted).
+ * This inventory is the SINGLE authoritative list, kept in sync with the
+ * host's `matchesKey` lifecycle checks in tui-app.ts (Ctrl+C/D exit,
+ * Ctrl+S steer-all, Ctrl+F fullscreen, Ctrl+Shift+F search, Ctrl+O
+ * expand, Ctrl+T todo panel, Ctrl+G external editor, Ctrl+J task
+ * browser, Ctrl+Enter queue, Enter submit, Esc cancel). Every reserved
+ * binding here must match a host `matchesKey(data, ...)` call; when a new
+ * host lifecycle key lands, extend THIS list in the same commit.
  */
-const RESERVED_KEYS: readonly NormalizedKey[] = [
-  { key: 'c', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+C exit
-  { key: 'd', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+D exit
-  { key: 's', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+S steer all
-  { key: 'f', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+F fullscreen
-  { key: 'o', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+O expand
-  { key: 't', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+T todo panel
+export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
+  { key: 'c', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+C exit
+  { key: 'd', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+D exit
+  { key: 's', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+S steer all
+  { key: 'f', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+F fullscreen
+  { key: 'f', ctrl: true, alt: false, shift: true, super: false },      // Ctrl+Shift+F search
+  { key: 'o', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+O expand
+  { key: 't', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+T todo panel
+  { key: 'g', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+G external editor
+  { key: 'j', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+J task browser
+  { key: 'enter', ctrl: true, alt: false, shift: false, super: false }, // Ctrl+Enter queue
   { key: 'enter', ctrl: false, alt: false, shift: false, super: false }, // Enter submit
   { key: 'escape', ctrl: false, alt: false, shift: false, super: false }, // Esc cancel
 ]
+
+/** Whether a key is reserved by the host lifecycle (the single check the
+ * registry and the InputRouter (M6) both use). */
+export function isReservedHostKey(key: NormalizedKey): boolean {
+  return RESERVED_HOST_KEYS.some(reserved => keyEquals(reserved, key))
+}
 
 function keyEquals(left: NormalizedKey, right: NormalizedKey): boolean {
   return left.key === right.key && left.ctrl === right.ctrl && left.alt === right.alt
@@ -86,7 +94,7 @@ export class KeybindingRegistry {
       throw new Error(`duplicate keybinding id "${contribution.id}"`)
     }
     if (contribution.key.key === '') throw new Error('keybinding key must not be empty')
-    if (RESERVED_KEYS.some(reserved => keyEquals(reserved, contribution.key))) {
+    if (isReservedHostKey(contribution.key)) {
       throw new Error(
         `keybinding for "${describeKey(contribution.key)}" is reserved by the host and cannot be claimed by a plugin`,
       )
@@ -162,4 +170,3 @@ export class KeybindingRegistry {
     return false
   }
 }
-

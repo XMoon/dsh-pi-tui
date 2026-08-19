@@ -22,11 +22,6 @@ import type { ColorPalette } from './theme.ts'
 import type { TuiThemeContribution, TuiThemeHandle, TuiThemeRegistrySnapshot } from './extension/public-types.ts'
 
 
-
-
-
-
-
 /** Internal registration record. */
 interface ThemeRecord {
   readonly id: string

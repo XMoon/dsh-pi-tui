@@ -30,16 +30,10 @@ import type { TuiCommandContribution, TuiCommandHandle, TuiLocalCommandHandler, 
 /** One command contribution: ownership metadata over an existing command. */
 
 
-
-
-
-
-
-
 /** Conflict-detection outcome for a new registration. */
 type RegisterOutcome =
   | { kind: 'registered'; handle: TuiCommandHandle }
-  | { kind: 'conflict'; existingOwner: string }
+  | { kind: 'conflict'; existingOwner: string; nearSynonym?: string }
 
 /** The bridge's internal registration record. */
 interface Contribution {
@@ -86,6 +80,23 @@ export class CommandBridge {
       if (existing.disposed) continue
       if (existing.name === spec.name) {
         return { kind: 'conflict', existingOwner: existing.owner }
+      }
+    }
+    // Near-synonym detection (AGENTS hard rule — /session vs /sessions):
+    // a command name that is a PREFIX of another registered name (or vice
+    // versa) is a confusion risk the user must resolve explicitly. The
+    // rule is deliberately conservative (exact prefix only, never fuzzy
+    // edit distance — a false positive would block legitimate names).
+    for (const existing of this.contributions.values()) {
+      if (existing.disposed) continue
+      const shorter = existing.name.length <= spec.name.length ? existing.name : spec.name
+      const longer = existing.name.length <= spec.name.length ? spec.name : existing.name
+      if (shorter !== longer && longer.startsWith(shorter)) {
+        return {
+          kind: 'conflict',
+          existingOwner: existing.owner,
+          nearSynonym: `${shorter} ↔ ${longer}`,
+        }
       }
     }
     const contribution: Contribution = {

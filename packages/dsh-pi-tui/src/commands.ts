@@ -817,7 +817,7 @@ export function registerTuiCommands(
             ...(row.values.length > 0 ? { values: [...row.values] } : {}),
           })),
         ],
-        (id, value) => {
+        (id, value, revert) => {
           if (id === 'approval') {
             if ((value === 'ask' || value === 'never') && liveAgent !== undefined) {
               ctx.get('approval')?.setPolicy(liveAgent, value)
@@ -873,10 +873,18 @@ export function registerTuiCommands(
             // M5: a plugin-registered settings row change. The row's own
             // onChange decides acceptance; the panel value follows the
             // accepted value. Detached (AGENTS.md — never a bare void).
+            // The fork optimistically mutated the row BEFORE this callback:
+            // on rejection, revert() restores the previous DISPLAYED value
+            // so the open panel never shows a value the registry rejected.
             const extSettings = runner.extensions?.settings
+            const settingId = id.slice('ext-setting:'.length)
+            const previous = extSettings?.rows().find(row => row.id === settingId)?.currentValue
             if (extSettings !== undefined) {
-              detach('extension setting apply', () => extSettings.apply(id.slice('ext-setting:'.length), value).then(accepted => {
-                if (!accepted) app.notify('setting rejected', 'error')
+              detach('extension setting apply', () => extSettings.apply(settingId, value).then(accepted => {
+                if (!accepted) {
+                  if (previous !== undefined) revert(previous)
+                  app.notify('setting rejected', 'error')
+                }
               }))
             }
           } else if (id === 'expand') {

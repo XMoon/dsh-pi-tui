@@ -50,6 +50,20 @@ test('CommandBridge: a name conflict is reported, never silently overridden', ()
   assert.equal(bridge.snapshot().entries.length, 1, 'the second registration is not stored')
 })
 
+test('CommandBridge: near-synonym names are reported (AGENTS hard rule)', () => {
+  const bridge = new CommandBridge()
+  bridge.register({ id: 'a', name: 'session', description: '', execution: 'local' }, 'owner-a')
+  // Exact prefix of an existing name: a confusion risk, rejected.
+  const outcome = bridge.register({ id: 'b', name: 'sessions', description: '', execution: 'local' }, 'owner-b')
+  assert.equal(outcome.kind, 'conflict')
+  assert.equal(outcome.nearSynonym, 'session ↔ sessions')
+  // The bridge stores only the first.
+  assert.equal(bridge.snapshot().entries.length, 1)
+  // Unrelated names are fine.
+  const ok = bridge.register({ id: 'c', name: 'grilling', description: '', execution: 'submission' }, 'owner-c')
+  assert.equal(ok.kind, 'registered')
+})
+
 test('CommandBridge: a duplicate id is an error', () => {
   const bridge = new CommandBridge()
   bridge.register({ id: 'x', name: 'a', description: '', execution: 'local' }, 'o1')
@@ -245,35 +259,89 @@ test('AutocompleteRegistry: latest-only commit drops stale results', async () =>
   assert.equal(secondResult, null)
 })
 
+test('AutocompleteRegistry: a newer request aborts the superseded provider', async () => {
+  const registry = new AutocompleteRegistry()
+  const sawAbort: boolean[] = []
+  registry.register({
+    id: 'spy',
+    provider: {
+      getSuggestions(query) {
+        return new Promise((resolve, reject) => {
+          // The provider OBSERVES the signal: the registry must abort the
+          // superseded request through its internal controller. A request
+          // that is NOT superseded resolves with nothing (the chain then
+          // returns null — the current request settles normally).
+          if (query.signal.aborted) {
+            sawAbort.push(true)
+            reject(new DOMException('aborted', 'AbortError'))
+            return
+          }
+          query.signal.addEventListener('abort', () => {
+            sawAbort.push(true)
+            reject(new DOMException('aborted', 'AbortError'))
+          }, { once: true })
+          // No suggestions: resolve null so the chain continues and the
+          // current request settles.
+          queueMicrotask(() => resolve(null))
+        })
+      },
+    },
+  }, 'a')
+  const p1 = registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal })
+  const p2 = registry.suggest({ lines: [], cursorLine: 0, cursorCol: 1, signal: new AbortController().signal })
+  await Promise.allSettled([p1, p2])
+  assert.ok(sawAbort.length >= 1, 'the superseded request must observe an abort')
+})
+
 // ── KeybindingRegistry ─────────────────────────────────────────────────────
 
-test('KeybindingRegistry: reserved host keys are rejected', () => {
+test('KeybindingRegistry: reserved host keys are rejected (full lifecycle inventory)', () => {
   const registry = new KeybindingRegistry()
+  const reserved: { key: string; ctrl: boolean; shift: boolean }[] = [
+    { key: 'c', ctrl: true, shift: false },
+    { key: 'd', ctrl: true, shift: false },
+    { key: 's', ctrl: true, shift: false },
+    { key: 'f', ctrl: true, shift: false },
+    { key: 'f', ctrl: true, shift: true },
+    { key: 'o', ctrl: true, shift: false },
+    { key: 't', ctrl: true, shift: false },
+    { key: 'g', ctrl: true, shift: false },
+    { key: 'j', ctrl: true, shift: false },
+    { key: 'enter', ctrl: true, shift: false },
+  ]
+  for (let index = 0; index < reserved.length; index++) {
+    const binding = reserved[index]!
+    assert.throws(() => registry.register({
+      id: `k${index}`,
+      key: { key: binding.key, ctrl: binding.ctrl, alt: false, shift: binding.shift, super: false },
+      action: 'submit-draft',
+    }, 'o'), /reserved/, `${binding.ctrl ? 'Ctrl+' : ''}${binding.key} must be reserved`)
+  }
   assert.throws(() => registry.register({
-    id: 'k1',
-    key: { key: 'c', ctrl: true, alt: false, shift: false, super: false },
-    action: 'submit-draft',
-  }, 'o'), /reserved/)
-  assert.throws(() => registry.register({
-    id: 'k2',
+    id: 'k-enter',
     key: { key: 'enter', ctrl: false, alt: false, shift: false, super: false },
     action: 'submit-draft',
-  }, 'o'), /reserved/)
+  }, 'o'), /reserved/, 'Enter must be reserved')
+  assert.throws(() => registry.register({
+    id: 'k-esc',
+    key: { key: 'escape', ctrl: false, alt: false, shift: false, super: false },
+    action: 'submit-draft',
+  }, 'o'), /reserved/, 'Esc must be reserved')
 })
 
 test('KeybindingRegistry: duplicate keys conflict; unload removes bindings', () => {
   const registry = new KeybindingRegistry()
   const handle = registry.register({
     id: 'k1',
-    key: { key: 'g', ctrl: true, alt: false, shift: false, super: false },
+    key: { key: 'y', ctrl: false, alt: true, shift: false, super: false },
     action: 'open-search',
   }, 'o')
   assert.throws(() => registry.register({
     id: 'k2',
-    key: { key: 'g', ctrl: true, alt: false, shift: false, super: false },
+    key: { key: 'y', ctrl: false, alt: true, shift: false, super: false },
     action: 'cancel-activity',
   }, 'o2'), /duplicate keybinding/)
-  assert.equal(registry.actionFor({ key: 'g', ctrl: true, alt: false, shift: false, super: false }), 'open-search')
+  assert.equal(registry.actionFor({ key: 'y', ctrl: false, alt: true, shift: false, super: false }), 'open-search')
   handle.dispose()
-  assert.equal(registry.actionFor({ key: 'g', ctrl: true, alt: false, shift: false, super: false }), undefined)
+  assert.equal(registry.actionFor({ key: 'y', ctrl: false, alt: true, shift: false, super: false }), undefined)
 })
