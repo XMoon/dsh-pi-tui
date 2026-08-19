@@ -390,8 +390,53 @@ test('TuiApp: a plugin editor view REPAINTS after setText + invalidate (round-2 
   await vt.waitForRender()
   // The seat's invalidate recompiled the view: the seat's component now
   // renders the NEW text (probe via a fresh compile of the current view).
-  const seat = app.seatEditorForTest()
-  const compiled = seat.component.render(80).join('\n')
-  assert.ok(compiled.includes('changed text'), `the view must repaint the new text:\n${compiled}`)
+  // The TERMINAL must show the new text (round-3 finding 2: the repro is
+  // the SCREEN, not the compiled component).
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const screen = vt.getViewport().map(strip).join('\n')
+  assert.ok(screen.includes('changed text'), `the terminal must repaint the new text:\n${screen}`)
+  assert.ok(!screen.includes('initial'), `the old text must be gone:\n${screen}`)
+  app.stop()
+})
+
+test('TuiApp: a compile throw inside invalidate() is isolated — the host keeps working (round-3 finding 1)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('before')
+  let explode = false
+  registry.register({
+    id: 'exploding-view', priority: 0,
+    create: (host: import('../src/extension/public-types.ts').EditorHost) => ({
+      get component(): import('../src/extension/public-types.ts').ExtensionView {
+        if (explode) throw new Error('view compile boom')
+        return { kind: 'text', spans: [{ text: 'before' }] }
+      },
+      getText: () => 'before',
+      setText: (text) => {
+        void text
+        // The plugin's state changed; the host invalidate recompiles and
+        // THROWS — the exception must not escape into the host path.
+        explode = true
+        host.invalidate()
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // A post-mount setText triggers the throwing recompile: the host must
+  // survive (no unhandled exception, the previous view stays).
+  app.setDraft('after')
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const screen = vt.getViewport().map(strip).join('\n')
+  assert.ok(app.getDraft() === 'after', 'the host editor state stays consistent')
+  void screen
   app.stop()
 })

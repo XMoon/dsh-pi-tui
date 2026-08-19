@@ -247,8 +247,18 @@ export class EditorSeatHolder {
       borderColor: editor.borderColor ?? ((value: string) => value),
       invalidate: () => {
         // Recompile the CURRENT view + swap it into the seat (the host's
-        // viewSwap re-mounts the child without a handoff).
-        component = holder.compileView(editor.component)
+        // viewSwap re-mounts the child without a handoff). ISOLATED like
+        // the handoff (round-3 finding 1): a compile throw must NOT
+        // escape into the host input/render path — the current component
+        // stays, the error is reported, and no swap happens.
+        let next: Component
+        try {
+          next = holder.compileView(editor.component)
+        } catch (error) {
+          holder.notifyError(error instanceof Error ? error.message : String(error))
+          return
+        }
+        component = next
         holder.viewSwap(component)
       },
       addToHistory: () => {}, // the host default owns history recall
