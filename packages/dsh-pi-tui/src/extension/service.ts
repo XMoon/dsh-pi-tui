@@ -246,6 +246,10 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       apiVersion: 1,
       hostVersion: this.hostVersion,
       capabilities: new Set([...PiTuiExtensionServiceImpl.ADVERTISED_CAPABILITIES, ...this.liveCapabilities]),
+      // M11 deprecation policy (plan §16): currently nothing is
+      // deprecated — the map stays empty. When a surface is deprecated,
+      // its note lands here AND the capability/API is removed in API v2.
+      deprecations: new Map(),
     }
   }
 

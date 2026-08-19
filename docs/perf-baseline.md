@@ -65,3 +65,21 @@
   (0.5ms p50 regardless of the 2220-message transcript);
 - ✅ heap enters a stable range under sustained streaming (growth ≈ 0);
 - ✅ all transcript golden/headless tests keep identical output.
+
+## M11: extension-plugin overhead (plan §23)
+
+Measured with the widget-outlet section of `scripts/bench.mts` (200 frames
+per configuration):
+
+| Configuration | Refresh cost |
+|---|---|
+| 0 widget contributions | ~5 µs/frame |
+| 10 widget contributions | ~13 µs/frame |
+| 50 widget contributions | ~13 µs/frame |
+| 100 invalidations in one tick | 1 flush (coalesced) |
+
+The 10→50 flatness is the outlet's early-out gate (a refresh skips when
+the ledger revision, theme revision, width and row budget are unchanged);
+the burst coalescing is the `InvalidateBatcher` (one flush per tick). The
+renderer path adds a registry-revision cheap gate so renderer functions
+never run in the frame loop for unchanged content.

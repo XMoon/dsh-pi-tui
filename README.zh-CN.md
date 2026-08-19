@@ -220,6 +220,9 @@ service.register<InputWidget>('input.widget.below', {
   dispose 会关闭所有仍在持有的租约),close() 幂等,hide()/show() 切换
   可见性而不关闭。插件永远不能挂载原始组件或抢焦点——终端和 overlay
   栈由 host 拥有。
+[扩展 API v1 作者指南](docs/extension-api.md)记录了导入规则、完整
+surface 表、生命周期/渲染契约、M11 弃用策略与稳定性契约。
+
 M10 验收插件(计划 §15):仓库附带一个 vim-mode fixture
 (`test/fixtures/vim-plugin/`),用**完整**公开 SDK 练习——编辑器替换、
 keybinding、widget、command、settings、tool renderer、managed overlay——

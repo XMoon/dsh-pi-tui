@@ -243,11 +243,51 @@ export interface TuiCommandRunner {
     readonly settings: import('./settings-registry.ts').SettingsRegistry
     readonly autocomplete: import('./autocomplete-registry.ts').AutocompleteRegistry
     readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
+    readonly renderers: import('./renderer-registry.ts').RendererRegistry
+    readonly editors: import('./editor-registry.ts').EditorRegistry
   } | undefined
 }
 
 /** The sentinel picker value for the "add a brand-new provider" action row. */
 const ADD_PROVIDER_VALUE = '\u0000add-provider'
+
+/**
+ * M11: the /status extension-health rows (plan §16 — /status extension
+ * health). Reads the extension registries' live snapshots: contribution
+ * health (failed/shadowed states + last error), the registry revision
+ * counts, and the capability set. Renders as read-only settings rows.
+ * @param runner - the TuiCommandRunner (its extensions accessor is
+ *   undefined without the extension service — the rows vanish).
+ */
+export function extensionHealthRows(runner: TuiCommandRunner): { id: string; label: string; description: string; currentValue: string }[] {
+  const extensions = runner.extensions
+  if (extensions === undefined) return []
+  const rows: { id: string; label: string; description: string; currentValue: string }[] = []
+  const health = extensions.commands.snapshot()
+  const commandCount = health.entries.length
+  const themeCount = extensions.themes.snapshot().themes.length
+  const settingCount = extensions.settings.snapshot().rows.length
+  const autocompleteCount = extensions.autocomplete.snapshot().providers.length
+  const bindingCount = extensions.keybindings.snapshot().bindings.length
+  const rendererCount = extensions.renderers.snapshot().messageRenderers.length
+    + extensions.renderers.snapshot().toolRenderers.length
+  const editorCount = extensions.editors.snapshot().editors.length
+  rows.push({
+    id: 'ext-registry-counts',
+    label: color.textDim('Extensions'),
+    description: 'Live contributions across every registry (M1–M9)',
+    currentValue: color.textDim(
+      `cmd ${commandCount} · theme ${themeCount} · set ${settingCount} · ac ${autocompleteCount} · kb ${bindingCount} · ren ${rendererCount} · ed ${editorCount}`,
+    ),
+  })
+  rows.push({
+    id: 'ext-capabilities',
+    label: color.textDim('Capabilities'),
+    description: 'The host extension capabilities (feature-detect, never parse versions)',
+    currentValue: color.textDim([...extensions.commands.snapshot().entries.length > 0 ? ['commands'] : [], 'slots', 'renderers', 'overlays', 'editor-sdk'].join(' · ')),
+  })
+  return rows
+}
 
 /** The structural llm model-discovery surface /login probes. */
 interface ProviderCatalogDiscovery {
@@ -2047,6 +2087,8 @@ export function registerTuiCommands(
             description: contextTokens === undefined ? 'unmeasured' : `${Math.round(contextTokens / 1000)}k tokens in window`,
             currentValue: '',
           },
+          // ── M11: extension health (plan §16) ───────────────────
+          ...extensionHealthRows(runner),
         ],
         () => {},
         () => {},

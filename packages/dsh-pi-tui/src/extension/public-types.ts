@@ -100,6 +100,14 @@ export interface PiTuiApiInfo {
   readonly hostVersion: string
   /** Capabilities the host currently supports; feature-detect, never parse the version. */
   readonly capabilities: ReadonlySet<PiTuiCapability>
+  /**
+   * M11: the deprecation policy (plan §16). A capability or API marked
+   * deprecated stays functional but is REMOVED in the next API version —
+   * a plugin should migrate before then. An entry's presence means the
+   * deprecated surface is still active; absence means it is gone.
+   * Keys: capability ids (or API method names) → the deprecation note.
+   */
+  readonly deprecations: ReadonlyMap<string, string>
 }
 
 /** Common registration metadata every contribution carries. */

@@ -239,6 +239,10 @@ Since M5 the extension surface also covers registries (plan §10):
   toggle visibility without closing. A plugin can never mount a raw
   component or steal focus — the host owns the terminal and the overlay
   stack.
+The [extension API v1 author guide](docs/extension-api.md) records the
+import rules, the full surface table, the lifecycle/render contracts, the
+M11 deprecation policy and the stability contract.
+
 The M10 acceptance plugin (plan §15): the repo ships a vim-mode fixture
 (`test/fixtures/vim-plugin/`) that exercises the FULL public SDK — editor
 replacement, keybindings, widgets, commands, settings, tool renderers and

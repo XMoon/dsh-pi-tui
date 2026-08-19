@@ -3190,6 +3190,8 @@ export function apply(ctx: Context, config: Config): void {
           settings: extensionService.settings,
           autocomplete: extensionService.autocomplete,
           keybindings: extensionService.keybindings,
+          renderers: extensionService.renderers,
+          editors: extensionService.editors,
         }
       },
       /** The live session's workspace cwd (header), falling back to the
