@@ -270,14 +270,15 @@ The M10 acceptance fixture (plan §15): the repo ships a vim-mode fixture
 (`test/fixtures/vim-plugin/`) that validates the editor-extension seam — the
 packed public SDK is consumable by a third-party Cordis plugin, its
 replacement editor receives SEMANTIC `EditorInputEvent`s (never raw terminal
-bytes) with insert/normal mode handling, and editor `create()`/`dispose()`
-work — importing ONLY `@xmoon76/dsh-pi-tui/extensions`. It is NOT a
-production Vim and NOT a Stable-API completeness proof: the other public
-surfaces (commands, themes, settings, autocomplete, keybindings, renderers,
-overlays, widgets) have their own dedicated tests. Its CI gate forbids
-`@xmoon76/pi-tui`, `src/tui-app` and repository-relative internal paths: if
-a STABLE plugin ever needs a private import, the SDK is missing a capability
-(there is no `unsafeGetTuiApp()` escape hatch).
+bytes), and editor `create()`/`dispose()` work — importing ONLY
+`@xmoon76/dsh-pi-tui/extensions`. It is NOT a production Vim and NOT a
+Stable-API completeness proof: modal-mode behavior (insert/normal) is not
+part of the Stable contract, and the other public surfaces (commands,
+themes, settings, autocomplete, keybindings, renderers, overlays, widgets)
+have their own dedicated tests. Its CI gate forbids `@xmoon76/pi-tui`,
+`src/tui-app` and repository-relative internal paths: if a STABLE plugin
+ever needs a private import, the SDK is missing a capability (there is no
+`unsafeGetTuiApp()` escape hatch).
 
 - `registerEditor(contribution)` — the EDITOR SDK (M9, plan §14):
   single-winner by priority (a tie is an explicit error); the winner

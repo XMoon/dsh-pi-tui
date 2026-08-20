@@ -154,14 +154,11 @@ function main() {
     for (const [api, label] of surface) {
       check(`fixture exercises ${label} (${api})`, fixtureSrc.includes(api))
     }
-    // P1-6: the vim fixture is a MINIMAL modal editor — it must implement the
-    // semantic handleInput(event) channel (EditorInputEvent) and own a mode
-    // state machine. (The checks below validate the editor-extension seam
-    // through the vim fixture; they are not a Stable-completeness proof —
-    // the fixture keeps its mini modal editor, which is not a blocker,
-    // see plan §7.)
-    check('fixture owns a modal state machine (insert/normal modes)',
-      fixtureSrc.includes("'insert'") && fixtureSrc.includes("'normal'"))
+    // The fixture must consume the semantic handleInput(event) channel
+    // (EditorInputEvent) — the editor-extension seam. Modal-mode behavior
+    // (insert/normal) is NOT part of the Stable contract (plan §7): the
+    // fixture keeps its mini modal editor, but CI must not define Vim
+    // behavior as a Stable API contract.
     check('fixture never parses raw terminal bytes (no CSI-u / escape matching in the plugin)',
       !/\\x1b\[/.test(fixtureSrc) && !/escape\s*\(/.test(fixtureSrc.replace(/handleInput/g, '')))
 

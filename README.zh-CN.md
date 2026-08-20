@@ -246,13 +246,13 @@ surface 表、生命周期/渲染契约、M11 弃用策略与稳定性契约。
 M10 验收 fixture(计划 §15):仓库附带一个 vim-mode fixture
 (`test/fixtures/vim-plugin/`),用于验证编辑器扩展接缝——第三方 Cordis
 插件可消费打包后的公开 SDK,其替换编辑器通过**语义化** `EditorInputEvent`
-接收输入(绝不接触原始终端字节)并实现 insert/normal 模式,编辑器的
-`create()`/`dispose()` 正常工作——只导入 `@xmoon76/dsh-pi-tui/extensions`。
-它**不是**生产级 Vim,也**不是** Stable API 完整性的证明:其余公开能力
-(命令、主题、设置、自动补全、按键绑定、渲染器、overlay、widget)都有各自
-的独立测试。它的 CI 门禁禁止 `@xmoon76/pi-tui`、`src/tui-app` 和仓库相对
-内部路径:如果 Stable 插件需要私有导入,说明 SDK 缺 capability(没有
-`unsafeGetTuiApp()` 逃生舱)。
+接收输入(绝不接触原始终端字节),编辑器的 `create()`/`dispose()` 正常
+工作——只导入 `@xmoon76/dsh-pi-tui/extensions`。它**不是**生产级 Vim,
+也**不是** Stable API 完整性的证明:模态模式行为(insert/normal)不属于
+Stable 契约,其余公开能力(命令、主题、设置、自动补全、按键绑定、渲染器、
+overlay、widget)都有各自的独立测试。它的 CI 门禁禁止 `@xmoon76/pi-tui`、
+`src/tui-app` 和仓库相对内部路径:如果 Stable 插件需要私有导入,说明 SDK
+缺 capability(没有 `unsafeGetTuiApp()` 逃生舱)。
 
 - `registerEditor(contribution)` — 编辑器 SDK(M9,计划 §14):按 priority
   单选(平局是显式错误);winner 通过 host 的**原子交接**占据编辑器座席
