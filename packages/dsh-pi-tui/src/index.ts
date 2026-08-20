@@ -1517,6 +1517,7 @@ export function apply(ctx: Context, config: Config): void {
       // fail-safe release and the low-level surface seam through it).
       _unstableInputRoute(data: string, surfaceId: string): import('./extension/internal/unstable-input.ts').UnstableRawRouteResult
       _unstableInputsLive(): boolean
+      _unstableInputsRevision(): number
       _unstableEmergencyRelease(): void
       setUnstableSurfaceSeam(surfaceId: string, handle: import('./extension/unstable-types.ts').UnstableSurfaceHandle): void
     }) | undefined
@@ -2700,6 +2701,7 @@ export function apply(ctx: Context, config: Config): void {
       // Unstable API).
       unstableInputRoute: (data, surfaceId) => extensionService?._unstableInputRoute(data, surfaceId) ?? { action: 'pass' },
       unstableInputsLive: () => extensionService?._unstableInputsLive() ?? false,
+      unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
       unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
     })
     // M3: attach the extension host to the surface chrome once per

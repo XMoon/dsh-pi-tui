@@ -816,6 +816,13 @@ export interface TuiAppOptions {
    */
   unstableInputsLive?: () => boolean
   /**
+   * Phase 3: the raw capture registry revision (the fail-safe tracker
+   * stamps each Esc press with it — a release/re-register bumps the
+   * revision, so presses from a previous capture session never count
+   * toward a new session's triple-Esc). Optional.
+   */
+  unstableInputsRevision?: () => number
+  /**
    * Phase 3: the Host emergency fail-safe release (wired by the runner to
    * the service's `_unstableEmergencyRelease`). Triggered by the
    * host-owned triple-Esc pattern BEFORE the captures are consulted — it
@@ -1039,11 +1046,15 @@ export class TuiApp {
   private readonly unstableInputRoute: ((data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult) | undefined
   /** Phase 3: whether any raw capture is live (arms the fail-safe). */
   private readonly unstableInputsLive: (() => boolean) | undefined
+  /** Phase 3: the raw capture registry revision (stale-press invalidation
+   * for the fail-safe tracker). */
+  private readonly unstableInputsRevision: (() => number) | undefined
   /** Phase 3: the Host emergency fail-safe release (triple-Esc). */
   private readonly unstableFailSafeRelease: (() => void) | undefined
-  /** Phase 3: the fail-safe Esc-press timestamps (triple-Esc within the
-   * window triggers the release). */
-  private unstableEscPresses: number[] = []
+  /** Phase 3: the fail-safe Esc-press stamps (timestamp + capture-session
+   * revision; triple-Esc within the window at the SAME revision triggers
+   * the release). */
+  private unstableEscPresses: { at: number; revision: number }[] = []
   /** Phase 3: still-owned UNSTABLE mount leases (closed by the final
    * dispose; re-mounted across fullscreen screen swaps). */
   private readonly unstableMountLeases = new Set<import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void }>()
@@ -1187,6 +1198,7 @@ export class TuiApp {
     this.advancedInputRoute = options.advancedInputRoute
     this.unstableInputRoute = options.unstableInputRoute
     this.unstableInputsLive = options.unstableInputsLive
+    this.unstableInputsRevision = options.unstableInputsRevision
     this.unstableFailSafeRelease = options.unstableFailSafeRelease
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
     this.renderers = options.renderers
@@ -1591,7 +1603,12 @@ export class TuiApp {
     // mount, restoring Host input. The fail-safe is armed only while
     // captures are live, so ordinary Esc behavior is unchanged otherwise.
     if (this.unstableInputRoute !== undefined) {
-      if (this.unstableInputsLive?.() === true && this.unstableFailSafe(data)) {
+      if (this.unstableInputsLive?.() !== true) {
+        // No captures are live: the fail-safe is disarmed — drop any
+        // stale Esc stamps (hygiene; the revision stamp already
+        // invalidates them on the next registration).
+        this.unstableEscPresses = []
+      } else if (this.unstableFailSafe(data)) {
         try {
           this.unstableFailSafeRelease?.()
         } catch {
@@ -2963,19 +2980,29 @@ export class TuiApp {
 
   /**
    * The Host emergency fail-safe detector (plan §7): triple-Esc within
-   * {@link UNSTABLE_FAILSAFE_WINDOW_MS}. Runs BEFORE the raw captures are
-   * consulted, so it cannot be rewritten or consumed by a capture. The
-   * first two Esc presses pass through (a plugin surface may use Esc
-   * normally); the third is consumed and triggers the release.
+   * {@link UNSTABLE_FAILSAFE_WINDOW_MS} at the SAME capture-session
+   * revision. Runs BEFORE the raw captures are consulted, so it cannot be
+   * rewritten or consumed by a capture. The first two Esc presses pass
+   * through (a plugin surface may use Esc normally); the third is
+   * consumed and triggers the release.
+   *
+   * Stale-press invalidation (round-1 finding): each press is stamped
+   * with the raw capture registry revision, which bumps on EVERY
+   * register/dispose. A release (fail-safe, owner unload) followed by a
+   * re-register therefore invalidates every earlier press — a stale pair
+   * from a previous capture session can never make the first Esc of a
+   * new session count as the third press.
    * @param data - the raw chunk.
    * @returns true when the fail-safe fired (the caller must consume the
    *   chunk and run the release).
    */
   private unstableFailSafe(data: string): boolean {
     if (!matchesKey(data, 'escape')) return false
+    const revision = this.unstableInputsRevision?.() ?? 0
     const now = Date.now()
-    this.unstableEscPresses = this.unstableEscPresses.filter(timestamp => now - timestamp < TuiApp.UNSTABLE_FAILSAFE_WINDOW_MS)
-    this.unstableEscPresses.push(now)
+    this.unstableEscPresses = this.unstableEscPresses.filter(press =>
+      now - press.at < TuiApp.UNSTABLE_FAILSAFE_WINDOW_MS && press.revision === revision)
+    this.unstableEscPresses.push({ at: now, revision })
     if (this.unstableEscPresses.length >= 3) {
       this.unstableEscPresses = []
       return true

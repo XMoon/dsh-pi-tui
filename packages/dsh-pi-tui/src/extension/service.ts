@@ -1403,6 +1403,13 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     return this.unstableInputs.hasAny()
   }
 
+  /** The raw capture registry revision (the app's fail-safe tracker
+   * stamps each Esc press with it — presses from a previous capture
+   * session never count toward a new session's triple-Esc). */
+  _unstableInputsRevision(): number {
+    return this.unstableInputs.revisionOf()
+  }
+
   /**
    * The Host emergency fail-safe (plan §7): release every unstable raw
    * capture and close every unstable mount, restoring Host input. This is

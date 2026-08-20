@@ -20,6 +20,7 @@ async function appWithUnstableRoute() {
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     unstableInputRoute: (data, surfaceId) => registry.route({ data, surfaceId }),
     unstableInputsLive: () => registry.hasAny(),
+    unstableInputsRevision: () => registry.revisionOf(),
     unstableFailSafeRelease: () => registry.disposeAll(),
   })
   app.start()
@@ -146,6 +147,33 @@ test('emergency fail-safe: not armed while no capture is live (ordinary Esc beha
   vt.sendInput('q')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'q')
+  app.stop()
+})
+
+test('emergency fail-safe: stale Esc presses from a released capture session never count (round-1 finding)', async () => {
+  const { vt, app, registry } = await appWithUnstableRoute()
+  const capture = rawCapture('c', () => true)
+  registry.register(capture.spec, 'owner')
+  // Two Esc presses while the capture is live.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  // The capture is released (owner unload / fail-safe path) and a NEW
+  // capture registers within the window — the stale pair must NOT make
+  // the next Esc count as the third press.
+  registry.disposeAll()
+  registry.register(rawCapture('c2', () => true).spec, 'owner')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(registry.hasAny(), true, 'the fail-safe did not fire on the stale pair')
+  // Two MORE Esc presses within the window DO trigger it (three fresh
+  // presses at the new capture-session revision).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(registry.hasAny(), false, 'three fresh Esc presses trigger the fail-safe')
   app.stop()
 })
 

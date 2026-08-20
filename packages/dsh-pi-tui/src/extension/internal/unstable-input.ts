@@ -164,6 +164,14 @@ export class UnstableInputRegistry {
     return false
   }
 
+  /** The registry revision (bumped on every register/dispose). The Host's
+   * fail-safe tracker stamps each Esc press with this revision so presses
+   * from a PREVIOUS capture session (before a release/re-register) never
+   * count toward a new session's triple-Esc. */
+  revisionOf(): number {
+    return this.revision
+  }
+
   /** An immutable snapshot (diagnostics + /status). */
   snapshot(): UnstableInputRegistrySnapshot {
     const captures = [...this.records.values()]
