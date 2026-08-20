@@ -1,12 +1,14 @@
 /**
- * P1-6 acceptance: the vim acceptance plugin is a REAL modal editor. The
- * fixture's apply() runs in a real Cordis context; its editor wins the
- * seat through the public SDK and its handleInput state machine performs
- * insert-mode editing (printable text, Backspace, Left/Right, Esc) and
- * normal-mode navigation/deletion (i/h/l/x) on SEMANTIC events — the
- * host normalized the terminal protocol, so legacy and CSI-u encodings
- * behave identically. Host-owned submission (Enter/Ctrl+Enter/Ctrl+S)
- * is never re-implemented in the plugin.
+ * Editor-extension acceptance (plan §15, M10): the vim acceptance fixture
+ * validates the Stable editor-extension seam. The fixture's apply() runs in
+ * a real Cordis context; its editor wins the seat through the public SDK and
+ * its handleInput state machine performs insert-mode editing (printable
+ * text, Backspace, Left/Right, Esc) and normal-mode navigation/deletion
+ * (i/h/l/x) on SEMANTIC events — the host normalized the terminal protocol,
+ * so legacy and CSI-u encodings behave identically. Host-owned submission
+ * (Enter/Ctrl+Enter/Ctrl+S) is never re-implemented in the plugin. The
+ * fixture is NOT a production Vim and NOT a Stable-API completeness proof
+ * (plan §7): the remaining public surfaces have their own dedicated tests.
  * @module @xmoon76/dsh-pi-tui/vim-fixture.test
  */
 
@@ -68,7 +70,7 @@ async function loadVimFixture(): Promise<(ctx: Context) => void> {
   }
 }
 
-test('P1-6: the vim fixture is a REAL modal editor — insert and normal modes over semantic events', async () => {
+test('M10: the vim fixture is a real modal editor — insert and normal modes over semantic events', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)

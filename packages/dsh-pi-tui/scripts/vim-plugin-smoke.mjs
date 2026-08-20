@@ -10,8 +10,12 @@
  *   2. the fixture typechecks against the packed `.d.mts`;
  *   3. the fixture COMPILES to JS and RUNTIME-LOADS against the packed
  *      bytes (apply() registers through a mock service without throwing);
- *   4. the fixture exercises the FULL SDK: editor replacement, keybinding,
- *      widget, command, setting, tool renderer, managed overlay;
+ *   4. the fixture exercises the EDITOR-EXTENSION SEAM (replacement
+ *      registration + semantic EditorInputEvent handling + modal state);
+ *      the remaining public surfaces (commands, themes, settings,
+ *      autocomplete, keybindings, renderers, overlays, widgets) are each
+ *      covered by their own dedicated tests — this gate is NOT a
+ *      Stable-completeness proof;
  *   5. the fixture's module shape (name/inject/apply) matches the Loader;
  *   6. no duplicate dsh runtime in the fixture tree.
  *
@@ -133,27 +137,29 @@ function main() {
       dshImports.length === 1 && dshImports[0] === '@xmoon76/dsh-pi-tui/extensions',
       dshImports.join(', '))
 
-    // 3. SDK SURFACE COVERAGE (plan §15 acceptance): every public
-    //    capability must be exercised.
+    // 3. EDITOR-SEAM SURFACE (plan §15 acceptance): the editor seam
+    //    exercised through the vim fixture. The checks below validate the
+    //    editor-extension seam, NOT a Stable-completeness proof: each
+    //    remaining public surface (commands, themes, settings,
+    //    autocomplete, keybindings, renderers, overlays, widgets) has its
+    //    own dedicated tests (plan §8) — this gate must not grow into a
+    //    FULL-SDK proof.
     const surface = [
       ['registerEditor', 'editor replacement'],
-      ['registerKeybinding', 'keybindings'],
-      ['register<InputWidget>', 'widget slot'],
-      ['registerCommand', 'command ownership'],
-      ['registerSetting', 'settings'],
-      ['registerToolRenderer', 'tool renderer'],
-      ['showOverlay', 'managed overlay'],
+      ['handleInput', 'semantic editor input channel'],
+      ['EditorInputEvent', 'host-normalized event shape'],
+      ['create:', 'editor create() protocol member'],
+      ['dispose:', 'editor dispose() protocol member'],
     ]
     for (const [api, label] of surface) {
       check(`fixture exercises ${label} (${api})`, fixtureSrc.includes(api))
     }
-    // P1-6: the vim fixture is a REAL modal editor — it must implement the
-    // semantic handleInput(event) channel (EditorInputEvent), own a mode
-    // state machine, and never parse raw terminal escape bytes itself.
-    check('fixture implements the semantic editor input channel (handleInput)',
-      fixtureSrc.includes('handleInput'))
-    check('fixture consumes EditorInputEvent (the host-normalized event shape)',
-      fixtureSrc.includes('EditorInputEvent'))
+    // P1-6: the vim fixture is a MINIMAL modal editor — it must implement the
+    // semantic handleInput(event) channel (EditorInputEvent) and own a mode
+    // state machine. (The checks below validate the editor-extension seam
+    // through the vim fixture; they are not a Stable-completeness proof —
+    // the fixture keeps its mini modal editor, which is not a blocker,
+    // see plan §7.)
     check('fixture owns a modal state machine (insert/normal modes)',
       fixtureSrc.includes("'insert'") && fixtureSrc.includes("'normal'"))
     check('fixture never parses raw terminal bytes (no CSI-u / escape matching in the plugin)',

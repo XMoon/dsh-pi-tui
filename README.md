@@ -135,8 +135,8 @@ service; the tiers are capability facades over that one service, not separate
 plugin systems or runtimes.
 
 The extension surface ships three tiers: a plugin imports ONLY the
-public entry — never the stable entry's internals (`PiTuiApp`,
-`PiTuiMainScreen`, `PiTuiAltScreen`) nor repository-relative paths.
+public entry — never the stable entry's internals (`TuiApp`,
+`TuiMainScreen`, `TuiAltScreen`) nor repository-relative paths.
 
 | Tier | Entry | Contract |
 |---|---|---|
@@ -266,13 +266,18 @@ The [extension API v1 author guide](docs/extension-api.md) records the
 import rules, the full surface table, the lifecycle/render contracts, the
 M11 deprecation policy and the stability contract.
 
-The M10 acceptance plugin (plan §15): the repo ships a vim-mode fixture
-(`test/fixtures/vim-plugin/`) that exercises the FULL public SDK — editor
-replacement, keybindings, widgets, commands, settings, tool renderers and
-managed overlays — importing ONLY `@xmoon76/dsh-pi-tui/extensions`. Its
-CI gate forbids `@xmoon76/pi-tui`, `src/tui-app` and repository-relative
-internal paths: if the plugin ever needs a private import, the SDK is
-missing a capability (there is no `unsafeGetTuiApp()` escape hatch).
+The M10 acceptance fixture (plan §15): the repo ships a vim-mode fixture
+(`test/fixtures/vim-plugin/`) that validates the editor-extension seam — the
+packed public SDK is consumable by a third-party Cordis plugin, its
+replacement editor receives SEMANTIC `EditorInputEvent`s (never raw terminal
+bytes) with insert/normal mode handling, and editor `create()`/`dispose()`
+work — importing ONLY `@xmoon76/dsh-pi-tui/extensions`. It is NOT a
+production Vim and NOT a Stable-API completeness proof: the other public
+surfaces (commands, themes, settings, autocomplete, keybindings, renderers,
+overlays, widgets) have their own dedicated tests. Its CI gate forbids
+`@xmoon76/pi-tui`, `src/tui-app` and repository-relative internal paths: if
+a STABLE plugin ever needs a private import, the SDK is missing a capability
+(there is no `unsafeGetTuiApp()` escape hatch).
 
 - `registerEditor(contribution)` — the EDITOR SDK (M9, plan §14):
   single-winner by priority (a tie is an explicit error); the winner
@@ -292,8 +297,9 @@ fiber unloads (HMR, disable), regular and fullscreen both refresh, and
 `handle.invalidate()/replace()` re-render through the active screen. The
 `@xmoon76/dsh-pi-tui/builtins` entry is the Loader-only first-party
 contributor (version badge, turn/step counters, todo-summary dock item) —
-not a stable third-party SDK. Editor replacement, overlays, transcript
-renderers and raw terminal access are NOT part of v1.
+not a stable third-party SDK. Raw terminal access, pre-host input
+interception and full input ownership are NOT part of the Stable tier (see
+the Advanced/Unstable roadmap).
 
 ## Slash commands (selection)
 

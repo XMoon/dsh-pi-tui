@@ -1,7 +1,7 @@
 # Extension tiers
 
 The extension surface ships three tiers. A plugin imports ONE tier entry — never the
-stable entry's internals, `PiTuiApp`, `PiTuiMainScreen`, `PiTuiAltScreen`,
+stable entry's internals, `TuiApp`, `TuiMainScreen`, `TuiAltScreen`,
 nor repository-relative paths.
 
 All extension plugins remain standard DeepSeek Harness / Cordis plugins using

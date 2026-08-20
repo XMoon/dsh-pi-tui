@@ -129,7 +129,7 @@ Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、�
 只是该单一 Service 上的能力 facade,而非独立的插件系统或 runtime。
 
 扩展面分为三个层级:插件只导入**公开入口**——绝不导入 Stable 入口的
-内部(`PiTuiApp`、`PiTuiMainScreen`、`PiTuiAltScreen`)或仓库相对路径。
+内部(`TuiApp`、`TuiMainScreen`、`TuiAltScreen`)或仓库相对路径。
 
 | 层级 | 入口 | 契约 |
 |---|---|---|
@@ -243,12 +243,16 @@ service.register<InputWidget>('input.widget.below', {
 [扩展 API v1 作者指南](docs/extension-api.md)记录了导入规则、完整
 surface 表、生命周期/渲染契约、M11 弃用策略与稳定性契约。
 
-M10 验收插件(计划 §15):仓库附带一个 vim-mode fixture
-(`test/fixtures/vim-plugin/`),用**完整**公开 SDK 练习——编辑器替换、
-keybinding、widget、command、settings、tool renderer、managed overlay——
-只导入 `@xmoon76/dsh-pi-tui/extensions`。它的 CI 门禁禁止
-`@xmoon76/pi-tui`、`src/tui-app` 和仓库相对内部路径:如果该插件需要
-私有导入,说明 SDK 缺 capability(没有 `unsafeGetTuiApp()` 逃生舱)。
+M10 验收 fixture(计划 §15):仓库附带一个 vim-mode fixture
+(`test/fixtures/vim-plugin/`),用于验证编辑器扩展接缝——第三方 Cordis
+插件可消费打包后的公开 SDK,其替换编辑器通过**语义化** `EditorInputEvent`
+接收输入(绝不接触原始终端字节)并实现 insert/normal 模式,编辑器的
+`create()`/`dispose()` 正常工作——只导入 `@xmoon76/dsh-pi-tui/extensions`。
+它**不是**生产级 Vim,也**不是** Stable API 完整性的证明:其余公开能力
+(命令、主题、设置、自动补全、按键绑定、渲染器、overlay、widget)都有各自
+的独立测试。它的 CI 门禁禁止 `@xmoon76/pi-tui`、`src/tui-app` 和仓库相对
+内部路径:如果 Stable 插件需要私有导入,说明 SDK 缺 capability(没有
+`unsafeGetTuiApp()` 逃生舱)。
 
 - `registerEditor(contribution)` — 编辑器 SDK(M9,计划 §14):按 priority
   单选(平局是显式错误);winner 通过 host 的**原子交接**占据编辑器座席
@@ -265,7 +269,8 @@ keybinding、widget、command、settings、tool renderer、managed overlay——
 regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕
 重渲染。`@xmoon76/dsh-pi-tui/builtins` 入口是仅 Loader 使用的一方贡献者
 (版本徽标、轮次/步骤计数器、todo 摘要 dock 项)——不是稳定的第三方
-SDK。编辑器替换、overlay、transcript 渲染器和原始终端访问**不属于 v1**。
+SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属于 Stable
+层级**(见 Advanced/Unstable 路线图)。
 
 ## 斜杠命令(节选)
 

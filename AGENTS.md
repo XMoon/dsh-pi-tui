@@ -97,7 +97,7 @@ packages/dsh-pi-tui/   The dsh bundle (the only published package). cordis.patch
 9. **Busy-Enter preference mirrors the web's `busyEnter`** (`ui-conversation` submission policy): while the agent is running, plain Enter uses the configured mode (`queue` default | `steer`) and Ctrl+Enter ALWAYS forces queue mode (the anti-steer chord — it only differs from Enter when the configured mode is `steer`). Enter-steer sends the DRAFT ONLY (`steerAll` `onlyDraft`) — explicitly queued messages are never swept along, because already-steered input cannot be pulled back. **Local commands** (the TUI-owned set, `LOCAL_COMMANDS` in index.ts: /status, /settings, /queue, ...) always execute directly and are never steered; everything else — plain prompts AND per-skill slash commands — steers as its raw `/name` line, which the host's pre-step listener (dsh-tool-skill) resolves into the injected skill body: web parity, where a skill invocation is a plain `session.prompt` with no command-execution wire. **Skill invocations never drop the user's arguments**: a per-skill wrapper forwards `invocation.rawInput` VERBATIM as a plain user message (the user's own words stay on the original `/name args` line), and the loaded body follows as injected instructions context — rendered by the host's dsh-tool-skill pre-step listener when its `skill` tool is visible to the agent, else injected by the TUI itself as a fallback (official `<skill_content>` rendering + `skill-invocation` source), never both (double injection would duplicate the body). The queue-pane hint and Ctrl+S are unchanged (the steer verb is always advertised).
 10. **Question dialogs live in the editor SEAT, never a centered overlay.** `ask_user_question` renders inside `editorSeat` (kimi's `mountEditorReplacement` pattern): full width, above the footer, capped at 60% of the terminal height when COLLAPSED (8..24 content rows, re-derived on EVERY render by `QuestionFrame` — resize- and queue-safe). The flow is a logical capturing modal: `presentQuestion` suspends visible overlays, `settleQuestions` restores them, and overlays created during a question join the suspension graph (`closeOverlayHandle`) so reverse modal order survives. `QuestionFlow`'s budget math (required-first question row, pinned free-text input, hint) is proven against actual chrome — do not reintroduce a fixed `budget - N` body formula. **The whole page — question, detail, EVERY option with its description, the free-text row — is ONE unified scrollport** (PageUp/PageDown page it; the `↓ N more lines`/`↑ M up` marker reports the remainder), so on any screen size the question starts at the top and every description is reachable by scrolling; cursor moves (↑↓/digits/click) follow the pointer into view. An explicit expand (`e` or a fullscreen click on the marker) grows the frame toward 80% (budget up to 38) — the 60% cap is the DEFAULT, not a hard ceiling — and is a no-op when everything fits; it KEEPS the scroll position (reveals more where the user is looking), and scroll + expand reset on every tab change. The hint fit loop RESERVES `esc cancel` (it always survives; other verbs drop from the end), and empty free-text rows show a dim placeholder instead of a bare cursor block. Fullscreen clicks inside the frame route through the seat's bottom-derived geometry (`QuestionFrame.rows` + footer height) to `QuestionFlow.clickRow`. **↑↓ scroll at the scrollport EDGES** (the less/scrolloff pattern): ↑ on the FIRST row scrolls the body up until the question overview returns, ↓ on the LAST row scrolls it down when the page overflows — without edge scrolling, walking the cursor into the options made the question unreachable (the old cursor wrap stole the ↑). The wrap-around survives when the page fits. Full rationale: `temp/question-dialog.md` (gitignored; on the implementing machine).
 11. **Surface catalog: prefetch + coordinator + STANDING-SCOPE cold skills, no probe code.** The first input must eventually see the effective agent-scoped command + human-skill catalog, but opening the TUI must not create a chat session: `--session` PREFETCHES the resumed agent's catalog before mount (synchronous install during command registration); the deferred start reads the cold HUMAN SKILL catalog through the effective preset's STANDING SCOPE (`agentPresets.standingKeyFor(id)` → `skills.snapshot({cwd, scope})` — no Agent, no session, no turn). **Composition probes are REMOVED** (module + tests deleted): host-level `session/created` observers (dsh-permission-presets) write durable knob events into every fresh session, so any probe fails the zero-event gate and materializes a session artifact (200ms write-behind) — verified empirically; never reintroduce `agents.create()` for catalog discovery. Post-mount refreshes go through ONE `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; agent targets install the live surface, preset targets install standing skills only; target changes turn old skill wrappers into revalidating transitions; a standing degradation rides the applied outcome as a one-shot notice; `skills/change` bursts are coalesced by `CoalescingRefreshGate` and always re-read the CURRENT ownership). All upstream service access is isolated in `src/skill-catalog.ts` (structural types; `standingKeyFor`/`snapshot` are capability-detected — an upstream change degrades to missing commands, never a crash). Full contract: `docs/surface-catalog.md`.
-12. **Extension API is a compatibility boundary.** `@xmoon76/dsh-pi-tui/extensions` is a public plugin SDK; Host changes must preserve existing public extension semantics and third-party lifecycle behavior. See `docs/extension-api.md` and the **Extension compatibility (hard rules)** section below; never fix an extension limitation by exposing private TUI/terminal internals.
+12. **Extension API is a compatibility boundary.** `@xmoon76/dsh-pi-tui/extensions` is a public plugin SDK; Host changes must preserve existing public extension semantics and third-party lifecycle behavior. See `docs/extension-api.md` and the **Extension compatibility (hard rules)** section below; never fix a STABLE extension limitation by exposing private TUI/terminal internals — lower-level access, when genuinely required, belongs to the Advanced/Unstable entries via their supported package boundary (never repository-private imports).
 
 ### Extension API tiers
 
@@ -117,6 +117,22 @@ All extension plugins remain standard DeepSeek Harness / Cordis plugins using
 `name`, `inject`, and `apply(ctx)`. API tiers are capability facades over the
 single `piTuiExtensions` service, not separate plugin systems or runtimes.
 
+### Extension API tier boundaries
+
+- Stable extension APIs must remain semantic and Host-controlled. They must
+  not expose raw terminal input, private Host objects, private screen/layout
+  objects, or repository-internal imports.
+- Advanced extension APIs may expose experimental interactive abstractions,
+  normalized input ownership, custom editor/component contracts, and other
+  higher-freedom capabilities.
+- Unstable extension APIs may deliberately expose low-level input,
+  Host-policy bypass, exclusive ownership, or selected implementation-coupled
+  primitives when required by the feature.
+- Advanced and Unstable do not permit arbitrary repository-private imports.
+  Low-level access must still be exposed through the supported package entry.
+- Do not expand Stable only to make a plugin work when the capability
+  naturally belongs in Advanced or Unstable.
+
 ## Extension compatibility (hard rules)
 
 `@xmoon76/dsh-pi-tui/extensions` is a public plugin SDK. Changes to the
@@ -134,12 +150,15 @@ explicitly planned breaking API change.
   extension point instead of adding a parallel host-only implementation.
   First-party extensible behavior should use the same public composition
   path as third-party plugins where practical.
-- **Never expose host internals to fix a plugin limitation.** Public APIs
-  must not expose `@xmoon76/pi-tui`, `TuiApp`, `TuiMainScreen`,
-  `TuiAltScreen`, raw screen/terminal objects, private components, or
-  repository-internal paths. Do not add `unsafeGetTuiApp()`,
-  `unsafeGetTerminal()`, raw-component escape hatches, or equivalent APIs.
-  Add a semantic capability instead.
+- **Never expose host internals to fix a plugin limitation (Stable tier).**
+  Stable public APIs must not expose `@xmoon76/pi-tui`, `TuiApp`,
+  `TuiMainScreen`, `TuiAltScreen`, raw screen/terminal objects, private
+  components, or repository-internal paths. Do not add
+  `unsafeGetTuiApp()`, `unsafeGetTerminal()`, raw-component escape
+  hatches, or equivalent APIs to the Stable surface. Add a semantic
+  capability instead; lower-level access, when genuinely required,
+  belongs to the Advanced/Unstable entries (via their supported package
+  boundary — never repository-private imports).
 - **Preserve caller-owned registration lifetime.** Plugin registrations
   and subscriptions belong to the calling Cordis fiber. Recreating,
   stopping, restarting, or replacing a TUI surface must not silently
@@ -151,11 +170,15 @@ explicitly planned breaking API change.
   renderer, keybinding, command metadata, setting, theme and autocomplete
   provider must be cleaned up when its owner fiber unloads. Explicit
   disposal and owner disposal must be idempotent.
-- **Host input policy stays Host-owned.** Terminal protocol decoding
-  (including Kitty CSI-u / modifyOtherKeys), reserved lifecycle shortcuts,
-  question/approval capture, submission policy and session safety must not
-  be delegated to third-party plugins. Public input APIs expose normalized
-  semantic events, not terminal escape sequences.
+- **Host input policy stays Host-owned (Stable tier).** Terminal protocol
+  decoding (including Kitty CSI-u / modifyOtherKeys), reserved lifecycle
+  shortcuts, question/approval capture, submission policy and session
+  safety must not be delegated to third-party plugins on the Stable
+  surface. Stable public input APIs expose normalized semantic events, not
+  terminal escape sequences. (A future Unstable tier may deliberately
+  provide input interception/ownership through its own supported entry —
+  never as a Stable addition, and never through repository-private
+  imports.)
 - **Do not create parallel execution paths.** Extension bridges should add
   metadata/composition around the host's canonical services rather than
   reimplementing them. In particular, commands must continue through the

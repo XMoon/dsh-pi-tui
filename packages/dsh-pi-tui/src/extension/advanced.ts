@@ -6,8 +6,8 @@
  * implemented yet, and no Host-private surface is exposed.
  *
  * Third-party plugins import ONLY this entry (and the unstable sibling)
- * — never the stable `./extensions` entry's internals, `PiTuiApp`,
- * `PiTuiMainScreen`, `PiTuiAltScreen` or repository-relative paths.
+ * — never the stable `./extensions` entry's internals, `TuiApp`,
+ * `TuiMainScreen`, `TuiAltScreen` or repository-relative paths.
  * @module @xmoon76/dsh-pi-tui/extensions/advanced
  */
 

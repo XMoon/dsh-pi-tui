@@ -1,14 +1,16 @@
-# Extension API v1 — author guide and stability contract
+# Extension API v1 — Stable author guide and stability contract
 
-The dsh-pi-tui extension surface (`@xmoon76/dsh-pi-tui/extensions`) is the
-ONLY public seam for third-party plugins. This document is the v1 author
-guide and the stability record (plan §16 — M11 API v1 hardening).
+The dsh-pi-tui STABLE extension surface (`@xmoon76/dsh-pi-tui/extensions`)
+is the compatibility-oriented public seam for third-party plugins. This
+document is the STABLE API author guide and stability record (plan §16 —
+M11 API v1 hardening). Advanced and Unstable tiers are documented in
+`docs/extension-tiers.md`.
 
-## Import rules (hard gate)
+## Import rules (hard gate — Stable)
 
-A plugin imports ONLY `@xmoon76/dsh-pi-tui/extensions`. The packed
-declaration gate (scripts/tarball-smoke.mjs) and the vim acceptance gate
-(scripts/vim-plugin-smoke.mjs) fail on:
+A STABLE plugin imports ONLY `@xmoon76/dsh-pi-tui/extensions`. The packed
+declaration gate (scripts/tarball-smoke.mjs) and the editor acceptance
+gate (scripts/vim-plugin-smoke.mjs) fail on:
 
 - `@xmoon76/pi-tui` (the private vendored fork — bundled, never
   importable);
@@ -16,14 +18,17 @@ declaration gate (scripts/tarball-smoke.mjs) and the vim acceptance gate
 - any repository-relative internal path;
 - dynamic `import(...)` / `require(...)` of the same.
 
-If a plugin NEEDS a private import, the SDK is missing a capability —
-report it; there is deliberately no `unsafeGetTuiApp()` escape hatch.
+If a STABLE plugin NEEDS a private import, the SDK is missing a capability —
+report it; there is deliberately no `unsafeGetTuiApp()` escape hatch. Higher
+freedom belongs to the Advanced / Unstable entries, which expose low-level
+capability through their own supported package boundary (never
+repository-private imports).
 
 ## API tiers
 
 The extension surface ships three tiers (plan §4/§5). A plugin imports
-ONE tier entry — never the stable entry's internals, `PiTuiApp`,
-`PiTuiMainScreen`, `PiTuiAltScreen` or repository-relative paths.
+ONE tier entry — never the stable entry's internals, `TuiApp`,
+`TuiMainScreen`, `TuiAltScreen` or repository-relative paths.
 
 All extension plugins remain standard DeepSeek Harness / Cordis plugins using
 `name`, `inject`, and `apply(ctx)`. The tier entries are package-export
@@ -44,6 +49,20 @@ exported path, a level constant (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`,
 both `0`), the reserved capability namespaces `advanced.` / `unstable.` and
 the shared `ExtensionTier` type. No advanced/unstable capability is implemented
 yet and no Host-private surface is exposed.
+
+Reserved future scope (documented here so the docs never promise that the
+Stable limits are platform-wide):
+
+- **Advanced** may expose public higher-level interactive abstractions —
+  normalized input ownership, interactive/focused UI, custom editor/component
+  contracts, richer Host-managed capabilities.
+- **Unstable** may intentionally expose low-level input interception,
+  exclusive ownership, Host-policy bypass, or selected implementation-coupled
+  primitives.
+
+Such access is provided through the supported tier package entry
+(`./extensions/advanced` / `./extensions/unstable`), never through
+repository-private imports.
 
 ## The surface (M1–M10)
 
@@ -72,23 +91,23 @@ text }` — never raw terminal bytes. The Host decodes the terminal protocol
 (legacy + Kitty CSI-u + modifyOtherKeys encodings, paste bursts, key
 release/repeat filtering) BEFORE the plugin sees anything, so a plugin
 editor behaves identically on every terminal. Returning `true` consumes the
-event; returning `false` or `undefined` hands it back to the host's editing
-semantics, which the host applies to the replacement's current text and
-cursor. The host then synchronizes the resulting draft and cursor back to
-the visible replacement. Staging is side-effect-free: the host preserves
-autocomplete, history browsing, undo snapshots, and paste-marker state
-before forwarding the single declined event. Enter remains host-owned and
-submits through the normal host path.
+event; returning `false` or `undefined` hands it back — the declined event
+may fall back to Host editing behavior at the replacement's current text
+and cursor, and the resulting draft/cursor may be synchronized back to the
+visible replacement (the exact fallback internals are NOT part of the
+Stable contract). Enter remains host-owned and submits through the normal
+host path.
 
 The editor id `host` is RESERVED for the built-in host editor: a
 `registerEditor({ id: 'host', ... })` contribution is rejected. The host seat
-is the fallback that occupies the seat whenever no plugin editor wins, and
-`TuiApp`'s input-routing guard distinguishes the host seat from display-only
-replacements by this id — a plugin claiming it could never occupy the
-replacement seat and would corrupt the seat-ownership checks. A display-only
+is the fallback that occupies the seat whenever no plugin editor wins; the
+host's input-routing guard distinguishes the host seat from display-only
+replacements by this id (a plugin claiming it could never occupy the
+replacement seat and would corrupt the seat-ownership checks). A display-only
 replacement (no `handleInput` hook) never receives ordinary typing, and
 ordinary typing is never silently routed into the hidden host editor while the
-plugin seat is visible.
+plugin seat is visible. The exact guard implementation is a Host detail, not
+part of the Stable contract.
 
 An `EditorHost` is bound to the editor-seat owner that created it. After a
 handoff, every operation from the old host (`getSnapshot`, `replaceText`,
@@ -112,9 +131,11 @@ capability — never parse the package version.
 - The surface GENERATION is stable across start/stop/fullscreen/
   external-editor round-trips; only a final surface dispose invalidates
   old handles (they become inert no-ops).
-- A plugin can never touch: the terminal, focus, submission policy,
+- A STABLE plugin can never touch: the terminal, focus, submission policy,
   approvals/questions, session lock/guard, the overlay stack, the editor
-  seat's internals, or the root layout.
+  seat's internals, or the root layout. These boundaries are Stable-tier
+  limits; Advanced / Unstable may later expose higher-freedom access through
+  their own supported entry.
 
 ## Rendering contract
 
@@ -123,10 +144,15 @@ capability — never parse the package version.
   budgets.
 - Rendering is synchronous, I/O-free, Promise-free.
 - Empty content abdicates (renders nothing).
+- `ExtensionView` trees / styled spans are the STABLE rendering model (the
+  main way a Stable plugin expresses UI); advances on it belong to the
+  Advanced/Unstable tiers, not to an unbounded Stable convenience surface.
 - A throwing contribution is isolated (health ledger) — it can never
   stall the host.
-- Plugins never receive raw terminal data: keys are normalized, tool
-  snapshots are semantic + deeply frozen.
+- Stable plugins never receive raw terminal data: keys are normalized,
+  tool snapshots are semantic + deeply frozen. (Advanced/Unstable may
+  deliberately expose raw or lower-level input later, through their own
+  entries.)
 
 ## Deprecation policy (M11)
 

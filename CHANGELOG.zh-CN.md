@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **分层扩展面。** 公开扩展 SDK 现在分三个层级:稳定的
+  `@xmoon76/dsh-pi-tui/extensions` 入口保持其兼容契约,新增的
+  `extensions/advanced`(实验性;minor 版本可破坏)与 `extensions/unstable`
+  (不保证兼容)入口携带层级元数据与保留的能力命名空间(`advanced.` /
+  `unstable.`)。所有层级共享同一个扩展运行时(caller-fiber 所有权、
+  surface 生命周期、失效机制)。vim fixture 不再兼任生产级 Stable-API
+  的证明;完整模态编辑器移入 advanced/unstable 路线图。
+
 ## [0.2.0] - 2026-08-20
 
 ### 新增

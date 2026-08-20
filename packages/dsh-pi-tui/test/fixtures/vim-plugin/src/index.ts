@@ -1,11 +1,13 @@
 /**
- * The VIM-MODE acceptance plugin (plan §15, M10): a THIRD-PARTY Cordis
- * plugin that exercises the FULL public extension surface — the editor
- * SDK (single-winner replacement), keybindings, widgets, commands,
- * settings, tool renderers and managed overlays — importing ONLY the
- * public `@xmoon76/dsh-pi-tui/extensions` subpath.
+ * The VIM-MODE acceptance fixture (plan §15, M10): a THIRD-PARTY Cordis
+ * plugin that validates the Stable editor-extension seam — the editor SDK
+ * (single-winner replacement, semantic input events, create/dispose) —
+ * importing ONLY the public `@xmoon76/dsh-pi-tui/extensions` subpath.
+ * The remaining public surfaces (keybindings, widgets, commands, settings,
+ * tool renderers, managed overlays) have their own dedicated tests; this
+ * fixture is NOT a Stable-API completeness proof (plan §7).
  *
- * The editor is a REAL minimal modal editor (P1-6): insert mode (printable
+ * The editor is a minimal modal editor (P1-6): insert mode (printable
  * text, Backspace, Left/Right, Esc → normal), normal mode (i → insert,
  * h/l → move, x → delete). It consumes SEMANTIC EditorInputEvents — the
  * host normalizes terminal protocols (legacy/CSI-u/modifyOtherKeys), so
@@ -14,7 +16,7 @@
  *
  * CI gate (the vim-plugin smoke): importing `@xmoon76/pi-tui`,
  * `src/tui-app`, or any repository-relative internal path FAILS the
- * gate. If this plugin ever needs a private import, the SDK is missing
+ * gate. If a STABLE plugin ever needs a private import, the SDK is missing
  * a capability — the plan forbids adding an `unsafeGetTuiApp()` escape
  * hatch instead.
  * @module dsh-pi-vim-fixture
@@ -51,7 +53,7 @@ function isPlainKey(key: NormalizedKey): boolean {
 }
 
 /**
- * A REAL modal editor that follows the ExtensionEditor protocol (P1-6):
+ * A minimal modal editor that follows the ExtensionEditor protocol (P1-6):
  * insert mode (printable text, Backspace, Left/Right, Esc → normal) and
  * normal mode (i → insert, h/l → move, x → delete). Input arrives as
  * SEMANTIC {@link EditorInputEvent}s — the host normalized the terminal
