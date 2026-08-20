@@ -3271,11 +3271,10 @@ export class TuiApp {
       // The zero-arg settle registered in pendingBrokerSettles (the
       // surface-dispose path) — removed on a normal select/cancel/abort
       // (round-2 finding: an anonymous entry would retain the closed
-      // picker until surface dispose).
-      const brokerSettle = (): void => {
-        handle.close()
-        resolve(undefined)
-      }
+      // picker until surface dispose). Routes through settle() so the
+      // dispose path shares the same single-settle semantics (round-3
+      // follow-up).
+      const brokerSettle = (): void => settle(undefined)
       const settle = (value: string | undefined): void => {
         if (settled) return
         settled = true

@@ -210,6 +210,20 @@ test('custom: a factory that settles synchronously never mounts a leaked overlay
   app.stop()
 })
 
+test('select: a normal completion leaves no pending settle (round-2/3 retention fix)', async () => {
+  const { vt, app } = await appWithBroker()
+  const broker = app.advancedUiBroker()
+  // Complete a select normally.
+  const promise = broker.select({ items: [{ value: 'a', label: 'Alpha' }] })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.equal(await promise, 'a')
+  // A subsequent dispose must not attempt to settle an already-settled
+  // promise (no double-settle, no throw).
+  app.dispose()
+  app.stop()
+})
+
 test('the surface dispose settles every still-open broker promise', async () => {
   const { vt, app } = await appWithBroker()
   const broker = app.advancedUiBroker()
