@@ -495,16 +495,22 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     }
   }
 
-  /** Runner-only: detach the surface (final dispose). `surfaceId` is the
-   * detaching generation's lease: a STALE detach (a different id than the
-   * current attachment) is a no-op, so an old generation's cleanup can
+  /** Runner-only: detach the surface (final dispose). With no argument,
+   * `detachSurface()` means the CURRENT attachment; an explicit `surfaceId`
+   * is the detaching generation's lease. A STALE detach (a different id than
+   * the current attachment) is a no-op, so an old generation's cleanup can
    * never tear down a newer surface's bridge (P1). */
   detachSurface(surfaceId?: string): void {
+    // The unified detaching identity (P1): a no-arg detach means detach the
+    // CURRENT generation — same lease as detach(currentSurfaceId), while a
+    // stale-generation detach keeps its no-op for the NEWER surface.
+    const detachingId = surfaceId ?? this.attachedSurfaceId
+
     // The generation-scoped lease (P1): a stale detach from an OLD surface
     // generation must not tear down the NEWER generation's bridge — the
     // runner's cleanup only detaches the generation it owns.
-    if (surfaceId !== undefined && this.attachedSurfaceId !== undefined
-      && surfaceId !== this.attachedSurfaceId) {
+    if (detachingId !== undefined && this.attachedSurfaceId !== undefined
+      && detachingId !== this.attachedSurfaceId) {
       return
     }
     this.attachedSurfaceId = undefined
@@ -513,13 +519,13 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // P1-1: unbind the surface's render sink. The surfaceId lease makes a
     // stale old-generation detach a no-op (it never unbinds a NEWER
     // surface's sink).
-    if (this.currentRenderSink !== undefined && this.currentRenderSink.surfaceId === surfaceId) {
+    if (this.currentRenderSink !== undefined && this.currentRenderSink.surfaceId === detachingId) {
       this.currentRenderSink = undefined
     }
     // P1-4: unbind the overlay mount seam with the same lease — a stale
     // old-generation detach never unbinds a NEWER surface's seam, and the
     // service never mounts on a dead surface.
-    if (this.overlayMount !== undefined && this.overlayMount.surfaceId === surfaceId) {
+    if (this.overlayMount !== undefined && this.overlayMount.surfaceId === detachingId) {
       this.overlayMount = undefined
     }
     // P1-3: unbind every live bridge subscription — the RECORDS stay

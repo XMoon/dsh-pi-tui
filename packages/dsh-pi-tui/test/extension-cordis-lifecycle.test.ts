@@ -690,6 +690,90 @@ test('P1-3: a subscription record survives detach and re-binds on the next attac
   }
 })
 
+test('P1-1/P1-3/P1-4: no-arg detach releases the current surface leases', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      attachSurface(
+        bridge: { subscribe(listener: (state: unknown) => void): () => void },
+        capabilities: ReadonlySet<string>,
+        surfaceId: string,
+        requestRender?: (force?: boolean) => void,
+      ): void
+      detachSurface(surfaceId?: string): void
+      setOverlayMount(surfaceId: string, mount: (view: unknown, options?: unknown) => { close(): void; hide(): void; show(): void }): void
+      showOverlay(view: unknown, options?: unknown): { close(): void; hide(): void; show(): void }
+      subscribeState(listener: (state: unknown) => void): () => void
+      _listenerUnsubscribersSize(): number
+    }
+
+    let renderRequests = 0
+    let bridgeSubscribed = 0
+    let overlayMounts = 0
+    let overlayCloses = 0
+    service.attachSurface({
+      subscribe: (listener) => {
+        bridgeSubscribed += 1
+        listener({ surface: { surfaceId: 'surface-current' } })
+        return () => { bridgeSubscribed -= 1 }
+      },
+    }, new Set(), 'surface-current', () => { renderRequests += 1 })
+    service.setOverlayMount('surface-current', () => {
+      overlayMounts += 1
+      return {
+        close: () => { overlayCloses += 1 },
+        hide: () => {},
+        show: () => {},
+      }
+    })
+    const releaseState = service.subscribeState(() => {})
+
+    let registration: { invalidate(): void; dispose(): void } | undefined
+    let overlay: { close(): void; hide(): void; show(): void } | undefined
+    const plugin = await mount(ctx, (c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as typeof service & {
+        register(slot: string, spec: { id: string }, value: { text: string }): { invalidate(): void; dispose(): void }
+      }
+      registration = svc.register('chrome.header.badge', { id: 'current' }, { text: 'current' })
+      overlay = svc.showOverlay({ kind: 'text', spans: [{ text: 'current' }] })
+    })
+    await settle()
+    assert.equal(bridgeSubscribed, 1, 'the current bridge is live')
+    assert.ok(renderRequests > 0, 'the current surface receives registration invalidation')
+    assert.equal(overlayMounts, 1, 'the current surface mounts the overlay')
+
+    // No-arg detach means the CURRENT generation. It releases the
+    // surface-owned seams while preserving caller-owned records for a later
+    // surface recreation.
+    service.detachSurface()
+    assert.equal(bridgeSubscribed, 0, 'the current bridge binding is released')
+    assert.equal(service._listenerUnsubscribersSize(), 1, 'the caller-owned subscription record survives detach')
+
+    const rendersBeforeDetachedInvalidation = renderRequests
+    registration!.invalidate()
+    await settle()
+    assert.equal(renderRequests, rendersBeforeDetachedInvalidation, 'detached invalidation must not reach the dead surface')
+
+    const mountsBeforeDetachedOverlay = overlayMounts
+    const inert = service.showOverlay({ kind: 'text', spans: [{ text: 'detached' }] })
+    assert.equal(overlayMounts, mountsBeforeDetachedOverlay, 'detached surface must not mount a new overlay')
+    inert.close()
+    overlay!.close()
+    assert.equal(overlayCloses, 1, 'closing the mounted overlay lease remains idempotent')
+
+    registration!.dispose()
+    releaseState()
+    await plugin()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
 test('P1-3: attach A → attach B → late detach A leaves B bound (stale detach)', async () => {
   const ctx = new Context()
   try {
