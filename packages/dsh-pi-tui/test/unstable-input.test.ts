@@ -146,6 +146,25 @@ test('the when gate controls consultation; a throwing gate is skipped and record
   registry.register(gated.spec, 'owner')
   assert.deepEqual(registry.route(event('a')), { action: 'pass' }, 'a false gate skips the capture')
   assert.equal(gated.events.length, 0)
+  // A THROWING gate is treated as false (the capture is skipped) AND
+  // recorded in health (round-3 follow-up: the throwing-gate branch was
+  // never directly asserted).
+  const errors: string[] = []
+  const throwing = capture('throwing-gate', 'capture', {
+    when: () => { throw new Error('gate boom') },
+    decide: { action: 'consume' },
+  })
+  const health = new UnstableInputRegistry(() => {}, {
+    track: () => {},
+    untrack: () => {},
+    recordError: (id, message) => errors.push(`${id}:${message}`),
+    clearError: () => {},
+  })
+  health.register(throwing.spec, 'owner')
+  assert.deepEqual(health.route(event('a')), { action: 'pass' }, 'a throwing gate never consumes')
+  assert.equal(throwing.events.length, 0, 'a throwing gate skips the handler')
+  assert.equal(errors.length, 1)
+  assert.ok(errors[0]!.includes('gate boom'))
 })
 
 test('owner unload removes exactly the owner’s captures; the rest keep working', () => {
