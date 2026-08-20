@@ -144,8 +144,10 @@ Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、�
 - **Advanced**(`ADVANCED_API_LEVEL = 1`,Phase 2):规范化输入捕获、
   聚焦交互表面(交互式托管 overlay)与高级编辑器控制——仍由 Host
   中介,绝不接触 raw terminal 字节。作者指南:`docs/extension-advanced.md`。
-- **Unstable**(`UNSTABLE_API_LEVEL = 0`):保留——尚未实现任何能力;
-  未来将不保证兼容,可能暴露低层输入拦截与 Host 策略绕过。
+- **Unstable**(`UNSTABLE_API_LEVEL = 1`,Phase 3):raw 输入拦截
+  (observe/consume/rewrite、exclusive raw 所有权)、Host 紧急 fail-safe
+  (三连 Esc)与精选低层 surface seam——不保证兼容;损坏的插件可能
+  破坏 Host 行为。作者指南:`docs/extension-unstable.md`。
 
 插件只导入公开入口:
 

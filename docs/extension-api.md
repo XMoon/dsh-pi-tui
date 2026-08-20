@@ -51,10 +51,11 @@ tiers have since grown:
   capture, focused interactive surfaces (interactive managed overlays) and
   advanced editor control — still Host-mediated, never raw terminal bytes.
   See `docs/extension-advanced.md`.
-- **Unstable** (`UNSTABLE_API_LEVEL = 0`): reserved — no capability is
-  implemented yet. It may intentionally expose low-level input
-  interception, exclusive ownership, Host-policy bypass, or selected
-  implementation-coupled primitives.
+- **Unstable** (`UNSTABLE_API_LEVEL = 1`, Phase 3): raw input
+  interception (observe/consume/rewrite, exclusive raw ownership), the
+  Host emergency fail-safe (triple-Esc), and a selected low-level surface
+  seam — NO compatibility guarantee; a broken plugin can disrupt Host
+  behavior. See `docs/extension-unstable.md`.
 
 Such access is provided through the supported tier package entry
 (`./extensions/advanced` / `./extensions/unstable`), never through

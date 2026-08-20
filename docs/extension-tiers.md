@@ -31,10 +31,13 @@ model per tier.
   (interactive managed overlays, `advanced.ui.interactive`), and advanced
   editor control (`advanced.editor.control`). See
   `docs/extension-advanced.md`.
-- **Unstable** (`UNSTABLE_API_LEVEL = 0`): reserved — no capability is
-  implemented yet. See `docs/extension-unstable.md` (once shipped).
+- **Unstable** (`UNSTABLE_API_LEVEL = 1`, Phase 3): raw input
+  interception (`unstable.input.raw` — observe/consume/rewrite, exclusive
+  raw ownership), the Host emergency fail-safe (triple-Esc), and the
+  low-level surface seam (`unstable.surface.handle`). NO compatibility
+  guarantee. See `docs/extension-unstable.md`.
 
 The capability model is shared: `service.api().capabilities` carries the
-tier-prefixed ids (`advanced.*`), feature-detected — never parsed from the
-host version. Advanced/Unstable capabilities may evolve with their APIs;
-Stable capabilities never silently change semantics.
+tier-prefixed ids (`advanced.*`, `unstable.*`), feature-detected — never
+parsed from the host version. Advanced/Unstable capabilities may evolve
+with their APIs; Stable capabilities never silently change semantics.

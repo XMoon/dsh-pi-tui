@@ -152,9 +152,11 @@ ownership/lifecycle model per tier. The tiers have grown since Phase 1:
   capture, focused interactive surfaces (interactive managed overlays)
   and advanced editor control — still Host-mediated, never raw terminal
   bytes. Author guide: `docs/extension-advanced.md`.
-- **Unstable** (`UNSTABLE_API_LEVEL = 0`): reserved — no capability is
-  implemented yet; it will carry NO compatibility guarantee and may expose
-  low-level input interception and Host-policy bypass.
+- **Unstable** (`UNSTABLE_API_LEVEL = 1`, Phase 3): raw input
+  interception (observe/consume/rewrite, exclusive raw ownership), the
+  Host emergency fail-safe (triple-Esc), and a selected low-level surface
+  seam — NO compatibility guarantee; a broken plugin can disrupt Host
+  behavior. Author guide: `docs/extension-unstable.md`.
 
 A plugin imports only the public entry:
 

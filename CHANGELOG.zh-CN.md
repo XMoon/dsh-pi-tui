@@ -9,6 +9,20 @@
 
 ### 新增
 
+- **Unstable 扩展层(Phase 3)。** `@xmoon76/dsh-pi-tui/extensions/unstable`
+  现在是可用层级(`UNSTABLE_API_LEVEL = 1`),不保证兼容:
+  **raw 输入拦截**(`unstable.input.raw`——在 Host 解码之前对 RAW
+  terminal 块做 observe/consume/rewrite、exclusive raw 所有权且冲突
+  显式报错、handler 抛错 fail-open、每个块最多过一次拦截链)、
+  **Host 紧急 fail-safe**(1.5 秒内三连 Esc 释放全部 raw capture 并
+  关闭全部 unstable mount——在 capture 之前检测,插件无法改写或消费)、
+  **低层 surface seam**(`unstable.surface.handle`——requestRender/
+  几何/mountComponent 承载 raw 渲染组件;绝不暴露 TuiApp/屏幕/
+  terminal)。facade 为 `unstable(service)`——Stable service 接口未动。
+  所有资源仍为 caller-fiber 所有、surface generation 作用域;失败进入
+  共享 health ledger。作者指南:`docs/extension-unstable.md`。打包验收:
+  新增 `unstable-plugin` fixture + `scripts/unstable-plugin-smoke.mjs`
+  门禁。
 - **Advanced 扩展层(Phase 2)。** `@xmoon76/dsh-pi-tui/extensions/advanced`
   现在是可用层级(`ADVANCED_API_LEVEL = 1`),提供三类能力,全部仍由
   Host 中介(绝不接触 raw terminal 字节、绝不暴露私有屏幕):

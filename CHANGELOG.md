@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unstable extension tier (Phase 3).** `@xmoon76/dsh-pi-tui/extensions/unstable`
+  is now a usable tier (`UNSTABLE_API_LEVEL = 1`) with NO compatibility
+  guarantee: **raw input interception** (`unstable.input.raw` —
+  observe/consume/rewrite of RAW terminal chunks BEFORE the Host decodes
+  anything, exclusive raw ownership with explicit conflict errors,
+  fail-open on throwing handlers, each chunk passes the chain at most
+  once), the **Host emergency fail-safe** (triple-Esc within 1.5s
+  releases every raw capture and closes every unstable mount — detected
+  before the captures, so it cannot be rewritten or consumed by a
+  plugin), and the **low-level surface seam** (`unstable.surface.handle`
+  — requestRender/geometry/mountComponent for raw-rendering components;
+  never exposes TuiApp/screens/terminal). The facade is
+  `unstable(service)` — the Stable service interface is untouched. All
+  resources stay caller-fiber-owned and surface-generation-scoped;
+  failures ride the shared health ledger. Author guide:
+  `docs/extension-unstable.md`. Packed acceptance: the new `unstable-plugin`
+  fixture + `scripts/unstable-plugin-smoke.mjs` gate.
 - **Advanced extension tier (Phase 2).** `@xmoon76/dsh-pi-tui/extensions/advanced`
   is now a usable tier (`ADVANCED_API_LEVEL = 1`) with three capabilities,
   all still Host-mediated (never raw terminal bytes, never private
