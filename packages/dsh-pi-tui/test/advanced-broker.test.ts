@@ -216,8 +216,10 @@ test('select: a normal completion leaves no pending settle (round-2/3 retention 
   // Complete a select normally.
   const promise = broker.select({ items: [{ value: 'a', label: 'Alpha' }] })
   await vt.waitForRender()
+  assert.equal(app.pendingBrokerSettlesForTest(), 1, 'the open select is pending')
   vt.sendInput('\r')
   assert.equal(await promise, 'a')
+  assert.equal(app.pendingBrokerSettlesForTest(), 0, 'a normal completion leaves no pending settle')
   // A subsequent dispose must not attempt to settle an already-settled
   // promise (no double-settle, no throw).
   app.dispose()

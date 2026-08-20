@@ -3382,6 +3382,10 @@ export class TuiApp {
       try {
         component = factory(host)
       } catch (error) {
+        // Round-4 follow-up: drop the abort listener before returning —
+        // a throwing factory never mounts, so the listener must not stay
+        // registered on the caller's signal.
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort)
         this.notify(`custom UI failed: ${safeErrorMessage(error)}`, 'error')
         resolve(undefined)
         return
@@ -3405,6 +3409,12 @@ export class TuiApp {
    * dispose — every still-open select/custom promise settles instead of
    * hanging). */
   private readonly pendingBrokerSettles = new Set<() => void>()
+
+  /** Phase 4 test hook: the number of still-pending broker settles
+   * (asserts a normal select/custom completion leaves none behind). */
+  pendingBrokerSettlesForTest(): number {
+    return this.pendingBrokerSettles.size
+  }
 
   /**
    * Phase 4: the ADVANCED host-state facade (plan §4D) — theme query/
