@@ -547,6 +547,13 @@ export interface TuiAppEventsBase {
   /** M11: extension callback health transitions from the editor seat. */
   onExtensionError?: (record: { slot: string; id: string; error: unknown }) => void
   onExtensionRecovered?: (record: { slot: string; id: string }) => void
+  /**
+   * Phase 4: the advanced host-state setTheme for a NON-built-in theme
+   * name (a registered plugin theme). The runner resolves the palette
+   * through the theme registry and applies it; unknown names are a no-op.
+   * Optional.
+   */
+  onAdvancedSetTheme?: (name: string) => void
 }
 
 /**
@@ -664,6 +671,8 @@ export interface PickerOptions {
   maxHeight?: number
   /** Render the key-hint footer line. */
   showHint?: boolean
+  /** Phase 4: abort the picker (closes it and fires onCancel). */
+  signal?: AbortSignal
 }
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
@@ -1433,6 +1442,11 @@ export class TuiApp {
     for (const lease of this.unstableMountLeases) lease.close()
     this.unstableMountLeases.clear()
     this.unstableMountAdapters.clear()
+    // Phase 4: settle every still-open imperative broker promise (select/
+    // custom) — the picker/overlay dies with the surface; the promises
+    // must not hang.
+    for (const settle of [...this.pendingBrokerSettles]) settle()
+    this.pendingBrokerSettles.clear()
     this.overlayBroker.clear()
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
@@ -2670,6 +2684,9 @@ export class TuiApp {
 
   /** Theme revision for render-cache invalidation; bumped on every switch. */
   private themeRevision = 0
+  /** Phase 4: the current theme id ('dark' | 'light' | 'custom'), tracked
+   * by applyTheme/applyPalette (the advanced host-state getTheme). */
+  private currentThemeId: string = 'dark'
 
   /** Persistent components per transcript message (stage J cache). */
   private readonly messageComponents = new Map<TranscriptMessage, MessageComponentEntry>()
@@ -3215,6 +3232,189 @@ export class TuiApp {
    * seam without going through the service). */
   advancedEditorControlsForTest(): import('./extension/advanced-types.ts').AdvancedEditorControls {
     return this.advancedEditorControls()
+  }
+
+  // ── Phase 4: the imperative UI broker + host-state facade (plan §4A/§4D) ─
+
+  /**
+   * Phase 4: the ADVANCED imperative UI broker (plan §4A) — select/
+   * confirm/input/notify/custom built on the Host's OWN picker, question
+   * flow and notify infrastructure (never a second modal manager). A
+   * disposed surface settles every prompt immediately.
+   */
+  advancedUiBroker(): {
+    select(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined>
+    confirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean>
+    input(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined>
+    notify(message: string, options?: import('./extension/advanced-types.ts').AdvancedNotifyOptions): void
+    custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions): Promise<unknown>
+  } {
+    const app = this
+    return {
+      select: (options) => app.advancedSelect(options),
+      confirm: (options) => app.advancedConfirm(options),
+      input: (options) => app.advancedInput(options),
+      notify: (message, options) => {
+        if (app.disposed) return
+        app.notify(message, options?.type ?? 'info')
+      },
+      custom: (factory, options) => app.advancedCustom(factory, options),
+    }
+  }
+
+  /** Phase 4: imperative selection — a picker overlay resolving with the
+   * selected value, or undefined on cancel/abort/dispose. */
+  private advancedSelect(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined> {
+    if (this.disposed) return Promise.resolve(undefined)
+    return new Promise<string | undefined>((resolve) => {
+      const handle = this.openPicker(
+        options.items.map(item => ({ ...item })),
+        (value) => resolve(value),
+        () => resolve(undefined),
+        {
+          header: options.header,
+          enableSearch: options.enableSearch,
+          width: options.width,
+          maxHeight: options.maxHeight,
+          signal: options.signal,
+        },
+      )
+      // The surface's dispose settles the prompt (the picker overlay dies
+      // with the surface; the promise must not hang).
+      this.pendingBrokerSettles.add(() => {
+        handle.close()
+        resolve(undefined)
+      })
+    })
+  }
+
+  /** Phase 4: imperative confirmation — a yes/no question resolving with
+   * the choice; cancel/abort/dispose resolves false. */
+  private advancedConfirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean> {
+    const approve = options.approveLabel ?? 'Yes'
+    const reject = options.rejectLabel ?? 'No'
+    return this.askQuestions([{
+      id: 'advanced-confirm',
+      question: options.question,
+      ...(options.detail === undefined ? {} : { detail: options.detail }),
+      options: [{ label: approve }, { label: reject }],
+    }], options.signal)
+      .then(answers => answers[0]?.selected[0] === approve)
+      .catch(() => false)
+  }
+
+  /** Phase 4: imperative free-text input — a question with a free-text
+   * row resolving with the text; cancel/abort/dispose resolves
+   * undefined. */
+  private advancedInput(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined> {
+    return this.askQuestions([{
+      id: 'advanced-input',
+      question: options.question,
+      ...(options.detail === undefined ? {} : { detail: options.detail }),
+    }], options.signal)
+      .then(answers => answers[0]?.custom)
+      .catch(() => undefined)
+  }
+
+  /**
+   * Phase 4: custom interactive UI (plan §4B) — mount a factory-built
+   * interactive component and resolve with the result reported through
+   * the public host facade's done(), or undefined on close/cancel/
+   * dispose. The factory receives ONLY the public facade — never a
+   * private TUI object. A throwing factory is isolated (resolves
+   * undefined).
+   */
+  private advancedCustom(
+    factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): Promise<unknown> {
+    if (this.disposed) return Promise.resolve(undefined)
+    const app = this
+    return new Promise<unknown>((resolve) => {
+      let settled = false
+      // The zero-arg settle registered in pendingBrokerSettles (the
+      // surface-dispose path) — the set holds `() => void` entries.
+      const brokerSettle = (): void => settle(undefined)
+      const settle = (result: unknown): void => {
+        if (settled) return
+        settled = true
+        this.pendingBrokerSettles.delete(brokerSettle)
+        lease.close()
+        resolve(result)
+      }
+      const host: import('./extension/advanced-types.ts').AdvancedCustomHost = {
+        surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+        generation: this.generation,
+        get width() { return app.terminal.columns },
+        get height() { return app.terminal.rows },
+        done: (result) => settle(result),
+        close: () => settle(undefined),
+      }
+      let component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent
+      try {
+        component = factory(host)
+      } catch (error) {
+        this.notify(`custom UI failed: ${safeErrorMessage(error)}`, 'error')
+        resolve(undefined)
+        return
+      }
+      const lease = this.showAdvancedInteractiveOverlay(component, options)
+      // The surface's dispose settles the promise (the overlay dies with
+      // the surface).
+      this.pendingBrokerSettles.add(brokerSettle)
+    })
+  }
+
+  /** Phase 4: the pending broker settles (run on the surface's final
+   * dispose — every still-open select/custom promise settles instead of
+   * hanging). */
+  private readonly pendingBrokerSettles = new Set<() => void>()
+
+  /**
+   * Phase 4: the ADVANCED host-state facade (plan §4D) — theme query/
+   * select, title override, working-indicator override and tool-expansion
+   * preference. A disposed surface is inert.
+   */
+  advancedHostState(): import('./extension/advanced-types.ts').AdvancedHostState {
+    const app = this
+    return {
+      getTheme: () => app.currentThemeId,
+      setTheme: (name) => {
+        if (app.disposed) return
+        if (name === 'dark' || name === 'light') {
+          app.applyTheme(name)
+          return
+        }
+        // A registered plugin theme name: the runner resolves the palette
+        // through the theme registry (wired below); unknown names are a
+        // no-op.
+        app.events.onAdvancedSetTheme?.(name)
+      },
+      setTitle: (title) => {
+        if (app.disposed) return
+        app.setSessionTitle(title)
+      },
+      setWorkingMessage: (message) => {
+        if (app.disposed) return
+        app.working.setMessage(message ?? '')
+        app.requestRender()
+      },
+      setToolsExpanded: (expanded) => {
+        if (app.disposed) return
+        app.setToolOutputExpanded(expanded)
+      },
+    }
+  }
+
+  /** Phase 4 test hook: the current ADVANCED host-state facade. */
+  advancedHostStateForTest(): import('./extension/advanced-types.ts').AdvancedHostState {
+    return this.advancedHostState()
+  }
+
+  /** Phase 4 test hook: the working indicator's current label (probes the
+   * working-message override). */
+  workingTextForTest(): string {
+    return this.working.messageText()
   }
 
   /** Phase 2: the ADVANCED overlay lease id counter. */
@@ -4767,6 +4967,19 @@ export class TuiApp {
       handle.hide()
       onCancel()
     }
+    // Phase 4: an abort signal closes the picker and fires onCancel (the
+    // imperative select broker's fiber-cancellation path).
+    if (options.signal !== undefined) {
+      const onAbort = (): void => {
+        handle.hide()
+        onCancel()
+      }
+      if (options.signal.aborted) {
+        onAbort()
+      } else {
+        options.signal.addEventListener('abort', onAbort, { once: true })
+      }
+    }
     return {
       close: () => handle.hide(),
       setItems: (next) => {
@@ -4925,6 +5138,9 @@ export class TuiApp {
    * they pick up the new palette on their next render too.) */
   applyTheme(theme: 'dark' | 'light'): void {
     setTheme(theme)
+    // Phase 4: track the current theme id (the advanced host-state
+    // facade's getTheme).
+    this.currentThemeId = theme
     // Rendered ANSI is baked into cached components: bump the revision so
     // the per-message render cache rebuilds on the next paint.
     this.themeRevision += 1
@@ -4938,6 +5154,8 @@ export class TuiApp {
   /** Apply a resolved custom palette and repaint everything. */
   applyPalette(palette: ColorPalette): void {
     setTheme('custom', palette)
+    // Phase 4: track the current theme id.
+    this.currentThemeId = 'custom'
     this.themeRevision += 1
     // Same ordering as applyTheme (F-14).
     this.extensionHost?.updateSurface({ themeId: 'custom', themeRevision: this.themeRevision })

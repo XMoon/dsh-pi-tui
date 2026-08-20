@@ -21,26 +21,38 @@
  */
 
 import type {
+  AdvancedConfirmOptions,
+  AdvancedCustomHost,
   AdvancedFacade,
   AdvancedInputCaptureSpec,
+  AdvancedInputOptions,
   AdvancedInteractiveComponent,
+  AdvancedNotifyOptions,
+  AdvancedSelectOptions,
   AdvancedServiceHost,
 } from './advanced-types.ts'
 import type { TuiOverlayOptions } from './public-types.ts'
 
 export { ADVANCED_API_LEVEL } from './advanced-types.ts'
 export type {
+  AdvancedConfirmOptions,
+  AdvancedCustomHost,
   AdvancedEditorControls,
   AdvancedFacade,
   AdvancedFocusHandle,
+  AdvancedHostState,
   AdvancedInputCaptureHandle,
   AdvancedInputCaptureMode,
   AdvancedInputCaptureSpec,
   AdvancedInputEvent,
   AdvancedInputFacade,
+  AdvancedInputOptions,
   AdvancedInteractiveComponent,
+  AdvancedNotifyOptions,
   AdvancedOverlayLease,
   AdvancedRenderContext,
+  AdvancedSelectItem,
+  AdvancedSelectOptions,
   AdvancedServiceHost,
   AdvancedUiFacade,
 } from './advanced-types.ts'
@@ -51,7 +63,15 @@ export type { ExtensionTier } from './public-types.ts'
  * declare them). */
 type AdvancedSeam = Required<Pick<
   AdvancedServiceHost,
-  '_advancedCaptureInput' | '_advancedShowInteractiveOverlay' | '_advancedEditorControls'
+  | '_advancedCaptureInput'
+  | '_advancedShowInteractiveOverlay'
+  | '_advancedEditorControls'
+  | '_advancedUiSelect'
+  | '_advancedUiConfirm'
+  | '_advancedUiInput'
+  | '_advancedUiNotify'
+  | '_advancedUiCustom'
+  | '_advancedHostState'
 >>
 
 /**
@@ -76,7 +96,13 @@ export function advanced(service: AdvancedServiceHost): AdvancedFacade {
   const host = service as AdvancedServiceHost & AdvancedSeam
   if (host._advancedCaptureInput === undefined
     || host._advancedShowInteractiveOverlay === undefined
-    || host._advancedEditorControls === undefined) {
+    || host._advancedEditorControls === undefined
+    || host._advancedUiSelect === undefined
+    || host._advancedUiConfirm === undefined
+    || host._advancedUiInput === undefined
+    || host._advancedUiNotify === undefined
+    || host._advancedUiCustom === undefined
+    || host._advancedHostState === undefined) {
     throw new Error(
       'this piTuiExtensions host does not implement the advanced seam ' +
       '(host/plugin version mismatch? upgrade the host bundle)',
@@ -89,11 +115,22 @@ export function advanced(service: AdvancedServiceHost): AdvancedFacade {
     ui: {
       showInteractiveOverlay: (component: AdvancedInteractiveComponent, options?: TuiOverlayOptions) =>
         host._advancedShowInteractiveOverlay(component, options),
+      select: (options: AdvancedSelectOptions) => host._advancedUiSelect(options),
+      confirm: (options: AdvancedConfirmOptions) => host._advancedUiConfirm(options),
+      input: (options: AdvancedInputOptions) => host._advancedUiInput(options),
+      notify: (message: string, options?: AdvancedNotifyOptions) => host._advancedUiNotify(message, options),
+      custom: (factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: TuiOverlayOptions) =>
+        host._advancedUiCustom(factory, options),
     },
     // A GETTER: the controls follow the CURRENT surface attachment (a
     // stale facade keeps working across surface recreate).
     get editor() {
       return host._advancedEditorControls()
+    },
+    // A GETTER: the host-state facade follows the CURRENT surface
+    // attachment (inert when no surface is live).
+    get host() {
+      return host._advancedHostState()
     },
   }
 }

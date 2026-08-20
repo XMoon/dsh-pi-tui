@@ -25,11 +25,17 @@ import { InvalidateBatcher } from './internal/batcher.ts'
 import { isSlotName, slotSemantic } from './slot-map.ts'
 import type { PiTuiApiInfo, PiTuiCapability, PiTuiSlotName, RegistrationHandle, RegistrationSpec, SurfaceStateValues } from './public-types.ts'
 import type {
+  AdvancedConfirmOptions,
+  AdvancedCustomHost,
   AdvancedEditorControls,
+  AdvancedHostState,
   AdvancedInputCaptureHandle,
   AdvancedInputCaptureSpec,
+  AdvancedInputOptions,
   AdvancedInteractiveComponent,
+  AdvancedNotifyOptions,
   AdvancedOverlayLease,
+  AdvancedSelectOptions,
 } from './advanced-types.ts'
 import type {
   UnstableRawInputHandle,
@@ -148,6 +154,18 @@ function inertUnstableSurfaceHandle(): UnstableSurfaceHandle {
       hide: () => {},
       show: () => {},
     }),
+  }
+}
+
+/** An inert Phase-4 host-state facade (no surface / seam detached).
+ * Every method is a safe no-op. */
+function inertAdvancedHostState(): AdvancedHostState {
+  return {
+    getTheme: () => 'dark',
+    setTheme: () => {},
+    setTitle: () => {},
+    setWorkingMessage: () => {},
+    setToolsExpanded: () => {},
   }
 }
 
@@ -360,6 +378,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   private advancedEditorSeam: {
     surfaceId: string
     controls: AdvancedEditorControls
+  } | undefined
+  /** Phase 4: the ADVANCED imperative UI seam (wired by the runner; the
+   * host owns the picker/question/notify infrastructure). SURFACE-scoped
+   * like the other seams. */
+  private advancedUiSeam: {
+    surfaceId: string
+    select(options: AdvancedSelectOptions): Promise<string | undefined>
+    confirm(options: AdvancedConfirmOptions): Promise<boolean>
+    input(options: AdvancedInputOptions): Promise<string | undefined>
+    notify(message: string, options?: AdvancedNotifyOptions): void
+    custom(factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions): Promise<unknown>
+  } | undefined
+  /** Phase 4: the ADVANCED host-state seam (wired by the runner; the host
+   * owns theme/title/working/tools-expanded state). SURFACE-scoped. */
+  private advancedHostSeam: {
+    surfaceId: string
+    state: AdvancedHostState
   } | undefined
   /** Phase 3: the UNSTABLE raw input capture registry. Registrations are
    * caller-fiber-owned; the registry is service-lifetime — captures
@@ -700,6 +735,14 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     }
     if (this.advancedEditorSeam !== undefined && this.advancedEditorSeam.surfaceId === detachingId) {
       this.advancedEditorSeam = undefined
+    }
+    // Phase 4: unbind the ADVANCED imperative-UI and host-state seams with
+    // the same lease.
+    if (this.advancedUiSeam !== undefined && this.advancedUiSeam.surfaceId === detachingId) {
+      this.advancedUiSeam = undefined
+    }
+    if (this.advancedHostSeam !== undefined && this.advancedHostSeam.surfaceId === detachingId) {
+      this.advancedHostSeam = undefined
     }
     // Phase 3: unbind the UNSTABLE surface seam with the same lease.
     if (this.unstableSurfaceSeam !== undefined && this.unstableSurfaceSeam.surfaceId === detachingId) {
@@ -1250,6 +1293,121 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
    * SURFACE-scoped like the overlay seam. */
   setAdvancedEditorSeam(surfaceId: string, controls: AdvancedEditorControls): void {
     this.advancedEditorSeam = { surfaceId, controls }
+  }
+
+  // ── Phase 4: the ADVANCED imperative UI + host-state seams ───────────────
+
+  /**
+   * Imperative selection (plan §4A). Caller-fiber-owned: owner unload
+   * aborts the prompt (the promise resolves undefined). The caller's own
+   * signal (if any) is combined with the fiber signal. Without a mounted
+   * surface the prompt resolves undefined immediately.
+   */
+  _advancedUiSelect(options: AdvancedSelectOptions): Promise<string | undefined> {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return Promise.resolve(undefined)
+    const caller = this.ctx
+    const controller = new AbortController()
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => () => controller.abort(), 'piTuiExtensions.advanced.ui.select()')
+    } catch (error) {
+      controller.abort()
+      throw error
+    }
+    const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
+    return seam.select({ ...options, signal }).finally(() => effectDispose())
+  }
+
+  /** Imperative confirmation (plan §4A). Same ownership as select;
+   * cancel/abort resolves false. */
+  _advancedUiConfirm(options: AdvancedConfirmOptions): Promise<boolean> {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return Promise.resolve(false)
+    const caller = this.ctx
+    const controller = new AbortController()
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => () => controller.abort(), 'piTuiExtensions.advanced.ui.confirm()')
+    } catch (error) {
+      controller.abort()
+      throw error
+    }
+    const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
+    return seam.confirm({ ...options, signal }).finally(() => effectDispose())
+  }
+
+  /** Imperative free-text input (plan §4A). Same ownership as select;
+   * cancel/abort resolves undefined. */
+  _advancedUiInput(options: AdvancedInputOptions): Promise<string | undefined> {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return Promise.resolve(undefined)
+    const caller = this.ctx
+    const controller = new AbortController()
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => () => controller.abort(), 'piTuiExtensions.advanced.ui.input()')
+    } catch (error) {
+      controller.abort()
+      throw error
+    }
+    const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
+    return seam.input({ ...options, signal }).finally(() => effectDispose())
+  }
+
+  /** Imperative notification (plan §4A). Bounded, no raw ANSI, surface-
+   * detach safe. */
+  _advancedUiNotify(message: string, options?: AdvancedNotifyOptions): void {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return
+    try {
+      seam.notify(message, options)
+    } catch {
+      // Best effort: a dead surface's notify is inert.
+    }
+  }
+
+  /**
+   * Custom interactive UI (plan §4B). The factory receives ONLY the public
+   * host facade; the promise resolves with the result reported through
+   * done(), or undefined on close/cancel. Caller-fiber-owned: owner
+   * unload closes the surface and settles the promise (the underlying
+   * overlay lease is fiber-owned).
+   */
+  _advancedUiCustom(
+    factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent,
+    options?: import('./public-types.ts').TuiOverlayOptions,
+  ): Promise<unknown> {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return Promise.resolve(undefined)
+    return seam.custom(factory, options)
+  }
+
+  /** The Phase-4 host-state facade (plan §4D), or an inert object when no
+   * surface is attached / the seam is detached. */
+  _advancedHostState(): AdvancedHostState {
+    return this.advancedHostSeam?.state ?? inertAdvancedHostState()
+  }
+
+  /** Runner-only: wire the ADVANCED imperative UI seam (Phase 4).
+   * SURFACE-scoped like the other seams. */
+  setAdvancedUiSeam(
+    surfaceId: string,
+    ui: {
+      select(options: AdvancedSelectOptions): Promise<string | undefined>
+      confirm(options: AdvancedConfirmOptions): Promise<boolean>
+      input(options: AdvancedInputOptions): Promise<string | undefined>
+      notify(message: string, options?: AdvancedNotifyOptions): void
+      custom(factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions): Promise<unknown>
+    },
+  ): void {
+    this.advancedUiSeam = { surfaceId, ...ui }
+  }
+
+  /** Runner-only: wire the ADVANCED host-state seam (Phase 4).
+   * SURFACE-scoped like the other seams. */
+  setAdvancedHostSeam(surfaceId: string, state: AdvancedHostState): void {
+    this.advancedHostSeam = { surfaceId, state }
   }
 
   // ── Phase 3: the UNSTABLE seam (consumed by `extensions/unstable`) ──────

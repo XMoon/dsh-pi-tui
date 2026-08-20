@@ -212,7 +212,70 @@ export interface AdvancedInputFacade {
   capture(spec: AdvancedInputCaptureSpec): AdvancedInputCaptureHandle
 }
 
-/** The advanced UI facade (plan §6/§8). */
+// ── Phase 4: the imperative UI broker (plan §4A) ──────────────────────────
+
+/** One selectable row in the imperative select broker. */
+export interface AdvancedSelectItem {
+  readonly value: string
+  readonly label: string
+  readonly description?: string
+  readonly group?: string
+}
+
+/** Options for {@link AdvancedUiFacade.select}. */
+export interface AdvancedSelectOptions {
+  readonly items: readonly AdvancedSelectItem[]
+  readonly header?: string
+  readonly enableSearch?: boolean
+  readonly width?: number
+  readonly maxHeight?: number
+  /** Abort the prompt (the promise resolves undefined). */
+  readonly signal?: AbortSignal
+}
+
+/** Options for {@link AdvancedUiFacade.confirm}. */
+export interface AdvancedConfirmOptions {
+  readonly question: string
+  readonly detail?: string
+  /** The approve option label (default 'Yes'). */
+  readonly approveLabel?: string
+  /** The reject option label (default 'No'). */
+  readonly rejectLabel?: string
+  /** Abort the prompt (the promise resolves false). */
+  readonly signal?: AbortSignal
+}
+
+/** Options for {@link AdvancedUiFacade.input}. */
+export interface AdvancedInputOptions {
+  readonly question: string
+  readonly detail?: string
+  /** Abort the prompt (the promise resolves undefined). */
+  readonly signal?: AbortSignal
+}
+
+/** Options for {@link AdvancedUiFacade.notify}. */
+export interface AdvancedNotifyOptions {
+  readonly type?: 'info' | 'error'
+}
+
+/**
+ * The public host facade handed to a {@link AdvancedUiFacade.custom}
+ * factory (plan §4B). The plugin builds an interactive component against
+ * this facade — never a private TUI object — and completes the custom()
+ * promise through `done`/`close`.
+ */
+export interface AdvancedCustomHost {
+  readonly surfaceId: string
+  readonly generation: number
+  readonly width: number
+  readonly height: number
+  /** Complete the custom() promise with a result (closes the surface). */
+  done(result?: unknown): void
+  /** Cancel the custom() promise (resolves undefined; closes the surface). */
+  close(): void
+}
+
+/** The advanced UI facade (plan §6/§8 + Phase 4 §4A/§4B). */
 export interface AdvancedUiFacade {
   /**
    * Open an interactive managed overlay hosting a focused interactive
@@ -225,17 +288,80 @@ export interface AdvancedUiFacade {
     component: AdvancedInteractiveComponent,
     options?: TuiOverlayOptions,
   ): AdvancedOverlayLease
+  /**
+   * Imperative selection (plan §4A): show a picker and resolve with the
+   * selected value, or undefined on cancel/abort. Caller-fiber-owned:
+   * owner unload aborts the prompt. Reuses the Host's picker overlay —
+   * no second modal manager.
+   */
+  select(options: AdvancedSelectOptions): Promise<string | undefined>
+  /**
+   * Imperative confirmation (plan §4A): show a yes/no question and
+   * resolve with the choice; cancel/abort resolves false. Caller-fiber-
+   * owned: owner unload aborts the prompt. Reuses the Host's question
+   * flow.
+   */
+  confirm(options: AdvancedConfirmOptions): Promise<boolean>
+  /**
+   * Imperative free-text input (plan §4A): show a question with a
+   * free-text row and resolve with the text, or undefined on
+   * cancel/abort. Caller-fiber-owned: owner unload aborts the prompt.
+   * Reuses the Host's question flow.
+   */
+  input(options: AdvancedInputOptions): Promise<string | undefined>
+  /**
+   * Imperative notification (plan §4A): show a transient notice. Bounded,
+   * no raw ANSI, surface-detach safe, plugin-unload safe.
+   */
+  notify(message: string, options?: AdvancedNotifyOptions): void
+  /**
+   * Custom interactive UI (plan §4B): mount a factory-built interactive
+   * component (fullscreen/panel/overlay) and resolve with the result the
+   * component reports through {@link AdvancedCustomHost.done}, or
+   * undefined on close/cancel. The factory receives ONLY the public host
+   * facade — never a private TUI object. Caller-fiber-owned: owner
+   * unload closes the surface and settles the promise.
+   */
+  custom(
+    factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent,
+    options?: TuiOverlayOptions,
+  ): Promise<unknown>
+}
+
+// ── Phase 4: the host state facade (plan §4D) ──────────────────────────────
+
+/**
+ * The advanced host-state facade (plan §4D): semantic Host UI state
+ * control — theme query/select, title override, working-indicator
+ * override and tool-expansion preference. The Host owns persistence and
+ * repaint; these are live overrides (a stale facade is inert).
+ */
+export interface AdvancedHostState {
+  /** The current theme id ('dark' | 'light' | 'custom'). */
+  getTheme(): string
+  /** Apply a theme by id ('dark'/'light' or a registered plugin theme
+   * name). Unknown names are a no-op. */
+  setTheme(name: string): void
+  /** Override the session title shown in the header (undefined clears). */
+  setTitle(title: string | undefined): void
+  /** Override the working-indicator message (undefined clears). */
+  setWorkingMessage(message: string | undefined): void
+  /** Set the tool-output expansion master switch. */
+  setToolsExpanded(expanded: boolean): void
 }
 
 /** The full advanced facade (plan §4: `advanced(service)`). */
 export interface AdvancedFacade {
   /** Normalized input capture. */
   readonly input: AdvancedInputFacade
-  /** Focused interactive surfaces (interactive overlays). */
+  /** Focused interactive surfaces (interactive overlays) + the Phase-4
+   * imperative UI broker (select/confirm/input/notify/custom). */
   readonly ui: AdvancedUiFacade
   /** The CURRENT surface's advanced editor controls (a getter — the
    * controls follow the live surface attachment). */
   readonly editor: AdvancedEditorControls
+  /** The Phase-4 host-state facade (theme/title/working/tools-expanded). */
+  readonly host: AdvancedHostState
 }
 
 /**
@@ -268,4 +394,17 @@ export interface AdvancedServiceHost {
   /** The service's internal advanced seam: the current surface's advanced
    * editor controls (inert when stale). */
   _advancedEditorControls?(): AdvancedEditorControls
+  /** The service's internal advanced seam (Phase 4): the imperative UI
+   * broker (select/confirm/input/notify/custom). */
+  _advancedUiSelect?(options: AdvancedSelectOptions): Promise<string | undefined>
+  _advancedUiConfirm?(options: AdvancedConfirmOptions): Promise<boolean>
+  _advancedUiInput?(options: AdvancedInputOptions): Promise<string | undefined>
+  _advancedUiNotify?(message: string, options?: AdvancedNotifyOptions): void
+  _advancedUiCustom?(
+    factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent,
+    options?: TuiOverlayOptions,
+  ): Promise<unknown>
+  /** The service's internal advanced seam (Phase 4): the host-state
+   * facade (theme/title/working/tools-expanded). */
+  _advancedHostState?(): AdvancedHostState
 }
