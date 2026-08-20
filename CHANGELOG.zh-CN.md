@@ -7,87 +7,20 @@
 
 ## [Unreleased]
 
-### 新增
-
-- **M4–M11 扩展平台**（累积，按 pluginization 计划）：M4 组件套件（结构化
-  `ExtensionView` 树——文本、markdown、spacer、垂直/水平 stack、frame、rows——
-  编译成活的、宽度感知的宿主组件；编辑器上下的 widget 槽）；M5 注册表（命令、
-  主题、设置行、自动补全 provider、按键）；M6 宿主拥有的 InputRouter（固定优先级
-  阶梯、归一化键与语义动作）；M7 转写/工具渲染器注册表（语义快照、链式回退、
-  抛错隔离、缓存身份重建）；M8 托管 overlay 租约；M9 编辑器 SDK（单赢家、原子
-  席位交接、`EditorHost` 快照订阅与宿主提交）；M10 vim 验收插件；M11 API v1
-  加固（`/status` 健康、弃用策略、作者文档、基准）。编辑器替换、overlay、
-  转写渲染器等现在属于已发布 API；早期 `0.2.0` 的“不属于 v1”说明已被取代。
-
-### 修复
-
-- **水平 stack 真正并排渲染**(P1-01):公开 `StackView` 的 horizontal
-  契约用 fork 的宽度感知 `HStack` 实现(gap、CJK/emoji 单元格测量、窄宽
-  截断),不再是顺序行。
-- **Frame 钳制到宿主预算**(P1-02):frame 的请求宽度钳制到终端宽度,内容
-  行按显示单元格补齐/截断(ANSI/CJK 精确)——边框永不溢出或错位。
-- **自动补全丢弃中止后的结果**(P1-03):调用方中止后才 resolve 的
-  provider 永不提交陈旧建议;预期中止是取消,不是 provider 失败。
-- **插件命令永不遮蔽宿主命令**(P1-04):命令桥对每个注册校验权威宿主
-  目录(精确与近义冲突都大声拒绝)。
-- **保留键清单完整**(P1-05):Shift+Tab、Alt+Up、Alt+T(宿主生命周期键)
-  加入单一权威保留列表。
-- **聚焦编辑器拥有自己的键**(P1-06):仅当聚焦编辑器拒绝该键时才咨询
-  插件绑定——方向键、Tab、多行移动永不被抢。
-- **渲染器编译失败被隔离**(P1-07):渲染器返回的视图编译抛错时让位给
-  宿主卡片并记录,永不逃出渲染路径。
-- **`/status` 健康是活的**(P1-08):扩展健康行展示每个注册表(含渲染器)
-  的 failed/shadowed 贡献与 lastError;恢复的渲染器清除记录。
-- **已销毁表面拒绝迟到 overlay**(P1-09):final dispose 后的插件 overlay
-  调用是惰性的——不建新租约、不复活挂载。
-- **插件编辑器接收真实输入**(P1-10):`ExtensionEditor` 契约新增
-  `handleInput` 通道;插件编辑器占席时,键入与导航到达它,Enter 走宿主
-  提交路径。
-- **编辑器订阅被驱动**(P1-11):每个宿主变更(键入、草稿写入、viewer
-  往返、提交)都通知 `EditorHost` 订阅者。
-- **陈旧宿主能力惰性化**(P1-12):表面 final dispose(或代变更)后,插件
-  编辑器捕获的 `replaceText`/`dispatch`/`subscribe`/`invalidate` 都是
-  no-op——迟到回调永不改动席位或触发真实提交。
-- **设置应用为 latest-wins**(P2-01):慢的较早变更永不覆盖更新的已完成
-  变更。
-- **编辑器交接零泄漏**(P2-02):transfer/compile 抛错会 dispose 新建的
-  编辑器;listener 异常被隔离。
-- **widget 编译有缓存**(P2-03):未变更的 widget 贡献跨刷新复用已编译树。
-- **窄宽 frame 安全让位**(P1-R1):一到两格宽的宿主预算不会输出溢出的边框，
-  缓存也按有效宽度区分。
-- **`/plan` 仍由宿主拥有**(P1-R2):特殊处理的命令进入权威宿主目录，插件不能遮蔽。
-- **替换编辑器具备真实宿主回退**(P1-R3):插件拒绝的按键通过隐藏宿主编辑器的编辑
-  语义处理，再同步回当前替换编辑器，包括光标，并只发出一个最终快照。
-- **渲染器编译失败继续链式回退**(P1-R5):格式错误的 renderer view 让位给下一候选，
-  不会提前落到宿主卡片。
-- **vendored fork 支持编辑器光标同步**(P1-R3):宿主可钳制并恢复替换编辑器光标，
-  且不会触发中间 change 回调。
-- **被拒绝的替换编辑器输入有可见回退**(P1-R3):替换编辑器返回 `false` 时将事件
-  交还宿主编辑语义,再把结果文本与光标同步回可见替换编辑器,不会只改动隐藏编辑器。
-- **替换回退保留宿主编辑状态**(P1-R3/P2):被拒绝的输入通过 vendored 编辑器的
-  无副作用 staging seam 暂存替换草稿,因此自动补全、历史浏览、undo 快照和粘贴
-  marker 继续遵循正常宿主语义;CRLF/tab 光标转换与回退异常也会被隔离。
-- **EditorHost 交接保障席位安全**(P1-R7/P1-R8/P2):席位切换后陈旧 host 在所有操作上
-  都会被隔离;create-time 订阅仅在成功提交后生效,create-time 变更保持 inert;宿主恢复
-  失败时保留原编辑器。
-- **按键运行时失败可定位**(M11):action 与 resolver 异常会从输入分发路径隔离,并记录到
-  实际 keybinding contribution id;诊断回调自身抛错也不会破坏输入路径。
-
-## [0.2.0] - 2026-08-19
+## [0.2.0] - 2026-08-20
 
 ### 新增
 
-- 扩展平台(早期,稳定化中):一个小的、带版本号的扩展面,让第三方
-  Cordis 插件无需接触 TUI 内部即可贡献 chrome。插件只导入
-  `@xmoon76/dsh-pi-tui/extensions` 并按能力特性检测(API 版本 1)。
-  首批三个 slot:`chrome.header.badge`(host 标题后的短徽标)、
-  `input.dock.item`(todo 面板上方的一行 dock)、`chrome.footer.status`
-  (一个 footer 段;宽度与截断由 host 负责)。注册是生命周期拥有的——
-  插件卸载(HMR、禁用)只移除该插件的贡献,provider 重启干净重挂载,
-  regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动
-  屏幕重渲染。`@xmoon76/dsh-pi-tui/builtins` 携带仅 Loader 使用的一方
-  贡献者(版本徽标 + 轮次/步骤计数器),用同一公开 API 自证。
-  编辑器替换、overlay、transcript 渲染器和原始终端访问明确不属于 v1。
+- **扩展平台 v1——本版本的重头戏。** TUI 现在可扩展:第三方 Cordis
+  插件可以贡献 chrome(标题徽标、dock 项、footer 段)、编辑器上下的
+  widget、斜杠命令、主题、设置行、自动补全 provider、按键绑定、
+  transcript/工具渲染器、托管 overlay,甚至替换编辑器本身——无需接触
+  TUI 内部。插件只导入 `@xmoon76/dsh-pi-tui/extensions`,按能力特性
+  检测(API 版本 1),并且完全生命周期化:插件卸载/HMR 只移除该插件
+  的贡献,表面销毁后陈旧句柄永远无法再变更它。内置的版本徽标与
+  轮次/步骤计数器现在也通过同一公开 API 自证
+  (`@xmoon76/dsh-pi-tui/builtins`)。作者指南见
+  `docs/extension-api.md`。
 - `/login` 现在可以新增部署从未配置过的供应商。凭据选择器合并了 llm
   configurable-provider 目录(所有内置 pi-ai catalog 路由 + 手写 profile)
   与 settings section,按 已配置 / 可用 / 自定义 分组,并提供
@@ -101,22 +34,40 @@
 
 ### 变更
 
+- **TUI surface 现在有显式的生命周期。** 一个 surface GENERATION 跨越
+  `start()`/`stop()`、fullscreen 切换与外部编辑器往返;只有最终
+  `dispose()` 才递增它,dispose 之后所有交互能力都是良性 no-op
+  (approval 以 cancelled 结算、question flow 以 rejected 结算、进行中的
+  工作不应用任何结果)。这是扩展平台陈旧句柄契约所依赖的基础。
 - `/preset` 选择器中 `code` 预设的英文名改为 `PTC mode`,与上游 dsh
   0.1.0-rc.7 的重命名保持一致(预设 id 未变,已有组合不受影响)。
-- 最终的 surface 生命周期显式化:一个 TUI surface 只有一个 GENERATION,
-  它跨越 `start()`/`stop()`、fullscreen 切换与外部编辑器往返;只有最终
-  `dispose()` 才递增它。dispose 之后所有交互能力都是良性 no-op
-  (approval 以 cancelled 结算、question flow 以 rejected 结算、进行中的
-  theme autodetect 与编辑器往返不应用任何结果)——扩展平台所依赖的
-  stale-generation 契约。
+
+### 安全
+
+- **插件文本不再能注入终端控制序列。** 插件文本曾是唯一原样到达终端
+  的通道;现在 C0 控制符、8-bit CSI、C1 控制符与完整 ESC 引导序列
+  (CSI/OSC/DCS/PM/APC)都会在渲染前的公开边界被剥离,纯文本与
+  markdown 视图均生效。宿主自身的样式是输出中唯一的 ANSI。
 
 ### 修复
 
+- **宿主永不会被插件遮蔽或拖垮。** 插件命令会对照权威宿主目录校验
+  (精确与近义冲突都被拒绝,包括特殊处理的 `/plan`);保留的宿主
+  生命周期键不能被按键绑定占用;插件按键绑定只在聚焦编辑器拒绝该键
+  时才触发;抛错的渲染器或回调被隔离到它自己的贡献,记录在
+  `/status` 健康行中,永不逃出渲染或输入路径。
+- **编辑器替换是安全的。** 插件编辑器占席时,通过其 `handleInput`
+  通道接收真实输入,Enter 走宿主提交路径;display-only 编辑器(无输入
+  钩子)绝不会把普通打字静默路由进隐藏的宿主编辑器;交接是原子的
+  (create/transfer/compile 抛错时当前编辑器继续工作);陈旧编辑器捕获
+  的每个能力在交接或销毁后都变为惰性。
+- **窄终端保持完好。** 水平 stack 真正并排渲染,frame 按显示单元格
+  精确钳制到宿主预算(ANSI/CJK 精确),一到两格宽的 frame 安全让位
+  而不是溢出。
 - 已结算的 `ask_user_question` 卡片不再显示原始 `{"answers":[…]}` JSON:
   改为显示已答计数摘要(`2/3 answered`,跳过的题目不计入),取消或中断的
   流程显示结构化错误标识(`UserQuestionError: ASK_CANCELLED` /
-  `ASK_ABORTED`),而不是空白或 JSON 正文——与 web AskQuestionRow 对齐,
-  因为问题本身已在对话框中展示过。
+  `ASK_ABORTED`),而不是空白或 JSON 正文——与 web AskQuestionRow 对齐。
 
 ## [0.1.8] - 2026-08-18
 

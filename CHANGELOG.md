@@ -7,126 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **M4–M11 extension platform** (cumulative, per the pluginization plan):
-  the M4 component kit (structured `ExtensionView` trees — text, markdown,
-  spacer, vertical/horizontal stacks, frames, rows — compiled into live,
-  width-aware host components; widget slots above/below the editor); the M5
-  registries (commands with ownership metadata, themes, settings rows,
-  autocomplete providers, keybindings); the M6 host-owned InputRouter (the
-  fixed precedence ladder: protocol artifacts, capturing flows, reserved
-  host lifecycle keys, the focused editor, then non-capturing plugin
-  bindings — plugins receive normalized keys mapped to semantic actions,
-  never raw terminal data); the M7 transcript/tool renderer registry
-  (semantic snapshots, chain + keyed slots, throw isolation, cache identity
-  rebuild); the M8 managed overlay leases (the host owns the overlay broker:
-  modal stacking, focus, fullscreen migration, teardown); the M9 editor SDK
-  (single-winner editor registry, atomic seat handoff, the `EditorHost`
-  protocol with snapshot subscription and host-owned submission); the M10
-  vim acceptance plugin fixture (imports only the public `extensions`
-  subpath, exercises the full SDK); and the M11 API v1 hardening
-  (`/status` extension health rows, deprecation policy, author docs,
-  benchmark). Editor replacement, overlays, transcript renderers and the
-  rest of the surface are now part of the shipped API — the earlier `0.2.0`
-  entry's "not part of v1" note is superseded.
-
-### Fixed
-
-- **Horizontal stacks render side by side** (P1-01): the public `StackView`
-  horizontal contract is implemented with the fork's width-aware `HStack`
-  (gap, CJK/emoji cell measurement, narrow-width truncation) instead of
-  sequential rows.
-- **Frames clamp to the host budget** (P1-02): a frame's requested width is
-  clamped to the terminal width and content rows are padded/truncated by
-  display cells (ANSI/CJK-exact) — borders never overflow or misalign.
-- **Autocomplete drops post-abort results** (P1-03): a provider that
-  resolves after the caller aborted never commits stale suggestions, and
-  expected aborts are cancellation, not provider failures.
-- **Plugin commands can never shadow host commands** (P1-04): the command
-  bridge validates every registration against the authoritative host
-  catalog (exact and near-synonym collisions are rejected loudly).
-- **Reserved-key inventory is complete** (P1-05): Shift+Tab, Alt+Up and
-  Alt+T (host lifecycle keys) join the single authoritative reserved list.
-- **The focused editor owns its keys** (P1-06): a plugin keybinding is
-  consulted only when the focused editor declines the key — arrows, Tab
-  and multiline movement are never stolen.
-- **Renderer compile failures are isolated** (P1-07): a renderer-returned
-  view whose compilation throws abdicates to the host card and is recorded,
-  never escaping the render path.
-- **`/status` health is live** (P1-08): the extension-health rows surface
-  failed/shadowed contributions with their last error across every
-  registry (renderers included), and a recovered renderer clears its
-  record.
-- **Disposed surfaces reject late overlays** (P1-09): a plugin overlay
-  call after final disposal is inert — no new lease, no revived mount.
-- **Plugin editors receive real input** (P1-10): the `ExtensionEditor`
-  contract gains a `handleInput` channel; while a plugin editor occupies
-  the seat, typing and navigation reach it, and Enter submits through the
-  host path.
-- **Editor subscriptions are driven** (P1-11): every host mutation
-  (typing, draft writes, viewer round-trips, submissions) notifies the
-  `EditorHost` subscribers.
-- **Stale host capabilities are inert** (P1-12): after a surface's final
-  disposal (or a generation change), a plugin editor's captured
-  `replaceText`/`dispatch`/`subscribe`/`invalidate` are no-ops — a late
-  callback can never mutate the seat or fire a real submission.
-- **Settings applies are latest-wins** (P2-01): a slow earlier change never
-  overwrites a newer completed one.
-- **Editor handoff leaks nothing** (P2-02): a transfer/compile throw
-  disposes the newly created editor; listener exceptions are isolated.
-- **Widget compiles are cached** (P2-03): unchanged widget contributions
-  reuse their compiled tree across refreshes.
-- **Narrow frames abdicate safely** (P1-R1): frames never emit borders wider
-  than a one- or two-cell host budget, and their cache follows the effective
-  width.
-- **`/plan` remains host-owned** (P1-R2): the special-cased command is present
-  in the authoritative host catalog and cannot be shadowed by a plugin.
-- **Replacement editors have a real host fallback** (P1-R3): a declined key
-  is applied with the hidden host editor's editing semantics and synchronized
-  back to the active replacement, including its cursor and one final snapshot.
-- **Renderer chains continue after compile failure** (P1-R5): a malformed
-  renderer view abdicates to the next candidate instead of prematurely using
-  the host card.
-- **Editor cursor synchronization is available in the vendored fork** (P1-R3):
-  the host can clamp and restore replacement cursors without firing an
-  intermediate change callback.
-- **Declined replacement input has a visible fallback** (P1-R3): a replacement
-  editor that returns `false` hands the event to the host's editing semantics;
-  the resulting text and cursor are synchronized back into the visible
-  replacement instead of being applied only to a hidden editor.
-- **Replacement fallback preserves host editing state** (P1-R3/P2): declined
-  input stages the replacement draft through a side-effect-free vendored editor
-  seam, so autocomplete, history browsing, undo snapshots, and paste markers
-  retain their normal host semantics; CRLF/tab cursor conversion and fallback
-  errors are isolated as well.
-- **EditorHost handoffs are seat-safe** (P1-R7/P1-R8/P2): stale hosts are
-  fenced at every seat transition, create-time subscriptions activate only
-  after a successful commit, create-time mutations remain inert, and failed
-  host restoration leaves the previous editor in place.
-- **Keybinding runtime failures are attributable** (M11): action and resolver
-  exceptions are isolated from input dispatch and recorded against the actual
-  keybinding contribution id, with guarded diagnostic callbacks.
-
-## [0.2.0] - 2026-08-19
+## [0.2.0] - 2026-08-20
 
 ### Added
 
-- The extension platform (early, stabilizing): a small, versioned extension
-  surface so a third-party Cordis plugin can contribute chrome without
-  touching TUI internals. Plugins import only
-  `@xmoon76/dsh-pi-tui/extensions` and feature-detect capabilities (API
-  version 1). Three slots ship: `chrome.header.badge` (a short badge after
-  the host title), `input.dock.item` (a dock line above the todo panel) and
-  `chrome.footer.status` (a footer segment; the host owns width and
-  truncation). Registrations are lifecycle-owned — plugin unload (HMR,
-  disable) removes exactly that plugin's contributions, provider restart
-  remounts cleanly, regular and fullscreen both refresh, and
-  `handle.invalidate()/replace()` re-render through the active screen.
-  `@xmoon76/dsh-pi-tui/builtins` carries the Loader-only first-party
-  contributor (version badge + turn/step counters), dogfooding the same
-  public API. Editor replacement, overlays, transcript renderers and raw
-  terminal access are explicitly NOT part of v1.
+- **Extension platform v1 — the headline of this release.** The TUI is now
+  extensible: a third-party Cordis plugin can contribute chrome (header
+  badge, dock items, footer segments), widgets above/below the editor,
+  slash commands, themes, settings rows, autocomplete providers,
+  keybindings, transcript/tool renderers, managed overlays, and even
+  replace the editor itself — without touching TUI internals. Plugins
+  import only `@xmoon76/dsh-pi-tui/extensions`, feature-detect
+  capabilities (API version 1), and are fully lifecycle-owned: plugin
+  unload/HMR removes exactly that plugin's contributions, and a stale
+  surface can never be mutated after disposal. The built-in version badge
+  and turn/step counters now dogfood the same public API
+  (`@xmoon76/dsh-pi-tui/builtins`). The author guide lives in
+  `docs/extension-api.md`.
 - `/login` can now add a provider the deployment has never configured. The
   credential picker merges the llm configurable-provider directory (every
   installed pi-ai catalog route plus hand-declared profiles) with the
@@ -143,26 +40,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A TUI surface now has an explicit lifetime.** One surface GENERATION
+  survives `start()`/`stop()`, fullscreen toggles and the external-editor
+  round-trip; only a final `dispose()` bumps it, and after disposal every
+  interactive capability is a benign no-op (approvals settle cancelled,
+  question flows settle rejected, in-flight work applies nothing). This is
+  the foundation the extension platform's stale-handle contract builds on.
 - The `/preset` picker's English name for the `code` preset is now
   `PTC mode`, following the upstream dsh 0.1.0-rc.7 rename (the preset id
   is unchanged, so existing compositions keep working).
-- The final surface lifetime is explicit: a TUI surface has one GENERATION
-  that survives `start()`/`stop()`, fullscreen toggles and the
-  external-editor round-trip; only a final `dispose()` bumps it. After
-  disposal every interactive capability is a benign no-op (approvals settle
-  cancelled, question flows settle rejected, in-flight theme autodetect and
-  editor round-trips apply nothing) — the stale-generation contract the
-  extension platform builds on.
+
+### Security
+
+- **Plugin text can no longer inject terminal control sequences.** Plugin
+  text was the one channel that reached the terminal verbatim; C0
+  controls, 8-bit CSI, C1 controls and complete ESC-led sequences
+  (CSI/OSC/DCS/PM/APC) are now stripped at the public boundary before
+  rendering, in both plain and markdown views. The host's own styling is
+  the only ANSI in the output.
 
 ### Fixed
 
+- **The host can never be shadowed or stalled by a plugin.** Plugin
+  commands are validated against the authoritative host catalog (exact and
+  near-synonym collisions are rejected, including the special-cased
+  `/plan`); reserved host lifecycle keys cannot be claimed by keybindings;
+  a plugin keybinding only fires when the focused editor declines the key;
+  and a throwing renderer or callback is isolated to its own contribution,
+  recorded in the `/status` health rows, and never escapes the render or
+  input path.
+- **Editor replacement is safe.** While a plugin editor occupies the seat
+  it receives real input through its `handleInput` channel and Enter
+  submits through the host path; a display-only editor (no input hook)
+  never silently routes typing into the hidden host editor; handoff is
+  atomic (a throwing create/transfer/compile keeps the current editor
+  working); and every capability captured by a stale editor becomes inert
+  after handoff or disposal.
+- **Narrow terminals stay intact.** Horizontal stacks render side by side,
+  frames clamp to the host budget with cell-exact ANSI/CJK padding, and
+  one- or two-cell-wide frames abdicate safely instead of overflowing.
 - A settled `ask_user_question` card no longer shows the raw
   `{"answers":[…]}` JSON: it renders an answered-count summary
   (`2/3 answered`, skipped questions excluded), and a cancelled or aborted
   flow shows the structured error identity (`UserQuestionError:
   ASK_CANCELLED` / `ASK_ABORTED`) instead of an empty or JSON body — web
-  AskQuestionRow parity, since the questions themselves were already shown
-  in the dialog.
+  AskQuestionRow parity.
 
 ## [0.1.8] - 2026-08-18
 
