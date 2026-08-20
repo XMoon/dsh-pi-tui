@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * advanced-plugin-smoke — verify the PACKED ADVANCED extension surface end
- * to end with a real third-party-shaped plugin (Phase 2, plan §15):
+ * phase4-plugin-smoke — verify the PACKED Phase-4 advanced surface end
+ * to end with a real third-party-shaped plugin (Phase 4, plan §17):
  *
  *   1. the fixture imports ONLY the public `@xmoon76/dsh-pi-tui/
  *      extensions/advanced` (and the stable `extensions` entry for the
@@ -11,9 +11,10 @@
  *   2. the fixture typechecks against the packed `.d.mts`;
  *   3. the fixture COMPILES to JS and RUNTIME-LOADS against the packed
  *      bytes (apply() registers through a mock service without throwing);
- *   4. the fixture exercises the ADVANCED surface: ADVANCED_API_LEVEL === 1,
- *      normalized input capture (observe + capture), the interactive
- *      overlay lease, and the advanced editor controls;
+ *   4. the fixture exercises the Phase-4 surface: the imperative UI
+ *      broker (select/confirm/input/notify), custom interactive UI
+ *      (ui.custom), and the host-state facade (theme/title/working/
+ *      tools-expanded);
  *   5. the fixture's module shape (name/inject/apply) matches the Loader;
  *   6. no duplicate dsh runtime in the fixture tree.
  *
@@ -21,8 +22,8 @@
  * gate is offline-safe; the packed package's runtime deps resolve from
  * the repo's node_modules exactly like a real profile).
  *
- * Usage: node scripts/advanced-plugin-smoke.mjs [path-to-tgz]
- * @module advanced-plugin-smoke
+ * Usage: node scripts/phase4-plugin-smoke.mjs [path-to-tgz]
+ * @module phase4-plugin-smoke
  */
 
 import { spawnSync } from 'node:child_process'
@@ -45,7 +46,7 @@ import { fileURLToPath } from 'node:url'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
-const FIXTURE_ROOT = join(PACKAGE_ROOT, 'test', 'fixtures', 'advanced-plugin')
+const FIXTURE_ROOT = join(PACKAGE_ROOT, 'test', 'fixtures', 'phase4-plugin')
 
 const failures = []
 const checks = []
@@ -78,7 +79,7 @@ function resolveTarball(explicit) {
 
 function main() {
   const tarball = resolveTarball(process.argv[2])
-  const workDir = mkdtempSync(join(tmpdir(), 'advanced-plugin-'))
+  const workDir = mkdtempSync(join(tmpdir(), 'phase4-plugin-'))
   try {
     // 1. Extract the packed package.
     const extractedDir = join(workDir, 'pkg')
@@ -137,17 +138,20 @@ function main() {
         && dshImports.includes('@xmoon76/dsh-pi-tui/extensions'),
       dshImports.join(', '))
 
-    // 3. ADVANCED-SURFACE EXERCISE (plan §15 acceptance): the fixture
-    //    exercises the Phase-2 advanced surface through the public entry.
+    // 3. PHASE-4 SURFACE EXERCISE (plan §17 acceptance): the fixture
+    //    exercises the Phase-4 advanced surface through the public entry.
     const surface = [
-      ['ADVANCED_API_LEVEL', 'tier level constant'],
-      ['advanced(', 'facade builder'],
-      ['ui.input.capture', 'normalized input capture'],
-      ["mode: 'observe'", 'observe mode'],
-      ["mode: 'capture'", 'capture mode'],
-      ['showInteractiveOverlay', 'interactive overlay'],
-      ['AdvancedInteractiveComponent', 'interactive component type'],
-      ['ui.editor', 'advanced editor controls'],
+      ['ui.ui.select', 'imperative select broker'],
+      ['ui.ui.confirm', 'imperative confirm broker'],
+      ['ui.ui.input', 'imperative input broker'],
+      ['ui.ui.notify', 'imperative notify broker'],
+      ['ui.ui.custom', 'custom interactive UI'],
+      ['AdvancedCustomHost', 'custom host facade type'],
+      ['ui.host.getTheme', 'host-state theme query'],
+      ['ui.host.setTheme', 'host-state theme select'],
+      ['ui.host.setTitle', 'host-state title override'],
+      ['ui.host.setWorkingMessage', 'host-state working override'],
+      ['ui.host.setToolsExpanded', 'host-state tool expansion'],
     ]
     for (const [api, label] of surface) {
       check(`fixture exercises ${label} (${api})`, fixtureSrc.includes(api))
@@ -188,7 +192,7 @@ function main() {
       include: ['src'],
     }, null, 2))
     writeFileSync(join(fixtureDir, 'package.json'), JSON.stringify({
-      name: 'dsh-pi-advanced-fixture',
+      name: 'dsh-pi-phase4-fixture',
       private: true,
       type: 'module',
     }, null, 2))
@@ -256,7 +260,7 @@ function main() {
         }
         const plugin = await import(${JSON.stringify(join(emitDir, 'index.js').replaceAll('\\', '/'))})
         plugin.apply(context)
-        if (plugin.name !== 'dsh-pi-advanced-fixture') throw new Error('bad name: ' + plugin.name)
+        if (plugin.name !== 'dsh-pi-phase4-fixture') throw new Error('bad name: ' + plugin.name)
         console.log('fixture-runtime-ok')
       `)
       const runtime = run(process.execPath, [join(fixtureDir, 'runtime-probe.mjs')], { cwd: fixtureDir })
@@ -304,11 +308,11 @@ function main() {
 
   for (const line of checks) console.log(line)
   if (failures.length > 0) {
-    console.error(`\nadvanced-plugin smoke FAILED (${failures.length}):`)
+    console.error(`\nphase4-plugin smoke FAILED (${failures.length}):`)
     for (const failure of failures) console.error(`  - ${failure}`)
     process.exit(1)
   }
-  console.log('\nadvanced-plugin smoke passed')
+  console.log('\nphase4-plugin smoke passed')
 }
 
 main()
