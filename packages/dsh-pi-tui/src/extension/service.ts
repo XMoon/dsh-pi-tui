@@ -24,6 +24,15 @@ import { ExtensionLedger } from './internal/ledger.ts'
 import { InvalidateBatcher } from './internal/batcher.ts'
 import { isSlotName, slotSemantic } from './slot-map.ts'
 import type { PiTuiApiInfo, PiTuiCapability, PiTuiSlotName, RegistrationHandle, RegistrationSpec, SurfaceStateValues } from './public-types.ts'
+import type {
+  AdvancedEditorControls,
+  AdvancedInputCaptureHandle,
+  AdvancedInputCaptureSpec,
+  AdvancedInteractiveComponent,
+  AdvancedOverlayLease,
+} from './advanced-types.ts'
+import { AdvancedInputRegistry } from './internal/advanced-input.ts'
+import { normalizeInputEvent } from './internal/input-events.ts'
 import { CommandBridge } from '../command-bridge.ts'
 import { ThemeRegistry } from '../theme-registry.ts'
 import { AutocompleteRegistry } from '../autocomplete-registry.ts'
@@ -74,6 +83,65 @@ function safeHealthMessage(error: unknown): string {
  * surface, or the seam was detached). Every method is a safe no-op. */
 function inertOverlayLease(): import('./public-types.ts').TuiOverlayHandle {
   return { close: () => {}, hide: () => {}, show: () => {} }
+}
+
+/** An inert ADVANCED overlay lease (no surface / seam detached / surface
+ * disposed). Every method is a safe no-op; `active` and `focused` are
+ * false. */
+function inertAdvancedOverlayLease(): AdvancedOverlayLease {
+  return {
+    id: 'inert',
+    active: false,
+    focused: false,
+    focus: () => {},
+    blur: () => {},
+    invalidate: () => {},
+    close: () => {},
+    hide: () => {},
+    show: () => {},
+  }
+}
+
+/** An inert ADVANCED editor controls object (no surface attached / seam
+ * detached / surface disposed). Every method is a safe no-op; the snapshot
+ * is a fixed inert shape. */
+function inertAdvancedEditorControls(): AdvancedEditorControls {
+  const inertSnapshot: import('./public-types.ts').EditorSnapshot = {
+    text: '',
+    cursor: 0,
+    focused: false,
+    composing: false,
+  }
+  return {
+    getEditorState: () => inertSnapshot,
+    setEditorText: () => {},
+    setEditorCursor: () => {},
+    insertEditorText: () => {},
+    pasteToEditor: () => {},
+    requestEditorFocus: () => {},
+  }
+}
+
+/**
+ * The internal ADVANCED seam the `extensions/advanced` facade consumes
+ * (plan §4: `advanced(service)` — the Stable service interface is NOT
+ * extended). These `_`-prefixed members are package-internal: the facade
+ * entry is the supported boundary, plugins never call them directly.
+ */
+export interface AdvancedHostSeam {
+  /** Register a normalized input capture (caller-fiber-owned). */
+  _advancedCaptureInput(spec: AdvancedInputCaptureSpec): AdvancedInputCaptureHandle
+  /** Open an interactive managed overlay (caller-fiber-owned lease). */
+  _advancedShowInteractiveOverlay(
+    component: AdvancedInteractiveComponent,
+    options?: import('./public-types.ts').TuiOverlayOptions,
+  ): AdvancedOverlayLease
+  /** The CURRENT surface's advanced editor controls (inert when stale). */
+  _advancedEditorControls(): AdvancedEditorControls
+  /** Consult the advanced captures for one raw input chunk (the Host's
+   * input path calls this after its own capturing flows and reserved
+   * lifecycle keys). */
+  _advancedInputRoute(data: string): 'consumed' | 'passed'
 }
 
 /** The service name plugins inject (`piTuiExtensions` in cordis.patch.yml). */
@@ -196,12 +264,19 @@ export interface PiTuiExtensionService {
 export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtensionService {
   /** Capabilities advertised from service-provide time (P0-1): the chrome
    * slots + widget slots work before any surface exists (registrations are
-   * simply rendered once the surface attaches). */
+   * simply rendered once the surface attaches). Phase 2 adds the ADVANCED
+   * capabilities: the advanced registry/seams are service-lifetime, so
+   * normalized input capture, interactive overlays and editor control are
+   * feature-detectable before any surface exists (their physical mounts
+   * attach later). */
   static readonly ADVERTISED_CAPABILITIES: readonly PiTuiCapability[] = [
     'slot.chrome.header.badge',
     'slot.input.dock.item',
     'slot.chrome.footer.status',
     'slot.input.widget',
+    'advanced.input.capture',
+    'advanced.ui.interactive',
+    'advanced.editor.control',
   ]
 
   private readonly ledger: ExtensionLedger
@@ -236,6 +311,25 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   } | undefined
   /** M9: the editor registry (single-winner). */
   readonly editors: EditorRegistry
+  /** Phase 2: the ADVANCED normalized input capture registry. The
+   * registrations are caller-fiber-owned (the service binds them); the
+   * registry itself is service-lifetime — captures survive surface
+   * recreate and are consulted by the CURRENT surface's input path. */
+  readonly advancedInputs: AdvancedInputRegistry
+  /** Phase 2: the ADVANCED interactive-overlay mount seam (wired by the
+   * runner; the host owns the screen + broker). SURFACE-scoped like the
+   * stable overlay seam: bound per attachment through a surfaceId lease —
+   * a stale old-generation detach never unbinds a newer surface's seam. */
+  private advancedOverlayMount: {
+    surfaceId: string
+    mount(component: AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions): AdvancedOverlayLease
+  } | undefined
+  /** Phase 2: the ADVANCED editor-control seam (wired by the runner; the
+   * host owns the editor seat). SURFACE-scoped like the overlay seam. */
+  private advancedEditorSeam: {
+    surfaceId: string
+    controls: AdvancedEditorControls
+  } | undefined
   /** Track health for one external registry contribution. */
   private trackRegistryHealth(slot: string, id: string, owner: string): void {
     this.ledger.trackHealth(slot, id, owner)
@@ -305,6 +399,19 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.keybindings = new KeybindingRegistry(() => this.batcher.invalidate())
     this.renderers = new RendererRegistry(() => this.batcher.invalidate())
     this.editors = new EditorRegistry(() => this.batcher.invalidate())
+    // Phase 2: the advanced input capture registry. Health rides the
+    // ledger (the plan's "no new Advanced health system" rule): a
+    // throwing capture handler/gate is recorded under
+    // 'advanced.input.capture' and cleared on the next successful consume.
+    this.advancedInputs = new AdvancedInputRegistry(
+      () => this.batcher.invalidate(),
+      {
+        track: (id, owner) => this.ledger.trackHealth('advanced.input.capture', id, owner),
+        untrack: (id) => this.ledger.untrackHealth('advanced.input.capture', id),
+        recordError: (id, message) => this.ledger.recordExternalError('advanced.input.capture', id, message),
+        clearError: (id) => this.ledger.clearExternalError('advanced.input.capture', id),
+      },
+    )
   }
 
   api(): PiTuiApiInfo {
@@ -527,6 +634,15 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // service never mounts on a dead surface.
     if (this.overlayMount !== undefined && this.overlayMount.surfaceId === detachingId) {
       this.overlayMount = undefined
+    }
+    // Phase 2: unbind the ADVANCED seams with the same lease — a stale
+    // old-generation detach never unbinds a newer surface's advanced
+    // overlay mount or editor controls.
+    if (this.advancedOverlayMount !== undefined && this.advancedOverlayMount.surfaceId === detachingId) {
+      this.advancedOverlayMount = undefined
+    }
+    if (this.advancedEditorSeam !== undefined && this.advancedEditorSeam.surfaceId === detachingId) {
+      this.advancedEditorSeam = undefined
     }
     // P1-3: unbind every live bridge subscription — the RECORDS stay
     // (caller-fiber-owned); a later attachSurface re-binds them. A
@@ -917,6 +1033,162 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** The ledger behind the service (SurfaceHost access in M2). */
   _ledger(): ExtensionLedger {
     return this.ledger
+  }
+
+  // ── Phase 2: the ADVANCED seam (consumed by `extensions/advanced`) ──────
+
+  /**
+   * Register a normalized input capture (plan §5). Caller-fiber-owned:
+   * owner unload removes the capture. A duplicate id or a second live
+   * exclusive capture is an explicit error (the registry's rules — never
+   * a load-order winner). A stale service handle's call is rejected by
+   * the fiber check (INACTIVE_EFFECT) and rolled back.
+   */
+  _advancedCaptureInput(spec: AdvancedInputCaptureSpec): AdvancedInputCaptureHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.advancedInputs.register(spec, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.advanced.input.capture()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /**
+   * Open an interactive managed overlay (plan §8). The returned lease is
+   * CALLER-FIBER-OWNED: its physical mount is surface-owned, but its
+   * LIFETIME is bound to the calling fiber — the fiber's unload/HMR/
+   * disable closes the overlay automatically. A lease without a mounted
+   * host surface is inert (registration-before-surface). Three paths
+   * close the lease, all idempotent: explicit close(), the caller fiber's
+   * unload, and the surface's own dispose.
+   */
+  _advancedShowInteractiveOverlay(
+    component: AdvancedInteractiveComponent,
+    options?: import('./public-types.ts').TuiOverlayOptions,
+  ): AdvancedOverlayLease {
+    const caller = this.ctx
+    const seam = this.advancedOverlayMount
+    if (seam === undefined) return inertAdvancedOverlayLease()
+    const mounted = seam.mount(component, options)
+    let closed = false
+    const close = (): void => {
+      if (closed) return
+      closed = true
+      try {
+        mounted.close()
+      } catch {
+        // The host's lease close is idempotent; a throwing close must
+        // never escape into the fiber disposer or the public close path.
+      }
+    }
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => close, 'piTuiExtensions.advanced.ui.showInteractiveOverlay()')
+    } catch (error) {
+      close()
+      throw error
+    }
+    return {
+      id: mounted.id,
+      get active() {
+        return !closed && mounted.active
+      },
+      get focused() {
+        return !closed && mounted.focused
+      },
+      focus: () => {
+        if (closed) return
+        try {
+          mounted.focus()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+      blur: () => {
+        if (closed) return
+        try {
+          mounted.blur()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+      invalidate: () => {
+        if (closed) return
+        try {
+          mounted.invalidate()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+      close: () => {
+        close()
+        effectDispose()
+      },
+      hide: () => {
+        if (closed) return
+        try {
+          mounted.hide()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+      show: () => {
+        if (closed) return
+        try {
+          mounted.show()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+    }
+  }
+
+  /** The CURRENT surface's advanced editor controls (plan §9), or an
+   * inert object when no surface is attached / the seam is detached. The
+   * controls follow the live attachment: a stale old-generation detach
+   * never unbinds a newer surface's seam (the surfaceId lease). */
+  _advancedEditorControls(): AdvancedEditorControls {
+    return this.advancedEditorSeam?.controls ?? inertAdvancedEditorControls()
+  }
+
+  /** Consult the advanced captures for one raw input chunk. The Host's
+   * input path calls this AFTER its own capturing flows (questions,
+   * approvals, overlays) and reserved lifecycle keys, and BEFORE the
+   * editor and the Stable keybindings (plan §5/§11 — the Phase-2
+   * contract: advanced plugins preempt ordinary editor/panel input, never
+   * Host questions/approvals/overlays or fatal-recovery shortcuts). */
+  _advancedInputRoute(data: string): 'consumed' | 'passed' {
+    return this.advancedInputs.route(data, normalizeInputEvent)
+  }
+
+  /** Runner-only: wire the ADVANCED interactive-overlay mount seam
+   * (Phase 2). SURFACE-scoped like the stable overlay seam: bound to the
+   * CURRENT attachment's surfaceId — a later attach replaces it, and a
+   * stale old-generation detach never unbinds a newer surface's seam. */
+  setAdvancedOverlayMount(
+    surfaceId: string,
+    mount: (component: AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions) => AdvancedOverlayLease,
+  ): void {
+    this.advancedOverlayMount = { surfaceId, mount }
+  }
+
+  /** Runner-only: wire the ADVANCED editor-control seam (Phase 2).
+   * SURFACE-scoped like the overlay seam. */
+  setAdvancedEditorSeam(surfaceId: string, controls: AdvancedEditorControls): void {
+    this.advancedEditorSeam = { surfaceId, controls }
   }
 
   /** Runner-only callback health bridges. */

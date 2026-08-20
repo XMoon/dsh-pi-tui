@@ -1503,6 +1503,15 @@ export function apply(ctx: Context, config: Config): void {
       _clearRegistryError(slot: string, id: string): void
       attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string, requestRender?: (force?: boolean) => void): void
       detachSurface(surfaceId?: string): void
+      // Phase 2: the ADVANCED seam (the `extensions/advanced` facade's
+      // internal surface — the runner wires the app's input path and the
+      // interactive-overlay/editor-control seams through it).
+      _advancedInputRoute(data: string): 'consumed' | 'passed'
+      setAdvancedOverlayMount(
+        surfaceId: string,
+        mount: (component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions) => import('./extension/advanced-types.ts').AdvancedOverlayLease,
+      ): void
+      setAdvancedEditorSeam(surfaceId: string, controls: import('./extension/advanced-types.ts').AdvancedEditorControls): void
     }) | undefined
     let extensionHost: SurfaceHost | undefined
     // Tool-card presentation bridge: the Web's render intents resolved from
@@ -2670,6 +2679,13 @@ export function apply(ctx: Context, config: Config): void {
         return keybindings.actionFor(normalized)
       },
       pluginActionIdFor: (normalized) => extensionService?.keybindings.idFor(normalized),
+      // Phase 2: the ADVANCED normalized input capture route. The host
+      // input path consults it AFTER its own capturing flows (questions,
+      // approvals, overlays) and reserved lifecycle keys, and BEFORE the
+      // editor and the Stable keybindings — an advanced plugin can preempt
+      // ordinary editor/panel input, never a Host question/approval/overlay
+      // or a fatal-recovery shortcut (session safety stays Host-owned).
+      advancedInputRoute: (data) => extensionService?._advancedInputRoute(data) ?? 'passed',
     })
     // M3: attach the extension host to the surface chrome once per
     // generation (F-1): the header/dock/footer merge extension content, and
@@ -2698,6 +2714,13 @@ export function apply(ctx: Context, config: Config): void {
       // surfaceId so a stale old-generation detach never unbinds a newer
       // surface's seam.
       extensionService.setOverlayMount(extensionHost.surfaceId, (view, options) => app.showExtensionOverlay(view, options))
+      // Phase 2: the ADVANCED seams (plan §4/§8/§9) — interactive overlay
+      // mounts and editor controls, both SURFACE-scoped like the stable
+      // overlay seam (a stale old-generation detach never unbinds a newer
+      // surface's seam).
+      extensionService.setAdvancedOverlayMount(extensionHost.surfaceId, (component, options) =>
+        app.showAdvancedInteractiveOverlay(component, options))
+      extensionService.setAdvancedEditorSeam(extensionHost.surfaceId, app.advancedEditorControls())
       extensionHost.attach(
         { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
         {

@@ -80,6 +80,14 @@ export type PiTuiCapability =
   | 'slot.chrome.footer.status'
   | 'slot.input.widget'
   | 'surface.snapshot'
+  // Phase 2: the ADVANCED tier's capabilities (plan §13 — the shared
+  // capability model carries the tier prefix; feature-detect, never parse
+  // the host version). Advertised from service-provide time: the advanced
+  // registries/seams are service-lifetime, so a plugin can register
+  // before any surface exists.
+  | 'advanced.input.capture'
+  | 'advanced.ui.interactive'
+  | 'advanced.editor.control'
 
 /** Slot identities this bundle knows; unknown names are rejected at registration. */
 export type PiTuiSlotName =

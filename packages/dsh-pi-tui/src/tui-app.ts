@@ -88,6 +88,7 @@ import { OverlayBroker } from './overlay-broker.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
+import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
 import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
@@ -786,6 +787,17 @@ export interface TuiAppOptions {
    * identically without it.
    */
   editorRegistry?: EditorRegistry
+  /**
+   * Phase 2: the ADVANCED normalized input capture route (wired by the
+   * runner from the service's advanced registry). Consulted by the host
+   * input path AFTER its own capturing flows (questions, approvals,
+   * overlays) and reserved lifecycle keys, and BEFORE the editor and the
+   * Stable keybindings — an advanced plugin can preempt ordinary
+   * editor/panel input, never a Host question/approval/overlay or a
+   * fatal-recovery shortcut. Optional — the surface works identically
+   * without it.
+   */
+  advancedInputRoute?: (data: string) => 'consumed' | 'passed'
 }
 
 /**
@@ -989,6 +1001,15 @@ export class TuiApp {
   /** M8: still-owned plugin overlay leases (closed by the final dispose —
    * plan §13.3: leases are generation-scoped). */
   private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle>()
+  /** Phase 2: still-owned ADVANCED interactive overlay leases (closed by
+   * the final dispose; re-mounted across fullscreen screen swaps). */
+  private readonly advancedOverlayLeases = new Set<import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void }>()
+  /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
+   * resize so the plugin's render(ctx) sees the new geometry). */
+  private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
+  /** Phase 2: the ADVANCED normalized input capture route (wired by the
+   * runner; consulted after host capturing flows + reserved keys). */
+  private readonly advancedInputRoute: ((data: string) => 'consumed' | 'passed') | undefined
   // M8: the overlay graph (handles/dependents) lives in the broker — the
   // host reads it through the accessors below. The old private sets were
   // removed; every use now goes through this.overlayBroker.
@@ -1122,6 +1143,7 @@ export class TuiApp {
     this.present = options.present
     this.pluginActionFor = options.pluginActionFor
     this.pluginActionIdFor = options.pluginActionIdFor
+    this.advancedInputRoute = options.advancedInputRoute
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
@@ -1345,6 +1367,11 @@ export class TuiApp {
     this.localMessages.length = 0
     for (const lease of this.extensionOverlayLeases) lease.close()
     this.extensionOverlayLeases.clear()
+    // Phase 2: close every still-owned ADVANCED interactive overlay lease
+    // (the wrappers die with the surface; the plugin's dispose() runs).
+    for (const lease of this.advancedOverlayLeases) lease.close()
+    this.advancedOverlayLeases.clear()
+    this.advancedOverlayWrappers.clear()
     this.overlayBroker.clear()
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
@@ -1711,6 +1738,17 @@ export class TuiApp {
     // seat editor or plugin bindings here; returning undefined lets pi-tui
     // dispatch the raw key to the overlay component (including reserved keys).
     if (context.hasOverlay) return undefined
+    // Phase 2: the ADVANCED normalized captures (plan §5/§11). Consulted
+    // AFTER the host's own capturing flows (questions, approvals, overlays)
+    // and reserved lifecycle keys, BEFORE the editor and the Stable
+    // keybindings — an advanced plugin can preempt ordinary editor/panel
+    // input, but never a Host question/approval/overlay or a fatal-recovery
+    // shortcut (session safety stays Host-owned). The registry normalizes
+    // the raw chunk itself (the shared Host decoder); a consuming capture
+    // stops the event here.
+    if (this.advancedInputRoute !== undefined && this.advancedInputRoute(data) === 'consumed') {
+      return { consume: true }
+    }
     const route = this.inputRouter.route(data, context, (key) => this.pluginActionForFor(key))
     if (route.kind === 'protocol') return undefined
     if (route.kind === 'consumed') {
@@ -2119,8 +2157,10 @@ export class TuiApp {
     this.events.onFullscreenChange?.(enabled)
     // M8 (round-1 finding 2): still-open plugin overlay leases re-mount on
     // the CURRENT active screen (their raw handles died with the old
-    // screen's teardown above).
+    // screen's teardown above). Phase 2: the ADVANCED interactive overlay
+    // leases follow the same migration.
     this.remountExtensionOverlays()
+    this.remountAdvancedOverlays()
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -2664,6 +2704,224 @@ export class TuiApp {
   ownedExtensionOverlayLeasesForTest(): number {
     return this.extensionOverlayLeases.size
   }
+
+  // ── Phase 2: ADVANCED interactive overlays (plan §6/§8) ─────────────────
+
+  /**
+   * Phase 2: mount an INTERACTIVE managed overlay hosting a plugin's
+   * focused interactive component (plan §8). The host wraps the plugin
+   * component (render compiled through the M4 kit, input normalized by
+   * the shared Host decoder, focus via the fork's Focusable protocol),
+   * mounts it through the overlay broker (modal stacking, focus,
+   * fullscreen migration, teardown) and returns a generation-scoped
+   * lease. The surface's final dispose closes every still-owned lease.
+   * @param component - the plugin's interactive component.
+   * @param options - sizing/positioning hints.
+   */
+  showAdvancedInteractiveOverlay(
+    component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): import('./extension/advanced-types.ts').AdvancedOverlayLease {
+    // A finally-disposed surface is inert: a late plugin call must never
+    // mount on the dead app or mint a new lease (same rule as the stable
+    // overlay path).
+    if (this.disposed) {
+      return {
+        id: 'inert',
+        active: false,
+        focused: false,
+        focus: () => {},
+        blur: () => {},
+        invalidate: () => {},
+        close: () => {},
+        hide: () => {},
+        show: () => {},
+      }
+    }
+    const mountOptions = this.overlayOptionsOf(options)
+    const id = `adv-overlay-${++this.advancedOverlayCounter}`
+    // The lease KEEPS the component + options so a fullscreen screen swap
+    // can RE-MOUNT it on the new active screen (the raw handle dies with
+    // the old screen — same contract as the stable overlay lease).
+    let wrapper: import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent | undefined
+    let raw: OverlayHandle | undefined
+    let hiddenByLease = false
+    let closed = false
+    const mount = (): void => {
+      if (closed || raw !== undefined) return
+      const created = new AdvancedOverlayComponent(
+        component,
+        () => this.advancedRenderContext(),
+        (message: string) => this.notify(`advanced overlay: ${message}`, 'error'),
+      )
+      wrapper = created
+      this.advancedOverlayWrappers.add(created)
+      raw = this.showOverlayOnHost(created, mountOptions)
+      if (hiddenByLease) raw.setHidden(true)
+    }
+    mount()
+    const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
+      id,
+      get active() {
+        return !closed
+      },
+      get focused() {
+        return raw?.isFocused() ?? false
+      },
+      focus: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+        raw?.focus()
+      },
+      blur: () => {
+        if (closed) return
+        raw?.unfocus()
+      },
+      invalidate: () => {
+        if (closed) return
+        wrapper?.invalidate()
+        this.requestRender()
+      },
+      close: () => {
+        if (closed) return
+        closed = true
+        this.advancedOverlayLeases.delete(lease)
+        if (wrapper !== undefined) {
+          this.advancedOverlayWrappers.delete(wrapper)
+          // The wrapper's dispose() runs the plugin's dispose() (isolated
+          // inside the wrapper) — the plugin component never outlives its
+          // overlay.
+          wrapper.dispose()
+        }
+        raw?.hide()
+        raw = undefined
+        wrapper = undefined
+      },
+      hide: () => {
+        if (closed) return
+        hiddenByLease = true
+        raw?.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+      },
+      // Host-internal: re-create the raw handle on the CURRENT active
+      // screen after a fullscreen swap (the old raw handle died with the
+      // old screen). Idempotent (a live raw handle skips).
+      _remount: () => {
+        if (closed) return
+        raw = undefined
+        mount()
+      },
+      // Host-internal: recompile the plugin's render() output (terminal
+      // resize — the plugin's render(ctx) must see the new geometry).
+      _recompile: () => {
+        if (closed) return
+        wrapper?.invalidate()
+      },
+    }
+    // The surface's dispose closes every still-owned lease: track it.
+    this.advancedOverlayLeases.add(lease)
+    return lease
+  }
+
+  /** Phase 2: re-mount every still-open ADVANCED lease on the CURRENT
+   * active screen (fullscreen toggle — the old screen's overlays died
+   * with it; a managed lease survives the screen migration). */
+  private remountAdvancedOverlays(): void {
+    for (const lease of this.advancedOverlayLeases) {
+      lease._remount()
+    }
+  }
+
+  /** Phase 2: recompile every live ADVANCED overlay wrapper (terminal
+   * resize — the plugin's render(ctx) sees the new geometry). */
+  private recompileAdvancedOverlays(): void {
+    for (const wrapper of this.advancedOverlayWrappers) {
+      wrapper.invalidate()
+    }
+  }
+
+  /** Phase 2 test hook: the number of still-owned ADVANCED overlay leases. */
+  ownedAdvancedOverlayLeasesForTest(): number {
+    return this.advancedOverlayLeases.size
+  }
+
+  /** Phase 2: the live render context for ADVANCED interactive overlays
+   * (surfaceId/generation/geometry; `focused` is added by the wrapper). */
+  private advancedRenderContext(): Omit<import('./extension/advanced-types.ts').AdvancedRenderContext, 'focused'> {
+    return {
+      surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+      generation: this.generation,
+      width: this.terminal.columns,
+      height: this.terminal.rows,
+    }
+  }
+
+  /** Phase 2: the ADVANCED editor controls (plan §9) — direct semantic
+   * editor actions through the host's editor seat. The host owns
+   * submission/session safety; these controls only carry text/cursor/
+   * focus. A disposed surface is inert. */
+  advancedEditorControls(): import('./extension/advanced-types.ts').AdvancedEditorControls {
+    const app = this
+    return {
+      getEditorState: () => app.editorSeatHolder.snapshot(),
+      setEditorText: (text) => {
+        if (app.disposed) return
+        app.seatEditor().setText(text)
+        app.editorSeatHolder.notifyChanged()
+      },
+      setEditorCursor: (offset) => {
+        if (app.disposed) return
+        app.seatEditor().setCursor(offset)
+        app.editorSeatHolder.notifyChanged()
+      },
+      insertEditorText: (text, at) => {
+        if (app.disposed) return
+        const current = app.seatEditor()
+        const offset = at ?? current.getCursor()
+        const draft = current.getText()
+        const next = draft.slice(0, offset) + text + draft.slice(offset)
+        current.setText(next)
+        current.setCursor(offset + text.length)
+        app.editorSeatHolder.notifyChanged()
+      },
+      pasteToEditor: (text) => {
+        if (app.disposed) return
+        const current = app.seatEditor()
+        const offset = current.getCursor()
+        const draft = current.getText()
+        const next = draft.slice(0, offset) + text + draft.slice(offset)
+        current.setText(next)
+        current.setCursor(offset + text.length)
+        app.editorSeatHolder.notifyChanged()
+      },
+      requestEditorFocus: () => {
+        if (app.disposed) return
+        // Best-effort: focus the seat component only when no capturing
+        // flow (question/approval/overlay) owns the seat — those flows
+        // restore their own focus and must never be stolen.
+        if (app.activeQuestions !== undefined || app.activeApproval !== undefined
+          || app.activeScreen.hasOverlayEntries) return
+        app.activeScreen.setFocus(app.seatEditor().component)
+      },
+    }
+  }
+
+  /** Phase 2 test hook: the current ADVANCED editor controls (probes the
+   * seam without going through the service). */
+  advancedEditorControlsForTest(): import('./extension/advanced-types.ts').AdvancedEditorControls {
+    return this.advancedEditorControls()
+  }
+
+  /** Phase 2: the ADVANCED overlay lease id counter. */
+  private advancedOverlayCounter = 0
+  /** Phase 2: the last geometry the ADVANCED overlays were recompiled at
+   * (the resize latch — recompile only on an actual geometry change). */
+  private lastAdvancedGeometry: { width: number; height: number } = { width: -1, height: -1 }
 
   /** M9: the host default editor adapted to the seat surface. The fork's
    * cursor is `{line, col}`; the seat uses a flat OFFSET (line lengths
@@ -3561,11 +3819,21 @@ export class TuiApp {
     if (this.syncingSurfaceGeometry) return
     this.syncingSurfaceGeometry = true
     try {
+      const width = this.terminal.columns
+      const height = this.terminal.rows
+      // Phase 2: a terminal resize recompiles every live ADVANCED overlay
+      // wrapper — the plugin's render(ctx) must see the new geometry (the
+      // compiled view itself re-wraps at the current width per frame, but
+      // the plugin's render() output is only re-read on invalidate). Runs
+      // even without an extension host (tests mount advanced overlays
+      // directly on the app); the last-geometry latch keeps it resize-only.
+      if (width !== this.lastAdvancedGeometry.width || height !== this.lastAdvancedGeometry.height) {
+        this.lastAdvancedGeometry = { width, height }
+        this.recompileAdvancedOverlays()
+      }
       const host = this.extensionHost
       if (host === undefined) return
       const current = host.state().surface
-      const width = this.terminal.columns
-      const height = this.terminal.rows
       // focusedSeat derives from the actual focus state (follow-up P1): the
       // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
       // question/approval/fullscreen entry; the requestRender mirror only

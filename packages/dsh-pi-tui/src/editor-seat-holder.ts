@@ -232,6 +232,12 @@ export class EditorSeatHolder {
     return this.current
   }
 
+  /** The current seat snapshot (Phase 2: the ADVANCED editor controls
+   * read the seat through this — same shape as the EditorHost contract). */
+  snapshot(): EditorSnapshot {
+    return this.snapshotOf(this.current.id === 'host' ? '' : this.current.id)
+  }
+
   /**
    * Perform the atomic handoff to a new winner. Called by the host when
    * the editor registry's winner changed. Creation runs FIRST — a throw
