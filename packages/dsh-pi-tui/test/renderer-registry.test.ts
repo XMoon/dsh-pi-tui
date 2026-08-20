@@ -58,6 +58,16 @@ test('RendererRegistry: a throwing message renderer is isolated and the chain co
   assert.match(errors[0] ?? '', /boom:renderer exploded/)
 })
 
+test('RendererRegistry: an onError throw does not stop the message chain', () => {
+  const registry = new RendererRegistry()
+  registry.registerMessageRenderer({ id: 'boom', order: 1, render: () => { throw new Error('render boom') } }, 'a')
+  registry.registerMessageRenderer({ id: 'fallback', order: 2, render: () => textView('fallback') }, 'b')
+  assert.equal(
+    registry.renderMessage({ kind: 'assistant', turn: 0, text: 'x' }, () => { throw new Error('health boom') })?.rendererId,
+    'fallback',
+  )
+})
+
 test('RendererRegistry: kind-scoped message renderers only apply to their kind', () => {
   const registry = new RendererRegistry()
   registry.registerMessageRenderer({
@@ -286,6 +296,38 @@ test('TuiApp: renderer failures reach the health ledger sink (round-1 P3)', asyn
   app.stop()
 })
 
+test('TuiApp: a broken renderer view lets a lower-priority renderer claim the card (P1-R5)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  let fallbackCalls = 0
+  registry.registerToolRenderer({
+    id: 'broken-first', toolName: 'bash', priority: 0,
+    render: () => ({
+      kind: 'text' as const,
+      get spans(): never { throw new Error('first compile boom') },
+    } as unknown as import('../src/extension/public-types.ts').ExtensionView),
+  }, 'plugin')
+  registry.registerToolRenderer({
+    id: 'valid-second', toolName: 'bash', priority: 1,
+    render: () => {
+      fallbackCalls++
+      return textView('SECOND')
+    },
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  await vt.waitForRender()
+  const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: '', status: 'ok' as const }
+  const entry = app.messageCacheEntryForTest?.(tool, 0)
+  assert.equal(entry?.rendererId, 'valid-second')
+  assert.equal(fallbackCalls, 1)
+  assert.ok(entry?.component.render(80).join('').includes('SECOND'))
+  app.stop()
+})
+
 test('TuiApp: a renderer-returned view whose COMPILATION throws abdicates to the host card, never escapes (P1-07)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
@@ -347,7 +389,7 @@ test('TuiApp: a failed renderer RECOVERS and its health record clears (P1-08)', 
   app.setRendererErrorSink(({ id, error }) => {
     ledger.recordError('transcript.renderer', id, String(error))
   })
-  app.setRendererRecoveredSink((id) => ledger.clearError('transcript.renderer', id))
+  app.setRendererRecoveredSink(({ id }) => ledger.clearError('transcript.renderer', id))
   app.start()
   await vt.waitForRender()
   const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: 'out', status: 'ok' as const }

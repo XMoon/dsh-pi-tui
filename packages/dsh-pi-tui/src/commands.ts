@@ -197,6 +197,9 @@ export interface TuiCommandRunner {
    */
   sessionCwd(): string
   signal: AbortSignal
+  /** M11: callback-health bridge for extension registries. */
+  recordExtensionError?: (slot: string, id: string, error: unknown) => void
+  clearExtensionError?: (slot: string, id: string) => void
   /** The runner's monotonic session generation; bumped on every session
    * swap. Late async work must re-check it before committing state. */
   readonly sessionGeneration: number
@@ -604,6 +607,8 @@ export function registerTuiCommands(
   // without it the MentionProvider falls back to a bounded recursive scan.
   const fdPath = resolveFdPath()
   const commands = ctx.get('commands')
+  const recordExtensionError = runner.recordExtensionError
+  const clearExtensionError = runner.clearExtensionError
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
@@ -683,12 +688,13 @@ export function registerTuiCommands(
         ? undefined
         : async (query) => {
             const result = await extensionAutocomplete.suggest(query, (id, error) => {
+              recordExtensionError?.('autocomplete', id, error)
               try {
                 ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
               } catch {
                 // The cordis logger must not block completion.
               }
-            })
+            }, id => clearExtensionError?.('autocomplete', id))
             if (result === null) return null
             return { items: [...result.items], prefix: result.prefix }
           },
@@ -940,12 +946,22 @@ export function registerTuiCommands(
                 // M5: a plugin-registered theme applies through the host's
                 // applyPalette (the ONLY application path — the registry
                 // never applies itself). Custom files resolve as before.
-                const pluginPalette = runner.extensions?.themes.paletteFor(value)
+                const themes = runner.extensions?.themes
+                const pluginPalette = themes?.paletteFor(value)
+                const pluginId = pluginPalette === undefined ? undefined : ((themes as { idFor?: (name: string) => string | undefined }).idFor?.(value) ?? value)
                 const palette = pluginPalette ?? loadCustomTheme(value)
                 if (palette !== undefined) {
-                  app.applyPalette(palette)
-                  app.trackTerminalTheme(false)
+                  try {
+                    app.applyPalette(palette)
+                    if (pluginId !== undefined) clearExtensionError?.('theme', pluginId)
+                    app.trackTerminalTheme(false)
+                  } catch (error) {
+                    if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, error)
+                    app.notify(`theme ${value} failed: ${safeErrorMessage(error)}`, 'error')
+                    return
+                  }
                 } else {
+                  if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, new Error('theme not found'))
                   app.notify(`theme ${value} not found`, 'error')
                   return
                 }
@@ -970,9 +986,15 @@ export function registerTuiCommands(
             if (extSettings !== undefined) {
               detach('extension setting apply', () => extSettings.apply(settingId, value).then(accepted => {
                 if (!accepted) {
+                  recordExtensionError?.('setting', settingId, new Error('setting rejected'))
                   if (previous !== undefined) revert(previous)
                   app.notify('setting rejected', 'error')
+                } else {
+                  clearExtensionError?.('setting', settingId)
                 }
+              }).catch(error => {
+                recordExtensionError?.('setting', settingId, error)
+                throw error
               }))
             }
           } else if (id === 'expand') {
@@ -1455,15 +1477,36 @@ export function registerTuiCommands(
         const reloadTheme = doc.theme
         if (reloadTheme === 'auto') {
           detach('theme autodetect', () => app.autoDetectTheme({
-            shouldApply: () => reloadTheme === 'auto',
+            // A settings panel write may complete while OSC 11 is in flight;
+            // only apply the late result if auto is still the latest choice.
+            shouldApply: () => settings.get().theme === 'auto',
           }))
           app.trackTerminalTheme(true)
         } else if (reloadTheme === 'dark' || reloadTheme === 'light') {
           app.applyTheme(reloadTheme)
           app.trackTerminalTheme(false)
         } else if (reloadTheme.startsWith('custom:')) {
-          const palette = loadCustomTheme(reloadTheme.slice('custom:'.length))
-          if (palette !== undefined) app.applyPalette(palette)
+          const name = reloadTheme.slice('custom:'.length)
+          const themes = runner.extensions?.themes
+          const pluginPalette = themes?.paletteFor(name)
+          const pluginId = pluginPalette === undefined
+            ? undefined
+            : (themes?.idFor?.(name) ?? name)
+          const customPalette = loadCustomTheme(name)
+          const palette = pluginPalette ?? customPalette
+          if (palette !== undefined) {
+            try {
+              app.applyPalette(palette)
+              if (pluginId !== undefined) clearExtensionError?.('theme', pluginId)
+            } catch (error) {
+              if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, error)
+              else app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+            }
+          } else {
+            // A missing custom selection is a host settings problem, not a
+            // plugin contribution failure. Do not create a theme health row.
+            app.notify(`theme ${name} not found`, 'error')
+          }
           app.trackTerminalTheme(false)
         }
         app.setFooterPreset(doc.footer === 'compact' ? 'compact' : 'full')

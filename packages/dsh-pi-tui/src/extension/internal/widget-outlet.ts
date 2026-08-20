@@ -61,7 +61,9 @@ export class WidgetOutlet {
    * the promise real). Invalidation: the ledger revision bumps on every
    * register/replace/dispose, so a stale identity key never survives a
    * contribution change. */
-  private readonly compiledNodes = new Map<string, ReturnType<typeof compileView>>()
+  private readonly compiledNodes = new Map<string, { value: InputWidget; node: ReturnType<typeof compileView> }>()
+  // Cache entries are additionally checked by value identity in refresh(); a
+  // same-id replace therefore cannot reuse the old compiled tree.
 
   constructor(ledger: ExtensionLedger, sink: OutletRenderSink, slot: 'input.widget.above' | 'input.widget.below') {
     this.ledger = ledger
@@ -107,10 +109,13 @@ export class WidgetOutlet {
         // P2-03: compile once per contribution identity; an EMPTY view is
         // cached too (abdication is re-derived from the ledger value each
         // pass — a replace() recompiles through the new record).
-        let node = this.compiledNodes.get(record.id)
-        if (node === undefined) {
+        const cached = this.compiledNodes.get(record.id)
+        let node: ReturnType<typeof compileView>
+        if (cached !== undefined && cached.value === widget) {
+          node = cached.node
+        } else {
           node = compileView(widget?.view)
-          this.compiledNodes.set(record.id, node)
+          this.compiledNodes.set(record.id, { value: widget, node })
         }
         if (node.isEmpty) {
           this.ledger.clearError(this.slot, record.id)

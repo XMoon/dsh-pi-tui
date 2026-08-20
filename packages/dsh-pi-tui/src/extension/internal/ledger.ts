@@ -292,6 +292,16 @@ export class ExtensionLedger {
     this.health.clearError(slot, id)
   }
 
+  /** Record a callback failure from an external registry. */
+  recordExternalError(slot: string, id: string, message: string): void {
+    this.health.recordError(slot, id, message)
+  }
+
+  /** Clear a recovered callback failure from an external registry. */
+  clearExternalError(slot: string, id: string): void {
+    this.health.clearError(slot, id)
+  }
+
   /**
    * Final-disposal boundary (plan §6.2, follow-up P1): freeze the handles
    * AND remove the records of every registration belonging to a generation

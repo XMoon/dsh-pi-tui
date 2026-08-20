@@ -38,6 +38,26 @@ report it; there is deliberately no `unsafeGetTuiApp()` escape hatch.
 | Managed overlay | `showOverlay(view, options)` | (always available) | M8 |
 | Editor replacement | `registerEditor(...)` | (always available) | M9 |
 
+Editor replacement input has one deliberate exception to the normalized-key
+rule: while a replacement occupies the seat, its optional `handleInput(data)`
+hook receives the raw terminal event first. Returning `true` consumes the event;
+returning `false` or `undefined` hands the event back to the host's editing
+semantics, which the host applies to the replacement's current text and cursor.
+The host then synchronizes the resulting draft and cursor back to the visible
+replacement. Staging is side-effect-free: the host preserves autocomplete,
+history browsing, undo snapshots, and paste-marker state before forwarding the
+single declined event. Enter remains host-owned and submits through the normal
+host path.
+
+An `EditorHost` is bound to the editor-seat owner that created it. After a
+handoff, every operation from the old host (`getSnapshot`, `replaceText`,
+`dispatch`, `subscribe`, and `invalidate`) is inert; subscriptions created
+while `create()` is running are registered but become live only after that
+editor successfully commits the seat, while all create-time snapshot,
+mutation, dispatch, and invalidation operations are inert. A host restore
+stages the host adapter before disposing the old occupant, so an adapter
+construction or restore failure leaves the old seat available.
+
 Always `service.api().capabilities.has(...)` before relying on a
 capability — never parse the package version.
 

@@ -110,6 +110,7 @@ export class AutocompleteRegistry {
   async suggest(
     query: TuiAutocompleteQuery,
     onError?: (id: string, error: unknown) => void,
+    onSuccess?: (id: string) => void,
   ): Promise<TuiAutocompleteSuggestions | null> {
     this.epoch += 1
     const requestEpoch = this.epoch
@@ -142,6 +143,10 @@ export class AutocompleteRegistry {
           // Latest-only commit: a result that arrives after a newer request
           // is stale for the current cursor — drop it.
           if (requestEpoch !== this.epoch) return null
+          // A provider returning null is still a successful invocation: it
+          // abdicates to the next provider, so a prior failure generation
+          // must be cleared before the chain continues.
+          onSuccess?.(record.id)
           if (result !== null) return result
         } catch (error) {
           if (combined.signal.aborted) return null

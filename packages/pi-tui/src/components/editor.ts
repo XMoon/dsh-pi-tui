@@ -1165,6 +1165,61 @@ export class Editor implements Component, Focusable {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
+	/**
+	 * Set the cursor position without changing the document or firing onChange.
+	 * Positions are clamped to a valid line and grapheme boundary so hosts can
+	 * temporarily synchronize an editor before forwarding a key to it.
+	 */
+	setCursor(cursor: { line: number; col: number }): void {
+		const requestedLine = Number.isFinite(cursor.line) ? Math.floor(cursor.line) : 0;
+		const line = Math.max(0, Math.min(requestedLine, this.state.lines.length - 1));
+		const text = this.state.lines[line] ?? "";
+		const requestedCol = Number.isFinite(cursor.col) ? Math.floor(cursor.col) : 0;
+		const boundedCol = Math.max(0, Math.min(requestedCol, text.length));
+		let col = 0;
+		for (const segment of this.segment(text, "grapheme")) {
+			if (segment.index >= boundedCol) break;
+			const end = segment.index + segment.segment.length;
+			if (boundedCol < end) break;
+			col = end;
+		}
+		if (boundedCol === text.length) col = boundedCol;
+		this.state.cursorLine = line;
+		this.setCursorCol(col);
+		this.scrollOffset = 0;
+		this.tui.requestRender();
+	}
+
+	/**
+	 * Replace the document and cursor atomically without changing editor
+	 * transient state. Unlike setText(), this does not cancel autocomplete,
+	 * leave history browsing, push an undo snapshot, clear paste markers, or
+	 * fire onChange. Hosts use this narrow seam to stage a replacement-editor
+	 * draft before forwarding one declined key through the normal editor path.
+	 */
+	setTextAndCursor(text: string, cursor: { line: number; col: number }): void {
+		const normalized = this.normalizeText(text);
+		this.state.lines = normalized.split("\n");
+		const requestedLine = Number.isFinite(cursor.line) ? Math.floor(cursor.line) : 0;
+		const line = Math.max(0, Math.min(requestedLine, this.state.lines.length - 1));
+		const textAtLine = this.state.lines[line] ?? "";
+		const requestedCol = Number.isFinite(cursor.col) ? Math.floor(cursor.col) : 0;
+		const boundedCol = Math.max(0, Math.min(requestedCol, textAtLine.length));
+		let col = 0;
+		for (const segment of this.segment(textAtLine, "grapheme")) {
+			if (segment.index >= boundedCol) break;
+			const end = segment.index + segment.segment.length;
+			if (boundedCol < end) break;
+			col = end;
+		}
+		if (boundedCol === textAtLine.length) col = boundedCol;
+		this.state.cursorLine = line;
+		this.setCursorCol(col);
+		this.scrollOffset = 0;
+		this.tui.requestRender();
+	}
+
+
 	setText(text: string, options?: { preservePasteRegistry?: boolean }): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;

@@ -7,41 +7,17 @@
 
 ## [Unreleased]
 
-### 修复
-
-- **扩展平台加固**(M0–M3 基础之上的多轮评审):扩展平台的第二轮评审发现
-  并关闭了生命周期与布局缺口。surface generation 现在端到端隔离——final
-  disposal 边界只冻结并移除**本代** host 的注册 handle(旧的过期代
-  `replace()`/`invalidate()` 再也无法改动新 surface 渲染的内容,新 host
-  自己的注册保持存活);同一 host 重复 `attach()` 幂等。`subscribeState()`
-  对过期 service handle 可回滚,其释放跨显式退订与 fiber 卸载幂等,重复
-  listener 会明确报错,迁移/分离时抛错的 bridge unsubscribe 不再泄漏
-  listener 或中断清理。slot 布局现在端到端遵循当前 cell 宽度: dock 行
-  截断而不是换行成额外行,footer 段在 resize 时重新折叠(通过
-  resize-aware terminal 包装),header 徽标预算按真实 host 标题/徽标计算,
-  声明了 `minWidth` 的 footer 段绝不被截断到其最小值以下。快照深度冻结
-  (包含外层 state 对象),空/视觉为空的 dock 贡献恢复健康记录,
-  `freezeLeases()` 仅在确实移除内容时触发 invalidate。
-
-## [Unreleased]
-
 ### 新增
 
-- **M4–M11 扩展平台**(累积,按 pluginization 计划):M4 组件套件(结构化
-  `ExtensionView` 树——文本、markdown、spacer、垂直/水平 stack、frame、
-  rows——编译成活的、宽度感知的宿主组件;编辑器上下的 widget 槽);M5
-  注册表(带归属元数据的命令、主题、设置行、自动补全 provider、按键);
-  M6 宿主拥有的 InputRouter(固定优先级阶梯:协议产物、捕获式流程、保留
-  的宿主生命周期键、聚焦编辑器、然后是非捕获式插件绑定——插件只收到
-  归一化键到语义动作的映射,永远不接触原始终端数据);M7 转写/工具渲染器
-  注册表(语义快照、链式 + 键控槽、抛错隔离、缓存身份重建);M8 托管
-  overlay 租约(宿主拥有 overlay broker:模态叠层、焦点、全屏迁移、拆除);
-  M9 编辑器 SDK(单赢家编辑器注册表、原子席位交接、带快照订阅与宿主提交
-  的 `EditorHost` 协议);M10 vim 验收插件夹具(只 import 公开
-  `extensions` 子路径,演练完整 SDK);M11 API v1 加固(`/status` 扩展健康
-  行、弃用策略、作者文档、基准)。编辑器替换、overlay、转写渲染器等表面
-  现在是已发布 API 的一部分——早期 `0.2.0` 条目里"不属于 v1"的说明已被
-  取代。
+- **M4–M11 扩展平台**（累积，按 pluginization 计划）：M4 组件套件（结构化
+  `ExtensionView` 树——文本、markdown、spacer、垂直/水平 stack、frame、rows——
+  编译成活的、宽度感知的宿主组件；编辑器上下的 widget 槽）；M5 注册表（命令、
+  主题、设置行、自动补全 provider、按键）；M6 宿主拥有的 InputRouter（固定优先级
+  阶梯、归一化键与语义动作）；M7 转写/工具渲染器注册表（语义快照、链式回退、
+  抛错隔离、缓存身份重建）；M8 托管 overlay 租约；M9 编辑器 SDK（单赢家、原子
+  席位交接、`EditorHost` 快照订阅与宿主提交）；M10 vim 验收插件；M11 API v1
+  加固（`/status` 健康、弃用策略、作者文档、基准）。编辑器替换、overlay、
+  转写渲染器等现在属于已发布 API；早期 `0.2.0` 的“不属于 v1”说明已被取代。
 
 ### 修复
 
@@ -77,6 +53,25 @@
 - **编辑器交接零泄漏**(P2-02):transfer/compile 抛错会 dispose 新建的
   编辑器;listener 异常被隔离。
 - **widget 编译有缓存**(P2-03):未变更的 widget 贡献跨刷新复用已编译树。
+- **窄宽 frame 安全让位**(P1-R1):一到两格宽的宿主预算不会输出溢出的边框，
+  缓存也按有效宽度区分。
+- **`/plan` 仍由宿主拥有**(P1-R2):特殊处理的命令进入权威宿主目录，插件不能遮蔽。
+- **替换编辑器具备真实宿主回退**(P1-R3):插件拒绝的按键通过隐藏宿主编辑器的编辑
+  语义处理，再同步回当前替换编辑器，包括光标，并只发出一个最终快照。
+- **渲染器编译失败继续链式回退**(P1-R5):格式错误的 renderer view 让位给下一候选，
+  不会提前落到宿主卡片。
+- **vendored fork 支持编辑器光标同步**(P1-R3):宿主可钳制并恢复替换编辑器光标，
+  且不会触发中间 change 回调。
+- **被拒绝的替换编辑器输入有可见回退**(P1-R3):替换编辑器返回 `false` 时将事件
+  交还宿主编辑语义,再把结果文本与光标同步回可见替换编辑器,不会只改动隐藏编辑器。
+- **替换回退保留宿主编辑状态**(P1-R3/P2):被拒绝的输入通过 vendored 编辑器的
+  无副作用 staging seam 暂存替换草稿,因此自动补全、历史浏览、undo 快照和粘贴
+  marker 继续遵循正常宿主语义;CRLF/tab 光标转换与回退异常也会被隔离。
+- **EditorHost 交接保障席位安全**(P1-R7/P1-R8/P2):席位切换后陈旧 host 在所有操作上
+  都会被隔离;create-time 订阅仅在成功提交后生效,create-time 变更保持 inert;宿主恢复
+  失败时保留原编辑器。
+- **按键运行时失败可定位**(M11):action 与 resolver 异常会从输入分发路径隔离,并记录到
+  实际 keybinding contribution id;诊断回调自身抛错也不会破坏输入路径。
 
 ## [0.2.0] - 2026-08-19
 

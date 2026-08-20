@@ -37,7 +37,7 @@ interface BindingRecord {
  * claim them (plan §11.3 — reserved lifecycle key cannot be preempted).
  * This inventory is the SINGLE authoritative list, kept in sync with the
  * host's `matchesKey` lifecycle checks in tui-app.ts (Ctrl+C/D exit,
- * Ctrl+S steer-all, Ctrl+F fullscreen, Ctrl+Shift+F search, Ctrl+O
+ * Ctrl+S steer-all, Ctrl+F transcript search, Ctrl+Shift+F search, Ctrl+O
  * expand, Ctrl+T todo panel, Ctrl+G external editor, Ctrl+J task
  * browser, Ctrl+Enter queue, Enter submit, Esc cancel, Shift+Tab
  * permission cycle, Alt+Up dequeue, Alt+T thinking toggle). Every
@@ -49,7 +49,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'c', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+C exit
   { key: 'd', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+D exit
   { key: 's', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+S steer all
-  { key: 'f', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+F fullscreen
+  { key: 'f', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+F transcript search
   { key: 'f', ctrl: true, alt: false, shift: true, super: false },      // Ctrl+Shift+F search
   { key: 'o', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+O expand
   { key: 't', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+T todo panel
@@ -148,6 +148,15 @@ export class KeybindingRegistry {
     for (const record of this.records.values()) {
       if (record.disposed) continue
       if (keyEquals(record.key, key)) return record.action
+    }
+    return undefined
+  }
+
+  /** The contribution id bound to one normalized key, or undefined. */
+  idFor(key: NormalizedKey): string | undefined {
+    for (const record of this.records.values()) {
+      if (record.disposed) continue
+      if (keyEquals(record.key, key)) return record.id
     }
     return undefined
   }

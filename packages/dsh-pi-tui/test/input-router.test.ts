@@ -78,6 +78,11 @@ test('InputRouter: the read-only viewer locks everything except Esc/Ctrl+O', () 
   assert.equal(r.route('\x1b[111;13u', locked, () => 'open-search' as TuiAction).kind, 'consumed')
 })
 
+test('InputRouter: Ctrl+F transcript search is reserved from plugin bindings', () => {
+  const r = router()
+  assert.equal(r.route('\x06', context(), () => 'open-search').kind, 'consumed')
+})
+
 test('InputRouter: reserved host lifecycle keys never reach a plugin binding', () => {
   const r = router()
   // Ctrl+C is reserved: the host ladder handles it; the router reports the
@@ -98,7 +103,10 @@ test('InputRouter: a plugin binding fires for a normalized non-printable key', (
     return 'open-search'
   })
   assert.equal(result.kind, 'plugin-action')
-  if (result.kind === 'plugin-action') assert.equal(result.action, 'open-search')
+  if (result.kind === 'plugin-action') {
+    assert.equal(result.action, 'open-search')
+    assert.deepEqual(result.key, { key: 'right', ctrl: true, alt: false, shift: false, super: false })
+  }
   assert.deepEqual(seen, { key: 'right', ctrl: true, alt: false, shift: false, super: false })
 })
 
@@ -111,7 +119,18 @@ test('InputRouter: plain printable keys never fire a plugin binding (typing wins
 test('InputRouter: overlays keep their keys (a plugin binding does not fire under an overlay)', () => {
   const r = router()
   const result = r.route('\x1b[1;5C', context({ hasOverlay: true }), () => 'open-search' as TuiAction)
-  assert.equal(result.kind, 'editor', 'the overlay/focused component owns the key')
+  assert.equal(result.kind, 'consumed', 'TuiApp passes consumed overlay keys to the focused overlay component')
+})
+
+test('InputRouter: replacement editors get the editor route before plugin bindings', () => {
+  const r = router()
+  let bindingCalls = 0
+  const result = r.route('\x1b[1;7x', context({ editorReplacement: true }), () => {
+    bindingCalls += 1
+    return 'open-search'
+  })
+  assert.equal(result.kind, 'editor')
+  assert.equal(bindingCalls, 0, 'replacement editor route must not consult plugin bindings')
 })
 
 test('InputRouter: search overlay owns its keys', () => {
@@ -149,6 +168,38 @@ test('InputRouter: CSI-u + modifyOtherKeys normalize (v0.1.8 matrix)', () => {
 })
 
 // ── TuiApp integration: a plugin keybinding fires through the host ─────────
+
+test('TuiApp: a throwing plugin action is isolated and reported with its contribution id', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const errors: Array<{ slot: string; id: string; error: unknown }> = []
+  const recovered: Array<{ slot: string; id: string }> = []
+  let attempts = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onExtensionAction: () => { attempts += 1; if (attempts === 1) throw new Error('action boom') },
+    onExtensionError: event => errors.push(event),
+    onExtensionRecovered: event => recovered.push(event),
+  }, {
+    pluginActionFor: key => key.key === 'x' && key.ctrl && key.alt ? 'open-search' : undefined,
+    pluginActionIdFor: key => key.key === 'x' && key.ctrl && key.alt ? 'binding-x' : undefined,
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b\x18')
+  await vt.waitForRender()
+  assert.equal(attempts, 1)
+  assert.deepEqual(errors.map(error => ({ slot: error.slot, id: error.id, message: String(error.error) })), [
+    { slot: 'keybinding', id: 'binding-x', message: 'Error: action boom' },
+  ])
+  vt.sendInput('\x1b\x18')
+  await vt.waitForRender()
+  assert.equal(attempts, 2)
+  assert.deepEqual(recovered, [{ slot: 'keybinding', id: 'binding-x' }])
+  app.stop()
+})
 
 test('TuiApp: a plugin keybinding fires the semantic action (headless)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
@@ -191,6 +242,26 @@ test('TuiApp: a plugin keybinding fires the semantic action (headless)', async (
 })
 
 // ── TuiApp integration: reserved keys never fire through the real path ─────
+
+test('TuiApp: an untracked keybinding error is not reported under the key name', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const errors: unknown[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onExtensionError: event => errors.push(event),
+  }, {
+    pluginActionFor: () => { throw new Error('resolver boom') },
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b\x18')
+  await vt.waitForRender()
+  assert.deepEqual(errors, [], 'a resolver without a tracked id must not fabricate health identity')
+  app.stop()
+})
 
 test('TuiApp: Enter / Ctrl+J / Ctrl+Enter never fire a plugin binding (round-1 P1)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')

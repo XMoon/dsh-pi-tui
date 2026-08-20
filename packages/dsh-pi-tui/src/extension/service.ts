@@ -60,6 +60,16 @@ import type {
   TuiToolRendererContribution,
 } from './public-types.ts'
 
+function safeHealthMessage(error: unknown): string {
+  let text: string
+  try {
+    text = error instanceof Error ? error.message : String(error)
+  } catch {
+    text = 'unknown error'
+  }
+  return text.replace(/\s+/g, ' ').slice(0, 200)
+}
+
 /** The service name plugins inject (`piTuiExtensions` in cordis.patch.yml). */
 export const PI_TUI_EXTENSIONS_SERVICE = 'piTuiExtensions'
 
@@ -202,6 +212,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   private overlayMount: ((view: ExtensionView, options?: TuiOverlayOptions) => TuiOverlayHandle) | undefined
   /** M9: the editor registry (single-winner). */
   readonly editors: EditorRegistry
+  /** Track health for one external registry contribution. */
+  private trackRegistryHealth(slot: string, id: string, owner: string): void {
+    this.ledger.trackHealth(slot, id, owner)
+  }
+
+  private untrackRegistryHealth(slot: string, id: string): void {
+    this.ledger.untrackHealth(slot, id)
+  }
+
+  private recordRegistryError(slot: string, id: string, error: unknown): void {
+    this.ledger.recordExternalError(slot, id, safeHealthMessage(error))
+  }
+
+  private clearRegistryError(slot: string, id: string): void {
+    this.ledger.clearExternalError(slot, id)
+  }
+
   /** The attached SurfaceHost's state bridge, wired by the runner (M3). */
   private stateBridge: {
     subscribe(listener: (state: SurfaceStateValues) => void): () => void
@@ -509,19 +536,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
         : `a near-synonym of "${contribution.name}" (${outcome.nearSynonym}, owned by "${outcome.existingOwner}") — the AGENTS near-synonym rule forbids the ambiguity`
       throw new Error(`command contribution "${contribution.name}" conflicts: ${detail} — resolve the conflict before registering`)
     }
+    this.trackRegistryHealth('command', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         outcome.handle.dispose()
+        this.untrackRegistryHealth('command', contribution.id)
       }, 'piTuiExtensions.registerCommand()')
     } catch (error) {
       outcome.handle.dispose()
+      this.untrackRegistryHealth('command', contribution.id)
       throw error
     }
     return {
       id: outcome.handle.id,
       dispose: () => {
         outcome.handle.dispose()
+        this.untrackRegistryHealth('command', contribution.id)
         dispose()
       },
     }
@@ -535,19 +566,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const handle = this.themes.register(contribution, owner)
+    this.trackRegistryHealth('theme', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
+        this.untrackRegistryHealth('theme', contribution.id)
       }, 'piTuiExtensions.registerTheme()')
     } catch (error) {
       handle.dispose()
+      this.untrackRegistryHealth('theme', contribution.id)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
+        this.untrackRegistryHealth('theme', contribution.id)
         dispose()
       },
     }
@@ -561,19 +596,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const handle = this.autocomplete.register(contribution, owner)
+    this.trackRegistryHealth('autocomplete', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
+        this.untrackRegistryHealth('autocomplete', contribution.id)
       }, 'piTuiExtensions.registerAutocomplete()')
     } catch (error) {
       handle.dispose()
+      this.untrackRegistryHealth('autocomplete', contribution.id)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
+        this.untrackRegistryHealth('autocomplete', contribution.id)
         dispose()
       },
     }
@@ -587,13 +626,16 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const handle = this.settings.register(contribution, owner)
+    this.trackRegistryHealth('setting', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
+        this.untrackRegistryHealth('setting', contribution.id)
       }, 'piTuiExtensions.registerSetting()')
     } catch (error) {
       handle.dispose()
+      this.untrackRegistryHealth('setting', contribution.id)
       throw error
     }
     return {
@@ -601,6 +643,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       setValue: (value: string) => handle.setValue(value),
       dispose: () => {
         handle.dispose()
+        this.untrackRegistryHealth('setting', contribution.id)
         dispose()
       },
     }
@@ -615,19 +658,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const handle = this.keybindings.register(contribution, owner)
+    this.trackRegistryHealth('keybinding', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
+        this.untrackRegistryHealth('keybinding', contribution.id)
       }, 'piTuiExtensions.registerKeybinding()')
     } catch (error) {
       handle.dispose()
+      this.untrackRegistryHealth('keybinding', contribution.id)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
+        this.untrackRegistryHealth('keybinding', contribution.id)
         dispose()
       },
     }
@@ -644,23 +691,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const handle = this.renderers.registerMessageRenderer(contribution, owner)
     // P1-08: the renderer registry is NOT the ledger — track its health
     // slot explicitly so /status can observe failed/recovered states.
-    this.ledger.trackHealth('transcript.renderer', contribution.id, owner)
+    this.ledger.trackHealth('transcript.message.renderer', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.ledger.untrackHealth('transcript.renderer', contribution.id)
+        this.ledger.untrackHealth('transcript.message.renderer', contribution.id)
       }, 'piTuiExtensions.registerMessageRenderer()')
     } catch (error) {
       handle.dispose()
-      this.ledger.untrackHealth('transcript.renderer', contribution.id)
+      this.ledger.untrackHealth('transcript.message.renderer', contribution.id)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
-        this.ledger.untrackHealth('transcript.renderer', contribution.id)
+        this.ledger.untrackHealth('transcript.message.renderer', contribution.id)
         dispose()
       },
     }
@@ -675,23 +722,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const handle = this.renderers.registerToolRenderer(contribution, owner)
     // P1-08: track the renderer's health slot (see registerMessageRenderer).
-    this.ledger.trackHealth('transcript.renderer', contribution.id, owner)
+    this.ledger.trackHealth('transcript.tool.renderer', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.ledger.untrackHealth('transcript.renderer', contribution.id)
+        this.ledger.untrackHealth('transcript.tool.renderer', contribution.id)
       }, 'piTuiExtensions.registerToolRenderer()')
     } catch (error) {
       handle.dispose()
-      this.ledger.untrackHealth('transcript.renderer', contribution.id)
+      this.ledger.untrackHealth('transcript.tool.renderer', contribution.id)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
-        this.ledger.untrackHealth('transcript.renderer', contribution.id)
+        this.ledger.untrackHealth('transcript.tool.renderer', contribution.id)
         dispose()
       },
     }
@@ -720,19 +767,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const handle = this.editors.register(contribution, owner)
+    this.trackRegistryHealth('editor', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
+        this.untrackRegistryHealth('editor', contribution.id)
       }, 'piTuiExtensions.registerEditor()')
     } catch (error) {
       handle.dispose()
+      this.untrackRegistryHealth('editor', contribution.id)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
+        this.untrackRegistryHealth('editor', contribution.id)
         dispose()
       },
     }
@@ -741,6 +792,15 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** The ledger behind the service (SurfaceHost access in M2). */
   _ledger(): ExtensionLedger {
     return this.ledger
+  }
+
+  /** Runner-only callback health bridges. */
+  _recordRegistryError(slot: string, id: string, error: unknown): void {
+    this.recordRegistryError(slot, id, error)
+  }
+
+  _clearRegistryError(slot: string, id: string): void {
+    this.clearRegistryError(slot, id)
   }
 
   /** Test hook: the number of live listener subscriptions (F1/F5 — an

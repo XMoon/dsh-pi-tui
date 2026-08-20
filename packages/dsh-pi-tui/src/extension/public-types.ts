@@ -514,7 +514,11 @@ export interface TuiSettingsRegistryView {
 
 /** The read-side of the autocomplete registry (M5). */
 export interface TuiAutocompleteRegistryView {
-  suggest(query: TuiAutocompleteQuery, onError?: (id: string, error: unknown) => void): Promise<TuiAutocompleteSuggestions | null>
+  suggest(
+    query: TuiAutocompleteQuery,
+    onError?: (id: string, error: unknown) => void,
+    onSuccess?: (id: string) => void,
+  ): Promise<TuiAutocompleteSuggestions | null>
   snapshot(): { providers: readonly AutocompleteProviderContribution[]; revision: number }
 }
 
@@ -653,10 +657,12 @@ export interface TuiRendererRegistryView {
   renderMessage(
     snapshot: MessagePresentationSnapshot,
     onError: (id: string, error: unknown) => void,
+    canUse?: (id: string, view: ExtensionView) => boolean,
   ): { view: ExtensionView; rendererId: string } | undefined
   renderTool(
     snapshot: ToolPresentationSnapshot,
     onError: (id: string, error: unknown) => void,
+    canUse?: (id: string, view: ExtensionView) => boolean,
   ): { view: ExtensionView; rendererId: string } | undefined
   snapshot(): TuiRendererRegistrySnapshot
 }
@@ -797,9 +803,13 @@ export interface ExtensionEditor {
    * the editor is delivered here FIRST (raw terminal data — the plugin
    * parses it with the host's key helpers or its own state machine).
    * Return true to CONSUME the key (the host does nothing further);
-   * return false/undefined to let the HOST default editor handle it.
-   * Without this hook the seat is display-only: ordinary typing would
-   * silently target the old host editor (the P1-10 gap).
+   * return false/undefined to hand the key back to the HOST editing
+   * semantics. The host synchronizes the replacement's current text/cursor
+   * into its hidden Editor, forwards the event once, and copies the resulting
+   * text/cursor back into the visible replacement. Enter remains host-owned
+   * and submits through the normal host path.
+   * Without this hook the seat is display-only: ordinary typing is not
+   * silently routed into the hidden host editor.
    */
   handleInput?(data: string): boolean
   /** Dispose the editor (the host calls it after the handoff). */

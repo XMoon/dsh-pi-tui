@@ -140,6 +140,10 @@ export class SettingsRegistry {
       // result is stale — never commit it.
       if (record.applyEpoch !== epoch) return false
     }
+    // The row may have been disposed (or replaced under the same id) while
+    // an async callback was in flight. A detached callback must never commit
+    // into an orphaned record or invalidate the live registry.
+    if (record.disposed || this.records.get(id) !== record) return false
     record.currentValue = value
     this.revision += 1
     this.onInvalidate()

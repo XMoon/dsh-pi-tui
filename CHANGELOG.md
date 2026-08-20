@@ -7,31 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Extension platform hardening** (review rounds over the M0–M3
-  foundation): a second review pass on the extension surface found and
-  closed lifecycle and layout gaps. Surface generations are now scoped
-  end-to-end — a final-disposal boundary freezes and removes exactly the
-  disposing generation's registration handles (a stale old-generation
-  `replace()`/`invalidate()` can no longer mutate what a newer surface
-  renders, and a newer host's own registrations stay live); repeated
-  `attach()` on the same host is idempotent. `subscribeState()` is
-  rollback-safe on stale service handles, its release is idempotent across
-  explicit unsubscribe and fiber unload, duplicate listeners are rejected
-  loudly, and a throwing bridge unsubscribe during migration/detach can no
-  longer leak a listener or abort the cleanup. Slot layout now honors the
-  current cell width end-to-end: dock lines are truncated instead of
-  wrapping into extra rows, footer segments re-fold on resize (via a
-  resize-aware terminal wrapper), header badge budgets account for the
-  real host-owned title/badges, and a footer segment declaring `minWidth`
-  is never truncated below it. Snapshots are deeply frozen (the outer
-  state object included), empty/visually-empty dock contributions recover
-  their health record, and `freezeLeases()` only invalidates when it
-  actually removed something.
-
-## [Unreleased]
-
 ### Added
 
 - **M4–M11 extension platform** (cumulative, per the pluginization plan):
@@ -45,16 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bindings — plugins receive normalized keys mapped to semantic actions,
   never raw terminal data); the M7 transcript/tool renderer registry
   (semantic snapshots, chain + keyed slots, throw isolation, cache identity
-  rebuild); the M8 managed overlay leases (the host owns the overlay
-  broker: modal stacking, focus, fullscreen migration, teardown); the M9
-  editor SDK (single-winner editor registry, atomic seat handoff, the
-  `EditorHost` protocol with snapshot subscription and host-owned
-  submission); the M10 vim acceptance plugin fixture (imports only the
-  public `extensions` subpath, exercises the full SDK); and the M11 API v1
-  hardening (`/status` extension health rows, deprecation policy, author
-  docs, benchmark). Editor replacement, overlays, transcript renderers and
-  the rest of the surface are now part of the shipped API — the earlier
-  `0.2.0` entry's "not part of v1" note is superseded.
+  rebuild); the M8 managed overlay leases (the host owns the overlay broker:
+  modal stacking, focus, fullscreen migration, teardown); the M9 editor SDK
+  (single-winner editor registry, atomic seat handoff, the `EditorHost`
+  protocol with snapshot subscription and host-owned submission); the M10
+  vim acceptance plugin fixture (imports only the public `extensions`
+  subpath, exercises the full SDK); and the M11 API v1 hardening
+  (`/status` extension health rows, deprecation policy, author docs,
+  benchmark). Editor replacement, overlays, transcript renderers and the
+  rest of the surface are now part of the shipped API — the earlier `0.2.0`
+  entry's "not part of v1" note is superseded.
 
 ### Fixed
 
@@ -102,6 +77,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disposes the newly created editor; listener exceptions are isolated.
 - **Widget compiles are cached** (P2-03): unchanged widget contributions
   reuse their compiled tree across refreshes.
+- **Narrow frames abdicate safely** (P1-R1): frames never emit borders wider
+  than a one- or two-cell host budget, and their cache follows the effective
+  width.
+- **`/plan` remains host-owned** (P1-R2): the special-cased command is present
+  in the authoritative host catalog and cannot be shadowed by a plugin.
+- **Replacement editors have a real host fallback** (P1-R3): a declined key
+  is applied with the hidden host editor's editing semantics and synchronized
+  back to the active replacement, including its cursor and one final snapshot.
+- **Renderer chains continue after compile failure** (P1-R5): a malformed
+  renderer view abdicates to the next candidate instead of prematurely using
+  the host card.
+- **Editor cursor synchronization is available in the vendored fork** (P1-R3):
+  the host can clamp and restore replacement cursors without firing an
+  intermediate change callback.
+- **Declined replacement input has a visible fallback** (P1-R3): a replacement
+  editor that returns `false` hands the event to the host's editing semantics;
+  the resulting text and cursor are synchronized back into the visible
+  replacement instead of being applied only to a hidden editor.
+- **Replacement fallback preserves host editing state** (P1-R3/P2): declined
+  input stages the replacement draft through a side-effect-free vendored editor
+  seam, so autocomplete, history browsing, undo snapshots, and paste markers
+  retain their normal host semantics; CRLF/tab cursor conversion and fallback
+  errors are isolated as well.
+- **EditorHost handoffs are seat-safe** (P1-R7/P1-R8/P2): stale hosts are
+  fenced at every seat transition, create-time subscriptions activate only
+  after a successful commit, create-time mutations remain inert, and failed
+  host restoration leaves the previous editor in place.
+- **Keybinding runtime failures are attributable** (M11): action and resolver
+  exceptions are isolated from input dispatch and recorded against the actual
+  keybinding contribution id, with guarded diagnostic callbacks.
 
 ## [0.2.0] - 2026-08-19
 

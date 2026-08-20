@@ -8,14 +8,18 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { randomUUID } from 'node:crypto'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { CommandId } from '@deepseek-ai/dsh-commands'
-import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
+import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'
 import { SESSIONLESS_COMMANDS } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
+import { customThemesDir, darkColors } from '../src/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -96,6 +100,10 @@ function stubRunner(options: {
   recomposeBlank?: (id: string) => Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   ensureCalls?: string[]
+  tuiSettings?: TuiSettingsLike
+  extensions?: TuiCommandRunner['extensions']
+  recordExtensionError?: (slot: string, id: string, error: unknown) => void
+  clearExtensionError?: (slot: string, id: string) => void
 }): { runner: TuiCommandRunner; pending: { value: string | undefined }; refreshes: CatalogRefreshRequest[] } {
   const pending = { value: undefined as string | undefined }
   const refreshes: CatalogRefreshRequest[] = []
@@ -106,7 +114,7 @@ function stubRunner(options: {
     get liveAgent() { return options.agent },
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
-    tuiSettings: undefined,
+    tuiSettings: options.tuiSettings,
     agents: {} as never,
     sessions: { flush: async () => {} },
     cwd: '/ws',
@@ -130,7 +138,9 @@ function stubRunner(options: {
     openJobView: () => {},
     enterView: async () => {},
     requestExit: () => {},
-    extensions: undefined,
+    extensions: options.extensions,
+    recordExtensionError: options.recordExtensionError,
+    clearExtensionError: options.clearExtensionError,
     exit: () => {},
   }
   return { runner, pending, refreshes }
@@ -152,6 +162,10 @@ function setup(options: {
   recomposeBlank?: (id: string) => Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
+  tuiSettings?: TuiSettingsLike
+  extensions?: TuiCommandRunner['extensions']
+  recordExtensionError?: (slot: string, id: string, error: unknown) => void
+  clearExtensionError?: (slot: string, id: string) => void
   width?: number
 }) {
   const ctx = new Context()
@@ -165,7 +179,16 @@ function setup(options: {
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   const ensureCalls: string[] = []
   const { runner, pending, refreshes } = stubRunner({
-    ctx, app, agent: options.agent, recomposeBlank: options.recomposeBlank, refreshCatalog: options.refreshCatalog, ensureCalls,
+    ctx,
+    app,
+    agent: options.agent,
+    recomposeBlank: options.recomposeBlank,
+    refreshCatalog: options.refreshCatalog,
+    ensureCalls,
+    tuiSettings: options.tuiSettings,
+    extensions: options.extensions,
+    recordExtensionError: options.recordExtensionError,
+    clearExtensionError: options.clearExtensionError,
   })
   registerTuiCommands(runner)
   const def = commands.defs.find(entry => entry.name === 'preset')
@@ -387,6 +410,123 @@ test('/reload with no session refreshes the STANDING catalog and reports the ski
   assert.equal(t.refreshes[0]?.source, 'reload')
   assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: undefined },
     'the effective preset id (none pending) resolves to the deployment default')
+  t.app.stop()
+})
+
+function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSettingsLike {
+  let reads = 0
+  let currentTheme = theme
+  return {
+    get: () => {
+      reads += 1
+      onGet?.(reads)
+      return { theme: currentTheme, footer: 'full', fullscreen: 'off', busyEnter: 'queue' }
+    },
+    replace: doc => { currentTheme = doc.theme },
+  }
+}
+
+function themeExtensions(paletteFor: (name: string) => typeof darkColors | undefined): NonNullable<TuiCommandRunner['extensions']> {
+  return { themes: { paletteFor } } as unknown as NonNullable<TuiCommandRunner['extensions']>
+}
+
+test('/reload theme autodetect rechecks the latest persisted choice before applying', async () => {
+  let settingsReads = 0
+  const t = setup({
+    tuiSettings: reloadSettings('auto', count => { settingsReads = count }),
+  })
+  let resolveBackground!: (value: { red: number; green: number; blue: number } | undefined) => void
+  const pending = new Promise<{ red: number; green: number; blue: number } | undefined>(resolve => { resolveBackground = resolve })
+  t.app.autoDetectTheme = async (options) => {
+    assert.equal(options?.shouldApply?.(), true)
+    // Simulate the settings panel changing the choice while OSC 11 is in flight.
+    t.app.applyTheme('light')
+    assert.equal(options?.shouldApply?.(), false)
+    await pending
+  }
+  const result = await t.runCommand('reload') as { kind: string }
+  assert.equal(result.kind, 'success')
+  assert.ok(settingsReads >= 2, 'the late guard must read settings again')
+  resolveBackground(undefined)
+  t.app.stop()
+})
+
+test('/reload custom file theme applies without touching plugin health', async () => {
+  const name = `reload-custom-${randomUUID()}`
+  const file = join(customThemesDir(), `${name}.json`)
+  mkdirSync(customThemesDir(), { recursive: true })
+  writeFileSync(file, JSON.stringify({ name, colors: { primary: '#123456' } }))
+  const cleared: string[] = []
+  const recorded: string[] = []
+  try {
+    const t = setup({
+      tuiSettings: reloadSettings(`custom:${name}`),
+      extensions: themeExtensions(() => undefined),
+      clearExtensionError: (_slot, id) => cleared.push(id),
+      recordExtensionError: (_slot, id) => recorded.push(id),
+    })
+    const result = await t.runCommand('reload') as { kind: string }
+    assert.equal(result.kind, 'success')
+    assert.deepEqual(cleared, [], 'custom-file success must not clear plugin health')
+    assert.deepEqual(recorded, [], 'custom-file success must not record plugin health')
+    t.app.stop()
+  } finally {
+    rmSync(file, { force: true })
+  }
+})
+
+test('/reload custom file theme failure does not record plugin health', async () => {
+  const name = `reload-custom-failing-${randomUUID()}`
+  const file = join(customThemesDir(), `${name}.json`)
+  mkdirSync(customThemesDir(), { recursive: true })
+  writeFileSync(file, JSON.stringify({ name, colors: { primary: '#123456' } }))
+  const recorded: string[] = []
+  try {
+    const t = setup({
+      tuiSettings: reloadSettings(`custom:${name}`),
+      extensions: themeExtensions(() => undefined),
+      recordExtensionError: (_slot, id) => recorded.push(id),
+    })
+    t.app.applyPalette = () => { throw new Error('custom palette failed') }
+    const result = await t.runCommand('reload') as { kind: string }
+    assert.equal(result.kind, 'success')
+    assert.deepEqual(recorded, [], 'custom-file failure must not create plugin health')
+    t.app.stop()
+  } finally {
+    rmSync(file, { force: true })
+  }
+})
+
+test('/reload plugin theme failure records and later success clears its health', async () => {
+  const name = `reload-plugin-${randomUUID()}`
+  const recorded: string[] = []
+  const cleared: string[] = []
+  const t = setup({
+    tuiSettings: reloadSettings(`custom:${name}`),
+    extensions: themeExtensions(candidate => candidate === name ? darkColors : undefined),
+    recordExtensionError: (_slot, id) => recorded.push(id),
+    clearExtensionError: (_slot, id) => cleared.push(id),
+  })
+  t.app.applyPalette = () => { throw new Error('plugin palette failed') }
+  await t.runCommand('reload')
+  assert.deepEqual(recorded, [name], 'plugin palette failure must record its contribution')
+  t.app.applyPalette = () => {}
+  await t.runCommand('reload')
+  assert.deepEqual(cleared, [name], 'a later plugin palette success must clear its contribution')
+  t.app.stop()
+})
+
+test('/reload unknown theme does not create plugin health', async () => {
+  const name = `reload-missing-${randomUUID()}`
+  const recorded: string[] = []
+  const t = setup({
+    tuiSettings: reloadSettings(`custom:${name}`),
+    extensions: themeExtensions(() => undefined),
+    recordExtensionError: (_slot, id) => recorded.push(id),
+  })
+  const result = await t.runCommand('reload') as { kind: string }
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(recorded, [], 'unknown host theme must not create plugin health')
   t.app.stop()
 })
 

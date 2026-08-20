@@ -202,7 +202,7 @@ function compileStack(view: {
 class CompiledFrame implements Component {
   private readonly child: Component
   private readonly width: number | undefined
-  private cachedWidth = -1
+  private cachedEffectiveWidth = -1
   private cached: string[] | undefined
 
   constructor(child: Component, width: number | undefined) {
@@ -215,15 +215,24 @@ class CompiledFrame implements Component {
   }
 
   render(outerWidth: number): string[] {
-    outerWidth = Math.max(1, outerWidth)
+    const outerBudget = Math.max(0, Math.floor(outerWidth))
+    // P1-R1: a bordered frame needs three cells (one side margin on each
+    // side plus content). At widths 1–2, abdicate rather than emitting a row
+    // that exceeds the host's budget. Width 3 is the smallest valid frame.
+    const requested = Math.max(0, Math.floor(this.width ?? outerBudget))
+    const effective = Math.min(requested, outerBudget)
+    if (effective < 3) {
+      this.cachedEffectiveWidth = effective
+      this.cached = []
+      return this.cached
+    }
     // P1-02: the frame's effective width is CLAMPED to the host budget —
     // a requested width beyond the terminal can never push the frame past
     // the surface (the public contract: `width` is a content budget, and
     // the host owns the outer budget).
-    const effective = Math.min(Math.max(1, Math.floor(this.width ?? outerWidth)), outerWidth)
-    const contentWidth = Math.max(1, effective - 2)
-    if (this.cachedWidth === contentWidth && this.cached !== undefined) return this.cached
-    this.cachedWidth = contentWidth
+    const contentWidth = effective - 2
+    if (this.cachedEffectiveWidth === effective && this.cached !== undefined) return this.cached
+    this.cachedEffectiveWidth = effective
     const rule = ` ${'─'.repeat(contentWidth)} `
     const border = color.border(rule)
     const lines = [border]

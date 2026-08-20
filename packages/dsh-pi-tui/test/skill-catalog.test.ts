@@ -205,6 +205,40 @@ test('a missing standingKeyFor capability degrades to the global view (upstream 
   assert.equal(resolution.degraded, undefined, 'a missing capability is a quiet degradation, not a failure notice')
 })
 
+test('an AbortError from standingKeyFor propagates instead of degrading to global', async () => {
+  const registry = fakeRegistry({})
+  const presets: AgentPresetsLike = {
+    standingKeyFor: async () => { throw abortError() },
+  }
+  await assert.rejects(
+    resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'cancelled', '/ws'),
+    (error: unknown) => (error as Error).name === 'AbortError',
+  )
+})
+
+test('a cross-realm-shaped AbortError from standingKeyFor propagates', async () => {
+  const registry = fakeRegistry({})
+  const presets: AgentPresetsLike = {
+    standingKeyFor: async () => { throw { name: 'AbortError', code: 'ABORT_ERR' } },
+  }
+  await assert.rejects(
+    resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'cross-realm', '/ws'),
+    (error: unknown) => (error as { name?: unknown }).name === 'AbortError',
+  )
+})
+
+test('a hostile standingKeyFor abort probe degrades safely', async () => {
+  const registry = fakeRegistry({})
+  const presets: AgentPresetsLike = {
+    standingKeyFor: async () => {
+      throw new Proxy({}, { get: () => { throw new Error('hostile getter') } })
+    },
+  }
+  const resolution = await resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'hostile', '/ws')
+  assert.equal(resolution.target?.kind, 'cold-global')
+  assert.match(resolution.degraded ?? '', /<unprintable error>/)
+})
+
 test('a standingKeyFor failure degrades to the global view with a one-shot notice', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {

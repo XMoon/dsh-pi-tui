@@ -8,6 +8,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EditorRegistry } from '../src/editor-registry.ts'
+import { EditorSeatHolder } from '../src/editor-seat-holder.ts'
+import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.ts'
 
 /** A minimal plugin editor backed by a text state. */
@@ -43,6 +45,163 @@ function fixedTextEditor(text: string): ExtensionEditor {
   }
 }
 
+function seatHostAdapter(overrides: Partial<{
+  text: string
+  cursor: number
+  setText: (text: string) => void
+  setCursor: (offset: number) => void
+}> = {}): import('../src/editor-seat-holder.ts').HostEditorAdapter {
+  let text = overrides.text ?? ''
+  let cursor = overrides.cursor ?? 0
+  const component = new Text('host', 0, 0)
+  return {
+    getText: () => text,
+    setText: value => { if (overrides.setText !== undefined) overrides.setText(value); else text = value },
+    getCursor: () => cursor,
+    setCursor: value => { if (overrides.setCursor !== undefined) overrides.setCursor(value); else cursor = value },
+    setTextAndCursor: (value, nextCursor) => { text = value; cursor = nextCursor },
+    handleInput: () => {},
+    runWithoutChange: task => task(),
+    focused: true,
+    borderColor: value => value,
+    invalidate: () => {},
+    addToHistory: () => {},
+    clearHistory: () => {},
+    component,
+  }
+}
+
+test('EditorSeatHolder: failed host restore keeps the old plugin seat and does not dispose it', () => {
+  let adapterCalls = 0
+  let pluginDisposed = false
+  const errors: string[] = []
+  const initialHost = seatHostAdapter({ text: 'draft', cursor: 2 })
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => {
+      adapterCalls += 1
+      if (adapterCalls > 1) throw new Error('host adapter unavailable')
+      return initialHost
+    },
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: message => errors.push(message),
+    viewSwap: () => {},
+  })
+  const plugin = pluginEditor('plugin draft')
+  holder.handoff({ id: 'plugin', create: () => plugin })
+  assert.equal(holder.currentEditor().id, 'plugin')
+  holder.handoff(undefined)
+  assert.equal(holder.currentEditor().id, 'plugin', 'failed host construction must leave the old seat selected')
+  assert.equal(plugin.disposed, false, 'failed host construction must not dispose the old editor')
+  assert.deepEqual(errors, ['host adapter unavailable'])
+  holder.dispose()
+})
+
+test('EditorSeatHolder: final dispose during create discards the uncommitted editor', () => {
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => seatHostAdapter(),
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  let createdDisposed = false
+  holder.handoff({
+    id: 'late',
+    create: () => {
+      holder.dispose()
+      return {
+        component: { kind: 'text', spans: [{ text: 'late' }] },
+        getText: () => '',
+        setText: () => {},
+        dispose: () => { createdDisposed = true },
+      }
+    },
+  })
+  assert.equal(createdDisposed, true)
+  assert.equal(holder.currentEditor().id, 'host')
+})
+
+test('EditorSeatHolder: create-time host mutations are inert until commit and subscriptions survive commit', () => {
+  const hostAdapter = seatHostAdapter()
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => hostAdapter,
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => true,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const snapshots: string[] = []
+  const plugin = pluginEditor()
+  holder.handoff({
+    id: 'plugin',
+    create: host => {
+      host.subscribe(snapshot => snapshots.push(snapshot.text))
+      host.replaceText('must-not-touch-old-seat')
+      assert.equal(host.dispatch('submit').kind, 'ignored')
+      host.invalidate()
+      return plugin
+    },
+  })
+  assert.equal(hostAdapter.getText(), '')
+  assert.equal(holder.currentEditor().id, 'plugin')
+  plugin.setText('committed')
+  holder.notifyChanged()
+  assert.deepEqual(snapshots, ['committed'])
+  holder.dispose()
+})
+
+test('EditorSeatHolder: a reentrant handoff is serialized to the latest target', () => {
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => seatHostAdapter(),
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const first = pluginEditor('first')
+  const second = pluginEditor('second')
+  let firstCreates = 0
+  holder.handoff({
+    id: 'first',
+    create: () => {
+      firstCreates += 1
+      holder.handoff({ id: 'second', create: () => second })
+      return first
+    },
+  })
+  assert.equal(firstCreates, 1)
+  assert.equal(holder.currentEditor().id, 'second')
+  assert.equal(first.disposed, true, 'the superseded intermediate editor is disposed')
+  assert.equal(second.disposed, false)
+  holder.dispose()
+})
+
+test('EditorSeatHolder: a throwing old-editor dispose cannot break the committed handoff', () => {
+  const errors: string[] = []
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => seatHostAdapter(),
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: message => errors.push(message),
+    viewSwap: () => {},
+  })
+  const old = pluginEditor()
+  old.dispose = () => { throw new Error('old dispose boom') }
+  const next = pluginEditor()
+  holder.handoff({ id: 'old', create: () => old })
+  assert.doesNotThrow(() => holder.handoff({ id: 'next', create: () => next }))
+  assert.equal(holder.currentEditor().id, 'next')
+  assert.equal(next.disposed, false)
+  assert.deepEqual(errors, ['old dispose boom'])
+  holder.dispose()
+})
+
 test('EditorRegistry: single-winner — lowest priority wins', () => {
   const registry = new EditorRegistry()
   registry.register({ id: 'a', priority: 10, create: (host: EditorHost) => pluginEditor() }, 'o1')
@@ -52,6 +211,17 @@ test('EditorRegistry: single-winner — lowest priority wins', () => {
   assert.equal(registry.winner()?.id, 'a', 'the next winner takes over after unload')
   registry.dispose('a')
   assert.equal(registry.winner(), undefined, 'no winner = host default')
+})
+
+test('EditorRegistry: a stale handle cannot dispose a same-id re-registration', () => {
+  const registry = new EditorRegistry()
+  const first = registry.register({ id: 'same', priority: 1, create: () => pluginEditor('first') }, 'owner-a')
+  first.dispose()
+  const second = registry.register({ id: 'same', priority: 2, create: () => pluginEditor('second') }, 'owner-b')
+  first.dispose()
+  assert.equal(registry.winner()?.id, 'same')
+  second.dispose()
+  assert.equal(registry.winner(), undefined)
 })
 
 test('EditorRegistry: a priority tie is an explicit error', () => {
@@ -212,6 +382,90 @@ test('TuiApp: a stale host captured BEFORE dispose is inert after it — no seat
   assert.equal(app.getDraft(), '', 'the disposed seat never received the stale write')
 })
 
+test('TuiApp: setEditorText writes through the active replacement seat (P1-R9)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  const editor = pluginEditor()
+  registry.register({ id: 'public-set', priority: 0, create: () => editor }, 'plugin')
+  app.reconcileEditorNow()
+  app.setEditorText('through-public-path')
+  assert.equal(editor.getText(), 'through-public-path')
+  assert.equal(app.getDraft(), 'through-public-path')
+  app.dispose()
+})
+
+test('TuiApp: an old EditorHost is inert after a successful handoff (P1-R7/R8)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: text => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  let oldHost: EditorHost | undefined
+  const first = registry.register({
+    id: 'first', priority: 0,
+    create: host => { oldHost = host; return pluginEditor('first') },
+  }, 'first-owner')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.ok(oldHost !== undefined)
+  const second = registry.register({
+    id: 'second', priority: -1,
+    create: () => pluginEditor('second'),
+  }, 'second-owner')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  const before = app.getDraft()
+  const snapshots: string[] = []
+  const unsubscribe = oldHost.subscribe(snapshot => snapshots.push(snapshot.text))
+  oldHost.replaceText('stale')
+  assert.equal(app.getDraft(), before)
+  assert.equal(oldHost.dispatch('submit').kind, 'ignored')
+  oldHost.invalidate()
+  assert.deepEqual(snapshots, [])
+  const staleSnapshot = oldHost.getSnapshot()
+  assert.equal(staleSnapshot.text, '')
+  assert.equal(staleSnapshot.replacementId, undefined)
+  assert.equal(staleSnapshot.focused, false)
+  unsubscribe()
+  second.dispose()
+  first.dispose()
+  app.dispose()
+  assert.deepEqual(submitted, [])
+})
+
+test('TuiApp: EditorHost.replaceText notifies the current subscriber (P1-R8)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  let host: EditorHost | undefined
+  const snapshots: string[] = []
+  registry.register({ id: 'replace-notify', priority: 0, create: editorHost => {
+    host = editorHost
+    editorHost.subscribe(snapshot => snapshots.push(snapshot.text))
+    return pluginEditor()
+  } }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  host!.replaceText('direct')
+  assert.ok(snapshots.includes('direct'))
+  app.dispose()
+})
+
 test('TuiApp: the EditorHost subscription is DRIVEN by host mutations (P1-11)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
@@ -252,6 +506,354 @@ test('TuiApp: the EditorHost subscription is DRIVEN by host mutations (P1-11)', 
   app.setDraft('three')
   assert.ok(!snapshots.includes('three'), 'an unsubscribed listener must not receive changes')
   app.stop()
+})
+
+test('TuiApp: a declined replacement key falls back into the active plugin draft (P1-R3)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    editorRegistry: registry,
+    // No plugin keybinding resolver: replacement routing must still reach the
+    // host fallback when the editor explicitly declines the key.
+  })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('abcd')
+  let text = ''
+  let cursor = 0
+  const snapshots: string[] = []
+  registry.register({
+    id: 'declining', priority: 0,
+    create: (editorHost) => {
+      editorHost.subscribe((snapshot) => { snapshots.push(`${snapshot.text}@${snapshot.cursor}`) })
+      return {
+        get component() { return { kind: 'text' as const, spans: [{ text }] } },
+        getText: () => text,
+        setText: (next) => { text = next },
+        getCursor: () => cursor,
+        setCursor: (next) => { cursor = next },
+        handleInput: () => false,
+        dispose: () => {},
+      }
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // Put the active replacement cursor in the middle. Backspace must delete
+  // 'b' in the visible replacement, not edit the hidden host at its end.
+  app.seatEditorForTest().setCursor(2)
+  const before = snapshots.length
+  vt.sendInput('\x7f')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'acd')
+  assert.equal(app.seatEditorForTest().getCursor(), 1)
+  assert.deepEqual(snapshots.slice(before), ['acd@1'], 'fallback delivers one final snapshot')
+  app.dispose()
+})
+
+test('TuiApp: a declined replacement printable key uses the host fallback without a plugin resolver (P1-R3)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  let text = ''
+  let cursor = 0
+  const snapshots: string[] = []
+  registry.register({
+    id: 'declining-printable', priority: 0,
+    create: (editorHost) => {
+      editorHost.subscribe(snapshot => snapshots.push(`${snapshot.text}@${snapshot.cursor}`))
+      return {
+        get component() { return { kind: 'text' as const, spans: [{ text }] } },
+        getText: () => text,
+        setText: (next) => { text = next },
+        getCursor: () => cursor,
+        setCursor: (next) => { cursor = next },
+        handleInput: () => false,
+        dispose: () => {},
+      }
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+
+  // No plugin keybinding resolver is installed. A declined printable key must
+  // still use the host editor's editing semantics and update the VISIBLE
+  // replacement, rather than mutating only the hidden host editor.
+  const before = snapshots.length
+  vt.sendInput('a')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'a')
+  assert.equal(text, 'a')
+  assert.equal(cursor, 1)
+  assert.deepEqual(snapshots.slice(before), ['a@1'])
+  app.dispose()
+})
+
+test('TuiApp: declined fallback preserves a multiline grapheme cursor (P1-R3)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('one\n界👩‍💻x')
+  let text = ''
+  let cursor = 0
+  const snapshots: string[] = []
+  registry.register({
+    id: 'declining-multiline', priority: 0,
+    create: (editorHost) => {
+      editorHost.subscribe(snapshot => snapshots.push(`${snapshot.text}@${snapshot.cursor}`))
+      return {
+        get component() { return { kind: 'text' as const, spans: [{ text }] } },
+        getText: () => text,
+        setText: (next) => { text = next },
+        getCursor: () => cursor,
+        setCursor: (next) => { cursor = next },
+        handleInput: () => false,
+        dispose: () => {},
+      }
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+
+  // Place the cursor immediately before x, after a CJK and a ZWJ emoji grapheme.
+  // If fallback stages only setText(), the hidden host cursor lands at the end
+  // and backspace deletes x instead of the preceding grapheme.
+  app.seatEditorForTest().setCursor('one\n界👩‍💻'.length)
+  const before = snapshots.length
+  vt.sendInput('\x7f')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'one\n界x')
+  assert.equal(text, 'one\n界x')
+  assert.equal(cursor, 'one\n界'.length)
+  assert.deepEqual(snapshots.slice(before), ['one\n界x@5'])
+  app.dispose()
+})
+
+test('TuiApp: declined fallback normalizes CRLF and tabs before host editing', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  let text = ''
+  let cursor = 0
+  registry.register({
+    id: 'declining-normalization', priority: 0,
+    create: () => ({
+      get component() { return { kind: 'text' as const, spans: [{ text }] } },
+      getText: () => text,
+      setText: next => { text = next },
+      getCursor: () => cursor,
+      setCursor: next => { cursor = next },
+      handleInput: () => false,
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  text = 'a\r\nb\tc'
+  cursor = 5
+  vt.sendInput('\x7f')
+  await vt.waitForRender()
+  assert.equal(text, 'a\nb   c')
+  assert.equal(cursor, 6)
+  app.dispose()
+})
+
+test('TuiApp: declined fallback preserves autocomplete state for host completion', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setCommandCompletions([
+    { name: 'alpha', description: 'Alpha' },
+    { name: 'alpine', description: 'Alpine' },
+  ], '/tmp')
+  let text = ''
+  let cursor = 0
+  registry.register({
+    id: 'declining-autocomplete', priority: 0,
+    create: () => ({
+      get component() { return { kind: 'text' as const, spans: [{ text }] } },
+      getText: () => text,
+      setText: (next) => { text = next },
+      getCursor: () => cursor,
+      setCursor: (next) => { cursor = next },
+      handleInput: () => false,
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  vt.sendInput('/')
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().getText(), '/')
+  // A declined Tab must be handled by the host's completion path without
+  // first clearing the autocomplete state during replacement staging.
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().getText(), '/alpha ')
+  assert.equal(app.seatEditorForTest().getCursor(), 7)
+  vt.sendInput('a')
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().getText(), '/alpha a')
+  assert.equal(app.seatEditorForTest().getCursor(), 8)
+  assert.equal(app.getDraft(), '/alpha a')
+  app.dispose()
+})
+
+test('TuiApp: declined fallback isolates replacement input errors', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const errors: string[] = []
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onExtensionError: event => errors.push(String(event.error)),
+  }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('draft')
+  registry.register({
+    id: 'throwing-fallback', priority: 0,
+    create: () => ({
+      component: { kind: 'text' as const, spans: [{ text: 'draft' }] },
+      getText: () => 'draft',
+      setText: () => { throw new Error('replacement sync failed') },
+      handleInput: () => false,
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.doesNotThrow(() => vt.sendInput('a'))
+  assert.ok(errors.some(error => error.includes('replacement sync failed')))
+  app.dispose()
+})
+
+test('TuiApp: declined Enter preserves host autocomplete confirmation semantics', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const submitted: string[] = []
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: text => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setCommandCompletions([{ name: 'alpha', description: 'Alpha' }], '/tmp')
+  let text = ''
+  let cursor = 0
+  registry.register({
+    id: 'declining-enter-autocomplete', priority: 0,
+    create: () => ({
+      get component() { return { kind: 'text' as const, spans: [{ text }] } },
+      getText: () => text,
+      setText: next => { text = next },
+      getCursor: () => cursor,
+      setCursor: next => { cursor = next },
+      handleInput: () => false,
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  vt.sendInput('/')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['/alpha'])
+  assert.equal(text, '')
+  assert.equal(cursor, 0)
+  app.dispose()
+})
+
+test('TuiApp: create-time EditorHost subscription survives the handoff commit', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  let host: EditorHost | undefined
+  const snapshots: string[] = []
+  registry.register({
+    id: 'create-subscribe', priority: 0,
+    create: editorHost => {
+      host = editorHost
+      editorHost.subscribe(snapshot => snapshots.push(snapshot.text))
+      return pluginEditor()
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.ok(host !== undefined)
+  app.setDraft('after-create')
+  assert.deepEqual(snapshots, ['after-create'])
+  app.dispose()
+})
+
+test('TuiApp: repeated declined Up events continue host history navigation', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('first')
+  app.submitDraft(false)
+  app.setDraft('second')
+  app.submitDraft(false)
+  let text = ''
+  let cursor = 0
+  registry.register({
+    id: 'declining-history', priority: 0,
+    create: () => ({
+      get component() { return { kind: 'text' as const, spans: [{ text }] } },
+      getText: () => text,
+      setText: (next) => { text = next },
+      getCursor: () => cursor,
+      setCursor: (next) => { cursor = next },
+      handleInput: () => false,
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'second')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'first')
+  app.dispose()
 })
 
 test('TuiApp: a plugin editor with handleInput receives REAL typing (P1-10)', async () => {

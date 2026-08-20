@@ -18,7 +18,7 @@ import { ThemeRegistry } from '../src/theme-registry.ts'
 import { SettingsRegistry } from '../src/settings-registry.ts'
 import { AutocompleteRegistry } from '../src/autocomplete-registry.ts'
 import { KeybindingRegistry } from '../src/keybinding-registry.ts'
-import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
+import { HOST_COMMAND_CATALOG, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
 
 /** A minimal valid structural autocomplete provider for tests. */
 function provider(getSuggestions: () => Promise<import('../src/extension/public-types.ts').TuiAutocompleteSuggestions | null>): import('../src/extension/public-types.ts').TuiAutocompleteProvider {
@@ -65,6 +65,10 @@ test('CommandBridge: a plugin command can NEVER shadow a host-owned command (P1-
   // The built-in is still local and still routes to the HOST handler.
   assert.equal(bridge.handlerFor('status'), undefined, 'no plugin handler can claim the built-in')
   assert.equal(bridge.isLocal('status', new Set(['status'])), true, 'the host ownership is untouched')
+
+  assert.equal(HOST_COMMAND_CATALOG.has('plan'), true, 'special-cased /plan is host-owned')
+  const plan = new CommandBridge(() => {}, HOST_COMMAND_CATALOG)
+  assert.equal(plan.register({ id: 'plan-plugin', name: 'plan', description: '', execution: 'local' }, 'plugin').kind, 'conflict')
 })
 
 test('CommandBridge: a name conflict is reported, never silently overridden', () => {
@@ -232,6 +236,23 @@ test('SettingsRegistry: a slow EARLIER apply never overwrites a newer completed 
   assert.equal(registry.rows()[0]?.currentValue, '2', 'the stale change must NOT overwrite the newer one')
 })
 
+test('SettingsRegistry: in-flight apply after disposal does not commit (P2-R3)', async () => {
+  const invalidations: number[] = []
+  const registry = new SettingsRegistry(() => { invalidations.push(1) })
+  let release!: (accepted: boolean) => void
+  const gate = new Promise<boolean>(resolve => { release = resolve })
+  const handle = registry.register({
+    id: 'dispose-race', label: 'R', currentValue: 'old', onChange: () => gate,
+  }, 'owner')
+  const before = registry.snapshot().revision
+  const pending = registry.apply('dispose-race', 'new')
+  handle.dispose()
+  release(true)
+  assert.equal(await pending, false)
+  assert.equal(registry.snapshot().revision, before + 1, 'only disposal changes the revision')
+  assert.equal(invalidations.length, 2, 'register and dispose only; apply does not invalidate')
+})
+
 test('SettingsRegistry: owner unload removes rows; setValue is idempotent', () => {
   const registry = new SettingsRegistry()
   const handle = registry.register({ id: 's', label: 'S', currentValue: 'v' }, 'o')
@@ -244,6 +265,23 @@ test('SettingsRegistry: owner unload removes rows; setValue is idempotent', () =
 })
 
 // ── AutocompleteRegistry ───────────────────────────────────────────────────
+
+test('AutocompleteRegistry: provider recovery callback follows successful results', async () => {
+  const registry = new AutocompleteRegistry()
+  const events: string[] = []
+  registry.register({ id: 'ok', provider: provider(async () => ({ items: [], prefix: '' })) }, 'owner')
+  await registry.suggest({ lines: [''], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal }, undefined, id => events.push(id))
+  assert.deepEqual(events, ['ok'])
+})
+
+test('AutocompleteRegistry: null is a successful provider result for recovery', async () => {
+  const registry = new AutocompleteRegistry()
+  const events: string[] = []
+  registry.register({ id: 'abdicate', provider: provider(async () => null) }, 'owner')
+  const result = await registry.suggest({ lines: [''], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal }, undefined, id => events.push(id))
+  assert.equal(result, null)
+  assert.deepEqual(events, ['abdicate'])
+})
 
 test('AutocompleteRegistry: first non-null provider wins, in registration order', async () => {
   const registry = new AutocompleteRegistry()

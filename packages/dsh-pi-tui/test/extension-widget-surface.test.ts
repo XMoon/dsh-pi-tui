@@ -62,6 +62,21 @@ test('SurfaceHost: a widget registered through the ledger renders in the above z
   host.dispose()
 })
 
+test('SurfaceHost: same-id widget replacement recompiles the new view', () => {
+  const ledger = new ExtensionLedger()
+  const host = new SurfaceHost(ledger, () => {})
+  host.attach({ header: {} as never, dock: {} as never, footer: {} as never }, surfaceSnapshot())
+  const handle = ledger.register('input.widget.above', { id: 'same' }, {
+    view: { kind: 'text', spans: [{ text: 'old' }] },
+  }, 'owner-a')
+  host.refreshOutlets()
+  assert.equal(stripAnsi(host.widgetsAboveText()), 'old')
+  handle.replace({ view: { kind: 'text', spans: [{ text: 'new' }] } })
+  host.refreshOutlets()
+  assert.equal(stripAnsi(host.widgetsAboveText()), 'new')
+  host.dispose()
+})
+
 test('SurfaceHost: below widgets render and respect the row budget', () => {
   const ledger = new ExtensionLedger()
   let renders = 0

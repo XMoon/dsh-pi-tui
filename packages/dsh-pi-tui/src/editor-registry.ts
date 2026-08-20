@@ -25,6 +25,11 @@ interface EditorRecord {
   disposed: boolean
 }
 
+interface EditorRegistrationHandle {
+  readonly id: string
+  readonly record: EditorRecord
+}
+
 /** The registry's observable snapshot. */
 export interface EditorRegistrySnapshot {
   readonly editors: readonly {
@@ -67,25 +72,38 @@ export class EditorRegistry {
         )
       }
     }
-    this.records.set(contribution.id, {
+    const record: EditorRecord = {
       id: contribution.id,
       priority: contribution.priority ?? 0,
       description: contribution.description,
       owner,
       create: contribution.create,
       disposed: false,
-    })
+    }
+    this.records.set(contribution.id, record)
     this.revision += 1
     this.onInvalidate()
-    return { id: contribution.id, dispose: () => this.dispose(contribution.id) }
+    const registration: EditorRegistrationHandle = { id: contribution.id, record }
+    return { id: contribution.id, dispose: () => this.disposeHandle(registration) }
   }
 
-  /** Remove one editor (idempotent; owner unload also disposes). */
+  /** Remove one editor by id (used by owner unload). */
   dispose(id: string): void {
     const record = this.records.get(id)
-    if (record === undefined || record.disposed) return
+    if (record === undefined) return
+    this.disposeRecord(record)
+  }
+
+  private disposeHandle(handle: EditorRegistrationHandle): void {
+    const record = this.records.get(handle.id)
+    if (record !== handle.record) return
+    this.disposeRecord(record)
+  }
+
+  private disposeRecord(record: EditorRecord): void {
+    if (record.disposed) return
     record.disposed = true
-    this.records.delete(id)
+    if (this.records.get(record.id) === record) this.records.delete(record.id)
     this.revision += 1
     this.onInvalidate()
   }

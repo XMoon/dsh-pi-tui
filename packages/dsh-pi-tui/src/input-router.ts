@@ -73,6 +73,10 @@ export interface InputRouterContext {
    * probe (default: the plugin binding wins, matching pre-P1-06
    * behavior for surfaces without a seat editor). */
   readonly editorAccepts?: (data: string) => boolean
+  /** Whether a replacement editor must receive an editor-routed key before
+   * plugin bindings are considered. TuiApp flips this off only after the
+   * replacement editor explicitly declines the key. */
+  readonly editorReplacement?: boolean
 }
 
 /** The outcome of one input event. */
@@ -84,7 +88,7 @@ export type InputRouteResult =
   | { kind: 'editor' }
   /** The input maps to a plugin keybinding: the SEMANTIC action to
    * execute (never raw input). */
-  | { kind: 'plugin-action'; action: TuiAction }
+  | { kind: 'plugin-action'; action: TuiAction; key: NormalizedKey }
   /** The input was a protocol reply/release/repeat: drop it entirely. */
   | { kind: 'protocol' }
 
@@ -153,6 +157,11 @@ export class InputRouter {
       }
       return { kind: 'editor' }
     }
+    // Any non-search overlay owns the focused component and captures the
+    // editor seat. This check must precede reserved-key routing: TuiApp lets
+    // the event continue to the focused overlay component, including Esc and
+    // other host-reserved keys.
+    if (ctx.hasOverlay) return { kind: 'consumed' }
     // Reserved Host lifecycle shortcuts (the ladder position for the
     // TuiApp's own matchesKey checks): the router must know the reserved
     // set so a plugin can never claim them — but the ROUTING itself stays
@@ -162,32 +171,21 @@ export class InputRouter {
     if (normalized !== undefined && this.isReserved(normalized)) {
       return { kind: 'consumed' }
     }
-    // Overlays that are NOT search keep their keys (Esc, Shift+Tab,
-    // Alt+↑, Ctrl+Enter, Ctrl+S, Ctrl+G, ↓ all fall through to the
-    // overlay/focused component — the editor does not see them).
-    // Non-capturing plugin keybindings: consulted LAST, only when nothing
-    // earlier consumed the input AND the input is a single normalized key
-    // AND the editor is not about to receive a plain keystroke that must
-    // win (a plugin binding for a plain printable key would otherwise
-    // swallow typing — the editor's own text input has priority).
-    // P1-06: the FOCUSED EDITOR is asked FIRST — the app-level listener
-    // runs before the focused component receives input, so a plugin
-    // binding may only claim a key the focused editor DECLINES (arrows,
-    // Tab, multiline cursor movement all belong to the editor while it is
-    // focused). The documented "non-capturing, after the editor"
-    // precedence is now actual: the editor keeps every key it handles.
-    if (normalized !== undefined && !ctx.hasOverlay) {
+    // A replacement editor is probed by TuiApp before this final plugin
+    // stage. The router reports the editor route so that TuiApp can deliver
+    // the key, then retry plugin resolution only when the editor declined.
+    if (ctx.editorReplacement) return { kind: 'editor' }
+    // Non-capturing plugin keybindings are consulted last for the host
+    // editor. Printable keys always stay with normal text entry, and an
+    // editor-owned binding (navigation, deletion, completion) keeps priority
+    // over a plugin action.
+    if (normalized !== undefined) {
       const action = pluginActionFor(normalized)
       if (action !== undefined && !isPrintableKey(normalized)) {
-        if (ctx.editorAccepts !== undefined && ctx.editorAccepts(data)) {
-          // The focused editor owns this key (e.g. ↑/↓/Tab while the
-          // editor is focused): the plugin binding is NOT consulted.
-          return { kind: 'editor' }
-        }
-        return { kind: 'plugin-action', action }
+        if (ctx.editorAccepts?.(data) === true) return { kind: 'editor' }
+        return { kind: 'plugin-action', action, key: normalized }
       }
     }
-    // Everything else is the editor's.
     return { kind: 'editor' }
   }
 

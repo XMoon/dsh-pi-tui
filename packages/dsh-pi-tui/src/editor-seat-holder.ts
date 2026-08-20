@@ -26,7 +26,25 @@ import type { Component } from '@xmoon76/pi-tui'
 import type { EditorHost, EditorSnapshot, ExtensionEditor } from './extension/public-types.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 
+function safeEditorErrorMessage(error: unknown): string {
+  try {
+    return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
+  } catch {
+    return 'unknown editor error'
+  }
+}
+
 /** The seat's occupant surface the host drives. */
+interface HostLease {
+  readonly seatGeneration: number
+  active: boolean
+}
+
+interface ChangeSubscription {
+  readonly listener: (snapshot: EditorSnapshot) => void
+  readonly lease: HostLease
+}
+
 export interface SeatEditor {
   readonly id: 'host' | string
   getText(): string
@@ -51,10 +69,14 @@ export interface HostEditorAdapter {
   getText(): string
   setText(text: string): void
   getCursor?(): number
-  /** Best-effort: the fork editor has no public cursor setter — the seat
-   * treats an absent setter as a no-op (the plugin editor contract still
-   * transfers cursors through ExtensionEditor.setCursor). */
+  /** Best-effort cursor setter for the host editor. */
   setCursor?(offset: number): void
+  /** Stage replacement text/cursor without resetting host transient state. */
+  setTextAndCursor(text: string, cursor: number): void
+  /** Forward one declined replacement-editor key through the host editor. */
+  handleInput?(data: string): void
+  /** Temporarily suppress the host adapter's normal change callback. */
+  runWithoutChange?<T>(task: () => T): T
   readonly focused: boolean
   borderColor: (text: string) => string
   invalidate(): void
@@ -90,6 +112,15 @@ export class EditorSeatHolder {
   /** The current occupant (always defined — the host default is the
    * fallback, never removed). */
   private current: SeatEditor
+  /** Monotonic seat-owner epoch. Every handoff invalidates capabilities
+   * captured by the previous occupant, even when the surface generation is
+   * unchanged. */
+  private seatGeneration = 0
+  /** The lease belonging to the current plugin occupant, if any. */
+  private currentHostLease: HostLease | undefined
+  /** Lease exposed while the winner's create() callback is constructing it;
+   * subscriptions made during create() are valid once the handoff commits. */
+  private creatingHostLease: HostLease | undefined
   /** P1-12: the holder's FINAL disposal latch — after it flips, every
    * host capability captured by a plugin editor (replaceText, dispatch,
    * subscribe, invalidate) is INERT: a late plugin callback can no
@@ -101,11 +132,17 @@ export class EditorSeatHolder {
    * UNTIL the registry changes — a same-id re-registration bumps the
    * revision, so the guard clears and the new editor is tried again). */
   private failedTarget: { id: string; revision: number } | undefined
+  /** User callbacks may synchronously request another reconcile. */
+  private handoffInProgress = false
+  private pendingHandoff: { target: PluginEditorTarget | undefined; registryRevision: number } | undefined
   private readonly hostAdapter: () => HostEditorAdapter
   private readonly surfaceId: string
   private readonly generation: () => number
   private readonly actionSink: SeatActionSink
   private readonly notifyError: (message: string) => void
+  /** Runner-owned health callback for editor create/input failures. */
+  private readonly recordError: ((id: string, message: string) => void) | undefined
+  private readonly clearError: ((id: string) => void) | undefined
   /** The host's view-swap callback (re-mounts a recompiled plugin view). */
   private readonly viewSwap: SeatViewSwap
 
@@ -115,6 +152,8 @@ export class EditorSeatHolder {
     generation: () => number
     actionSink: SeatActionSink
     notifyError: (message: string) => void
+    recordError?: (id: string, message: string) => void
+    clearError?: (id: string) => void
     viewSwap: SeatViewSwap
   }) {
     this.hostAdapter = options.hostAdapter
@@ -122,8 +161,47 @@ export class EditorSeatHolder {
     this.generation = options.generation
     this.actionSink = options.actionSink
     this.notifyError = options.notifyError
+    this.recordError = options.recordError
+    this.clearError = options.clearError
     this.viewSwap = options.viewSwap
     this.current = this.adaptHost()
+  }
+
+  /** Report an editor contribution failure without allowing diagnostic hooks
+   * to escape into the host's handoff or input path. */
+  private reportEditorError(id: string, error: unknown): void {
+    const message = safeEditorErrorMessage(error)
+    try { this.recordError?.(id, message) } catch {}
+    try { this.notifyError(message) } catch {}
+  }
+
+  /** Report a host-adapter failure without attributing it to a plugin. */
+  private reportHostError(error: unknown): void {
+    const message = safeEditorErrorMessage(error)
+    try { this.notifyError(message) } catch {}
+  }
+
+  private clearEditorError(id: string): void {
+    try { this.clearError?.(id) } catch {}
+  }
+
+  /** Invalidate one seat-owner lease and remove only its subscriptions. */
+  private invalidateLease(lease: HostLease): void {
+    lease.active = false
+    for (const subscription of [...this.changeListeners]) {
+      if (subscription.lease === lease) this.changeListeners.delete(subscription)
+    }
+  }
+
+  /** Dispose an editor that was created but never committed to the seat. */
+  private discardCreatedEditor(id: string, editor: ExtensionEditor, lease: HostLease): void {
+    try {
+      editor.dispose()
+    } catch (error) {
+      this.reportEditorError(id, error)
+    }
+    this.invalidateLease(lease)
+    if (this.creatingHostLease === lease) this.creatingHostLease = undefined
   }
 
   /** The host default editor adapted to the seat surface. */
@@ -159,6 +237,23 @@ export class EditorSeatHolder {
    * @param target - the new winner (undefined = restore the host default).
    */
   handoff(target: PluginEditorTarget | undefined, registryRevision = 0): void {
+    if (this.disposed) return
+    if (this.handoffInProgress) {
+      this.pendingHandoff = { target, registryRevision }
+      return
+    }
+    this.handoffInProgress = true
+    try {
+      this.performHandoff(target, registryRevision)
+    } finally {
+      this.handoffInProgress = false
+      const pending = this.pendingHandoff
+      this.pendingHandoff = undefined
+      if (pending !== undefined && !this.disposed) this.handoff(pending.target, pending.registryRevision)
+    }
+  }
+
+  private performHandoff(target: PluginEditorTarget | undefined, registryRevision: number): void {
     const previous = this.current
     // A target whose creation failed is INERT while the registry is
     // UNCHANGED (its notify triggered a render → reconcile → re-create
@@ -168,32 +263,68 @@ export class EditorSeatHolder {
       && target.id === this.failedTarget.id && registryRevision === this.failedTarget.revision) return
     if (target === undefined || target.id === 'host') {
       this.failedTarget = undefined
-      // Restore the host default, preserving the draft.
-      const draft = previous.getText()
-      const cursor = previous.getCursor()
-      previous.dispose()
-      const host = this.adaptHost()
-      host.setText(draft)
-      // CURSOR RESTORE IS BEST-EFFORT (round-1 finding 6): the vendored
-      // fork's Editor exposes no public cursor setter, so the host
-      // adapter's setCursor is a documented no-op — the draft survives
-      // the unload handoff, the cursor lands at the fork's default
-      // position. This is an explicit SDK contract limit (a plugin
-      // editor's OWN cursor transfers through ExtensionEditor.setCursor;
-      // only the host-default restore is best-effort).
-      host.setCursor(cursor)
+      // Restore the host default, preserving the draft. Construct and stage
+      // the replacement host BEFORE disposing the current occupant: if the
+      // host adapter ever fails to initialize or restore, the current seat
+      // remains available and the handoff stays atomic.
+      let host: SeatEditor
+      try {
+        const draft = previous.getText()
+        const cursor = previous.getCursor()
+        host = this.adaptHost()
+        host.setText(draft)
+        // Restore both draft and cursor through the host adapter. Older
+        // structural adapters may still implement setCursor as a no-op, but
+        // the vendored fork's adapter preserves the active cursor as well.
+        host.setCursor(cursor)
+      } catch (error) {
+        this.reportHostError(error)
+        return
+      }
+      // Commit the staged host before calling user-owned dispose(). This
+      // fences the old host capability first and leaves a valid seat even if
+      // the old editor's teardown throws or re-enters through its old host.
+      if (this.currentHostLease !== undefined) this.invalidateLease(this.currentHostLease)
+      this.currentHostLease = undefined
       this.current = host
+      ++this.seatGeneration
+      try {
+        previous.dispose()
+      } catch (error) {
+        // Teardown is user-owned and must not break restoration of the host
+        // seat; the host is already the selected occupant.
+        this.reportHostError(error)
+      }
       return
     }
     // Atomic: create BEFORE any transfer (a throw keeps the current
     // editor working — plan §14.2).
     let created: ExtensionEditor
+    const lease: HostLease = { seatGeneration: this.seatGeneration + 1, active: true }
+    this.creatingHostLease = lease
     try {
-      created = target.create(this.hostFor(target.id))
+      created = target.create(this.hostFor(target.id, lease))
+      if (this.disposed || !lease.active || this.creatingHostLease !== lease) {
+        this.discardCreatedEditor(target.id, created, lease)
+        return
+      }
       this.failedTarget = undefined
+      try {
+        this.clearEditorError(target.id)
+      } catch {
+        // Health callbacks are observational and must not abort a successful
+        // editor creation.
+      }
     } catch (error) {
+      this.invalidateLease(lease)
+      this.creatingHostLease = undefined
       this.failedTarget = { id: target.id, revision: registryRevision }
-      this.notifyError(error instanceof Error ? error.message : String(error))
+      this.reportEditorError(target.id, error)
+      return
+    }
+    this.creatingHostLease = undefined
+    if (this.disposed || !lease.active) {
+      this.discardCreatedEditor(target.id, created, lease)
       return
     }
     // Transfer draft/cursor — INSIDE the guarded block (P2-02): a
@@ -201,14 +332,20 @@ export class EditorSeatHolder {
     // and keep the current one working (the atomic handoff promise
     // extends to EVERY post-create step, never a leak).
     try {
+      if (this.disposed || !lease.active) throw new Error('editor seat disposed during handoff')
       const draft = previous.getText()
       const cursor = previous.getCursor()
       created.setText(draft)
       created.setCursor?.(cursor)
     } catch (error) {
-      created.dispose()
+      try {
+        created.dispose()
+      } catch (disposeError) {
+        this.reportEditorError(target.id, disposeError)
+      }
+      this.invalidateLease(lease)
       this.failedTarget = { id: target.id, revision: registryRevision }
-      this.notifyError(error instanceof Error ? error.message : String(error))
+      this.reportEditorError(target.id, error)
       return
     }
     // Compile the plugin component BEFORE disposing the old editor
@@ -217,54 +354,84 @@ export class EditorSeatHolder {
     // throw. Nothing is disposed until every throwing step succeeded.
     let adapted: SeatEditor
     try {
+      if (this.disposed || !lease.active) throw new Error('editor seat disposed during handoff')
       adapted = this.adaptPlugin(target.id, created)
     } catch (error) {
       // P2-02: the transfer succeeded but the compile failed — dispose the
       // created editor (it never mounted), keep the current one working.
-      created.dispose()
+      try {
+        created.dispose()
+      } catch (disposeError) {
+        this.reportEditorError(target.id, disposeError)
+      }
+      this.invalidateLease(lease)
       this.failedTarget = { id: target.id, revision: registryRevision }
-      this.notifyError(error instanceof Error ? error.message : String(error))
+      this.reportEditorError(target.id, error)
       return
     }
-    // Mount + dispose old (atomic: everything succeeded).
-    previous.dispose()
+    // Mount + dispose old (atomic: everything succeeded). A throwing old
+    // dispose is reported but cannot leave the new editor unowned.
+    if (this.disposed || !lease.active) {
+      this.discardCreatedEditor(target.id, created, lease)
+      return
+    }
+    lease.active = true
+    if (this.currentHostLease !== undefined) this.invalidateLease(this.currentHostLease)
     this.current = adapted
+    this.currentHostLease = lease
+    ++this.seatGeneration
+    // The creating lease becomes the committed seat owner only here; any
+    // create-time subscriptions retained their lease and now receive changes.
+    try {
+      previous.dispose()
+    } catch (error) {
+      this.reportEditorError(previous.id, error)
+    }
   }
 
   /** Build the EditorHost handed to a plugin editor. */
-  private hostFor(replacementId: string): EditorHost {
+  private hostFor(replacementId: string, lease: HostLease): EditorHost {
     const holder = this
-    // The generation the host was created under — a stale host from an
-    // EARLIER surface generation (or a disposed surface) must be inert.
     const hostGeneration = this.generation()
+    const inertSnapshot: EditorSnapshot = {
+      text: '',
+      cursor: 0,
+      focused: false,
+      replacementId: undefined,
+      composing: false,
+    }
+    // During create(), the old seat is still committed. The new host may
+    // register a listener so it becomes live after commit, but all seat
+    // observations/mutations remain inert until this lease is committed.
+    const live = (): boolean => !holder.disposed
+      && lease.active
+      && holder.generation() === hostGeneration
+      && holder.currentHostLease === lease
+    const canSubscribe = (): boolean => !holder.disposed
+      && lease.active
+      && holder.generation() === hostGeneration
+      && (holder.currentHostLease === lease || holder.creatingHostLease === lease)
     return {
       surfaceId: this.surfaceId,
       generation: hostGeneration,
-      getSnapshot: () => {
-        if (holder.disposed) return holder.snapshotOf('host')
-        return holder.snapshotOf(replacementId)
-      },
+      // A stale or not-yet-committed host must not inspect or disclose the
+      // current seat. Return a fixed inert snapshot rather than falling
+      // through to the previous occupant.
+      getSnapshot: () => live() ? holder.snapshotOf(replacementId) : inertSnapshot,
       replaceText: (text, cursor) => {
-        // P1-12: a stale/disposed host can never mutate the CURRENT seat
-        // (the review repro: after dispose, replaceText('after') must be
-        // a no-op, not a live write into a dead surface).
-        if (holder.disposed || holder.generation() !== hostGeneration) return
+        if (!live()) return
         holder.current.setText(text)
         if (cursor !== undefined) holder.current.setCursor(cursor)
+        holder.notifyChanged()
       },
       dispatch: (action) => {
-        // P1-12: a stale/disposed host can never dispatch a real
-        // submission (the review repro: after dispose, dispatch('submit')
-        // must be ignored, not fire the app's onSubmit).
-        if (holder.disposed || holder.generation() !== hostGeneration) {
-          return { kind: 'ignored' }
-        }
+        if (!live()) return { kind: 'ignored' }
         const accepted = holder.actionSink(action)
         return accepted ? { kind: 'accepted' } : { kind: 'ignored' }
       },
-      subscribe: (listener) => holder.subscribe(listener, replacementId, hostGeneration),
+      subscribe: (listener) => canSubscribe() ? holder.subscribe(listener, lease) : () => {},
       invalidate: () => {
-        if (holder.disposed || holder.generation() !== hostGeneration) return
+        if (!live()) return
         holder.current.invalidate()
       },
     }
@@ -298,9 +465,10 @@ export class EditorSeatHolder {
           next = holder.compileView(editor.component)
           holder.viewSwap(next)
         } catch (error) {
-          holder.notifyError(error instanceof Error ? error.message : String(error))
+          holder.reportEditorError(id, error)
           return
         }
+        holder.clearEditorError(id)
         component = next
       },
       addToHistory: () => {}, // the host default owns history recall
@@ -315,10 +483,13 @@ export class EditorSeatHolder {
             if (holder.disposed) return true
             try {
               const consumed = editor.handleInput!(data)
-              if (consumed) holder.current.invalidate()
+              if (consumed) {
+                holder.clearEditorError(id)
+                holder.current.invalidate()
+              }
               return consumed
             } catch (error) {
-              holder.notifyError(error instanceof Error ? error.message : String(error))
+              holder.reportEditorError(id, error)
               return true // a throwing plugin input handler never crashes the host
             }
           },
@@ -332,6 +503,52 @@ export class EditorSeatHolder {
   /** Compile the plugin's ExtensionView into a mountable component. */
   private compileView(view: import('./extension/public-types.ts').ExtensionView): Component {
     return compileView(view).component
+  }
+
+  /**
+   * Forward one key to the hidden host editor and synchronize its resulting
+   * text/cursor back into the visible replacement. This is the host fallback
+   * promised by ExtensionEditor.handleInput returning false; doing it here
+   * keeps all pi-tui editing semantics (graphemes, paste, history and
+   * autocomplete) in the vendored Editor instead of reimplementing them in
+   * the consumer.
+   */
+  handleHostFallbackInput(data: string): boolean {
+    const current = this.current
+    if (current.id === 'host') return false
+    const reportError = (error: unknown): void => {
+      this.reportEditorError(current.id, error)
+    }
+    try {
+      const host = this.hostAdapter()
+      if (host.handleInput === undefined) return false
+      const text = current.getText()
+      const cursor = current.getCursor()
+      const run = <T>(task: () => T): T => {
+        if (host.runWithoutChange !== undefined) return host.runWithoutChange(task)
+        return task()
+      }
+      run(() => {
+        host.setTextAndCursor(text, cursor)
+        host.handleInput!(data)
+        const nextText = host.getText()
+        const nextCursor = host.getCursor?.() ?? 0
+        current.setText(nextText)
+        current.setCursor(nextCursor)
+      })
+      // The host adapter may invoke the normal host onChange for a mutation,
+      // and the fallback itself is also a seat mutation. The host callback is
+      // suppressed above; emit exactly one final snapshot here.
+      this.notifyChanged()
+      current.invalidate()
+      this.clearEditorError(current.id)
+    } catch (error) {
+      reportError(error)
+      // A throwing replacement fallback must consume the event and leave the
+      // seat in a coherent state; never let plugin-owned code escape the host
+      // input dispatcher.
+    }
+    return true
   }
 
   /** The current snapshot (the EditorHost contract). */
@@ -352,20 +569,18 @@ export class EditorSeatHolder {
    * disposed holder clears every listener (P1-11 delivery ends). */
   private subscribe(
     listener: (snapshot: EditorSnapshot) => void,
-    replacementId: string,
-    hostGeneration: number,
+    lease: HostLease,
   ): () => void {
-    if (this.disposed) return () => {}
-    this.changeListeners.add(listener)
+    if (this.disposed || !lease.active) return () => {}
+    const subscription: ChangeSubscription = { listener, lease }
+    this.changeListeners.add(subscription)
     return () => {
-      this.changeListeners.delete(listener)
-      void replacementId
-      void hostGeneration
+      this.changeListeners.delete(subscription)
     }
   }
 
   /** Change listeners (host-driven notifications). */
-  private readonly changeListeners = new Set<(snapshot: EditorSnapshot) => void>()
+  private readonly changeListeners = new Set<ChangeSubscription>()
 
   /** The host calls this after every editor mutation; listeners fire
    * with the CURRENT snapshot (bounded — the fork's editor onChange). */
@@ -376,13 +591,17 @@ export class EditorSeatHolder {
     // P2-02: per-listener isolation — a throwing plugin listener must
     // never abort the delivery to the remaining listeners (or escape into
     // the host's editor mutation path).
-    for (const listener of [...this.changeListeners]) {
+    for (const subscription of [...this.changeListeners]) {
+      if (!subscription.lease.active || subscription.lease !== this.currentHostLease) {
+        this.changeListeners.delete(subscription)
+        continue
+      }
       try {
-        listener(snapshot)
+        subscription.listener(snapshot)
       } catch {
         // A hostile listener is dropped (it cannot keep poisoning the
         // channel); the host's own paths never see its throw.
-        this.changeListeners.delete(listener)
+        this.changeListeners.delete(subscription)
       }
     }
   }
@@ -392,6 +611,11 @@ export class EditorSeatHolder {
    * from its own dispose() (the surface's final teardown). */
   dispose(): void {
     this.disposed = true
+    this.pendingHandoff = undefined
+    if (this.currentHostLease !== undefined) this.invalidateLease(this.currentHostLease)
+    if (this.creatingHostLease !== undefined) this.invalidateLease(this.creatingHostLease)
+    this.currentHostLease = undefined
+    this.creatingHostLease = undefined
     this.changeListeners.clear()
   }
 }

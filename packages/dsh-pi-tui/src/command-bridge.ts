@@ -199,6 +199,13 @@ export class CommandBridge {
     return undefined
   }
 
+  /** The live contribution id for one name, or undefined for host-owned
+   * commands. Runtime health callbacks use the contribution id, never the
+   * command's display name. */
+  idFor(name: string): string | undefined {
+    return this.find(name)?.id
+  }
+
   /** The handler for one name, or undefined (dispatch falls back to the
    * commands service). */
   handlerFor(name: string): TuiLocalCommandHandler | undefined {

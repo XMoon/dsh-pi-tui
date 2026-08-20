@@ -168,6 +168,7 @@ export class RendererRegistry {
   renderMessage(
     snapshot: MessagePresentationSnapshot,
     onError: (id: string, error: unknown) => void,
+    canUse?: (id: string, view: ExtensionView) => boolean,
   ): { view: ExtensionView; rendererId: string } | undefined {
     const records = [...this.messageRenderers.values()]
       .filter(record => !record.disposed && (record.kind === undefined || record.kind === snapshot.kind))
@@ -175,9 +176,11 @@ export class RendererRegistry {
     for (const record of records) {
       try {
         const view = record.render(snapshot)
-        if (view !== undefined) return { view, rendererId: record.id }
+        if (view !== undefined && (canUse === undefined || canUse(record.id, view))) {
+          return { view, rendererId: record.id }
+        }
       } catch (error) {
-        onError(record.id, error)
+        try { onError(record.id, error) } catch {}
       }
     }
     return undefined
@@ -191,6 +194,7 @@ export class RendererRegistry {
   renderTool(
     snapshot: ToolPresentationSnapshot,
     onError: (id: string, error: unknown) => void,
+    canUse?: (id: string, view: ExtensionView) => boolean,
   ): { view: ExtensionView; rendererId: string } | undefined {
     const records = [...this.toolRenderers.values()]
       .filter(record => !record.disposed && record.toolName === snapshot.toolName)
@@ -198,9 +202,11 @@ export class RendererRegistry {
     for (const record of records) {
       try {
         const view = record.render(snapshot)
-        if (view !== undefined) return { view, rendererId: record.id }
+        if (view !== undefined && (canUse === undefined || canUse(record.id, view))) {
+          return { view, rendererId: record.id }
+        }
       } catch (error) {
-        onError(record.id, error)
+        try { onError(record.id, error) } catch {}
       }
     }
     return undefined

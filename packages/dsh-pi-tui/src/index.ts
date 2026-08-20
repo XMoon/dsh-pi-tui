@@ -200,6 +200,10 @@ export const LOCAL_COMMANDS = new Set([
 export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
   ...LOCAL_COMMANDS,
   ...SESSIONLESS_COMMANDS,
+  // `/plan` is handled specially by the runner (bare form toggles plan mode)
+  // and must remain host-owned even though it is not registered by the TUI
+  // command list.
+  'plan',
 ])
 
 /**
@@ -1495,6 +1499,8 @@ export function apply(ctx: Context, config: Config): void {
       readonly renderers: import('./renderer-registry.ts').RendererRegistry
       readonly editors: import('./editor-registry.ts').EditorRegistry
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
+      _recordRegistryError(slot: string, id: string, error: unknown): void
+      _clearRegistryError(slot: string, id: string): void
       attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
       detachSurface(surfaceId?: string): void
     }) | undefined
@@ -1964,6 +1970,9 @@ export function apply(ctx: Context, config: Config): void {
       // with an explicit error below — it must never fall through to the
       // model as a plain user message.
       const parsedAtSubmit = parseCommand(text)
+      const extensionCommandId = parsedAtSubmit === undefined
+        ? undefined
+        : extensionService?.commands.idFor(parsedAtSubmit.name)
       const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
@@ -2023,6 +2032,9 @@ export function apply(ctx: Context, config: Config): void {
             diag,
             sessionId: () => agent.session.id,
             onResult: (execution) => {
+              if (extensionCommandId !== undefined && execution !== undefined) {
+                extensionService?._clearRegistryError('command', extensionCommandId)
+              }
               // A command the surface advertised (e.g. from the startup
               // probe) but the real session's catalog lacks: consume the
               // slash input with an explicit error — never a plain model
@@ -2052,6 +2064,7 @@ export function apply(ctx: Context, config: Config): void {
               }
             },
             onError: (error) => {
+              if (extensionCommandId !== undefined) extensionService?._recordRegistryError('command', extensionCommandId, error)
               const message = safeErrorMessage(error)
               try {
                 ctx.logger.error(`tui-runner: command execution failed: ${message}`)
@@ -2088,6 +2101,7 @@ export function apply(ctx: Context, config: Config): void {
       // re-parsed or rewritten, the skill rawInput regression gate); the
       // commands service is the fallback for core commands.
       const bridgeHandler = extensionService?.commands.handlerFor(parsed.name)
+      const bridgeCommandId = extensionService?.commands.idFor(parsed.name)
       const commands = ctx.get('commands')
       const definition = commands?.find(undefined as unknown as Agent, parsed.name)
       if (bridgeHandler === undefined && (commands === undefined || definition === undefined)) {
@@ -2113,9 +2127,15 @@ export function apply(ctx: Context, config: Config): void {
         diag,
         sessionId: () => liveAgent?.session.id,
         onResult: (result) => {
-          if (result !== undefined && result.kind === 'error') app.notify(result.text)
+          if (result !== undefined && result.kind === 'error') {
+            if (bridgeCommandId !== undefined) extensionService?._recordRegistryError('command', bridgeCommandId, new Error(result.text))
+            app.notify(result.text)
+          } else if (bridgeCommandId !== undefined) {
+            extensionService?._clearRegistryError('command', bridgeCommandId)
+          }
         },
         onError: (error) => {
+          if (bridgeCommandId !== undefined) extensionService?._recordRegistryError('command', bridgeCommandId, error)
           const message = safeErrorMessage(error)
           try {
             ctx.logger.error(`tui-runner: local command failed: ${message}`)
@@ -2408,6 +2428,12 @@ export function apply(ctx: Context, config: Config): void {
         }
       },
       onSteer: (text) => steerNow(text),
+      onExtensionError: ({ slot, id, error }) => {
+        try { extensionService?._recordRegistryError(slot, id, error) } catch {}
+      },
+      onExtensionRecovered: ({ slot, id }) => {
+        try { extensionService?._clearRegistryError(slot, id) } catch {}
+      },
       openExternalEditor: async (draft) => {
         // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
         // parse with a real shell-word parser, never a plain split.
@@ -2643,6 +2669,7 @@ export function apply(ctx: Context, config: Config): void {
         if (keybindings === undefined) return undefined
         return keybindings.actionFor(normalized)
       },
+      pluginActionIdFor: (normalized) => extensionService?.keybindings.idFor(normalized),
     })
     // M3: attach the extension host to the surface chrome once per
     // generation (F-1): the header/dock/footer merge extension content, and
@@ -2652,15 +2679,17 @@ export function apply(ctx: Context, config: Config): void {
       // health ledger — observable via /status diagnostics, never
       // swallowed. Safe single-line message (no stack traces, hostile
       // toString handled — the plan's error policy §18).
-      app.setRendererErrorSink(({ id, error }) => {
+      app.setRendererErrorSink(({ id, error, slot }) => {
         const message = safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200)
-        extensionService._ledger().recordError('transcript.renderer', id, message)
+        const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
+        extensionService._ledger().recordError(healthSlot, id, message)
       })
       // M7 (P1-08): a renderer that renders successfully after a failure
       // RECOVERS — clear its health record (the next failure starts a NEW
       // error generation).
-      app.setRendererRecoveredSink((id) => {
-        extensionService._ledger().clearError('transcript.renderer', id)
+      app.setRendererRecoveredSink(({ id, slot }) => {
+        const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
+        extensionService._ledger().clearError(healthSlot, id)
       })
       // M8: the managed-overlay mount seam (plan §13.3) — the plugin
       // supplies an ExtensionView; the host compiles + mounts it through
@@ -2743,7 +2772,13 @@ export function apply(ctx: Context, config: Config): void {
       const customPalette = loadCustomTheme(name)
       const palette = pluginPalette ?? customPalette
       if (palette !== undefined) {
-        app.applyPalette(palette)
+        try {
+          app.applyPalette(palette)
+          if (pluginPalette !== undefined) extensionService?._clearRegistryError('theme', name)
+        } catch (error) {
+          if (pluginPalette !== undefined) extensionService?._recordRegistryError('theme', name, error)
+          app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+        }
       } else {
         // Neither a plugin theme nor a custom file: the selection is gone
         // (unloaded plugin) — fall back to the built-in dark palette.
@@ -3218,6 +3253,8 @@ export function apply(ctx: Context, config: Config): void {
           health: () => extensionService._ledger().healthSnapshot(),
         }
       },
+      recordExtensionError: (slot, id, error) => extensionService?._recordRegistryError(slot, id, error),
+      clearExtensionError: (slot, id) => extensionService?._clearRegistryError(slot, id),
       /** The live session's workspace cwd (header), falling back to the
        * process cwd before any session exists; the footer/welcome/
        * completions/history follow it so a session switch updates the

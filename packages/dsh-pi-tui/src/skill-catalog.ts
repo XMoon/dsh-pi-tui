@@ -24,6 +24,17 @@
 import { isUserInvocable } from '@deepseek-ai/dsh-skill'
 import { safeErrorMessage } from './error-boundary.ts'
 
+function isAbortError(error: unknown): boolean {
+  try {
+    if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return false
+    const candidate = error as { name?: unknown; code?: unknown }
+    return candidate.name === 'AbortError' || candidate.code === 'ABORT_ERR'
+  } catch {
+    // Hostile getters/proxies are ordinary failures, not cancellation.
+    return false
+  }
+}
+
 /** The human-facing slice of one skill: display fields only. */
 export interface HumanSkillSummary {
   readonly name: string
@@ -216,8 +227,10 @@ export async function resolveColdSkillTarget(
     const scope = await presets.standingKeyFor(presetId)
     return { target: { kind: 'cold-standing', registry, cwd, scope } }
   } catch (error) {
-    // Unknown/broken preset or a mount failure: degrade to the global view
-    // with a one-shot notice. Never fall back to creating a probe Agent.
+    // Cancellation belongs to the current coordinator epoch and must not be
+    // converted into a stale global catalog. Ordinary preset/mount failures
+    // still degrade to the global view with a one-shot notice.
+    if (isAbortError(error)) throw error
     const message = safeErrorMessage(error)
     return {
       target: { kind: 'cold-global', registry, cwd, scope: undefined },

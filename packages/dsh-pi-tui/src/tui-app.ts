@@ -541,6 +541,9 @@ export interface TuiAppEventsBase {
    * Optional.
    */
   onExtensionAction?: (action: import('./extension/public-types.ts').TuiAction) => void
+  /** M11: extension callback health transitions from the editor seat. */
+  onExtensionError?: (record: { slot: string; id: string; error: unknown }) => void
+  onExtensionRecovered?: (record: { slot: string; id: string }) => void
 }
 
 /**
@@ -766,6 +769,8 @@ export interface TuiAppOptions {
    * identically without it.
    */
   pluginActionFor?: (key: import('./extension/public-types.ts').NormalizedKey) => import('./extension/public-types.ts').TuiAction | undefined
+  /** M6: resolves the contribution id for keybinding health diagnostics. */
+  pluginActionIdFor?: (key: import('./extension/public-types.ts').NormalizedKey) => string | undefined
   /**
    * M7: the transcript/tool renderer registry (wired by the runner).
    * When present, tool cards and (optionally) messages may be rendered by
@@ -1023,6 +1028,7 @@ export class TuiApp {
    * keybindings (the surface runs exactly as before).
    */
   private readonly pluginActionFor: ((key: import('./extension/public-types.ts').NormalizedKey) => import('./extension/public-types.ts').TuiAction | undefined) | undefined
+  private readonly pluginActionIdFor: ((key: import('./extension/public-types.ts').NormalizedKey) => string | undefined) | undefined
   /** M6: the host-owned input precedence router (normalization + rules). */
   private readonly inputRouter: InputRouter
   /** M7: the transcript/tool renderer registry (optional). */
@@ -1105,6 +1111,7 @@ export class TuiApp {
     this.workspaceRoot = options.workspaceRoot
     this.present = options.present
     this.pluginActionFor = options.pluginActionFor
+    this.pluginActionIdFor = options.pluginActionIdFor
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
@@ -1189,6 +1196,12 @@ export class TuiApp {
         }
       },
       notifyError: (message) => this.notify(`editor failed: ${message}`, 'error'),
+      recordError: (id, message) => {
+        try { this.events.onExtensionError?.({ slot: 'editor', id, error: message }) } catch {}
+      },
+      clearError: (id) => {
+        try { this.events.onExtensionRecovered?.({ slot: 'editor', id }) } catch {}
+      },
     })
     // If a plugin editor already won the registry (registration before
     // the surface), hand off immediately.
@@ -1361,7 +1374,40 @@ export class TuiApp {
 
   /** Resolve a normalized key through the runner's resolver (M6). */
   private pluginActionForFor(key: import('./extension/public-types.ts').NormalizedKey): import('./extension/public-types.ts').TuiAction | undefined {
-    return this.pluginActionFor?.(key)
+    try {
+      return this.pluginActionFor?.(key)
+    } catch (error) {
+      this.reportKeybindingError(key, error)
+      return undefined
+    }
+  }
+
+  private keybindingIdFor(key: import('./extension/public-types.ts').NormalizedKey): string | undefined {
+    try {
+      return this.pluginActionIdFor?.(key)
+    } catch {
+      return undefined
+    }
+  }
+
+  private reportKeybindingError(key: import('./extension/public-types.ts').NormalizedKey, error: unknown): void {
+    try {
+      const id = this.keybindingIdFor(key)
+      if (id === undefined) return
+      this.events.onExtensionError?.({ slot: 'keybinding', id, error })
+    } catch {
+      // Diagnostics are observational and must never escape the input path.
+    }
+  }
+
+  private recoverKeybinding(key: import('./extension/public-types.ts').NormalizedKey): void {
+    try {
+      const id = this.keybindingIdFor(key)
+      if (id === undefined) return
+      this.events.onExtensionRecovered?.({ slot: 'keybinding', id })
+    } catch {
+      // Diagnostics are observational and must never escape the input path.
+    }
   }
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
@@ -1409,18 +1455,23 @@ export class TuiApp {
       }
       return undefined
     }
+    // A managed non-search overlay owns the focused component. App-level
+    // lifecycle handlers must not consume its keys before pi-tui dispatches
+    // them to that component.
+    if (this.activeScreen.hasOverlayEntries) return undefined
     if (matchesKey(data, 'ctrl+shift+f') || matchesKey(data, 'ctrl+f')) {
       this.startTranscriptSearch()
       return { consume: true }
     }
-    // P1-10: a PLUGIN editor occupying the seat has no fork-Editor
-    // onSubmit — a plain Enter (reserved by the router, so it would
-    // otherwise be consumed before the seat sees it) must submit through
-    // the HOST path (history, notify clear, draft clear, runner event).
-    // Shift+Enter stays with the plugin (its own multiline editing).
+    // P1-10: a PLUGIN editor occupying the seat receives editor-routed input
+    // before plugin keybindings. Enter remains host-owned: forward it through
+    // the hidden host editor so active autocomplete gets its normal confirm /
+    // submit semantics before the resulting draft is synchronized back. The
+    // plugin editor never receives host-owned Enter; Shift+Enter stays with
+    // the plugin (its own multiline editing).
     if (this.seatEditor().handleInput !== undefined
       && matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
-      this.submitDraft(false)
+      this.editorSeatHolder.handleHostFallbackInput(data)
       return { consume: true }
     }
     if (matchesKey(data, 'shift+tab')) {
@@ -1539,46 +1590,70 @@ export class TuiApp {
       this.events.onExit()
       return { consume: true }
     }
-    // M6: non-capturing plugin keybindings, LAST in the ladder (plan
-    // §11.1). The InputRouter is the SINGLE gate: it filters protocol
-    // artifacts, capturing flows (question/approval/viewer/search), the
-    // reserved Host lifecycle keys (a reserved key NEVER reaches a plugin
-    // resolver, even when the host handler above fell through on state —
-    // e.g. Enter with no submit, Ctrl+J with no tasks, Ctrl+Enter without
-    // onQueueSubmit), and plain printable keys (typing always wins). The
-    // plugin receives ONLY the normalized key → SEMANTIC action mapping —
-    // never raw terminal data.
-    if (this.pluginActionFor !== undefined) {
-      const route = this.inputRouter.route(data, this.inputRouterContext(), (key) => {
-        // The router already normalized the input; the runner's resolver
-        // maps the normalized key → semantic action via the keybinding
-        // registry (the plugin never sees raw data).
-        return this.pluginActionForFor(key)
-      })
-      if (route.kind === 'plugin-action') {
-        this.events.onExtensionAction?.(route.action)
+    // M6: the router first determines whether a capturing path owns the key.
+    // A replacement editor gets the first chance for editor-routed input;
+    // only an explicit decline is eligible for a plugin binding. The host
+    // editor keeps the normal last-stage plugin binding behavior.
+    const context = this.inputRouterContext()
+    const replacement = this.seatEditor().handleInput
+    // A generic managed overlay owns the focused component. Do not probe the
+    // seat editor or plugin bindings here; returning undefined lets pi-tui
+    // dispatch the raw key to the overlay component (including reserved keys).
+    if (context.hasOverlay) return undefined
+    const route = this.inputRouter.route(data, context, (key) => this.pluginActionForFor(key))
+    if (route.kind === 'protocol') return undefined
+    if (route.kind === 'consumed') {
+      // A generic overlay is the focused owner. The app listener must not
+      // consume its key before pi-tui dispatches to that component; this also
+      // lets reserved overlay keys (Esc, Ctrl+Enter, etc.) reach the overlay.
+      if (context.hasOverlay) return undefined
+      // With the host editor in the seat, a reserved key that was not
+      // handled by the app ladder must still reach the fork Editor (notably
+      // Enter, whose onSubmit lives on the focused component). A replacement
+      // editor has no host onSubmit, so its reserved fallback remains inert.
+      return replacement === undefined ? undefined : { consume: true }
+    }
+    if (replacement !== undefined && route.kind === 'editor') {
+      if (replacement(data)) return { consume: true }
+      // A declined key is retried against the plugin binding only after the
+      // replacement editor has explicitly handed it back.
+      const retry = this.inputRouter.route(data, { ...context, editorReplacement: false }, (key) => this.pluginActionForFor(key))
+      if (retry.kind === 'plugin-action') {
+        try {
+          this.events.onExtensionAction?.(retry.action)
+          this.recoverKeybinding(retry.key)
+        } catch (error) {
+          this.reportKeybindingError(retry.key, error)
+        }
         return { consume: true }
       }
-      if (route.kind === 'protocol') return undefined
-      if (route.kind === 'consumed') return { consume: true }
-      // 'editor' falls through to the editor — but a PLUGIN editor with
-      // an input channel sees the key FIRST (P1-10): while it occupies
-      // the seat, ordinary typing and navigation must reach it, not the
-      // old host editor. Consumed keys never reach the focused component.
-      const seat = this.seatEditor()
-      if (seat.handleInput !== undefined) {
-        if (seat.handleInput(data)) return { consume: true }
-        // P1-10: the plugin editor DECLINED the key. Enter submission is
-        // host-owned (a plugin editor never re-implements it): route a
-        // plain Enter through the SAME host submit path the fork Editor's
-        // onSubmit uses — history, notify clear, draft clear, then the
-        // runner's submit event. (Newline/Shift+Enter stay declined so
-        // the plugin can implement its own multiline editing.)
-        if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
-          this.submitDraft(false)
-          return { consume: true }
-        }
+      if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+        this.submitDraft(false)
+        return { consume: true }
       }
+      // ExtensionEditor's false result follows the public contract: let the
+      // vendored host editor process the key at the replacement's current
+      // text/cursor, then copy the result back into the visible seat. The
+      // replacement remains the owner of the draft; the host is only the
+      // editing-semantics fallback for this one declined event.
+      this.editorSeatHolder.handleHostFallbackInput(data)
+      return { consume: true }
+    }
+    if (route.kind === 'editor' && replacement === undefined) {
+      // Keep the host editor in the normal route when no replacement owns the
+      // seat. This explicit branch also makes the optional plugin resolver
+      // independent from ordinary host editing.
+      this.editor.handleInput(data)
+      return { consume: true }
+    }
+    if (route.kind === 'plugin-action') {
+      try {
+        this.events.onExtensionAction?.(route.action)
+          this.recoverKeybinding(route.key)
+      } catch (error) {
+        this.reportKeybindingError(route.key, error)
+      }
+      return { consume: true }
     }
     return undefined
   }
@@ -1595,6 +1670,7 @@ export class TuiApp {
       editorText: this.seatEditor().getText(),
       externalEditorInFlight: this.externalEditorInFlight,
       editorReceivesText: true,
+      editorReplacement: this.seatEditor().handleInput !== undefined,
       // P1-06: the focused EDITOR owns its keys. The fork dispatches to
       // app-level listeners BEFORE the focused component, so the router
       // must ask the seat editor directly whether it would consume this
@@ -2278,7 +2354,11 @@ export class TuiApp {
       this.draftBeforeViewer = text
       return
     }
-    this.editor.setText(text)
+    // M9: every public draft mutation targets the visible seat occupant, not
+    // the hidden host editor left behind by an editor handoff.
+    this.seatEditor().setText(text)
+    this.editorSeatHolder.notifyChanged()
+    this.requestRender()
   }
 
   /**
@@ -2368,21 +2448,21 @@ export class TuiApp {
   /** M7: a renderer failure sink (the runner wires the extension
    * service's health ledger — round-1 finding 3: failures must be
    * observable, never swallowed). Optional. */
-  private rendererError: ((record: { id: string; error: unknown }) => void) | undefined
+  private rendererError: ((record: { id: string; error: unknown; slot?: 'message' | 'tool' }) => void) | undefined
 
   /** M7 (P1-08): a renderer RECOVERY sink — called when a renderer that
    * previously failed renders successfully again, so its health record
    * clears (the next failure starts a NEW error generation). */
-  private rendererRecovered: ((id: string) => void) | undefined
+  private rendererRecovered: ((record: { id: string; slot?: 'message' | 'tool' }) => void) | undefined
 
   /** M7: wire the renderer-failure sink (the runner calls this with the
    * extension service's health recording). */
-  setRendererErrorSink(sink: (record: { id: string; error: unknown }) => void): void {
+  setRendererErrorSink(sink: (record: { id: string; error: unknown; slot?: 'message' | 'tool' }) => void): void {
     this.rendererError = sink
   }
 
   /** M7 (P1-08): wire the renderer-recovery sink. */
-  setRendererRecoveredSink(sink: (id: string) => void): void {
+  setRendererRecoveredSink(sink: (record: { id: string; slot?: 'message' | 'tool' }) => void): void {
     this.rendererRecovered = sink
   }
 
@@ -2510,9 +2590,50 @@ export class TuiApp {
         }
         return offset + cursor.col
       },
-      // The fork editor has no public cursor setter: the seat's cursor
-      // transfer is a no-op for the host default (plugin editors carry
-      // their own setCursor).
+      setCursor: (offset) => {
+        const text = editor.getText()
+        const lines = text.split('\n')
+        let remaining = Math.max(0, Math.min(offset, text.length))
+        for (let line = 0; line < lines.length; line++) {
+          const length = lines[line]?.length ?? 0
+          if (remaining <= length) {
+            editor.setCursor?.({ line, col: remaining })
+            return
+          }
+          remaining -= length + 1
+        }
+        const line = Math.max(0, lines.length - 1)
+        editor.setCursor?.({ line, col: lines[line]?.length ?? 0 })
+      },
+      setTextAndCursor: (text, offset) => {
+        // Editor.setTextAndCursor normalizes CRLF/CR and expands tabs before
+        // clamping the cursor. Convert the flat replacement offset against
+        // that same stored representation, otherwise a tab/newline before
+        // the cursor would shift the host position by a different amount.
+        const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ')
+        const lines = normalized.split('\n')
+        let remaining = Math.max(0, Math.min(offset, text.length))
+        const rawPrefix = text.slice(0, remaining)
+        remaining = rawPrefix.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ').length
+        let line = 0
+        for (; line < lines.length; line++) {
+          const length = lines[line]?.length ?? 0
+          if (remaining <= length) break
+          remaining -= length + 1
+        }
+        const targetLine = Math.min(line, Math.max(0, lines.length - 1))
+        editor.setTextAndCursor(normalized, { line: targetLine, col: remaining })
+      },
+      handleInput: (data) => editor.handleInput(data),
+      runWithoutChange: <T>(task: () => T): T => {
+        const onChange = editor.onChange
+        editor.onChange = undefined
+        try {
+          return task()
+        } finally {
+          editor.onChange = onChange
+        }
+      },
       get focused() { return editor.focused },
       borderColor: (text) => editor.borderColor(text),
       invalidate: () => editor.invalidate(),
@@ -2940,20 +3061,32 @@ export class TuiApp {
       // The tool snapshot's expanded state follows the fold boundary +
       // click override (the host's own card does the same).
       const tool = { ...snapshot.tool, expanded: snapshot.turn >= boundary || this.expandedOverride.get(message) === true }
-      const rendered = registry.renderTool(tool, (id, error) => this.rendererError?.({ id, error }))
+      const compiled = new Map<string, Component>()
+      const rendered = registry.renderTool(tool, (id, error) => this.rendererError?.({ id, error, slot: 'tool' }), (id, view) => {
+        const component = this.compileExtensionViewIsolated(view, id, 'tool')
+        if (component === undefined) return false
+        compiled.set(id, component)
+        return true
+      })
       if (rendered === undefined) return undefined
-      const component = this.compileExtensionViewIsolated(rendered.view, rendered.rendererId)
+      const component = compiled.get(rendered.rendererId) ?? this.compileExtensionViewIsolated(rendered.view, rendered.rendererId, 'tool')
       if (component === undefined) return undefined
       // P1-08: a SUCCESSFUL render clears the renderer's failure record.
-      this.rendererRecovered?.(rendered.rendererId)
+      this.rendererRecovered?.({ id: rendered.rendererId, slot: 'tool' })
       return { component, rendererId: rendered.rendererId }
     }
-    const rendered = registry.renderMessage(snapshot, (id, error) => this.rendererError?.({ id, error }))
+    const compiled = new Map<string, Component>()
+    const rendered = registry.renderMessage(snapshot, (id, error) => this.rendererError?.({ id, error, slot: 'message' }), (id, view) => {
+      const component = this.compileExtensionViewIsolated(view, id, 'message')
+      if (component === undefined) return false
+      compiled.set(id, component)
+      return true
+    })
     if (rendered === undefined) return undefined
-    const component = this.compileExtensionViewIsolated(rendered.view, rendered.rendererId)
+    const component = compiled.get(rendered.rendererId) ?? this.compileExtensionViewIsolated(rendered.view, rendered.rendererId, 'message')
     if (component === undefined) return undefined
     // P1-08: a SUCCESSFUL render clears the renderer's failure record.
-    this.rendererRecovered?.(rendered.rendererId)
+    this.rendererRecovered?.({ id: rendered.rendererId, slot: 'message' })
     return { component, rendererId: rendered.rendererId }
   }
 
@@ -2966,11 +3099,11 @@ export class TuiApp {
    * render throw, never escape into the render path. The failure is
    * recorded through the same bounded health sink.
    */
-  private compileExtensionViewIsolated(view: ExtensionView, rendererId: string): Component | undefined {
+  private compileExtensionViewIsolated(view: ExtensionView, rendererId: string, slot?: 'message' | 'tool'): Component | undefined {
     try {
       return compileView(view).component
     } catch (error) {
-      this.rendererError?.({ id: rendererId, error })
+      this.rendererError?.({ id: rendererId, error, slot })
       return undefined
     }
   }

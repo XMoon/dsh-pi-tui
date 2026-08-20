@@ -20,7 +20,12 @@ export class ExtensionHealth {
 
   /** Register a contribution's health slot. */
   track(slot: string, id: string, owner: string): void {
-    this.records.set(healthKey(slot, id), {
+    const key = healthKey(slot, id)
+    // Tracking is idempotent for the same live contribution. A repeated
+    // bridge call must not erase an already-recorded failure or replace the
+    // owner metadata with a stale callback.
+    if (this.records.has(key)) return
+    this.records.set(key, {
       id,
       owner,
       extensionPoint: slot,

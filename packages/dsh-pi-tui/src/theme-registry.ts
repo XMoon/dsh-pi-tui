@@ -116,6 +116,11 @@ export class ThemeRegistry {
       .sort((left, right) => left.localeCompare(right))
   }
 
+  /** The contribution id for one selectable name, or undefined. */
+  idFor(name: string): string | undefined {
+    return this.byName(name)?.id
+  }
+
   /** The palette for one name, or undefined. */
   paletteFor(name: string): ColorPalette | undefined {
     return this.byName(name)?.palette
