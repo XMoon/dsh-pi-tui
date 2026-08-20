@@ -1520,7 +1520,7 @@ export function apply(ctx: Context, config: Config): void {
           confirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean>
           input(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined>
           notify(message: string, options?: import('./extension/advanced-types.ts').AdvancedNotifyOptions): void
-          custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions): Promise<unknown>
+          custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
         },
       ): void
       setAdvancedHostSeam(surfaceId: string, state: import('./extension/advanced-types.ts').AdvancedHostState): void
@@ -2463,6 +2463,21 @@ export function apply(ctx: Context, config: Config): void {
       onExtensionRecovered: ({ slot, id }) => {
         try { extensionService?._clearRegistryError(slot, id) } catch {}
       },
+      // Phase 4: the advanced host-state setTheme for a NON-built-in name
+      // (a registered plugin theme). The runner resolves the palette
+      // through the theme registry; unknown names are a no-op; a throwing
+      // palette is recorded in the theme health slot.
+      onAdvancedSetTheme: (name) => {
+        const palette = extensionService?.themes.paletteFor(name)
+        if (palette === undefined) return
+        try {
+          app.applyPalette(palette)
+          extensionService?._clearRegistryError('theme', name)
+        } catch (error) {
+          extensionService?._recordRegistryError('theme', name, error)
+          app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+        }
+      },
       openExternalEditor: async (draft) => {
         // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
         // parse with a real shell-word parser, never a plain split.
@@ -2753,30 +2768,17 @@ export function apply(ctx: Context, config: Config): void {
       // Phase 4: the ADVANCED imperative UI seam (plan §4A/§4B) — the
       // broker reuses the host's own picker/question/notify infrastructure.
       extensionService.setAdvancedUiSeam(extensionHost.surfaceId, app.advancedUiBroker())
-      // Phase 4: the ADVANCED host-state seam (plan §4D). setTheme for a
-      // NON-built-in name resolves the palette through the theme registry
-      // (a registered plugin theme); unknown names are a no-op.
+      // Phase 4: the ADVANCED host-state seam (plan §4D). The seam
+      // DELEGATES to the app's host-state facade (single source of
+      // truth); the app fires onAdvancedSetTheme for non-built-in theme
+      // names and THIS handler resolves the palette through the theme
+      // registry (a registered plugin theme; unknown names are a no-op).
       extensionService.setAdvancedHostSeam(extensionHost.surfaceId, {
         getTheme: () => app.advancedHostState().getTheme(),
-        setTheme: (name) => {
-          if (name === 'dark' || name === 'light') {
-            app.applyTheme(name)
-            return
-          }
-          const palette = extensionService?.themes.paletteFor(name)
-          if (palette !== undefined) {
-            try {
-              app.applyPalette(palette)
-              extensionService?._clearRegistryError('theme', name)
-            } catch (error) {
-              extensionService?._recordRegistryError('theme', name, error)
-              app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
-            }
-          }
-        },
-        setTitle: (title) => app.setSessionTitle(title),
+        setTheme: (name) => app.advancedHostState().setTheme(name),
+        setTitle: (title) => app.advancedHostState().setTitle(title),
         setWorkingMessage: (message) => app.advancedHostState().setWorkingMessage(message),
-        setToolsExpanded: (expanded) => app.setToolOutputExpanded(expanded),
+        setToolsExpanded: (expanded) => app.advancedHostState().setToolsExpanded(expanded),
       })
       // Phase 3: the UNSTABLE low-level surface seam (plan §10) — the
       // selected host surface capabilities for low-level plugins (never

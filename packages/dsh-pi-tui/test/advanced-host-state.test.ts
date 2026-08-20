@@ -67,6 +67,34 @@ test('host state: setToolsExpanded toggles the expansion master switch', async (
   app.stop()
 })
 
+test('host state: setTheme fires the runner handler for non-built-in names; dark/light apply directly', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const requested: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The runner's handler (round-1 finding 2: the event must be wired —
+    // it resolves plugin palettes; unknown names are a no-op).
+    onAdvancedSetTheme: (name) => { requested.push(name) },
+  })
+  app.start()
+  await vt.waitForRender()
+  const host = app.advancedHostStateForTest()
+  // A registered plugin theme name rides the event (the runner resolves).
+  host.setTheme('plugin-theme')
+  assert.deepEqual(requested, ['plugin-theme'])
+  // An unknown name also rides the event (the runner no-ops).
+  host.setTheme('unknown-theme')
+  assert.deepEqual(requested, ['plugin-theme', 'unknown-theme'])
+  // Built-in names apply directly and never fire the event.
+  host.setTheme('light')
+  assert.equal(host.getTheme(), 'light')
+  assert.deepEqual(requested, ['plugin-theme', 'unknown-theme'], 'built-in themes never fire the event')
+  app.stop()
+})
+
 test('host state: a disposed surface is inert', async () => {
   const { app } = await appWithHostState()
   const host = app.advancedHostStateForTest()

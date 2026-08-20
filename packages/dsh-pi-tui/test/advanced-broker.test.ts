@@ -164,6 +164,26 @@ test('custom: a throwing factory is isolated (resolves undefined, host keeps wor
   app.stop()
 })
 
+test('custom: an abort signal settles the promise and closes the surface (round-1 finding)', async () => {
+  const { vt, app } = await appWithBroker()
+  const broker = app.advancedUiBroker()
+  const controller = new AbortController()
+  const promise = broker.custom(() => ({
+    render: () => ({ kind: 'text', spans: [{ text: 'abortable' }] }),
+  }), {}, controller.signal)
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('abortable'), `custom surface missing:\n${view}`)
+  controller.abort()
+  assert.equal(await promise, undefined, 'the abort settles the promise')
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('abortable'), 'the abort closed the surface')
+  assert.equal(app.ownedAdvancedOverlayLeasesForTest(), 0)
+  app.stop()
+})
+
 test('the surface dispose settles every still-open broker promise', async () => {
   const { vt, app } = await appWithBroker()
   const broker = app.advancedUiBroker()

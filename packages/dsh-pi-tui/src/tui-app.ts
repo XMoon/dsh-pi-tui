@@ -3247,7 +3247,7 @@ export class TuiApp {
     confirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean>
     input(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined>
     notify(message: string, options?: import('./extension/advanced-types.ts').AdvancedNotifyOptions): void
-    custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions): Promise<unknown>
+    custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
   } {
     const app = this
     return {
@@ -3258,7 +3258,7 @@ export class TuiApp {
         if (app.disposed) return
         app.notify(message, options?.type ?? 'info')
       },
-      custom: (factory, options) => app.advancedCustom(factory, options),
+      custom: (factory, options, signal) => app.advancedCustom(factory, options, signal),
     }
   }
 
@@ -3327,11 +3327,15 @@ export class TuiApp {
   private advancedCustom(
     factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent,
     options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (this.disposed) return Promise.resolve(undefined)
     const app = this
     return new Promise<unknown>((resolve) => {
       let settled = false
+      // Declared BEFORE the factory call: a factory that synchronously
+      // calls host.done()/close() must not hit a TDZ reference.
+      let lease: import('./extension/advanced-types.ts').AdvancedOverlayLease | undefined
       // The zero-arg settle registered in pendingBrokerSettles (the
       // surface-dispose path) — the set holds `() => void` entries.
       const brokerSettle = (): void => settle(undefined)
@@ -3339,8 +3343,19 @@ export class TuiApp {
         if (settled) return
         settled = true
         this.pendingBrokerSettles.delete(brokerSettle)
-        lease.close()
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+        lease?.close()
         resolve(result)
+      }
+      // The fiber-cancellation path (round-1 finding): owner unload aborts
+      // the signal — the promise settles undefined and the surface closes.
+      const onAbort = (): void => settle(undefined)
+      if (signal !== undefined) {
+        if (signal.aborted) {
+          resolve(undefined)
+          return
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
       }
       const host: import('./extension/advanced-types.ts').AdvancedCustomHost = {
         surfaceId: this.extensionHost?.surfaceId ?? 'tui',
@@ -3358,7 +3373,7 @@ export class TuiApp {
         resolve(undefined)
         return
       }
-      const lease = this.showAdvancedInteractiveOverlay(component, options)
+      lease = this.showAdvancedInteractiveOverlay(component, options)
       // The surface's dispose settles the promise (the overlay dies with
       // the surface).
       this.pendingBrokerSettles.add(brokerSettle)
@@ -4959,26 +4974,32 @@ export class TuiApp {
       },
     )
     const handle = this.showOverlayOnHost(new Frame(list), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
-    list.onSelect = (item) => {
-      handle.hide()
-      onSelect(item.value)
-    }
-    list.onCancel = () => {
-      handle.hide()
-      onCancel()
-    }
     // Phase 4: an abort signal closes the picker and fires onCancel (the
-    // imperative select broker's fiber-cancellation path).
+    // imperative select broker's fiber-cancellation path). The listener
+    // is removed on a normal select/cancel so a late abort can never
+    // touch a closed picker (round-1 finding 4).
+    let onAbort: (() => void) | undefined
     if (options.signal !== undefined) {
-      const onAbort = (): void => {
+      onAbort = (): void => {
         handle.hide()
         onCancel()
       }
       if (options.signal.aborted) {
         onAbort()
+        onAbort = undefined
       } else {
         options.signal.addEventListener('abort', onAbort, { once: true })
       }
+    }
+    list.onSelect = (item) => {
+      if (onAbort !== undefined && options.signal !== undefined) options.signal.removeEventListener('abort', onAbort)
+      handle.hide()
+      onSelect(item.value)
+    }
+    list.onCancel = () => {
+      if (onAbort !== undefined && options.signal !== undefined) options.signal.removeEventListener('abort', onAbort)
+      handle.hide()
+      onCancel()
     }
     return {
       close: () => handle.hide(),

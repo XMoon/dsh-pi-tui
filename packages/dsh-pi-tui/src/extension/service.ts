@@ -388,7 +388,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     confirm(options: AdvancedConfirmOptions): Promise<boolean>
     input(options: AdvancedInputOptions): Promise<string | undefined>
     notify(message: string, options?: AdvancedNotifyOptions): void
-    custom(factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions): Promise<unknown>
+    custom(factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
   } | undefined
   /** Phase 4: the ADVANCED host-state seam (wired by the runner; the host
    * owns theme/title/working/tools-expanded state). SURFACE-scoped. */
@@ -1371,8 +1371,8 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
    * Custom interactive UI (plan §4B). The factory receives ONLY the public
    * host facade; the promise resolves with the result reported through
    * done(), or undefined on close/cancel. Caller-fiber-owned: owner
-   * unload closes the surface and settles the promise (the underlying
-   * overlay lease is fiber-owned).
+   * unload aborts the prompt (the promise settles undefined and the
+   * surface closes) — the fiber signal rides into the seam.
    */
   _advancedUiCustom(
     factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent,
@@ -1380,7 +1380,16 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   ): Promise<unknown> {
     const seam = this.advancedUiSeam
     if (seam === undefined) return Promise.resolve(undefined)
-    return seam.custom(factory, options)
+    const caller = this.ctx
+    const controller = new AbortController()
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => () => controller.abort(), 'piTuiExtensions.advanced.ui.custom()')
+    } catch (error) {
+      controller.abort()
+      throw error
+    }
+    return seam.custom(factory, options, controller.signal).finally(() => effectDispose())
   }
 
   /** The Phase-4 host-state facade (plan §4D), or an inert object when no
@@ -1398,7 +1407,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       confirm(options: AdvancedConfirmOptions): Promise<boolean>
       input(options: AdvancedInputOptions): Promise<string | undefined>
       notify(message: string, options?: AdvancedNotifyOptions): void
-      custom(factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions): Promise<unknown>
+      custom(factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
     },
   ): void {
     this.advancedUiSeam = { surfaceId, ...ui }
