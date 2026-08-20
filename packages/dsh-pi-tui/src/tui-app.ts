@@ -2997,7 +2997,11 @@ export class TuiApp {
    *   chunk and run the release).
    */
   private unstableFailSafe(data: string): boolean {
-    if (!matchesKey(data, 'escape')) return false
+    // Only a PRESS counts: Kitty CSI-u release/repeat events
+    // (`\x1b[27;1:3u` / `\x1b[27;1:2u`) match matchesKey('escape') but
+    // must never increment the fail-safe tracker (round-2 finding — a
+    // release/repeat would otherwise make the third press fire early).
+    if (isKeyRelease(data) || isKeyRepeat(data) || !matchesKey(data, 'escape')) return false
     const revision = this.unstableInputsRevision?.() ?? 0
     const now = Date.now()
     this.unstableEscPresses = this.unstableEscPresses.filter(press =>

@@ -150,6 +150,29 @@ test('emergency fail-safe: not armed while no capture is live (ordinary Esc beha
   app.stop()
 })
 
+test('emergency fail-safe: CSI-u Esc release/repeat events never count as presses (round-2 finding)', async () => {
+  const { vt, app, registry } = await appWithUnstableRoute()
+  const capture = rawCapture('c', () => true)
+  registry.register(capture.spec, 'owner')
+  // Two real Esc presses.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  // A CSI-u Esc RELEASE and REPEAT arrive (Kitty flag-2 encodings): they
+  // match matchesKey('escape') but must NOT count toward the triple.
+  vt.sendInput('\x1b[27;1:3u')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[27;1:2u')
+  await vt.waitForRender()
+  assert.equal(registry.hasAny(), true, 'release/repeat events did not trigger the fail-safe')
+  // One more real press completes the triple (2 presses + 1 press).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(registry.hasAny(), false, 'three real presses trigger the fail-safe')
+  app.stop()
+})
+
 test('emergency fail-safe: stale Esc presses from a released capture session never count (round-1 finding)', async () => {
   const { vt, app, registry } = await appWithUnstableRoute()
   const capture = rawCapture('c', () => true)
