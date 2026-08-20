@@ -47,6 +47,20 @@ test('select: resolves with the picked value; Esc cancels to undefined', async (
   app.stop()
 })
 
+test('select: an already-aborted signal resolves undefined without a TDZ crash (round-6 finding)', async () => {
+  const { app } = await appWithBroker()
+  const broker = app.advancedUiBroker()
+  const controller = new AbortController()
+  controller.abort()
+  const promise = broker.select({
+    items: [{ value: 'a', label: 'Alpha' }],
+    signal: controller.signal,
+  })
+  assert.equal(await promise, undefined, 'an already-aborted select resolves undefined')
+  assert.equal(app.pendingBrokerSettlesForTest(), 0, 'no pending settle after the synchronous abort')
+  app.stop()
+})
+
 test('select: an abort signal resolves undefined and closes the picker', async () => {
   const { vt, app } = await appWithBroker()
   const broker = app.advancedUiBroker()
@@ -158,10 +172,12 @@ test('custom: a throwing factory is isolated (resolves undefined, host keeps wor
     throw new Error('factory boom')
   }, {}, controller.signal)
   assert.equal(await promise, undefined)
-  // The throw path must have removed the abort listener (round-4/5
-  // finding): aborting the signal afterwards must not fire any settle
-  // (the promise already resolved; a dangling listener would be a
-  // retained closure).
+  // NOTE (round-5/6): a dangling abort listener on the throw path is NOT
+  // observable through this hook — the throw path resolves before
+  // pendingBrokerSettles.add, so the set is always empty here, and a
+  // retained listener would only fire a no-op settle (settled is already
+  // true). The assertion below is a smoke check; the listener removal
+  // itself is verified by code inspection (the catch block drops it).
   controller.abort()
   await vt.waitForRender()
   assert.equal(app.pendingBrokerSettlesForTest(), 0, 'the throw path left no pending settle')

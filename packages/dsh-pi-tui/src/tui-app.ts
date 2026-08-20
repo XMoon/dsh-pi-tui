@@ -3272,6 +3272,11 @@ export class TuiApp {
     if (this.disposed) return Promise.resolve(undefined)
     return new Promise<string | undefined>((resolve) => {
       let settled = false
+      // Declared BEFORE settle: an already-aborted signal fires onCancel
+      // SYNCHRONOUSLY inside openPicker, so settle must not hit a TDZ
+      // reference to handle (round-6 finding — the promise would reject
+      // with a ReferenceError instead of resolving undefined).
+      let handle: PickerHandle | undefined
       // The zero-arg settle registered in pendingBrokerSettles (the
       // surface-dispose path) — removed on a normal select/cancel/abort
       // (round-2 finding: an anonymous entry would retain the closed
@@ -3285,11 +3290,12 @@ export class TuiApp {
         this.pendingBrokerSettles.delete(brokerSettle)
         // Round-5 asymmetry: a settled promise must not retain the
         // picker's abort listener on the caller's signal (the dispose
-        // path routes through settle too).
-        handle._removeAbortListener?.()
+        // path routes through settle too). Optional-chained: the
+        // already-aborted path never registered a listener.
+        handle?._removeAbortListener?.()
         resolve(value)
       }
-      const handle = this.openPicker(
+      handle = this.openPicker(
         options.items.map(item => ({ ...item })),
         (value) => settle(value),
         () => settle(undefined),
