@@ -247,6 +247,10 @@ export interface TuiCommandRunner {
     readonly editors: import('./editor-registry.ts').EditorRegistry
     /** The live extension API info (capabilities + deprecations — M11). */
     readonly api: (() => import('./extension/public-types.ts').PiTuiApiInfo) | undefined
+    /** P1-08: the live contribution-health snapshot (failed/shadowed
+     * states + lastError across EVERY registry incl. renderers/editors).
+     * Undefined without the extension service. */
+    readonly health: (() => readonly import('./extension/public-types.ts').ContributionHealth[]) | undefined
   } | undefined
 }
 
@@ -267,6 +271,10 @@ export function extensionHealthRows(runner: TuiCommandRunner): { id: string; lab
   const rows: { id: string; label: string; description: string; currentValue: string }[] = []
   const health = extensions.commands.snapshot()
   const commandCount = health.entries.length
+  // P1-08: the LIVE contribution-health snapshot (failed/shadowed states
+  // + lastError) — the M11 health requirement is a real observable
+  // surface, not registry counts only.
+  const healthRecords = extensions.health?.() ?? []
   const themeCount = extensions.themes.snapshot().themes.length
   const settingCount = extensions.settings.snapshot().rows.length
   const autocompleteCount = extensions.autocomplete.snapshot().providers.length
@@ -310,6 +318,21 @@ export function extensionHealthRows(runner: TuiCommandRunner): { id: string; lab
     label: color.textDim('Registries'),
     description: 'Live registries with contributions (diagnostic, not capabilities)',
     currentValue: color.textDim(registryTypes.length === 0 ? 'none' : registryTypes.join(' · ')),
+  })
+  // P1-08: the live health row — failed/shadowed contributions with their
+  // last error, across EVERY registry (incl. transcript renderers). A
+  // healthy surface shows 'all active'; failures are surfaced verbatim
+  // (single-line, bounded — the ledger's error policy).
+  const failed = healthRecords.filter(record => record.state !== 'active')
+  rows.push({
+    id: 'ext-health',
+    label: color.textDim('Health'),
+    description: 'Live contribution states (failed/shadowed + last error; recovery clears)',
+    currentValue: failed.length === 0
+      ? color.textDim('all active')
+      : failed.map(record =>
+          `${record.extensionPoint}:${record.id} ${record.state}${record.lastError === undefined ? '' : ` — ${record.lastError}`}`,
+        ).join(' · '),
   })
   return rows
 }

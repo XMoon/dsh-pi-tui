@@ -65,6 +65,14 @@ export interface InputRouterContext {
   /** Whether the editor should see plain text (true normally; false while
    * a capturing flow hides it). */
   readonly editorReceivesText: boolean
+  /** P1-06: whether the FOCUSED component would consume this raw input.
+   * The app-level listener runs BEFORE the focused component sees input
+   * (the fork dispatches to listeners first, then the focused component),
+   * so the router must ask the editor directly — a plugin binding can
+   * only claim keys the focused editor DECLINES. Undefined = no editor
+   * probe (default: the plugin binding wins, matching pre-P1-06
+   * behavior for surfaces without a seat editor). */
+  readonly editorAccepts?: (data: string) => boolean
 }
 
 /** The outcome of one input event. */
@@ -162,9 +170,20 @@ export class InputRouter {
     // AND the editor is not about to receive a plain keystroke that must
     // win (a plugin binding for a plain printable key would otherwise
     // swallow typing — the editor's own text input has priority).
+    // P1-06: the FOCUSED EDITOR is asked FIRST — the app-level listener
+    // runs before the focused component receives input, so a plugin
+    // binding may only claim a key the focused editor DECLINES (arrows,
+    // Tab, multiline cursor movement all belong to the editor while it is
+    // focused). The documented "non-capturing, after the editor"
+    // precedence is now actual: the editor keeps every key it handles.
     if (normalized !== undefined && !ctx.hasOverlay) {
       const action = pluginActionFor(normalized)
       if (action !== undefined && !isPrintableKey(normalized)) {
+        if (ctx.editorAccepts !== undefined && ctx.editorAccepts(data)) {
+          // The focused editor owns this key (e.g. ↑/↓/Tab while the
+          // editor is focused): the plugin binding is NOT consulted.
+          return { kind: 'editor' }
+        }
         return { kind: 'plugin-action', action }
       }
     }

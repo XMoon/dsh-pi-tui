@@ -27,6 +27,7 @@ import {
   TuiAltScreen,
   TuiMainScreen,
   VStack,
+  getKeybindings,
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
@@ -1127,6 +1128,11 @@ export class TuiApp {
       // editor is empty; the editor mutates without going through
       // setStatus, so keep the badge truthful while tasks are active.
       if (this.tasksActive) this.renderFooter()
+      // P1-11: every HOST-driven editor mutation notifies the seat
+      // holder's subscribers (the fork Editor's own typing/editing flows
+      // through onChange — the plugin subscription protocol must observe
+      // host-driven draft/cursor changes).
+      this.editorSeatHolder.notifyChanged()
     }
     // M9: the editor seat holder — the atomic handoff + current occupant.
     // The host default editor is the adapter source; a plugin editor
@@ -1167,6 +1173,7 @@ export class TuiApp {
           case 'steer': {
             const text = this.seatEditor().getText()
             this.seatEditor().setText('')
+            this.editorSeatHolder.notifyChanged()
             this.events.onSteer?.(text)
             return true
           }
@@ -1320,6 +1327,11 @@ export class TuiApp {
     // Detach the extension surface host: its subscriptions and capability
     // set die with the surface (M2 stale-generation contract).
     this.extensionHost?.dispose()
+    // P1-12: the editor seat holder's FINAL disposal — every host
+    // capability a plugin editor captured (replaceText, dispatch,
+    // subscribe, invalidate) becomes inert; a late plugin callback can no
+    // longer mutate the seat or dispatch a real submission.
+    this.editorSeatHolder.dispose()
   }
 
   /** The surface generation (M0): stable across start/stop/fullscreen/
@@ -1401,6 +1413,16 @@ export class TuiApp {
       this.startTranscriptSearch()
       return { consume: true }
     }
+    // P1-10: a PLUGIN editor occupying the seat has no fork-Editor
+    // onSubmit — a plain Enter (reserved by the router, so it would
+    // otherwise be consumed before the seat sees it) must submit through
+    // the HOST path (history, notify clear, draft clear, runner event).
+    // Shift+Enter stays with the plugin (its own multiline editing).
+    if (this.seatEditor().handleInput !== undefined
+      && matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+      this.submitDraft(false)
+      return { consume: true }
+    }
     if (matchesKey(data, 'shift+tab')) {
       // Cycle the permission preset; overlays keep Shift+Tab for themselves.
       if (this.activeScreen.hasOverlayEntries) return undefined
@@ -1432,6 +1454,7 @@ export class TuiApp {
       this.rememberInput(text)
       this.clearNotify()
       this.seatEditor().setText('')
+      this.editorSeatHolder.notifyChanged()
       this.events.onQueueSubmit(text)
       return { consume: true }
     }
@@ -1473,6 +1496,7 @@ export class TuiApp {
       if (this.activeScreen.hasOverlayEntries) return { consume: true }
       const draft = this.seatEditor().getText()
       this.seatEditor().setText('')
+      this.editorSeatHolder.notifyChanged()
       this.events.onSteer?.(draft)
       return { consume: true }
     }
@@ -1537,7 +1561,24 @@ export class TuiApp {
       }
       if (route.kind === 'protocol') return undefined
       if (route.kind === 'consumed') return { consume: true }
-      // 'editor' falls through to the editor.
+      // 'editor' falls through to the editor — but a PLUGIN editor with
+      // an input channel sees the key FIRST (P1-10): while it occupies
+      // the seat, ordinary typing and navigation must reach it, not the
+      // old host editor. Consumed keys never reach the focused component.
+      const seat = this.seatEditor()
+      if (seat.handleInput !== undefined) {
+        if (seat.handleInput(data)) return { consume: true }
+        // P1-10: the plugin editor DECLINED the key. Enter submission is
+        // host-owned (a plugin editor never re-implements it): route a
+        // plain Enter through the SAME host submit path the fork Editor's
+        // onSubmit uses — history, notify clear, draft clear, then the
+        // runner's submit event. (Newline/Shift+Enter stay declined so
+        // the plugin can implement its own multiline editing.)
+        if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+          this.submitDraft(false)
+          return { consume: true }
+        }
+      }
     }
     return undefined
   }
@@ -1554,6 +1595,43 @@ export class TuiApp {
       editorText: this.seatEditor().getText(),
       externalEditorInFlight: this.externalEditorInFlight,
       editorReceivesText: true,
+      // P1-06: the focused EDITOR owns its keys. The fork dispatches to
+      // app-level listeners BEFORE the focused component, so the router
+      // must ask the seat editor directly whether it would consume this
+      // input; a plugin binding may only claim a key the editor declines
+      // (arrows/Tab/multiline movement stay with the editor while it is
+      // focused — never stolen by a plugin binding). The probe asks the
+      // fork's GLOBAL keybinding manager whether the raw input matches ANY
+      // editor-owned binding (navigation, editing, submit, tab, select) —
+      // the exact set the focused Editor consumes. It never executes the
+      // editor (no double-handling); a chord the editor has no binding for
+      // (e.g. Ctrl+Alt+X) is NOT editor-owned and may fire a plugin
+      // binding.
+      editorAccepts: (data) => {
+        const focused = this.activeScreen.getFocusedComponent()
+        if (focused === undefined || focused === null) return false
+        if (focused !== this.seatEditor().component) return false
+        // The seat editor is focused: it owns every key its binding set
+        // defines. (The seat editor's component is either the fork Editor
+        // or a plugin editor's compiled view — a plugin editor that wants
+        // its own keys must provide a handleInput component; until then
+        // the host's keybinding set is the conservative ownership rule.)
+        const kb = getKeybindings()
+        return [
+          'tui.editor.cursorUp', 'tui.editor.cursorDown', 'tui.editor.cursorLeft',
+          'tui.editor.cursorRight', 'tui.editor.cursorWordLeft', 'tui.editor.cursorWordRight',
+          'tui.editor.cursorLineStart', 'tui.editor.cursorLineEnd', 'tui.editor.pageUp',
+          'tui.editor.pageDown', 'tui.editor.jumpForward', 'tui.editor.jumpBackward',
+          'tui.editor.historyPrevious', 'tui.editor.historyNext',
+          'tui.editor.deleteCharBackward', 'tui.editor.deleteCharForward',
+          'tui.editor.deleteWordBackward', 'tui.editor.deleteWordForward',
+          'tui.editor.deleteToLineStart', 'tui.editor.deleteToLineEnd',
+          'tui.editor.yank', 'tui.editor.yankPop', 'tui.editor.undo',
+          'tui.input.newLine', 'tui.input.submit', 'tui.input.tab', 'tui.input.copy',
+          'tui.select.up', 'tui.select.down', 'tui.select.pageUp', 'tui.select.pageDown',
+          'tui.select.confirm', 'tui.select.cancel',
+        ].some(binding => kb.matches(data, binding as never))
+      },
     }
   }
 
@@ -1588,6 +1666,13 @@ export class TuiApp {
    * @returns the handle; hide() also forgets the handle.
    */
   private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
+    // P1-09: never mount on a finally-disposed surface (the plugin lease
+    // path guards earlier; this is the last-chance guard for every other
+    // caller — a stopped screen's showOverlay would otherwise revive a
+    // dead surface's overlay stack).
+    if (this.disposed) {
+      return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false }
+    }
     const handle = this.activeScreen.showOverlay(component, options)
     // M8: the stacking graph + suspension rules live in the broker (plan
     // §13 — behavior identical; the existing modal-stacking tests gate
@@ -1639,7 +1724,10 @@ export class TuiApp {
         if (this.disposed) return
         // No redundant editor update when the editor saved the draft
         // unchanged (an update would bump history/undo and repaint).
-        if (next !== '' && next !== draft) this.seatEditor().setText(next)
+        if (next !== '' && next !== draft) {
+          this.seatEditor().setText(next)
+          this.editorSeatHolder.notifyChanged()
+        }
       } finally {
         if (!this.disposed) this.start()
       }
@@ -2213,6 +2301,7 @@ export class TuiApp {
       seat.setText(this.draftBeforeViewer ?? '')
       this.draftBeforeViewer = undefined
       seat.invalidate()
+      this.editorSeatHolder.notifyChanged()
       this.renderHeader()
       this.requestRender()
       this.syncExtensionState()
@@ -2229,6 +2318,7 @@ export class TuiApp {
     seat.borderColor = color.accent
     seat.setText(`viewing subagent: ${mode.label} — read-only · Esc returns`)
     seat.invalidate()
+    this.editorSeatHolder.notifyChanged()
     this.renderHeader()
     this.requestRender()
     this.syncExtensionState()
@@ -2280,10 +2370,20 @@ export class TuiApp {
    * observable, never swallowed). Optional. */
   private rendererError: ((record: { id: string; error: unknown }) => void) | undefined
 
+  /** M7 (P1-08): a renderer RECOVERY sink — called when a renderer that
+   * previously failed renders successfully again, so its health record
+   * clears (the next failure starts a NEW error generation). */
+  private rendererRecovered: ((id: string) => void) | undefined
+
   /** M7: wire the renderer-failure sink (the runner calls this with the
    * extension service's health recording). */
   setRendererErrorSink(sink: (record: { id: string; error: unknown }) => void): void {
     this.rendererError = sink
+  }
+
+  /** M7 (P1-08): wire the renderer-recovery sink. */
+  setRendererRecoveredSink(sink: (id: string) => void): void {
+    this.rendererRecovered = sink
   }
 
   /**
@@ -2299,6 +2399,14 @@ export class TuiApp {
     view: import('./extension/public-types.ts').ExtensionView,
     options: import('./extension/public-types.ts').TuiOverlayOptions = {},
   ): import('./extension/public-types.ts').TuiOverlayHandle {
+    // P1-09: a surface that was FINALLY disposed is inert — a late plugin
+    // call must never mount on the dead app or mint a new lease (the
+    // dispose cleanup already closed every owned lease; a new one would
+    // resurrect a handle after teardown). The inert-lease shape matches
+    // the no-surface-host path below.
+    if (this.disposed) {
+      return { close: () => {}, hide: () => {}, show: () => {} }
+    }
     const mountOptions = this.overlayOptionsOf(options)
     // The lease KEEPS the view + options so a fullscreen screen swap can
     // RE-MOUNT it on the new active screen (round-1 finding 2 — a plugin
@@ -2443,10 +2551,27 @@ export class TuiApp {
    * (the host default editor or the plugin winner's compiled view). The
    * question flow's seat restore uses the same path, so a plugin editor
    * survives a question round-trip.
+   *
+   * P1-06/P1-10: the mount ALSO transfers focus to the new occupant when
+   * the editor seat currently owns input — after a handoff the plugin
+   * editor's component must actually receive keys (typing, arrows), not
+   * leave the old host Editor focused. Focus transfer is skipped while a
+   * capturing flow (question/approval) owns the seat — those flows
+   * restore their own focus.
    */
   private mountSeatChild(): void {
+    const component = this.seatEditor().component
     this.editorSeat.clear()
-    this.editorSeat.addChild(this.seatEditor().component)
+    this.editorSeat.addChild(component)
+    // Focus follows the occupant: if the seat owns input right now (no
+    // question/approval/overlay is capturing), the NEW component must be
+    // the focused component — otherwise every key after a handoff still
+    // targets the old host Editor (P1-06 probe would see the WRONG
+    // focused component and plugin bindings would steal editor keys).
+    if (this.activeQuestions === undefined && this.activeApproval === undefined
+      && !this.activeScreen.hasOverlayEntries) {
+      this.activeScreen.setFocus(component)
+    }
   }
 
   /**
@@ -2817,17 +2942,37 @@ export class TuiApp {
       const tool = { ...snapshot.tool, expanded: snapshot.turn >= boundary || this.expandedOverride.get(message) === true }
       const rendered = registry.renderTool(tool, (id, error) => this.rendererError?.({ id, error }))
       if (rendered === undefined) return undefined
-      return { component: this.compileExtensionView(rendered.view), rendererId: rendered.rendererId }
+      const component = this.compileExtensionViewIsolated(rendered.view, rendered.rendererId)
+      if (component === undefined) return undefined
+      // P1-08: a SUCCESSFUL render clears the renderer's failure record.
+      this.rendererRecovered?.(rendered.rendererId)
+      return { component, rendererId: rendered.rendererId }
     }
     const rendered = registry.renderMessage(snapshot, (id, error) => this.rendererError?.({ id, error }))
     if (rendered === undefined) return undefined
-    return { component: this.compileExtensionView(rendered.view), rendererId: rendered.rendererId }
+    const component = this.compileExtensionViewIsolated(rendered.view, rendered.rendererId)
+    if (component === undefined) return undefined
+    // P1-08: a SUCCESSFUL render clears the renderer's failure record.
+    this.rendererRecovered?.(rendered.rendererId)
+    return { component, rendererId: rendered.rendererId }
   }
 
-  /** M7: compile a plugin ExtensionView into a private component (the
-   * ComponentCompiler's live, width-aware tree). */
-  private compileExtensionView(view: ExtensionView): Component {
-    return compileView(view).component
+  /**
+   * M7 (P1-07): compile a renderer-returned view INSIDE the per-renderer
+   * isolation boundary. `RendererRegistry.render*` catches throws from
+   * `record.render()`, but the returned view's compilation is a separate
+   * hostile surface (a throwing `spans` getter, a broken tree shape) — a
+   * compile failure must ABDICATE to the host card (undefined) like a
+   * render throw, never escape into the render path. The failure is
+   * recorded through the same bounded health sink.
+   */
+  private compileExtensionViewIsolated(view: ExtensionView, rendererId: string): Component | undefined {
+    try {
+      return compileView(view).component
+    } catch (error) {
+      this.rendererError?.({ id: rendererId, error })
+      return undefined
+    }
   }
 
   /**
@@ -3514,6 +3659,7 @@ export class TuiApp {
     }
     // M9: write the CURRENT seat occupant (host default or plugin editor).
     this.seatEditor().setText(text)
+    this.editorSeatHolder.notifyChanged()
     this.requestRender()
   }
 
@@ -3535,14 +3681,22 @@ export class TuiApp {
    *   the busyEnter preference.
    */
   submitDraft(forceQueue = false): void {
+    // P1-12: a finally-disposed surface never submits — a late plugin
+    // callback (or a stale host dispatch) must not produce a real
+    // session-side effect after teardown.
+    if (this.disposed) return
     const text = this.getDraft()
     if (text.trim() === '') return
     this.rememberInput(text)
     this.clearNotify()
     // Clear the draft like a normal Enter submit (the runner's dispatch
     // owns the session/guard path). M9: clear the CURRENT seat occupant.
-    if (this.viewerMode === undefined) this.seatEditor().setText('')
-    else this.draftBeforeViewer = ''
+    if (this.viewerMode === undefined) {
+      this.seatEditor().setText('')
+      this.editorSeatHolder.notifyChanged()
+    } else {
+      this.draftBeforeViewer = ''
+    }
     if (forceQueue) {
       this.events.onQueueSubmit?.(text)
     } else {

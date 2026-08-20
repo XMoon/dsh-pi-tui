@@ -268,6 +268,18 @@ export class ExtensionLedger {
     return this.health.snapshot()
   }
 
+  /** Track a NON-ledger contribution's health slot (P1-08: renderers and
+   * editors live in their own registries, not the ledger — their health
+   * must still be observable via /status). Idempotent per (slot, id). */
+  trackHealth(slot: string, id: string, owner: string): void {
+    this.health.track(slot, id, owner)
+  }
+
+  /** Drop a NON-ledger contribution's health record (registry disposal). */
+  untrackHealth(slot: string, id: string): void {
+    this.health.untrack(slot, id)
+  }
+
   /** Record a contribution failure (render errors in M2+). */
   recordError(slot: string, id: string, message: string): void {
     this.health.recordError(slot, id, message)

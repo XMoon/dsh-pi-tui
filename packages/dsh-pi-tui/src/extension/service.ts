@@ -220,12 +220,16 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
    * releases the LIVE subscription on unload (F1). */
   private readonly listenerUnsubscribers = new Map<(state: SurfaceStateValues) => void, () => void>()
 
-  constructor(ctx: Context, hostVersion: string, requestRender: () => void) {
+  constructor(ctx: Context, hostVersion: string, requestRender: () => void, staticCommandCatalog?: ReadonlySet<string>) {
     super(ctx, PI_TUI_EXTENSIONS_SERVICE)
     this.hostVersion = hostVersion
     this.batcher = new InvalidateBatcher({ requestRender })
     this.ledger = new ExtensionLedger(() => this.batcher.invalidate())
-    this.commands = new CommandBridge(() => this.batcher.invalidate())
+    // P1-04: the authoritative host command catalog (TUI commands +
+    // LOCAL/SESSIONLESS ownership sets) rides into the bridge — a plugin
+    // command can never shadow a built-in. Optional so tests can
+    // construct a catalog-free bridge for dynamic-vs-dynamic rules only.
+    this.commands = new CommandBridge(() => this.batcher.invalidate(), staticCommandCatalog)
     this.themes = new ThemeRegistry(() => this.batcher.invalidate())
     this.autocomplete = new AutocompleteRegistry(() => this.batcher.invalidate())
     this.settings = new SettingsRegistry(() => this.batcher.invalidate())
@@ -638,19 +642,25 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const handle = this.renderers.registerMessageRenderer(contribution, owner)
+    // P1-08: the renderer registry is NOT the ledger — track its health
+    // slot explicitly so /status can observe failed/recovered states.
+    this.ledger.trackHealth('transcript.renderer', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
+        this.ledger.untrackHealth('transcript.renderer', contribution.id)
       }, 'piTuiExtensions.registerMessageRenderer()')
     } catch (error) {
       handle.dispose()
+      this.ledger.untrackHealth('transcript.renderer', contribution.id)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
+        this.ledger.untrackHealth('transcript.renderer', contribution.id)
         dispose()
       },
     }
@@ -664,19 +674,24 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const handle = this.renderers.registerToolRenderer(contribution, owner)
+    // P1-08: track the renderer's health slot (see registerMessageRenderer).
+    this.ledger.trackHealth('transcript.renderer', contribution.id, owner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
+        this.ledger.untrackHealth('transcript.renderer', contribution.id)
       }, 'piTuiExtensions.registerToolRenderer()')
     } catch (error) {
       handle.dispose()
+      this.ledger.untrackHealth('transcript.renderer', contribution.id)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
+        this.ledger.untrackHealth('transcript.renderer', contribution.id)
         dispose()
       },
     }

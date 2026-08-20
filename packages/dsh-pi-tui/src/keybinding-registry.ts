@@ -39,9 +39,11 @@ interface BindingRecord {
  * host's `matchesKey` lifecycle checks in tui-app.ts (Ctrl+C/D exit,
  * Ctrl+S steer-all, Ctrl+F fullscreen, Ctrl+Shift+F search, Ctrl+O
  * expand, Ctrl+T todo panel, Ctrl+G external editor, Ctrl+J task
- * browser, Ctrl+Enter queue, Enter submit, Esc cancel). Every reserved
- * binding here must match a host `matchesKey(data, ...)` call; when a new
- * host lifecycle key lands, extend THIS list in the same commit.
+ * browser, Ctrl+Enter queue, Enter submit, Esc cancel, Shift+Tab
+ * permission cycle, Alt+Up dequeue, Alt+T thinking toggle). Every
+ * reserved binding here must match a host `matchesKey(data, ...)` call;
+ * when a new host lifecycle key lands, extend THIS list in the same
+ * commit.
  */
 export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'c', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+C exit
@@ -56,6 +58,9 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'enter', ctrl: true, alt: false, shift: false, super: false }, // Ctrl+Enter queue
   { key: 'enter', ctrl: false, alt: false, shift: false, super: false }, // Enter submit
   { key: 'escape', ctrl: false, alt: false, shift: false, super: false }, // Esc cancel
+  { key: 'tab', ctrl: false, alt: false, shift: true, super: false },   // Shift+Tab permission cycle
+  { key: 'up', ctrl: false, alt: true, shift: false, super: false },    // Alt+Up dequeue
+  { key: 't', ctrl: false, alt: true, shift: false, super: false },     // Alt+T thinking toggle
 ]
 
 /** Whether a key is reserved by the host lifecycle (the single check the

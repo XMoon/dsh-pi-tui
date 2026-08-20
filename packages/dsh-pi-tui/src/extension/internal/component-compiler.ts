@@ -19,8 +19,8 @@
  * @module @xmoon76/dsh-pi-tui/extension/component-compiler
  */
 
-import { Container, Markdown, Spacer, VStack, type Component } from '@xmoon76/pi-tui'
-import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { Container, HStack, Markdown, Spacer, VStack, type Component } from '@xmoon76/pi-tui'
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { color, markdownTheme } from '../../theme.ts'
 import type { ExtensionView, StyledSpan, TextView } from '../public-types.ts'
 import { renderSpans, sanitizeSpanText } from './slot-outlet.ts'
@@ -159,9 +159,10 @@ function compileSpacer(view: { rows: number }): CompiledNode {
 
 /**
  * A compiled stack. Vertical stacks use the fork's VStack with the public
- * layout hints; horizontal stacks render as sequential rows (the bounded
- * interpretation the plan allows — the host pads rows). Empty children
- * render nothing; an all-empty stack abdicates.
+ * layout hints; horizontal stacks use the fork's HStack (width-aware,
+ * ANSI-safe side-by-side placement honoring the gap — never sequential
+ * rows, the P1-01 layout-contract fix). Empty children render nothing; an
+ * all-empty stack abdicates.
  */
 function compileStack(view: {
   direction: 'vertical' | 'horizontal'
@@ -175,9 +176,10 @@ function compileStack(view: {
   const visible = children.filter(child => !child.isEmpty)
   if (visible.length === 0) return { component: new Container(), isEmpty: true }
   if (view.direction === 'horizontal') {
-    const container = new Container()
-    for (const child of visible) container.addChild(child.component)
-    return { component: container, isEmpty: false }
+    const stack = new HStack(visible.map(child => child.component), {
+      gap: Math.max(0, Math.floor(view.gap ?? 0)),
+    })
+    return { component: stack, isEmpty: false }
   }
   const stack = new VStack(
     visible.map(child => child.component),
@@ -214,14 +216,22 @@ class CompiledFrame implements Component {
 
   render(outerWidth: number): string[] {
     outerWidth = Math.max(1, outerWidth)
-    const contentWidth = Math.max(1, (this.width ?? outerWidth) - 2)
+    // P1-02: the frame's effective width is CLAMPED to the host budget —
+    // a requested width beyond the terminal can never push the frame past
+    // the surface (the public contract: `width` is a content budget, and
+    // the host owns the outer budget).
+    const effective = Math.min(Math.max(1, Math.floor(this.width ?? outerWidth)), outerWidth)
+    const contentWidth = Math.max(1, effective - 2)
     if (this.cachedWidth === contentWidth && this.cached !== undefined) return this.cached
     this.cachedWidth = contentWidth
     const rule = ` ${'─'.repeat(contentWidth)} `
     const border = color.border(rule)
     const lines = [border]
     for (const line of this.child.render(contentWidth)) {
-      lines.push(` ${line}`.padEnd(contentWidth + 2, ' '))
+      // ANSI-safe padding/truncation (P1-02): padEnd on an ANSI-bearing
+      // line misaligns the border; truncateToWidth pads by DISPLAY CELLS
+      // (CJK/emoji exact) and truncates over-wide content to the budget.
+      lines.push(` ${truncateToWidth(line, contentWidth, '', true)} `)
     }
     lines.push(border)
     this.cached = lines

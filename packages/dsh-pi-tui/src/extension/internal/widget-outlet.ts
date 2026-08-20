@@ -54,6 +54,14 @@ export class WidgetOutlet {
   /** The host-owned row budget for this position. */
   private rowBudget = 3
   private textValue = ''
+  /** P2-03: compiled nodes cached by contribution IDENTITY — a refresh
+   * (revision/width/theme change) reuses the SAME compiled tree for an
+   * unchanged contribution instead of recompiling every pass (the
+   * compiler contract promises reference-stable trees; the cache makes
+   * the promise real). Invalidation: the ledger revision bumps on every
+   * register/replace/dispose, so a stale identity key never survives a
+   * contribution change. */
+  private readonly compiledNodes = new Map<string, ReturnType<typeof compileView>>()
 
   constructor(ledger: ExtensionLedger, sink: OutletRenderSink, slot: 'input.widget.above' | 'input.widget.below') {
     this.ledger = ledger
@@ -88,24 +96,34 @@ export class WidgetOutlet {
     this.rowBudget = rowBudget
     const contentWidth = Math.max(1, width)
     // Compile (or reuse) each contribution; a throwing compile is recorded
-    // and the contribution omitted.
+    // and the contribution omitted. P2-03: an unchanged contribution's
+    // compiled tree is REUSED across refreshes (identity-keyed cache) —
+    // the M11 benchmark measures the refresh cost, and the compiler's
+    // reference-stability promise only pays off when the tree survives.
     const entries: WidgetEntry[] = []
     for (const record of snapshot.records) {
       try {
         const widget = record.value
-        const compiled = compileView(widget?.view)
-        if (compiled.isEmpty) {
+        // P2-03: compile once per contribution identity; an EMPTY view is
+        // cached too (abdication is re-derived from the ledger value each
+        // pass — a replace() recompiles through the new record).
+        let node = this.compiledNodes.get(record.id)
+        if (node === undefined) {
+          node = compileView(widget?.view)
+          this.compiledNodes.set(record.id, node)
+        }
+        if (node.isEmpty) {
           this.ledger.clearError(this.slot, record.id)
           continue
         }
         // Render at the CURRENT width so the height is truthful for the
         // budget pass (a width change re-measures; the compiled component
         // stays live and re-wraps).
-        const rows = compiled.component.render(contentWidth).filter(line => visibleWidth(line) > 0 || line !== '')
+        const rows = node.component.render(contentWidth).filter(line => visibleWidth(line) > 0 || line !== '')
         const importance = widget?.importance ?? 0
         const maxHeight = widget?.maxHeight === undefined ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(widget.maxHeight))
         entries.push({
-          component: compiled.component,
+          component: node.component,
           rows,
           height: rows.length,
           importance,
@@ -114,6 +132,14 @@ export class WidgetOutlet {
         this.ledger.clearError(this.slot, record.id)
       } catch (error) {
         this.ledger.recordError(this.slot, record.id, safeMessage(error))
+      }
+    }
+    // P2-03: prune cache entries whose contribution left the ledger (a
+    // removed contribution's compiled tree must not linger).
+    if (this.compiledNodes.size > snapshot.records.length) {
+      const live = new Set(snapshot.records.map(record => record.id))
+      for (const id of [...this.compiledNodes.keys()]) {
+        if (!live.has(id)) this.compiledNodes.delete(id)
       }
     }
     // Host row budget (plan §19): drop whole widgets in ASCENDING

@@ -17,6 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PI_TUI_EXTENSIONS_SERVICE, PiTuiExtensionServiceImpl } from './extension/service.ts'
+import { HOST_COMMAND_CATALOG } from './index.ts'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 
 /** Stable Cordis plugin name for the extension host row. */
@@ -124,5 +125,5 @@ export { describeKey } from './extension/public-types.ts'
  */
 export function apply(ctx: Context): void {
   if (ctx.get(TUI_STARTUP_SERVICE) === undefined) return
-  new PiTuiExtensionServiceImpl(ctx, packageVersion(), () => {})
+  new PiTuiExtensionServiceImpl(ctx, packageVersion(), () => {}, HOST_COMMAND_CATALOG)
 }

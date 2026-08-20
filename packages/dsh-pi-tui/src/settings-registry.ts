@@ -29,6 +29,10 @@ interface SettingRecord {
   readonly order: number
   readonly owner: string
   currentValue: string
+  /** P2-01: the latest APPLY epoch for this row — a slow earlier change
+   * must never overwrite a newer completed one (last-completion-wins
+   * race). */
+  applyEpoch: number
   readonly onChange: ((value: string) => boolean | void | Promise<boolean | void>) | undefined
   disposed: boolean
 }
@@ -66,6 +70,7 @@ export class SettingsRegistry {
       order: contribution.order ?? 0,
       owner,
       currentValue: contribution.currentValue,
+      applyEpoch: 0,
       onChange: contribution.onChange,
       disposed: false,
     })
@@ -113,10 +118,15 @@ export class SettingsRegistry {
   }
 
   /** Apply a value change to one row; returns whether the change was
-   * accepted (the row's onChange may reject). */
+   * accepted (the row's onChange may reject). P2-01: concurrent applies
+   * use latest-only commit — a slow EARLIER change that settles after a
+   * NEWER one must NOT overwrite it (last-completion-wins race). Each
+   * apply stamps an epoch; only the LATEST epoch may write the value. */
   async apply(id: string, value: string): Promise<boolean> {
     const record = this.records.get(id)
     if (record === undefined || record.disposed) return false
+    const epoch = record.applyEpoch + 1
+    record.applyEpoch = epoch
     const onChange = record.onChange
     if (onChange !== undefined) {
       let accepted: boolean | void
@@ -126,6 +136,9 @@ export class SettingsRegistry {
         return false
       }
       if (accepted === false) return false
+      // A newer apply started while this onChange was in flight: this
+      // result is stale — never commit it.
+      if (record.applyEpoch !== epoch) return false
     }
     record.currentValue = value
     this.revision += 1

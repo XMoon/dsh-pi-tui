@@ -41,6 +41,32 @@ test('CommandBridge: dynamic local commands join the effective-local set', () =>
   assert.equal(bridge.isLocal('grilling', LOCAL_COMMANDS), false, 'unregistered is not local')
 })
 
+test('CommandBridge: a plugin command can NEVER shadow a host-owned command (P1-04)', () => {
+  // The authoritative host catalog (TUI commands + ownership sets).
+  const catalog = new Set(['status', 'sessions', 'help', 'exit', 'kill', 'settings'])
+  const bridge = new CommandBridge(() => {}, catalog)
+  // EXACT collision with a TUI-registered command: rejected loudly.
+  const status = bridge.register({ id: 's1', name: 'status', description: '', execution: 'local' }, 'plugin')
+  assert.equal(status.kind, 'conflict')
+  assert.equal(status.existingOwner, 'host', 'the conflict is owned by the HOST, not another plugin')
+  // EXACT collision with a core command the TUI dispatches locally (/kill).
+  const kill = bridge.register({ id: 's2', name: 'kill', description: '', execution: 'local' }, 'plugin')
+  assert.equal(kill.kind, 'conflict')
+  assert.equal(kill.existingOwner, 'host')
+  // NEAR-SYNONYM of a host command (/session vs /sessions): rejected too.
+  const near = bridge.register({ id: 's3', name: 'session', description: '', execution: 'local' }, 'plugin')
+  assert.equal(near.kind, 'conflict')
+  assert.equal(near.existingOwner, 'host')
+  assert.ok(near.nearSynonym !== undefined, 'the near-synonym pair is reported')
+  // A genuinely NEW name still registers (the catalog never blocks growth).
+  const fresh = bridge.register({ id: 's4', name: 'vimish', description: '', execution: 'local' }, 'plugin')
+  assert.equal(fresh.kind, 'registered')
+  assert.equal(bridge.snapshot().entries.length, 1)
+  // The built-in is still local and still routes to the HOST handler.
+  assert.equal(bridge.handlerFor('status'), undefined, 'no plugin handler can claim the built-in')
+  assert.equal(bridge.isLocal('status', new Set(['status'])), true, 'the host ownership is untouched')
+})
+
 test('CommandBridge: a name conflict is reported, never silently overridden', () => {
   const bridge = new CommandBridge()
   bridge.register({ id: 'a', name: 'dup', description: '', execution: 'local' }, 'owner-a')
@@ -180,6 +206,30 @@ test('SettingsRegistry: onChange rejection keeps the old value', async () => {
   assert.equal(registry.rows()[0]?.currentValue, 'allowed')
   assert.equal(await registry.apply('s1', 'denied'), false)
   assert.equal(registry.rows()[0]?.currentValue, 'allowed', 'rejected change keeps the old value')
+})
+
+test('SettingsRegistry: a slow EARLIER apply never overwrites a newer completed one (P2-01)', async () => {
+  const registry = new SettingsRegistry()
+  let release1!: (accepted: boolean) => void
+  const gate1 = new Promise<boolean>(resolve => { release1 = resolve })
+  let release2!: (accepted: boolean) => void
+  const gate2 = new Promise<boolean>(resolve => { release2 = resolve })
+  registry.register({
+    id: 'race', label: 'R', currentValue: '0',
+    onChange: (value) => value === '1' ? gate1 : value === '2' ? gate2 : true,
+  }, 'o')
+  // apply('1') STARTS first but settles LAST; apply('2') starts second and
+  // settles FIRST. The review repro ended with currentValue '1' (the slow
+  // first change overwrote the newer second) — the epoch commit must end
+  // with '2'.
+  const p1 = registry.apply('race', '1')
+  const p2 = registry.apply('race', '2')
+  release2(true) // the NEWER change completes first
+  assert.equal(await p2, true)
+  assert.equal(registry.rows()[0]?.currentValue, '2', 'the newer change wins')
+  release1(true) // the OLDER change completes LATE
+  assert.equal(await p1, false, 'a stale apply reports not-committed')
+  assert.equal(registry.rows()[0]?.currentValue, '2', 'the stale change must NOT overwrite the newer one')
 })
 
 test('SettingsRegistry: owner unload removes rows; setValue is idempotent', () => {
@@ -339,6 +389,60 @@ test('AutocompleteRegistry: the active controller is released after the request 
   assert.equal(firstWasAborted, false, 'a settled request must not be aborted by later requests')
 })
 
+test('AutocompleteRegistry: a provider that IGNORES the abort signal never commits stale results after the caller aborts (P1-03)', async () => {
+  const registry = new AutocompleteRegistry()
+  let release: (() => void) | undefined
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const errors: string[] = []
+  registry.register({
+    id: 'stubborn',
+    provider: {
+      // The provider NEVER observes the signal — it resolves from its own
+      // timing, exactly the hostile/provider-bug shape P1-03 targets.
+      getSuggestions() {
+        return gate.then(() => ({ items: [{ value: 'stale', label: 'stale' }], prefix: '' }))
+      },
+    },
+  }, 'a')
+  const caller = new AbortController()
+  const pending = registry.suggest(
+    { lines: [], cursorLine: 0, cursorCol: 0, signal: caller.signal },
+    (id, error) => errors.push(`${id}:${String(error)}`),
+  )
+  // The caller aborts BEFORE the provider resolves; the provider resolves
+  // LATER anyway. The stale result must be dropped AND the abort must not
+  // be reported as a provider failure.
+  caller.abort()
+  release!()
+  const result = await pending
+  assert.equal(result, null, 'a stale result after a caller abort must be dropped')
+  assert.deepEqual(errors, [], 'an expected abort is cancellation, never a provider error')
+})
+
+test('AutocompleteRegistry: a provider THROWING after a caller abort also stops quietly (P1-03)', async () => {
+  const registry = new AutocompleteRegistry()
+  const errors: string[] = []
+  registry.register({
+    id: 'thrower',
+    provider: {
+      getSuggestions() {
+        return new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error('late boom')), 5)
+        })
+      },
+    },
+  }, 'a')
+  const caller = new AbortController()
+  const pending = registry.suggest(
+    { lines: [], cursorLine: 0, cursorCol: 0, signal: caller.signal },
+    (id, error) => errors.push(`${id}:${String(error)}`),
+  )
+  caller.abort()
+  const result = await pending
+  assert.equal(result, null)
+  assert.deepEqual(errors, [], 'a post-abort rejection is cancellation, not a provider failure')
+})
+
 // ── KeybindingRegistry ─────────────────────────────────────────────────────
 
 test('KeybindingRegistry: reserved host keys are rejected (full lifecycle inventory)', () => {
@@ -373,6 +477,22 @@ test('KeybindingRegistry: reserved host keys are rejected (full lifecycle invent
     key: { key: 'escape', ctrl: false, alt: false, shift: false, super: false },
     action: 'submit-draft',
   }, 'o'), /reserved/, 'Esc must be reserved')
+  // P1-05: the host consumes Shift+Tab (permission cycle), Alt+Up
+  // (dequeue) and Alt+T (thinking toggle) unconditionally in tui-app.ts —
+  // all three must be in the SINGLE authoritative reserved inventory.
+  const altKeys: { key: string; alt: boolean; shift: boolean }[] = [
+    { key: 'tab', alt: false, shift: true },   // Shift+Tab
+    { key: 'up', alt: true, shift: false },    // Alt+Up
+    { key: 't', alt: true, shift: false },     // Alt+T
+  ]
+  for (let index = 0; index < altKeys.length; index++) {
+    const binding = altKeys[index]!
+    assert.throws(() => registry.register({
+      id: `k-alt-${index}`,
+      key: { key: binding.key, ctrl: false, alt: binding.alt, shift: binding.shift, super: false },
+      action: 'open-search',
+    }, 'o'), /reserved/, `${binding.alt ? 'Alt+' : 'Shift+'}${binding.key} must be reserved`)
+  }
 })
 
 test('KeybindingRegistry: duplicate keys conflict; unload removes bindings', () => {

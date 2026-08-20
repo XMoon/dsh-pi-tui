@@ -20,7 +20,13 @@
  * - dynamic unload removes the contribution (fiber-bound, like every
  *   extension registration);
  * - near-synonym command conflicts keep the AGENTS hard rule: the bridge
- *   reports a conflicting registration loudly instead of guessing.
+ *   reports a conflicting registration loudly instead of guessing;
+ * - P1-04: a dynamic command can NEVER shadow a host-owned command. The
+ *   authoritative static catalog (TUI-registered commands + the
+ *   LOCAL_COMMANDS/SESSIONLESS_COMMANDS ownership sets) is validated at
+ *   register time — an exact-name or near-synonym collision with a
+ *   host-owned command name is rejected loudly, never silently overriding
+ *   the built-in behavior.
  * @module @xmoon76/dsh-pi-tui/command-bridge
  */
 
@@ -56,12 +62,20 @@ interface Contribution {
 export class CommandBridge {
   /** Contributions by id (diagnostic identity; also the registry key). */
   private readonly contributions = new Map<string, Contribution>()
+  /** The AUTHORITATIVE host-owned command names (P1-04): TUI-registered
+   * commands + the LOCAL_COMMANDS/SESSIONLESS_COMMANDS ownership sets. A
+   * dynamic contribution colliding with this catalog (exact or
+   * near-synonym) is rejected at register time — a plugin can never
+   * shadow a built-in command. Defaults to empty for standalone tests
+   * that exercise the dynamic-vs-dynamic rules only. */
+  private readonly staticCatalog: ReadonlySet<string>
   /** Local names, derived on demand (never stored twice). */
   private revision = 0
   private readonly onInvalidate: () => void
 
-  constructor(onInvalidate: () => void = () => {}) {
+  constructor(onInvalidate: () => void = () => {}, staticCatalog: ReadonlySet<string> = new Set()) {
     this.onInvalidate = onInvalidate
+    this.staticCatalog = staticCatalog
   }
 
   /**
@@ -76,6 +90,20 @@ export class CommandBridge {
       throw new Error(`duplicate command contribution id "${spec.id}" (owner "${this.contributions.get(spec.id)?.owner}")`)
     }
     if (spec.name === '') throw new Error('command contribution name must not be empty')
+    // P1-04: the host-owned catalog is authoritative — an EXACT collision
+    // with a host command is rejected loudly (a plugin can never shadow
+    // /status, /sessions, ...). Near-synonyms of host names are rejected
+    // too (the AGENTS hard rule applies to the static set as well).
+    for (const hostName of this.staticCatalog) {
+      if (hostName === spec.name) {
+        return { kind: 'conflict', existingOwner: 'host' }
+      }
+      const shorter = hostName.length <= spec.name.length ? hostName : spec.name
+      const longer = hostName.length <= spec.name.length ? spec.name : hostName
+      if (shorter !== longer && longer.startsWith(shorter)) {
+        return { kind: 'conflict', existingOwner: 'host', nearSynonym: `${shorter} ↔ ${longer}` }
+      }
+    }
     for (const existing of this.contributions.values()) {
       if (existing.disposed) continue
       if (existing.name === spec.name) {

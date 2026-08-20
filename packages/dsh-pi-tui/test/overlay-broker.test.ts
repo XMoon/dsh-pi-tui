@@ -206,6 +206,30 @@ test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 findi
   app.stop()
 })
 
+test('TuiApp: a LATE showExtensionOverlay after dispose is inert — no new lease, no revived overlay (P1-09)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+  app.dispose()
+  // The review repro: before dispose 0 owned leases; a late plugin call
+  // must NOT create a lease or mount on the dead surface.
+  assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'dispose leaves zero owned leases')
+  const late = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'too late' }] })
+  assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'a late overlay must not mint a new lease')
+  assert.equal(app.overlayGraphState().handles, 0, 'a late overlay must not revive the broker graph')
+  // Every lease method is inert (no throw, no dead-terminal touch).
+  late.show()
+  late.hide()
+  late.close()
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('too late'), 'a late overlay never renders')
+  app.dispose() // idempotent
+})
+
 test('TuiApp: an explicitly closed lease is dropped from the owned set (round-1 finding 1)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')

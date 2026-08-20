@@ -30,6 +30,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their health record, and `freezeLeases()` only invalidates when it
   actually removed something.
 
+## [Unreleased]
+
+### Added
+
+- **M4–M11 extension platform** (cumulative, per the pluginization plan):
+  the M4 component kit (structured `ExtensionView` trees — text, markdown,
+  spacer, vertical/horizontal stacks, frames, rows — compiled into live,
+  width-aware host components; widget slots above/below the editor); the M5
+  registries (commands with ownership metadata, themes, settings rows,
+  autocomplete providers, keybindings); the M6 host-owned InputRouter (the
+  fixed precedence ladder: protocol artifacts, capturing flows, reserved
+  host lifecycle keys, the focused editor, then non-capturing plugin
+  bindings — plugins receive normalized keys mapped to semantic actions,
+  never raw terminal data); the M7 transcript/tool renderer registry
+  (semantic snapshots, chain + keyed slots, throw isolation, cache identity
+  rebuild); the M8 managed overlay leases (the host owns the overlay
+  broker: modal stacking, focus, fullscreen migration, teardown); the M9
+  editor SDK (single-winner editor registry, atomic seat handoff, the
+  `EditorHost` protocol with snapshot subscription and host-owned
+  submission); the M10 vim acceptance plugin fixture (imports only the
+  public `extensions` subpath, exercises the full SDK); and the M11 API v1
+  hardening (`/status` extension health rows, deprecation policy, author
+  docs, benchmark). Editor replacement, overlays, transcript renderers and
+  the rest of the surface are now part of the shipped API — the earlier
+  `0.2.0` entry's "not part of v1" note is superseded.
+
+### Fixed
+
+- **Horizontal stacks render side by side** (P1-01): the public `StackView`
+  horizontal contract is implemented with the fork's width-aware `HStack`
+  (gap, CJK/emoji cell measurement, narrow-width truncation) instead of
+  sequential rows.
+- **Frames clamp to the host budget** (P1-02): a frame's requested width is
+  clamped to the terminal width and content rows are padded/truncated by
+  display cells (ANSI/CJK-exact) — borders never overflow or misalign.
+- **Autocomplete drops post-abort results** (P1-03): a provider that
+  resolves after the caller aborted never commits stale suggestions, and
+  expected aborts are cancellation, not provider failures.
+- **Plugin commands can never shadow host commands** (P1-04): the command
+  bridge validates every registration against the authoritative host
+  catalog (exact and near-synonym collisions are rejected loudly).
+- **Reserved-key inventory is complete** (P1-05): Shift+Tab, Alt+Up and
+  Alt+T (host lifecycle keys) join the single authoritative reserved list.
+- **The focused editor owns its keys** (P1-06): a plugin keybinding is
+  consulted only when the focused editor declines the key — arrows, Tab
+  and multiline movement are never stolen.
+- **Renderer compile failures are isolated** (P1-07): a renderer-returned
+  view whose compilation throws abdicates to the host card and is recorded,
+  never escaping the render path.
+- **`/status` health is live** (P1-08): the extension-health rows surface
+  failed/shadowed contributions with their last error across every
+  registry (renderers included), and a recovered renderer clears its
+  record.
+- **Disposed surfaces reject late overlays** (P1-09): a plugin overlay
+  call after final disposal is inert — no new lease, no revived mount.
+- **Plugin editors receive real input** (P1-10): the `ExtensionEditor`
+  contract gains a `handleInput` channel; while a plugin editor occupies
+  the seat, typing and navigation reach it, and Enter submits through the
+  host path.
+- **Editor subscriptions are driven** (P1-11): every host mutation
+  (typing, draft writes, viewer round-trips, submissions) notifies the
+  `EditorHost` subscribers.
+- **Stale host capabilities are inert** (P1-12): after a surface's final
+  disposal (or a generation change), a plugin editor's captured
+  `replaceText`/`dispatch`/`subscribe`/`invalidate` are no-ops — a late
+  callback can never mutate the seat or fire a real submission.
+- **Settings applies are latest-wins** (P2-01): a slow earlier change never
+  overwrites a newer completed one.
+- **Editor handoff leaks nothing** (P2-02): a transfer/compile throw
+  disposes the newly created editor; listener exceptions are isolated.
+- **Widget compiles are cached** (P2-03): unchanged widget contributions
+  reuse their compiled tree across refreshes.
+
 ## [0.2.0] - 2026-08-19
 
 ### Added

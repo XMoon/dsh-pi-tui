@@ -132,11 +132,19 @@ export class AutocompleteRegistry {
       for (const record of records) {
         try {
           const result = await record.provider.getSuggestions(combined)
+          // P1-03: the COMBINED signal is re-checked after every awaited
+          // provider result — a provider that IGNORES the signal and
+          // resolves later must never commit stale suggestions after the
+          // caller aborted (the epoch check alone misses caller-side
+          // aborts that never raced a newer request). Expected aborts
+          // stop quietly: they are cancellation, not provider failure.
+          if (combined.signal.aborted) return null
           // Latest-only commit: a result that arrives after a newer request
           // is stale for the current cursor — drop it.
           if (requestEpoch !== this.epoch) return null
           if (result !== null) return result
         } catch (error) {
+          if (combined.signal.aborted) return null
           // Per-provider isolation: a throwing provider never aborts the
           // chain. The error is recorded (health) and the next provider runs.
           onError?.(record.id, error)

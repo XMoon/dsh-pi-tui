@@ -791,6 +791,17 @@ export interface ExtensionEditor {
   /** The editor's own border color hook (optional; the host theme
    * default applies otherwise). */
   borderColor?: (text: string) => string
+  /**
+   * P1-10: the plugin editor's INPUT channel. While the plugin editor
+   * occupies the seat, every key the host's precedence ladder routes to
+   * the editor is delivered here FIRST (raw terminal data — the plugin
+   * parses it with the host's key helpers or its own state machine).
+   * Return true to CONSUME the key (the host does nothing further);
+   * return false/undefined to let the HOST default editor handle it.
+   * Without this hook the seat is display-only: ordinary typing would
+   * silently target the old host editor (the P1-10 gap).
+   */
+  handleInput?(data: string): boolean
   /** Dispose the editor (the host calls it after the handoff). */
   dispose(): void
 }

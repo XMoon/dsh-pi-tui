@@ -226,6 +226,59 @@ test('TuiApp: Enter / Ctrl+J / Ctrl+Enter never fire a plugin binding (round-1 P
   app.stop()
 })
 
+test('TuiApp: a plugin binding NEVER steals a key the focused editor owns (P1-06)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const actions: string[] = []
+  const submitted: string[] = []
+  const registry = new EditorRegistry()
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    onExtensionAction: (action) => { actions.push(action) },
+  }, {
+    // A resolver claiming EVERY non-printable key (arrows, Tab, ...).
+    pluginActionFor: (key) => 'open-search' as const,
+    editorRegistry: registry,
+  })
+  app.start()
+  await vt.waitForRender()
+  // While the HOST editor is focused (the default), ↑ must reach the
+  // editor — never fire the plugin binding.
+  vt.sendInput('\x1b[A') // legacy up
+  await vt.waitForRender()
+  assert.deepEqual(actions, [], 'Up must reach the focused editor, never the plugin')
+  // Tab too (completion trigger in the editor).
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.deepEqual(actions, [], 'Tab must reach the focused editor, never the plugin')
+  // A non-editor key (Ctrl+Alt+X chord) STILL fires the plugin binding —
+  // the editor has no claim on it.
+  vt.sendInput('\x1b\x18')
+  await vt.waitForRender()
+  assert.deepEqual(actions, ['open-search'], 'a chord the editor declines still fires the binding')
+
+  // The same holds with a PLUGIN editor occupying the seat: while its
+  // component is focused, arrows belong to it — the binding must not fire.
+  registry.register({ id: 'vim', priority: 0, create: () => ({
+    component: { kind: 'text', spans: [{ text: 'vim' }] },
+    getText: () => 'vim draft',
+    setText: () => {},
+    getCursor: () => 0,
+    setCursor: () => {},
+    focused: true,
+    dispose: () => {},
+  }) }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // legacy down
+  await vt.waitForRender()
+  assert.deepEqual(actions, ['open-search'], 'Down must reach the focused PLUGIN editor, never the plugin binding')
+  app.stop()
+})
+
 test('TuiApp: submitDraft clears the draft like a normal submit (round-1 P2)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')

@@ -286,6 +286,88 @@ test('TuiApp: renderer failures reach the health ledger sink (round-1 P3)', asyn
   app.stop()
 })
 
+test('TuiApp: a renderer-returned view whose COMPILATION throws abdicates to the host card, never escapes (P1-07)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  // The render() itself SUCCEEDS (the registry's per-renderer boundary is
+  // not the failing stage) — the returned view's `spans` GETTER throws at
+  // COMPILE time. P1-07: that failure must be isolated (recorded) and the
+  // message must fall back to the host card.
+  registry.registerToolRenderer({
+    id: 'broken-view', toolName: 'bash',
+    render: () => ({
+      kind: 'text' as const,
+      get spans(): never { throw new Error('compile boom') },
+    } as unknown as import('../src/extension/public-types.ts').ExtensionView),
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  const failures: { id: string; error: unknown }[] = []
+  app.setRendererErrorSink((record) => failures.push(record))
+  app.start()
+  await vt.waitForRender()
+  const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: 'out', status: 'ok' as const }
+  // Must NOT throw (the old code let 'compile boom' escape the render
+  // path); the entry must fall back to the host card (rendererId
+  // undefined) and the failure must reach the health sink.
+  const entry = app.messageCacheEntryForTest?.(tool, 0)
+  assert.equal(entry?.rendererId, undefined, 'a compile failure abdicates to the host card')
+  assert.equal(failures.length, 1, 'the compile failure must be recorded (never swallowed)')
+  assert.equal(failures[0]?.id, 'broken-view')
+  assert.ok(String(failures[0]?.error).includes('compile boom'))
+  // The host card still renders the tool content (the fallback path).
+  const rendered = entry?.component.render(80).join('\n') ?? ''
+  assert.ok(rendered.includes('out'), `the host card renders the tool result:\n${rendered}`)
+  app.stop()
+})
+
+test('TuiApp: a failed renderer RECOVERS and its health record clears (P1-08)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { ExtensionLedger } = await import('../src/extension/internal/ledger.ts')
+  const ledger = new ExtensionLedger(() => {})
+  // P1-08: renderers are tracked in the health ledger by the SERVICE; the
+  // TuiApp test uses the ledger directly to prove the full loop: track →
+  // fail → recover.
+  ledger.trackHealth('transcript.renderer', 'flaky', 'plugin')
+  const registry = new RendererRegistry()
+  let explode = true
+  registry.registerToolRenderer({
+    id: 'flaky', toolName: 'bash',
+    render: () => {
+      if (explode) throw new Error('flaky boom')
+      return textView('flaky ok')
+    },
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.setRendererErrorSink(({ id, error }) => {
+    ledger.recordError('transcript.renderer', id, String(error))
+  })
+  app.setRendererRecoveredSink((id) => ledger.clearError('transcript.renderer', id))
+  app.start()
+  await vt.waitForRender()
+  const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: 'out', status: 'ok' as const }
+  // FAIL: the renderer throws → the host card renders + the health record
+  // is failed.
+  const failed = app.messageCacheEntryForTest?.(tool, 0)
+  assert.equal(failed?.rendererId, undefined, 'a throwing renderer falls back to the host card')
+  assert.equal(ledger.healthSnapshot().find(r => r.id === 'flaky')?.state, 'failed')
+  // RECOVER: the renderer stops throwing → a NEW message (different
+  // turn — the cache identity rebuilds on content) is claimed by the
+  // renderer AND the health record clears (the next failure starts a NEW
+  // generation).
+  explode = false
+  const recovered = app.messageCacheEntryForTest?.({ ...tool, turn: 1 }, 0)
+  assert.equal(recovered?.rendererId, 'flaky', 'a recovered renderer claims the card')
+  assert.equal(ledger.healthSnapshot().find(r => r.id === 'flaky')?.state, 'active', 'recovery clears the health record')
+  assert.equal(ledger.healthSnapshot().find(r => r.id === 'flaky')?.lastError, undefined)
+  app.stop()
+})
+
 test('TuiApp: the tool snapshot arguments/result are deeply frozen (round-1 P4)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')

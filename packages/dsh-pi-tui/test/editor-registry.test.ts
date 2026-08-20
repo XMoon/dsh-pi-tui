@@ -174,6 +174,216 @@ test('TuiApp: the editor host dispatch routes semantic actions through host path
   app.stop()
 })
 
+test('TuiApp: a stale host captured BEFORE dispose is inert after it — no seat mutation, no submission (P1-12)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  let host: EditorHost | undefined
+  registry.register({
+    id: 'stale-host', priority: 0,
+    create: (editorHost: EditorHost) => {
+      host = editorHost
+      return pluginEditor('draft')
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.ok(host !== undefined)
+  // The review repro: after dispose, the OLD host's replaceText('after')
+  // and dispatch('submit') must be inert — accepted=false, no submit
+  // event, no seat write.
+  app.dispose()
+  host.replaceText('after')
+  const result = host.dispatch('submit')
+  assert.equal(result.kind, 'ignored', 'a stale host dispatch must be IGNORED after dispose')
+  assert.deepEqual(submitted, [], 'a stale host must never fire a real submission')
+  // A fresh surface's holder is a different generation: the stale host's
+  // invalidate/getSnapshot are inert too (no throw, no dead-terminal touch).
+  host.invalidate()
+  assert.equal(app.getDraft(), '', 'the disposed seat never received the stale write')
+})
+
+test('TuiApp: the EditorHost subscription is DRIVEN by host mutations (P1-11)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  let host: EditorHost | undefined
+  let unsubscribe: (() => void) | undefined
+  const snapshots: string[] = []
+  registry.register({
+    id: 'subscriber', priority: 0,
+    create: (editorHost: EditorHost) => {
+      host = editorHost
+      unsubscribe = editorHost.subscribe((snapshot) => snapshots.push(snapshot.text))
+      return pluginEditor()
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.ok(host !== undefined)
+  // The review repro: host-driven draft changes must reach the listener.
+  app.setDraft('one')
+  app.setDraft('two')
+  assert.ok(snapshots.includes('one'), `host setDraft must notify: ${JSON.stringify(snapshots)}`)
+  assert.ok(snapshots.includes('two'), `host setDraft must notify: ${JSON.stringify(snapshots)}`)
+  // The host's own editor typing (through the fork onChange) notifies too:
+  // feed the HOST editor directly while the seat is the host default.
+  // (With the plugin winner, host writes go through seat writes — the
+  // listener sees the CURRENT seat occupant's text either way.)
+  const before = snapshots.length
+  app.submitDraft(false)
+  assert.ok(snapshots.length > before, 'a submit (draft clear) must notify subscribers')
+  // Unsubscribe stops delivery (the ORIGINAL listener's disposer).
+  unsubscribe!()
+  app.setDraft('three')
+  assert.ok(!snapshots.includes('three'), 'an unsubscribed listener must not receive changes')
+  app.stop()
+})
+
+test('TuiApp: a plugin editor with handleInput receives REAL typing (P1-10)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  }, {
+    editorRegistry: registry,
+    // The InputRouter gate only runs with a plugin resolver wired (M6);
+    // an empty resolver keeps the routing ladder alive without any
+    // binding claiming keys.
+    pluginActionFor: () => undefined,
+  })
+  app.start()
+  await vt.waitForRender()
+  // A vim-like plugin editor: its OWN state machine owns every key. The
+  // host routes editor keys to handleInput; consume=true keeps them.
+  let inputLog = ''
+  registry.register({
+    id: 'vimish', priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: 'vim' }] },
+      getText: () => inputLog,
+      setText: (text) => { inputLog = text },
+      getCursor: () => inputLog.length,
+      setCursor: (offset) => { void offset },
+      focused: true,
+      handleInput: (data) => {
+        // Accept printable chars; DECLINE Enter (the host's own submit
+        // path owns submission — a plugin editor never re-implements it)
+        // and everything else.
+        if (data === '\r') return false
+        if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) < 127) {
+          inputLog += data
+          return true
+        }
+        return false
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // REAL typing through the terminal: the plugin editor receives 'abc',
+  // not the old host editor.
+  vt.sendInput('a')
+  vt.sendInput('b')
+  vt.sendInput('c')
+  await vt.waitForRender()
+  assert.equal(inputLog, 'abc', 'ordinary typing must reach the PLUGIN editor (P1-10)')
+  assert.equal(app.getDraft(), 'abc', 'the host reads the plugin draft')
+  // Enter routes through the host submit path (the runner's onSubmit) —
+  // and the submit CLEARS the plugin draft like a normal host submit.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['abc'], 'Enter submits the plugin draft through the host path')
+  assert.equal(inputLog, '', 'the host submit clears the plugin draft (host-owned semantics)')
+  // Keys the plugin DECLINES (e.g. Ctrl+X) fall through to the host
+  // (the host editor's own handler — the plugin never sees them).
+  vt.sendInput('\x18') // ctrl+x — the plugin returns false
+  await vt.waitForRender()
+  assert.equal(inputLog, '', 'a declined key does not reach the plugin')
+  app.stop()
+})
+
+test('TuiApp: a TRANSFER throw disposes the newly created editor — no leak, current stays (P2-02)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('keep me')
+  let createdDisposed = false
+  const created: ExtensionEditor = {
+    component: { kind: 'text', spans: [{ text: 'x' }] },
+    getText: () => '',
+    setText: () => { throw new Error('transfer boom') }, // the transfer THROWS
+    getCursor: () => 0,
+    setCursor: () => {},
+    focused: true,
+    dispose: () => { createdDisposed = true },
+  }
+  registry.register({ id: 'transfer-boom', priority: 0, create: () => created }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.equal(createdDisposed, true, 'a transfer throw must dispose the created editor (P2-02)')
+  assert.equal(app.getDraft(), 'keep me', 'the current editor keeps working')
+  // The failed target is inert until the registry changes (no re-create loop).
+  app.reconcileEditorNow()
+  assert.equal(app.getDraft(), 'keep me')
+  app.stop()
+})
+
+test('TuiApp: a COMPILE throw after transfer disposes the created editor too (P2-02)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  app.setDraft('keep')
+  let createdDisposed = false
+  const created: ExtensionEditor = {
+    // The view's spans getter THROWS at COMPILE time (after the transfer
+    // succeeded — the P2-02 compile-throw resource path).
+    get component(): never { throw new Error('view boom') },
+    getText: () => '',
+    setText: () => {},
+    getCursor: () => 0,
+    setCursor: () => {},
+    focused: true,
+    dispose: () => { createdDisposed = true },
+  }
+  registry.register({ id: 'view-boom', priority: 0, create: () => created }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.equal(createdDisposed, true, 'a compile throw after transfer must dispose the created editor')
+  assert.equal(app.getDraft(), 'keep', 'the current editor keeps working')
+  app.stop()
+})
+
 // ── Round-1 regression tests ───────────────────────────────────────────────
 
 test('TuiApp: a failed editor creation is retried after a same-id re-registration (round-1 finding 4)', async () => {

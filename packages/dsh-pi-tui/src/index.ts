@@ -189,6 +189,20 @@ export const LOCAL_COMMANDS = new Set([
 ])
 
 /**
+ * The AUTHORITATIVE host-owned command catalog (P1-04): every command name
+ * the TUI registers itself (registerTuiCommands in commands.ts) plus the
+ * ownership sets (LOCAL_COMMANDS and SESSIONLESS_COMMANDS — /kill and
+ * other core commands the TUI does not register but dispatches locally).
+ * A plugin command contribution is validated against this catalog at
+ * register time: an exact or near-synonym collision is rejected loudly,
+ * so a plugin can never shadow a built-in command.
+ */
+export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
+  ...LOCAL_COMMANDS,
+  ...SESSIONLESS_COMMANDS,
+])
+
+/**
  * Whether one submission steers under the busy-Enter preference: NOT a
  * force-queued chord, NOT a TUI-owned local command, and the agent is
  * running with the preference set to 'steer'. Pure so the dispatch gate
@@ -2642,6 +2656,12 @@ export function apply(ctx: Context, config: Config): void {
         const message = safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200)
         extensionService._ledger().recordError('transcript.renderer', id, message)
       })
+      // M7 (P1-08): a renderer that renders successfully after a failure
+      // RECOVERS — clear its health record (the next failure starts a NEW
+      // error generation).
+      app.setRendererRecoveredSink((id) => {
+        extensionService._ledger().clearError('transcript.renderer', id)
+      })
       // M8: the managed-overlay mount seam (plan §13.3) — the plugin
       // supplies an ExtensionView; the host compiles + mounts it through
       // its overlay broker (modal stacking, focus, migration, teardown).
@@ -3193,6 +3213,9 @@ export function apply(ctx: Context, config: Config): void {
           renderers: extensionService.renderers,
           editors: extensionService.editors,
           api: () => extensionService.api(),
+          // P1-08: the live contribution-health snapshot (failed/shadowed
+          // states + lastError across every registry incl. renderers).
+          health: () => extensionService._ledger().healthSnapshot(),
         }
       },
       /** The live session's workspace cwd (header), falling back to the

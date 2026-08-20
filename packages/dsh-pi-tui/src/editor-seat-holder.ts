@@ -39,6 +39,10 @@ export interface SeatEditor {
   addToHistory(text: string): void
   clearHistory(): void
   readonly component: Component
+  /** P1-10: the occupant's input channel — a PLUGIN editor with a
+   * handleInput hook receives routed keys here; the host default has no
+   * hook (the fork Editor is the focused component itself). */
+  handleInput?(data: string): boolean
   dispose(): void
 }
 
@@ -86,6 +90,11 @@ export class EditorSeatHolder {
   /** The current occupant (always defined — the host default is the
    * fallback, never removed). */
   private current: SeatEditor
+  /** P1-12: the holder's FINAL disposal latch — after it flips, every
+   * host capability captured by a plugin editor (replaceText, dispatch,
+   * subscribe, invalidate) is INERT: a late plugin callback can no
+   * longer mutate the seat or dispatch a real submission. */
+  private disposed = false
   /** The id + registry REVISION of the LAST target whose creation threw
    * (round-1: the failure notify triggers a render → reconcile →
    * re-create → re-throw loop; the guard makes a failed target inert
@@ -187,11 +196,21 @@ export class EditorSeatHolder {
       this.notifyError(error instanceof Error ? error.message : String(error))
       return
     }
-    // Transfer draft/cursor.
-    const draft = previous.getText()
-    const cursor = previous.getCursor()
-    created.setText(draft)
-    created.setCursor?.(cursor)
+    // Transfer draft/cursor — INSIDE the guarded block (P2-02): a
+    // throwing setText/setCursor must dispose the newly created editor
+    // and keep the current one working (the atomic handoff promise
+    // extends to EVERY post-create step, never a leak).
+    try {
+      const draft = previous.getText()
+      const cursor = previous.getCursor()
+      created.setText(draft)
+      created.setCursor?.(cursor)
+    } catch (error) {
+      created.dispose()
+      this.failedTarget = { id: target.id, revision: registryRevision }
+      this.notifyError(error instanceof Error ? error.message : String(error))
+      return
+    }
     // Compile the plugin component BEFORE disposing the old editor
     // (round-2 finding 3): adaptPlugin's compileView can throw — a broken
     // view must keep the OLD editor working, exactly like a creation
@@ -200,6 +219,9 @@ export class EditorSeatHolder {
     try {
       adapted = this.adaptPlugin(target.id, created)
     } catch (error) {
+      // P2-02: the transfer succeeded but the compile failed — dispose the
+      // created editor (it never mounted), keep the current one working.
+      created.dispose()
       this.failedTarget = { id: target.id, revision: registryRevision }
       this.notifyError(error instanceof Error ? error.message : String(error))
       return
@@ -212,20 +234,39 @@ export class EditorSeatHolder {
   /** Build the EditorHost handed to a plugin editor. */
   private hostFor(replacementId: string): EditorHost {
     const holder = this
+    // The generation the host was created under — a stale host from an
+    // EARLIER surface generation (or a disposed surface) must be inert.
+    const hostGeneration = this.generation()
     return {
       surfaceId: this.surfaceId,
-      generation: this.generation(),
-      getSnapshot: () => holder.snapshotOf(replacementId),
+      generation: hostGeneration,
+      getSnapshot: () => {
+        if (holder.disposed) return holder.snapshotOf('host')
+        return holder.snapshotOf(replacementId)
+      },
       replaceText: (text, cursor) => {
+        // P1-12: a stale/disposed host can never mutate the CURRENT seat
+        // (the review repro: after dispose, replaceText('after') must be
+        // a no-op, not a live write into a dead surface).
+        if (holder.disposed || holder.generation() !== hostGeneration) return
         holder.current.setText(text)
         if (cursor !== undefined) holder.current.setCursor(cursor)
       },
       dispatch: (action) => {
+        // P1-12: a stale/disposed host can never dispatch a real
+        // submission (the review repro: after dispose, dispatch('submit')
+        // must be ignored, not fire the app's onSubmit).
+        if (holder.disposed || holder.generation() !== hostGeneration) {
+          return { kind: 'ignored' }
+        }
         const accepted = holder.actionSink(action)
         return accepted ? { kind: 'accepted' } : { kind: 'ignored' }
       },
-      subscribe: (listener) => holder.subscribe(listener, replacementId),
-      invalidate: () => holder.current.invalidate(),
+      subscribe: (listener) => holder.subscribe(listener, replacementId, hostGeneration),
+      invalidate: () => {
+        if (holder.disposed || holder.generation() !== hostGeneration) return
+        holder.current.invalidate()
+      },
     }
   }
 
@@ -264,6 +305,23 @@ export class EditorSeatHolder {
       },
       addToHistory: () => {}, // the host default owns history recall
       clearHistory: () => {},
+      // P1-10: the plugin editor's input channel — the host's routeInput
+      // delivers every editor-routed key here first; consume=true stops
+      // the key (the plugin owns it), false/undefined lets the host
+      // default editor handle it.
+      handleInput: editor.handleInput === undefined
+        ? undefined
+        : (data) => {
+            if (holder.disposed) return true
+            try {
+              const consumed = editor.handleInput!(data)
+              if (consumed) holder.current.invalidate()
+              return consumed
+            } catch (error) {
+              holder.notifyError(error instanceof Error ? error.message : String(error))
+              return true // a throwing plugin input handler never crashes the host
+            }
+          },
       // A GETTER (round-2 P1): invalidate() recompiles the view; the
       // seat's component always reflects the CURRENT compiled view.
       get component() { return component },
@@ -288,12 +346,22 @@ export class EditorSeatHolder {
   }
 
   /** Subscribe to snapshot changes (poll-free: the host notifies on
-   * change; the holder forwards through a change counter). */
-  private subscribe(listener: (snapshot: EditorSnapshot) => void, replacementId: string): () => void {
-    // The host drives the editor; the subscription delivers on every
-    // host-driven change (the host calls notifyChanged()).
+   * change; the holder forwards through a change counter). The listener
+   * is bound to the CREATING host's generation (P1-12): a stale host's
+   * subscription stops delivering once the surface moved on — and a
+   * disposed holder clears every listener (P1-11 delivery ends). */
+  private subscribe(
+    listener: (snapshot: EditorSnapshot) => void,
+    replacementId: string,
+    hostGeneration: number,
+  ): () => void {
+    if (this.disposed) return () => {}
     this.changeListeners.add(listener)
-    return () => this.changeListeners.delete(listener)
+    return () => {
+      this.changeListeners.delete(listener)
+      void replacementId
+      void hostGeneration
+    }
   }
 
   /** Change listeners (host-driven notifications). */
@@ -302,8 +370,28 @@ export class EditorSeatHolder {
   /** The host calls this after every editor mutation; listeners fire
    * with the CURRENT snapshot (bounded — the fork's editor onChange). */
   notifyChanged(): void {
+    if (this.disposed) return
     const replacementId = this.current.id === 'host' ? undefined : this.current.id
     const snapshot = this.snapshotOf(replacementId ?? '')
-    for (const listener of this.changeListeners) listener(snapshot)
+    // P2-02: per-listener isolation — a throwing plugin listener must
+    // never abort the delivery to the remaining listeners (or escape into
+    // the host's editor mutation path).
+    for (const listener of [...this.changeListeners]) {
+      try {
+        listener(snapshot)
+      } catch {
+        // A hostile listener is dropped (it cannot keep poisoning the
+        // channel); the host's own paths never see its throw.
+        this.changeListeners.delete(listener)
+      }
+    }
+  }
+
+  /** P1-12: FINAL disposal of the holder — every captured host capability
+   * becomes inert and every listener stops delivering. Called by TuiApp
+   * from its own dispose() (the surface's final teardown). */
+  dispose(): void {
+    this.disposed = true
+    this.changeListeners.clear()
   }
 }
