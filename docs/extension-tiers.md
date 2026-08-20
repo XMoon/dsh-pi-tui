@@ -26,11 +26,13 @@ model per tier.
 - **Stable** (`ADVANCED_API_LEVEL` n/a): the M0–M11 platform — chrome
   slots, widgets, commands, themes, settings, autocomplete, keybindings,
   renderers, managed overlays, the editor SDK. See `docs/extension-api.md`.
-- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2): normalized input
-  capture (`advanced.input.capture`), focused interactive surfaces
-  (interactive managed overlays, `advanced.ui.interactive`), and advanced
-  editor control (`advanced.editor.control`). See
-  `docs/extension-advanced.md`.
+- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2 + Phase 4): normalized
+  input capture (`advanced.input.capture`), focused interactive surfaces
+  (interactive managed overlays, `advanced.ui.interactive`), advanced
+  editor control (`advanced.editor.control`), the imperative UI broker
+  (select/confirm/input/notify), custom interactive UI (`ui.custom`) and
+  the host-state facade (theme/title/working/tools-expanded). See
+  `docs/extension-advanced.md` and `docs/extension-capability-matrix.md`.
 - **Unstable** (`UNSTABLE_API_LEVEL = 1`, Phase 3): raw input
   interception (`unstable.input.raw` — observe/consume/rewrite, exclusive
   raw ownership), the Host emergency fail-safe (triple-Esc), and the

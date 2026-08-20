@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pi capability parity (Phase 4).** The ADVANCED tier gains the
+  high-value Pi-style capabilities: the **imperative UI broker**
+  (`advanced.ui.select/confirm/input/notify` — promise-based prompts built
+  on the Host's own picker/question/notify infrastructure, caller-fiber
+  cancellation, surface-disposal settlement), **custom interactive UI**
+  (`advanced.ui.custom` — a factory-built interactive component mounted
+  by the Host, resolving with the result reported through the public
+  `AdvancedCustomHost` facade, never a private TUI object), and the
+  **host-state facade** (`advanced.host` — theme query/select, title
+  override, working-indicator override, tool-expansion preference). The
+  Pi capability matrix (`docs/extension-capability-matrix.md`) records
+  the tier mapping as a roadmap reference. Packed acceptance: the new
+  `phase4-plugin` fixture + `scripts/phase4-plugin-smoke.mjs` gate.
 - **Unstable extension tier (Phase 3).** `@xmoon76/dsh-pi-tui/extensions/unstable`
   is now a usable tier (`UNSTABLE_API_LEVEL = 1`) with NO compatibility
   guarantee: **raw input interception** (`unstable.input.raw` —

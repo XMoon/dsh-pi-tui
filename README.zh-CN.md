@@ -141,9 +141,12 @@ Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、�
 生命周期、失效机制、能力发现。不要按层级复制第二套所有权/生命周期
 模型。第一阶段之后各层级已逐步落地:
 
-- **Advanced**(`ADVANCED_API_LEVEL = 1`,Phase 2):规范化输入捕获、
-  聚焦交互表面(交互式托管 overlay)与高级编辑器控制——仍由 Host
-  中介,绝不接触 raw terminal 字节。作者指南:`docs/extension-advanced.md`。
+- **Advanced**(`ADVANCED_API_LEVEL = 1`,Phase 2 + Phase 4):规范化输入捕获、
+  聚焦交互表面(交互式托管 overlay)、高级编辑器控制、命令式 UI broker
+  (select/confirm/input/notify)、自定义交互 UI 与 host-state facade
+  (theme/title/working/tools-expanded)——仍由 Host 中介,绝不接触 raw
+  terminal 字节。作者指南:`docs/extension-advanced.md`;Pi 能力参考:
+  `docs/extension-capability-matrix.md`。
 - **Unstable**(`UNSTABLE_API_LEVEL = 1`,Phase 3):raw 输入拦截
   (observe/consume/rewrite、exclusive raw 所有权)、Host 紧急 fail-safe
   (三连 Esc)与精选低层 surface seam——不保证兼容;损坏的插件可能

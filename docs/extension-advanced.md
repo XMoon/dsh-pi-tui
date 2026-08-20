@@ -123,6 +123,80 @@ ui.editor.requestEditorFocus()      // best-effort; never steals a capturing flo
 - The controls follow the CURRENT surface attachment; without a live
   surface they are inert (safe no-ops).
 
+## 4. Imperative UI broker (`ui.select` / `ui.confirm` / `ui.input` / `ui.notify`)
+
+Phase 4 (plan §4A): Pi-style imperative prompts, built on the Host's OWN
+picker, question flow and notify infrastructure — never a second modal
+manager.
+
+```ts
+const picked = await ui.select({
+  items: [{ value: 'a', label: 'Alpha' }, { value: 'b', label: 'Beta' }],
+  header: 'Pick one',
+  enableSearch: true,
+})                       // string | undefined (undefined on cancel/abort)
+
+const ok = await ui.confirm({
+  question: 'Proceed?',
+  detail: 'This will overwrite the file.',
+  approveLabel: 'Go',
+  rejectLabel: 'Stop',
+})                       // boolean (false on cancel/abort)
+
+const name = await ui.input({ question: 'Your name?' })  // string | undefined
+
+ui.notify('Saved', { type: 'info' })   // transient, bounded, no raw ANSI
+```
+
+- **Caller-fiber-owned:** owner unload aborts a pending prompt (the
+  promise settles — never hangs). The caller's own `signal` is combined
+  with the fiber signal.
+- **Surface disposal settles** every still-open prompt.
+- The prompts reuse the Host's question/overlay/editor-seat
+  infrastructure: deterministic stacking, question/approval conflict
+  rules, fullscreen migration.
+
+## 5. Custom interactive UI (`ui.custom`)
+
+Phase 4 (plan §4B): mount a factory-built interactive component and
+resolve with its result.
+
+```ts
+const result = await ui.custom((host) => ({
+  render: () => ({ kind: 'text', spans: [{ text: `w=${host.width}` }] }),
+  handleInput: (event) => {
+    if (event.kind === 'key' && event.key.key === 'd') host.done('result-42')
+    if (event.kind === 'key' && event.key.key === 'c') host.close()
+    return true
+  },
+}), { width: 60 })
+```
+
+- The factory receives ONLY the public `AdvancedCustomHost` facade
+  (surfaceId/generation/width/height + `done(result)`/`close()`) — never
+  a private TUI object.
+- The promise resolves with the `done()` result, or undefined on
+  close/cancel/dispose. A throwing factory is isolated (resolves
+  undefined).
+- Caller-fiber-owned: owner unload closes the surface and settles the
+  promise.
+
+## 6. Host-state facade (`ui.host`)
+
+Phase 4 (plan §4D): semantic Host UI state control.
+
+```ts
+ui.host.getTheme()                    // 'dark' | 'light' | 'custom'
+ui.host.setTheme('dark')              // or a registered plugin theme name
+ui.host.setTitle('my title')          // header title override (undefined clears)
+ui.host.setWorkingMessage('working')  // working-indicator label override
+ui.host.setToolsExpanded(true)        // tool-output expansion master switch
+```
+
+- The Host owns persistence and repaint; these are LIVE overrides. Theme
+  persistence stays with the user's `/settings` theme picker.
+- A stale facade (surface disposed) is inert.
+
 ## Lifecycle
 
 - Every capture, overlay lease and editor action is caller-fiber-owned:
@@ -134,10 +208,13 @@ ui.editor.requestEditorFocus()      // best-effort; never steals a capturing flo
   editor round-trips; only a final surface dispose invalidates old
   handles.
 
-## Non-goals (Phase 2)
+## Non-goals (Phase 2/4)
 
 - No raw terminal bytes, no pre-decode interception, no escape-sequence
   rewrite, no Host-policy bypass, no private `TuiApp`/screen exposure, no
   repository-relative imports. Those belong to the Unstable tier
   (`docs/extension-unstable.md`).
+- No production Vim (Phase 5 validates the editor seam with a real modal
+  editor), no full Pi source compatibility (the capability matrix in
+  `docs/extension-capability-matrix.md` is the reference).
 - No production Vim, no full Pi parity.

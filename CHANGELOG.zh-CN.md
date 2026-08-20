@@ -9,6 +9,17 @@
 
 ### 新增
 
+- **Pi 能力对齐(Phase 4)。** Advanced 层新增高价值 Pi 风格能力:
+  **命令式 UI broker**(`advanced.ui.select/confirm/input/notify`——
+  基于 Host 自有 picker/question/notify 基础设施的 Promise 化提示,
+  caller-fiber 取消、surface 销毁结算)、**自定义交互 UI**
+  (`advanced.ui.custom`——由 Host 挂载工厂构建的交互组件,通过公开的
+  `AdvancedCustomHost` facade 报告结果,绝不传私有 TUI 对象)、
+  **host-state facade**(`advanced.host`——theme 查询/选择、title
+  覆盖、working 指示覆盖、tool 展开偏好)。Pi 能力矩阵
+  (`docs/extension-capability-matrix.md`)记录层级映射作为路线图参考。
+  打包验收:新增 `phase4-plugin` fixture + `scripts/phase4-plugin-smoke.mjs`
+  门禁。
 - **Unstable 扩展层(Phase 3)。** `@xmoon76/dsh-pi-tui/extensions/unstable`
   现在是可用层级(`UNSTABLE_API_LEVEL = 1`),不保证兼容:
   **raw 输入拦截**(`unstable.input.raw`——在 Host 解码之前对 RAW

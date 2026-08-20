@@ -148,10 +148,13 @@ All tiers reuse the SAME shared extension runtime: caller-fiber ownership,
 surface lifecycle, invalidation, capability discovery. Do not fork a second
 ownership/lifecycle model per tier. The tiers have grown since Phase 1:
 
-- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2): normalized input
-  capture, focused interactive surfaces (interactive managed overlays)
-  and advanced editor control — still Host-mediated, never raw terminal
-  bytes. Author guide: `docs/extension-advanced.md`.
+- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2 + Phase 4): normalized
+  input capture, focused interactive surfaces (interactive managed
+  overlays), advanced editor control, the imperative UI broker
+  (select/confirm/input/notify), custom interactive UI and the host-state
+  facade (theme/title/working/tools-expanded) — still Host-mediated,
+  never raw terminal bytes. Author guide: `docs/extension-advanced.md`;
+  Pi capability reference: `docs/extension-capability-matrix.md`.
 - **Unstable** (`UNSTABLE_API_LEVEL = 1`, Phase 3): raw input
   interception (observe/consume/rewrite, exclusive raw ownership), the
   Host emergency fail-safe (triple-Esc), and a selected low-level surface
