@@ -1512,6 +1512,13 @@ export function apply(ctx: Context, config: Config): void {
         mount: (component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions) => import('./extension/advanced-types.ts').AdvancedOverlayLease,
       ): void
       setAdvancedEditorSeam(surfaceId: string, controls: import('./extension/advanced-types.ts').AdvancedEditorControls): void
+      // Phase 3: the UNSTABLE seam (the `extensions/unstable` facade's
+      // internal surface — the runner wires the raw input route, the
+      // fail-safe release and the low-level surface seam through it).
+      _unstableInputRoute(data: string, surfaceId: string): import('./extension/internal/unstable-input.ts').UnstableRawRouteResult
+      _unstableInputsLive(): boolean
+      _unstableEmergencyRelease(): void
+      setUnstableSurfaceSeam(surfaceId: string, handle: import('./extension/unstable-types.ts').UnstableSurfaceHandle): void
     }) | undefined
     let extensionHost: SurfaceHost | undefined
     // Tool-card presentation bridge: the Web's render intents resolved from
@@ -2686,6 +2693,14 @@ export function apply(ctx: Context, config: Config): void {
       // ordinary editor/panel input, never a Host question/approval/overlay
       // or a fatal-recovery shortcut (session safety stays Host-owned).
       advancedInputRoute: (data) => extensionService?._advancedInputRoute(data) ?? 'passed',
+      // Phase 3: the UNSTABLE raw input route — consulted BEFORE terminal
+      // protocol decoding (a raw capture can see, consume or rewrite ANY
+      // chunk). The emergency fail-safe is armed only while captures are
+      // live and releases them all (Host recovery, not rewritable by the
+      // Unstable API).
+      unstableInputRoute: (data, surfaceId) => extensionService?._unstableInputRoute(data, surfaceId) ?? { action: 'pass' },
+      unstableInputsLive: () => extensionService?._unstableInputsLive() ?? false,
+      unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
     })
     // M3: attach the extension host to the surface chrome once per
     // generation (F-1): the header/dock/footer merge extension content, and
@@ -2721,6 +2736,10 @@ export function apply(ctx: Context, config: Config): void {
       extensionService.setAdvancedOverlayMount(extensionHost.surfaceId, (component, options) =>
         app.showAdvancedInteractiveOverlay(component, options))
       extensionService.setAdvancedEditorSeam(extensionHost.surfaceId, app.advancedEditorControls())
+      // Phase 3: the UNSTABLE low-level surface seam (plan §10) — the
+      // selected host surface capabilities for low-level plugins (never
+      // TuiApp/screens/terminal). SURFACE-scoped like the other seams.
+      extensionService.setUnstableSurfaceSeam(extensionHost.surfaceId, app.unstableSurfaceHandle())
       extensionHost.attach(
         { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
         {

@@ -89,6 +89,7 @@ import { EditorSeatHolder } from './editor-seat-holder.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
+import { UnstableMountedComponentAdapter } from './extension/internal/unstable-mount.ts'
 import { normalizeInputEvent } from './extension/internal/input-events.ts'
 import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
 
@@ -799,6 +800,28 @@ export interface TuiAppOptions {
    * without it.
    */
   advancedInputRoute?: (data: string) => 'consumed' | 'passed'
+  /**
+   * Phase 3: the UNSTABLE raw input route (wired by the runner from the
+   * service's unstable registry). Consulted by the host input path BEFORE
+   * terminal protocol decoding — a raw capture can see, consume or rewrite
+   * ANY chunk. The returned outcome is applied exactly once (a rewrite
+   * goes straight to the host decoder, never re-entering the chain).
+   * Optional — the surface works identically without it.
+   */
+  unstableInputRoute?: (data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult
+  /**
+   * Phase 3: whether any raw capture is live (the host arms the emergency
+   * fail-safe only while captures exist, so the fail-safe never changes
+   * ordinary Esc behavior). Optional.
+   */
+  unstableInputsLive?: () => boolean
+  /**
+   * Phase 3: the Host emergency fail-safe release (wired by the runner to
+   * the service's `_unstableEmergencyRelease`). Triggered by the
+   * host-owned triple-Esc pattern BEFORE the captures are consulted — it
+   * cannot be rewritten or consumed by a capture. Optional.
+   */
+  unstableFailSafeRelease?: () => void
 }
 
 /**
@@ -1011,6 +1034,23 @@ export class TuiApp {
   /** Phase 2: the ADVANCED normalized input capture route (wired by the
    * runner; consulted after host capturing flows + reserved keys). */
   private readonly advancedInputRoute: ((data: string) => 'consumed' | 'passed') | undefined
+  /** Phase 3: the UNSTABLE raw input route (wired by the runner; consulted
+   * BEFORE terminal protocol decoding). */
+  private readonly unstableInputRoute: ((data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult) | undefined
+  /** Phase 3: whether any raw capture is live (arms the fail-safe). */
+  private readonly unstableInputsLive: (() => boolean) | undefined
+  /** Phase 3: the Host emergency fail-safe release (triple-Esc). */
+  private readonly unstableFailSafeRelease: (() => void) | undefined
+  /** Phase 3: the fail-safe Esc-press timestamps (triple-Esc within the
+   * window triggers the release). */
+  private unstableEscPresses: number[] = []
+  /** Phase 3: still-owned UNSTABLE mount leases (closed by the final
+   * dispose; re-mounted across fullscreen screen swaps). */
+  private readonly unstableMountLeases = new Set<import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void }>()
+  /** Phase 3: the live UNSTABLE mount adapters (dropped on remount). */
+  private readonly unstableMountAdapters = new Set<import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter>()
+  /** Phase 3: the UNSTABLE mount lease id counter. */
+  private unstableMountCounter = 0
   // M8: the overlay graph (handles/dependents) lives in the broker — the
   // host reads it through the accessors below. The old private sets were
   // removed; every use now goes through this.overlayBroker.
@@ -1145,6 +1185,9 @@ export class TuiApp {
     this.pluginActionFor = options.pluginActionFor
     this.pluginActionIdFor = options.pluginActionIdFor
     this.advancedInputRoute = options.advancedInputRoute
+    this.unstableInputRoute = options.unstableInputRoute
+    this.unstableInputsLive = options.unstableInputsLive
+    this.unstableFailSafeRelease = options.unstableFailSafeRelease
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
@@ -1373,6 +1416,11 @@ export class TuiApp {
     for (const lease of this.advancedOverlayLeases) lease.close()
     this.advancedOverlayLeases.clear()
     this.advancedOverlayWrappers.clear()
+    // Phase 3: close every still-owned UNSTABLE mount lease (the adapters
+    // die with the surface; the plugin's dispose() runs).
+    for (const lease of this.unstableMountLeases) lease.close()
+    this.unstableMountLeases.clear()
+    this.unstableMountAdapters.clear()
     this.overlayBroker.clear()
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
@@ -1534,6 +1582,45 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
+    // Phase 3: the UNSTABLE raw interception stage — BEFORE terminal
+    // protocol decoding (plan §4). A raw capture can see, consume or
+    // rewrite ANY chunk (Enter, Esc, Ctrl+C, paste, CSI-u, terminal-
+    // specific protocols). The Host emergency fail-safe is detected FIRST
+    // (host-owned, not rewritable by the Unstable API): triple-Esc within
+    // the window releases every raw capture and closes every unstable
+    // mount, restoring Host input. The fail-safe is armed only while
+    // captures are live, so ordinary Esc behavior is unchanged otherwise.
+    if (this.unstableInputRoute !== undefined) {
+      if (this.unstableInputsLive?.() === true && this.unstableFailSafe(data)) {
+        try {
+          this.unstableFailSafeRelease?.()
+        } catch {
+          // The release is Host recovery; a throwing release must never
+          // escape the input path.
+        }
+        this.notify('unstable captures released (emergency fail-safe)', 'info')
+        return { consume: true }
+      }
+      const outcome = this.unstableInputRoute(data, this.extensionHost?.surfaceId ?? 'tui')
+      if (outcome.action === 'consume') return { consume: true }
+      if (outcome.action === 'rewrite') {
+        // The rewritten chunk flows through the host's OWN processing AND
+        // propagates to the focused component (the fork's listener-result
+        // `data` field). Each terminal chunk passes the interception chain
+        // at most once: the rewrite goes straight to the host decoder and
+        // never re-enters the raw stage (handleInputCore has no raw
+        // stage).
+        const result = this.handleInputCore(outcome.data)
+        if (result === undefined) return { data: outcome.data }
+        return result
+      }
+    }
+    return this.handleInputCore(data)
+  }
+
+  /** The host's own input precedence ladder (the raw stage has already
+   * run — see {@link handleInput}). */
+  private handleInputCore(data: string): TuiInputListenerResult {
     // Kitty-protocol terminals report press, repeat, and release events as
     // separate sequences; the app must act on the PRESS only. A release of
     // Ctrl+O would otherwise double-toggle the fold (press expands, release
@@ -2153,6 +2240,7 @@ export class TuiApp {
     // leases follow the same migration.
     this.remountExtensionOverlays()
     this.remountAdvancedOverlays()
+    this.remountUnstableMounts()
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -2865,6 +2953,181 @@ export class TuiApp {
       width: this.terminal.columns,
       height: this.terminal.rows,
     }
+  }
+
+  // ── Phase 3: UNSTABLE raw input + low-level surface seam (plan §4–§10) ──
+
+  /** The emergency fail-safe window (ms): three Esc presses within this
+   * window trigger the release. */
+  private static readonly UNSTABLE_FAILSAFE_WINDOW_MS = 1500
+
+  /**
+   * The Host emergency fail-safe detector (plan §7): triple-Esc within
+   * {@link UNSTABLE_FAILSAFE_WINDOW_MS}. Runs BEFORE the raw captures are
+   * consulted, so it cannot be rewritten or consumed by a capture. The
+   * first two Esc presses pass through (a plugin surface may use Esc
+   * normally); the third is consumed and triggers the release.
+   * @param data - the raw chunk.
+   * @returns true when the fail-safe fired (the caller must consume the
+   *   chunk and run the release).
+   */
+  private unstableFailSafe(data: string): boolean {
+    if (!matchesKey(data, 'escape')) return false
+    const now = Date.now()
+    this.unstableEscPresses = this.unstableEscPresses.filter(timestamp => now - timestamp < TuiApp.UNSTABLE_FAILSAFE_WINDOW_MS)
+    this.unstableEscPresses.push(now)
+    if (this.unstableEscPresses.length >= 3) {
+      this.unstableEscPresses = []
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Phase 3: the UNSTABLE low-level surface handle (plan §10) — a
+   * SELECTED set of host surface capabilities for low-level plugins. It
+   * NEVER exposes `TuiApp`, `TuiMainScreen`, `TuiAltScreen` or the
+   * terminal object. A finally-disposed surface is inert.
+   */
+  unstableSurfaceHandle(): import('./extension/unstable-types.ts').UnstableSurfaceHandle {
+    const app = this
+    return {
+      surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+      generation: this.generation,
+      get width() {
+        return app.terminal.columns
+      },
+      get height() {
+        return app.terminal.rows
+      },
+      requestRender: () => {
+        if (app.disposed) return
+        app.requestRender()
+      },
+      mountComponent: (component, options) => app.showUnstableMount(component, options),
+    }
+  }
+
+  /**
+   * Phase 3: mount a low-level component (plan §9 option A) as a capturing
+   * overlay. The plugin renders RAW lines and receives RAW input (the
+   * Unstable contract — no sanitization); the host owns the physical
+   * mount, focus, stacking, fullscreen migration and teardown. The
+   * surface's final dispose closes every still-owned lease.
+   */
+  showUnstableMount(
+    component: import('./extension/unstable-types.ts').UnstableMountedComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): import('./extension/unstable-types.ts').UnstableMountLease {
+    if (this.disposed) {
+      return {
+        id: 'inert',
+        active: false,
+        focused: false,
+        focus: () => {},
+        blur: () => {},
+        invalidate: () => {},
+        close: () => {},
+        hide: () => {},
+        show: () => {},
+      }
+    }
+    const mountOptions = this.overlayOptionsOf(options)
+    const id = `unstable-mount-${++this.unstableMountCounter}`
+    let adapter: import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter | undefined
+    let raw: OverlayHandle | undefined
+    let hiddenByLease = false
+    let closed = false
+    const mount = (): void => {
+      if (closed || raw !== undefined) return
+      const created = new UnstableMountedComponentAdapter(
+        component,
+        (message: string) => this.notify(`unstable mount: ${message}`, 'error'),
+      )
+      adapter = created
+      this.unstableMountAdapters.add(created)
+      raw = this.showOverlayOnHost(created, mountOptions)
+      if (hiddenByLease) raw.setHidden(true)
+    }
+    mount()
+    const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
+      id,
+      get active() {
+        return !closed
+      },
+      get focused() {
+        return raw?.isFocused() ?? false
+      },
+      focus: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+        raw?.focus()
+      },
+      blur: () => {
+        if (closed) return
+        raw?.unfocus()
+      },
+      invalidate: () => {
+        if (closed) return
+        this.requestRender()
+      },
+      close: () => {
+        if (closed) return
+        closed = true
+        this.unstableMountLeases.delete(lease)
+        if (adapter !== undefined) {
+          this.unstableMountAdapters.delete(adapter)
+          adapter.dispose()
+        }
+        raw?.hide()
+        raw = undefined
+        adapter = undefined
+      },
+      hide: () => {
+        if (closed) return
+        hiddenByLease = true
+        raw?.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+      },
+      // Host-internal: re-create the raw handle on the CURRENT active
+      // screen after a fullscreen swap. The OLD adapter is dropped from
+      // the live set WITHOUT disposing it (the plugin component must
+      // survive the screen migration).
+      _remount: () => {
+        if (closed) return
+        if (adapter !== undefined) {
+          this.unstableMountAdapters.delete(adapter)
+        }
+        raw = undefined
+        mount()
+      },
+    }
+    this.unstableMountLeases.add(lease)
+    return lease
+  }
+
+  /** Phase 3: re-mount every still-open UNSTABLE lease on the CURRENT
+   * active screen (fullscreen toggle). */
+  private remountUnstableMounts(): void {
+    for (const lease of this.unstableMountLeases) {
+      lease._remount()
+    }
+  }
+
+  /** Phase 3 test hook: the number of still-owned UNSTABLE mount leases. */
+  ownedUnstableMountLeasesForTest(): number {
+    return this.unstableMountLeases.size
+  }
+
+  /** Phase 3 test hook: the number of live UNSTABLE mount adapters
+   * (asserts a fullscreen remount drops the old adapter). */
+  unstableMountAdaptersForTest(): number {
+    return this.unstableMountAdapters.size
   }
 
   /** Phase 2: the ADVANCED editor controls (plan §9) — direct semantic

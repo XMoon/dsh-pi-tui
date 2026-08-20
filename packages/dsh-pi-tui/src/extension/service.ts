@@ -31,7 +31,13 @@ import type {
   AdvancedInteractiveComponent,
   AdvancedOverlayLease,
 } from './advanced-types.ts'
+import type {
+  UnstableRawInputHandle,
+  UnstableRawInputSpec,
+  UnstableSurfaceHandle,
+} from './unstable-types.ts'
 import { AdvancedInputRegistry } from './internal/advanced-input.ts'
+import { UnstableInputRegistry } from './internal/unstable-input.ts'
 import { normalizeInputEvent } from './internal/input-events.ts'
 import { CommandBridge } from '../command-bridge.ts'
 import { ThemeRegistry } from '../theme-registry.ts'
@@ -119,6 +125,29 @@ function inertAdvancedEditorControls(): AdvancedEditorControls {
     insertEditorText: () => {},
     pasteToEditor: () => {},
     requestEditorFocus: () => {},
+  }
+}
+
+/** An inert UNSTABLE surface handle (no surface / seam detached / surface
+ * disposed). Every method is a safe no-op; geometry is 0. */
+function inertUnstableSurfaceHandle(): UnstableSurfaceHandle {
+  return {
+    surfaceId: 'inert',
+    generation: 0,
+    width: 0,
+    height: 0,
+    requestRender: () => {},
+    mountComponent: () => ({
+      id: 'inert',
+      active: false,
+      focused: false,
+      focus: () => {},
+      blur: () => {},
+      invalidate: () => {},
+      close: () => {},
+      hide: () => {},
+      show: () => {},
+    }),
   }
 }
 
@@ -265,8 +294,8 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** Capabilities advertised from service-provide time (P0-1): the chrome
    * slots + widget slots work before any surface exists (registrations are
    * simply rendered once the surface attaches). Phase 2 adds the ADVANCED
-   * capabilities: the advanced registry/seams are service-lifetime, so
-   * normalized input capture, interactive overlays and editor control are
+   * capabilities; Phase 3 adds the UNSTABLE capabilities — the advanced/
+   * unstable registries and seams are service-lifetime, so they are
    * feature-detectable before any surface exists (their physical mounts
    * attach later). */
   static readonly ADVERTISED_CAPABILITIES: readonly PiTuiCapability[] = [
@@ -277,6 +306,8 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     'advanced.input.capture',
     'advanced.ui.interactive',
     'advanced.editor.control',
+    'unstable.input.raw',
+    'unstable.surface.handle',
   ]
 
   private readonly ledger: ExtensionLedger
@@ -330,6 +361,20 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     surfaceId: string
     controls: AdvancedEditorControls
   } | undefined
+  /** Phase 3: the UNSTABLE raw input capture registry. Registrations are
+   * caller-fiber-owned; the registry is service-lifetime — captures
+   * survive surface recreate and are consulted by the CURRENT surface's
+   * input path BEFORE terminal protocol decoding. */
+  readonly unstableInputs: UnstableInputRegistry
+  /** Phase 3: the UNSTABLE low-level surface seam (wired by the runner;
+   * the host owns the screens). SURFACE-scoped like the other seams. */
+  private unstableSurfaceSeam: {
+    surfaceId: string
+    handle: UnstableSurfaceHandle
+  } | undefined
+  /** Phase 3: the still-open UNSTABLE mount close functions (closed by
+   * the emergency fail-safe and by owner unload). */
+  private readonly unstableMounts = new Set<() => void>()
   /** Track health for one external registry contribution. */
   private trackRegistryHealth(slot: string, id: string, owner: string): void {
     this.ledger.trackHealth(slot, id, owner)
@@ -410,6 +455,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
         untrack: (id) => this.ledger.untrackHealth('advanced.input.capture', id),
         recordError: (id, message) => this.ledger.recordExternalError('advanced.input.capture', id, message),
         clearError: (id) => this.ledger.clearExternalError('advanced.input.capture', id),
+      },
+    )
+    // Phase 3: the unstable raw capture registry. Health rides the ledger
+    // ('unstable.input.raw' slot) — a throwing raw handler is recorded and
+    // cleared on the next successful decision.
+    this.unstableInputs = new UnstableInputRegistry(
+      () => this.batcher.invalidate(),
+      {
+        track: (id, owner) => this.ledger.trackHealth('unstable.input.raw', id, owner),
+        untrack: (id) => this.ledger.untrackHealth('unstable.input.raw', id),
+        recordError: (id, message) => this.ledger.recordExternalError('unstable.input.raw', id, message),
+        clearError: (id) => this.ledger.clearExternalError('unstable.input.raw', id),
       },
     )
   }
@@ -643,6 +700,10 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     }
     if (this.advancedEditorSeam !== undefined && this.advancedEditorSeam.surfaceId === detachingId) {
       this.advancedEditorSeam = undefined
+    }
+    // Phase 3: unbind the UNSTABLE surface seam with the same lease.
+    if (this.unstableSurfaceSeam !== undefined && this.unstableSurfaceSeam.surfaceId === detachingId) {
+      this.unstableSurfaceSeam = undefined
     }
     // P1-3: unbind every live bridge subscription — the RECORDS stay
     // (caller-fiber-owned); a later attachSurface re-binds them. A
@@ -1189,6 +1250,176 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
    * SURFACE-scoped like the overlay seam. */
   setAdvancedEditorSeam(surfaceId: string, controls: AdvancedEditorControls): void {
     this.advancedEditorSeam = { surfaceId, controls }
+  }
+
+  // ── Phase 3: the UNSTABLE seam (consumed by `extensions/unstable`) ──────
+
+  /**
+   * Register a raw input capture (plan §5). Caller-fiber-owned: owner
+   * unload removes the capture. A duplicate id or a second live exclusive
+   * capture is an explicit error (the registry's rules — never a
+   * load-order winner). A stale service handle's call is rejected by the
+   * fiber check (INACTIVE_EFFECT) and rolled back.
+   */
+  _unstableCaptureRaw(spec: UnstableRawInputSpec): UnstableRawInputHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.unstableInputs.register(spec, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.unstable.input.captureRaw()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /** The CURRENT surface's low-level handle (plan §10), or an inert
+   * handle when no surface is attached / the seam is detached. The
+   * handle follows the live attachment (the surfaceId lease). Mounts
+   * created through it are caller-fiber-owned AND tracked for the
+   * emergency fail-safe. */
+  _unstableSurfaceHandle(): UnstableSurfaceHandle {
+    const seam = this.unstableSurfaceSeam
+    if (seam === undefined) return inertUnstableSurfaceHandle()
+    const caller = this.ctx
+    const service = this
+    return {
+      surfaceId: seam.handle.surfaceId,
+      generation: seam.handle.generation,
+      get width() {
+        return seam.handle.width
+      },
+      get height() {
+        return seam.handle.height
+      },
+      requestRender: () => {
+        try {
+          seam.handle.requestRender()
+        } catch {
+          // Best effort: a dead surface's handle is inert.
+        }
+      },
+      mountComponent: (component, options) => {
+        const mounted = seam.handle.mountComponent(component, options)
+        let closed = false
+        const close = (): void => {
+          if (closed) return
+          closed = true
+          service.unstableMounts.delete(close)
+          try {
+            mounted.close()
+          } catch {
+            // The host's lease close is idempotent; a throwing close must
+            // never escape into the fiber disposer or the public close
+            // path.
+          }
+        }
+        let effectDispose: () => void
+        try {
+          effectDispose = caller.fiber.effect(() => close, 'piTuiExtensions.unstable.surface.mountComponent()')
+        } catch (error) {
+          close()
+          throw error
+        }
+        service.unstableMounts.add(close)
+        return {
+          id: mounted.id,
+          get active() {
+            return !closed && mounted.active
+          },
+          get focused() {
+            return !closed && mounted.focused
+          },
+          focus: () => {
+            if (closed) return
+            try {
+              mounted.focus()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+          blur: () => {
+            if (closed) return
+            try {
+              mounted.blur()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+          invalidate: () => {
+            if (closed) return
+            try {
+              mounted.invalidate()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+          close: () => {
+            close()
+            effectDispose()
+          },
+          hide: () => {
+            if (closed) return
+            try {
+              mounted.hide()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+          show: () => {
+            if (closed) return
+            try {
+              mounted.show()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+        }
+      },
+    }
+  }
+
+  /** Consult the raw captures for one chunk. The Host's input path calls
+   * this BEFORE terminal protocol decoding (plan §4) — a capture can see,
+   * consume or rewrite ANY raw chunk. The returned outcome is applied
+   * exactly once (a rewrite goes straight to the Host decoder). */
+  _unstableInputRoute(data: string, surfaceId: string): import('./internal/unstable-input.ts').UnstableRawRouteResult {
+    return this.unstableInputs.route({ data, surfaceId })
+  }
+
+  /** Whether any raw capture is live (the app arms the emergency
+   * fail-safe only while captures exist). */
+  _unstableInputsLive(): boolean {
+    return this.unstableInputs.hasAny()
+  }
+
+  /**
+   * The Host emergency fail-safe (plan §7): release every unstable raw
+   * capture and close every unstable mount, restoring Host input. This is
+   * Host recovery — it is NOT part of the Unstable plugin API and cannot
+   * be rewritten or consumed by a capture (the Host detects the fail-safe
+   * pattern before consulting the captures). Idempotent.
+   */
+  _unstableEmergencyRelease(): void {
+    this.unstableInputs.disposeAll()
+    for (const close of [...this.unstableMounts]) close()
+    this.unstableMounts.clear()
+  }
+
+  /** Runner-only: wire the UNSTABLE low-level surface seam (Phase 3).
+   * SURFACE-scoped like the other seams. */
+  setUnstableSurfaceSeam(surfaceId: string, handle: UnstableSurfaceHandle): void {
+    this.unstableSurfaceSeam = { surfaceId, handle }
   }
 
   /** Runner-only callback health bridges. */
