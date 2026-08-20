@@ -75,6 +75,15 @@ class VimState {
     this.cursorCol = Math.max(0, Math.min(remaining, this.lines[line]!.length))
   }
 
+  /** Open a new line below the cursor and enter insert mode (o — an
+   * undoable mutation, round-1 finding). */
+  openLineBelow(): void {
+    this.pushUndo()
+    this.lines.splice(this.cursorLine + 1, 0, '')
+    this.cursorLine += 1
+    this.cursorCol = 0
+  }
+
   /** Push an undo snapshot (clears the redo stack). */
   private pushUndo(): void {
     this.undoStack.push(this.snapshot())
@@ -160,20 +169,6 @@ class VimState {
     this.cursorCol = Math.min(this.cursorCol, this.currentLine().length)
   }
 
-  /** Delete the word at/after the cursor (dw in normal mode). */
-  deleteWord(): void {
-    this.pushUndo()
-    const line = this.currentLine()
-    const rest = line.slice(this.cursorCol)
-    const match = /^\s*\S*/.exec(rest)
-    const wordLength = match?.[0]?.length ?? 0
-    if (wordLength > 0) {
-      this.lines[this.cursorLine] = line.slice(0, this.cursorCol) + line.slice(this.cursorCol + wordLength)
-    } else if (this.cursorLine < this.lines.length - 1) {
-      this.lines.splice(this.cursorLine, 1)
-    }
-  }
-
   /** Undo (u in normal mode). */
   undo(): void {
     const snapshot = this.undoStack.pop()
@@ -208,10 +203,12 @@ class VimState {
     this.cursorCol += this.yank.length
   }
 
-  /** Move the cursor (clamped). */
+  /** Move the cursor (clamped). Normal-mode movement stops at the LAST
+   * char of a line (col length-1) — a cursor at `length` is a valid
+   * insert position but l/x there would be no-ops (round-1 finding). */
   move(deltaLine: number, deltaCol: number): void {
     this.cursorLine = Math.max(0, Math.min(this.lines.length - 1, this.cursorLine + deltaLine))
-    this.cursorCol = Math.max(0, Math.min(this.currentLine().length, this.cursorCol + deltaCol))
+    this.cursorCol = Math.max(0, Math.min(Math.max(0, this.currentLine().length - 1), this.cursorCol + deltaCol))
   }
 
   /** Move to the next/previous word START (w/b in normal mode — vim
@@ -221,10 +218,13 @@ class VimState {
     const line = this.currentLine()
     if (forward) {
       // Skip the current word, then any whitespace → the next word start.
+      // When the word ends AT the line end, advance to the next line
+      // (round-1 finding: w from the last word of a line must not leave
+      // the cursor past the end).
       const rest = line.slice(this.cursorCol)
       const word = /^\S*/.exec(rest)?.[0] ?? ''
       const whitespace = /^\s*/.exec(rest.slice(word.length))?.[0] ?? ''
-      if (word.length + whitespace.length > 0) {
+      if (word.length + whitespace.length > 0 && this.cursorCol + word.length + whitespace.length < line.length) {
         this.cursorCol += word.length + whitespace.length
       } else if (this.cursorLine < this.lines.length - 1) {
         this.cursorLine += 1
@@ -232,7 +232,8 @@ class VimState {
       }
     } else {
       // Skip whitespace before the cursor, then the previous word → its
-      // first char.
+      // first char. From the start of a line, land on the previous line's
+      // LAST word start (vim b semantics).
       const before = line.slice(0, this.cursorCol)
       const whitespace = /^\s*$/.exec(before)?.[0] ?? ''
       const word = /(\S+)\s*$/.exec(before)?.[1] ?? ''
@@ -240,7 +241,9 @@ class VimState {
         this.cursorCol -= word.length + whitespace.length
       } else if (this.cursorLine > 0) {
         this.cursorLine -= 1
-        this.cursorCol = this.currentLine().length
+        const previous = this.currentLine()
+        const previousWord = /(\S+)\s*$/.exec(previous)?.[1] ?? ''
+        this.cursorCol = Math.max(0, previous.length - previousWord.length)
       }
     }
   }
@@ -402,10 +405,17 @@ function handleVimInput(
   if (isKey(key, 'i')) { state.mode = 'insert'; return true }
   if (isKey(key, 'a')) { state.mode = 'insert'; state.cursorCol = Math.min(state.cursorCol + 1, state.currentLine().length); return true }
   if (isKey(key, 'o')) {
+    // o opens a new line below — an undoable mutation (round-1 finding).
+    state.openLineBelow()
     state.mode = 'insert'
-    state.lines.splice(state.cursorLine + 1, 0, '')
-    state.cursorLine += 1
-    state.cursorCol = 0
+    host.invalidate()
+    return true
+  }
+  // c (change): delete the char at the cursor and enter insert mode (the
+  // DoD's x/d/c — round-1 finding).
+  if (isKey(key, 'c')) {
+    state.deleteAt()
+    state.mode = 'insert'
     host.invalidate()
     return true
   }

@@ -100,16 +100,18 @@ test('vim example: multi-line editing (o, Enter, j/k movement)', async () => {
   press(editor, 'o')
   editor.handleInput?.({ kind: 'text', text: 'line2' })
   assert.equal(editor.getText(), 'line1\nline2')
-  // Esc → normal; k moves up; a appends after the cursor.
+  // Esc → normal; k moves up (the preserved column clamps to the target
+  // line's LAST char); a appends at the end of line1.
   press(editor, 'escape')
   press(editor, 'k')
   press(editor, 'a')
   editor.handleInput?.({ kind: 'text', text: '!' })
   assert.equal(editor.getText(), 'line1!\nline2')
-  // Enter in insert mode inserts a newline.
+  // Esc → normal; j moves down; a appends at the end of line2; Enter
+  // inserts a newline; typing fills the new line.
   press(editor, 'escape')
   press(editor, 'j')
-  press(editor, 'i')
+  press(editor, 'a')
   editor.handleInput?.({ kind: 'key', key: key('enter') })
   editor.handleInput?.({ kind: 'text', text: 'line3' })
   assert.equal(editor.getText(), 'line1!\nline2\nline3')
@@ -124,6 +126,42 @@ test('vim example: paste events insert in insert mode; Enter in normal mode subm
   press(editor, 'escape')
   press(editor, 'enter')
   assert.deepEqual(host.dispatched, ['submit'], 'Enter in normal mode dispatches submit')
+})
+
+test('vim example: c changes the char at the cursor (DoD x/d/c)', async () => {
+  const { editor } = await createVimEditor('abc')
+  // c deletes the char at the cursor and enters insert mode.
+  press(editor, 'c')
+  editor.handleInput?.({ kind: 'text', text: 'X' })
+  assert.equal(editor.getText(), 'Xbc')
+  // Esc → normal; u undoes the typing, a second u undoes the c.
+  press(editor, 'escape')
+  press(editor, 'u')
+  assert.equal(editor.getText(), 'bc')
+  press(editor, 'u')
+  assert.equal(editor.getText(), 'abc')
+})
+
+test('vim example: w advances to the next line at a line end; b lands on the previous word start', async () => {
+  const { editor } = await createVimEditor('one\ntwo')
+  // w from the last word of line 0 advances to line 1 col 0.
+  press(editor, 'w')
+  assert.equal(editor.getCursor?.() ?? 0, 4, 'w from the line end lands on the next line start')
+  // b from the start of line 1 lands on the previous word start (col 0).
+  press(editor, 'b')
+  assert.equal(editor.getCursor?.() ?? 0, 0, 'b lands on the previous word start')
+})
+
+test('vim example: o is undoable (round-1 finding)', async () => {
+  const { editor } = await createVimEditor('line1')
+  press(editor, 'o')
+  editor.handleInput?.({ kind: 'text', text: 'line2' })
+  assert.equal(editor.getText(), 'line1\nline2')
+  press(editor, 'escape')
+  press(editor, 'u')
+  assert.equal(editor.getText(), 'line1\n', 'u undoes the typing, leaving the o-opened line')
+  press(editor, 'u')
+  assert.equal(editor.getText(), 'line1', 'a second u undoes the o-opened line')
 })
 
 test('vim example: the flat cursor offset round-trips through the seat shape', async () => {
