@@ -184,6 +184,32 @@ test('custom: an abort signal settles the promise and closes the surface (round-
   app.stop()
 })
 
+test('custom: a factory that settles synchronously never mounts a leaked overlay (round-2 finding)', async () => {
+  const { vt, app } = await appWithBroker()
+  const broker = app.advancedUiBroker()
+  // The factory calls host.done() DURING the factory call — the promise
+  // resolves immediately and NO overlay may be mounted afterwards.
+  const immediate = broker.custom((host) => {
+    host.done('immediate-result')
+    return { render: () => ({ kind: 'text', spans: [{ text: 'never shown' }] }) }
+  })
+  assert.equal(await immediate, 'immediate-result')
+  await vt.waitForRender()
+  assert.equal(app.ownedAdvancedOverlayLeasesForTest(), 0, 'no overlay leaked from a synchronous settle')
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('never shown'), 'the synchronous-settled surface never mounted')
+  // The same for a synchronous close().
+  const closed = broker.custom((host) => {
+    host.close()
+    return { render: () => ({ kind: 'text', spans: [{ text: 'never shown 2' }] }) }
+  })
+  assert.equal(await closed, undefined)
+  await vt.waitForRender()
+  assert.equal(app.ownedAdvancedOverlayLeasesForTest(), 0)
+  app.stop()
+})
+
 test('the surface dispose settles every still-open broker promise', async () => {
   const { vt, app } = await appWithBroker()
   const broker = app.advancedUiBroker()

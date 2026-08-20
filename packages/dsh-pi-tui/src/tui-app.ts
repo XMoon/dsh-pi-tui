@@ -3267,10 +3267,25 @@ export class TuiApp {
   private advancedSelect(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined> {
     if (this.disposed) return Promise.resolve(undefined)
     return new Promise<string | undefined>((resolve) => {
+      let settled = false
+      // The zero-arg settle registered in pendingBrokerSettles (the
+      // surface-dispose path) — removed on a normal select/cancel/abort
+      // (round-2 finding: an anonymous entry would retain the closed
+      // picker until surface dispose).
+      const brokerSettle = (): void => {
+        handle.close()
+        resolve(undefined)
+      }
+      const settle = (value: string | undefined): void => {
+        if (settled) return
+        settled = true
+        this.pendingBrokerSettles.delete(brokerSettle)
+        resolve(value)
+      }
       const handle = this.openPicker(
         options.items.map(item => ({ ...item })),
-        (value) => resolve(value),
-        () => resolve(undefined),
+        (value) => settle(value),
+        () => settle(undefined),
         {
           header: options.header,
           enableSearch: options.enableSearch,
@@ -3280,11 +3295,10 @@ export class TuiApp {
         },
       )
       // The surface's dispose settles the prompt (the picker overlay dies
-      // with the surface; the promise must not hang).
-      this.pendingBrokerSettles.add(() => {
-        handle.close()
-        resolve(undefined)
-      })
+      // with the surface; the promise must not hang). Guarded: an
+      // already-aborted signal settles synchronously inside openPicker —
+      // the entry must not be added afterwards.
+      if (!settled) this.pendingBrokerSettles.add(brokerSettle)
     })
   }
 
@@ -3373,10 +3387,18 @@ export class TuiApp {
         resolve(undefined)
         return
       }
-      lease = this.showAdvancedInteractiveOverlay(component, options)
-      // The surface's dispose settles the promise (the overlay dies with
-      // the surface).
-      this.pendingBrokerSettles.add(brokerSettle)
+      // Round-2 finding: a factory that settles SYNCHRONOUSLY (calls
+      // host.done()/close() during the factory call) must not mount the
+      // overlay afterwards — the settle already resolved the promise and
+      // the lease was still undefined, so the mount would leak forever
+      // (the surface-dispose path cannot clean it up either: settle
+      // returns early on `settled`).
+      if (!settled) {
+        lease = this.showAdvancedInteractiveOverlay(component, options)
+        // The surface's dispose settles the promise (the overlay dies with
+        // the surface).
+        this.pendingBrokerSettles.add(brokerSettle)
+      }
     })
   }
 
