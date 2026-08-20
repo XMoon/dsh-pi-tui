@@ -1640,9 +1640,14 @@ export class TuiApp {
       return { consume: true }
     }
     if (route.kind === 'editor' && replacement === undefined) {
-      // Keep the host editor in the normal route when no replacement owns the
-      // seat. This explicit branch also makes the optional plugin resolver
-      // independent from ordinary host editing.
+      // P2-R5: only the HOST seat may forward to the hidden host editor. A
+      // display-only replacement editor (no handleInput hook) owns the seat
+      // too: the public contract (public-types.ts) says ordinary typing is
+      // NOT silently routed into the hidden host editor while it is
+      // visible. Consume the key so the focused replacement component (or
+      // the app's own listeners) keep it, and the hidden host draft never
+      // diverges from what the user sees.
+      if (this.seatEditor().id !== 'host') return { consume: true }
       this.editor.handleInput(data)
       return { consume: true }
     }
@@ -2719,6 +2724,13 @@ export class TuiApp {
   /** M9 test hook: the CURRENT seat occupant (component rendering probe). */
   seatEditorForTest(): import('./editor-seat-holder.ts').SeatEditor {
     return this.seatEditor()
+  }
+
+  /** P2-R5 test hook: the HIDDEN host editor's live text (probes that a
+   * display-only replacement editor never silently routes typing into the
+   * hidden host editor while the plugin seat is visible). */
+  hostEditorTextForTest(): string {
+    return this.editor.getText()
   }
 
   /** M7 test hook: build (or fetch) the cached component entry for one

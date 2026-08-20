@@ -61,6 +61,16 @@ export class EditorRegistry {
    * @param owner - the Cordis fiber name.
    */
   register(contribution: EditorContribution, owner: string): EditorHandle {
+    if (contribution.id === 'host') {
+      // P2-R5 review: 'host' is the RESERVED built-in seat identity.
+      // EditorSeatHolder.performHandoff() treats target.id === 'host' as
+      // RESTORATION of the host default, so such a plugin can never occupy
+      // the replacement seat — and a live 'host' registration would weaken
+      // the seat-ownership checks (TuiApp routes editor input only for the
+      // host seat). Reject it loudly instead of silently accepting a
+      // contribution that can never win.
+      throw new Error(`editor contribution id "host" is reserved for the built-in host editor`)
+    }
     if (this.records.has(contribution.id)) {
       throw new Error(`duplicate editor contribution id "${contribution.id}"`)
     }

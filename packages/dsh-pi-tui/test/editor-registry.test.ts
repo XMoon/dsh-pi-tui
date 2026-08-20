@@ -230,6 +230,20 @@ test('EditorRegistry: a priority tie is an explicit error', () => {
   assert.throws(() => registry.register({ id: 'b', priority: 5, create: (host: EditorHost) => pluginEditor() }, 'o2'), /priority tie/)
 })
 
+test('EditorRegistry: the reserved "host" id is rejected (P2-R5 review)', () => {
+  const registry = new EditorRegistry()
+  // 'host' is the built-in seat identity: EditorSeatHolder.performHandoff()
+  // treats target.id === 'host' as RESTORATION of the host default, so a
+  // plugin claiming it could never occupy the replacement seat and would
+  // weaken the seat-ownership checks. It must be rejected at registration.
+  assert.throws(
+    () => registry.register({ id: 'host', priority: 0, create: (host: EditorHost) => pluginEditor() }, 'plugin'),
+    /reserved for the built-in host editor/,
+  )
+  assert.equal(registry.winner(), undefined, 'a rejected registration must not become a winner')
+  assert.equal(registry.hasAny(), false, 'a rejected registration must not be live')
+})
+
 test('EditorRegistry: owner unload removes the editor; duplicate ids error', () => {
   const registry = new EditorRegistry()
   registry.register({ id: 'x', priority: 1, create: (host: EditorHost) => pluginEditor() }, 'owner-a')
@@ -922,6 +936,77 @@ test('TuiApp: a plugin editor with handleInput receives REAL typing (P1-10)', as
   vt.sendInput('\x18') // ctrl+x — the plugin returns false
   await vt.waitForRender()
   assert.equal(inputLog, '', 'a declined key does not reach the plugin')
+  app.stop()
+})
+
+test('TuiApp: display-only replacement editor never routes typing into the hidden host editor (P2-R5)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  }, {
+    editorRegistry: registry,
+    // An empty resolver keeps the routing ladder alive without any
+    // binding claiming keys (same wiring as the P1-10 test).
+    pluginActionFor: () => undefined,
+  })
+  app.start()
+  await vt.waitForRender()
+  // A display-only plugin editor: NO handleInput hook. The public contract
+  // (public-types.ts:811-812) says ordinary typing is NOT silently routed
+  // into the hidden host editor while this seat is visible.
+  let text = ''
+  registry.register({
+    id: 'display-only', priority: 0,
+    create: () => ({
+      get component() { return { kind: 'text' as const, spans: [{ text }] } },
+      getText: () => text,
+      setText: (next) => { text = next },
+      getCursor: () => 0,
+      setCursor: () => {},
+      focused: true,
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().id, 'display-only')
+  // Ordinary typing must NOT reach the display-only editor (it owns no
+  // input channel) and must NOT be routed into the hidden host editor.
+  vt.sendInput('a')
+  vt.sendInput('b')
+  vt.sendInput('c')
+  await vt.waitForRender()
+  assert.equal(text, '', 'the display-only editor must not receive typing')
+  assert.equal(app.hostEditorTextForTest(), '', 'typing must not leak into the hidden host editor (P2-R5)')
+  assert.equal(app.getDraft(), '', 'the visible seat draft stays untouched')
+  // Enter submits nothing (the seat draft is empty) and must not leak into
+  // the hidden host editor either.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.hostEditorTextForTest(), '', 'Enter must not leak into the hidden host editor')
+  assert.deepEqual(submitted, [], 'an empty display-only draft submits nothing')
+  app.stop()
+})
+
+test('TuiApp: the HOST seat still routes ordinary typing normally (P2-R5 guard)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().id, 'host')
+  vt.sendInput('a')
+  vt.sendInput('b')
+  await vt.waitForRender()
+  assert.equal(app.hostEditorTextForTest(), 'ab', 'the host seat must keep normal editing')
+  assert.equal(app.getDraft(), 'ab', 'the host draft is the seat draft')
   app.stop()
 })
 

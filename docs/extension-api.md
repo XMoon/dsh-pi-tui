@@ -49,6 +49,16 @@ history browsing, undo snapshots, and paste-marker state before forwarding the
 single declined event. Enter remains host-owned and submits through the normal
 host path.
 
+The editor id `host` is RESERVED for the built-in host editor: a
+`registerEditor({ id: 'host', ... })` contribution is rejected. The host seat
+is the fallback that occupies the seat whenever no plugin editor wins, and
+`TuiApp`'s input-routing guard distinguishes the host seat from display-only
+replacements by this id — a plugin claiming it could never occupy the
+replacement seat and would corrupt the seat-ownership checks. A display-only
+replacement (no `handleInput` hook) never receives ordinary typing, and
+ordinary typing is never silently routed into the hidden host editor while the
+plugin seat is visible.
+
 An `EditorHost` is bound to the editor-seat owner that created it. After a
 handoff, every operation from the old host (`getSnapshot`, `replaceText`,
 `dispatch`, `subscribe`, and `invalidate`) is inert; subscriptions created
