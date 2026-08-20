@@ -44,10 +44,6 @@ export class SurfaceHost {
    * so dispose() can ask the LEDGER whether it is still the current owner.
    * The ledger, not the host, decides who may restore the no-op sink. */
   private ownToken: object | undefined
-  /** THIS host's attachment generation (plan §6.2): assigned by the ledger
-   * at attach; a final dispose freezes/removes exactly the registrations
-   * of generations up to this one (never a newer host's). */
-  private ownGeneration = 0
   /** Unique identity for this surface instance (P1-2: the allocator).
    * Stable for the host's lifetime; a NEW SurfaceHost gets a NEW id. */
   readonly surfaceId: string
@@ -124,11 +120,11 @@ export class SurfaceHost {
     // sink is owned by THIS attachment from the moment it is installed.
     const token = {}
     this.ownToken = token
-    // The ledger assigns each attachment a generation (plan §6.2): this
-    // host records its OWN generation so a final dispose can freeze/remove
-    // exactly the registrations of generations up to its own — never a
-    // newer host's.
-    this.ownGeneration = this.ledger.markAttachment(token)
+    // The ledger records this attachment as the sink owner (P1-2: the
+    // ledger is the service-lifetime registry — attachments own only the
+    // SINK, never the registrations; a surface dispose stops consuming,
+    // it never removes still-live caller-owned contributions).
+    this.ledger.markAttachment(token)
     this.store.set({ surface })
     this.capabilities.add('slot.chrome.header.badge')
     this.capabilities.add('slot.input.dock.item')
@@ -330,7 +326,13 @@ export class SurfaceHost {
     this.store.set({ activity: { ...this.store.get().activity, ...activity } })
   }
 
-  /** Detach this surface host (final dispose; M0 generation bump). */
+  /** Detach this surface host (final dispose; M0 generation bump). The
+   * host is a LEDGER CONSUMER: dispose stops consuming the ledger —
+   * detaches the render sink, disposes the outlets, clears the surface
+   * state subscribers — but NEVER removes registrations owned by still-
+   * live caller fibers (P1-2). A later surface attaches to the SAME
+   * ledger and reads the same still-live registrations; old handles stay
+   * fully live across the recreation. */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -344,16 +346,6 @@ export class SurfaceHost {
       this.ledger.restoreSinkIfCurrent(this.ownToken)
       this.ownToken = undefined
     }
-    // Final-disposal generation lease (plan §6.2, follow-up P1): freeze
-    // and remove the registrations of generations up to THIS host's. The
-    // generation bound is the isolation — a late old-generation dispose
-    // freezes exactly its own era's handles/records and never touches a
-    // newer host's registrations (the ledger enforces this, not the host).
-    // A late old-generation replace/invalidate/dispose is a benign no-op,
-    // and the old records no longer render on a newer surface. Ordinary
-    // stop()/fullscreen round-trips never reach here — only the final
-    // surface dispose.
-    this.ledger.freezeLeases(this.ownGeneration)
     // Clear every outlet's baked text (M4): a disposed surface must not
     // leave stale widget rows (or chrome text) behind — the host's zone
     // Texts would otherwise keep painting them (the fork's emptied-pane

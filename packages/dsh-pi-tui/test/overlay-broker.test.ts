@@ -245,3 +245,4 @@ test('TuiApp: an explicitly closed lease is dropped from the owned set (round-1 
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0)
   app.stop()
 })
+

@@ -1501,7 +1501,7 @@ export function apply(ctx: Context, config: Config): void {
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
       _recordRegistryError(slot: string, id: string, error: unknown): void
       _clearRegistryError(slot: string, id: string): void
-      attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
+      attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string, requestRender?: (force?: boolean) => void): void
       detachSurface(surfaceId?: string): void
     }) | undefined
     let extensionHost: SurfaceHost | undefined
@@ -2694,7 +2694,10 @@ export function apply(ctx: Context, config: Config): void {
       // M8: the managed-overlay mount seam (plan §13.3) — the plugin
       // supplies an ExtensionView; the host compiles + mounts it through
       // its overlay broker (modal stacking, focus, migration, teardown).
-      extensionService.setOverlayMount((view, options) => app.showExtensionOverlay(view, options))
+      // The seam is SURFACE-scoped (P1-4): bound to THIS attachment's
+      // surfaceId so a stale old-generation detach never unbinds a newer
+      // surface's seam.
+      extensionService.setOverlayMount(extensionHost.surfaceId, (view, options) => app.showExtensionOverlay(view, options))
       extensionHost.attach(
         { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
         {
@@ -2710,12 +2713,19 @@ export function apply(ctx: Context, config: Config): void {
       )
       app.refreshChrome()
       const attached = extensionHost
+      // P1-1: attach the surface's RENDER SINK to the extension service —
+      // registry invalidations (register/unload/replace on commands,
+      // themes, autocomplete, settings, keybindings, renderers, editors
+      // and the ledger slots) flush through the service batcher into THIS
+      // surface's render path, so a dynamic registration repaints without
+      // any user input. The stale-detach lease protects a newer surface.
       extensionService.attachSurface(
         { subscribe: (listener) => attached.subscribeState(listener as never) },
         extensionHost.capabilitiesOf() as ReadonlySet<string>,
         // The attachment lease (P1): a stale detachSurface from an older
         // generation must not tear down THIS surface's bridge.
         attached.surfaceId,
+        (force) => app.requestRender(force),
       )
     }
     // Persisted TUI preferences: register the namespace and restore the

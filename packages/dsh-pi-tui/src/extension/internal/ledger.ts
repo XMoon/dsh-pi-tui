@@ -38,19 +38,6 @@ interface Registration<T> {
   value: T
   /** Latched by dispose(); a disposed registration is inert. */
   disposed: boolean
-  /** The attachment generation this registration was created under (plan
-   * §6.2, follow-up P1): registrations created BEFORE the current
-   * attachment are old-generation — they are frozen (and their records
-   * removed) when the CURRENT host is finally disposed, so a stale
-   * old-generation handle can never mutate the ledger a newer surface
-   * renders. Registrations created AFTER the current attachment are
-   * newer-generation and stay live. */
-  generation: number
-  /** Set when the generation this registration belongs to was finally
-   * disposed: the handle is inert — replace/invalidate/dispose become
-   * no-ops, and the record is dropped (a stale old-generation record must
-   * not keep rendering as live content on a newer surface). */
-  leaseFrozen: boolean
 }
 
 /** The ledger's observable snapshot of one slot (M2 attaches to this). */
@@ -84,16 +71,11 @@ export class ExtensionLedger {
    * The CURRENT attachment token owning the sink (P1: generation-scoped
    * isolation). Only the current owner may restore a no-op sink on dispose;
    * a stale old-generation dispose leaves the NEWER host's sink intact.
+   * Registrations are NOT tied to attachments: the ledger is the
+   * service-lifetime registry (P1-2) — a surface dispose only stops
+   * CONSUMING it, never removes still-live caller-owned registrations.
    */
   private attachmentToken: object | undefined
-  /**
-   * The current attachment generation (plan §6.2, follow-up P1): bumped on
-   * every attachment. Registrations record the generation they were created
-   * under; a final-disposal boundary freezes/removes only registrations of
-   * generations up to the DISPOSING host's generation — never the newer
-   * generation's handles.
-   */
-  private attachmentGeneration = 0
   /**
    * Test-only semantic overrides (P2-2): lets a test declare a slot as
    * `single` even though the shipped slot map is all-`list` today, so the
@@ -122,17 +104,12 @@ export class ExtensionLedger {
    * Record the current attachment token that owns the sink (P1). Called by
    * the SurfaceHost's attach AFTER re-sinking, so a later
    * {@link restoreSinkIfCurrent} from a STALE generation is a no-op.
+   * Attachments do NOT own registrations: the ledger is the service-
+   * lifetime registry (P1-2), so no generation is stamped here anymore.
    * @param token - the attaching host's lease token.
-   * @returns the generation assigned to THIS attachment (plan §6.2): the
-   * host stores it so a final dispose can freeze/remove exactly the
-   * registrations of generations up to its own.
    */
-  markAttachment(token: object): number {
+  markAttachment(token: object): void {
     this.attachmentToken = token
-    // A NEW attachment is a new generation: registrations created from
-    // here on belong to it (plan §6.2 generation-scoped freeze).
-    this.attachmentGeneration += 1
-    return this.attachmentGeneration
   }
 
   /**
@@ -180,13 +157,6 @@ export class ExtensionLedger {
       owner,
       value,
       disposed: false,
-      // The generation this registration belongs to: the CURRENT
-      // attachment generation at register time (0 before any attach — a
-      // pre-attach registration belongs to the generation that first
-      // attaches and renders it). A final-disposal boundary freezes only
-      // the generations up to the disposing host's own generation.
-      generation: this.attachmentGeneration,
-      leaseFrozen: false,
     }
     if (semantic === 'single') {
       // A priority TIE is an explicit error: never guess the winner by
@@ -302,45 +272,6 @@ export class ExtensionLedger {
     this.health.clearError(slot, id)
   }
 
-  /**
-   * Final-disposal boundary (plan §6.2, follow-up P1): freeze the handles
-   * AND remove the records of every registration belonging to a generation
-   * UP TO the disposing host's generation. The generation bound alone
-   * provides the isolation: registrations of `generation <= disposingGen`
-   * can never belong to a NEWER host (newer hosts register under higher
-   * generations), so a late old-generation dispose freezes exactly its own
-   * era's handles/records and never touches a newer host's registrations.
-   * A late `replace()`/`invalidate()`/`dispose()` on a frozen handle is a
-   * benign no-op, and the old records no longer render as live content on
-   * a newer surface (the follow-up probe: attach A, register through the
-   * old ledger, dispose A, attach B, old handle.replace => B must NOT
-   * render the old handle's value — and B's OWN registrations stay live).
-   *
-   * @param generation - the DISPOSING host's attachment generation.
-   */
-  freezeLeases(generation: number): void {
-    let changed = false
-    for (const registration of [...this.registrations.values()]) {
-      if (registration.disposed) continue
-      if (registration.generation <= generation) {
-        // Old-generation: freeze the handle (replace/invalidate/dispose
-        // become no-ops) and remove the record (it must not keep rendering
-        // as live content on a newer surface). Health is untracked like a
-        // normal disposal.
-        registration.leaseFrozen = true
-        this.registrations.delete(registryKey(registration.slot, registration.id))
-        this.health.untrack(registration.slot, registration.id)
-        this.revision += 1
-        changed = true
-      }
-    }
-    // Invalidate only when something was actually frozen (review round-3
-    // finding 2): a no-match freeze (nothing registered, generation 0,
-    // repeated dispose) must not trigger a meaningless refresh on whatever
-    // sink is current.
-    if (changed) this.onInvalidate()
-  }
-
   private handleFor<T>(registration: Registration<T>): RegistrationHandle<T> {
     const ledger = this
     return {
@@ -348,7 +279,7 @@ export class ExtensionLedger {
         return registration.id
       },
       invalidate(): void {
-        if (registration.disposed || registration.leaseFrozen) return
+        if (registration.disposed) return
         // An invalidate is a "content changed in place" signal: bump the
         // revision so the outlets re-bake even though the ledger's record
         // is structurally unchanged (round-4 finding 2 — a plugin that
@@ -358,7 +289,7 @@ export class ExtensionLedger {
         ledger.onInvalidate()
       },
       replace(next: T): void {
-        if (registration.disposed || registration.leaseFrozen) return
+        if (registration.disposed) return
         registration.value = next
         // A replacement IS a content change: bump the revision so the
         // outlets re-bake (F-16 — a replace must reach the screen even
@@ -368,7 +299,7 @@ export class ExtensionLedger {
         ledger.onInvalidate()
       },
       dispose(): void {
-        if (registration.disposed || registration.leaseFrozen) return
+        if (registration.disposed) return
         ledger.disposeRegistration(registration)
       },
     }

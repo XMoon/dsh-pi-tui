@@ -81,7 +81,7 @@ export type PiTuiCapability =
   | 'slot.input.widget'
   | 'surface.snapshot'
 
-/** Slot identities this package knows; unknown names are rejected at registration. */
+/** Slot identities this bundle knows; unknown names are rejected at registration. */
 export type PiTuiSlotName =
   | 'chrome.header.badge'
   | 'input.dock.item'
@@ -92,11 +92,24 @@ export type PiTuiSlotName =
 /** Slot semantics: how competing contributions resolve. */
 export type PiTuiSlotSemantic = 'list' | 'single'
 
+/** Extension tier metadata shared by every tier entry (plan §4/§5). */
+export type ExtensionTier = 'stable' | 'advanced' | 'unstable'
+
+/** Reserved capability namespaces for the future advanced/unstable tiers (plan §11). */
+export const ADVANCED_CAPABILITY_NAMESPACE = 'advanced.' as const
+export const UNSTABLE_CAPABILITY_NAMESPACE = 'unstable.' as const
+
+/** A capability under the advanced namespace (reserved; none advertised yet). */
+export type AdvancedCapability = `advanced.${string}`
+
+/** A capability under the unstable namespace (reserved; none advertised yet). */
+export type UnstableCapability = `unstable.${string}`
+
 /** What a plugin may know about the host (M1: version + capabilities only). */
 export interface PiTuiApiInfo {
   /** The extension API version; 1 for the M0–M3 foundation. */
   readonly apiVersion: typeof API_VERSION
-  /** The `@xmoon76/dsh-pi-tui` package version (semver string). */
+  /** The `@xmoon76/dsh-pi-tui` bundle version (semver string). */
   readonly hostVersion: string
   /** Capabilities the host currently supports; feature-detect, never parse the version. */
   readonly capabilities: ReadonlySet<PiTuiCapability>
@@ -778,6 +791,29 @@ export interface EditorContribution {
   create(host: EditorHost): ExtensionEditor
 }
 
+/** A semantic editor input event (P1-5). Third-party editors NEVER receive
+ * raw terminal bytes: the Host normalizes terminal protocol decoding
+ * (legacy + Kitty CSI-u + modifyOtherKeys encodings, paste protocols, key
+ * release/repeat filtering) into one of these shapes, so a plugin editor
+ * behaves identically on every terminal. */
+export type EditorInputEvent =
+  /** One key press, normalized to the semantic identity (same shape as
+   * the keybinding {@link NormalizedKey}). */
+  | {
+      readonly kind: 'key'
+      readonly key: NormalizedKey
+    }
+  /** One plain printable character run (ordinary typing). */
+  | {
+      readonly kind: 'text'
+      readonly text: string
+    }
+  /** A paste burst (bracketed-paste or the host's paste heuristic). */
+  | {
+      readonly kind: 'paste'
+      readonly text: string
+    }
+
 /** The plugin editor surface (plan §14.1): the component to mount in the
  * seat + the state hooks the host reads/writes. */
 export interface ExtensionEditor {
@@ -798,20 +834,23 @@ export interface ExtensionEditor {
    * default applies otherwise). */
   borderColor?: (text: string) => string
   /**
-   * P1-10: the plugin editor's INPUT channel. While the plugin editor
+   * P1-5: the plugin editor's INPUT channel. While the plugin editor
    * occupies the seat, every key the host's precedence ladder routes to
-   * the editor is delivered here FIRST (raw terminal data — the plugin
-   * parses it with the host's key helpers or its own state machine).
-   * Return true to CONSUME the key (the host does nothing further);
-   * return false/undefined to hand the key back to the HOST editing
-   * semantics. The host synchronizes the replacement's current text/cursor
-   * into its hidden Editor, forwards the event once, and copies the resulting
-   * text/cursor back into the visible replacement. Enter remains host-owned
-   * and submits through the normal host path.
+   * the editor is delivered here as a SEMANTIC event ({@link
+   * EditorInputEvent}) — the host has already decoded the terminal
+   * protocol (legacy/CSI-u/modifyOtherKeys encodings, paste bursts, key
+   * release/repeat filtering), so a plugin editor NEVER parses raw
+   * terminal escape bytes. Return true to CONSUME the event (the host
+   * does nothing further); return false/undefined to hand the event back
+   * to the HOST editing semantics. The host synchronizes the replacement's
+   * current text/cursor into its hidden Editor, forwards the event once,
+   * and copies the resulting text/cursor back into the visible
+   * replacement. Enter remains host-owned and submits through the normal
+   * host path.
    * Without this hook the seat is display-only: ordinary typing is not
    * silently routed into the hidden host editor.
    */
-  handleInput?(data: string): boolean
+  handleInput?(event: EditorInputEvent): boolean
   /** Dispose the editor (the host calls it after the handoff). */
   dispose(): void
 }

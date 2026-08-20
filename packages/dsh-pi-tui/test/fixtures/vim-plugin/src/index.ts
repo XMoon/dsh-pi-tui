@@ -5,6 +5,13 @@
  * settings, tool renderers and managed overlays — importing ONLY the
  * public `@xmoon76/dsh-pi-tui/extensions` subpath.
  *
+ * The editor is a REAL minimal modal editor (P1-6): insert mode (printable
+ * text, Backspace, Left/Right, Esc → normal), normal mode (i → insert,
+ * h/l → move, x → delete). It consumes SEMANTIC EditorInputEvents — the
+ * host normalizes terminal protocols (legacy/CSI-u/modifyOtherKeys), so
+ * the plugin never parses raw terminal bytes. Enter / Ctrl+Enter / Ctrl+S
+ * stay HOST-owned (submission is never re-implemented in the plugin).
+ *
  * CI gate (the vim-plugin smoke): importing `@xmoon76/pi-tui`,
  * `src/tui-app`, or any repository-relative internal path FAILS the
  * gate. If this plugin ever needs a private import, the SDK is missing
@@ -17,9 +24,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   PI_TUI_EXTENSIONS_SERVICE,
   type EditorHost,
+  type EditorInputEvent,
   type EditorSnapshot,
   type ExtensionEditor,
   type InputWidget,
+  type NormalizedKey,
   type PiTuiExtensionService,
   type TuiSettingContribution,
   type TuiToolRendererContribution,
@@ -29,17 +38,31 @@ export const name = 'dsh-pi-vim-fixture'
 
 export const inject = ['tuiStartup', PI_TUI_EXTENSIONS_SERVICE]
 
-// ── A minimal vim-mode editor built on the SDK ────────────────────────────
+// ── A minimal modal editor built on the SDK ────────────────────────────────
+
+/** The fixture's mode state machine: insert (text editing) and normal
+ * (navigation + deletion via h/l/x/i). The host owns submission. */
+type VimMode = 'insert' | 'normal'
+
+/** Whether a normalized key is a plain printable (no modifiers). */
+function isPlainKey(key: NormalizedKey): boolean {
+  return !key.ctrl && !key.alt && !key.shift && !key.super
+    && key.key.length === 1 && key.key.charCodeAt(0) >= 32 && key.key.charCodeAt(0) <= 126
+}
 
 /**
- * A modal editor that follows the ExtensionEditor protocol: the host
+ * A REAL modal editor that follows the ExtensionEditor protocol (P1-6):
+ * insert mode (printable text, Backspace, Left/Right, Esc → normal) and
+ * normal mode (i → insert, h/l → move, x → delete). Input arrives as
+ * SEMANTIC {@link EditorInputEvent}s — the host normalized the terminal
+ * protocol, so legacy and CSI-u encodings behave identically. The host
  * snapshot subscription is DISPOSED with the editor, host-driven state
  * is adopted through a single update + host.invalidate(), and the view
  * is rebuilt from the CURRENT plugin state (never a captured snapshot).
  * The plugin owns its mode state; the host owns focus, submission and
  * session safety.
  */
-function createVimEditor(host: EditorHost, mode: { current: string }): ExtensionEditor {
+function createVimEditor(host: EditorHost, mode: { current: VimMode }): ExtensionEditor {
   let text = ''
   let cursor = 0
   let disposed = false
@@ -55,6 +78,87 @@ function createVimEditor(host: EditorHost, mode: { current: string }): Extension
     }
     if (snapshot.cursor !== cursor) cursor = snapshot.cursor
   })
+
+  /** The vim state machine: consume one semantic event, mutate the draft. */
+  const handleInput = (event: EditorInputEvent): boolean => {
+    if (disposed) return true
+    // INSERT mode.
+    if (mode.current === 'insert') {
+      if (event.kind === 'key') {
+        const key = event.key
+        if (isPlainKey(key)) {
+          text = text.slice(0, cursor) + key.key + text.slice(cursor)
+          cursor += 1
+          host.invalidate()
+          return true
+        }
+        if (key.key === 'backspace' && !key.ctrl && !key.alt) {
+          if (cursor > 0) {
+            text = text.slice(0, cursor - 1) + text.slice(cursor)
+            cursor -= 1
+            host.invalidate()
+          }
+          return true
+        }
+        if (key.key === 'left' && !key.ctrl && !key.alt) {
+          if (cursor > 0) { cursor -= 1; host.invalidate() }
+          return true
+        }
+        if (key.key === 'right' && !key.ctrl && !key.alt) {
+          if (cursor < text.length) { cursor += 1; host.invalidate() }
+          return true
+        }
+        if (key.key === 'escape') {
+          mode.current = 'normal'
+          host.invalidate()
+          return true
+        }
+        // Enter and other host-reserved keys: hand back to the host
+        // (submission stays host-owned).
+        return false
+      }
+      // Text runs and pastes insert at the cursor.
+      const chunk = event.kind === 'text' ? event.text : event.text
+      text = text.slice(0, cursor) + chunk + text.slice(cursor)
+      cursor += chunk.length
+      host.invalidate()
+      return true
+    }
+    // NORMAL mode.
+    if (event.kind === 'key') {
+      const key = event.key
+      if (isPlainKey(key)) {
+        if (key.key === 'i') {
+          mode.current = 'insert'
+          host.invalidate()
+          return true
+        }
+        if (key.key === 'h') {
+          if (cursor > 0) { cursor -= 1; host.invalidate() }
+          return true
+        }
+        if (key.key === 'l') {
+          if (cursor < text.length) { cursor += 1; host.invalidate() }
+          return true
+        }
+        if (key.key === 'x') {
+          if (cursor < text.length) {
+            text = text.slice(0, cursor) + text.slice(cursor + 1)
+            host.invalidate()
+          }
+          return true
+        }
+        return true // normal-mode keys are consumed (no typing into the draft)
+      }
+      if (key.key === 'escape') {
+        host.invalidate()
+        return true // stay in normal mode; Esc is consumed by the editor
+      }
+      return false // host-reserved keys (Enter etc.) hand back
+    }
+    return false
+  }
+
   return {
     // The view reads the CURRENT plugin state at compile time (the host
     // compiles it on mount; a state change calls host.invalidate() which
@@ -79,6 +183,9 @@ function createVimEditor(host: EditorHost, mode: { current: string }): Extension
       host.invalidate()
     },
     get focused() { return false },
+    // P1-6: the SEMANTIC input channel — the host normalized the terminal
+    // protocol; the plugin never parses raw escape bytes.
+    handleInput,
     dispose: () => {
       if (disposed) return
       disposed = true
@@ -95,7 +202,7 @@ export function apply(ctx: Context): void {
 
   // 1. EDITOR SDK: win the seat (single-winner by priority 0). The mode
   //    state is plugin-local; the host owns focus/submission/safety.
-  const mode = { current: 'insert' }
+  const mode = { current: 'insert' as VimMode }
   const editorHandle = service.registerEditor({
     id: 'vim-editor',
     priority: 0,

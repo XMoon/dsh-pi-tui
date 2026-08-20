@@ -1035,6 +1035,16 @@ export class TuiApp {
   private readonly renderers: RendererRegistry | undefined
   /** M9: the editor registry (optional). */
   private readonly editorRegistry: EditorRegistry | undefined
+  /**
+   * P1-1: the renderer registry revision observed by the LAST render pass.
+   * When the registry revision moves (a renderer registered/unloaded —
+   * HMR, dynamic registration), the transcript message cache MUST be
+   * rebuilt on the next render: the cache identity embeds the revision
+   * (componentForMessage), but a plain repaint reuses the old cached
+   * components. The check is O(1) per render (revisionOf()), and the
+   * rebuild only re-runs renderers for entries whose identity changed.
+   */
+  private lastRendererRevision = -1
   /** M9: the editor seat holder (the atomic handoff + current occupant). */
   private readonly editorSeatHolder: EditorSeatHolder
   /** The busy indicator row directly above the editor border; idle renders nothing. */
@@ -1203,9 +1213,8 @@ export class TuiApp {
         try { this.events.onExtensionRecovered?.({ slot: 'editor', id }) } catch {}
       },
     })
-    // If a plugin editor already won the registry (registration before
-    // the surface), hand off immediately.
-    this.reconcileEditorWinner()
+    // M9: the editor seat holder's host adapter + view swap were built
+    // above; the seat child mounts later (editorSeat is created below).
     this.header = new Text('🐋  dsh-pi-tui', 0, 0)
     this.messagesView = new Container()
     this.dock = new Text('', 0, 0)
@@ -1227,6 +1236,11 @@ export class TuiApp {
     this.widgetsBelow = new Text('', 0, 0)
     this.editorSeat = new Container()
     this.editorSeat.addChild(this.editor)
+    // If a plugin editor already won the registry (registration before
+    // the surface), hand off immediately. MUST run after editorSeat
+    // exists — the handoff re-mounts the seat child (mountSeatChild
+    // clears/refills this.editorSeat).
+    this.reconcileEditorWinner()
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
     // statusContainer). The widget zones sit directly around the editor
@@ -1372,6 +1386,95 @@ export class TuiApp {
     return this.inputRouter.normalize(data)
   }
 
+  /**
+   * P1-5: normalize raw terminal input into a SEMANTIC editor input event
+   * (the ONLY input shape a plugin editor ever sees — never raw terminal
+   * bytes). Terminal protocol decoding (legacy + Kitty CSI-u +
+   * modifyOtherKeys encodings) happens HERE in the host; a plugin editor
+   * behaves identically on every terminal.
+   *
+   * Classification:
+   * - bracketed paste (`\x1b[200~...\x1b[201~`, the fork re-wraps pastes
+   *   this way) → `{ kind: 'paste', text }`;
+   * - one key press (parseKey resolves legacy/CSI-u/modifyOtherKeys) →
+   *   `{ kind: 'key', key: NormalizedKey }`;
+   * - a plain printable run (multi-char chunk that is not a single key) →
+   *   `{ kind: 'text', text }`;
+   * - anything else (unparseable control sequences) → undefined (the host
+   *   keeps it; a plugin editor never sees it).
+   */
+  private editorInputEventOf(data: string): import('./extension/public-types.ts').EditorInputEvent | undefined {
+    if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
+    // Bracketed paste: the fork re-wraps paste content with the markers,
+    // so a paste arrives here as ONE bracketed chunk.
+    const paste = parseBracketedPaste(data)
+    if (paste !== undefined) return { kind: 'paste', text: paste }
+    const key = this.inputRouter.normalize(data)
+    if (key !== undefined) return { kind: 'key', key }
+    // A plain printable run: multi-char chunks that are not a single key
+    // (fast typing / non-bracketed paste heuristic) are TEXT.
+    if (data.length > 0 && [...data].every(char => char.charCodeAt(0) >= 32 && char.charCodeAt(0) < 127)) {
+      return { kind: 'text', text: data }
+    }
+    return undefined
+  }
+
+  /**
+   * P1-5: route one raw input through a REPLACEMENT editor as a SEMANTIC
+   * event. The replacement hook receives {@link EditorInputEvent} — never
+   * raw terminal bytes (the host decoded the protocol in
+   * editorInputEventOf). Returning true CONSUMES the event (the plugin
+   * owns it); the seat adapter already isolates a throwing handler (the
+   * plugin can never crash the host input path).
+   *
+   * When the replacement DECLINES the event:
+   * - `forceEscapeRoute` (the Esc pre-route): return undefined so the
+   *   caller's post-if host fallback runs (overlay Esc handling and the
+   *   host's own single-Esc arming mint on re-entry);
+   * - otherwise (the route.kind === 'editor' branch): the declined event
+   *   is retried against plugin keybindings first (editorReplacement is
+   *   flipped off so a binding may claim it), then Enter submits through
+   *   the normal host path, and only then does the HOST EDITING fallback
+   *   run — the vendored Editor at the replacement's current text/cursor,
+   *   with the resulting draft/cursor copied back into the visible
+   *   replacement (the P1-5 contract).
+   */
+  private handleReplacementEditorInput(
+    data: string,
+    context: Parameters<InputRouter['route']>[1],
+    forceEscapeRoute: boolean,
+  ): TuiInputListenerResult {
+    const replacement = this.seatEditor().handleInput
+    if (replacement === undefined) return undefined
+    const event = this.editorInputEventOf(data)
+    if (event === undefined) return undefined
+    if (replacement(event)) return { consume: true }
+    if (forceEscapeRoute) return undefined
+    // Declined regular editor input: retry against plugin bindings only
+    // after the replacement editor has explicitly handed it back.
+    const retry = this.inputRouter.route(data, { ...context, editorReplacement: false }, (key) => this.pluginActionForFor(key))
+    if (retry.kind === 'plugin-action') {
+      try {
+        this.events.onExtensionAction?.(retry.action)
+        this.recoverKeybinding(retry.key)
+      } catch (error) {
+        this.reportKeybindingError(retry.key, error)
+      }
+      return { consume: true }
+    }
+    if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+      this.submitDraft(false)
+      return { consume: true }
+    }
+    // ExtensionEditor's false result follows the public contract: let the
+    // vendored host editor process the event at the replacement's current
+    // text/cursor, then copy the result back into the visible seat. The
+    // replacement remains the owner of the draft; the host is only the
+    // editing-semantics fallback for this one declined event.
+    this.editorSeatHolder.handleHostFallbackInput(data)
+    return { consume: true }
+  }
+
   /** Resolve a normalized key through the runner's resolver (M6). */
   private pluginActionForFor(key: import('./extension/public-types.ts').NormalizedKey): import('./extension/public-types.ts').TuiAction | undefined {
     try {
@@ -1512,6 +1615,14 @@ export class TuiApp {
     if (matchesKey(data, 'escape')) {
       // Overlays (pickers, settings) own Esc while they are up.
       if (this.activeScreen.hasOverlayEntries) return undefined
+      // P1-6: a REPLACEMENT editor owns Esc for its own modal state
+      // machine (vim normal-mode entry) — route it through the editor
+      // channel below instead of the host's double-Esc cancel. If the
+      // plugin DECLINES it, the editor route hands it back to the host
+      // fallback (which includes this cancel path on re-entry).
+      if (this.seatEditor().handleInput !== undefined) {
+        return this.handleReplacementEditorInput(data, this.inputRouterContext(), true)
+      }
       // The host may consume the first Esc (runner-owned modes like the
       // subagent viewer); otherwise it arms the double-Esc cancel.
       if (this.events.onSingleEscape?.() === true) return { consume: true }
@@ -1614,30 +1725,7 @@ export class TuiApp {
       return replacement === undefined ? undefined : { consume: true }
     }
     if (replacement !== undefined && route.kind === 'editor') {
-      if (replacement(data)) return { consume: true }
-      // A declined key is retried against the plugin binding only after the
-      // replacement editor has explicitly handed it back.
-      const retry = this.inputRouter.route(data, { ...context, editorReplacement: false }, (key) => this.pluginActionForFor(key))
-      if (retry.kind === 'plugin-action') {
-        try {
-          this.events.onExtensionAction?.(retry.action)
-          this.recoverKeybinding(retry.key)
-        } catch (error) {
-          this.reportKeybindingError(retry.key, error)
-        }
-        return { consume: true }
-      }
-      if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
-        this.submitDraft(false)
-        return { consume: true }
-      }
-      // ExtensionEditor's false result follows the public contract: let the
-      // vendored host editor process the key at the replacement's current
-      // text/cursor, then copy the result back into the visible seat. The
-      // replacement remains the owner of the draft; the host is only the
-      // editing-semantics fallback for this one declined event.
-      this.editorSeatHolder.handleHostFallbackInput(data)
-      return { consume: true }
+      return this.handleReplacementEditorInput(data, context, false)
     }
     if (route.kind === 'editor' && replacement === undefined) {
       // P2-R5: only the HOST seat may forward to the hidden host editor. A
@@ -3436,6 +3524,18 @@ export class TuiApp {
     // unchanged (id comparison), so the frame loop cost is negligible
     // (plan §23).
     this.reconcileEditorWinner()
+    // P1-1: a renderer register/unload bumps the registry revision — the
+    // message cache embeds it, so the affected transcript components must
+    // be REBUILT on this render (never waiting for a key, resize, session
+    // event or setStatus). O(1) gate; the rebuild itself only re-runs
+    // renderers for entries whose identity changed (plan §23).
+    if (this.renderers !== undefined) {
+      const revision = this.renderers.revisionOf()
+      if (revision !== this.lastRendererRevision) {
+        this.lastRendererRevision = revision
+        this.rebuildMessages()
+      }
+    }
     // Live surface geometry (P1-1): the fork consumes the terminal resize
     // callback internally, so the extension surface slice is refreshed
     // from the CURRENT terminal geometry on every render — a resize lands
@@ -4730,4 +4830,18 @@ export function startProcessTui(events: TuiAppEvents, options: TuiAppOptions = {
   const app = new TuiApp(new ProcessTerminal(), events, options)
   app.start()
   return app
+}
+
+/** The bracketed-paste open marker. */
+const BRACKETED_PASTE_START = '\x1b[200~'
+/** The bracketed-paste close marker. */
+const BRACKETED_PASTE_END = '\x1b[201~'
+
+/** Parse a bracketed-paste chunk into its content, or undefined when the
+ * data is not a bracketed paste (P1-5: the host classifies pastes for the
+ * semantic editor input events). The fork re-wraps pastes with the
+ * markers, so one paste arrives as one bracketed chunk. */
+function parseBracketedPaste(data: string): string | undefined {
+  if (!data.startsWith(BRACKETED_PASTE_START) || !data.endsWith(BRACKETED_PASTE_END)) return undefined
+  return data.slice(BRACKETED_PASTE_START.length, data.length - BRACKETED_PASTE_END.length)
 }

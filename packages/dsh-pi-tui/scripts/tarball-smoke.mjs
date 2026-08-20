@@ -149,13 +149,11 @@ function main() {
     // --- structure ---
     const files = walkFiles(extracted)
     const has = (path) => files.includes(path)
-    check('exports entry dist/index.mjs', has('dist/index.mjs'))
-    check('exports entry dist/startup.mjs', has('dist/startup.mjs'))
-    check('exports entry dist/extensions.mjs', has('dist/extensions.mjs'))
+    check('exports entry dist/extension/advanced.mjs', has('dist/extension/advanced.mjs'))
+    check('exports entry dist/extension/unstable.mjs', has('dist/extension/unstable.mjs'))
+    check('types dist/extension/advanced.d.mts', has('dist/extension/advanced.d.mts'))
+    check('types dist/extension/unstable.d.mts', has('dist/extension/unstable.d.mts'))
     check('exports entry dist/builtins.mjs', has('dist/builtins.mjs'))
-    check('types dist/index.d.mts', has('dist/index.d.mts'))
-    check('types dist/startup.d.mts', has('dist/startup.d.mts'))
-    check('types dist/extensions.d.mts', has('dist/extensions.d.mts'))
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('cordis.patch.yml included', has('cordis.patch.yml'))
     check('config/ included', files.some(name => name.startsWith('config/')))
@@ -260,7 +258,7 @@ function main() {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(builtins|commands|diag|extension\/public-types|extension\/service|extension\/slot-map|extensions|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(builtins|commands|diag|extension\/advanced|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extensions|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -303,8 +301,11 @@ function main() {
         check('installed package contains dist', existsSync(join(installed, 'dist', 'index.mjs')))
         const importRun = run(process.execPath, ['--input-type=module', '-e',
           "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup'),"
-            + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins')])"
-            + ".then(m => console.log('imports-ok')).catch(e => { console.error(e.message); process.exit(1) })",
+            + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
+            + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable')])"
+            + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 0) throw new Error('ADVANCED_API_LEVEL');"
+            + "if (m[5].UNSTABLE_API_LEVEL !== 0) throw new Error('UNSTABLE_API_LEVEL'); console.log('imports-ok') })"
+            + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })
         check('all exports entries import', importRun.status === 0 && importRun.stdout.includes('imports-ok'),
           importRun.status === 0 ? '' : importRun.stderr.slice(0, 200))

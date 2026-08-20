@@ -277,10 +277,32 @@ test('a stale service detachSurface does not tear down a newer generation bridge
     service.detachSurface('gen-a')
     assert.equal(bridge2Subscribed, 1, 'the newer generation must keep its bridge after a stale detach (P1)')
 
-    // The REAL current detach tears down the newer generation.
+    // The REAL current detach tears down the newer generation's BRIDGE
+    // BINDING — the subscription RECORD stays pending (P1-3: caller-owned
+    // records survive surface recreation; a later attach re-binds).
     service.detachSurface('gen-b')
-    assert.equal(bridge2Subscribed, 0, 'the current detach must release the live bridge (P1)')
-    assert.equal(service._listenerUnsubscribersSize(), 0, 'no listener map entries may survive (P1)')
+    assert.equal(bridge2Subscribed, 0, 'the current detach must release the live bridge binding (P1)')
+    assert.equal(service._listenerUnsubscribersSize(), 1, 'the subscription RECORD survives the detach (P1-3)')
+
+    // A NEW generation attaches: the record re-binds automatically.
+    let bridge3Subscribed = 0
+    service.attachSurface({ subscribe: () => { bridge3Subscribed += 1; return () => { bridge3Subscribed -= 1 } } }, new Set(), 'gen-c')
+    assert.equal(bridge3Subscribed, 1, 'the pending record must re-bind to the new bridge (P1-3)')
+
+    // The OWNER FIBER unload removes the record (the fiber-bound disposer).
+    // The listener was subscribed by THIS test's fiber (the service's
+    // caller is the plugin fiber created by mount() below), so mount a
+    // plugin that subscribes and unload it.
+    let pluginDisposer: (() => Promise<void>) | undefined
+    pluginDisposer = await mount(ctx, (c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as { subscribeState(listener: (state: unknown) => void): () => void }
+      svc.subscribeState(() => {})
+    })
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 2, 'the plugin subscription record exists')
+    await pluginDisposer()
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 1, 'owner unload removes exactly the owner record (F1)')
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
@@ -469,20 +491,30 @@ test('a throwing bridge unsubscribe during migration/detach does not leak or abo
     assert.equal(bridge2Subscribed, 2, 'both listeners must migrate to the new bridge despite the throwing old unsubscribe')
     assert.equal(service._listenerUnsubscribersSize(), 2, 'both listeners stay tracked on the new bridge')
 
-    // Detach: the throwing bridge-2 teardown (here non-throwing) releases;
-    // simulate a throwing teardown on a fresh attach.
+    // Detach: the bridge-2 binding releases; the RECORDS stay pending
+    // (P1-3). A throwing teardown must not abort the loop and must not
+    // leave a live binding on the dead bridge.
     service.detachSurface('gen-2')
-    assert.equal(service._listenerUnsubscribersSize(), 0, 'detach must clear every listener')
+    assert.equal(service._listenerUnsubscribersSize(), 2, 'detach keeps the records pending (P1-3)')
     assert.equal(bridge2Subscribed, 0)
 
-    // A detach where the teardown itself throws must still clear the map.
+    // A detach where the teardown itself throws must still unbind the
+    // records (no live binding on the dead bridge).
     service.attachSurface({
       subscribe: () => { return () => { throw new Error('detach boom') } },
     }, new Set(), 'gen-3')
-    service.subscribeState(l1)
-    assert.equal(service._listenerUnsubscribersSize(), 1)
+    const l3 = (): void => {}
+    service.subscribeState(l3)
+    assert.equal(service._listenerUnsubscribersSize(), 3)
     service.detachSurface('gen-3')
-    assert.equal(service._listenerUnsubscribersSize(), 0, 'a throwing teardown must not leave a map entry')
+    assert.equal(service._listenerUnsubscribersSize(), 3, 'a throwing teardown must not leak or abort; records stay pending (P1-3)')
+
+    // A NEW attach re-binds every pending record.
+    let bridge4Subscribed = 0
+    service.attachSurface({
+      subscribe: () => { bridge4Subscribed += 1; return () => { bridge4Subscribed -= 1 } },
+    }, new Set(), 'gen-4')
+    assert.equal(bridge4Subscribed, 3, 'every pending record re-binds on the new attach (P1-3)')
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
@@ -591,6 +623,261 @@ test('M5: command/theme/setting registrations are fiber-bound (owner unload clea
     assert.equal(service.keybindings.hasAny(), false)
     await host()
     await startup()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('P1-3: a subscription record survives detach and re-binds on the next attach (no reload needed)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
+      detachSurface(surfaceId?: string): void
+      subscribeState(listener: (state: unknown) => void): () => void
+      _listenerUnsubscribersSize(): number
+    }
+
+    // A PLUGIN fiber subscribes (its fiber stays alive the whole test —
+    // the review repro: plugin fiber alive, surface recreated).
+    const received: string[] = []
+    const plugin = await mount(ctx, (c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as typeof service
+      svc.subscribeState((state) => received.push((state as { surface: { surfaceId: string } }).surface.surfaceId))
+    })
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 1, 'the plugin subscription record exists')
+
+    // Surface A attaches: the listener receives A's state.
+    service.attachSurface({
+      subscribe: (listener) => {
+        listener({ surface: { surfaceId: 'surface-A' } } as never)
+        return () => {}
+      },
+    }, new Set(), 'surface-A')
+    await settle()
+    assert.deepEqual(received, ['surface-A'], 'the listener receives A state on attach')
+
+    // Surface A detaches: the RECORD survives (pending), the binding is gone.
+    service.detachSurface('surface-A')
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 1, 'the record survives the detach (P1-3)')
+
+    // A while later, surface B attaches: the SAME record re-binds WITHOUT
+    // the plugin fiber reloading.
+    service.attachSurface({
+      subscribe: (listener) => {
+        listener({ surface: { surfaceId: 'surface-B' } } as never)
+        return () => {}
+      },
+    }, new Set(), 'surface-B')
+    await settle()
+    assert.deepEqual(received, ['surface-A', 'surface-B'], 'the listener receives B state on re-attach (P1-3)')
+
+    // The plugin unloads: the record is removed and nothing is bound.
+    await plugin()
+    await settle()
+    assert.equal(service._listenerUnsubscribersSize(), 0, 'owner unload removes the record')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('P1-3: attach A → attach B → late detach A leaves B bound (stale detach)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
+      detachSurface(surfaceId?: string): void
+      subscribeState(listener: (state: unknown) => void): () => void
+      _listenerUnsubscribersSize(): number
+    }
+
+    // A listener migrates A → B; the LATE detach of A must not unbind B.
+    let bridgeASubscribed = 0
+    let bridgeBSubscribed = 0
+    service.attachSurface({
+      subscribe: () => { bridgeASubscribed += 1; return () => { bridgeASubscribed -= 1 } },
+    }, new Set(), 'surface-A')
+    service.subscribeState(() => {})
+    assert.equal(bridgeASubscribed, 1)
+    service.attachSurface({
+      subscribe: () => { bridgeBSubscribed += 1; return () => { bridgeBSubscribed -= 1 } },
+    }, new Set(), 'surface-B')
+    assert.equal(bridgeBSubscribed, 1, 'the listener migrates to B')
+    assert.equal(bridgeASubscribed, 0, 'the old bridge binding is released')
+    // The stale detach (A) must be a NO-OP for B's binding.
+    service.detachSurface('surface-A')
+    assert.equal(bridgeBSubscribed, 1, 'the late detach of A must not unbind B (P1)')
+    assert.equal(service._listenerUnsubscribersSize(), 1, 'the record stays')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+// ── P1-4: managed overlays are CALLER-FIBER-OWNED ──────────────────────────
+
+test('P1-4: a plugin overlay closes automatically when the owner fiber unloads (HMR/disable)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startupFiber = ctx.plugin((c) => {
+      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    })
+    await startupFiber
+    const hostFiber = ctx.plugin(applyExtensionHost)
+    await hostFiber
+
+    // The runner wires the service seam to a REAL app surface.
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      setOverlayMount(surfaceId: string, mount: (view: unknown, options?: unknown) => { close(): void; hide(): void; show(): void }): void
+      showOverlay(view: unknown, options?: unknown): { close(): void; hide(): void; show(): void }
+    }
+    const vt = new VirtualTerminal(80, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    await vt.waitForRender()
+    service.setOverlayMount('surface-1', (view, options) => app.showExtensionOverlay(view as never, options as never))
+
+    // A plugin fiber opens an overlay.
+    const plugin = ctx.plugin((c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as typeof service
+      svc.showOverlay({ kind: 'text', spans: [{ text: 'plugin overlay' }] })
+    })
+    await plugin
+    await vt.waitForRender()
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    let view = vt.getViewport().map(strip).join('\n')
+    assert.ok(view.includes('plugin overlay'), 'the plugin overlay must be visible')
+
+    // The plugin fiber unloads (HMR/disable): the overlay MUST close
+    // automatically — the TUI surface stays alive.
+    await plugin.dispose()
+    await Promise.resolve()
+    await Promise.resolve()
+    await vt.waitForRender()
+    view = vt.getViewport().map(strip).join('\n')
+    assert.ok(!view.includes('plugin overlay'), `the overlay must close on owner unload (P1-4):\n${view}`)
+    assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'no owned lease may survive the owner unload')
+    app.stop()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('P1-4: explicit close then fiber unload is idempotent — no double close, no throw', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startupFiber = ctx.plugin((c) => {
+      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    })
+    await startupFiber
+    const hostFiber = ctx.plugin(applyExtensionHost)
+    await hostFiber
+
+    let closes = 0
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      setOverlayMount(surfaceId: string, mount: (view: unknown, options?: unknown) => { close(): void; hide(): void; show(): void }): void
+      showOverlay(view: unknown, options?: unknown): { close(): void; hide(): void; show(): void }
+    }
+    service.setOverlayMount('surface-1', () => ({
+      close: () => { closes += 1 },
+      hide: () => {},
+      show: () => {},
+    }))
+
+    // The plugin explicitly closes, THEN its fiber unloads.
+    const plugin = ctx.plugin((c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as typeof service
+      const lease = svc.showOverlay({ kind: 'text', spans: [{ text: 'x' }] })
+      lease.close()
+      lease.close()
+      lease.hide()
+      lease.show()
+    })
+    await plugin
+    await plugin.dispose()
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(closes, 1, 'close + fiber unload must close EXACTLY once (idempotent, no double close)')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('P1-4: an old overlay lease is INERT after its surface disposes; it never mounts on a newer surface', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startupFiber = ctx.plugin((c) => {
+      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    })
+    await startupFiber
+    const hostFiber = ctx.plugin(applyExtensionHost)
+    await hostFiber
+
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      setOverlayMount(surfaceId: string, mount: (view: unknown, options?: unknown) => { close(): void; hide(): void; show(): void }): void
+      detachSurface(surfaceId?: string): void
+      showOverlay(view: unknown, options?: unknown): { close(): void; hide(): void; show(): void }
+    }
+    const vt = new VirtualTerminal(80, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    await vt.waitForRender()
+
+    // Surface A's seam is wired; a plugin opens an overlay through it.
+    service.setOverlayMount('surface-A', (view, options) => app.showExtensionOverlay(view as never, options as never))
+    let lease: { close(): void; hide(): void; show(): void } | undefined
+    const plugin = ctx.plugin((c) => {
+      const svc = c.get(PI_TUI_EXTENSIONS_SERVICE) as typeof service
+      lease = svc.showOverlay({ kind: 'text', spans: [{ text: 'old overlay' }] })
+    })
+    await plugin
+    await vt.waitForRender()
+    assert.ok(vt.getViewport().join('\n').includes('old overlay'))
+
+    // Surface A disposes: the seam detaches (surface-owned) AND the app's
+    // dispose closes every still-owned lease.
+    app.dispose()
+    service.detachSurface('surface-A')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // A newer surface B attaches with ITS OWN seam — the OLD lease must
+    // never mount on B (the old seam is gone; show() is inert).
+    const vtB = new VirtualTerminal(80, 24)
+    const appB = new TuiApp(vtB, { onSubmit: () => {}, onExit: () => {} })
+    appB.start()
+    await vtB.waitForRender()
+    service.setOverlayMount('surface-B', (view, options) => appB.showExtensionOverlay(view as never, options as never))
+    lease?.show()
+    await vtB.waitForRender()
+    assert.ok(!vtB.getViewport().join('\n').includes('old overlay'), 'the old lease must not mount on surface B (P1-4)')
+    lease?.close()
+    assert.equal(appB.ownedExtensionOverlayLeasesForTest(), 0)
+    appB.stop()
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

@@ -19,6 +19,26 @@ declaration gate (scripts/tarball-smoke.mjs) and the vim acceptance gate
 If a plugin NEEDS a private import, the SDK is missing a capability —
 report it; there is deliberately no `unsafeGetTuiApp()` escape hatch.
 
+## API tiers
+
+The extension surface ships three tiers (plan §4/§5). A plugin imports
+ONE tier entry — never the stable entry's internals, `PiTuiApp`,
+`PiTuiMainScreen`, `PiTuiAltScreen` or repository-relative paths.
+
+| Tier | Entry | Contract |
+|---|---|---|
+| Stable | `@xmoon76/dsh-pi-tui/extensions` | Compatibility-oriented; additive-first; existing semantics never silently change; public removal requires a planned breaking change. |
+| Advanced | `@xmoon76/dsh-pi-tui/extensions/advanced` | Experimental; minor releases may break; a migration note is required; no long-term shims. |
+| Unstable | `@xmoon76/dsh-pi-tui/extensions/unstable` | NO compatibility guarantee; implementation may change at any time. |
+
+All tiers reuse the SAME shared extension runtime: caller-fiber
+ownership, surface lifecycle, invalidation, capability discovery. Do not fork a
+second ownership/lifecycle model per tier. Phase 1 ships only metadata: an
+exported path, a level constant (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`,
+both `0`), the reserved capability namespaces `advanced.` / `unstable.` and
+the shared `ExtensionTier` type. No advanced/unstable capability is implemented
+yet and no Host-private surface is exposed.
+
 ## The surface (M1–M10)
 
 | Area | Entry point | Capability | Since |
@@ -38,16 +58,21 @@ report it; there is deliberately no `unsafeGetTuiApp()` escape hatch.
 | Managed overlay | `showOverlay(view, options)` | (always available) | M8 |
 | Editor replacement | `registerEditor(...)` | (always available) | M9 |
 
-Editor replacement input has one deliberate exception to the normalized-key
-rule: while a replacement occupies the seat, its optional `handleInput(data)`
-hook receives the raw terminal event first. Returning `true` consumes the event;
-returning `false` or `undefined` hands the event back to the host's editing
-semantics, which the host applies to the replacement's current text and cursor.
-The host then synchronizes the resulting draft and cursor back to the visible
-replacement. Staging is side-effect-free: the host preserves autocomplete,
-history browsing, undo snapshots, and paste-marker state before forwarding the
-single declined event. Enter remains host-owned and submits through the normal
-host path.
+Editor replacement input is the ONE deliberate exception to the
+normalized-key rule: while a replacement occupies the seat, its optional
+`handleInput(event)` hook receives a SEMANTIC {@link EditorInputEvent} —
+`{ kind: 'key', key }`, `{ kind: 'text', text }` or `{ kind: 'paste',
+text }` — never raw terminal bytes. The Host decodes the terminal protocol
+(legacy + Kitty CSI-u + modifyOtherKeys encodings, paste bursts, key
+release/repeat filtering) BEFORE the plugin sees anything, so a plugin
+editor behaves identically on every terminal. Returning `true` consumes the
+event; returning `false` or `undefined` hands it back to the host's editing
+semantics, which the host applies to the replacement's current text and
+cursor. The host then synchronizes the resulting draft and cursor back to
+the visible replacement. Staging is side-effect-free: the host preserves
+autocomplete, history browsing, undo snapshots, and paste-marker state
+before forwarding the single declined event. Enter remains host-owned and
+submits through the normal host path.
 
 The editor id `host` is RESERVED for the built-in host editor: a
 `registerEditor({ id: 'host', ... })` contribution is rejected. The host seat

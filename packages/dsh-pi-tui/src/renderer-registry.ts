@@ -223,6 +223,13 @@ export class RendererRegistry {
     return false
   }
 
+  /** The current registry revision — O(1), for the host's render-path
+   * staleness gate (a full snapshot() is O(contributions), so the frame
+   * loop must never call it; P1-1 dynamic renderer invalidation). */
+  revisionOf(): number {
+    return this.revision
+  }
+
   /** An immutable snapshot (diagnostics + /status). */
   snapshot(): TuiRendererRegistrySnapshot {
     const messageRenderers = [...this.messageRenderers.values()]

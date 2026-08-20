@@ -57,6 +57,7 @@ export {
   type EditorHost,
   type EditorHostAction,
   type EditorHostActionResult,
+  type EditorInputEvent,
   type EditorSnapshot,
   type ExtensionEditor,
   type ExtensionView,

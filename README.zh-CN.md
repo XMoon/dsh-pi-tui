@@ -124,6 +124,24 @@ Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、�
 下面的能力是当前集合;API 版本(`1`)只在破坏性变更时递增,插件必须
 **按能力特性检测**,而不是解析包版本。
 
+**按能力特性检测**,而不是解析包版本。
+
+扩展面分为三个层级:插件只导入**公开入口**——绝不导入 Stable 入口的
+内部(`PiTuiApp`、`PiTuiMainScreen`、`PiTuiAltScreen`)或仓库相对路径。
+
+| 层级 | 入口 | 契约 |
+|---|---|---|
+| Stable | `@xmoon76/dsh-pi-tui/extensions` | 面向兼容;只增不改;既有语义永不静默变更;删除需计划内破坏性变更 |
+| Advanced | `@xmo月76/dsh-pi-tui/extensions/advanced` | 实验性;minor 版本可破坏;需迁移说明;不做长期 shim |
+| Unstable | `@xmoon76/dsh-pi-tui/extensions/unstable` | 不保证兼容;实现可随时变更 |
+
+所有层级复用同一个共享 Extension Runtime:caller-fiber 所有权、surface
+生命周期、失效机制、能力发现。不要按层级复制第二套所有权/生命周期
+模型。第一阶段只提供元数据:导出路径、层级常量
+(`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`,均为 `0`)、保留的能力
+命名空间 `advanced.` / `unstable.`,以及共享的 `ExtensionTier` 类型。
+目前尚未实现任何 advanced/unstable 能力,也未暴露任何 Host 私有表面。
+
 插件只导入公开入口:
 
 ```ts

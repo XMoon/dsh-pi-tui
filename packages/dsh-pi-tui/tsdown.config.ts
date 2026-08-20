@@ -17,6 +17,8 @@ export default defineConfig({
     './src/startup.ts',
     './src/extensions.ts',
     './src/builtins.ts',
+    './src/extension/advanced.ts',
+    './src/extension/unstable.ts',
   ],
   format: ['esm'],
   outDir: 'dist',

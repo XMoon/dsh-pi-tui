@@ -295,7 +295,7 @@ test('a Cordis plugin registering through the real service renders into the surf
   }
 })
 
-test('disposing an OLD host freezes ONLY its generation; a NEWER host\'s handles stay live (P1)', async () => {
+test('surface recreation keeps caller-owned registrations alive; old handles stay live (P1-2)', async () => {
   const ledger = new ExtensionLedger(() => {})
   const { vt, app, host: hostA } = makeApp(ledger)
   await vt.waitForRender()
@@ -304,39 +304,47 @@ test('disposing an OLD host freezes ONLY its generation; a NEWER host\'s handles
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
   })
   app.refreshChrome()
-  // Generation 1 (host A) registers a badge.
+  // A caller fiber registers a badge (the registration is caller-owned,
+  // NOT surface-owned — P1-2).
   const handleA = ledger.register('chrome.header.badge', { id: 'gen-a' }, { text: 'A' }, 'plugin-a')
   hostA.refreshOutlets()
   app.refreshChrome()
   await settle()
   assert.ok(hostA.headerBadgeText().includes('A'))
 
-  // Host B attaches (a NEW generation) and registers its own badge.
+  // Host B attaches (a NEW surface generation) to the SAME ledger.
   const hostB = new SurfaceHost(ledger, () => app.requestRender())
   hostB.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
     surfaceId: 'b', generation: 2, width: 80, height: 24, fullscreen: false,
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
   })
-  const handleB = ledger.register('chrome.header.badge', { id: 'gen-b' }, { text: 'B' }, 'plugin-b')
   hostB.refreshOutlets()
   await settle()
-  assert.ok(hostB.headerBadgeText().includes('B'))
+  assert.ok(hostB.headerBadgeText().includes('A'), `the still-live registration must render on the NEW surface (P1-2):\n${hostB.headerBadgeText()}`)
 
-  // Dispose the OLD host A: only generation ≤ A's must freeze. A's handle
-  // becomes inert AND its record is removed (it must not render as live
-  // content on B), while B's handle stays fully live.
+  // Dispose the OLD host A: it is a LEDGER CONSUMER — dispose stops
+  // consuming; the registration and the old handle stay fully live.
   hostA.dispose()
   await settle()
   handleA.replace({ text: 'A-mutated' } as HeaderBadge)
-  await settle()
-  assert.ok(!hostB.headerBadgeText().includes('A-mutated'), `a frozen old-generation handle must not mutate the newer surface (P1):\n${hostB.headerBadgeText()}`)
-  assert.ok(!hostB.headerBadgeText().includes('A'), `the old record must not render as live content on the newer surface (P1):\n${hostB.headerBadgeText()}`)
-  // B's own handle is STILL live (the review's gap: a global freeze would
-  // have killed it).
-  handleB.replace({ text: 'B-mutated' } as HeaderBadge)
   hostB.refreshOutlets()
   await settle()
-  assert.ok(hostB.headerBadgeText().includes('B-mutated'), `a NEWER generation's handle must stay live after an OLD host disposes (P1):\n${hostB.headerBadgeText()}`)
+  assert.ok(hostB.headerBadgeText().includes('A-mutated'), `the OLD handle must still mutate the NEWER surface (P1-2):\n${hostB.headerBadgeText()}`)
+
+  // A second recreation (host C) still sees the same live registration.
+  const hostC = new SurfaceHost(ledger, () => app.requestRender())
+  hostC.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 'c', generation: 3, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  hostC.refreshOutlets()
+  await settle()
+  assert.ok(hostC.headerBadgeText().includes('A-mutated'), `a second recreation must keep rendering the live registration (P1-2):\n${hostC.headerBadgeText()}`)
+  // Only the caller-fiber unload (or an explicit dispose) removes it.
+  handleA.dispose()
+  hostC.refreshOutlets()
+  await settle()
+  assert.ok(!hostC.headerBadgeText().includes('A-mutated'), 'an explicit dispose must remove the contribution')
   app.stop()
 })
 
@@ -480,9 +488,9 @@ test('a repeated attach on the SAME host is idempotent (round-3 finding 1)', asy
     surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
   })
-  // A second attach must NOT mint a new generation: the host keeps its
-  // FIRST lease (ownGeneration unchanged), so a later dispose freezes the
-  // registrations of THAT generation.
+  // A second attach must NOT mint a new sink lease: the host keeps its
+  // FIRST token, so a later dispose releases exactly that attachment's
+  // sink (P1-2: registrations are caller-owned and never affected).
   host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
     surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
@@ -491,13 +499,12 @@ test('a repeated attach on the SAME host is idempotent (round-3 finding 1)', asy
   host.refreshOutlets()
   await settle()
   assert.ok(host.headerBadgeText().includes('R'))
-  // Dispose: the registration (created under the FIRST attach's generation)
-  // must be frozen+removed — if the second attach had minted a new
-  // generation, the dispose would use the NEW one and miss it.
+  // Dispose: the host stops consuming — the registration stays LIVE (P1-2:
+  // only the owner fiber unload / explicit dispose makes it inert).
   host.dispose()
   await settle()
   handle.replace({ text: 'R-mutated' } as HeaderBadge)
-  await settle()
-  assert.ok(!host.headerBadgeText().includes('R-mutated'), 'a repeated attach must not leak a stale generation (round-3 finding 1)')
+  assert.equal(ledger.snapshot<HeaderBadge>('chrome.header.badge').records[0]?.value.text, 'R-mutated',
+    'a repeated attach must not leak a sink; the caller-owned registration stays live (P1-2)')
   app.stop()
 })

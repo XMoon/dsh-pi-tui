@@ -126,12 +126,25 @@ Since `0.2.0` the bundle ships a small, versioned extension surface so a
 third-party Cordis plugin can contribute chrome without touching the TUI
 internals. It is **early and stabilizing**: the capabilities below are the
 current set; the API version (`1`) is bumped only on breaking changes, and
-plugins must **feature-detect** capabilities instead of parsing the package
-version.
+The extension surface ships three tiers: a plugin imports ONLY the
+public entry — never the stable entry's internals (`PiTuiApp`,
+`PiTuiMainScreen`, `PiTuiAltScreen`) nor repository-relative paths.
+
+| Tier | Entry | Contract |
+|---|---|---|
+| Stable | `@xmoon76/dsh-pi-tui/extensions` | compatibility-oriented; additive-first; existing semantics never silently change; removal requires a planned breaking change |
+| Advanced | `@xmoon76/dsh-pi-tui/extensions/advanced` | experimental; minor releases may break; a migration note is required; no long-term shims |
+| Unstable | `@xmoon76/dsh-pi-tui/extensions/unstable` | NO compatibility guarantee; implementation may change anytime |
+
+All tiers reuse the SAME shared extension runtime: caller-fiber ownership,
+surface lifecycle, invalidation, capability discovery. Do not fork a second
+ownership/lifecycle model per tier. Phase 1 ships metadata only: an exported
+path, a tier constant (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`, both `0`),
+the reserved capability namespaces `advanced.` / `unstable.`, and the shared
+`ExtensionTier` type. No advanced/unstable capability is implemented yet and no
+Host-private surface is exposed.
 
 A plugin imports only the public entry:
-
-```ts
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '@xmoon76/dsh-pi-tui/extensions'
 
 export const name = 'my-plugin'

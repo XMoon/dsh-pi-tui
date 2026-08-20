@@ -147,6 +147,17 @@ function main() {
     for (const [api, label] of surface) {
       check(`fixture exercises ${label} (${api})`, fixtureSrc.includes(api))
     }
+    // P1-6: the vim fixture is a REAL modal editor — it must implement the
+    // semantic handleInput(event) channel (EditorInputEvent), own a mode
+    // state machine, and never parse raw terminal escape bytes itself.
+    check('fixture implements the semantic editor input channel (handleInput)',
+      fixtureSrc.includes('handleInput'))
+    check('fixture consumes EditorInputEvent (the host-normalized event shape)',
+      fixtureSrc.includes('EditorInputEvent'))
+    check('fixture owns a modal state machine (insert/normal modes)',
+      fixtureSrc.includes("'insert'") && fixtureSrc.includes("'normal'"))
+    check('fixture never parses raw terminal bytes (no CSI-u / escape matching in the plugin)',
+      !/\\x1b\[/.test(fixtureSrc) && !/escape\s*\(/.test(fixtureSrc.replace(/handleInput/g, '')))
 
     // 4. The fixture tree: symlink the packed package + the host's
     //    node_modules (the offline-safe mirror of a real profile install —

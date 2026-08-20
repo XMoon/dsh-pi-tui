@@ -870,7 +870,7 @@ test('TuiApp: repeated declined Up events continue host history navigation', asy
   app.dispose()
 })
 
-test('TuiApp: a plugin editor with handleInput receives REAL typing (P1-10)', async () => {
+test('TuiApp: a plugin editor with handleInput receives SEMANTIC events, never raw bytes (P1-5)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
   const { EditorRegistry } = await import('../src/editor-registry.ts')
@@ -890,8 +890,10 @@ test('TuiApp: a plugin editor with handleInput receives REAL typing (P1-10)', as
   app.start()
   await vt.waitForRender()
   // A vim-like plugin editor: its OWN state machine owns every key. The
-  // host routes editor keys to handleInput; consume=true keeps them.
+  // host routes editor events to handleInput as SEMANTIC events; the
+  // plugin never sees raw terminal bytes (P1-5).
   let inputLog = ''
+  const seenEvents: string[] = []
   registry.register({
     id: 'vimish', priority: 0,
     create: () => ({
@@ -901,13 +903,25 @@ test('TuiApp: a plugin editor with handleInput receives REAL typing (P1-10)', as
       getCursor: () => inputLog.length,
       setCursor: (offset) => { void offset },
       focused: true,
-      handleInput: (data) => {
-        // Accept printable chars; DECLINE Enter (the host's own submit
-        // path owns submission — a plugin editor never re-implements it)
-        // and everything else.
-        if (data === '\r') return false
-        if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) < 127) {
-          inputLog += data
+      handleInput: (event) => {
+        // Accept plain printable text/key events; DECLINE Enter (the
+        // host's own submit path owns submission — a plugin editor never
+        // re-implements it), modifier chords and everything else.
+        if (event.kind === 'key') {
+          if (event.key.ctrl || event.key.alt || event.key.shift || event.key.super) return false
+          if (event.key.key === 'enter') return false
+          seenEvents.push(`key:${event.key.key}`)
+          inputLog += event.key.key
+          return true
+        }
+        if (event.kind === 'text') {
+          seenEvents.push(`text:${event.text}`)
+          inputLog += event.text
+          return true
+        }
+        if (event.kind === 'paste') {
+          seenEvents.push(`paste:${event.text}`)
+          inputLog += event.text
           return true
         }
         return false
@@ -917,13 +931,15 @@ test('TuiApp: a plugin editor with handleInput receives REAL typing (P1-10)', as
   }, 'plugin')
   app.reconcileEditorNow()
   await vt.waitForRender()
-  // REAL typing through the terminal: the plugin editor receives 'abc',
-  // not the old host editor.
+  // REAL typing through the terminal: the plugin editor receives 'abc'
+  // as semantic events, not the old host editor.
   vt.sendInput('a')
   vt.sendInput('b')
   vt.sendInput('c')
   await vt.waitForRender()
-  assert.equal(inputLog, 'abc', 'ordinary typing must reach the PLUGIN editor (P1-10)')
+  assert.equal(inputLog, 'abc', 'ordinary typing must reach the PLUGIN editor (P1-5)')
+  assert.ok(seenEvents.includes('key:a') && seenEvents.includes('key:b') && seenEvents.includes('key:c'),
+    `typing must arrive as semantic KEY events: ${seenEvents.join(', ')}`)
   assert.equal(app.getDraft(), 'abc', 'the host reads the plugin draft')
   // Enter routes through the host submit path (the runner's onSubmit) —
   // and the submit CLEARS the plugin draft like a normal host submit.
@@ -931,11 +947,61 @@ test('TuiApp: a plugin editor with handleInput receives REAL typing (P1-10)', as
   await vt.waitForRender()
   assert.deepEqual(submitted, ['abc'], 'Enter submits the plugin draft through the host path')
   assert.equal(inputLog, '', 'the host submit clears the plugin draft (host-owned semantics)')
-  // Keys the plugin DECLINES (e.g. Ctrl+X) fall through to the host
+  // Events the plugin DECLINES (e.g. Ctrl+X) fall through to the host
   // (the host editor's own handler — the plugin never sees them).
   vt.sendInput('\x18') // ctrl+x — the plugin returns false
   await vt.waitForRender()
-  assert.equal(inputLog, '', 'a declined key does not reach the plugin')
+  assert.equal(inputLog, '', 'a declined event does not reach the plugin')
+  app.stop()
+})
+
+test('TuiApp: terminal protocol normalization — legacy and CSI-u encodings reach the plugin as the SAME semantic key (P1-5)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    editorRegistry: registry,
+    pluginActionFor: () => undefined,
+  })
+  app.start()
+  await vt.waitForRender()
+  // The plugin editor records the NORMALIZED keys it receives.
+  const received: string[] = []
+  registry.register({
+    id: 'normalizing', priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: 'vim' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      focused: true,
+      handleInput: (event) => {
+        if (event.kind === 'key') received.push(`${event.key.key}:${event.key.ctrl ? 'c' : ''}${event.key.alt ? 'a' : ''}${event.key.shift ? 's' : ''}`)
+        return true
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // LEGACY encoding: arrow up = \x1b[A; Tab = \t. (Esc is a HOST-reserved
+  // key — the app's double-Esc cancel consumes it before the editor route,
+  // so it never reaches a plugin editor; the host owns it.)
+  vt.sendInput('\x1b[A')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  // CSI-u encoding (Kitty-style): arrow up = \x1b[1;1A; Tab = \x1b[9;1u.
+  vt.sendInput('\x1b[1;1A')
+  vt.sendInput('\x1b[9;1u')
+  await vt.waitForRender()
+  // The plugin sees the SAME normalized keys regardless of the encoding.
+  assert.deepEqual(received, [
+    'up:', 'tab:',
+    'up:', 'tab:',
+  ], `legacy and CSI-u encodings must normalize to the SAME semantic keys (P1-5): ${received.join(', ')}`)
   app.stop()
 })
 

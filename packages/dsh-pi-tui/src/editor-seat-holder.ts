@@ -57,10 +57,13 @@ export interface SeatEditor {
   addToHistory(text: string): void
   clearHistory(): void
   readonly component: Component
-  /** P1-10: the occupant's input channel — a PLUGIN editor with a
-   * handleInput hook receives routed keys here; the host default has no
-   * hook (the fork Editor is the focused component itself). */
-  handleInput?(data: string): boolean
+  /** P1-5: the occupant's input channel — a PLUGIN editor with a
+   * handleInput hook receives routed SEMANTIC events here (the host has
+   * already decoded the terminal protocol — legacy/CSI-u/modifyOtherKeys
+   * encodings, bracketed paste, key release/repeat filtering); the host
+   * default has no hook (the fork Editor is the focused component
+   * itself). */
+  handleInput?(event: import('./extension/public-types.ts').EditorInputEvent): boolean
   dispose(): void
 }
 
@@ -473,16 +476,17 @@ export class EditorSeatHolder {
       },
       addToHistory: () => {}, // the host default owns history recall
       clearHistory: () => {},
-      // P1-10: the plugin editor's input channel — the host's routeInput
-      // delivers every editor-routed key here first; consume=true stops
-      // the key (the plugin owns it), false/undefined lets the host
-      // default editor handle it.
+      // P1-5: the plugin editor's input channel — the host's routeInput
+      // delivers every editor-routed event here as a SEMANTIC event (the
+      // host decoded the terminal protocol); consume=true stops the event
+      // (the plugin owns it), false/undefined lets the host default
+      // editor handle it.
       handleInput: editor.handleInput === undefined
         ? undefined
-        : (data) => {
+        : (event) => {
             if (holder.disposed) return true
             try {
-              const consumed = editor.handleInput!(data)
+              const consumed = editor.handleInput!(event)
               if (consumed) {
                 holder.clearEditorError(id)
                 holder.current.invalidate()

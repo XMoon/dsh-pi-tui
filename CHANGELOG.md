@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Tiered extension surface.** The public extension SDK now ships three tiers:
+  the stable `@xmoon76/dsh-pi-tui/extensions` entry keeps its compatibility
+  contract, and the new `extensions/advanced` (experimental; minor releases may
+  break) and `extensions/unstable` (NO compatibility guarantee) entries carry
+  tier metadata plus the reserved capability namespaces (`advanced.` / `unstable.`).
+  All tiers share ONE extension runtime (caller-fiber ownership, surface lifecycle,
+  invalidation). The vim fixture no longer doubles as a production-Stable-API
+  proof; full modal editors move to the advanced/unstable roadmap.
+
 ## [0.2.0] - 2026-08-20
 
 ### Added
