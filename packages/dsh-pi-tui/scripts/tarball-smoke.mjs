@@ -258,7 +258,7 @@ function main() {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(builtins|commands|diag|extension\/advanced|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extensions|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(builtins|commands|diag|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extensions|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -303,7 +303,7 @@ function main() {
           "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup'),"
             + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
             + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable')])"
-            + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 0) throw new Error('ADVANCED_API_LEVEL');"
+            + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
             + "if (m[5].UNSTABLE_API_LEVEL !== 0) throw new Error('UNSTABLE_API_LEVEL'); console.log('imports-ok') })"
             + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })
