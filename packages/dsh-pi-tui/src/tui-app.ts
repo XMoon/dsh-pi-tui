@@ -699,6 +699,10 @@ export interface PickerHandle {
   close(): void
   /** Replace the rows while the picker is open; the active query re-applies. */
   setItems(items: readonly PickerItem[]): void
+  /** Host-internal: drop the abort listener (the imperative select
+   * broker's settle path — a settled promise must not retain the
+   * listener on the caller's signal). */
+  _removeAbortListener?(): void
 }
 
 /** Live control of an open task browser (rows carry status/startedAt). */
@@ -3279,6 +3283,10 @@ export class TuiApp {
         if (settled) return
         settled = true
         this.pendingBrokerSettles.delete(brokerSettle)
+        // Round-5 asymmetry: a settled promise must not retain the
+        // picker's abort listener on the caller's signal (the dispose
+        // path routes through settle too).
+        handle._removeAbortListener?.()
         resolve(value)
       }
       const handle = this.openPicker(
@@ -5007,9 +5015,16 @@ export class TuiApp {
     const handle = this.showOverlayOnHost(new Frame(list), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
-    // is removed on a normal select/cancel so a late abort can never
-    // touch a closed picker (round-1 finding 4).
+    // is removed on a normal select/cancel AND on the handle's close
+    // (round-1 finding 4 + round-5 asymmetry: a settled promise must not
+    // retain the listener on the caller's signal).
     let onAbort: (() => void) | undefined
+    const removeAbortListener = (): void => {
+      if (onAbort !== undefined && options.signal !== undefined) {
+        options.signal.removeEventListener('abort', onAbort)
+        onAbort = undefined
+      }
+    }
     if (options.signal !== undefined) {
       onAbort = (): void => {
         handle.hide()
@@ -5023,21 +5038,25 @@ export class TuiApp {
       }
     }
     list.onSelect = (item) => {
-      if (onAbort !== undefined && options.signal !== undefined) options.signal.removeEventListener('abort', onAbort)
+      removeAbortListener()
       handle.hide()
       onSelect(item.value)
     }
     list.onCancel = () => {
-      if (onAbort !== undefined && options.signal !== undefined) options.signal.removeEventListener('abort', onAbort)
+      removeAbortListener()
       handle.hide()
       onCancel()
     }
     return {
-      close: () => handle.hide(),
+      close: () => {
+        removeAbortListener()
+        handle.hide()
+      },
       setItems: (next) => {
         list.setItems(next.map(item => ({ ...item })))
         this.requestRender()
       },
+      _removeAbortListener: removeAbortListener,
     }
   }
 

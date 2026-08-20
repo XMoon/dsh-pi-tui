@@ -153,10 +153,18 @@ test('custom: resolves with the done() result; close resolves undefined', async 
 test('custom: a throwing factory is isolated (resolves undefined, host keeps working)', async () => {
   const { vt, app } = await appWithBroker()
   const broker = app.advancedUiBroker()
+  const controller = new AbortController()
   const promise = broker.custom(() => {
     throw new Error('factory boom')
-  })
+  }, {}, controller.signal)
   assert.equal(await promise, undefined)
+  // The throw path must have removed the abort listener (round-4/5
+  // finding): aborting the signal afterwards must not fire any settle
+  // (the promise already resolved; a dangling listener would be a
+  // retained closure).
+  controller.abort()
+  await vt.waitForRender()
+  assert.equal(app.pendingBrokerSettlesForTest(), 0, 'the throw path left no pending settle')
   // The host still works.
   vt.sendInput('q')
   await vt.waitForRender()
