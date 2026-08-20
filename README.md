@@ -126,6 +126,14 @@ Since `0.2.0` the bundle ships a small, versioned extension surface so a
 third-party Cordis plugin can contribute chrome without touching the TUI
 internals. It is **early and stabilizing**: the capabilities below are the
 current set; the API version (`1`) is bumped only on breaking changes, and
+plugins must **feature-detect** capabilities instead of parsing the package
+version.
+
+All extension plugins remain standard DeepSeek Harness / Cordis plugins using
+`name`, `inject`, and `apply(ctx)` against the single `piTuiExtensions`
+service; the tiers are capability facades over that one service, not separate
+plugin systems or runtimes.
+
 The extension surface ships three tiers: a plugin imports ONLY the
 public entry — never the stable entry's internals (`PiTuiApp`,
 `PiTuiMainScreen`, `PiTuiAltScreen`) nor repository-relative paths.
@@ -145,6 +153,8 @@ the reserved capability namespaces `advanced.` / `unstable.`, and the shared
 Host-private surface is exposed.
 
 A plugin imports only the public entry:
+
+```ts
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '@xmoon76/dsh-pi-tui/extensions'
 
 export const name = 'my-plugin'

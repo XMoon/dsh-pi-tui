@@ -99,6 +99,24 @@ packages/dsh-pi-tui/   The dsh bundle (the only published package). cordis.patch
 11. **Surface catalog: prefetch + coordinator + STANDING-SCOPE cold skills, no probe code.** The first input must eventually see the effective agent-scoped command + human-skill catalog, but opening the TUI must not create a chat session: `--session` PREFETCHES the resumed agent's catalog before mount (synchronous install during command registration); the deferred start reads the cold HUMAN SKILL catalog through the effective preset's STANDING SCOPE (`agentPresets.standingKeyFor(id)` → `skills.snapshot({cwd, scope})` — no Agent, no session, no turn). **Composition probes are REMOVED** (module + tests deleted): host-level `session/created` observers (dsh-permission-presets) write durable knob events into every fresh session, so any probe fails the zero-event gate and materializes a session artifact (200ms write-behind) — verified empirically; never reintroduce `agents.create()` for catalog discovery. Post-mount refreshes go through ONE `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; agent targets install the live surface, preset targets install standing skills only; target changes turn old skill wrappers into revalidating transitions; a standing degradation rides the applied outcome as a one-shot notice; `skills/change` bursts are coalesced by `CoalescingRefreshGate` and always re-read the CURRENT ownership). All upstream service access is isolated in `src/skill-catalog.ts` (structural types; `standingKeyFor`/`snapshot` are capability-detected — an upstream change degrades to missing commands, never a crash). Full contract: `docs/surface-catalog.md`.
 12. **Extension API is a compatibility boundary.** `@xmoon76/dsh-pi-tui/extensions` is a public plugin SDK; Host changes must preserve existing public extension semantics and third-party lifecycle behavior. See `docs/extension-api.md` and the **Extension compatibility (hard rules)** section below; never fix an extension limitation by exposing private TUI/terminal internals.
 
+### Extension API tiers
+
+The extension platform has three tiers:
+
+- `extensions`: Stable, semantic, compatibility-oriented.
+- `extensions/advanced`: Experimental higher-level interactive APIs; minor releases may break.
+- `extensions/unstable`: Low-level escape hatches with no compatibility guarantee.
+
+Do not expand the Stable API solely to support a plugin that inherently
+requires low-level input, custom component, or Host-policy bypass behavior.
+Place such capabilities in Advanced or Unstable instead.
+
+All tiers must reuse the shared Cordis ownership and surface lifecycle model.
+
+All extension plugins remain standard DeepSeek Harness / Cordis plugins using
+`name`, `inject`, and `apply(ctx)`. API tiers are capability facades over the
+single `piTuiExtensions` service, not separate plugin systems or runtimes.
+
 ## Extension compatibility (hard rules)
 
 `@xmoon76/dsh-pi-tui/extensions` is a public plugin SDK. Changes to the

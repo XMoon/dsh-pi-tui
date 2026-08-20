@@ -24,6 +24,24 @@
  * non-capturing plugin keybindings (M5 registry, normalized keys)
  * ```
  *
+ * Internal stage seam (phase-1 tier architecture, plan §9): the ladder
+ * above is the host-owned routing path, and future Advanced/Unstable
+ * capture stages seat into it at fixed points. NOT exported, NOT usable
+ * by plugins yet, and no behavior changes with this phase — the mapping
+ * below only documents where a future stage plugs in:
+ *
+ * ```text
+ * InternalInputStage  ladder position
+ * 'preDecode'         before terminal protocol replies / press-filtering
+ *                    (raw bytes interception — future unstable raw hook)
+ * 'preHost'           between protocol replies and the question/approval
+ *                    capture (future pre-host interception)
+ * 'focused'           after host modal capture, before the editor
+ *                    (future focused-component input ownership)
+ * 'binding'           the existing non-capturing plugin keybinding stage
+ *                    (already present, at the bottom of the ladder)
+ * ```
+ *
  * Contract (plan §11):
  * - plugins receive ONLY the normalized key identity
  *   ({@link NormalizedKey} — key + ctrl/alt/shift/super), never raw escape

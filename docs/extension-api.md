@@ -25,6 +25,12 @@ The extension surface ships three tiers (plan §4/§5). A plugin imports
 ONE tier entry — never the stable entry's internals, `PiTuiApp`,
 `PiTuiMainScreen`, `PiTuiAltScreen` or repository-relative paths.
 
+All extension plugins remain standard DeepSeek Harness / Cordis plugins using
+`name`, `inject`, and `apply(ctx)`. The tier entries are package-export
+boundaries: they may expose different types/helpers, but at runtime there is
+ONE `piTuiExtensions` service and ONE shared Extension Runtime — never three
+plugin systems, three loaders, or three HMR/lifecycle runtimes.
+
 | Tier | Entry | Contract |
 |---|---|---|
 | Stable | `@xmoon76/dsh-pi-tui/extensions` | Compatibility-oriented; additive-first; existing semantics never silently change; public removal requires a planned breaking change. |
@@ -130,8 +136,21 @@ version and is REMOVED in the next version bump. Migrate before then.
 
 ## Stability
 
-API v1 is **early, stabilizing** (documented in the README): the shape
-above is the current contract, version `1` bumps ONLY on breaking
-changes. M11 freezes the v1 surface for the 0.2.x line; the vim
-acceptance plugin (test/fixtures/vim-plugin/) is the living proof that a
-plugin needs nothing else.
+The extension surface is **early, stabilizing** (documented in the README).
+The 0.x policy is deliberately NOT a freeze: no source-hash gate, no protocol
+hash, no compatibility database is introduced to pin the surface. The tiers
+carry the actual contract (see "API tiers" above):
+
+- **Stable** (`./extensions`) is compatibility-oriented and additive-first;
+  a documented semantic never silently changes, and a public removal is a
+  planned breaking change with a migration path.
+- **Advanced** (`./extensions/advanced`) is experimental; minor releases may
+  break; a migration note is required; no long-term shims.
+- **Unstable** (`./extensions/unstable`) carries NO compatibility guarantee;
+  implementation may change at any time.
+
+A full modal editor (Vim-class) is NOT a Stable-API proof target — it
+belongs to the Advanced/Unstable roadmap. The vim test fixture validates the
+editor-extension seam: the public package is consumable, the replacement
+editor lifecycle works, and plugin editors consume semantic
+`EditorInputEvent`s (never raw terminal bytes).

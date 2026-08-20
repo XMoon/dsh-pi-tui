@@ -4,6 +4,13 @@ The extension surface ships three tiers. A plugin imports ONE tier entry — nev
 stable entry's internals, `PiTuiApp`, `PiTuiMainScreen`, `PiTuiAltScreen`,
 nor repository-relative paths.
 
+All extension plugins remain standard DeepSeek Harness / Cordis plugins using
+`name`, `inject`, and `apply(ctx)`. The tiers are capability facades over the
+single `piTuiExtensions` Cordis service — NOT three plugin frameworks, three
+loaders, three services, or three HMR/lifecycle runtimes. The package export
+paths below are TypeScript/package boundaries; at runtime there is ONE
+`piTuiExtensions` service and ONE shared Extension Runtime.
+
 | Tier | Entry | Contract |
 |---|---|---|
 | Stable | `@xmoon76/dsh-pi-tui/extensions` | Compatibility-oriented; additive-first; existing semantics never silently change; removal requires a planned breaking change. |
