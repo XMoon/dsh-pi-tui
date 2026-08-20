@@ -74,15 +74,6 @@ export interface InputRouterContext {
   readonly hasOverlay: boolean
   /** Whether the transcript-search overlay is open (owns its keys). */
   readonly searchActive: boolean
-  /** Whether background tasks are active (the ↓/Ctrl+J browser trigger). */
-  readonly tasksActive: boolean
-  /** The current editor draft (for task-browser gating). */
-  readonly editorText: string
-  /** Whether the external-editor launch is currently in flight. */
-  readonly externalEditorInFlight: boolean
-  /** Whether the editor should see plain text (true normally; false while
-   * a capturing flow hides it). */
-  readonly editorReceivesText: boolean
   /** P1-06: whether the FOCUSED component would consume this raw input.
    * The app-level listener runs BEFORE the focused component sees input
    * (the fork dispatches to listeners first, then the focused component),
@@ -197,9 +188,9 @@ export class InputRouter {
     // editor. Printable keys always stay with normal text entry, and an
     // editor-owned binding (navigation, deletion, completion) keeps priority
     // over a plugin action.
-    if (normalized !== undefined) {
+    if (normalized !== undefined && !isPrintableKey(normalized)) {
       const action = pluginActionFor(normalized)
-      if (action !== undefined && !isPrintableKey(normalized)) {
+      if (action !== undefined) {
         if (ctx.editorAccepts?.(data) === true) return { kind: 'editor' }
         return { kind: 'plugin-action', action, key: normalized }
       }

@@ -28,10 +28,6 @@ function context(overrides: Partial<Parameters<InputRouter['route']>[1]> = {}): 
     viewerLocked: false,
     hasOverlay: false,
     searchActive: false,
-    tasksActive: false,
-    editorText: '',
-    externalEditorInFlight: false,
-    editorReceivesText: true,
     ...overrides,
   }
 }
@@ -110,10 +106,15 @@ test('InputRouter: a plugin binding fires for a normalized non-printable key', (
   assert.deepEqual(seen, { key: 'right', ctrl: true, alt: false, shift: false, super: false })
 })
 
-test('InputRouter: plain printable keys never fire a plugin binding (typing wins)', () => {
+test('InputRouter: plain printable keys never consult plugin bindings (typing wins)', () => {
   const r = router()
-  const result = r.route('a', context(), () => 'open-search' as TuiAction)
+  let bindingCalls = 0
+  const result = r.route('a', context(), () => {
+    bindingCalls += 1
+    return 'open-search' as TuiAction
+  })
   assert.equal(result.kind, 'editor', 'a plain letter is the editor\'s')
+  assert.equal(bindingCalls, 0, 'printable input must not scan plugin bindings')
 })
 
 test('InputRouter: overlays keep their keys (a plugin binding does not fire under an overlay)', () => {
@@ -198,6 +199,34 @@ test('TuiApp: a throwing plugin action is isolated and reported with its contrib
   await vt.waitForRender()
   assert.equal(attempts, 2)
   assert.deepEqual(recovered, [{ slot: 'keybinding', id: 'binding-x' }])
+  app.stop()
+})
+
+test('TuiApp: host-routed typing updates the visible editor immediately', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+
+  const seat = app.seatEditorForTest()
+  const originalGetText = seat.getText
+  let getTextCalls = 0
+  seat.getText = () => {
+    getTextCalls += 1
+    return originalGetText()
+  }
+  vt.sendInput('a')
+  await vt.waitForRender()
+
+  // One read is the existing host-editor onChange notification snapshot;
+  // routing must not add another draft read. The visible frame must still
+  // contain the character because the host route returns undefined and lets
+  // pi-tui dispatch to the focused editor and schedule its repaint.
+  assert.equal(getTextCalls, 1, 'routing a printable key must not add a duplicate draft read')
+  assert.equal(app.getDraft(), 'a')
+  assert.ok(vt.getViewport().some(line => line.includes('a')), 'typed text must be painted immediately')
   app.stop()
 })
 

@@ -1736,8 +1736,12 @@ export class TuiApp {
       // the app's own listeners) keep it, and the hidden host draft never
       // diverges from what the user sees.
       if (this.seatEditor().id !== 'host') return { consume: true }
-      this.editor.handleInput(data)
-      return { consume: true }
+      // Leave normal host editing to pi-tui's focused-component dispatch.
+      // Returning undefined is important: TuiBase then calls Editor.handleInput
+      // and schedules its immediate active-screen repaint. Calling the editor
+      // here and returning consume=true would update the draft but skip that
+      // framework repaint, making typed characters appear to be swallowed.
+      return undefined
     }
     if (route.kind === 'plugin-action') {
       try {
@@ -1759,10 +1763,6 @@ export class TuiApp {
       viewerLocked: this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries,
       hasOverlay: this.activeScreen.hasOverlayEntries,
       searchActive: this.searchOverlay !== undefined,
-      tasksActive: this.tasksActive,
-      editorText: this.seatEditor().getText(),
-      externalEditorInFlight: this.externalEditorInFlight,
-      editorReceivesText: true,
       editorReplacement: this.seatEditor().handleInput !== undefined,
       // P1-06: the focused EDITOR owns its keys. The fork dispatches to
       // app-level listeners BEFORE the focused component, so the router
