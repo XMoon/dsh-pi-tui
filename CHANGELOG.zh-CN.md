@@ -9,6 +9,20 @@
 
 ### 新增
 
+- **Advanced 扩展层(Phase 2)。** `@xmoon76/dsh-pi-tui/extensions/advanced`
+  现在是可用层级(`ADVANCED_API_LEVEL = 1`),提供三类能力,全部仍由
+  Host 中介(绝不接触 raw terminal 字节、绝不暴露私有屏幕):
+  **规范化输入捕获**(`advanced.input.capture`——observe/capture/
+  exclusive 模式、确定性优先级排序、exclusive 冲突显式报错、handler
+  抛错 fail-open)、**聚焦交互表面**(`advanced.ui.interactive`——交互式
+  托管 overlay 承载插件自有的交互组件,渲染由 Host 编译、输入由 Host
+  归一化、focus/blur、resize 重编译与全屏迁移)、**高级编辑器控制**
+  (`advanced.editor.control`——经 Host 编辑器座位的 get/set/cursor/
+  insert/paste/focus)。facade 为 `advanced(service)`——Stable service
+  接口未动。所有资源仍为 caller-fiber 所有、surface generation 作用域;
+  失败进入共享 health ledger。作者指南:`docs/extension-advanced.md`。
+  打包验收:新增 `advanced-plugin` fixture + `scripts/advanced-plugin-smoke.mjs`
+  门禁。
 - **分层扩展面。** 公开扩展 SDK 现在分三个层级:稳定的
   `@xmoon76/dsh-pi-tui/extensions` 入口保持其兼容契约,新增的
   `extensions/advanced`(实验性;minor 版本可破坏)与 `extensions/unstable`

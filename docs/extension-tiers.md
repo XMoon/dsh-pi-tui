@@ -19,7 +19,22 @@ paths below are TypeScript/package boundaries; at runtime there is ONE
 
 All tiers reuse the SAME shared extension runtime: caller-fiber ownership, surface
 lifecycle, invalidation, capability discovery. Do not fork a second ownership/lifecycle
-model per tier. Phase 1 ships metadata only: an exported path, a tier constant
-(`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`, both `0`), the reserved
-capability namespaces `advanced.` / `unstable.`, and the shared `ExtensionTier` type.
-No advanced/unstable capability is implemented yet and no Host-private surface is exposed.
+model per tier.
+
+## Current tier status
+
+- **Stable** (`ADVANCED_API_LEVEL` n/a): the M0–M11 platform — chrome
+  slots, widgets, commands, themes, settings, autocomplete, keybindings,
+  renderers, managed overlays, the editor SDK. See `docs/extension-api.md`.
+- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2): normalized input
+  capture (`advanced.input.capture`), focused interactive surfaces
+  (interactive managed overlays, `advanced.ui.interactive`), and advanced
+  editor control (`advanced.editor.control`). See
+  `docs/extension-advanced.md`.
+- **Unstable** (`UNSTABLE_API_LEVEL = 0`): reserved — no capability is
+  implemented yet. See `docs/extension-unstable.md` (once shipped).
+
+The capability model is shared: `service.api().capabilities` carries the
+tier-prefixed ids (`advanced.*`), feature-detected — never parsed from the
+host version. Advanced/Unstable capabilities may evolve with their APIs;
+Stable capabilities never silently change semantics.

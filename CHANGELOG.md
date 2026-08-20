@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Advanced extension tier (Phase 2).** `@xmoon76/dsh-pi-tui/extensions/advanced`
+  is now a usable tier (`ADVANCED_API_LEVEL = 1`) with three capabilities,
+  all still Host-mediated (never raw terminal bytes, never private
+  screens): **normalized input capture** (`advanced.input.capture` —
+  observe/capture/exclusive modes, deterministic priority ordering,
+  explicit exclusive-conflict errors, fail-open on throwing handlers),
+  **focused interactive surfaces** (`advanced.ui.interactive` — interactive
+  managed overlays hosting plugin-owned interactive components with
+  Host-compiled rendering, normalized input, focus/blur, resize
+  recompilation and fullscreen migration), and **advanced editor control**
+  (`advanced.editor.control` — get/set/cursor/insert/paste/focus through
+  the host's editor seat). The facade is `advanced(service)` — the Stable
+  service interface is untouched. All resources stay caller-fiber-owned
+  and surface-generation-scoped; failures ride the shared health ledger.
+  Author guide: `docs/extension-advanced.md`. Packed acceptance: the new
+  `advanced-plugin` fixture + `scripts/advanced-plugin-smoke.mjs` gate.
 - **Tiered extension surface.** The public extension SDK now ships three tiers:
   the stable `@xmoon76/dsh-pi-tui/extensions` entry keeps its compatibility
   contract, and the new `extensions/advanced` (experimental; minor releases may

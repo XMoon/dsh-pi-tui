@@ -139,10 +139,13 @@ Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、�
 
 所有层级复用同一个共享 Extension Runtime:caller-fiber 所有权、surface
 生命周期、失效机制、能力发现。不要按层级复制第二套所有权/生命周期
-模型。第一阶段只提供元数据:导出路径、层级常量
-(`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`,均为 `0`)、保留的能力
-命名空间 `advanced.` / `unstable.`,以及共享的 `ExtensionTier` 类型。
-目前尚未实现任何 advanced/unstable 能力,也未暴露任何 Host 私有表面。
+模型。第一阶段之后各层级已逐步落地:
+
+- **Advanced**(`ADVANCED_API_LEVEL = 1`,Phase 2):规范化输入捕获、
+  聚焦交互表面(交互式托管 overlay)与高级编辑器控制——仍由 Host
+  中介,绝不接触 raw terminal 字节。作者指南:`docs/extension-advanced.md`。
+- **Unstable**(`UNSTABLE_API_LEVEL = 0`):保留——尚未实现任何能力;
+  未来将不保证兼容,可能暴露低层输入拦截与 Host 策略绕过。
 
 插件只导入公开入口:
 

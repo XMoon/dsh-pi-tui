@@ -146,11 +146,15 @@ public entry — never the stable entry's internals (`TuiApp`,
 
 All tiers reuse the SAME shared extension runtime: caller-fiber ownership,
 surface lifecycle, invalidation, capability discovery. Do not fork a second
-ownership/lifecycle model per tier. Phase 1 ships metadata only: an exported
-path, a tier constant (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`, both `0`),
-the reserved capability namespaces `advanced.` / `unstable.`, and the shared
-`ExtensionTier` type. No advanced/unstable capability is implemented yet and no
-Host-private surface is exposed.
+ownership/lifecycle model per tier. The tiers have grown since Phase 1:
+
+- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2): normalized input
+  capture, focused interactive surfaces (interactive managed overlays)
+  and advanced editor control — still Host-mediated, never raw terminal
+  bytes. Author guide: `docs/extension-advanced.md`.
+- **Unstable** (`UNSTABLE_API_LEVEL = 0`): reserved — no capability is
+  implemented yet; it will carry NO compatibility guarantee and may expose
+  low-level input interception and Host-policy bypass.
 
 A plugin imports only the public entry:
 

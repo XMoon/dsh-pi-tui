@@ -44,21 +44,17 @@ plugin systems, three loaders, or three HMR/lifecycle runtimes.
 
 All tiers reuse the SAME shared extension runtime: caller-fiber
 ownership, surface lifecycle, invalidation, capability discovery. Do not fork a
-second ownership/lifecycle model per tier. Phase 1 ships only metadata: an
-exported path, a level constant (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`,
-both `0`), the reserved capability namespaces `advanced.` / `unstable.` and
-the shared `ExtensionTier` type. No advanced/unstable capability is implemented
-yet and no Host-private surface is exposed.
+second ownership/lifecycle model per tier. Phase 1 shipped metadata only; the
+tiers have since grown:
 
-Reserved future scope (documented here so the docs never promise that the
-Stable limits are platform-wide):
-
-- **Advanced** may expose public higher-level interactive abstractions —
-  normalized input ownership, interactive/focused UI, custom editor/component
-  contracts, richer Host-managed capabilities.
-- **Unstable** may intentionally expose low-level input interception,
-  exclusive ownership, Host-policy bypass, or selected implementation-coupled
-  primitives.
+- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2): normalized input
+  capture, focused interactive surfaces (interactive managed overlays) and
+  advanced editor control — still Host-mediated, never raw terminal bytes.
+  See `docs/extension-advanced.md`.
+- **Unstable** (`UNSTABLE_API_LEVEL = 0`): reserved — no capability is
+  implemented yet. It may intentionally expose low-level input
+  interception, exclusive ownership, Host-policy bypass, or selected
+  implementation-coupled primitives.
 
 Such access is provided through the supported tier package entry
 (`./extensions/advanced` / `./extensions/unstable`), never through
