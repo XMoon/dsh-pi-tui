@@ -9,6 +9,18 @@
 
 ### 新增
 
+- **真实插件验证(Phase 5)。**层级选择由真实消费者验证,见
+  `packages/dsh-pi-tui/examples/plugins/`,由
+  `scripts/examples-plugin-smoke.mjs` 对打包 tarball 门禁:
+  **生产级 vim 模态编辑器**(insert/normal 模式、h/j/k/l、词移动、
+  x/d/c、i/a/o、undo/redo、yank/paste、多行、光标同步、提交集成——
+  全部经语义化 `EditorInputEvent`,绝不接触 raw 字节;Advanced editor
+  SDK 足够,无需 Unstable)、**questionnaire 表单**(Phase-4 命令式 UI
+  broker:select → 自由文本 → confirm → notify)与**交互式 shell**
+  (Unstable raw seam:exclusive raw 所有权 + raw 渲染低层 mount;
+  `exit` 或 Host 紧急 fail-safe 返回)。作者决策树见
+  `docs/plugin-authoring.md`;API gap 过程与 Stable promotion review
+  记录在 `examples/README.md`。
 - **Pi 能力对齐(Phase 4)。** Advanced 层新增高价值 Pi 风格能力:
   **命令式 UI broker**(`advanced.ui.select/confirm/input/notify`——
   基于 Host 自有 picker/question/notify 基础设施的 Promise 化提示,

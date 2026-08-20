@@ -151,6 +151,11 @@ Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、�
   (observe/consume/rewrite、exclusive raw 所有权)、Host 紧急 fail-safe
   (三连 Esc)与精选低层 surface seam——不保证兼容;损坏的插件可能
   破坏 Host 行为。作者指南:`docs/extension-unstable.md`。
+- **真实插件验证(Phase 5):**层级选择由真实消费者验证,见
+  `packages/dsh-pi-tui/examples/plugins/`——生产级 vim 模态编辑器
+  (Advanced editor SDK)、questionnaire 表单(Advanced 命令式 UI
+  broker)与交互式 shell(Unstable raw seam)。"该用哪一层?"决策树:
+  `docs/plugin-authoring.md`。
 
 插件只导入公开入口:
 

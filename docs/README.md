@@ -22,6 +22,7 @@ knows where the rest lives.
 | `extension-api.md` | plugin authors | The extension API v1 author guide: import rules, the surface table, lifecycle/render contracts, deprecation policy, stability |
 | `extension-advanced.md` | plugin authors | The ADVANCED tier author guide (Phase 2/4): normalized input capture, focused interactive surfaces, advanced editor control, the imperative UI broker, custom UI and the host-state facade — the Host-mediated contract and the capture ladder position |
 | `extension-capability-matrix.md` | plugin authors | The Pi capability reference: Pi capability → dsh equivalent → tier → status (roadmap, not a hash gate) |
+| `plugin-authoring.md` | plugin authors | The "which tier should I use?" decision tree and the authoring checklist |
 | `extension-unstable.md` | plugin authors | The UNSTABLE tier author guide (Phase 3): raw input interception, exclusive raw ownership, the emergency fail-safe, the low-level surface seam — NO compatibility guarantee |
 | `extension-tiers.md` | plugin authors | The three-tier contract table and the current tier status (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`) |
 | `tmux/` | — | Helper scripts (`ansi2html.mjs`, `tui-demo.sh`) with their own tests |

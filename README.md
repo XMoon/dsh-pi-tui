@@ -160,6 +160,12 @@ ownership/lifecycle model per tier. The tiers have grown since Phase 1:
   Host emergency fail-safe (triple-Esc), and a selected low-level surface
   seam — NO compatibility guarantee; a broken plugin can disrupt Host
   behavior. Author guide: `docs/extension-unstable.md`.
+- **Real-plugin validation (Phase 5):** the tier selection is proven by
+  real consumers in `packages/dsh-pi-tui/examples/plugins/` — a
+  production-class vim modal editor (Advanced editor SDK), a
+  questionnaire form (Advanced imperative UI broker) and an interactive
+  shell (Unstable raw seam). The "which tier should I use?" decision
+  tree: `docs/plugin-authoring.md`.
 
 A plugin imports only the public entry:
 

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real-plugin validation (Phase 5).** The tier selection is proven by
+  real consumers in `packages/dsh-pi-tui/examples/plugins/`, gated by
+  `scripts/examples-plugin-smoke.mjs` against the packed tarball: a
+  **production-class vim modal editor** (insert/normal modes, h/j/k/l,
+  word movement, x/d/c, i/a/o, undo/redo, yank/paste, multi-line,
+  cursor sync, submit integration — all through semantic
+  `EditorInputEvent`s, never raw bytes; the Advanced editor SDK is
+  sufficient, no Unstable usage), a **questionnaire form** (the Phase-4
+  imperative UI broker: select → free text → confirm → notify) and an
+  **interactive shell** (the Unstable raw seam: exclusive raw ownership
+  + a raw-rendering low-level mount; `exit` or the Host emergency
+  fail-safe returns). The authoring decision tree lives in
+  `docs/plugin-authoring.md`; the API gap process and the Stable
+  promotion review are recorded in `examples/README.md`.
 - **Pi capability parity (Phase 4).** The ADVANCED tier gains the
   high-value Pi-style capabilities: the **imperative UI broker**
   (`advanced.ui.select/confirm/input/notify` — promise-based prompts built
