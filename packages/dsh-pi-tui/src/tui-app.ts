@@ -89,6 +89,7 @@ import { EditorSeatHolder } from './editor-seat-holder.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
+import { normalizeInputEvent } from './extension/internal/input-events.ts'
 import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
@@ -1431,19 +1432,10 @@ export class TuiApp {
    *   keeps it; a plugin editor never sees it).
    */
   private editorInputEventOf(data: string): import('./extension/public-types.ts').EditorInputEvent | undefined {
-    if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
-    // Bracketed paste: the fork re-wraps paste content with the markers,
-    // so a paste arrives here as ONE bracketed chunk.
-    const paste = parseBracketedPaste(data)
-    if (paste !== undefined) return { kind: 'paste', text: paste }
-    const key = this.inputRouter.normalize(data)
-    if (key !== undefined) return { kind: 'key', key }
-    // A plain printable run: multi-char chunks that are not a single key
-    // (fast typing / non-bracketed paste heuristic) are TEXT.
-    if (data.length > 0 && [...data].every(char => char.charCodeAt(0) >= 32 && char.charCodeAt(0) < 127)) {
-      return { kind: 'text', text: data }
-    }
-    return undefined
+    // Phase 2: ONE shared classification (extension/internal/input-events.ts)
+    // serves the editor channel, the advanced captures and the advanced
+    // interactive components — never two decoders that can drift.
+    return normalizeInputEvent(data)
   }
 
   /**
@@ -2810,9 +2802,16 @@ export class TuiApp {
       },
       // Host-internal: re-create the raw handle on the CURRENT active
       // screen after a fullscreen swap (the old raw handle died with the
-      // old screen). Idempotent (a live raw handle skips).
+      // old screen). Idempotent (a live raw handle skips). The OLD wrapper
+      // is dropped from the live set WITHOUT disposing it — the plugin
+      // component must survive the screen migration (the lease stays
+      // live); the dead screen's overlay stack is the only remaining
+      // reference and dies with the screen.
       _remount: () => {
         if (closed) return
+        if (wrapper !== undefined) {
+          this.advancedOverlayWrappers.delete(wrapper)
+        }
         raw = undefined
         mount()
       },
@@ -2848,6 +2847,13 @@ export class TuiApp {
   /** Phase 2 test hook: the number of still-owned ADVANCED overlay leases. */
   ownedAdvancedOverlayLeasesForTest(): number {
     return this.advancedOverlayLeases.size
+  }
+
+  /** Phase 2 test hook: the number of live ADVANCED overlay wrappers
+   * (asserts a fullscreen remount drops the old wrapper — the set must
+   * not grow across screen migrations). */
+  advancedOverlayWrappersForTest(): number {
+    return this.advancedOverlayWrappers.size
   }
 
   /** Phase 2: the live render context for ADVANCED interactive overlays
@@ -5098,18 +5104,4 @@ export function startProcessTui(events: TuiAppEvents, options: TuiAppOptions = {
   const app = new TuiApp(new ProcessTerminal(), events, options)
   app.start()
   return app
-}
-
-/** The bracketed-paste open marker. */
-const BRACKETED_PASTE_START = '\x1b[200~'
-/** The bracketed-paste close marker. */
-const BRACKETED_PASTE_END = '\x1b[201~'
-
-/** Parse a bracketed-paste chunk into its content, or undefined when the
- * data is not a bracketed paste (P1-5: the host classifies pastes for the
- * semantic editor input events). The fork re-wraps pastes with the
- * markers, so one paste arrives as one bracketed chunk. */
-function parseBracketedPaste(data: string): string | undefined {
-  if (!data.startsWith(BRACKETED_PASTE_START) || !data.endsWith(BRACKETED_PASTE_END)) return undefined
-  return data.slice(BRACKETED_PASTE_START.length, data.length - BRACKETED_PASTE_END.length)
 }

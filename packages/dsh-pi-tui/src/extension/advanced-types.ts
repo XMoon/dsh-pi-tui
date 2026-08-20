@@ -237,3 +237,35 @@ export interface AdvancedFacade {
    * controls follow the live surface attachment). */
   readonly editor: AdvancedEditorControls
 }
+
+/**
+ * The minimal service surface the advanced facade consumes (plan §4:
+ * `advanced(service)`). STRUCTURAL and defined here so the packed
+ * advanced declarations never reference the internal service module —
+ * the concrete `piTuiExtensions` service implements these members, but
+ * the public `PiTuiExtensionService` interface does not declare them.
+ *
+ * `api` is the structural anchor: a plain `PiTuiExtensionService` value
+ * satisfies the facade's parameter (the seam members are optional in the
+ * type), and the facade throws loudly when the host does not implement
+ * the seam (a host/plugin version mismatch) instead of failing later
+ * with an obscure "not a function".
+ */
+export interface AdvancedServiceHost {
+  /** The public api() surface (the structural anchor — the facade does
+   * not consume it; it makes a plain `PiTuiExtensionService` value
+   * assignable to the parameter). */
+  readonly api: () => import('./public-types.ts').PiTuiApiInfo
+  /** The service's internal advanced seam: register a normalized input
+   * capture (caller-fiber-owned). */
+  _advancedCaptureInput?(spec: AdvancedInputCaptureSpec): AdvancedInputCaptureHandle
+  /** The service's internal advanced seam: open an interactive managed
+   * overlay (caller-fiber-owned lease). */
+  _advancedShowInteractiveOverlay?(
+    component: AdvancedInteractiveComponent,
+    options?: TuiOverlayOptions,
+  ): AdvancedOverlayLease
+  /** The service's internal advanced seam: the current surface's advanced
+   * editor controls (inert when stale). */
+  _advancedEditorControls?(): AdvancedEditorControls
+}

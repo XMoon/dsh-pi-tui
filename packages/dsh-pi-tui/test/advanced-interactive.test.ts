@@ -180,16 +180,29 @@ test('interactive overlay: a lease survives a fullscreen toggle (screen migratio
   let view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('fs interactive'), `overlay content missing:\n${view}`)
   // Fullscreen toggle: the old screen's raw handles die; the lease must
-  // re-mount on the new active screen.
-  app.setFullscreen(true)
+  // re-mount on the new active screen. REPEATED toggles must not grow the
+  // wrapper set (round-1 finding 2: every remount used to leave a stale
+  // wrapper behind, so resize recompiled every historical wrapper).
+  for (let toggle = 0; toggle < 3; toggle += 1) {
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    view = vt.getViewport().map(strip).join('\n')
+    assert.ok(view.includes('fs interactive'), `overlay missing after fullscreen #${toggle}:\n${view}`)
+    assert.equal(app.advancedOverlayWrappersForTest(), 1, `remount #${toggle} drops the old wrapper (no set growth)`)
+    app.setFullscreen(false)
+    await vt.waitForRender()
+    view = vt.getViewport().map(strip).join('\n')
+    assert.ok(view.includes('fs interactive'), `overlay missing after fullscreen exit #${toggle}:\n${view}`)
+    assert.equal(app.advancedOverlayWrappersForTest(), 1, `exit #${toggle} also keeps exactly one wrapper`)
+  }
+  // A terminal resize recompiles the ONE live wrapper exactly once (the
+  // stale-wrapper leak would recompile every historical wrapper).
+  const rendersBefore = component.renderCount
+  vt.resize(100, 30)
   await vt.waitForRender()
-  view = vt.getViewport().map(strip).join('\n')
-  assert.ok(view.includes('fs interactive'), `overlay missing after fullscreen:\n${view}`)
-  app.setFullscreen(false)
-  await vt.waitForRender()
-  view = vt.getViewport().map(strip).join('\n')
-  assert.ok(view.includes('fs interactive'), `overlay missing after fullscreen exit:\n${view}`)
+  assert.equal(component.renderCount, rendersBefore + 1, 'a resize recompiles the live overlay exactly once')
   lease.close()
+  assert.equal(app.advancedOverlayWrappersForTest(), 0, 'close drops the wrapper')
   app.stop()
 })
 

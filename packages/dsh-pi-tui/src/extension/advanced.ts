@@ -20,12 +20,11 @@
  * @module @xmoon76/dsh-pi-tui/extensions/advanced
  */
 
-import type { PiTuiExtensionService } from './service.ts'
-import type { AdvancedHostSeam } from './service.ts'
 import type {
   AdvancedFacade,
   AdvancedInputCaptureSpec,
   AdvancedInteractiveComponent,
+  AdvancedServiceHost,
 } from './advanced-types.ts'
 import type { TuiOverlayOptions } from './public-types.ts'
 
@@ -42,9 +41,18 @@ export type {
   AdvancedInteractiveComponent,
   AdvancedOverlayLease,
   AdvancedRenderContext,
+  AdvancedServiceHost,
   AdvancedUiFacade,
 } from './advanced-types.ts'
 export type { ExtensionTier } from './public-types.ts'
+
+/** The seam members the facade requires at runtime (the concrete service
+ * implements them; the public `PiTuiExtensionService` interface does not
+ * declare them). */
+type AdvancedSeam = Required<Pick<
+  AdvancedServiceHost,
+  '_advancedCaptureInput' | '_advancedShowInteractiveOverlay' | '_advancedEditorControls'
+>>
 
 /**
  * Build the ADVANCED facade over the shared `piTuiExtensions` service
@@ -56,11 +64,24 @@ export type { ExtensionTier } from './public-types.ts'
  * (input captures) are service-lifetime and attach later; leases
  * (interactive overlays) and the editor controls are inert until a
  * surface is live.
+ *
+ * The parameter is the structural {@link AdvancedServiceHost}: a plain
+ * `PiTuiExtensionService` value is accepted (the seam members are optional
+ * in the type), and the facade throws loudly when the host does not
+ * implement the seam (a host/plugin version mismatch).
  * @param service - the `piTuiExtensions` service (from `ctx.get(...)`).
  * @returns the Advanced facade.
  */
-export function advanced(service: PiTuiExtensionService): AdvancedFacade {
-  const host = service as PiTuiExtensionService & AdvancedHostSeam
+export function advanced(service: AdvancedServiceHost): AdvancedFacade {
+  const host = service as AdvancedServiceHost & AdvancedSeam
+  if (host._advancedCaptureInput === undefined
+    || host._advancedShowInteractiveOverlay === undefined
+    || host._advancedEditorControls === undefined) {
+    throw new Error(
+      'this piTuiExtensions host does not implement the advanced seam ' +
+      '(host/plugin version mismatch? upgrade the host bundle)',
+    )
+  }
   return {
     input: {
       capture: (spec: AdvancedInputCaptureSpec) => host._advancedCaptureInput(spec),
