@@ -845,6 +845,25 @@ export function foldTranscript(events: readonly SessionEvent[], options?: FoldOp
   return folder.messages(options)
 }
 
+/**
+ * A child session's OWN events: everything after the LAST
+ * `session/end-seed` marker. The fork provider seeds a child with the
+ * PARENT's completed-turn prefix (upstream: "a fork seed replays the
+ * parent's log"), so the child log's pre-marker events are the parent's
+ * history — parent completion notices included. The subagent viewer must
+ * never render them as the child's transcript. Spawned children have no
+ * seed and no marker: everything is their own. A resumed child carries a
+ * second marker (its stored log becomes the new seed), so the LAST marker
+ * is the boundary.
+ */
+export function childOwnEvents(events: readonly SessionEvent[]): readonly SessionEvent[] {
+  let cut = 0
+  for (let index = 0; index < events.length; index += 1) {
+    if (events[index]!.type === 'session/end-seed') cut = index + 1
+  }
+  return cut === 0 ? events : events.slice(cut)
+}
+
 /** Render one session's log as a readable markdown transcript for `/export md`. */
 export function renderTranscriptMarkdown(session: {
   header: SessionHeader

@@ -91,6 +91,7 @@ export function contextEmoji(source: unknown): string {
       // A notice is a one-off account; everything else is payload.
       return readString(record ?? {}, 'form') === 'notice' ? '📌' : '📦'
     }
+    case 'subagent-settled': return '📌'
     case 'session-reference': return '🕘'
     default: return '📎'
   }

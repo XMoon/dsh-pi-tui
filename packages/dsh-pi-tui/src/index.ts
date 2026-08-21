@@ -72,7 +72,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
-import { textOf, TranscriptFolder } from './transcript.ts'
+import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
@@ -2010,15 +2010,19 @@ export function apply(ctx: Context, config: Config): void {
     /** Enter the read-only subagent viewer for one session (live or persisted). */
     const enterView = async (childId: SessionId, label?: string): Promise<void> => {
       const childFolder = new TranscriptFolder()
+      // Only the child's OWN events enter the viewer: a fork provider seeds
+      // the child with the parent's completed-turn history (session/end-seed
+      // boundary), and the parent's records — its subagent completion
+      // notices included — must never render as the child's transcript.
       const child = sessions.get(childId)
       if (child !== undefined) {
-        childFolder.apply(child.events)
+        childFolder.apply(childOwnEvents(child.events))
       } else {
         // An inactive child is no longer in the live store; load its log.
         const persistence = ctx.get('sessionPersistence')
         if (persistence !== undefined) {
           try {
-            childFolder.apply((await persistence.inspect(childId)).events)
+            childFolder.apply(childOwnEvents((await persistence.inspect(childId)).events))
           } catch {
             // No persisted log either: the view stays empty.
           }
