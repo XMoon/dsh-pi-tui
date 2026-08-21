@@ -151,6 +151,7 @@ function invoke(rawInput: string): CommandInvocation {
     commandId: CommandId('cmd-test-1'),
     agent: undefined as unknown as Agent,
     rawInput,
+    attachments: [],
     signal: new AbortController().signal,
   }
 }

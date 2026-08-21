@@ -2057,7 +2057,7 @@ export function apply(ctx: Context, config: Config): void {
             : text
           // The command execution is itself an owned workflow: its outcome
           // decides between the fallback follow-up and a draft restore.
-          runOwned('command execution', () => commands.execute(agent as Agent, toggled, signal), {
+          runOwned('command execution', () => commands.execute(agent as Agent, toggled, [], signal), {
             diag,
             sessionId: () => agent.session.id,
             onResult: (execution) => {

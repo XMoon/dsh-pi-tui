@@ -1741,7 +1741,7 @@ export function registerTuiCommands(
       const liveAgent = await requireAgent()
       const commands = ctx.get('commands')
       if (commands === undefined) return { kind: 'error', text: 'commands service unavailable' }
-      const execution = await commands.execute(liveAgent, '/permission danger-full-access', signal)
+      const execution = await commands.execute(liveAgent, '/permission danger-full-access', [], signal)
       if (execution === undefined) {
         return { kind: 'error', text: '/permission unavailable (permission presets not composed)' }
       }
