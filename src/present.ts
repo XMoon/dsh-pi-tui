@@ -473,6 +473,35 @@ export function parseReadEnvelope(result: string): ReadEnvelope | undefined {
 }
 
 /**
+ * Parse the write tool's XML confirmation envelope (`<path>…</path> <type>
+ * …</type> <content>Created file</content>` — no file content is echoed).
+ * The verb + path are the only material the envelope carries.
+ * @param result - the tool result text.
+ * @returns the envelope's verb and path, or undefined when the result is
+ * not a write envelope (never a partial parse).
+ */
+export function parseWriteEnvelope(result: string): { verb: 'Created' | 'Updated'; path: string } | undefined {
+  const match = /<path>([\s\S]*?)<\/path>\s*<type>[^<]*<\/type>\s*<content>([\s\S]*?)<\/content>/.exec(result)
+  if (match === null) return undefined
+  const verb = /^\s*(Created|Updated)\s+file\s*$/.exec(match[2] ?? '')?.[1]
+  if (verb !== 'Created' && verb !== 'Updated') return undefined
+  return { verb, path: match[1] ?? '' }
+}
+
+/**
+ * The folded preview suffix for a write card: ` — Created` / ` — Updated`
+ * when the result is the tool's XML confirmation envelope, empty otherwise.
+ * The folded row must NEVER dump the raw envelope (the read-card no-XML
+ * rule; a malformed envelope yields no preview at all, not the raw text).
+ * @param result - the tool result text.
+ * @returns the verb suffix, or '' when the result is not a write envelope.
+ */
+export function writeFoldedPreview(result: string): string {
+  const envelope = parseWriteEnvelope(result)
+  return envelope === undefined ? '' : ` — ${envelope.verb}`
+}
+
+/**
  * The folded preview suffix for a read card: `— {N} lines` when the envelope
  * reports a total (or a line count), empty otherwise. A merged group card
  * (multiple envelopes) yields nothing — its head already carries "N files".

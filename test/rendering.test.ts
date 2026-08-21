@@ -1907,6 +1907,40 @@ test('read envelopes parse single, merged, and non-envelope results', () => {
   assert.equal(parseReadEnvelopes('').length, 0)
 })
 
+test('write cards preview the envelope verb, never the raw XML', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/a.ts","content":"line one"}',
+    result: `<path>/ws/a.ts</path>\n<type>file</type>\n<content>\nUpdated file\n</content>`,
+    status: 'ok',
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Write /ws/a.ts'), `write header missing:\n${view}`)
+  assert.ok(view.includes('— Updated'), `envelope verb missing:\n${view}`)
+  assert.ok(!view.includes('<path>'), `raw envelope leaked into the folded row:\n${view}`)
+  assert.ok(!view.includes('<content>'), `raw envelope leaked into the folded row:\n${view}`)
+  // The Created verb renders too; a malformed envelope shows no preview at
+  // all (never the raw text).
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/b.ts","content":"x"}',
+    result: `<path>/ws/b.ts</path>\n<type>file</type>\n<content>\nCreated file\n</content>`,
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(view.includes('— Created'), `created verb missing:\n${view}`)
+  assert.ok(!view.includes('<path>'), `created envelope leaked:\n${view}`)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/c.ts","content":"x"}',
+    result: 'some unrelated text',
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('<'), `non-envelope result must not render angle brackets:\n${view}`)
+})
+
 test('read cards preview their envelope summary, never the raw XML', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{

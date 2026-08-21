@@ -18,6 +18,14 @@
   输入在界面各处都是同一个标记。气泡背景是可选的调色板 token
   (`roleUserBg`),自定义主题可覆盖。
 
+### 修复
+
+- **write 卡片折叠时只显示动词,不再泄漏原始 XML 信封。** write 工具的
+  result 是 XML 确认信封(`<path>…</path> <type>…</type> <content>Updated
+  file</content>`);折叠行现在像 read 卡片显示行数摘要那样显示
+  `— Created` / `— Updated`,无 presenter 的降级展开也渲染动词+路径行
+  ——原始信封不再泄漏进 transcript。
+
 ## [0.3.1] - 2026-08-21
 
 ### Changed

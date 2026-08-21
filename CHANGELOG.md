@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the user's own input everywhere. The bubble background is an
   optional palette token (`roleUserBg`) custom themes can override.
 
+### Fixed
+
+- **Write cards fold their verb, never the raw XML envelope.** The write
+  tool's result is an XML confirmation envelope (`<path>…</path> <type>
+  …</type> <content>Updated file</content>`); the folded row now shows
+  `— Created` / `— Updated` the way read cards show their line summary,
+  and the no-presenter fallback renders the verb + path line — the raw
+  envelope never leaks into the transcript.
+
 ## [0.3.1] - 2026-08-21
 
 ### Changed

@@ -62,7 +62,9 @@ import {
   latestLine,
   parseCallPreview,
   parseReadEnvelopes,
+  parseWriteEnvelope,
   readFoldedPreview,
+  writeFoldedPreview,
   relativizeToCwd,
   foldedCallPreview,
   genericRawInputLines,
@@ -4284,6 +4286,13 @@ export class TuiApp {
       let resultPreview: string
       if (message.name === 'read') {
         resultPreview = readFoldedPreview(message.result)
+      } else if (message.name === 'write') {
+        // The write tool's result is an XML confirmation envelope
+        // (`<path>…</path> <type>…</type> <content>Updated file</content>`,
+        // no content echo). The folded row shows the verb (` — Updated`),
+        // never the raw envelope — the same no-XML rule as read cards; a
+        // malformed envelope shows no preview at all.
+        resultPreview = writeFoldedPreview(message.result)
       } else if (message.name === 'ask_user_question') {
         // The folded preview never shows the raw `{"answers":[…]}` JSON the
         // tool's render text carries (Web AskQuestionRow parity): the
@@ -4719,6 +4728,17 @@ export class TuiApp {
             ), 0, 0))
           })
         }
+        return
+      }
+    }
+    if (message.name === 'write') {
+      // Without a presenter (replay edge), the write confirmation envelope
+      // renders its verb + path, never the raw XML (read-card rule).
+      const envelope = parseWriteEnvelope(message.result)
+      if (envelope !== undefined) {
+        card.addChild(new Text(color.textDim(
+          `  ${envelope.verb} ${relativizeToCwd(envelope.path, this.workspaceRoot)}`,
+        ), 0, 0))
         return
       }
     }
