@@ -17,7 +17,6 @@
 import {
   Box,
   Container,
-  Editor,
   Markdown,
   ProcessTerminal,
   ScrollView,
@@ -35,6 +34,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
   type Component,
+  type Editor,
   type Focusable,
   type OverlayHandle,
   type OverlayOptions,
@@ -86,6 +86,7 @@ import { RESERVED_HOST_KEYS } from './keybinding-registry.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
+import { TuiEditor } from './tui-editor.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
@@ -899,6 +900,10 @@ interface MessageComponentEntry {
   meta?: unknown
   members?: unknown
   error?: { name: string; code: string }
+  /** Compaction card facts (kind 'compaction'). */
+  items?: number
+  tokens?: number
+  errorText?: string
   /** M7: the renderer that produced this component, when one did (the
    * cache identity — plan §12.1: a renderer HMR/unload must rebuild). */
   rendererId?: string
@@ -1038,6 +1043,9 @@ export class TuiApp {
   private searchOverlay: OverlayHandle | undefined
   /** The search input component, while one is open (for match counts). */
   private searchComponent: TranscriptSearchComponent | undefined
+  /** The open CATEGORIZED picker (e.g. /sessions): Tab cycles its
+   * categories while it is open. Cleared when the picker closes. */
+  private activeCategorizedPicker: CategorizedPickerState | undefined
   /** M8: the overlay stacking graph (extracted from TuiApp — plan §13).
    * The broker owns the modal-stacking + question-suspension rules; the
    * host keeps the physical screen mounts. */
@@ -1102,6 +1110,27 @@ export class TuiApp {
   private lastEscapeAt: number | undefined
   /** Double-Esc window in ms. */
   private static readonly ESCAPE_CANCEL_WINDOW_MS = 400
+  /** Footer wrap cap (plan §14): host line-1 wraps to at most 3 physical
+   * rows, the stats line to 1, total never above 4 — a long extension
+   * segment folds from the tail first. */
+  private static readonly FOOTER_MAX_LINES = 4
+  /**
+   * The agent-busy state pushed by the runner at turn/compaction
+   * boundaries (pi parity): while busy, a SINGLE Esc stops the current
+   * activity instead of arming the double-Esc cancel.
+   */
+  private busy = false
+  /** Context compaction in flight: the working row shows "Compacting
+   * context…" in place of the Working label until compaction/end. */
+  private compacting = false
+  /** The working row's turn-derived activity (setWorking input). */
+  private workingActive = false
+  /** Phase 4: the plugin working-message override (advanced host state). */
+  private workingMessageOverride: string | undefined
+  /** Timestamp of the last Ctrl+C press, for the empty-editor exit chord. */
+  private lastCtrlCAt: number | undefined
+  /** The empty-editor double-Ctrl+C exit window in ms (pi handleCtrlC). */
+  private static readonly CTRL_C_EXIT_WINDOW_MS = 500
   /** Session workspace root for path relativization (Web relativizeToCwd). */
   private readonly workspaceRoot: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
@@ -1222,7 +1251,10 @@ export class TuiApp {
     })
 
     this.tui = new TuiMainScreen(resizeAware)
-    this.editor = new Editor(this.tui, editorTheme)
+    // The host default editor is the TuiEditor subclass: kimi parity for
+    // `@dir/` mention completion (Tab-accepting a directory reopens the
+    // dropdown at its children; Esc closes it without re-triggering).
+    this.editor = new TuiEditor(this.tui, editorTheme)
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
       this.rememberInput(text)
@@ -1756,6 +1788,14 @@ export class TuiApp {
     if (matchesKey(data, 'escape')) {
       // Overlays (pickers, settings) own Esc while they are up.
       if (this.activeScreen.hasOverlayEntries) return undefined
+      // Autocomplete owns Esc while the dropdown is open: let the editor
+      // close it (TuiEditor intercepts; kimi parity). Without this the
+      // app-level consume swallows Esc and the dropdown cannot close.
+      // Capability-detected: a REPLACEMENT editor with its own dropdown
+      // gets the same pass-through (its focused component handles Esc).
+      if ((this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true) {
+        return undefined
+      }
       // P1-6: a REPLACEMENT editor owns Esc for its own modal state
       // machine (vim normal-mode entry) — route it through the editor
       // channel below instead of the host's double-Esc cancel. If the
@@ -1767,6 +1807,14 @@ export class TuiApp {
       // The host may consume the first Esc (runner-owned modes like the
       // subagent viewer); otherwise it arms the double-Esc cancel.
       if (this.events.onSingleEscape?.() === true) return { consume: true }
+      // pi parity: a SINGLE Esc while the agent is busy stops the current
+      // activity (turn, tool run, compaction) — partial content stays on
+      // screen. Idle keeps the double-Esc cancel.
+      if (this.busy) {
+        this.lastEscapeAt = undefined
+        this.events.onCancel?.()
+        return { consume: true }
+      }
       const now = Date.now()
       if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
         this.lastEscapeAt = undefined
@@ -1833,7 +1881,24 @@ export class TuiApp {
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+c')) {
-      this.events.onExit()
+      // pi parity (handleCtrlC): a first press CLEARS a non-empty editor
+      // (recording the time); a second press within the window on the now
+      // EMPTY editor exits. Overlays own the key (the global overlay guard
+      // above already passed them through).
+      const text = this.seatEditor().getText()
+      if (text !== '') {
+        this.seatEditor().setText('')
+        this.editorSeatHolder.notifyChanged()
+        this.lastCtrlCAt = Date.now()
+        return { consume: true }
+      }
+      const now = Date.now()
+      if (this.lastCtrlCAt !== undefined && now - this.lastCtrlCAt < TuiApp.CTRL_C_EXIT_WINDOW_MS) {
+        this.lastCtrlCAt = undefined
+        this.events.onExit()
+      } else {
+        this.lastCtrlCAt = now
+      }
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+d')) {
@@ -2429,19 +2494,62 @@ export class TuiApp {
   }
 
   /**
+   * Set the agent-busy flag (pi parity): while busy, a single Esc stops
+   * the current activity. The runner pushes it at turn/start, turn/end,
+   * compaction/start and compaction/end boundaries.
+   */
+  setBusy(busy: boolean): void {
+    this.busy = busy
+  }
+
+  /**
+   * Advertise an in-flight context compaction: the working row (above the
+   * editor border) shows "Compacting context…" in place of the Working
+   * label while the compaction runs — pi's status-indicator parity. The
+   * runner pairs start/end by compactionId; on end it re-derives the row
+   * from the turn state (a turn-enclosed compaction hands back to the
+   * turn animation, a standalone one clears the row).
+   */
+  setCompacting(active: boolean): void {
+    if (this.compacting === active) return
+    this.compacting = active
+    this.reconcileWorkingRow()
+    this.requestRender()
+  }
+
+  /**
    * Show or hide the busy indicator on the row directly above the editor
    * border: while a turn is streaming or a tool is running (the runner
-   * derives it from turn/start and turn/end).
+   * derives it from turn/start and turn/end). A compaction in flight keeps
+   * the row live under its own label (see {@link setCompacting}).
    */
   setWorking(active: boolean): void {
-    if (active) {
+    this.workingActive = active
+    this.reconcileWorkingRow()
+    this.requestRender()
+    this.syncExtensionState()
+  }
+
+  /** The working row's effective label: the base Working label (or the
+   * Phase-4 plugin override) ALWAYS leads, and a running compaction
+   * appends its state — one unified row whether the turn is busy, the
+   * compaction is standalone, or both. */
+  private effectiveWorkingMessage(): string {
+    const base = this.workingMessageOverride ?? 'Working...'
+    return this.compacting ? `${base} · Compacting context…` : base
+  }
+
+  /** Reconcile the working row against its two drivers (turn activity,
+   * compaction): the row animates while either is live, with the label
+   * chosen by {@link effectiveWorkingMessage}. */
+  private reconcileWorkingRow(): void {
+    this.working.setMessage(this.effectiveWorkingMessage())
+    if (this.workingActive || this.compacting) {
       this.working.start()
     } else {
       this.working.stop()
       this.working.setText('')
     }
-    this.requestRender()
-    this.syncExtensionState()
   }
 
   /**
@@ -3456,7 +3564,10 @@ export class TuiApp {
       },
       setWorkingMessage: (message) => {
         if (app.disposed) return
-        app.working.setMessage(message ?? '')
+        // The override feeds the working row's effective label: a running
+        // compaction keeps its own label, the override applies otherwise.
+        app.workingMessageOverride = message ?? undefined
+        app.reconcileWorkingRow()
         app.requestRender()
       },
       setToolsExpanded: (expanded) => {
@@ -3492,6 +3603,7 @@ export class TuiApp {
     return {
       getText: () => editor.getText(),
       setText: (text) => editor.setText(text),
+      isShowingAutocomplete: () => editor.isShowingAutocomplete(),
       getCursor: () => {
         const cursor = editor.getCursor()
         const lines = editor.getText().split('\n')
@@ -3677,6 +3789,10 @@ export class TuiApp {
       }
       case 'summary':
         return { kind: 'summary', turn: 0, text: message.text }
+      case 'compaction':
+        // Host-owned card: extension renderers never present compaction
+        // records (the host fallback below renders them).
+        return undefined
     }
   }
 
@@ -3691,7 +3807,7 @@ export class TuiApp {
    * switch (clearSessionOverrides).
    */
   private componentForMessage(message: TranscriptMessage, boundary: number): Component {
-    const expanded = (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool')
+    const expanded = (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
       && (message.turn >= boundary || this.expandedOverride.get(message) === true)
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
@@ -3772,6 +3888,13 @@ export class TuiApp {
         break
       case 'summary':
         break
+      case 'compaction':
+        entry.text = message.text
+        entry.items = message.items
+        entry.tokens = message.tokens
+        entry.running = message.running
+        entry.errorText = message.error
+        break
     }
   }
 
@@ -3791,6 +3914,10 @@ export class TuiApp {
           || entry.error !== message.error
       case 'summary':
         return false
+      case 'compaction':
+        return entry.text !== message.text || entry.items !== message.items
+          || entry.tokens !== message.tokens || entry.running !== message.running
+          || entry.errorText !== message.error
     }
   }
 
@@ -3881,6 +4008,38 @@ export class TuiApp {
     if (message.kind === 'summary') {
       // Windowing: turns older than the display window collapse to one line.
       return new Text(color.textDim(message.text), 0, 0)
+    }
+    if (message.kind === 'compaction') {
+      // Compaction card (web CompactionItem parity): a title row with the
+      // shadowed item/token counts, expandable to the summary body. The
+      // running card shows "Compacting context…" until the summary lands.
+      const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
+      const title = message.error !== undefined
+        ? color.error('🗜 Compaction failed')
+        : message.running === true
+          ? color.textMuted('🗜 Compacting context…')
+          : color.text('🗜 Context compacted')
+      const counts = (message.items > 0 || message.tokens > 0)
+        ? `Compacted ${message.items} history item${message.items === 1 ? '' : 's'} (~${message.tokens} tokens)`
+        : ''
+      const card = new Container()
+      card.addChild(new Text(title, 0, 0))
+      if (expanded) {
+        if (counts !== '') card.addChild(new Text(color.textDim(counts), 0, 0))
+        if (message.text !== '') {
+          card.addChild(new Markdown(message.text, 0, 0, markdownTheme))
+        } else if (message.error !== undefined) {
+          card.addChild(new Text(color.textDim(message.error), 0, 0))
+        }
+      } else {
+        const summary = counts === '' ? '' : counts
+        card.addChild(new Text(truncateToWidth(
+          color.textDim(`${summary}${summary === '' ? '' : ' '}(ctrl+o to expand)`),
+          this.terminal.columns,
+          '…',
+        ), 0, 0))
+      }
+      return card
     }
     // Tool card: the Web row-model header (design title + relativized args
     // summary + status pill), with the result body when expanded. The whole
@@ -4936,14 +5095,37 @@ export class TuiApp {
     ].filter(part => part !== '')
     // Line 2: the stats line only; context pressure is the bar on line 1.
     const line2 = this.footerPreset === 'compact' ? '' : this.status.statsLine
-    // Host-owned width budget (plan §8.3): the assembled line-1 is
-    // truncated to the terminal width so extension segments can never
-    // overflow the footer (truncateToWidth is ANSI-safe — it strips
-    // styling, measures the visible width, and re-applies the style).
+    // Narrow-screen footer (plan §14): the host line-1 WRAPS instead of
+    // being hard-truncated (v0.1.x behavior — the multi-row footer returns,
+    // and the layout already budgets footer rows via
+    // footer.render(width).length). The caps are the overflow BACKSTOP,
+    // not the normal compression: host line-1 keeps ≤3 physical rows, the
+    // stats line ≤1, total ≤4 — a long extension segment folds from the
+    // tail first, matching the FooterSegmentOutlet's own priority folding
+    // (the 0710746 overflow concern stays covered by the outlet budget).
     const width = Math.max(1, this.terminal.columns)
-    const line1Text = truncateToWidth(line1.join('  '), width, '…')
-    this.footer.setText([dim(line1Text), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n'))
+    const hostBudget = TuiApp.FOOTER_MAX_LINES - (line2 === '' ? 0 : 1)
+    const line1Rows = wrapTextWithAnsi(line1.join('  '), width)
+    const rows: string[] = []
+    for (let index = 0; index < Math.min(line1Rows.length, hostBudget); index += 1) {
+      const row = line1Rows[index]!
+      rows.push(index === hostBudget - 1 && line1Rows.length > hostBudget
+        ? TuiApp.capRowWithEllipsis(row, width)
+        : row)
+    }
+    if (line2 !== '') {
+      const statsRows = wrapTextWithAnsi(line2, width)
+      rows.push(statsRows.length > 1 ? TuiApp.capRowWithEllipsis(statsRows[0]!, width) : statsRows[0]!)
+    }
+    this.footer.setText(rows.map(row => dim(row)).join('\n'))
     this.requestRender()
+  }
+
+  /** Force a visible `…` on a wrapped row that still has hidden content
+   * behind it (wrapTextWithAnsi rows already fit the width, so a plain
+   * truncateToWidth would not add the marker). */
+  private static capRowWithEllipsis(row: string, width: number): string {
+    return `${truncateToWidth(row, Math.max(1, width - 1), '')}…`
   }
 
   /**

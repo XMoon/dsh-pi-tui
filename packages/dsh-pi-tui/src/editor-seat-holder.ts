@@ -57,6 +57,11 @@ export interface SeatEditor {
   addToHistory(text: string): void
   clearHistory(): void
   readonly component: Component
+  /** Whether the occupant's autocomplete dropdown is open (the host
+   * editor always answers; a plugin editor may not have one). The host
+   * escape branch passes Esc through while it is open so the editor can
+   * close it (kimi parity). */
+  isShowingAutocomplete?(): boolean
   /** P1-5: the occupant's input channel — a PLUGIN editor with a
    * handleInput hook receives routed SEMANTIC events here (the host has
    * already decoded the terminal protocol — legacy/CSI-u/modifyOtherKeys
@@ -71,6 +76,8 @@ export interface SeatEditor {
 export interface HostEditorAdapter {
   getText(): string
   setText(text: string): void
+  /** Whether the host editor's autocomplete dropdown is open. */
+  isShowingAutocomplete?(): boolean
   getCursor?(): number
   /** Best-effort cursor setter for the host editor. */
   setCursor?(offset: number): void
@@ -214,6 +221,7 @@ export class EditorSeatHolder {
       id: 'host',
       getText: () => editor.getText(),
       setText: (text) => editor.setText(text),
+      isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getCursor: () => editor.getCursor?.() ?? 0,
       setCursor: (offset) => editor.setCursor?.(offset),
       get focused() { return editor.focused },

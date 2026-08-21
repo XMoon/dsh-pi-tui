@@ -768,6 +768,52 @@ function foldGoal(events: readonly SessionEvent[]): string | undefined {
  */
 export { forkSeed } from './commands.ts'
 
+/** One fold of a compaction lifecycle event over the runner's in-flight
+ * compaction state. Pure (the firehose applies the returned surface
+ * effects): dsh-compaction is not a peer, so the event is read
+ * structurally. */
+export interface CompactionFold {
+  /** The updated in-flight compaction id (the newest start wins). */
+  id: string | undefined
+  /** compaction/start: the compacting flag turns ON (footer/working row). */
+  active: boolean
+  /** A MATCHED compaction/end: the compacting flag turns OFF and busy is
+   * re-derived from the turn log (a stale end never clears a newer
+   * compaction's state). */
+  clear: boolean
+  /** The settle notification for compaction/end, when one fires. */
+  notify: { text: string; kind: 'info' | 'error' } | undefined
+}
+
+/** Fold one compaction lifecycle event over the in-flight state. */
+export function foldCompactionEvent(
+  state: { id: string | undefined },
+  event: { type: string; data: { compactionId?: unknown; error?: unknown } },
+): CompactionFold {
+  if (event.type === 'compaction/start') {
+    return {
+      id: typeof event.data.compactionId === 'string' ? event.data.compactionId : undefined,
+      active: true,
+      clear: false,
+      notify: undefined,
+    }
+  }
+  if (event.type === 'compaction/end') {
+    const error = typeof event.data.error === 'string' && event.data.error !== '' ? event.data.error : undefined
+    const matched = typeof event.data.compactionId !== 'string' || event.data.compactionId === state.id
+    return {
+      id: matched ? undefined : state.id,
+      active: false,
+      clear: matched,
+      notify: {
+        text: error === undefined ? 'Context compacted' : `Compaction failed: ${error}`,
+        kind: error === undefined ? 'info' : 'error',
+      },
+    }
+  }
+  return { id: state.id, active: false, clear: false, notify: undefined }
+}
+
 /** One agent's preset composition: the id to record and the setup that installs it. */
 export interface AgentComposition {
   /** Preset id for the session header, absent when the deployment composes no roster. */
@@ -1884,6 +1930,9 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
     const callArgs = new Map<CallId, string>()
+    // The in-flight compaction's id (paired start/end in the firehose): a
+    // stale end must never clear a NEWER compaction's footer/busy state.
+    let compactingId: string | undefined
     // Transcript-search state (see the onSearch* events below).
     let searchMatches: TranscriptMessage[] = []
     let searchCurrent = -1
@@ -3561,6 +3610,29 @@ export function apply(ctx: Context, config: Config): void {
         guardToken = undefined
         queueMicrotask(refreshQueue)
       }
+      // Compaction lifecycle (dsh-compaction is not a peer — the event
+      // data is read structurally): the working row advertises an
+      // in-flight compaction, the busy flag covers the single-Esc cancel
+      // (pi parity), and the settle notifies. The compactionId pairs
+      // start/end so a stale end can never clear a NEWER compaction's
+      // state (foldCompactionEvent).
+      const compacted = foldCompactionEvent({ id: compactingId }, event as never)
+      compactingId = compacted.id
+      if (compacted.active) {
+        app.setCompacting(true)
+        // Busy while compacting: a single Esc cancels the compaction (pi
+        // parity — compaction rides the turn signal).
+        app.setBusy(true)
+      }
+      if (compacted.clear) {
+        app.setCompacting(false)
+        // The working row hands back to the turn state: a turn-enclosed
+        // compaction keeps the turn animation, a standalone one clears.
+        const busyNow = workingFromLog(liveAgent.session.events)
+        app.setBusy(busyNow)
+        app.setWorking(busyNow)
+      }
+      if (compacted.notify !== undefined) app.notify(compacted.notify.text, compacted.notify.kind)
       // Persist each completed turn so a crash loses at most the live turn.
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.
@@ -3570,9 +3642,11 @@ export function apply(ctx: Context, config: Config): void {
         // blocked before the turn ran.
         guardToken = undefined
         app.setWorking(true)
+        app.setBusy(true)
       } else if (event.type === 'turn/end') {
         guardToken = undefined
         app.setWorking(false)
+        app.setBusy(false)
         paintNow()
         refreshStatus()
         // Persist each completed turn so a crash loses at most the live
@@ -3622,7 +3696,26 @@ export function apply(ctx: Context, config: Config): void {
     if (liveAgent !== undefined) {
       app.setPlanMode(foldPlanMode(liveAgent.session.events))
       app.setWorking(workingFromLog(liveAgent.session.events))
+      app.setBusy(workingFromLog(liveAgent.session.events))
       app.setSessionTitle(foldSessionTitle(liveAgent.session.events)?.title)
+      // Initial compaction state: a resumed session may be persisted
+      // MID-compaction (compaction/start without a matching end) — the
+      // working row shows the unified label and the busy flag keeps the
+      // single-Esc cancel armed. The newest compaction bracket decides.
+      for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
+        const event = liveAgent.session.events[index]
+        if (event === undefined) break
+        const kind = event.type as string
+        if (kind === 'compaction/start') {
+          const data = (event as { data?: { compactionId?: unknown } }).data
+          if (typeof data?.compactionId === 'string') compactingId = data.compactionId
+          app.setCompacting(true)
+          app.setBusy(true)
+          app.setWorking(true)
+          break
+        }
+        if (kind === 'compaction/end') break
+      }
       // Initial todo state: the last todo/write snapshot in the log.
       for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
         const event = liveAgent.session.events[index]

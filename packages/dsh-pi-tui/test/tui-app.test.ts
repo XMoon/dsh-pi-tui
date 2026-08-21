@@ -50,10 +50,13 @@ test('submits editor content to the onSubmit event', async () => {
   assert.deepEqual(submitted, ['hello'])
 })
 
-test('ctrl+c triggers the exit event', async () => {
+test('ctrl+c twice within the window exits (pi parity)', async () => {
   const surface = startApp()
   await surface.vt.waitForRender()
-  surface.vt.sendInput('\x03')
+  surface.vt.sendInput('\x03') // empty editor: first press only arms the chord
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'a single Ctrl+C must not exit')
+  surface.vt.sendInput('\x03') // within 500ms: exit
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 1)
 })

@@ -63,6 +63,27 @@ export type TranscriptMessage =
   }
   /** Older-than-window turns collapsed into one line (windowing). */
   | { kind: 'summary'; text: string }
+  /**
+   * A context-compaction card: created at `compaction/start` (running),
+   * filled by `compaction/summary` (shadowed item/token counts + the
+   * summary body), settled by `compaction/end` (error on failure). The
+   * collapsed card shows the title + the counts; expanding reveals the
+   * summary markdown.
+   */
+  | {
+    kind: 'compaction'
+    turn: number
+    /** The summary body (markdown), filled when compaction/summary lands. */
+    text: string
+    /** Shadowed history items (the shadowedSeqs count). */
+    items: number
+    /** Shadowed token estimate. */
+    tokens: number
+    /** In-progress until compaction/end settles it. */
+    running?: boolean
+    /** Non-empty when compaction/end carried an error. */
+    error?: string
+  }
 
 /** One member row of a workflow run card. */
 export interface WorkflowMemberView {
@@ -232,6 +253,8 @@ export class TranscriptFolder {
   private readonly workflowRuns = new Map<string, Extract<TranscriptMessage, { kind: 'tool' }>>()
   /** Workflow member rows by `${runId}/${seq}`, for agent-end settlement. */
   private readonly workflowMembers = new Map<string, WorkflowMemberView>()
+  /** Compaction lifecycle: compactionId → items index (start/summary/end). */
+  private readonly compacting = new Map<string, number>()
   /** The turn most recently opened by turn/start. */
   private currentTurn = 0
   /**
@@ -498,7 +521,58 @@ export class TranscriptFolder {
     return entry
   }
 
+  /**
+   * Fold the compaction lifecycle (`compaction/start` → `compaction/summary`
+   * → `compaction/end`) into ONE `kind: 'compaction'` card, paired by
+   * compactionId. Start creates the running card; summary fills the body and
+   * the shadowed item/token counts; end settles it (an `error` marks the
+   * card failed). Events of an unknown compactionId (a summary/end without
+   * a seen start — e.g. applied from a log fragment) create the card lazily
+   * so a resumed session still shows its compaction records.
+   */
+  private applyCompactionEvent(
+    event: { type: string; data: Record<string, unknown> },
+    kind: string,
+  ): void {
+    const data = event.data as { compactionId?: unknown } & Record<string, unknown>
+    const compactionId = typeof data.compactionId === 'string' ? data.compactionId : undefined
+    let index = compactionId === undefined ? undefined : this.compacting.get(compactionId)
+    if (index === undefined) {
+      this.appendItem({ kind: 'compaction', turn: this.currentTurn, text: '', items: 0, tokens: 0, running: true })
+      index = this.items.length - 1
+      if (compactionId !== undefined) this.compacting.set(compactionId, index)
+    }
+    const entry = this.items[index]
+    if (entry === undefined || entry.kind !== 'compaction') return
+    if (kind === 'compaction/start') {
+      entry.running = true
+    } else if (kind === 'compaction/summary') {
+      const summary = data.summary
+      const seqs = data.shadowedSeqs
+      const tokens = data.shadowedTokenCount
+      if (Array.isArray(summary)) {
+        entry.text = textOf(summary as readonly ContentBlock[])
+      }
+      if (Array.isArray(seqs)) entry.items = seqs.length
+      if (typeof tokens === 'number') entry.tokens = tokens
+    } else if (kind === 'compaction/end') {
+      entry.running = false
+      const error = data.error
+      if (typeof error === 'string' && error !== '') entry.error = error
+      if (compactionId !== undefined) this.compacting.delete(compactionId)
+    }
+  }
+
   private applyEvent(event: SessionEvent): void {
+    // Compaction lifecycle events are typed STRUCTURALLY: dsh-compaction
+    // is not a peer dependency, so its session-event augmentation never
+    // enters our type graph (the same pattern as the structural service
+    // types). An unknown event type is otherwise skipped by the switch.
+    const kind = event.type as string
+    if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end') {
+      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
+      return
+    }
     switch (event.type) {
       case 'turn/start': {
         this.currentTurn = event.data.turn

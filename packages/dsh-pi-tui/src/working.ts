@@ -43,7 +43,7 @@ export class WorkingIndicator extends Text {
     this.requestRender = requestRender
     this.frames = options.frames ?? ['🐋', '🐳']
     this.intervalMs = options.intervalMs ?? 500
-    this.message = options.message ?? 'Working'
+    this.message = options.message ?? 'Working...'
   }
 
   /** Override the label after the animated frame (Phase 4: the advanced
