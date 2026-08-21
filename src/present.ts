@@ -521,6 +521,52 @@ export function askAnswersSummary(text: string): string | undefined {
   return `${answered}/${total} answered`
 }
 
+/** One display line of a settled `ask_user_question` result, pre-colored. */
+export interface AskAnswerLine {
+  /** The rendered line: `● <id> → <answers>` or `○ <id> — skipped`. */
+  readonly text: string
+  /** Whether the question was skipped (dimmed rendering). */
+  readonly skipped: boolean
+}
+
+/**
+ * The per-question display lines for a settled `ask_user_question` result
+ * (the expanded card's body, complementing {@link askAnswersSummary}'s
+ * count). Parses the tool's `{"answers":[…]}` render text and renders one
+ * line per entry: `● <id> → <selected, custom>` for an answered question,
+ * `○ <id> — skipped` when neither is present. Shape-checking is lenient
+ * like {@link askAnswersSummary}: a malformed entry is skipped, non-string
+ * members of `selected` are dropped, and an unparseable/non-`answers` text
+ * returns undefined so the caller falls back to the generic presentation.
+ * @param text - the settled result text.
+ * @returns the display lines, or undefined when unparseable.
+ */
+export function askAnswersLines(text: string): AskAnswerLine[] | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const answers = (parsed as { answers?: unknown }).answers
+  if (!Array.isArray(answers)) return undefined
+  const lines: AskAnswerLine[] = []
+  for (const entry of answers) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const candidate = entry as { id?: unknown; selected?: unknown; custom?: unknown }
+    const id = typeof candidate.id === 'string' ? candidate.id : ''
+    const selected = Array.isArray(candidate.selected)
+      ? candidate.selected.filter((item): item is string => typeof item === 'string')
+      : []
+    const custom = typeof candidate.custom === 'string' ? candidate.custom : ''
+    if (selected.length > 0) lines.push({ text: `● ${id} → ${selected.join(', ')}`, skipped: false })
+    else if (custom !== '') lines.push({ text: `● ${id} → ${custom}`, skipped: false })
+    else lines.push({ text: `○ ${id} — skipped`, skipped: true })
+  }
+  return lines
+}
+
 /**
  * The folded-card call preview for tools whose args carry a one-line
  * identity (Web TodoRow/WebRow folded parity): `todo_write` summarizes

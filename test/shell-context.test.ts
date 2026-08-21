@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   formatShellSubmitText,
+  localShellSandboxPreferenceOf,
   shellCommandOf,
   shellModeOf,
   submitShellResult,
@@ -154,4 +155,14 @@ test('submitShellResult: a session switch during the guard aborts stale', async 
   assert.equal(agentB.followed.length, 0, 'nothing is written to the new session either')
   assert.equal(cleared.count, 0, 'the card stays: the output was not submitted')
   assert.equal(notices.some(n => n.message === 'stale'), true)
+})
+
+// --- localShellSandboxPreferenceOf ---
+
+test('localShellSandboxPreferenceOf defaults to bypass and honors only sandbox', () => {
+  assert.equal(localShellSandboxPreferenceOf(undefined), 'bypass')
+  assert.equal(localShellSandboxPreferenceOf({}), 'bypass')
+  assert.equal(localShellSandboxPreferenceOf({ localShellSandbox: 'bypass' }), 'bypass')
+  assert.equal(localShellSandboxPreferenceOf({ localShellSandbox: 'sandbox' }), 'sandbox')
+  assert.equal(localShellSandboxPreferenceOf({ localShellSandbox: 'something-else' }), 'bypass')
 })

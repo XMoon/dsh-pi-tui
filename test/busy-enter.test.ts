@@ -73,8 +73,10 @@ process.env.FORCE_COLOR = ''
 process.env.CI = ''
 
 /** A fake tuiSettings document recording every replace write. */
-function fakeTuiSettings(busyEnter: string): { value: TuiSettingsLike; writes: Array<Record<string, unknown>> } {
-  const doc: Record<string, unknown> = { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter, history: {} }
+function fakeTuiSettings(busyEnter: string, localShellSandbox = 'bypass'): { value: TuiSettingsLike; writes: Array<Record<string, unknown>> } {
+  const doc: Record<string, unknown> = {
+    theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter, localShellSandbox, history: {},
+  }
   const writes: Array<Record<string, unknown>> = []
   return {
     writes,
@@ -107,14 +109,14 @@ function fakeCommands() {
 }
 
 /** Register the TUI commands with a stubbed runner and return /settings. */
-function setup(options: { busyEnter?: string } = {}) {
+function setup(options: { busyEnter?: string; localShellSandbox?: string } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  const settings = fakeTuiSettings(options.busyEnter ?? 'queue')
+  const settings = fakeTuiSettings(options.busyEnter ?? 'queue', options.localShellSandbox ?? 'bypass')
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -206,5 +208,42 @@ test('the busy-enter row defaults to queue', async () => {
   await t.run('')
   const view = await t.view()
   assert.ok(view.includes('queue'), `default value missing:\n${view}`)
+  t.app.stop()
+})
+
+test('/settings shows the local-shell-sandbox row with the persisted value', async () => {
+  const t = setup({ localShellSandbox: 'sandbox' })
+  await t.run('')
+  const view = await t.view()
+  assert.ok(view.includes('Local shell sandbox'), `local-shell-sandbox row missing:\n${view}`)
+  assert.ok(view.includes('sandbox'), `persisted value missing:\n${view}`)
+  t.app.stop()
+})
+
+test('the local-shell-sandbox row defaults to bypass', async () => {
+  const t = setup()
+  await t.run('')
+  const view = await t.view()
+  assert.ok(view.includes('bypass'), `default bypass value missing:\n${view}`)
+  t.app.stop()
+})
+
+test('the local-shell-sandbox row Enter toggle persists the other behavior', async () => {
+  const t = setup({ localShellSandbox: 'bypass' })
+  await t.run('')
+  await t.view()
+  // Rows without a session: theme, expand, thinking, footer, busy-enter,
+  // local-shell-sandbox, fullscreen, separator, cwd — the sandbox row is
+  // the 6th.
+  t.vt.sendInput('\x1b[B') // down × 5
+  t.vt.sendInput('\x1b[B')
+  t.vt.sendInput('\x1b[B')
+  t.vt.sendInput('\x1b[B')
+  t.vt.sendInput('\x1b[B')
+  t.vt.sendInput('\r') // toggle the selected row's value
+  await t.view()
+  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
+  const last = t.settings.writes[t.settings.writes.length - 1]
+  assert.equal(last?.localShellSandbox, 'sandbox', `the toggle must flip bypass -> sandbox, wrote: ${JSON.stringify(last)}`)
   t.app.stop()
 })

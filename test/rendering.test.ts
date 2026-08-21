@@ -2128,8 +2128,32 @@ test('settled ask_user_question cards show the answered count, never raw JSON', 
   app.setToolOutputExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('2/3 answered'), `answered count missing:\n${view}`)
+  // The expanded card carries the actual answers, one line per question —
+  // the count alone cannot recall the choices once the flow closed.
+  assert.ok(view.includes('● q1 → x'), `selected answer line missing:\n${view}`)
+  assert.ok(view.includes('● q2 → freeform'), `custom answer line missing:\n${view}`)
+  assert.ok(view.includes('○ q3 — skipped'), `skipped answer line missing:\n${view}`)
   assert.ok(!view.includes('"answers"'), `raw answers JSON leaked:\n${view}`)
   assert.ok(!view.includes('"selected"'), `raw selected JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('folded ask_user_question cards preview the answered count, never raw JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    {
+      kind: 'tool', turn: 0, name: 'ask_user_question',
+      args: '{"questions":[{"id":"q1","question":"A?"},{"id":"q2","question":"B?"}]}',
+      result: JSON.stringify({ answers: [
+        { id: 'q1', selected: ['x'] },
+        { id: 'q2', selected: [], custom: '' },
+      ] }),
+      status: 'ok',
+    },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('— 1/2 answered'), `folded answered summary missing:\n${view}`)
+  assert.ok(!view.includes('"answers"'), `raw answers JSON leaked into the fold:\n${view}`)
   app.stop()
 })
 
@@ -2169,6 +2193,30 @@ test('askAnswersSummary counts answered entries and skips skipped ones', async (
   assert.equal(askAnswersSummary('null'), undefined)
   assert.equal(askAnswersSummary('{"other":1}'), undefined)
   assert.equal(askAnswersSummary(JSON.stringify({ answers: [null] })), '0/1 answered')
+})
+
+test('askAnswersLines renders one line per answer, skipped entries dimmed', async () => {
+  const { askAnswersLines } = await import('../src/present.ts')
+  assert.deepEqual(askAnswersLines(JSON.stringify({ answers: [
+    { id: 'q1', selected: ['x', 'y'] },
+    { id: 'q2', selected: [], custom: 'freeform' },
+    { id: 'q3', selected: [], custom: '' },
+    // Malformed entries are skipped, non-string selected members dropped.
+    null,
+    { id: 'q5', selected: [1, 'ok'] },
+  ] })), [
+    { text: '● q1 → x, y', skipped: false },
+    { text: '● q2 → freeform', skipped: false },
+    { text: '○ q3 — skipped', skipped: true },
+    { text: '● q5 → ok', skipped: false },
+  ])
+  // Unparseable / non-answer text: undefined (caller falls back).
+  assert.equal(askAnswersLines('oops'), undefined)
+  assert.equal(askAnswersLines('"str"'), undefined)
+  assert.equal(askAnswersLines('null'), undefined)
+  assert.equal(askAnswersLines('{"other":1}'), undefined)
+  // Empty answers array parses to no lines (not an error).
+  assert.deepEqual(askAnswersLines(JSON.stringify({ answers: [] })), [])
 })
 
 test('web search result views render sources and the answer (WebBlock parity)', async () => {

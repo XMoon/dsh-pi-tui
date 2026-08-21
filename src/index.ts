@@ -90,7 +90,7 @@ import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.t
 import { safeErrorMessage } from './error-boundary.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
-import { formatShellSubmitText, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
+import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from './skill-catalog-refresh.ts'
@@ -1834,10 +1834,14 @@ export function apply(ctx: Context, config: Config): void {
         // run was cancelled; the partial output is noise).
         if (includeInContext && !localSignal.aborted) submitResult(result)
       }
-      const shell = ctx.get('shell')
+      const shell = localShellSandboxPreferenceOf(tuiSettings?.get()) === 'sandbox' ? ctx.get('shell') : undefined
       if (shell !== undefined) {
         // The dsh shell capability (sandbox policy + DSH env) when the
-        // composition provides it; completion-based like the spawn fallback.
+        // composition provides it AND the local-shell sandbox preference
+        // opts in ('sandbox'); completion-based like the spawn fallback.
+        // The default ('bypass') runs user-typed commands through the plain
+        // spawn path below — pi/kimi parity: the sandbox guards the model's
+        // autonomous commands, not commands the user typed and chose to run.
         const spec = shell.resolve({ command, workdir: cwd, signal: localSignal })
         // An owned workflow: the RESULT settles the UI card, so the settle
         // logic stays in onResult and the cancellation/failure semantics
@@ -2975,12 +2979,18 @@ export function apply(ctx: Context, config: Config): void {
         // Busy-Enter delivery mode for plain Enter while the agent is
         // running (web busyEnter parity): 'queue' (default) or 'steer'.
         busyEnter: z.string(),
+        // Local-shell sandbox for user-typed `!`/`!!` commands: 'bypass'
+        // (default) runs them outside the dsh sandbox (pi/kimi parity —
+        // the sandbox guards the model's autonomous commands, not the
+        // user's own), 'sandbox' routes them through the dsh shell
+        // capability's policy for deployments that want it applied.
+        localShellSandbox: z.string(),
       }),
       // `history` used to live here (a per-cwd map in the settings
       // document). It moved to $DSH_HOME/user-history/*.jsonl (see
       // history.ts); the schema deliberately no longer carries it, so the
       // stored section drops the key on the next settings write.
-      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue' } },
+      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass' } },
     )
     // Fullscreen is a persisted preference like the theme and the footer
     // (new installs default to 'on' — alt screen by default): boot applies

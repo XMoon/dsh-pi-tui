@@ -69,6 +69,7 @@ import {
   subagentModelDisplay,
   resultTextLines,
   askAnswersSummary,
+  askAnswersLines,
   toolCardHeader,
   toolEmoji,
   webCardLines,
@@ -2696,28 +2697,35 @@ export class TuiApp {
     }
     void x
     const width = this.terminal.columns
-    // Fullscreen layout, bottom-up: footer, editor seat, working row, queue
-    // pane, goal line, todo panel, dock, scroll pane, header. A click on
-    // the todo panel's own rows toggles its compact/full expansion
-    // (click-to-disclose, like the question frame's expand marker).
-    if (this.todoPanelVisible) {
-      const height = this.terminal.rows
-      const footerHeight = this.footer.render(width).length
-      const editorHeight = this.editorSeat.render(width).length
-      const workingHeight = this.working.render(width).length
-      const queueHeight = this.queuePane.render(width).length
-      const goalHeight = this.goalLine.render(width).length
-      const todoHeight = this.todoPanel.render(width).length
-      // Bottom-up geometry, clamped to the terminal: a tiny terminal (or a
-      // tall editor/queue) can push the derived rows off-screen, in which
-      // case no click maps onto the panel — never a negative or inverted
-      // region.
-      const todoBottom = Math.max(0, Math.min(height, height - footerHeight - editorHeight - workingHeight - queueHeight - goalHeight))
-      const todoTop = Math.max(0, todoBottom - todoHeight)
-      if (todoTop < todoBottom && y >= todoTop && y < todoBottom) {
-        this.toggleTodoExpanded()
-        return
-      }
+    const height = this.terminal.rows
+    const footerHeight = this.footer.render(width).length
+    const editorHeight = this.editorSeat.render(width).length
+    const workingHeight = this.working.render(width).length
+    const queueHeight = this.queuePane.render(width).length
+    const goalHeight = this.goalLine.render(width).length
+    const todoHeight = this.todoPanel.render(width).length
+    // Bottom-up geometry, clamped to the terminal: a tiny terminal (or a
+    // tall editor/queue) can push the derived rows off-screen, in which
+    // case no click maps onto the panel — never a negative or inverted
+    // region. Fullscreen layout, bottom-up: footer, editor seat, working
+    // row, queue pane, goal line, todo panel, dock, scroll pane, header.
+    const todoBottom = Math.max(0, Math.min(height, height - footerHeight - editorHeight - workingHeight - queueHeight - goalHeight))
+    const todoTop = Math.max(0, todoBottom - todoHeight)
+    // The dock strip (the todo summary row) sits directly above the panel:
+    // clicking it opens the panel (mouse parity with Ctrl+T). The summary
+    // is hidden while the panel is open, so the dock renders zero rows and
+    // this branch is inert — the two regions never fight.
+    const dockHeight = this.dock.render(width).length
+    if (dockHeight > 0 && y >= todoTop - dockHeight && y < todoTop) {
+      this.toggleTodoPanel()
+      return
+    }
+    // A click on the todo panel's own rows runs the three-state loop
+    // (compact → full list → back to the summary row), so the mouse opens
+    // AND closes the panel without Ctrl+T.
+    if (todoTop < todoBottom && y >= todoTop && y < todoBottom) {
+      this.handleTodoPanelClick()
+      return
     }
     // Fullscreen layout: header row(s), then the transcript scroll pane.
     const headerHeight = this.header.render(width).length
@@ -4186,11 +4194,23 @@ export class TuiApp {
       // summary is empty (e.g. an arg shape the generic derivation cannot
       // read). Web/skill/todo never need it — their headers are friendly.
       const foldedCall = header.summary === '' ? foldedCallPreview(message.name, message.args) : ''
-      const resultPreview = message.name === 'read'
-        ? readFoldedPreview(message.result)
-        : message.result === ''
+      let resultPreview: string
+      if (message.name === 'read') {
+        resultPreview = readFoldedPreview(message.result)
+      } else if (message.name === 'ask_user_question') {
+        // The folded preview never shows the raw `{"answers":[…]}` JSON the
+        // tool's render text carries (Web AskQuestionRow parity): the
+        // answered-count summary replaces it when parseable, otherwise the
+        // generic result preview (e.g. a cancellation verdict) stays.
+        const summary = askAnswersSummary(message.result)
+        resultPreview = summary === undefined
+          ? message.result === '' ? '' : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
+          : ` — ${summary}`
+      } else {
+        resultPreview = message.result === ''
           ? ''
           : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
+      }
       const callHead = foldedCall === '' ? '' : foldedCall
       const headWithPreview = `${head}${callHead}${resultPreview}`
       if (callPreview?.kind === 'bash' && callPreview.command !== '') {
@@ -4438,6 +4458,16 @@ export class TuiApp {
       const summary = message.status === 'ok' ? askAnswersSummary(message.result) : undefined
       if (summary !== undefined) {
         card.addChild(new Text(color.textDim(summary), 0, 0))
+        // The expanded card carries the actual answers, one line per
+        // question (`● id → answer`; skipped questions dimmed) — the
+        // count alone would leave the user unable to recall their choices
+        // once the question flow closed.
+        const answerLines = askAnswersLines(message.result)
+        if (answerLines !== undefined) {
+          for (const line of answerLines) {
+            card.addChild(new Text(`  ${line.skipped ? color.textMuted(line.text) : color.textDim(line.text)}`, 0, 0))
+          }
+        }
         return
       }
       // Unparseable or failed: fall through to the generic presentation.
@@ -4772,6 +4802,15 @@ export class TuiApp {
     this.renderTodoPanel()
     this.requestRender()
     return this.todoExpanded
+  }
+
+  /** The fullscreen click loop over the todo panel's own rows: compact →
+   * full list → back to the summary row (the panel closes). The mouse thus
+   * opens AND closes the panel without Ctrl+T; the dock summary row itself
+   * opens it (handleFullscreenClick's dock region). */
+  private handleTodoPanelClick(): void {
+    if (this.todoExpanded) this.toggleTodoPanel()
+    else this.toggleTodoExpanded()
   }
 
   /** Whether the todo panel is currently shown. */

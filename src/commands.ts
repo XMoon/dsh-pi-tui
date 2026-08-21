@@ -145,12 +145,13 @@ export function presetDisplayText(preset: {
   }
 }
 
-/** The TUI settings document surface (theme/footer/fullscreen/busyEnter).
- * The old `history` field moved to $DSH_HOME/user-history/*.jsonl and is
- * deliberately NOT part of the document anymore. */
+/** The TUI settings document surface (theme/footer/fullscreen/busyEnter/
+ * localShellSandbox). The old `history` field moved to
+ * $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
+ * document anymore. */
 export interface TuiSettingsLike {
-  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string }
-  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string }): unknown
+  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string }
+  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string }): unknown
 }
 
 /** The agents-service surface /new and /fork create sessions through. */
@@ -907,6 +908,13 @@ export function registerTuiCommands(
             values: ['queue', 'steer'],
           },
           {
+            id: 'local-shell-sandbox',
+            label: 'Local shell sandbox',
+            description: '! / !! commands run outside the dsh sandbox (bypass, default) or under the sandbox policy',
+            currentValue: tuiSettings?.get().localShellSandbox ?? 'bypass',
+            values: ['bypass', 'sandbox'],
+          },
+          {
             id: 'fullscreen',
             label: 'Fullscreen',
             description: 'Alt-screen mode: on keeps the terminal clean (default); off keeps the scrollback',
@@ -1057,6 +1065,13 @@ export function registerTuiCommands(
               const settings = tuiSettings
               if (settings !== undefined) {
                 detach('settings busy enter write', () => settings.replace({ ...settings.get(), busyEnter: value }) as Promise<unknown>, { notify: true })
+              }
+            }
+          } else if (id === 'local-shell-sandbox') {
+            if (value === 'bypass' || value === 'sandbox') {
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings local shell sandbox write', () => settings.replace({ ...settings.get(), localShellSandbox: value }) as Promise<unknown>, { notify: true })
               }
             }
           } else if (id === 'fullscreen') {

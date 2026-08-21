@@ -20,6 +20,7 @@ import {
   type AutocompleteSuggestions,
   type SlashCommand,
 } from '@xmoon76/pi-tui'
+import { shellCompletionContext, suggestShellCompletion } from './shell-completion.ts'
 
 /** Token separators: `@` must sit at the start of the current token. */
 const PATH_DELIMITERS = new Set([' ', '\t', '"', "'", '='])
@@ -201,6 +202,16 @@ export class MentionProvider implements AutocompleteProvider {
       }
       return fsMentionSuggestions(this.workDir, atPrefix, options.signal)
     }
+    // `!`/`!!` shell lines: command names, subcommands and `$VAR` names come
+    // from the real-shell compgen bridge (docs/input-and-card-polish.md §1);
+    // path positions fall through to the fork's fd completion below.
+    const shellContext = shellCompletionContext(currentLine, cursorCol)
+    if (shellContext !== undefined) {
+      const suggestions = await suggestShellCompletion(shellContext, this.workDir, options)
+      if (suggestions !== null) return suggestions
+      // No shell suggestions (or the shell is unavailable): fall through —
+      // a path position still gets the fork's file completion.
+    }
     try {
       return await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
     } catch {
@@ -215,6 +226,23 @@ export class MentionProvider implements AutocompleteProvider {
     item: AutocompleteItem,
     prefix: string,
   ): { lines: string[]; cursorLine: number; cursorCol: number } {
+    const currentLine = lines[cursorLine] ?? ''
+    // A shell-completion item replaces the current word only (command
+    // names, subcommands, `$VAR` names all land as one plain word); the
+    // `!` prefix and everything before the word stay untouched. Same
+    // pattern as the fork's slash-command apply.
+    if (shellCompletionContext(currentLine, cursorCol) !== undefined) {
+      const before = currentLine.slice(0, cursorCol - prefix.length)
+      const after = currentLine.slice(cursorCol)
+      const newLine = `${before}${item.value} ${after}`
+      const newLines = [...lines]
+      newLines[cursorLine] = newLine
+      return {
+        lines: newLines,
+        cursorLine,
+        cursorCol: before.length + item.value.length + 1,
+      }
+    }
     return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix)
   }
 

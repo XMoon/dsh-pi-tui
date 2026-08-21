@@ -523,14 +523,53 @@ test('fullscreen click on the todo panel toggles its compact/full expansion', as
   // Click again (a DIFFERENT cell — same-cell rapid clicks read as a
   // double-click word selection, never a disclosure). The layout must have
   // repainted after the expansion (the expanded panel moves rows), or the
-  // click still lands on the stale scroll pane rect.
+  // click still lands on the stale scroll pane rect. The three-state loop:
+  // full list → the panel closes back to the summary row.
   await vt.waitForRender()
   vt.sendInput('\x1b[<0;30;20M')
   vt.sendInput('\x1b[<0;30;20m')
   await vt.waitForRender()
-  assert.ok(!app.isTodoPanelExpanded(), 'second click must collapse the panel')
-  assert.ok(!vt.getViewport().join('\n').includes('todo item 8'), 'collapsed panel must hide later rows')
+  assert.ok(!app.isTodoPanelVisible(), 'second click must close the panel back to the summary')
+  assert.ok(!app.isTodoPanelExpanded(), 'closing resets the expansion')
+  assert.ok(!vt.getViewport().join('\n').includes('todo item 8'), 'closed panel must hide later rows')
   app.setFullscreen(false)
+})
+
+test('fullscreen click on the todo summary dock row opens the todo panel', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('☑'), `todo summary must render in the dock:\n${view}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  // The dock summary row sits at 0-based row 20 (editor seat 3 + footer 0
+  // at the bottom on the 80x24 test terminal; the closed panel renders
+  // zero rows, so the todo region clamps to [20, 21) — exactly the dock
+  // row).
+  vt.sendInput('\x1b[<0;20;21M')
+  vt.sendInput('\x1b[<0;20;21m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'click on the summary row must open the panel')
+  assert.ok(!app.isTodoPanelExpanded(), 'opens compact')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('todo item 0'), `compact panel must show after the click:\n${view}`)
+  // With the panel open the summary is hidden and the panel owns rows
+  // 14..20 — the same cell is now a panel row, so the next click runs the
+  // compact → full step of the loop.
+  vt.sendInput('\x1b[<0;20;21M')
+  vt.sendInput('\x1b[<0;20;21m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'panel must stay open (the cell is now a panel row)')
+  assert.ok(app.isTodoPanelExpanded(), 'the click now expands the panel (compact → full)')
+  app.setFullscreen(false)
+  app.stop()
 })
 
 test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
