@@ -632,6 +632,11 @@ export interface TuiQuestion {
   multiSelect?: boolean
   /** Presentation intent: approve names the recommended option label. */
   intent?: { kind: string; approve?: string }
+  /** Mask the free-text row's rendered content (an authorization secret
+   *  prompt). The real value stays in the input's memory and is returned
+   *  in the answer; only the DISPLAY is bullets, and nothing is logged,
+   *  put in history, or shown anywhere else. */
+  masked?: boolean
 }
 
 /** One answered question, keyed by id. */
@@ -6101,6 +6106,7 @@ export class TuiApp {
             ...question.options !== undefined ? { options: question.options } : {},
             ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
             ...question.intent !== undefined ? { intent: question.intent } : {},
+            ...question.masked !== undefined ? { masked: question.masked } : {},
           })),
           (answers) => this.settleQuestions(state, answers),
           () => this.settleQuestions(state, undefined),

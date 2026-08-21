@@ -40,19 +40,27 @@ const LLM_PI_AI_SECTION = {
   },
 }
 
-/** A fake credentials service recording every set/unset. */
+/** A fake credentials service recording every set/unset and serving the
+ * rc.1 record enumeration /logout's picker reads. */
 function fakeCredentials(options: { failSet?: boolean } = {}) {
   const sets: string[] = []
   const unsets: string[] = []
+  const deletes: string[] = []
+  const records: { key: string; kind?: string }[] = []
   return {
     sets,
     unsets,
+    deletes,
+    records,
     service: {
       set: async (ref: string, key: string): Promise<void> => {
         if (options.failSet === true) throw new Error('ref is shadowed read-only by the environment')
         sets.push(`${ref}=${key}`)
       },
       unset: async (ref: string): Promise<void> => { unsets.push(ref) },
+      describe: async (ref: string): Promise<{ configured: boolean; source?: string }> => ({ configured: true }),
+      listRecords: async (): Promise<{ key: string; kind?: string }[]> => [...records],
+      deleteRecord: async (key: string): Promise<void> => { deletes.push(key) },
     },
   }
 }
