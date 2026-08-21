@@ -7,6 +7,21 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-21
+
+### 变更
+
+- **仓库根目录即发布包。** `@xmoon76/dsh-pi-tui` 的包根从
+  `packages/dsh-pi-tui/` 提升为仓库根目录;`packages/pi-tui`(私有
+  vendored fork,仍在构建时打进 `dist/`)成为唯一子 workspace 包。
+  对 npm 消费者无行为变化——0.2.0 的完整契约原样保留:全部 8 个公开
+  exports(含 `./extensions`、`./extensions/advanced`、
+  `./extensions/unstable` 与 `./builtins`)、6 个 tsdown 入口、7 套
+  postpack smoke,以及 CI exact-artifact 发布链(Node 22/24/26 tarball
+  smoke 与 vim-plugin-smoke 仍是 publish 门禁)。源码安装路径从
+  `@file:$PWD/packages/dsh-pi-tui` 变为 `@file:$PWD` / `@link:$PWD`,
+  中文 README 现在随包发布。
+
 ## [0.2.0] - 2026-08-21
 
 ### 新增
@@ -399,7 +414,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7

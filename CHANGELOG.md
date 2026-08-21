@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-21
+
+### Changed
+
+- **The repository root is now the published package.** The
+  `@xmoon76/dsh-pi-tui` package root moved from `packages/dsh-pi-tui/` up
+  to the repository root; `packages/pi-tui` (the private vendored fork,
+  still bundled into `dist/` at build time) is now the only child
+  workspace package. There is no behavior change for npm consumers — the
+  full 0.2.0 contract is preserved: all eight public exports (including
+  `./extensions`, `./extensions/advanced`, `./extensions/unstable` and
+  `./builtins`), the six tsdown entries, the seven postpack smokes, and
+  the CI exact-artifact publish chain (Node 22/24/26 tarball smoke and
+  the vim-plugin-smoke stay publish gates). Source installs now use
+  `@file:$PWD` / `@link:$PWD` instead of `@file:$PWD/packages/dsh-pi-tui`,
+  and the Chinese README ships with the package.
+
 ## [0.2.0] - 2026-08-21
 
 ### Added
@@ -478,7 +495,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
