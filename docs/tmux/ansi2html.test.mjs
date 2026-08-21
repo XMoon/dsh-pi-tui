@@ -81,3 +81,22 @@ test('the converter renders truecolor and 16-color spans', () => {
   assert.ok(html.includes('color:#CD0000'), '16-color must render as a real color')
   assert.ok(html.includes('<span'), 'styled spans must exist')
 })
+
+test('a styled background survives a wrapped continuation row', () => {
+  // tmux's incremental captures omit a redundant background re-open on a
+  // continuation row; the state must carry across the line break.
+  const html = convertAnsiToHtml('\x1b[48;2;44;44;47m❯\x1b[39m body\n  cont')
+  const continuation = html.split('\n').at(-1)
+  assert.ok(continuation.includes('background-color:rgb(44,44,47)'), `continuation must keep the bubble:\n${html}`)
+})
+
+test('a styled trailing newline emits no stray empty span', () => {
+  const html = convertAnsiToHtml('\x1b[48;2;44;44;47mrow\n')
+  assert.ok(!html.includes('span style="background-color:rgb(44,44,47)"></span>'), `no empty re-open at EOF:\n${html}`)
+  assert.ok(!html.endsWith('<span'), `no unclosed span at EOF:\n${html}`)
+})
+
+test('consecutive styled newlines emit no empty span between blank rows', () => {
+  const html = convertAnsiToHtml('\x1b[48;2;44;44;47mrow\n\n')
+  assert.ok(!html.includes('span style="background-color:rgb(44,44,47)"></span>'), `no empty span between blank rows:\n${html}`)
+})

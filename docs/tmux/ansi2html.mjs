@@ -154,8 +154,11 @@ export function convertAnsiToHtml(raw) {
       // incremental captures omit a redundant background re-open on a
       // continuation row), so re-open a span for the current state —
       // otherwise a bubble background silently vanishes after the wrap.
+      // Guard: never re-open when nothing real follows (EOF or another
+      // newline), which would emit a stray empty span between blank rows.
       const css = styleCss(state)
-      if (css !== '') {
+      const next = cleaned[pos + 1]
+      if (css !== '' && next !== undefined && next !== '\n') {
         html += `<span style="${css}">`
         open = true
       }

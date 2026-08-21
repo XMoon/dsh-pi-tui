@@ -475,17 +475,21 @@ export function parseReadEnvelope(result: string): ReadEnvelope | undefined {
 /**
  * Parse the write tool's XML confirmation envelope (`<path>…</path> <type>
  * …</type> <content>Created file</content>` — no file content is echoed).
- * The verb + path are the only material the envelope carries.
+ * The verb + path are the only material the envelope carries. A malformed
+ * envelope — including a blank `<path>` — yields undefined, never a
+ * partial parse (a whitespace path would surface as an invalid card row).
  * @param result - the tool result text.
  * @returns the envelope's verb and path, or undefined when the result is
- * not a write envelope (never a partial parse).
+ * not a well-formed write envelope.
  */
 export function parseWriteEnvelope(result: string): { verb: 'Created' | 'Updated'; path: string } | undefined {
   const match = /<path>([\s\S]*?)<\/path>\s*<type>[^<]*<\/type>\s*<content>([\s\S]*?)<\/content>/.exec(result)
   if (match === null) return undefined
   const verb = /^\s*(Created|Updated)\s+file\s*$/.exec(match[2] ?? '')?.[1]
   if (verb !== 'Created' && verb !== 'Updated') return undefined
-  return { verb, path: match[1] ?? '' }
+  const path = (match[1] ?? '').trim()
+  if (path === '') return undefined
+  return { verb, path }
 }
 
 /**

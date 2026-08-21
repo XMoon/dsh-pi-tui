@@ -1939,6 +1939,17 @@ test('write cards preview the envelope verb, never the raw XML', async () => {
   }])
   view = await viewport(vt)
   assert.ok(!view.includes('<'), `non-envelope result must not render angle brackets:\n${view}`)
+  // A blank <path> envelope is malformed: no preview at all (a whitespace
+  // path would surface as an invalid card row).
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/d.ts","content":"x"}',
+    result: `<path>   </path>\n<type>file</type>\n<content>\nUpdated file\n</content>`,
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('— Updated'), `blank-path envelope must yield no preview:\n${view}`)
+  assert.ok(!view.includes('<path>'), `blank-path envelope must not leak XML:\n${view}`)
 })
 
 test('read cards preview their envelope summary, never the raw XML', async () => {

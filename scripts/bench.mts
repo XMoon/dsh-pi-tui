@@ -52,6 +52,12 @@ class BenchTerminal {
 }
 
 // --- synthetic session content ---------------------------------------------
+// NOTE: the CJK strings below are FUNCTIONAL benchmark fixtures, not
+// user-facing copy: the wide-grapheme samples exercise the CJK width
+// paths (get-east-asian-width, wrap + emoji) whose cost this script
+// measures. The English-only rule applies to user-facing strings and
+// comments; these samples are deliberately CJK — an English-only fixture
+// would silently drop the wide-character code path from the benchmark.
 
 const MARKDOWN_BLOCKS = [
   '## Findings\n\nThe **cache** now hits for unchanged messages, so `markdown` is not re-parsed every frame.\n\n```ts\nconst hit = cached.text === message.text\n```\n\n- one\n- two\n- three',
