@@ -284,3 +284,69 @@ test('effort info reject while the menu is current shows the error in place, app
   const after = await viewport(vt)
   assert.ok(after.includes('m1') && !after.includes('unavailable'), `esc from the error back to the list:\n${after}`)
 })
+
+// ── requirement 6: applying an effort closes the WHOLE overlay ───────────
+
+test('applying an effort closes the whole overlay (web settleSelection parity)', async () => {
+  const applied: ModelSelection[] = []
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const current = { provider: 'p', model: 'm0' } as ModelSelection
+  const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+  const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void => {
+    runOwned(label, task, { ...options, diag })
+  }
+  // The SAME closer wrapper the /model command wires (commands.ts): an
+  // applied selection closes the whole overlay, Esc keeps the walk-back.
+  let closer: () => void = () => {}
+  closer = app.openSettings(
+    [{
+      id: 'p',
+      label: 'provider',
+      currentValue: current.model,
+      submenu: (value, done) => new ModelSubmenu('p', current.model, undefined, {
+        listModels: async () => [{ id: 'm1' }],
+        resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'high', name: 'High' }] } }),
+        apply: (next) => applied.push(next),
+        requestRender: () => app.requestRender(),
+        done: (picked) => {
+          if (picked !== undefined) closer()
+          done(picked)
+        },
+        runOwned: owned,
+      }),
+    }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  vt.sendInput('\r') // provider → model list
+  await settle()
+  vt.sendInput('\r') // m1 → effort list
+  await settle()
+  let view = await viewport(vt)
+  assert.ok(view.includes('High'), `effort list missing:\n${view}`)
+  vt.sendInput('\r') // select the FIRST effort row (Default)
+  await settle()
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(!view.includes('provider'), `overlay must close after applying an effort:\n${view}`)
+  assert.ok(!view.includes('High'), `the effort list must be gone with the overlay:\n${view}`)
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm1' }], 'the default effort applies the model')
+  app.stop()
+})
+
+test('a model WITHOUT effort options keeps the overlay open (Esc still walks back)', async () => {
+  const applied: ModelSelection[] = []
+  const { vt } = await openModelFlow(fakeLlm({ models: [{ id: 'm1' }], efforts: undefined }), applied)
+  await settle()
+  let view = await viewport(vt)
+  assert.ok(view.includes('m1'), `model list missing:\n${view}`)
+  vt.sendInput('\r') // select m1 (no effort route: applies and returns to the list)
+  await settle()
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('m1'), `the model list (overlay) must stay open without effort options:\n${view}`)
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm1' }], 'the model still applies')
+})

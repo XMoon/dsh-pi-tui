@@ -25,8 +25,9 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { TuiApp } from './tui-app.ts'
-import type { PickerItem } from './tui-app.ts'
+import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
+import { dshHome } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
@@ -36,10 +37,14 @@ import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
 import {
   MAX_PICKER_SESSIONS,
+  TITLE_BATCH_SIZE,
+  TITLE_FIRST_BATCH,
+  buildSessionTree,
   findSessionMatch,
   headerToPickerRow,
-  loadSessionTitles,
+  loadSessionTitleBatch,
   sessionPickerItem,
+  type SessionPickerItem,
   type SessionPickerRow,
   type SessionQueryLike,
 } from './sessions.ts'
@@ -1057,8 +1062,36 @@ export function registerTuiCommands(
     // The picker opens instantly on the headers; titles land in the
     // background below. The cap keeps the title read bounded.
     const shown = rows.slice(0, MAX_PICKER_SESSIONS)
+    // Live title map: the background loader fills it, and the category
+    // factories re-read it on every activation (Tab cycle, refresh).
+    const titlesById = new Map<string, string>()
+    const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
+      sessionPickerItem({ ...row, title: titlesById.get(row.id) }, runner.liveAgent?.session.id ?? '', indent)
+    // Category tabs (Tab cycles while the picker is open): Main sessions by
+    // default (subagent children hidden — the resume surface is for humans),
+    // All (tree indent: subagents hang under their parent), Subagents only.
+    const categories: PickerCategory[] = [
+      {
+        id: 'main',
+        label: 'Main',
+        header: `${header} · Main`,
+        items: () => shown.filter(row => row.origin !== 'subagent').map(row => itemFor(row)),
+      },
+      {
+        id: 'all',
+        label: 'All',
+        header: `${header} · All`,
+        items: () => buildSessionTree(shown).map(({ row, depth }) => itemFor(row, depth)),
+      },
+      {
+        id: 'sub',
+        label: 'Subagents',
+        header: `${header} · Subagents`,
+        items: () => shown.filter(row => row.origin === 'subagent').map(row => itemFor(row)),
+      },
+    ]
     const picker = app.openPicker(
-      shown.map(row => sessionPickerItem(row, currentId ?? '')),
+      categories[0]!.items(),
       (id) => {
         if (id === currentId) return
         switchSession(id)
@@ -1066,24 +1099,35 @@ export function registerTuiCommands(
       () => {},
       {
         enableSearch: true,
-        header,
+        header: categories[0]!.header,
         noMatchText: '  no matching sessions',
         initialQuery: invocation.rawInput.trim(),
         width: 76,
         maxHeight: 26,
         showHint: true,
+        categories,
       },
     )
-    // Enrich rows with titles as they load; the active search query is
-    // re-applied by the picker, and the current marker is re-read so a
-    // session switch mid-load does not mislabel. Cancellations (TUI quit,
-    // the abort signal) are debug-level through the unified entry; a real
-    // batch failure lands in diagnostics instead of being swallowed.
-    detach('session titles', () => loadSessionTitles(query, persistence, shown.map(row => row.id), signal)
-      .then(titles => {
+    // Enrich rows with titles as they load (progressive: the first
+    // TITLE_FIRST_BATCH rows land immediately so the visible window fills,
+    // then TITLE_BATCH_SIZE chunks refresh behind it — the picker's own
+    // factory re-reads the shared title map). The local cache under
+    // $DSH_HOME skips the expensive full-log reads while the log files are
+    // unchanged. Cancellations (TUI quit, the abort signal) are debug-level
+    // through the unified entry; a real batch failure lands in diagnostics
+    // instead of being swallowed.
+    detach('session titles', async () => {
+      const loadBatch = async (batch: SessionPickerRow[]): Promise<void> => {
+        const titles = await loadSessionTitleBatch(query, persistence, dshHome(process.env), batch, signal)
         if (titles.size === 0) return
-        picker.setItems(shown.map(row => sessionPickerItem({ ...row, title: titles.get(row.id) }, runner.liveAgent?.session.id ?? '')))
-      }))
+        for (const [id, title] of titles) titlesById.set(id, title)
+        picker.refresh?.()
+      }
+      await loadBatch(shown.slice(0, TITLE_FIRST_BATCH))
+      for (let offset = TITLE_FIRST_BATCH; offset < shown.length; offset += TITLE_BATCH_SIZE) {
+        await loadBatch(shown.slice(offset, offset + TITLE_BATCH_SIZE))
+      }
+    })
     return { kind: 'success' }
   }
 
@@ -1555,7 +1599,7 @@ export function registerTuiCommands(
       // immediately and Esc walks back one level. A nested openSettings
       // would mount a second overlay and leave the first one hanging
       // (the ghost-overlay trap the /subagents flow documents).
-      app.openSettings(
+      const closer = app.openSettings(
         providers.map(provider => ({
           id: provider.id,
           label: provider.name,
@@ -1565,7 +1609,16 @@ export function registerTuiCommands(
             resolveModelInfo: (id, modelId) => llm.resolveModelInfo(id, modelId),
             apply,
             requestRender: () => app.requestRender(),
-            done,
+            // An APPLIED selection (non-undefined) closes the WHOLE overlay
+            // (web ModelSelect settleSelection parity): picking a model
+            // walks into the effort submenu, picking an effort (or Default)
+            // commits and dismisses the panel. Esc (undefined) keeps the
+            // step-by-step walk-back. closer() runs BEFORE done() — close
+            // the overlay first, then the submenu level (order-safe).
+            done: (picked) => {
+              if (picked !== undefined) closer()
+              done(picked)
+            },
             // The owned-task entry for the menu loads: runOwned with the
             // runner's diag pre-attached (AGENTS.md — never a bare void).
             runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {

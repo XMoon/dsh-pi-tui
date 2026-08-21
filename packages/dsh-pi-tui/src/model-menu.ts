@@ -213,7 +213,18 @@ export class ModelSubmenu implements Component {
             label: model.id,
             description: model.id === currentModel ? '← current' : undefined,
             currentValue: model.id === currentModel ? '← current' : '',
-            submenu: (value, done) => new EffortSubmenu(providerId, model.id, currentEffort, { ...deps, done }),
+            submenu: (value, done) => new EffortSubmenu(providerId, model.id, currentEffort, {
+              ...deps,
+              // An APPLIED effort (non-undefined) closes this model level
+              // too, propagating the application up through the provider
+              // list — the /model overlay dismisses in full after an
+              // effort (or Default) is picked (web ModelSelect parity).
+              // Esc (undefined) still walks back one level at a time.
+              done: (selected) => {
+                if (selected !== undefined) close(selected)
+                done(selected)
+              },
+            }),
           })),
           6,
           settingsListTheme(),

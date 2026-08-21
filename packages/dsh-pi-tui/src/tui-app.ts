@@ -656,6 +656,34 @@ export interface PickerItem {
   group?: string
 }
 
+/** One category tab of a categorized picker (e.g. /sessions: Main / All /
+ * Subagents). Tab cycles the open categories; the active category's header
+ * titles the picker. The `items` factory runs on every activation (open,
+ * Tab cycle, setItems/refresh), so a caller may read live state (e.g. a
+ * title map filled in the background). */
+export interface PickerCategory {
+  /** Stable id (setCategory target). */
+  id: string
+  /** Short tab label. */
+  label: string
+  /** Picker title while this category is active. */
+  header: string
+  /** Rows for this category, rebuilt on every activation. */
+  items: () => readonly PickerItem[]
+}
+
+/** Host-internal live state of the open categorized picker (Tab cycling). */
+interface CategorizedPickerState {
+  /** The category tabs, in cycle order. */
+  readonly categories: readonly PickerCategory[]
+  /** Index of the active category. */
+  index: number
+  /** Close the CURRENT overlay (select/cancel/close/abort all funnel here). */
+  close(): void
+  /** Advance to the next category (Tab), carrying the search query. */
+  cycle(): void
+}
+
 /** Options for {@link TuiApp.openPicker}. */
 export interface PickerOptions {
   /** Show a search input; typing filters rows by id/label/description. */
@@ -674,6 +702,10 @@ export interface PickerOptions {
   showHint?: boolean
   /** Phase 4: abort the picker (closes it and fires onCancel). */
   signal?: AbortSignal
+  /** Optional category tabs: Tab cycles them while the picker is open. The
+   * picker opens on `categories[0]`; the caller's `items` argument is only
+   * the initial rows (the first category's factory wins on activation). */
+  categories?: readonly PickerCategory[]
 }
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
@@ -698,8 +730,18 @@ export interface TaskBrowserOptions {
 export interface PickerHandle {
   /** Close the picker without a selection. */
   close(): void
-  /** Replace the rows while the picker is open; the active query re-applies. */
+  /** Replace the rows while the picker is open; the active query re-applies.
+   * On a CATEGORIZED picker this re-runs the ACTIVE category's items
+   * factory instead (the argument is ignored — the factory reads live
+   * state); prefer {@link refresh} there. */
   setItems(items: readonly PickerItem[]): void
+  /** Categorized pickers only: re-run the ACTIVE category's items factory
+   * (e.g. after background data the factory reads landed). No-op on a
+   * plain picker. */
+  refresh?(): void
+  /** Categorized pickers only: switch to a category by id (re-running its
+   * items factory). No-op on a plain picker. */
+  setCategory?(id: string): void
   /** Host-internal: drop the abort listener (the imperative select
    * broker's settle path — a settled promise must not retain the
    * listener on the caller's signal). */
@@ -1730,6 +1772,13 @@ export class TuiApp {
         return { consume: true }
       }
       return undefined
+    }
+    // A categorized picker (e.g. /sessions) owns Tab while it is open:
+    // cycle to the next category. Checked BEFORE the overlay guard — Tab
+    // must not fall through to the focused picker component.
+    if (matchesKey(data, 'tab') && this.activeCategorizedPicker !== undefined) {
+      this.activeCategorizedPicker.cycle()
+      return { consume: true }
     }
     // A managed non-search overlay owns the focused component. App-level
     // lifecycle handlers must not consume its keys before pi-tui dispatches
@@ -5187,6 +5236,10 @@ export class TuiApp {
     onCancel: () => void,
     options: PickerOptions = {},
   ): PickerHandle {
+    if (options.categories !== undefined && options.categories.length > 0) {
+      return this.openCategorizedPicker(items, onSelect, onCancel,
+        options as PickerOptions & { categories: readonly PickerCategory[] })
+    }
     const list = new SelectList(
       items.map(item => ({ ...item })),
       10,
@@ -5245,6 +5298,129 @@ export class TuiApp {
         this.requestRender()
       },
       _removeAbortListener: removeAbortListener,
+    }
+  }
+
+  /**
+   * Open a CATEGORIZED picker: the overlay opens on `categories[0]` and Tab
+   * cycles the tabs (each category re-runs its `items` factory and re-titles
+   * the picker with its own header; the live search query is carried across
+   * the switch). All close paths (select, cancel, handle.close, signal
+   * abort) clear the Tab-cycling state. Consumer-side only — the fork
+   * SelectList stays pristine (the header is baked into the constructor, so
+   * a category switch rebuilds the overlay rather than mutating it).
+   */
+  private openCategorizedPicker(
+    items: readonly PickerItem[],
+    onSelect: (value: string) => void,
+    onCancel: () => void,
+    options: PickerOptions & { categories: readonly PickerCategory[] },
+  ): PickerHandle {
+    const categories = options.categories
+    let currentIndex = 0
+    let overlay: OverlayHandle | undefined
+    let list: SelectList | undefined
+    // The live search query, carried across category switches (the rebuilt
+    // SelectList re-applies it via initialQuery).
+    let query = ''
+    let onAbort: (() => void) | undefined
+    const state: CategorizedPickerState = {
+      categories,
+      index: 0,
+      close: () => {
+        if (this.activeCategorizedPicker === state) this.activeCategorizedPicker = undefined
+        if (onAbort !== undefined && options.signal !== undefined) {
+          options.signal.removeEventListener('abort', onAbort)
+          onAbort = undefined
+        }
+        overlay?.hide()
+      },
+      cycle: () => {
+        // Carry the CURRENT search query into the rebuilt category.
+        query = list?.getFilter() ?? query
+        currentIndex = (currentIndex + 1) % categories.length
+        state.index = currentIndex
+        activate()
+      },
+    }
+    const activate = (): void => {
+      const category = categories[currentIndex]!
+      const next = new SelectList(
+        category.items().map(item => ({ ...item })),
+        10,
+        selectListTheme,
+        {},
+        {
+          enableSearch: options.enableSearch,
+          header: category.header,
+          noMatchText: options.noMatchText,
+          showHint: options.showHint,
+          initialQuery: query === '' ? options.initialQuery : query,
+        },
+      )
+      next.onSelect = (item) => {
+        query = next.getFilter()
+        state.close()
+        onSelect(item.value)
+      }
+      next.onCancel = () => {
+        query = next.getFilter()
+        state.close()
+        onCancel()
+      }
+      overlay?.hide()
+      list = next
+      overlay = this.showOverlayOnHost(new Frame(next), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    }
+    // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
+    // onCancel. The listener lives once on the signal — category switches
+    // replace the overlay, never the listener.
+    if (options.signal !== undefined) {
+      onAbort = (): void => {
+        state.close()
+        onCancel()
+      }
+      if (options.signal.aborted) {
+        onAbort()
+        onAbort = undefined
+      } else {
+        options.signal.addEventListener('abort', onAbort, { once: true })
+      }
+    }
+    // The caller's items are the initial rows; the first category's factory
+    // re-runs on activation and wins.
+    void items
+    activate()
+    this.activeCategorizedPicker = state
+    return {
+      close: () => state.close(),
+      setItems: () => {
+        // Categorized: re-run the ACTIVE category's items factory (the
+        // factory reads live state); the argument is a compatibility no-op.
+        if (list === undefined) return
+        list.setItems(categories[currentIndex]!.items().map(item => ({ ...item })))
+        this.requestRender()
+      },
+      refresh: () => {
+        if (list === undefined) return
+        list.setItems(categories[currentIndex]!.items().map(item => ({ ...item })))
+        this.requestRender()
+      },
+      setCategory: (id) => {
+        const index = categories.findIndex(category => category.id === id)
+        if (index === -1) return
+        // Carry the CURRENT search query into the rebuilt category.
+        query = list?.getFilter() ?? query
+        currentIndex = index
+        state.index = index
+        activate()
+      },
+      _removeAbortListener: () => {
+        if (onAbort !== undefined && options.signal !== undefined) {
+          options.signal.removeEventListener('abort', onAbort)
+          onAbort = undefined
+        }
+      },
     }
   }
 
