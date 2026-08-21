@@ -124,9 +124,12 @@ degrades to the official target only, preserving the old behavior.
 
 The `/login`/`/logout` surface refreshes the footer model row and the
 welcome card on `llm/adapters-updated`, `settings/document-updated`
-(llm-pi-ai/llm-deepseek namespaces only) and `credentials/updated`, so a
-provider added here — or edited externally in `settings.yaml` /
-`.credentials.yaml` — shows up without a restart.
+(llm-pi-ai/llm-deepseek namespaces only) and the credential events
+(`credentials/reference-updated` and `credentials/record-updated` — the
+0.1.1-rc.1 split of the old `credentials/updated`), so a provider added
+here — or edited externally in `settings.yaml` / `.credentials.yaml` —
+shows up without a restart. `/login` supports both CredentialRef
+(API-key) and CredentialKey authorization-flow targets.
 
 Resolution helpers: `src/provider-catalog.ts` (`providerOptionsFor`,
 `credentialOptionsFor`, `resolveCredentialArg`, `deriveKeyRef`,

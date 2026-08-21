@@ -18,6 +18,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { dshVersion } from './dsh-version.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import type { DockItem, FooterSegment, HeaderBadge, StyledSpan } from './extension/public-types.ts'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
@@ -51,14 +52,20 @@ export function apply(ctx: Context): void {
   const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService | undefined
   if (service === undefined) return
 
-  // Version header badge: `[vX.Y.Z]` after the host title (read live from
-  // the installed package.json — never hardcode the version here).
+  // Version header badge: the installed dsh version first, then the bundle
+  // version prefixed `tui-` — `[dsh-0.1.1-rc.1 · tui-v0.3.0]` (read live
+  // from the launcher + the installed package.json — never hardcode either
+  // version here). Without a resolvable dsh launcher the badge degrades to
+  // the bundle version alone.
+  const installedDsh = dshVersion()
   service.register<HeaderBadge>('chrome.header.badge', {
     id: 'builtin-version',
     order: 1000,
-    description: 'The bundle version (first-party builtin).',
+    description: 'The dsh and bundle versions (first-party builtin).',
   }, {
-    text: `v${packageVersion()}`,
+    text: installedDsh === undefined
+      ? `tui-v${packageVersion()}`
+      : `dsh-${installedDsh} · tui-v${packageVersion()}`,
     tone: 'info',
   })
 

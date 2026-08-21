@@ -32,6 +32,11 @@ export interface QuestionFlowQuestion {
   multiSelect?: boolean
   /** Presentation intent: approve names the recommended option label. */
   intent?: { kind: string; approve?: string }
+  /** Mask the free-text row's rendered content (an authorization secret
+   *  prompt). The real value stays in the input's memory (the answer
+   *  returns it); only the DISPLAY is bullets, and nothing here logs,
+   *  records history, or writes the transcript. */
+  masked?: boolean
 }
 
 /** One answered question, keyed by id. */
@@ -430,6 +435,17 @@ export class QuestionFlow implements Component, Focusable {
         const inputLines = this.otherInput.render(Math.max(1, width - visibleWidth(prefix)))
         const inputLine = inputLines[0] ?? ''
         const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
+        if (question.masked === true && this.otherInput.getValue() !== '') {
+          // A secret prompt: replace the rendered content with one bullet
+          // per CHARACTER of the real value (the input's own render pads to
+          // the full width; the mask must not). The input's real value and
+          // cursor are untouched — editing keeps working — only the display
+          // is masked, and the value never reaches the transcript, history,
+          // or any log.
+          lines.push(prefix + color.textDim('•'.repeat(this.otherInput.getValue().length)))
+          hits.push(OTHER_ROW)
+          continue
+        }
         lines.push(prefix + (this.otherInput.getValue() === '' ? color.textDim(row.label) : stripped))
         hits.push(OTHER_ROW)
         continue
@@ -836,7 +852,11 @@ export class QuestionFlow implements Component, Focusable {
         const value = draft.skipped
           ? '(skipped)'
           : draft.custom !== '' && question.multiSelect !== true
-            ? draft.custom
+            ? question.masked === true
+              // A masked secret stays masked on the review page too: the
+              // answer is confirmed as "typed", never re-shown in plaintext.
+              ? '•'.repeat(draft.custom.length)
+              : draft.custom
             : [...draft.selected].join(', ') + (draft.custom !== '' ? ` + ${draft.custom}` : '')
         reviewBudget = appendWrappedBudgeted(
           lines,
@@ -938,11 +958,21 @@ export class QuestionFlow implements Component, Focusable {
       // The free-text input is pinned below the scrollport (always visible).
       // An EMPTY input renders only a subtle fake cursor — on a small screen
       // that row reads as blank, so show a dim placeholder instead (typing
-      // replaces it with the live value).
+      // replaces it with the live value). A MASKED question renders bullets
+      // of the same display width (the value never reaches the transcript,
+      // history, or any log — only the display is hidden).
       const inputLines = this.otherInput.render(Math.max(1, safeWidth - 2))
       const inputLine = inputLines[0] ?? ''
       const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
-      lines.push(this.otherInput.getValue() === '' ? color.textDim(' Type your answer…') : ` ${stripped}`)
+      if (question.masked === true && this.otherInput.getValue() !== '') {
+        // A MASKED question renders one bullet per character of the real
+        // value (the input's render pads to the full width; the mask must
+        // not). The value never reaches the transcript, history, or any
+        // log — only the display is hidden.
+        lines.push(` ${color.textDim('•'.repeat(this.otherInput.getValue().length))}`)
+      } else {
+        lines.push(this.otherInput.getValue() === '' ? color.textDim(' Type your answer…') : ` ${stripped}`)
+      }
     }
     if (draft.skipped) {
       lines.push(color.textDim('(skipped)'))

@@ -26,9 +26,21 @@
 
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
-      inject: [tuiStartup, piTuiExtensions]
+      inject: [tuiStartup, piTuiExtensions, authorization]
       config:
         sessionId: ''
+
+    # The authorization seam (`ctx.authorization`): plugin-owned credential-
+    # obtaining flows, one attempt per key, transport-neutral notices and
+    # prompts. The dsh host does NOT mount it anywhere (the base layer ships
+    # only `credentials` + `llm-pi-ai`), so the TUI profile inserts the row
+    # itself — the TUI is the interactive surface that can answer its
+    # prompts. `AuthorizationService` injects `credentials`, so this row
+    # activates only after the base's credentials row; llm-pi-ai's
+    # provider login flows register once both services are up (it injects
+    # `authorization` optionally and degrades without it).
+    - id: authorization
+      name: '@deepseek-ai/dsh-authorization'
 
     # The agent-preset roster. The SHIPPED root is an assembly fact of this
     # bundle: the four presets (standard/code/minimal/cordis) travel with the

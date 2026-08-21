@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-21
+
+## [0.3.1] - 2026-08-21
+
+### Changed
+
+- **A startup gate explains an unsupported harness.** Running on a DeepSeek
+  Harness older than `dsh-v0.1.1-rc.1` now prints an actionable message
+  (the detected version, the minimum version, and the upgrade command)
+  before the loader's own failure — instead of a raw
+  `ERR_MODULE_NOT_FOUND` stack for the authorization row the profile
+  mounts, which the old harness cannot resolve. The message is generated
+  from a declarative compatibility table (`HARNESS_COMPAT`): future
+  version constraints are added as table entries, each with its own
+  incompatible range, the release line that first imposed it, and its
+  guidance.
+
+## [Unreleased]
+
+### Changed
+
+- **A startup gate explains an unsupported harness.** Running on a DeepSeek
+  Harness older than `dsh-v0.1.1-rc.1` now prints an actionable message
+  (the detected version, the minimum version, and the upgrade command)
+  before the loader's own failure — instead of a raw
+  `ERR_MODULE_NOT_FOUND` stack for the authorization row the profile
+  mounts, which the old harness cannot resolve. The message is generated
+  from a declarative compatibility table (`HARNESS_COMPAT`): future
+  version constraints are added as table entries, each with its own
+  incompatible range, the release line that first imposed it, and its
+  guidance.
+## [0.3.0] - 2026-08-21
+
+### Changed
+
+- **Minimum compatible DeepSeek Harness is now `dsh-v0.1.1-rc.1` or later on
+  the same compat line** — this release no longer supports `dsh-v0.1.0-rc.8`
+  (the split credential events, the dual credential planes and the
+  `ctx.authorization` seam it consumes do not exist there).
+
+### Added
+
+- **Provider-native sign-in through the dsh authorization seam.** `/login`
+  now understands the two credential planes of DeepSeek Harness
+  `dsh-v0.1.1-rc.1`: a route whose profile explicitly names `apiKeyEnv`
+  keeps the classic API-key path (even when the same route has a provider
+  login flow), while a keyless route with a flow signs in provider-natively
+  — OAuth / device-code / interactive API key. Notices (the page to open,
+  the device code) stay visible in a durable panel, text/select prompts use
+  the existing question and picker surfaces, and **secret prompts render
+  masked** (the value stays in the input's memory, stays masked on the
+  review page, and never reaches history, logs, the transcript or
+  `/status`). A successful sign-in for an unconfigured catalog route
+  records a minimal keyless provider profile (never `apiKeyEnv`, so the
+  runtime keeps reading the credential record); hand-declared routes still
+  go through the add-provider wizard.
+- **`/logout` clears both credential planes.** A named-key route unsets
+  the reference as before; a keyless route deletes the stored credential
+  record and says "signed out locally" — it never claims server-side
+  OAuth revocation. The no-argument `/logout` now opens a picker over the
+  stored records plus the configured references (presence and kind only;
+  secret values never leave the credentials service).
+
+### Changed
+
+- **Compatible with DeepSeek Harness `dsh-v0.1.1-rc.1`.** Every
+  `@deepseek-ai/dsh-*` peer and dev range moved from `^0.1.0-rc.8` to
+  `^0.1.1-rc.1`, and `@deepseek-ai/dsh-authorization` joined the peer set.
+  The old `credentials/updated` event no longer exists upstream; the
+  surface now follows `credentials/reference-updated` and
+  `credentials/record-updated` (both refresh the footer model row and the
+  welcome card).
+- **The TUI profile mounts the authorization seam itself.** No dsh bundle
+  ships `ctx.authorization`, so `cordis.patch.yml` inserts the service row
+  and the runner injects it — llm-pi-ai's provider login flows register
+  once it is up.
+- The `/login` API-key question and authorization secret prompts are
+  masked by default.
+- **The header version badge shows the dsh version first, then the TUI
+  bundle version under the `tui-` label** — `[dsh-0.1.1-rc.1 ·
+  tui-v0.3.0]` — degrading to `[tui-vX.Y.Z]` alone when the installed
+  dsh launcher's version cannot be resolved.
+
+### Security
+
+- Authorization secrets are never printed, logged, put in input history,
+  written to the session transcript, or shown in `/status`; notice and
+  error paths never echo token material.
+
 ## [0.2.2] - 2026-08-21
 
 ### Added
@@ -620,7 +709,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0

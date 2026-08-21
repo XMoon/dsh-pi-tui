@@ -22,7 +22,7 @@ import type { CommandInvocation, CommandResult, CommandDescriptor } from '@deeps
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
+import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
@@ -59,6 +59,16 @@ import {
   type ProviderCatalogSettings,
   type ProviderOption,
 } from './provider-catalog.ts'
+import {
+  authorizationFailureText,
+  authorizationTargets,
+  createAuthorizationInteraction,
+  flowForRoute,
+  mergeLoginTargets,
+  type AuthorizationServiceLike,
+  type AuthorizationTarget,
+  type LoginTarget,
+} from './authorization.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from './skill-catalog-refresh.ts'
 import {
   commandSummaryOf,
@@ -271,6 +281,9 @@ export interface TuiCommandRunner {
 
 /** The sentinel picker value for the "add a brand-new provider" action row. */
 const ADD_PROVIDER_VALUE = '\u0000add-provider'
+/** The sentinel prefix for an authorization-target picker row (a credential
+ * key can never start with NUL, so route values cannot collide). */
+const AUTH_VALUE_PREFIX = '\u0000auth:'
 
 /**
  * M11: the /status extension-health rows (plan §16 — /status extension
@@ -402,13 +415,16 @@ function readProviderOptions(ctx: Context): ProviderOption[] {
     }
   }
   // Settings-only fallback (old behavior): deepseek official plus every
-  // llm-pi-ai route the section declares.
+  // llm-pi-ai route the section declares. The settings-only reader only
+  // sees routes that NAME a credential (credentialOptionsFor skips keyless
+  // profiles), so every fallback option names its reference.
   const settingsOnly = credentialOptionsFor(readLlmpiAiProviders(ctx))
   return settingsOnly.map((option, index) => index === 0 ? {
     ...option,
     route: 'deepseek-official',
     configured: true,
     declared: false,
+    namesCredential: true,
     group: 'configured' as const,
     settingsNs: '',
     settingsPath: [],
@@ -417,31 +433,195 @@ function readProviderOptions(ctx: Context): ProviderOption[] {
     route: option.label,
     configured: true,
     declared: false,
+    namesCredential: true,
     group: 'configured' as const,
     settingsNs: 'llm-pi-ai',
     settingsPath: ['providers', option.label],
   })
 }
 
-/** Build the picker rows from the merged options: grouped by configured /
- * available / custom via the SelectList group extension (the fork renders a
- * non-interactive header row per group automatically), with the Add New
- * Platform action row pinned last. */
-function providerPickerRows(options: readonly ProviderOption[]): PickerItem[] {
+/** Build the merged /login picker rows: reference targets (the API-key
+ * path) keep their configured/available/custom groups, prefixed with the
+ * `API key` category so the two credential planes are visible at a glance
+ * (the fork renders a non-interactive header row per group); authorization
+ * targets (the provider sign-in path) get their own group, and the Add New
+ * Platform action row is pinned last. Authorization row values carry the
+ * AUTH_VALUE_PREFIX so they can never collide with a route. */
+function mergedPickerRows(merged: readonly LoginTarget[]): PickerItem[] {
   const rows: PickerItem[] = []
-  const groupLabels: Record<ProviderOption['group'], string> = {
-    configured: 'configured',
-    available: 'available · catalog',
-    custom: 'custom',
+  const groupLabels: Record<string, string> = {
+    configured: 'API key · configured',
+    available: 'API key · available',
+    custom: 'API key · custom',
+    authorization: 'sign in with provider',
   }
-  for (const option of options) {
-    rows.push({
-      value: option.route,
-      label: `${option.label} (${option.ref})`,
-      group: groupLabels[option.group],
-    })
+  for (const target of merged) {
+    if (target.kind === 'reference') {
+      const group = target.configured ? 'configured' : target.declared ? 'custom' : 'available'
+      rows.push({
+        value: target.route,
+        label: `${target.label} (${target.ref})`,
+        group: groupLabels[group],
+      })
+    } else {
+      rows.push({
+        value: AUTH_VALUE_PREFIX + target.key,
+        label: target.inFlight ? `${target.label} — sign-in in progress` : `${target.label} — sign in`,
+        group: groupLabels.authorization,
+      })
+    }
   }
   rows.push({ value: ADD_PROVIDER_VALUE, label: '[ Add New Platform ]' })
+  return rows
+}
+
+/** Recover an authorization target from a picked row value (the marker
+ * prefix guarantees no collision with reference route values). */
+function targetFromPickerValue(merged: readonly LoginTarget[], value: string): AuthorizationTarget | undefined {
+  if (!value.startsWith(AUTH_VALUE_PREFIX)) return undefined
+  const key = value.slice(AUTH_VALUE_PREFIX.length)
+  for (const target of merged) {
+    if (target.kind === 'authorization' && target.key === key) return target
+  }
+  return undefined
+}
+
+/** One-line summary of every merged target, for the unknown-target error. */
+function mergedTargetsSummary(merged: readonly LoginTarget[]): string {
+  return merged.map(target => target.kind === 'reference'
+    ? `${target.label} (${target.ref})`
+    : `${target.label} (provider sign-in)`).join(', ')
+}
+
+/**
+ * Run one authorization attempt on the seam and report it. Method picking
+ * (single method → direct; multiple → a picker), notice rendering and
+ * prompts all live behind the interaction built here; the seam's stable
+ * error taxonomy maps to user-facing copy (§15). On success, a catalog
+ * route that is not configured yet gets a minimal keyless profile so the
+ * runtime keeps reading the credential record (§12.1 — never an apiKeyEnv,
+ * which would switch the request path back to a reference that is not set).
+ */
+async function runAuthorizationLogin(
+  ctx: Context,
+  app: TuiApp,
+  runner: TuiCommandRunner,
+  target: AuthorizationTarget,
+  options: readonly ProviderOption[],
+): Promise<CommandResult> {
+  const authorization = ctx.get('authorization') as AuthorizationServiceLike | undefined
+  if (authorization === undefined) return { kind: 'error', text: 'authorization service unavailable' }
+  if (target.inFlight) return { kind: 'error', text: `sign-in already in progress for ${target.label}` }
+  let method = target.methods[0]?.id
+  if (method === undefined) return { kind: 'error', text: `no sign-in method available for ${target.label}` }
+  if (target.methods.length > 1) {
+    const picked = await new Promise<string | undefined>((resolve) => {
+      app.openPicker(
+        target.methods.map(candidate => ({ value: candidate.id, label: candidate.label })),
+        (value) => resolve(value),
+        () => resolve(undefined),
+        { header: `Sign in method · ${target.label}`, enableSearch: false },
+      )
+    })
+    if (picked === undefined) return { kind: 'error', text: 'login cancelled' }
+    method = picked
+  }
+  const { interaction, close } = createAuthorizationInteraction(app)
+  let outcome: { status: 'authorized' | 'cancelled' }
+  try {
+    outcome = await authorization.begin({ key: target.key, method, interaction, signal: runner.signal })
+  } catch (error) {
+    if (runner.signal.aborted) return { kind: 'error', text: 'login cancelled' }
+    if ((error as { code?: unknown } | null)?.code === 'NOT_COMMITTED') {
+      // A provider flow bug/abnormality: worth a diagnostic line.
+      runner.diag.error('authorization', { key: target.key, error: safeErrorMessage(error) })
+    }
+    return { kind: 'error', text: authorizationFailureText(error, safeErrorMessage(error)) }
+  } finally {
+    close()
+  }
+  if (outcome.status === 'cancelled') return { kind: 'error', text: 'login cancelled' }
+  const profileNote = await provisionKeylessProfile(ctx, runner, target, options)
+  return { kind: 'success', text: `signed in to ${target.label}${profileNote}` }
+}
+
+/**
+ * After a successful authorization, write a MINIMAL keyless profile for a
+ * catalog route that is not configured yet (§12.1). The record alone does
+ * not make the route selectable — llm-pi-ai registers a route only when
+ * its settings section names it — and the profile must NOT carry
+ * apiKeyEnv, or the request path would switch back to a reference that was
+ * never set. Hand-declared/custom routes are left to the add wizard
+ * (§12.2). Any failure degrades silently (the sign-in itself succeeded).
+ * @returns a user-facing note, or '' when nothing was provisioned.
+ */
+async function provisionKeylessProfile(
+  ctx: Context,
+  runner: TuiCommandRunner,
+  target: AuthorizationTarget,
+  options: readonly ProviderOption[],
+): Promise<string> {
+  if (target.route === undefined) return ''
+  const option = options.find(candidate => candidate.route === target.route)
+  if (option === undefined || option.configured || option.declared || option.settingsNs === '') return ''
+  const settings = ctx.get('settings') as ProviderCatalogSettingsWrite | undefined
+  if (settings === undefined) return ''
+  try {
+    await settings.mutate(option.settingsNs, [
+      { op: 'set', path: [...option.settingsPath], value: {} },
+    ])
+    return ' — provider profile recorded'
+  } catch (error) {
+    runner.diag.warn('authorization', { key: target.key, note: 'profile write failed', error: safeErrorMessage(error) })
+    return ''
+  }
+}
+
+/** The structural credentials surface /logout's picker needs. */
+interface LogoutCredentialsLike {
+  listRecords(): Promise<readonly { key: string; kind?: string }[]>
+  describe(ref: string): Promise<{ configured: boolean; source?: string }>
+}
+
+/** Value prefixes for the /logout picker rows (no collision with a ref). */
+const LOGOUT_REF_VALUE = '\u0000ref:'
+const LOGOUT_RECORD_VALUE = '\u0000record:'
+
+/** Build the /logout picker rows: every stored credential record plus every
+ * configured reference (presence only — a secret's value never leaves the
+ * credentials service). Records are deduplicated by key and labelled with
+ * the authorization flow's user-facing name when one owns the key (a
+ * record row must say what signing out actually clears). */
+async function logoutPickerRows(
+  credentials: LogoutCredentialsLike,
+  options: readonly ProviderOption[],
+  targets: readonly AuthorizationTarget[],
+): Promise<PickerItem[]> {
+  const rows: PickerItem[] = []
+  const seenRefs = new Set<string>()
+  for (const option of options) {
+    if (seenRefs.has(option.ref)) continue
+    seenRefs.add(option.ref)
+    try {
+      const info = await credentials.describe(option.ref)
+      if (info.configured) {
+        rows.push({ value: LOGOUT_REF_VALUE + option.ref, label: `${option.label} (${option.ref})`, group: 'API keys' })
+      }
+    } catch {
+      // A throwing describe degrades to "not configured".
+    }
+  }
+  const records = await credentials.listRecords()
+  const seenKeys = new Set<string>()
+  for (const record of records) {
+    if (seenKeys.has(record.key)) continue
+    seenKeys.add(record.key)
+    const owner = targets.find(target => target.key === record.key)
+    const label = owner !== undefined
+      ? `${owner.label} — stored credential${record.kind === undefined ? '' : ` (${record.kind})`}`
+      : `${record.key}${record.kind === undefined ? '' : ` (${record.kind})`}`
+    rows.push({ value: LOGOUT_RECORD_VALUE + record.key, label, group: 'stored credentials' })
+  }
   return rows
 }
 
@@ -569,7 +749,7 @@ async function askAddProvider(
     kind: 'ok',
     text: key === ''
       ? `provider ${routeValue} added (no key; provider-native authentication)`
-      : `${ref} set · provider ${routeValue} added`,
+      : `API key ${ref} set · provider ${routeValue} added`,
   }
 }
 
@@ -2126,54 +2306,67 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'login',
-    description: 'Set an API key — deepseek official or an llm-pi-ai provider route',
+    description: 'Sign in with a provider or set an API key — deepseek official or an llm-pi-ai provider route',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
       const credentials = ctx.get('credentials')
       if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
-      // One merged credential catalog: deepseek official plus every
-      // configurable-provider directory route (the installed catalog, dormant
-      // or not, plus hand-declared profiles), each carrying its apiKeyEnv ref
-      // (or the derived conventional one). The llm directory is the primary
-      // source; the settings-only read is the fallback when the llm service
-      // is absent.
+      // The two credential planes (dsh 0.1.1-rc.1): reference targets from
+      // the provider catalog, authorization flows from the seam. An absent
+      // authorization service degrades to the reference-only surface.
+      const authorization = ctx.get('authorization') as AuthorizationServiceLike | undefined
       const options = readProviderOptions(ctx)
+      const targets = authorizationTargets(authorization?.list() ?? [])
+      const merged = mergeLoginTargets(options, targets)
       const arg = invocation.rawInput.trim()
       let route: string | undefined
-      // The credential ref to set. Resolved once, verbatim: for a known
-      // target it is the option's ref; for a novel env-var name (the old
-      // escape hatch) it IS the typed name — never re-derived through
-      // deriveKeyRef, which would corrupt `MY_CUSTOM_KEY` into
-      // `MY_CUSTOM_KEY_API_KEY` (a silent wrong-target write).
       let ref: string | undefined
+      let target: AuthorizationTarget | undefined
       if (arg !== '') {
-        // A route name that resolves to a known target sets that target's key;
-        // an env-var-looking name is used verbatim (the old escape hatch); a
-        // NEW route name (valid route pattern, not in the catalog) starts the
-        // add wizard with the route pre-filled.
+        // An explicit env-var / known-ref name ALWAYS keeps the reference
+        // path, even when the same route has an authorization flow (§11.1,
+        // §11.2, §11.5 case D): the typed name is the escape hatch.
         const known = resolveCredentialArg(arg, options)
         if (known !== undefined) {
           const option = options.find(candidate => candidate.ref === known)
           if (option !== undefined) {
-            route = option.route
-            ref = option.ref
+            // Known route: a profile that explicitly names apiKeyEnv keeps
+            // the reference path; a KEYLESS route with a flow goes
+            // provider-native (§11.3 vs §11.4).
+            const flow = option.route !== 'deepseek-official' ? flowForRoute(targets, option.route) : undefined
+            if (flow !== undefined && option.namesCredential === false) {
+              target = flow
+            } else {
+              route = option.route
+              ref = option.ref
+            }
           } else {
             // Novel env-var name: use it verbatim (no route to map to).
             ref = known
           }
         } else if (ROUTE_PATTERN.test(arg)) {
-          const outcome = await askAddProvider(ctx, app, runner.signal, arg)
-          if (outcome.kind === 'cancelled') return { kind: 'error', text: 'add provider cancelled' }
-          if (outcome.kind === 'error') return { kind: 'error', text: outcome.text }
-          return { kind: 'success', text: outcome.text }
+          // A route that has no credential option but IS offered by an
+          // authorization flow starts the flow (§11.4); a genuinely new
+          // route starts the add wizard.
+          const flow = flowForRoute(targets, arg)
+          if (flow !== undefined) {
+            target = flow
+          } else {
+            const outcome = await askAddProvider(ctx, app, runner.signal, arg)
+            if (outcome.kind === 'cancelled') return { kind: 'error', text: 'add provider cancelled' }
+            if (outcome.kind === 'error') return { kind: 'error', text: outcome.text }
+            return { kind: 'success', text: outcome.text }
+          }
         } else {
-          return { kind: 'error', text: `unknown credential target "${arg}" — ${options.map(option => `${option.label} (${option.ref})`).join(', ')}` }
+          return { kind: 'error', text: `unknown credential target "${arg}" — ${mergedTargetsSummary(merged)}` }
         }
-      } else if (options.length > 1) {
+      } else if (merged.length > 1) {
         // Picker with search + grouping + the Add New Platform action row.
+        // Reference rows keep their route value; authorization rows carry a
+        // key marker so the two address spaces never collide.
         const picked = await new Promise<string | undefined>((resolve) => {
           app.openPicker(
-            providerPickerRows(options),
+            mergedPickerRows(merged),
             (value) => resolve(value),
             () => resolve(undefined),
             {
@@ -2193,9 +2386,24 @@ export function registerTuiCommands(
           if (outcome.kind === 'error') return { kind: 'error', text: outcome.text }
           return { kind: 'success', text: outcome.text }
         }
-        route = picked
+        const authTarget = targetFromPickerValue(merged, picked)
+        if (authTarget !== undefined) {
+          target = authTarget
+        } else {
+          route = picked
+        }
       } else {
-        route = options[0]?.route
+        const only = merged[0]
+        if (only === undefined) return { kind: 'error', text: 'no credential targets available' }
+        if (only.kind === 'authorization') {
+          target = only
+        } else {
+          route = only.route
+          ref = only.ref
+        }
+      }
+      if (target !== undefined) {
+        return runAuthorizationLogin(ctx, app, runner, target, options)
       }
       if (route === undefined && ref === undefined) return { kind: 'error', text: 'no credential targets available' }
       const option = route === undefined ? undefined : options.find(candidate => candidate.route === route)
@@ -2203,12 +2411,12 @@ export function registerTuiCommands(
       const label = option?.label ?? route ?? targetRef
       try {
         const answers = await app.askQuestions([
-          { id: 'key', question: `Paste the API key for ${label}:` },
+          { id: 'key', question: `Enter the API key for ${label}:`, masked: true },
         ])
         const key = answers[0]?.custom ?? ''
         if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
         await credentials.set(targetRef as CredentialRef, key)
-        return { kind: 'success', text: `${targetRef} set` }
+        return { kind: 'success', text: `API key ${targetRef} set` }
       } catch {
         return { kind: 'error', text: 'login cancelled' }
       }
@@ -2217,23 +2425,62 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'logout',
-    description: 'Clear a stored API key — deepseek official or an llm-pi-ai provider route',
+    description: 'Clear a stored credential — deepseek official or an llm-pi-ai provider route (API key or stored record)',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
       const credentials = ctx.get('credentials')
       if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
+      const authorization = ctx.get('authorization') as AuthorizationServiceLike | undefined
       const options = readProviderOptions(ctx)
+      const targets = authorizationTargets(authorization?.list() ?? [])
       const arg = invocation.rawInput.trim()
       if (arg !== '') {
+        // A configured/derived reference name takes the reference path
+        // (§13.1) — EXCEPT a keyless route with a flow, whose login stores
+        // a RECORD: clearing the never-set derived ref would be a silent
+        // no-op, so the record is what gets cleared (§13.2).
         const resolved = resolveCredentialArg(arg, options)
-        if (resolved === undefined) {
-          return { kind: 'error', text: `unknown credential target "${arg}" — ${options.map(option => `${option.label} (${option.ref})`).join(', ')}` }
+        if (resolved !== undefined) {
+          const option = options.find(candidate => candidate.ref === resolved)
+          const flow = option !== undefined && option.route !== 'deepseek-official' && !option.namesCredential
+            ? flowForRoute(targets, option.route)
+            : undefined
+          if (flow !== undefined) {
+            await credentials.deleteRecord(flow.key)
+            return { kind: 'success', text: `${flow.label} signed out locally — stored credential cleared` }
+          }
+          await credentials.unset(resolved as CredentialRef)
+          return { kind: 'success', text: `API key ${resolved} cleared` }
         }
-        await credentials.unset(resolved as CredentialRef)
-        return { kind: 'success', text: `${resolved} cleared` }
+        // A route naming a flow directly (no provider option for it).
+        const flow = flowForRoute(targets, arg.toLowerCase())
+        if (flow !== undefined) {
+          await credentials.deleteRecord(flow.key)
+          return { kind: 'success', text: `${flow.label} signed out locally — stored credential cleared` }
+        }
+        return { kind: 'error', text: `unknown credential target "${arg}" — ${mergedTargetsSummary(mergeLoginTargets(options, targets))}` }
       }
-      await credentials.unset(options[0]!.ref as CredentialRef)
-      return { kind: 'success', text: `${options[0]!.ref} cleared` }
+      // No argument: aggregate what actually exists — stored records plus
+      // configured references (§13.3). Presence and kind only; a secret's
+      // value never leaves the credentials service.
+      const rows = await logoutPickerRows(credentials, options, targets)
+      if (rows.length === 0) return { kind: 'error', text: 'nothing to sign out' }
+      const picked = await new Promise<string | undefined>((resolve) => {
+        app.openPicker(
+          rows,
+          (value) => resolve(value),
+          () => resolve(undefined),
+          { enableSearch: true, header: 'logout · credentials', noMatchText: '  nothing to sign out', width: 76, maxHeight: 26, showHint: true },
+        )
+      })
+      if (picked === undefined) return { kind: 'error', text: 'logout cancelled' }
+      if (picked.startsWith(LOGOUT_RECORD_VALUE)) {
+        await credentials.deleteRecord(picked.slice(LOGOUT_RECORD_VALUE.length) as CredentialKey)
+        return { kind: 'success', text: `${picked.slice(LOGOUT_RECORD_VALUE.length)} signed out locally — stored credential cleared` }
+      }
+      const targetRef = picked.slice(LOGOUT_REF_VALUE.length)
+      await credentials.unset(targetRef as CredentialRef)
+      return { kind: 'success', text: `API key ${targetRef} cleared` }
     },
   })
 

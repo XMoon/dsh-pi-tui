@@ -32,6 +32,16 @@ export interface ProviderOption extends LoginCredentialOption {
   /** Whether a user profile already exists in the settings section. */
   readonly configured: boolean
   /**
+   * Whether the route's profile EXPLICITLY names a credential reference
+   * (`apiKeyEnv` set to a non-empty env-var name). False for a keyless
+   * profile (provider-native auth — an authorization flow owns the
+   * credential record), for a bare profile, and for the unconfigured case
+   * where the reference is only the derived convention. This is the fact
+   * the rc.1 /login merge branches on: an explicitly named reference wins
+   * over any authorization flow for the same route.
+   */
+  readonly namesCredential: boolean
+  /**
    * Whether the owning adapter knows this route only because configuration
    * declared it — a hand-written gateway the installed catalog ships nothing
    * about. Only such routes need the full add wizard.
@@ -140,8 +150,9 @@ export function providerOptionsFor(
   }
   // The deepseek official adapter leads; it is the one route every deployment
   // can name regardless of the directory (the old /login behavior). It is
-  // always "configured" in the sense that its target always exists.
-  push({ label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', route: 'deepseek-official', configured: true, declared: false, group: 'configured', settingsNs: '', settingsPath: [] })
+  // always "configured" in the sense that its target always exists, and it
+  // always names its credential (DEEPSEEK_API_KEY).
+  push({ label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', route: 'deepseek-official', configured: true, declared: false, namesCredential: true, group: 'configured', settingsNs: '', settingsPath: [] })
   if (entries === undefined) return options
   for (const entry of entries) {
     if (entry.provider.length === 0 || entry.settingsNs.length === 0) continue
@@ -157,13 +168,15 @@ export function providerOptionsFor(
       && typeof (profile as { apiKeyEnv?: unknown }).apiKeyEnv === 'string'
       ? (profile as { apiKeyEnv: string }).apiKeyEnv
       : undefined
-    const ref = namedRef !== undefined && namedRef !== '' ? namedRef : deriveKeyRef(entry.provider)
+    const namesCredential = namedRef !== undefined && namedRef !== ''
+    const ref = namesCredential ? namedRef : deriveKeyRef(entry.provider)
     push({
       label: entry.displayName,
       ref,
       route: entry.provider,
       configured,
       declared: entry.declared === true,
+      namesCredential,
       group: configured ? 'configured' : entry.declared === true ? 'custom' : 'available',
       settingsNs: entry.settingsNs,
       settingsPath: [...entry.settingsPath],

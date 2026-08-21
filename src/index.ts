@@ -88,6 +88,7 @@ import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
@@ -143,6 +144,20 @@ export interface Config {
 export const Config: z<Config> = z.object({
   sessionId: z.string(),
 })
+
+/**
+ * Wire the credential surface refresh to the dsh 0.1.1-rc.1 credential
+ * events. The rc.1 release split the credential update event into the
+ * reference half and the durable-record half; both change what the footer
+ * model row and the welcome card show (a /login /logout, an external
+ * .credentials.yaml edit, or an authorization flow committing a record), so
+ * they share one best-effort callback. The callback must not read secrets
+ * or mutate providers — it only re-reads describe-level state.
+ */
+export function registerCredentialSurfaceRefresh(ctx: Context, refresh: () => void): void {
+  ctx.on('credentials/reference-updated', refresh)
+  ctx.on('credentials/record-updated', refresh)
+}
 
 /** The launcher's bounded exit request; the TUI asks for it on Ctrl+C. */
 interface AppExit {
@@ -538,39 +553,10 @@ export function foldQueueRows(
 }
 
 /**
- * The installed dsh version (e.g. `0.1.0-rc.6`), resolved from the launcher's
- * real path: `process.argv[1]` is the `dsh` bin, whose realpath walks up to
- * the `@deepseek-ai/dsh/package.json` that owns it. The version the welcome
- * card shows is the harness the TUI runs on, not this bundle's own patch
- * level. Undefined when the launcher path is unreadable.
- * @returns the installed dsh version string, or undefined.
- */
-function dshVersion(): string | undefined {
-  const bin = process.argv[1]
-  if (bin === undefined) return undefined
-  try {
-    let dir = dirname(realpathSync(bin))
-    for (let depth = 0; depth < 8; depth += 1) {
-      try {
-        const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string }
-        if (pkg.name === '@deepseek-ai/dsh' && typeof pkg.version === 'string') return pkg.version
-      } catch {
-        // Not a manifest directory; keep walking up.
-      }
-      const parent = dirname(dir)
-      if (parent === dir) return undefined
-      dir = parent
-    }
-  } catch {
-    // Unreadable launcher path: fall back to the bundle version.
-  }
-  return undefined
-}
-
-/**
  * The bundle's own version, read from package.json at runtime so the welcome
  * card never drifts from the shipped version. The DISPLAYED version prefers
- * the installed dsh version (`dshVersion`), falling back to this one.
+ * the installed dsh version (`dshVersion` — shared with the header badge
+ * via src/dsh-version.ts), falling back to this one.
  * @returns the version string, or a fallback when the file is unreadable.
  */
 function packageVersion(): string {
@@ -3807,6 +3793,9 @@ export function apply(ctx: Context, config: Config): void {
     // selection. All three events are capability-optional: an absent llm /
     // settings / credentials service never mounts them, and a throwing
     // listener is contained by the event bus (the refresh is best-effort).
+    // dsh 0.1.1-rc.1 split the credential update event into the reference
+    // half and the durable-record half; both change the same surface, so
+    // they share one refresh callback.
     ctx.on('llm/adapters-updated', () => { refreshStatus(); updateWelcomeCard() })
     ctx.on('settings/document-updated', (ns) => {
       if (ns === settingsNamespace('llm-pi-ai') || ns === settingsNamespace('llm-deepseek')) {
@@ -3814,7 +3803,8 @@ export function apply(ctx: Context, config: Config): void {
         updateWelcomeCard()
       }
     })
-    ctx.on('credentials/updated', () => { refreshStatus(); updateWelcomeCard() })
+    const refreshCredentialSurface = (): void => { refreshStatus(); updateWelcomeCard() }
+    registerCredentialSurfaceRefresh(ctx, refreshCredentialSurface)
     // Initial plan badge, busy indicator, and auto title from the log (a
     // resumed session may be persisted mid-turn). Without a session the
     // surfaces stay at their idle defaults.
