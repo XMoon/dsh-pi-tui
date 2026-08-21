@@ -89,6 +89,122 @@ const TUI_TOOL_TITLES: Record<string, string> = {
 /** The goal tool family (all three share the `{"goal":…}` result shape). */
 export const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set(['get_goal', 'create_goal', 'update_goal'])
 
+/**
+ * Tools whose folded result preview must never leak the raw result JSON
+ * (web parity: the web's folded row shows only the args summary, never the
+ * result). The TUI keeps its result-preview row but shows a parsed summary
+ * instead — and nothing at all when the result cannot be parsed.
+ *
+ * `ralph`'s render already leads with a friendly line ("Ralph worker
+ * reported completion after N rounds.") before the JSON report, so its
+ * summary IS that first line. The agent-team family is deliberately NOT in
+ * the set: it is experimental (not in the production bundle) and two of its
+ * tools (`send_message`, `interrupt_agent`) share names with subagent tools
+ * whose render text is friendly — a name-keyed set cannot tell them apart.
+ */
+export const FOLDED_JSON_RESULT_TOOLS: ReadonlySet<string> = new Set([
+  'ralph',
+  'schedule_create',
+  'schedule_list',
+  'schedule_delete',
+  'cordis_inspect_list',
+  'cordis_inspect_query',
+  'cordis_inspect_self',
+])
+
+/** Parse a result text as JSON, tolerating a friendly prefix line before
+ * the JSON document (e.g. ralph's "…\nFinal report:\n{…}"). */
+function parseJsonValue(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    // Fall through to the prefix-tolerant scan.
+  }
+  const brace = text.indexOf('{')
+  const bracket = text.indexOf('[')
+  const start = bracket !== -1 && (brace === -1 || bracket < brace) ? bracket : brace
+  if (start > 0) {
+    try {
+      return JSON.parse(text.slice(start))
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+/** A non-empty string field, or undefined. */
+function stringField(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/**
+ * The folded preview summary for one of {@link FOLDED_JSON_RESULT_TOOLS}:
+ * a short human phrase derived from the parsed result JSON. Returns
+ * undefined when nothing useful can be derived — the caller then shows NO
+ * folded result preview (web parity), never the raw JSON.
+ * @param name - the tool name.
+ * @param text - the settled result text.
+ */
+export function foldedResultSummaryFor(name: string, text: string): string | undefined {
+  if (name === 'ralph') {
+    // The render text leads with a friendly line before the JSON report;
+    // that line is the best folded summary. A bare-JSON result (e.g. a
+    // replay without the render prefix) falls back to status/rounds.
+    const line = firstLine(text)
+    if (line !== '' && !line.startsWith('{')) return line
+    const parsed = parseJsonValue(text)
+    if (typeof parsed === 'object' && parsed !== null) {
+      const record = parsed as Record<string, unknown>
+      const status = stringField(record.status)
+      const rounds = typeof record.roundsStarted === 'number' ? String(record.roundsStarted) : undefined
+      const parts = [status, rounds === undefined ? undefined : `${rounds} rounds`].filter((part): part is string => part !== undefined)
+      return parts.length === 0 ? undefined : parts.join(' · ')
+    }
+    return undefined
+  }
+  const parsed = parseJsonValue(text)
+  if (name === 'schedule_list') {
+    if (Array.isArray(parsed)) return parsed.length === 0 ? 'no scheduled jobs' : `${parsed.length} scheduled`
+    if (typeof parsed === 'object' && parsed !== null) return stringField((parsed as Record<string, unknown>).code)
+    return undefined
+  }
+  if (name === 'schedule_create') {
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const record = parsed as Record<string, unknown>
+    const kind = stringField(record.kind)
+    const state = stringField(record.state)
+    const parts = [kind, state].filter((part): part is string => part !== undefined)
+    return parts.length === 0 ? undefined : parts.join(' · ')
+  }
+  if (name === 'schedule_delete') {
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const record = parsed as Record<string, unknown>
+    if (record.deleted === true) return 'deleted'
+    if (record.deleted === false) return 'not found'
+    return stringField(record.code)
+  }
+  if (name === 'cordis_inspect_list') {
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const providers = (parsed as Record<string, unknown>).providers
+    if (Array.isArray(providers)) return providers.length === 0 ? 'no providers' : `${providers.length} providers`
+    return undefined
+  }
+  if (name === 'cordis_inspect_query') {
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const record = parsed as Record<string, unknown>
+    const parts = [stringField(record.platform), stringField(record.provider), stringField(record.method)]
+      .filter((part): part is string => part !== undefined)
+    return parts.length === 0 ? undefined : parts.join(' · ')
+  }
+  if (name === 'cordis_inspect_self') {
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const mode = stringField((parsed as Record<string, unknown>).mode)
+    return mode === undefined ? undefined : `mode ${mode}`
+  }
+  return undefined
+}
+
 /** Summary key preference per variant (args-derived). */
 const SUMMARY_KEYS: Record<string, string[]> = {
   bash: ['description', 'command'],

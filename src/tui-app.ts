@@ -73,6 +73,8 @@ import {
   goalResultSummary,
   goalResultLines,
   GOAL_TOOL_NAMES,
+  foldedResultSummaryFor,
+  FOLDED_JSON_RESULT_TOOLS,
   toolCardHeader,
   toolEmoji,
   webCardLines,
@@ -4217,6 +4219,13 @@ export class TuiApp {
         resultPreview = summary === undefined
           ? message.result === '' ? '' : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
           : ` — ${summary}`
+      } else if (FOLDED_JSON_RESULT_TOOLS.has(message.name)) {
+        // Web parity: the folded row never shows the result JSON. The TUI
+        // keeps its result-preview row but shows a parsed summary (ralph:
+        // its friendly first line; schedule/cordis: derived phrases) — and
+        // NO preview at all when nothing can be derived, never raw JSON.
+        const summary = foldedResultSummaryFor(message.name, message.result)
+        resultPreview = summary === undefined || summary === '' ? '' : ` — ${summary}`
       } else {
         resultPreview = message.result === ''
           ? ''

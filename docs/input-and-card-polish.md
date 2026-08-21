@@ -1,6 +1,6 @@
-# Input and card polish: bash completion, local-shell sandbox, question answers, goal cards, todo dock click
+# Input and card polish: bash completion, local-shell sandbox, question answers, goal cards, todo dock click, JSON folded previews
 
-Five small, independent surface improvements, designed together because they
+Six small, independent surface improvements, designed together because they
 land in the same release cycle. Each section records the decision, the
 rationale, the exact touch points, and the guarding tests. Workflow card
 rendering (`tool-workflow/*`) is deliberately **out of scope** — reviewed and
@@ -13,6 +13,7 @@ kept as-is.
 | 3 | `ask_user_question` answers card | Folded: `N/M answered` summary; expanded: per-question answer lines |
 | 4 | Goal cards (`get_goal`/`create_goal`/`update_goal`) | Folded: goal summary; expanded: field lines; named headers |
 | 5 | Todo dock click (fullscreen) | Map the dock summary row to `toggleTodoPanel()` |
+| 6 | JSON-result folded previews | Web parity audit: expanded stays verbatim, folded never leaks JSON |
 
 ---
 
@@ -290,7 +291,6 @@ are omitted, malformed text returns undefined → generic fallback).
   (`Update Goal edit`, `Create Goal ship it`).
 
 ## 5. Todo dock click (fullscreen)
-
 ### Why
 
 In fullscreen the dock strip shows the todo summary (`☑ 2 active · …`) while
@@ -368,6 +368,52 @@ wholesale each frame).
 
 ---
 
+## 6. JSON-result folded previews (web parity audit)
+
+### Why
+
+An audit of every dsh tool definition (four parallel passes over all
+`defineTool` registrations) found the families whose render text is a raw
+`JSON.stringify` dump with no `presentResult`: `schedule_create` /
+`schedule_list` / `schedule_delete`, `cordis_inspect_list` /
+`cordis_inspect_query` / `cordis_inspect_self`, and `ralph` (whose render
+leads with a friendly line, so only its JSON tail was at risk). The web
+renders all of these through `GenericToolCard`: the folded row shows only
+the args summary (never the result), and the expanded OUT section shows the
+result text verbatim — **no JSON beautification on the web either**.
+
+### Decision (align with the web)
+
+- **Expanded body stays verbatim** — the web shows the result text as-is,
+  so the TUI keeps the raw text too (it already did; no change).
+- **Folded preview never leaks JSON.** The TUI keeps its result-preview row
+  (a kimi-style feature the web lacks) but shows a parsed summary instead:
+  ralph → its friendly first line (or `status · N rounds` for a bare-JSON
+  result), `schedule_list` → `N scheduled` / `no scheduled jobs`,
+  `schedule_create` → `kind · state`, `schedule_delete` → `deleted` /
+  `not found`, `cordis_inspect_list` → `N providers` /
+  `no providers`, `cordis_inspect_query` → `platform · provider · method`,
+  `cordis_inspect_self` → `mode <mode>`. When nothing can be derived the
+  preview row is dropped entirely — never the raw JSON.
+- The agent-team family (experimental, not in the production bundle) is
+  deliberately excluded: two of its tools (`send_message`,
+  `interrupt_agent`) share names with subagent tools whose render text is
+  friendly, and a name-keyed set cannot tell them apart.
+
+**Touch points**
+
+- `src/present.ts` — `FOLDED_JSON_RESULT_TOOLS`, `parseJsonValue`
+  (prefix-tolerant), `foldedResultSummaryFor`.
+- `src/tui-app.ts` — the folded `resultPreview` branch for the set.
+
+**Tests**
+
+- `present` unit tests: every tool's summary phrase, the ralph friendly
+  prefix, bare-JSON ralph, error shapes, undeducible results → `undefined`.
+- Headless: folded cards show the summaries and never the raw JSON keys.
+
+---
+
 ## Non-goals
 
 - Workflow card rendering (`tool-workflow/*`) — reviewed, kept as-is.
@@ -377,3 +423,6 @@ wholesale each frame).
 - Regular (non-fullscreen) mouse support — the main screen has no
   `onCellClick` by design (terminal scrollback).
 - Any change to the `!` context-submission guard/followup flow.
+- Expanded-body beautification of JSON-result tools — the web shows the
+  result verbatim; the TUI aligns. (agent-team folded previews excluded:
+  experimental, name collisions.)

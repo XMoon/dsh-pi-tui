@@ -2246,6 +2246,61 @@ test('goalResultSummary and goalResultLines parse the shared goal shape', async 
   ])
 })
 
+test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async () => {
+  const { foldedResultSummaryFor } = await import('../src/present.ts')
+  // ralph: the render text's friendly first line is the summary.
+  assert.equal(
+    foldedResultSummaryFor('ralph', 'Ralph worker reported completion after 2 rounds.\nFinal report:\n{"status":"complete"}'),
+    'Ralph worker reported completion after 2 rounds.',
+  )
+  // A bare-JSON ralph result (no render prefix) falls back to status/rounds.
+  assert.equal(foldedResultSummaryFor('ralph', '{"status":"blocked","roundsStarted":3,"report":{}}'), 'blocked · 3 rounds')
+  // schedule family.
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1"}]'), '1 scheduled')
+  assert.equal(foldedResultSummaryFor('schedule_list', '[]'), 'no scheduled jobs')
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"pending"}'), 'after · pending')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true}'), 'deleted')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false}'), 'not found')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"code":"schedule_error","message":"boom"}'), 'schedule_error')
+  // cordis inspect family.
+  assert.equal(foldedResultSummaryFor('cordis_inspect_list', '{"providers":[{"platform":"p"},{"platform":"q"}]}'), '2 providers')
+  assert.equal(foldedResultSummaryFor('cordis_inspect_list', '{"providers":[]}'), 'no providers')
+  assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"platform":"p","provider":"x","method":"query"}'), 'p · x · query')
+  assert.equal(foldedResultSummaryFor('cordis_inspect_self', '{"mode":"plugins","plugins":[]}'), 'mode plugins')
+  // Undeducible results yield undefined (the caller shows NO preview).
+  assert.equal(foldedResultSummaryFor('schedule_create', 'not json at all'), undefined)
+  assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"data":42}'), undefined)
+})
+
+test('folded JSON-result cards show the summary, never the raw JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    {
+      kind: 'tool', turn: 0, name: 'schedule_list', args: '{}',
+      result: '[{"kind":"after","id":"s1","prompt":"ping","scheduledAt":"t","state":"pending","deliveryMode":"queue","afterSeconds":30}]',
+      status: 'ok',
+    },
+    {
+      kind: 'tool', turn: 0, name: 'cordis_inspect_list', args: '{}',
+      result: '{"providers":[{"platform":"p","id":"i","purpose":"x","methods":[]}]}',
+      status: 'ok',
+    },
+    {
+      kind: 'tool', turn: 0, name: 'ralph', args: '{}',
+      result: 'Ralph worker reported completion after 2 rounds.\nFinal report:\n{"status":"complete","report":{"summary":"done"}}',
+      status: 'ok',
+    },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('— 1 scheduled'), `schedule summary missing:\n${view}`)
+  assert.ok(view.includes('— 1 providers'), `cordis summary missing:\n${view}`)
+  assert.ok(view.includes('— Ralph worker reported completion after 2 rounds.'), `ralph summary missing:\n${view}`)
+  assert.ok(!view.includes('"afterSeconds"'), `raw schedule JSON leaked into the fold:\n${view}`)
+  assert.ok(!view.includes('"providers"'), `raw cordis JSON leaked into the fold:\n${view}`)
+  assert.ok(!view.includes('"summary"'), `raw ralph report JSON leaked into the fold:\n${view}`)
+  app.stop()
+})
+
 test('cancelled ask_user_question cards show the structured error identity', async () => {
   const { vt, app } = startApp()
   app.setTranscript([
