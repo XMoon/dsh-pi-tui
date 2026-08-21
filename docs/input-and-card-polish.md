@@ -78,9 +78,11 @@ Decisions that matter:
   the lister produces nothing). Unknown commands fall back to fd path
   completion. The table is a `Record<string, {lister, fallback}>`
   constant — extending it is a one-line change.
-- **Item shape.** `AutocompleteItem { value, label, description }`; the
-  description carries the resolved command path (`which`-style, from
-  `compgen`'s output only — no extra spawn) when available.
+- **Item shape.** `AutocompleteItem { value, label }` — the compgen
+  command list carries names only, and resolving each candidate's path
+  would need an extra `which`-style spawn per keystroke, so items carry no
+  description (revised from an early draft that promised a `which`-style
+  path; `$VAR` and subcommand items are name-only too).
 - **applyCompletion.** Command-name items replace the first word after the
   `!` prefix; path items keep the fork's existing apply path. The `!`/`!!`
   prefix itself is never touched.
@@ -411,6 +413,35 @@ result text verbatim — **no JSON beautification on the web either**.
 - `present` unit tests: every tool's summary phrase, the ralph friendly
   prefix, bare-JSON ralph, error shapes, undeducible results → `undefined`.
 - Headless: folded cards show the summaries and never the raw JSON keys.
+
+---
+
+## Review record
+
+Independent review chain (codex / gpt-5.6-luna, read-only, fresh context per
+round) over the three commits plus the round-1 fixes:
+
+- **Round 1 — needs-fixes (10 findings).** P1: folded question/goal previews
+  leaked raw JSON on parse/shape failure; folded branches did not prioritize
+  `message.error`; question-modal clicks outside the frame reached background
+  routing; failed compgen runs were cached as empty command sets; the
+  completion bridge had no deterministic spawn/cache test seam; the sandbox
+  preference silently downgraded to spawn when `ctx.shell` is absent. P2:
+  answer summary totals could disagree with the expanded lines (malformed
+  entries); the question-frame stale guard checked rows only; completion and
+  `!` execution used different working directories; the item-shape doc
+  promised a path description that was never implemented.
+- **Round 1 fixes.** Folded previews drop the row entirely when nothing safe
+  can be derived and never run for failed calls; the question branch captures
+  every click while a question is up; `CompgenRun { ok, lines }` with
+  success-only caching plus an injectable runner and cache-reset seam;
+  `parseAnswerEntries` shares one normalization (a malformed entry
+  invalidates the whole set, web `every-isAnswer` parity); `termColumns` is
+  recorded and guarded alongside rows; `!` runs in `sessionCwd()` (pi
+  parity); an opted-in sandbox with no shell capability notifies every run.
+- **Round 2 verdict — accepted, no open findings.** 154/154 targeted and
+  1227/1227 full-suite tests, typecheck, `git diff --check`, and the CJK scan
+  all clean; the working tree was not modified by the reviewer.
 
 ---
 

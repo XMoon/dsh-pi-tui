@@ -205,6 +205,7 @@ class QuestionFrame extends Frame implements Focusable {
   render(width: number): string[] {
     const rows = Math.max(1, this.heightOf())
     this.lastTermRows = rows
+    this.lastTermColumns = width
     // The 60% cap is the DEFAULT (keeps the transcript visible); an explicit
     // body expand ('e' or a click on the scroll marker) grows the frame
     // toward 80% — the user asked for the room, and the flow's budget math
@@ -229,6 +230,12 @@ class QuestionFrame extends Frame implements Focusable {
     return this.lastTermRows
   }
 
+  /** The terminal width the last render used (a resize changes wrapping and
+   * the flow's hit map, so clicks must wait for a fresh render too). */
+  get termColumns(): number {
+    return this.lastTermColumns
+  }
+
   get focused(): boolean {
     return this.flow.focused
   }
@@ -236,6 +243,8 @@ class QuestionFrame extends Frame implements Focusable {
   set focused(value: boolean) {
     this.flow.focused = value
   }
+
+  private lastTermColumns = 0
 }
 
 /** The session head card: identity facts, wrapped to the available width so
@@ -2679,11 +2688,15 @@ export class TuiApp {
     // rendered height.
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
-      // Stale-geometry guard: between a terminal resize and the next
-      // repaint the frame's rendered height (and the flow's hit map) still
-      // reflect the OLD terminal — a click in that window would map to the
-      // wrong content row. Ignore clicks until the next render.
-      if (this.terminal.rows !== question.frame.termRows) return
+      // The question owns the modal front: EVERY click while a question is
+      // up is captured here (in-frame clicks route to the flow; out-of-frame
+      // clicks and the stale-geometry window are ignored) — background todo/
+      // transcript interaction must not be reachable behind the modal.
+      // Stale-geometry guard: between a terminal resize (rows OR columns —
+      // a width change rewraps the body and shifts the flow's hit map) and
+      // the next repaint, the frame's rendered height and hit map still
+      // reflect the OLD terminal.
+      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) return
       const width = this.terminal.columns
       const height = this.terminal.rows
       const footerHeight = this.footer.render(width).length
@@ -2697,8 +2710,8 @@ export class TuiApp {
           question.flow.clickRow(y - seatTop - 1)
           this.requestRender()
         }
-        return
       }
+      return
     }
     void x
     const width = this.terminal.columns
@@ -4205,25 +4218,26 @@ export class TuiApp {
       } else if (message.name === 'ask_user_question') {
         // The folded preview never shows the raw `{"answers":[…]}` JSON the
         // tool's render text carries (Web AskQuestionRow parity): the
-        // answered-count summary replaces it when parseable, otherwise the
-        // generic result preview (e.g. a cancellation verdict) stays.
-        const summary = askAnswersSummary(message.result)
-        resultPreview = summary === undefined
-          ? message.result === '' ? '' : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
-          : ` — ${summary}`
+        // answered-count summary replaces it when parseable. A FAILED call
+        // shows no summary at all (its error identity is the verdict), and
+        // an unparseable result shows no preview either — the no-JSON
+        // contract holds even for malformed text.
+        const summary = message.error === undefined ? askAnswersSummary(message.result) : undefined
+        resultPreview = summary === undefined ? '' : ` — ${summary}`
       } else if (GOAL_TOOL_NAMES.has(message.name)) {
         // Same rule for the goal family: the folded preview summarizes the
         // `{"goal":…}` result (`phase active · revision 3 · 2/6 rounds`,
-        // `no goal set`) instead of dumping raw JSON.
-        const summary = goalResultSummary(message.result)
-        resultPreview = summary === undefined
-          ? message.result === '' ? '' : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
-          : ` — ${summary}`
+        // `no goal set`) instead of dumping raw JSON; failed calls and
+        // unparseable results show no preview.
+        const summary = message.error === undefined ? goalResultSummary(message.result) : undefined
+        resultPreview = summary === undefined ? '' : ` — ${summary}`
       } else if (FOLDED_JSON_RESULT_TOOLS.has(message.name)) {
         // Web parity: the folded row never shows the result JSON. The TUI
         // keeps its result-preview row but shows a parsed summary (ralph:
         // its friendly first line; schedule/cordis: derived phrases) — and
         // NO preview at all when nothing can be derived, never raw JSON.
+        // A failed call's summary doubles as its error identity (e.g. a
+        // schedule error object's code), so it is NOT suppressed.
         const summary = foldedResultSummaryFor(message.name, message.result)
         resultPreview = summary === undefined || summary === '' ? '' : ` — ${summary}`
       } else {

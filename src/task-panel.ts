@@ -372,6 +372,14 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private hint(): string {
     const search = this.searchEnabled ? 'type to filter · ' : ''
-    return `${search}↑↓ navigate · enter open · esc close`
+    // The interrupt verbatim shows only while a subagent row is selectable
+    // (search off, or an empty query on a subagent row): `i` on a job row
+    // is a search letter, so advertising it unconditionally would lie.
+    // Without the hint the merged /tasks surface hid its only terminate
+    // entry — the old /subagents submenu is gone (ec74c9b).
+    const interrupt = this.filtered.some(item => item.value.startsWith('agent:'))
+      ? 'i interrupt · '
+      : ''
+    return `${search}${interrupt}↑↓ navigate · enter open · esc close`
   }
 }

@@ -1541,9 +1541,11 @@ export function apply(ctx: Context, config: Config): void {
     /**
      * The LIVE session's workspace: each session carries its own header cwd
      * (fixed at creation, e.g. a session birthed by the web in another
-     * directory). The footer/welcome/completions follow THIS cwd so a
-     * session switch updates the whole surface; `cwd` (the process cwd)
-     * stays for launch-relative concerns (`!` shell, /export paths).
+     * directory). The footer/welcome/completions AND `!`/`!!` shell runs
+     * follow THIS cwd, so a session switch moves the whole surface with the
+     * session (pi parity: `executeBash` runs in the session cwd) and a
+     * shell command executes where the completions suggest files; `cwd`
+     * (the process cwd) stays for launch-relative concerns (/export paths).
      */
     const sessionCwd = (): string => liveAgent?.session.header.cwd ?? cwd
     /** The footer model label: the live selection (with effort) when one exists. */
@@ -1834,7 +1836,14 @@ export function apply(ctx: Context, config: Config): void {
         // run was cancelled; the partial output is noise).
         if (includeInContext && !localSignal.aborted) submitResult(result)
       }
-      const shell = localShellSandboxPreferenceOf(tuiSettings?.get()) === 'sandbox' ? ctx.get('shell') : undefined
+      const sandboxPreference = localShellSandboxPreferenceOf(tuiSettings?.get())
+      const shell = sandboxPreference === 'sandbox' ? ctx.get('shell') : undefined
+      if (shell === undefined && sandboxPreference === 'sandbox') {
+        // The user explicitly opted into the sandbox but the composition
+        // provides no shell capability: running unsandboxed SILENTLY would
+        // violate the preference, so the downgrade is surfaced every time.
+        app.notify('local shell sandbox unavailable in this composition — running unsandboxed', 'error')
+      }
       if (shell !== undefined) {
         // The dsh shell capability (sandbox policy + DSH env) when the
         // composition provides it AND the local-shell sandbox preference
@@ -1842,7 +1851,7 @@ export function apply(ctx: Context, config: Config): void {
         // The default ('bypass') runs user-typed commands through the plain
         // spawn path below — pi/kimi parity: the sandbox guards the model's
         // autonomous commands, not commands the user typed and chose to run.
-        const spec = shell.resolve({ command, workdir: cwd, signal: localSignal })
+        const spec = shell.resolve({ command, workdir: sessionCwd(), signal: localSignal })
         // An owned workflow: the RESULT settles the UI card, so the settle
         // logic stays in onResult and the cancellation/failure semantics
         // stay per-task (runOwned — AGENTS.md); the classification
@@ -1878,7 +1887,7 @@ export function apply(ctx: Context, config: Config): void {
         })
         return
       }
-      const child = spawn(command, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: true })
+      const child = spawn(command, { cwd: sessionCwd(), stdio: ['ignore', 'pipe', 'pipe'], shell: true })
       // Bounded capture: the card keeps only the TAIL (byte- and line-
       // capped, unterminated output included); the FULL output is streamed
       // to a 0600 temp file (disk-capped) so a truncated run still leaves

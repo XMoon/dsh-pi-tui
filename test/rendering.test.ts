@@ -824,6 +824,64 @@ test('a fullscreen click on an option row selects it', async () => {
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
 })
 
+test('clicks outside the active question frame are captured (the modal owns every click)', async () => {
+  const { vt, app } = startApp()
+  const todos = Array.from({ length: 3 }, (_, i) => ({
+    id: `t-${i}`, content: `todo item ${i}`,
+    status: 'pending' as const,
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = view.split('\n')
+  const dockIdx = lines.findIndex(line => strip(line).includes('☑'))
+  assert.ok(dockIdx >= 0, `todo summary dock row missing:\n${view}`)
+  assert.ok(lines.some(line => strip(line).includes('Proceed?')), `question missing:\n${view}`)
+  // A click on the dock row (outside the question frame) must NOT open the
+  // todo panel — the capturing modal consumes every click.
+  clickCell(vt, 10, dockIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(!app.isTodoPanelVisible(), 'a click outside the frame must not open the todo panel')
+  assert.ok(view.includes('Proceed?'), `question must stay mounted:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a question resize refreshes the click geometry in both dimensions', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const yesRow = (): number => view.split('\n').findIndex(line => strip(line).includes('[1] Yes'))
+  assert.ok(yesRow() >= 0, `option row missing:\n${view}`)
+  // The frame records BOTH terminal dimensions for the stale-click guard
+  // (a width resize rewraps the body and shifts the hit map, exactly like
+  // a height change).
+  const frame = (app as unknown as { activeQuestions?: { frame?: { termRows: number; termColumns: number } } }).activeQuestions?.frame
+  assert.equal(frame?.termColumns, 100, 'the frame must record the rendered width')
+  assert.equal(frame?.termRows, 24, 'the frame must record the rendered height')
+  // Resize the width; after the repaint the geometry is fresh and a click
+  // on the (moved) option row selects it again.
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  assert.equal(frame?.termColumns, 120, 'the repaint must refresh the recorded width')
+  view = await viewport(vt)
+  const movedIdx = view.split('\n').findIndex(line => strip(line).includes('[1] Yes'))
+  assert.ok(movedIdx >= 0, `option row missing after resize:\n${view}`)
+  clickCell(vt, 10, movedIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('Submit'), `a post-resize click must select the option:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
 test('a fullscreen click on the body scroll marker expands the panel', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -2336,7 +2394,11 @@ test('askAnswersSummary counts answered entries and skips skipped ones', async (
   assert.equal(askAnswersSummary('"str"'), undefined)
   assert.equal(askAnswersSummary('null'), undefined)
   assert.equal(askAnswersSummary('{"other":1}'), undefined)
-  assert.equal(askAnswersSummary(JSON.stringify({ answers: [null] })), '0/1 answered')
+  // A malformed entry (non-object) invalidates the WHOLE set — the same
+  // every-isAnswer check the web's answeredSummary applies — so the count
+  // can never disagree with the rendered lines.
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [null] })), undefined)
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [{ id: 'a', selected: ['x'] }, 'oops'] })), undefined)
 })
 
 test('askAnswersLines renders one line per answer, skipped entries dimmed', async () => {
@@ -2345,8 +2407,7 @@ test('askAnswersLines renders one line per answer, skipped entries dimmed', asyn
     { id: 'q1', selected: ['x', 'y'] },
     { id: 'q2', selected: [], custom: 'freeform' },
     { id: 'q3', selected: [], custom: '' },
-    // Malformed entries are skipped, non-string selected members dropped.
-    null,
+    // Non-string selected members are dropped.
     { id: 'q5', selected: [1, 'ok'] },
   ] })), [
     { text: '● q1 → x, y', skipped: false },
@@ -2359,6 +2420,10 @@ test('askAnswersLines renders one line per answer, skipped entries dimmed', asyn
   assert.equal(askAnswersLines('"str"'), undefined)
   assert.equal(askAnswersLines('null'), undefined)
   assert.equal(askAnswersLines('{"other":1}'), undefined)
+  // A malformed entry invalidates the set, exactly like the summary — the
+  // count and the rendered rows can never disagree.
+  assert.equal(askAnswersLines(JSON.stringify({ answers: [null] })), undefined)
+  assert.equal(askAnswersLines(JSON.stringify({ answers: [{ id: 'a', selected: ['x'] }, null] })), undefined)
   // Empty answers array parses to no lines (not an error).
   assert.deepEqual(askAnswersLines(JSON.stringify({ answers: [] })), [])
 })

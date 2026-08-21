@@ -303,6 +303,21 @@ test('empty state renders the no-match text and hint', () => {
   assert.ok(joined.includes('↑↓ navigate'), `hint missing:\n${joined}`)
 })
 
+test('the hint advertises i interrupt only while a subagent row is selectable', () => {
+  // A subagent row in the list: the interrupt verb shows (the merged /tasks
+  // surface's only terminate entry — the old /subagents submenu is gone).
+  const withAgent = makePanel([runningJob(), subagent()])
+  assert.ok(withAgent.rendered().map(strip).join('\n').includes('i interrupt · ↑↓ navigate'),
+    `interrupt hint missing with a subagent row:\n${withAgent.rendered().map(strip).join('\n')}`)
+  // Jobs only: `i` would be a search letter, so the verb must stay hidden.
+  const jobsOnly = makePanel([runningJob()])
+  assert.ok(!jobsOnly.rendered().map(strip).join('\n').includes('i interrupt'),
+    `interrupt hint must not advertise on job rows:\n${jobsOnly.rendered().map(strip).join('\n')}`)
+  // Empty list: no interrupt either.
+  const empty = makePanel([])
+  assert.ok(!empty.rendered().map(strip).join('\n').includes('i interrupt'))
+})
+
 test('dispose stops the elapsed tick (no render callbacks after close)', async (t) => {
   mock.timers.enable({ apis: ['setInterval'] })
   t.after(() => mock.timers.reset())

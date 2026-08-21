@@ -130,3 +130,74 @@ test('MentionProvider applies a shell item as a plain word replacement', async (
   const appliedVar = provider.applyCompletion(['!echo $HO'], 0, 9, { value: '$HOME', label: '$HOME' }, '$HO')
   assert.deepEqual(appliedVar, { lines: ['!echo $HOME '], cursorLine: 0, cursorCol: 12 })
 })
+
+// --- injected-runner determinism (review finding 4/5: failed runs must not
+// be cached, and the spawn/cache must be testable without real bash) ---
+
+import { resetCommandCacheForTest, setCompgenRunnerForTest, type CompgenRun } from '../src/shell-completion.ts'
+
+function fakeRunner(script: (expression: string, prefix: string) => CompgenRun): {
+  calls: { expression: string; prefix: string }[]
+} {
+  const calls: { expression: string; prefix: string }[] = []
+  setCompgenRunnerForTest((_cwd, expression, prefix) => {
+    calls.push({ expression, prefix })
+    return Promise.resolve(script(expression, prefix))
+  })
+  return { calls }
+}
+
+test('successful command lists are cached; failed runs are never cached', async () => {
+  resetCommandCacheForTest()
+  try {
+    const runner = fakeRunner(() => ({ ok: true, lines: ['git', 'gist'] }))
+    const first = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    assert.ok(first !== null && first.items.some(item => item.value === 'git'))
+    assert.equal(runner.calls.length, 1, 'the first request spawns once')
+    // Cache hit: a second request must not spawn again.
+    const second = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    assert.ok(second !== null)
+    assert.equal(runner.calls.length, 1, 'a cache hit must not re-run compgen')
+    // A FAILED run (timeout/abort/spawn error) must not create a cache
+    // entry: the next request retries the spawn instead of seeing an empty
+    // command set for the whole TTL.
+    resetCommandCacheForTest()
+    const failedRunner = fakeRunner(() => ({ ok: false, lines: [] }))
+    const failed = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    assert.equal(failed, null)
+    assert.equal(failedRunner.calls.length, 1, 'the failed run happened once')
+    const retried = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    assert.equal(retried, null)
+    assert.equal(failedRunner.calls.length, 2, 'a failed run must NOT be cached — the retry must spawn again')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+})
+
+test('an aborted request never spawns and variable/subcommand failures degrade', async () => {
+  resetCommandCacheForTest()
+  try {
+    const controller = new AbortController()
+    const calls: string[] = []
+    setCompgenRunnerForTest((_cwd, expression) => {
+      calls.push(expression)
+      return Promise.resolve({ ok: false, lines: [] })
+    })
+    controller.abort()
+    const aborted = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: controller.signal })
+    assert.equal(aborted, null)
+    assert.equal(calls.length, 0, 'an already-aborted request must not spawn')
+    // Variable failure: null, no cache side effects.
+    const vars = await suggestShellCompletion({ kind: 'variable', prefix: '$HO', priorWords: ['echo'] }, cwd, { signal: abort })
+    assert.equal(vars, null)
+    // Subcommand lister failure: the static fallback wins (never treated as
+    // a valid empty list).
+    const subs = await suggestShellCompletion({ kind: 'subcommand', prefix: 'che', priorWords: ['git'] }, cwd, { signal: abort })
+    assert.ok(subs !== null && subs.items.some(item => item.value === 'checkout'),
+      'a failed lister must fall back to the static subcommand table')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+})

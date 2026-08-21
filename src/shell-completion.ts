@@ -93,20 +93,51 @@ const SUBCOMMAND_TABLE: Readonly<Record<string, { lister: string; fallback: read
   },
 }
 
-/** One settled compgen run: stdout lines, or [] on any failure/timeout. */
-function runCompgen(cwd: string, expression: string, prefix: string, signal: AbortSignal): Promise<string[]> {
-  return new Promise<string[]>((resolve) => {
-    const settle = (lines: string[]): void => {
+/** One settled compgen run: whether the shell completed cleanly (exit 0)
+ * and its stdout lines. `ok: false` covers timeout kills, aborts, spawn
+ * failures and non-zero exits — the caller must NOT treat it as a valid
+ * empty result (a failed run cached as "no commands" would suppress
+ * completion for the whole TTL). */
+export interface CompgenRun {
+  readonly ok: boolean
+  readonly lines: readonly string[]
+}
+
+/** The compgen runner seam: the real spawn is default; tests inject a fake
+ * runner to make timeout/abort/failure/cache behavior deterministic. */
+type CompgenRunner = (cwd: string, expression: string, prefix: string, signal: AbortSignal) => Promise<CompgenRun>
+
+let compgenRunner: CompgenRunner = (cwd, expression, prefix, signal) => runCompgenSpawn(cwd, expression, prefix, signal)
+
+/** Test seam: replace the spawn-backed runner (restore with
+ * {@link setCompgenRunnerForTest} and the original). */
+export function setCompgenRunnerForTest(runner: CompgenRunner | undefined): void {
+  if (runner === undefined) {
+    compgenRunner = (cwd, expression, prefix, signal) => runCompgenSpawn(cwd, expression, prefix, signal)
+    return
+  }
+  compgenRunner = runner
+}
+
+/** Test seam: drop every cached command list (a failed run must never have
+ * cached anything; this also resets between tests that mutate PATH). */
+export function resetCommandCacheForTest(): void {
+  commandCache.clear()
+}
+
+function runCompgenSpawn(cwd: string, expression: string, prefix: string, signal: AbortSignal): Promise<CompgenRun> {
+  return new Promise<CompgenRun>((resolve) => {
+    const settle = (ok: boolean, lines: readonly string[]): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       signal.removeEventListener('abort', onAbort)
-      resolve(lines)
+      resolve({ ok, lines })
     }
     let settled = false
     const onAbort = (): void => {
       child.kill()
-      settle([])
+      settle(false, [])
     }
     const child = spawn('bash', ['-lc', expression], {
       cwd,
@@ -115,7 +146,7 @@ function runCompgen(cwd: string, expression: string, prefix: string, signal: Abo
     })
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
-      settle([])
+      settle(false, [])
     }, COMPGEN_TIMEOUT_MS)
     signal.addEventListener('abort', onAbort, { once: true })
     let out = ''
@@ -123,9 +154,9 @@ function runCompgen(cwd: string, expression: string, prefix: string, signal: Abo
     // stderr is ignored: a missing command or a bash error is "no
     // suggestions", never an editor-visible error.
     child.stderr.on('data', () => {})
-    child.on('error', () => settle([]))
-    child.on('close', () => {
-      settle(out.split('\n').filter(line => line !== ''))
+    child.on('error', () => settle(false, []))
+    child.on('close', (code) => {
+      settle(code === 0, out.split('\n').filter(line => line !== ''))
     })
   })
 }
@@ -135,18 +166,21 @@ interface CommandCacheEntry {
   readonly commands: readonly string[]
 }
 
-/** Command-name cache, keyed by cwd + PATH (30s TTL). */
+/** Command-name cache, keyed by cwd + PATH (30s TTL). Only SUCCESSFUL runs
+ * are cached — a failed run (timeout/abort/spawn error) must not suppress
+ * completion for the whole TTL, so the next request retries the spawn. */
 const commandCache = new Map<string, CommandCacheEntry>()
 
 /** The cached `compgen -A command` list for one cwd+PATH, refreshed on
- * expiry or abort. */
+ * expiry or after a failed run. */
 async function cachedCommands(cwd: string, signal: AbortSignal): Promise<readonly string[]> {
   const key = `${cwd}\0${process.env.PATH ?? ''}`
   const entry = commandCache.get(key)
   if (entry !== undefined && entry.expires > Date.now()) return entry.commands
-  const commands = await runCompgen(cwd, 'compgen -A command', '', signal)
-  commandCache.set(key, { expires: Date.now() + COMMAND_CACHE_TTL_MS, commands })
-  return commands
+  const run = await compgenRunner(cwd, 'compgen -A command', '', signal)
+  if (!run.ok) return []
+  commandCache.set(key, { expires: Date.now() + COMMAND_CACHE_TTL_MS, commands: run.lines })
+  return run.lines
 }
 
 /** Filter one candidate list to the prefix and cap it ('' prefix keeps all). */
@@ -187,17 +221,19 @@ export async function suggestShellCompletion(
     return matchesFor(context.prefix, commands)
   }
   if (context.kind === 'variable') {
-    const names = await runCompgen(cwd, 'compgen -A variable -- "$COMPGEN_WORD"', context.prefix.slice(1), options.signal)
-    const items = names.slice(0, MAX_SUGGESTIONS).map(name => ({ value: `$${name}`, label: `$${name}` }))
+    const run = await compgenRunner(cwd, 'compgen -A variable -- "$COMPGEN_WORD"', context.prefix.slice(1), options.signal)
+    if (!run.ok) return null
+    const items = run.lines.slice(0, MAX_SUGGESTIONS).map(name => ({ value: `$${name}`, label: `$${name}` }))
     return items.length === 0 ? null : { items, prefix: context.prefix }
   }
   // Subcommand of a known listable command: the live lister wins, the
-  // static fallback covers commands/versions that cannot list themselves.
+  // static fallback covers commands/versions that cannot list themselves
+  // (a failed lister is NOT a valid empty list).
   const command = context.priorWords[0]!
   const entry = SUBCOMMAND_TABLE[command]
-  const lines = await runCompgen(cwd, entry.lister, '', options.signal)
-  const candidates = lines.length > 0
-    ? lines.map(line => line.trim()).filter(line => line !== '')
+  const run = await compgenRunner(cwd, entry.lister, '', options.signal)
+  const candidates = run.ok && run.lines.length > 0
+    ? run.lines.map(line => line.trim()).filter(line => line !== '')
     : entry.fallback
   return matchesFor(context.prefix, candidates)
 }

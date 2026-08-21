@@ -632,6 +632,48 @@ export function resultTextLines(blocks: readonly ContentBlock[], error?: { name:
   return lines
 }
 
+/** One normalized answer entry, shared by the summary and the display lines
+ * so the count always matches the rendered rows (the review-fix-loop P2
+ * finding: malformed entries must not be counted but skipped from lines). */
+interface NormalizedAnswerEntry {
+  readonly id: string
+  readonly selected: readonly string[]
+  readonly custom: string
+}
+
+/**
+ * Parse and normalize the tool's `{"answers":[…]}` render text. A
+ * malformed entry (non-object) invalidates the WHOLE text — the Web's
+ * `answeredSummary` checks `answers.every(isAnswer)` the same way, and a
+ * half-valid set would make the count and the rendered rows disagree.
+ * Non-string `selected` members are dropped; missing id/custom normalize
+ * to empty.
+ * @param text - the settled result text.
+ * @returns the normalized entries, or undefined when unparseable/malformed.
+ */
+function parseAnswerEntries(text: string): NormalizedAnswerEntry[] | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const answers = (parsed as { answers?: unknown }).answers
+  if (!Array.isArray(answers)) return undefined
+  if (!answers.every(entry => typeof entry === 'object' && entry !== null)) return undefined
+  return answers.map(entry => {
+    const candidate = entry as { id?: unknown; selected?: unknown; custom?: unknown }
+    return {
+      id: typeof candidate.id === 'string' ? candidate.id : '',
+      selected: Array.isArray(candidate.selected)
+        ? candidate.selected.filter((item): item is string => typeof item === 'string')
+        : [],
+      custom: typeof candidate.custom === 'string' ? candidate.custom : '',
+    }
+  })
+}
+
 /**
  * The answered-count summary for a settled `ask_user_question` result
  * (Web AskQuestionRow parity): parses the tool's `{"answers":[…]}` render
@@ -644,23 +686,10 @@ export function resultTextLines(blocks: readonly ContentBlock[], error?: { name:
  * @returns the answered-count summary, or undefined when unparseable.
  */
 export function askAnswersSummary(text: string): string | undefined {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return undefined
-  }
-  if (typeof parsed !== 'object' || parsed === null) return undefined
-  const answers = (parsed as { answers?: unknown }).answers
-  if (!Array.isArray(answers)) return undefined
-  const total = answers.length
-  const answered = answers.filter((entry): boolean => {
-    if (typeof entry !== 'object' || entry === null) return false
-    const candidate = entry as { selected?: unknown; custom?: unknown }
-    return (Array.isArray(candidate.selected) && candidate.selected.length > 0)
-      || (typeof candidate.custom === 'string' && candidate.custom !== '')
-  }).length
-  return `${answered}/${total} answered`
+  const entries = parseAnswerEntries(text)
+  if (entries === undefined) return undefined
+  const answered = entries.filter(entry => entry.selected.length > 0 || entry.custom !== '').length
+  return `${answered}/${entries.length} answered`
 }
 
 /** One display line of a settled `ask_user_question` result, pre-colored. */
@@ -676,37 +705,20 @@ export interface AskAnswerLine {
  * (the expanded card's body, complementing {@link askAnswersSummary}'s
  * count). Parses the tool's `{"answers":[…]}` render text and renders one
  * line per entry: `● <id> → <selected, custom>` for an answered question,
- * `○ <id> — skipped` when neither is present. Shape-checking is lenient
- * like {@link askAnswersSummary}: a malformed entry is skipped, non-string
- * members of `selected` are dropped, and an unparseable/non-`answers` text
- * returns undefined so the caller falls back to the generic presentation.
+ * `○ <id> — skipped` when neither is present. Shares the normalization with
+ * {@link askAnswersSummary}, so the rendered rows and the count always
+ * agree; an unparseable/malformed text returns undefined.
  * @param text - the settled result text.
- * @returns the display lines, or undefined when unparseable.
+ * @returns the display lines, or undefined when unparseable/malformed.
  */
 export function askAnswersLines(text: string): AskAnswerLine[] | undefined {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return undefined
-  }
-  if (typeof parsed !== 'object' || parsed === null) return undefined
-  const answers = (parsed as { answers?: unknown }).answers
-  if (!Array.isArray(answers)) return undefined
-  const lines: AskAnswerLine[] = []
-  for (const entry of answers) {
-    if (typeof entry !== 'object' || entry === null) continue
-    const candidate = entry as { id?: unknown; selected?: unknown; custom?: unknown }
-    const id = typeof candidate.id === 'string' ? candidate.id : ''
-    const selected = Array.isArray(candidate.selected)
-      ? candidate.selected.filter((item): item is string => typeof item === 'string')
-      : []
-    const custom = typeof candidate.custom === 'string' ? candidate.custom : ''
-    if (selected.length > 0) lines.push({ text: `● ${id} → ${selected.join(', ')}`, skipped: false })
-    else if (custom !== '') lines.push({ text: `● ${id} → ${custom}`, skipped: false })
-    else lines.push({ text: `○ ${id} — skipped`, skipped: true })
-  }
-  return lines
+  const entries = parseAnswerEntries(text)
+  if (entries === undefined) return undefined
+  return entries.map(entry => {
+    if (entry.selected.length > 0) return { text: `● ${entry.id} → ${entry.selected.join(', ')}`, skipped: false }
+    if (entry.custom !== '') return { text: `● ${entry.id} → ${entry.custom}`, skipped: false }
+    return { text: `○ ${entry.id} — skipped`, skipped: true }
+  })
 }
 
 /** The parsed `{"goal":…}` result shape the three goal tools share. */
