@@ -341,9 +341,11 @@ test('/login picker rows are grouped via the group field with the Add row last',
   // may be selectable; the Add New Platform row is last and ungrouped.
   // anthropic has a stored profile in the section (apiKeyEnv undefined →
   // derived ref) so it is configured; acme-gateway has no profile → custom.
-  assert.equal(t.pickerRows[0]?.group, 'configured') // deepseek official
-  assert.equal(t.pickerRows[1]?.group, 'configured') // anthropic
-  assert.equal(t.pickerRows[2]?.group, 'custom') // acme-gateway
+  // Reference rows all live under the `API key` category so the picker
+  // separates them from provider sign-in rows at a glance.
+  assert.equal(t.pickerRows[0]?.group, 'API key · configured') // deepseek official
+  assert.equal(t.pickerRows[1]?.group, 'API key · configured') // anthropic
+  assert.equal(t.pickerRows[2]?.group, 'API key · custom') // acme-gateway
   const add = t.pickerRows.at(-1)
   assert.equal(add?.label, '[ Add New Platform ]')
   assert.equal(add?.group, undefined)

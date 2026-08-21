@@ -440,17 +440,19 @@ function readProviderOptions(ctx: Context): ProviderOption[] {
   })
 }
 
-/** Build the merged /login picker rows: reference targets keep their
- * configured/available/custom groups (the fork renders a non-interactive
- * header row per group), authorization targets get their own group, and the
- * Add New Platform action row is pinned last. Authorization row values
- * carry the AUTH_VALUE_PREFIX so they can never collide with a route. */
+/** Build the merged /login picker rows: reference targets (the API-key
+ * path) keep their configured/available/custom groups, prefixed with the
+ * `API key` category so the two credential planes are visible at a glance
+ * (the fork renders a non-interactive header row per group); authorization
+ * targets (the provider sign-in path) get their own group, and the Add New
+ * Platform action row is pinned last. Authorization row values carry the
+ * AUTH_VALUE_PREFIX so they can never collide with a route. */
 function mergedPickerRows(merged: readonly LoginTarget[]): PickerItem[] {
   const rows: PickerItem[] = []
   const groupLabels: Record<string, string> = {
-    configured: 'configured',
-    available: 'available · catalog',
-    custom: 'custom',
+    configured: 'API key · configured',
+    available: 'API key · available',
+    custom: 'API key · custom',
     authorization: 'sign in with provider',
   }
   for (const target of merged) {
@@ -747,7 +749,7 @@ async function askAddProvider(
     kind: 'ok',
     text: key === ''
       ? `provider ${routeValue} added (no key; provider-native authentication)`
-      : `${ref} set · provider ${routeValue} added`,
+      : `API key ${ref} set · provider ${routeValue} added`,
   }
 }
 
@@ -2304,7 +2306,7 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'login',
-    description: 'Sign in — deepseek official or an llm-pi-ai provider route (API key or provider-native flow)',
+    description: 'Sign in with a provider or set an API key — deepseek official or an llm-pi-ai provider route',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
       const credentials = ctx.get('credentials')
@@ -2409,12 +2411,12 @@ export function registerTuiCommands(
       const label = option?.label ?? route ?? targetRef
       try {
         const answers = await app.askQuestions([
-          { id: 'key', question: `Paste the API key for ${label}:`, masked: true },
+          { id: 'key', question: `Enter the API key for ${label}:`, masked: true },
         ])
         const key = answers[0]?.custom ?? ''
         if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
         await credentials.set(targetRef as CredentialRef, key)
-        return { kind: 'success', text: `${targetRef} set` }
+        return { kind: 'success', text: `API key ${targetRef} set` }
       } catch {
         return { kind: 'error', text: 'login cancelled' }
       }
@@ -2448,7 +2450,7 @@ export function registerTuiCommands(
             return { kind: 'success', text: `${flow.label} signed out locally — stored credential cleared` }
           }
           await credentials.unset(resolved as CredentialRef)
-          return { kind: 'success', text: `${resolved} cleared` }
+          return { kind: 'success', text: `API key ${resolved} cleared` }
         }
         // A route naming a flow directly (no provider option for it).
         const flow = flowForRoute(targets, arg.toLowerCase())
@@ -2478,7 +2480,7 @@ export function registerTuiCommands(
       }
       const targetRef = picked.slice(LOGOUT_REF_VALUE.length)
       await credentials.unset(targetRef as CredentialRef)
-      return { kind: 'success', text: `${targetRef} cleared` }
+      return { kind: 'success', text: `API key ${targetRef} cleared` }
     },
   })
 
