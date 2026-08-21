@@ -1171,8 +1171,11 @@ export class TuiApp {
   private workingMessageOverride: string | undefined
   /** Timestamp of the last Ctrl+C press, for the empty-editor exit chord. */
   private lastCtrlCAt: number | undefined
-  /** The empty-editor double-Ctrl+C exit window in ms (pi handleCtrlC). */
-  private static readonly CTRL_C_EXIT_WINDOW_MS = 500
+  /** The empty-editor double-Ctrl+C exit window in ms. A 500ms window
+   * silently misses a human-paced double press (0.6–1s apart), which
+   * read as "the chord doesn't work"; 1.5s covers a natural double
+   * press, and the armed state is announced by the hint. */
+  private static readonly CTRL_C_EXIT_WINDOW_MS = 1500
   /** Session workspace root for path relativization (Web relativizeToCwd). */
   private readonly workspaceRoot: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
@@ -1831,6 +1834,9 @@ export class TuiApp {
       this.clearNotify()
       this.seatEditor().setText('')
       this.editorSeatHolder.notifyChanged()
+      // Consumed at the app level: request the frame ourselves (the
+      // stale-clear trap — see the Ctrl+C branch).
+      this.requestRender()
       this.events.onQueueSubmit(text)
       return { consume: true }
     }
@@ -1897,6 +1903,9 @@ export class TuiApp {
       const draft = this.seatEditor().getText()
       this.seatEditor().setText('')
       this.editorSeatHolder.notifyChanged()
+      // Consumed at the app level: request the frame ourselves (the
+      // stale-clear trap — see the Ctrl+C branch).
+      this.requestRender()
       this.events.onSteer?.(draft)
       return { consume: true }
     }
@@ -1939,6 +1948,13 @@ export class TuiApp {
         this.seatEditor().setText('')
         this.editorSeatHolder.notifyChanged()
         this.lastCtrlCAt = Date.now()
+        // The key is CONSUMED at the app level, so the fork's input path
+        // never reaches the focused editor and never requests its own
+        // frame — without an explicit render the cleared draft stays on
+        // screen until the next keypress (the stale-clear trap, seen in
+        // tmux: the editor reads empty but the old text is still
+        // visible). Same pattern as setDraft/submitDraft.
+        this.requestRender()
         return { consume: true }
       }
       const now = Date.now()
@@ -1947,6 +1963,12 @@ export class TuiApp {
         this.events.onExit()
       } else {
         this.lastCtrlCAt = now
+        // First press on an EMPTY editor changes nothing visible, and the
+        // exit window is easy to miss — announce the armed state so a
+        // slow second press is not a silent no-op (the next Enter would
+        // otherwise send an empty draft). The second press within the
+        // window exits.
+        this.notify('Press Ctrl+C again to exit', 'info')
       }
       return { consume: true }
     }

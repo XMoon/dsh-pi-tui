@@ -106,11 +106,23 @@ test('a second Ctrl+C within the window on the EMPTY editor exits', async () => 
   assert.equal(surface.exits, 1, 'after exiting the window resets')
 })
 
+test('the first empty-editor Ctrl+C shows the exit-chord hint', async () => {
+  const surface = startAppWithExits()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // empty editor: arms the window
+  await surface.vt.waitForRender()
+  const viewport = surface.vt.getViewport().join('\n')
+  assert.ok(viewport.includes('Press Ctrl+C again to exit'),
+    `the armed window must be visible (a silent arm is a missed chord):\n${viewport}`)
+  assert.equal(surface.exits, 0, 'the first press must not exit')
+})
+
 test('Ctrl+C presses spaced beyond the window do not exit', async () => {
   const surface = startAppWithExits()
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03')
-  await new Promise(resolve => setTimeout(resolve, 600))
+  // The exit window is 1500ms; a press beyond it must only re-arm.
+  await new Promise(resolve => setTimeout(resolve, 1750))
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 0, 'a slow second Ctrl+C must not exit')
@@ -125,6 +137,21 @@ test('Ctrl+C clears text first, THEN a fast second press exits', async () => {
   surface.vt.sendInput('\x03') // empty + within the window: exit
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 1, 'clear-then-exit is the pi chord')
+})
+
+test('Ctrl+C clearing the editor REPAINTS the frame (stale-clear trap)', async () => {
+  const surface = startAppWithExits()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('hello world')
+  await surface.vt.waitForRender()
+  const before = surface.vt.getViewport().join('\n')
+  assert.ok(before.includes('hello world'), `the draft must be visible before Ctrl+C:\n${before}`)
+  surface.vt.sendInput('\x03') // ctrl+c
+  await surface.vt.waitForRender()
+  assert.equal(surface.app.seatTextForTest(), '', 'the editor must be cleared')
+  const after = surface.vt.getViewport().join('\n')
+  assert.ok(!after.includes('hello world'),
+    `the cleared editor must paint on the next frame (the key is app-consumed, so the fork never renders on its own):\n${after}`)
 })
 
 test('a SINGLE Esc while busy cancels immediately (pi parity)', async () => {

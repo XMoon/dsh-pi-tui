@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The double-Ctrl+C exit chord is now visible and forgiving.** The first
+  Ctrl+C on an empty editor silently armed a 500ms exit window with no
+  feedback, so a human-paced "double press" (often 0.6–1s apart) silently
+  re-armed and never exited — the next Enter then sent an empty draft,
+  looking exactly like the chord had broken. The window is now 1.5s and
+  the first press shows `Press Ctrl+C again to exit`, so the armed state
+  is discoverable and a natural double press exits.
+- **Ctrl+C clearing the editor now repaints immediately.** The pi-parity
+  first-press clear emptied the draft in memory but never scheduled a new
+  frame — the key is consumed at the app level, so the fork's input path
+  never reaches the focused editor and its render never fires. In a real
+  terminal the old text stayed visible until the next keypress, making the
+  clear look dead (and a hasty second Ctrl+C would then exit, per the
+  clear-then-exit chord). The Ctrl+S steer and Ctrl+Enter queue chords
+  received the same explicit repaint for their draft clears.
+
 ## [0.2.1] - 2026-08-21
 
 ### Changed
