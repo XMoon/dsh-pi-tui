@@ -176,9 +176,11 @@ function tabLabel(index: number, total: number): string {
 }
 
 /** Split a conventional recommendation suffix off the DISPLAY label (the
- * answer value keeps the full label — Web parseRecommendedLabel parity). */
+ * answer value keeps the full label — Web parseRecommendedLabel parity).
+ * English-only: the TUI never writes or matches localized labels (repo
+ * hard rule — user-facing strings are English). */
 function parseRecommended(label: string): { label: string; recommended: boolean } {
-  const suffix = /\s*(?:\((?:recommended|推荐)\)|（(?:recommended|推荐)）)\s*$/i
+  const suffix = /\s*\(recommended\)\s*$/i
   return suffix.test(label)
     ? { label: label.replace(suffix, ''), recommended: true }
     : { label, recommended: false }

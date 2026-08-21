@@ -149,8 +149,8 @@
   "scripts": {
     "build": "tsdown",
     "build:package": "pnpm --dir ../pi-tui build && pnpm build",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/*.test.ts test/*.test.mjs",
+    "typecheck": "pnpm build:package && tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build:package && node --test test/*.test.ts test/*.test.mjs",
     "clean": "rm -rf dist",
     "smoke": "node scripts/tarball-smoke.mjs",
     "smoke:fixture": "node scripts/extension-fixture-smoke.mjs",
