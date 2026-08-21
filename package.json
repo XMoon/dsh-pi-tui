@@ -1,6 +1,6 @@
 {
   "name": "@xmoon76/dsh-pi-tui",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "The dsh-pi-tui bundle: a TUI surface for DeepSeek Harness profiles (dsh --profile pi-tui)",
   "license": "MIT",
   "author": "XMoon <xmoonox@gmail.com>",

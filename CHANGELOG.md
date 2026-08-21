@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-21
+
+### Changed
+
+- **A startup gate explains an unsupported harness.** Running on a DeepSeek
+  Harness older than `dsh-v0.1.1-rc.1` now prints an actionable message
+  (the detected version, the minimum version, and the upgrade command)
+  before the loader's own failure — instead of a raw
+  `ERR_MODULE_NOT_FOUND` stack for the authorization row the profile
+  mounts, which the old harness cannot resolve. The message is generated
+  from a declarative compatibility table (`HARNESS_COMPAT`): future
+  version constraints are added as table entries, each with its own
+  incompatible range, the release line that first imposed it, and its
+  guidance.
+
+## [Unreleased]
+
+### Changed
+
+- **A startup gate explains an unsupported harness.** Running on a DeepSeek
+  Harness older than `dsh-v0.1.1-rc.1` now prints an actionable message
+  (the detected version, the minimum version, and the upgrade command)
+  before the loader's own failure — instead of a raw
+  `ERR_MODULE_NOT_FOUND` stack for the authorization row the profile
+  mounts, which the old harness cannot resolve. The message is generated
+  from a declarative compatibility table (`HARNESS_COMPAT`): future
+  version constraints are added as table entries, each with its own
+  incompatible range, the release line that first imposed it, and its
+  guidance.
 ## [0.3.0] - 2026-08-21
 
 ### Changed
@@ -678,7 +707,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1

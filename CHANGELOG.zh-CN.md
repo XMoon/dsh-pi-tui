@@ -7,6 +7,27 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-21
+
+### Changed
+
+- **不支持的宿主版本现在有明确的启动提示。** 在早于 `dsh-v0.1.1-rc.1` 的
+  DeepSeek Harness 上运行时,会先打印可操作的提示(检测到的版本、最低
+  版本与升级命令),再出现 loader 自身的失败——而不再是一段原始的
+  `ERR_MODULE_NOT_FOUND` 堆栈(旧宿主无法解析 profile 挂载的
+  authorization 行)。提示按声明式兼容表(`HARNESS_COMPAT`)生成,后续
+  版本约束只需在表中增加条目。
+
+## [Unreleased]
+
+### Changed
+
+- **不支持的宿主版本现在有明确的启动提示。** 在早于 `dsh-v0.1.1-rc.1` 的
+  DeepSeek Harness 上运行时,会先打印可操作的提示(检测到的版本、最低
+  版本与升级命令),再出现 loader 自身的失败——而不再是一段原始的
+  `ERR_MODULE_NOT_FOUND` 堆栈(旧宿主无法解析 profile 挂载的
+  authorization 行)。提示按声明式兼容表(`HARNESS_COMPAT`)生成,后续
+  版本约束只需在表中增加条目。
 ## [0.3.0] - 2026-08-21
 
 ### Changed
@@ -556,7 +577,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1

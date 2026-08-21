@@ -32,3 +32,52 @@ export function dshVersion(): string | undefined {
   }
   return undefined
 }
+
+/** One parsed semver (core numbers + optional prerelease identifiers). */
+interface ParsedVersion {
+  nums: number[]
+  pre: string[]
+}
+
+function parseVersion(value: string): ParsedVersion {
+  const [core, prerelease = ''] = value.split('-')
+  return {
+    nums: core.split('.').map(Number),
+    pre: prerelease === '' ? [] : prerelease.split('.'),
+  }
+}
+
+/**
+ * Whether one semver string is >= another, prerelease-aware (semver
+ * ordering: a release beats any prerelease of the same core; numeric
+ * prerelease identifiers compare numerically and sort BELOW alphanumeric
+ * ones). Used by the startup compatibility gate to decide whether the
+ * installed harness satisfies the minimum dsh version.
+ */
+export function versionAtLeast(version: string, minimum: string): boolean {
+  const a = parseVersion(version)
+  const b = parseVersion(minimum)
+  for (let i = 0; i < 3; i += 1) {
+    const pa = a.nums[i] ?? 0
+    const pb = b.nums[i] ?? 0
+    if (pa !== pb) return pa > pb
+  }
+  if (a.pre.length === 0) return true
+  if (b.pre.length === 0) return false
+  const length = Math.max(a.pre.length, b.pre.length)
+  for (let i = 0; i < length; i += 1) {
+    const pa = a.pre[i]
+    const pb = b.pre[i]
+    if (pa === undefined) return false
+    if (pb === undefined) return true
+    if (pa === pb) continue
+    const na = Number(pa)
+    const nb = Number(pb)
+    const naNumeric = !Number.isNaN(na)
+    const nbNumeric = !Number.isNaN(nb)
+    if (naNumeric && nbNumeric) return na > nb
+    if (naNumeric !== nbNumeric) return !naNumeric
+    return pa > pb
+  }
+  return true
+}
