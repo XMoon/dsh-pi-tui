@@ -139,10 +139,23 @@ Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、�
 
 所有层级复用同一个共享 Extension Runtime:caller-fiber 所有权、surface
 生命周期、失效机制、能力发现。不要按层级复制第二套所有权/生命周期
-模型。第一阶段只提供元数据:导出路径、层级常量
-(`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`,均为 `0`)、保留的能力
-命名空间 `advanced.` / `unstable.`,以及共享的 `ExtensionTier` 类型。
-目前尚未实现任何 advanced/unstable 能力,也未暴露任何 Host 私有表面。
+模型。第一阶段之后各层级已逐步落地:
+
+- **Advanced**(`ADVANCED_API_LEVEL = 1`,Phase 2 + Phase 4):规范化输入捕获、
+  聚焦交互表面(交互式托管 overlay)、高级编辑器控制、命令式 UI broker
+  (select/confirm/input/notify)、自定义交互 UI 与 host-state facade
+  (theme/title/working/tools-expanded)——仍由 Host 中介,绝不接触 raw
+  terminal 字节。作者指南:`docs/extension-advanced.md`;Pi 能力参考:
+  `docs/extension-capability-matrix.md`。
+- **Unstable**(`UNSTABLE_API_LEVEL = 1`,Phase 3):raw 输入拦截
+  (observe/consume/rewrite、exclusive raw 所有权)、Host 紧急 fail-safe
+  (三连 Esc)与精选低层 surface seam——不保证兼容;损坏的插件可能
+  破坏 Host 行为。作者指南:`docs/extension-unstable.md`。
+- **真实插件验证(Phase 5):**层级选择由真实消费者验证,见
+  `packages/dsh-pi-tui/examples/plugins/`——生产级 vim 模态编辑器
+  (Advanced editor SDK)、questionnaire 表单(Advanced 命令式 UI
+  broker)与交互式 shell(Unstable raw seam)。"该用哪一层?"决策树:
+  `docs/plugin-authoring.md`。
 
 插件只导入公开入口:
 

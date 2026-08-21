@@ -1503,6 +1503,35 @@ export function apply(ctx: Context, config: Config): void {
       _clearRegistryError(slot: string, id: string): void
       attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string, requestRender?: (force?: boolean) => void): void
       detachSurface(surfaceId?: string): void
+      // Phase 2: the ADVANCED seam (the `extensions/advanced` facade's
+      // internal surface — the runner wires the app's input path and the
+      // interactive-overlay/editor-control seams through it).
+      _advancedInputRoute(data: string): 'consumed' | 'passed'
+      setAdvancedOverlayMount(
+        surfaceId: string,
+        mount: (component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions) => import('./extension/advanced-types.ts').AdvancedOverlayLease,
+      ): void
+      setAdvancedEditorSeam(surfaceId: string, controls: import('./extension/advanced-types.ts').AdvancedEditorControls): void
+      // Phase 4: the ADVANCED imperative-UI + host-state seams.
+      setAdvancedUiSeam(
+        surfaceId: string,
+        ui: {
+          select(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined>
+          confirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean>
+          input(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined>
+          notify(message: string, options?: import('./extension/advanced-types.ts').AdvancedNotifyOptions): void
+          custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
+        },
+      ): void
+      setAdvancedHostSeam(surfaceId: string, state: import('./extension/advanced-types.ts').AdvancedHostState): void
+      // Phase 3: the UNSTABLE seam (the `extensions/unstable` facade's
+      // internal surface — the runner wires the raw input route, the
+      // fail-safe release and the low-level surface seam through it).
+      _unstableInputRoute(data: string, surfaceId: string): import('./extension/internal/unstable-input.ts').UnstableRawRouteResult
+      _unstableInputsLive(): boolean
+      _unstableInputsRevision(): number
+      _unstableEmergencyRelease(): void
+      setUnstableSurfaceSeam(surfaceId: string, handle: import('./extension/unstable-types.ts').UnstableSurfaceHandle): void
     }) | undefined
     let extensionHost: SurfaceHost | undefined
     // Tool-card presentation bridge: the Web's render intents resolved from
@@ -2434,6 +2463,21 @@ export function apply(ctx: Context, config: Config): void {
       onExtensionRecovered: ({ slot, id }) => {
         try { extensionService?._clearRegistryError(slot, id) } catch {}
       },
+      // Phase 4: the advanced host-state setTheme for a NON-built-in name
+      // (a registered plugin theme). The runner resolves the palette
+      // through the theme registry; unknown names are a no-op; a throwing
+      // palette is recorded in the theme health slot.
+      onAdvancedSetTheme: (name) => {
+        const palette = extensionService?.themes.paletteFor(name)
+        if (palette === undefined) return
+        try {
+          app.applyPalette(palette)
+          extensionService?._clearRegistryError('theme', name)
+        } catch (error) {
+          extensionService?._recordRegistryError('theme', name, error)
+          app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+        }
+      },
       openExternalEditor: async (draft) => {
         // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
         // parse with a real shell-word parser, never a plain split.
@@ -2670,6 +2714,22 @@ export function apply(ctx: Context, config: Config): void {
         return keybindings.actionFor(normalized)
       },
       pluginActionIdFor: (normalized) => extensionService?.keybindings.idFor(normalized),
+      // Phase 2: the ADVANCED normalized input capture route. The host
+      // input path consults it AFTER its own capturing flows (questions,
+      // approvals, overlays) and reserved lifecycle keys, and BEFORE the
+      // editor and the Stable keybindings — an advanced plugin can preempt
+      // ordinary editor/panel input, never a Host question/approval/overlay
+      // or a fatal-recovery shortcut (session safety stays Host-owned).
+      advancedInputRoute: (data) => extensionService?._advancedInputRoute(data) ?? 'passed',
+      // Phase 3: the UNSTABLE raw input route — consulted BEFORE terminal
+      // protocol decoding (a raw capture can see, consume or rewrite ANY
+      // chunk). The emergency fail-safe is armed only while captures are
+      // live and releases them all (Host recovery, not rewritable by the
+      // Unstable API).
+      unstableInputRoute: (data, surfaceId) => extensionService?._unstableInputRoute(data, surfaceId) ?? { action: 'pass' },
+      unstableInputsLive: () => extensionService?._unstableInputsLive() ?? false,
+      unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
+      unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
     })
     // M3: attach the extension host to the surface chrome once per
     // generation (F-1): the header/dock/footer merge extension content, and
@@ -2698,6 +2758,32 @@ export function apply(ctx: Context, config: Config): void {
       // surfaceId so a stale old-generation detach never unbinds a newer
       // surface's seam.
       extensionService.setOverlayMount(extensionHost.surfaceId, (view, options) => app.showExtensionOverlay(view, options))
+      // Phase 2: the ADVANCED seams (plan §4/§8/§9) — interactive overlay
+      // mounts and editor controls, both SURFACE-scoped like the stable
+      // overlay seam (a stale old-generation detach never unbinds a newer
+      // surface's seam).
+      extensionService.setAdvancedOverlayMount(extensionHost.surfaceId, (component, options) =>
+        app.showAdvancedInteractiveOverlay(component, options))
+      extensionService.setAdvancedEditorSeam(extensionHost.surfaceId, app.advancedEditorControls())
+      // Phase 4: the ADVANCED imperative UI seam (plan §4A/§4B) — the
+      // broker reuses the host's own picker/question/notify infrastructure.
+      extensionService.setAdvancedUiSeam(extensionHost.surfaceId, app.advancedUiBroker())
+      // Phase 4: the ADVANCED host-state seam (plan §4D). The seam
+      // DELEGATES to the app's host-state facade (single source of
+      // truth); the app fires onAdvancedSetTheme for non-built-in theme
+      // names and THIS handler resolves the palette through the theme
+      // registry (a registered plugin theme; unknown names are a no-op).
+      extensionService.setAdvancedHostSeam(extensionHost.surfaceId, {
+        getTheme: () => app.advancedHostState().getTheme(),
+        setTheme: (name) => app.advancedHostState().setTheme(name),
+        setTitle: (title) => app.advancedHostState().setTitle(title),
+        setWorkingMessage: (message) => app.advancedHostState().setWorkingMessage(message),
+        setToolsExpanded: (expanded) => app.advancedHostState().setToolsExpanded(expanded),
+      })
+      // Phase 3: the UNSTABLE low-level surface seam (plan §10) — the
+      // selected host surface capabilities for low-level plugins (never
+      // TuiApp/screens/terminal). SURFACE-scoped like the other seams.
+      extensionService.setUnstableSurfaceSeam(extensionHost.surfaceId, app.unstableSurfaceHandle())
       extensionHost.attach(
         { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
         {

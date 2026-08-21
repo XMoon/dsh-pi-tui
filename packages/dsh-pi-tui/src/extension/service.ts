@@ -24,6 +24,27 @@ import { ExtensionLedger } from './internal/ledger.ts'
 import { InvalidateBatcher } from './internal/batcher.ts'
 import { isSlotName, slotSemantic } from './slot-map.ts'
 import type { PiTuiApiInfo, PiTuiCapability, PiTuiSlotName, RegistrationHandle, RegistrationSpec, SurfaceStateValues } from './public-types.ts'
+import type {
+  AdvancedConfirmOptions,
+  AdvancedCustomHost,
+  AdvancedEditorControls,
+  AdvancedHostState,
+  AdvancedInputCaptureHandle,
+  AdvancedInputCaptureSpec,
+  AdvancedInputOptions,
+  AdvancedInteractiveComponent,
+  AdvancedNotifyOptions,
+  AdvancedOverlayLease,
+  AdvancedSelectOptions,
+} from './advanced-types.ts'
+import type {
+  UnstableRawInputHandle,
+  UnstableRawInputSpec,
+  UnstableSurfaceHandle,
+} from './unstable-types.ts'
+import { AdvancedInputRegistry } from './internal/advanced-input.ts'
+import { UnstableInputRegistry } from './internal/unstable-input.ts'
+import { normalizeInputEvent } from './internal/input-events.ts'
 import { CommandBridge } from '../command-bridge.ts'
 import { ThemeRegistry } from '../theme-registry.ts'
 import { AutocompleteRegistry } from '../autocomplete-registry.ts'
@@ -74,6 +95,100 @@ function safeHealthMessage(error: unknown): string {
  * surface, or the seam was detached). Every method is a safe no-op. */
 function inertOverlayLease(): import('./public-types.ts').TuiOverlayHandle {
   return { close: () => {}, hide: () => {}, show: () => {} }
+}
+
+/** An inert ADVANCED overlay lease (no surface / seam detached / surface
+ * disposed). Every method is a safe no-op; `active` and `focused` are
+ * false. */
+function inertAdvancedOverlayLease(): AdvancedOverlayLease {
+  return {
+    id: 'inert',
+    active: false,
+    focused: false,
+    focus: () => {},
+    blur: () => {},
+    invalidate: () => {},
+    close: () => {},
+    hide: () => {},
+    show: () => {},
+  }
+}
+
+/** An inert ADVANCED editor controls object (no surface attached / seam
+ * detached / surface disposed). Every method is a safe no-op; the snapshot
+ * is a fixed inert shape. */
+function inertAdvancedEditorControls(): AdvancedEditorControls {
+  const inertSnapshot: import('./public-types.ts').EditorSnapshot = {
+    text: '',
+    cursor: 0,
+    focused: false,
+    composing: false,
+  }
+  return {
+    getEditorState: () => inertSnapshot,
+    setEditorText: () => {},
+    setEditorCursor: () => {},
+    insertEditorText: () => {},
+    pasteToEditor: () => {},
+    requestEditorFocus: () => {},
+  }
+}
+
+/** An inert UNSTABLE surface handle (no surface / seam detached / surface
+ * disposed). Every method is a safe no-op; geometry is 0. */
+function inertUnstableSurfaceHandle(): UnstableSurfaceHandle {
+  return {
+    surfaceId: 'inert',
+    generation: 0,
+    width: 0,
+    height: 0,
+    requestRender: () => {},
+    mountComponent: () => ({
+      id: 'inert',
+      active: false,
+      focused: false,
+      focus: () => {},
+      blur: () => {},
+      invalidate: () => {},
+      close: () => {},
+      hide: () => {},
+      show: () => {},
+    }),
+  }
+}
+
+/** An inert Phase-4 host-state facade (no surface / seam detached).
+ * Every method is a safe no-op. */
+function inertAdvancedHostState(): AdvancedHostState {
+  return {
+    getTheme: () => 'dark',
+    setTheme: () => {},
+    setTitle: () => {},
+    setWorkingMessage: () => {},
+    setToolsExpanded: () => {},
+  }
+}
+
+/**
+ * The internal ADVANCED seam the `extensions/advanced` facade consumes
+ * (plan §4: `advanced(service)` — the Stable service interface is NOT
+ * extended). These `_`-prefixed members are package-internal: the facade
+ * entry is the supported boundary, plugins never call them directly.
+ */
+export interface AdvancedHostSeam {
+  /** Register a normalized input capture (caller-fiber-owned). */
+  _advancedCaptureInput(spec: AdvancedInputCaptureSpec): AdvancedInputCaptureHandle
+  /** Open an interactive managed overlay (caller-fiber-owned lease). */
+  _advancedShowInteractiveOverlay(
+    component: AdvancedInteractiveComponent,
+    options?: import('./public-types.ts').TuiOverlayOptions,
+  ): AdvancedOverlayLease
+  /** The CURRENT surface's advanced editor controls (inert when stale). */
+  _advancedEditorControls(): AdvancedEditorControls
+  /** Consult the advanced captures for one raw input chunk (the Host's
+   * input path calls this after its own capturing flows and reserved
+   * lifecycle keys). */
+  _advancedInputRoute(data: string): 'consumed' | 'passed'
 }
 
 /** The service name plugins inject (`piTuiExtensions` in cordis.patch.yml). */
@@ -196,12 +311,21 @@ export interface PiTuiExtensionService {
 export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtensionService {
   /** Capabilities advertised from service-provide time (P0-1): the chrome
    * slots + widget slots work before any surface exists (registrations are
-   * simply rendered once the surface attaches). */
+   * simply rendered once the surface attaches). Phase 2 adds the ADVANCED
+   * capabilities; Phase 3 adds the UNSTABLE capabilities — the advanced/
+   * unstable registries and seams are service-lifetime, so they are
+   * feature-detectable before any surface exists (their physical mounts
+   * attach later). */
   static readonly ADVERTISED_CAPABILITIES: readonly PiTuiCapability[] = [
     'slot.chrome.header.badge',
     'slot.input.dock.item',
     'slot.chrome.footer.status',
     'slot.input.widget',
+    'advanced.input.capture',
+    'advanced.ui.interactive',
+    'advanced.editor.control',
+    'unstable.input.raw',
+    'unstable.surface.handle',
   ]
 
   private readonly ledger: ExtensionLedger
@@ -236,6 +360,56 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   } | undefined
   /** M9: the editor registry (single-winner). */
   readonly editors: EditorRegistry
+  /** Phase 2: the ADVANCED normalized input capture registry. The
+   * registrations are caller-fiber-owned (the service binds them); the
+   * registry itself is service-lifetime — captures survive surface
+   * recreate and are consulted by the CURRENT surface's input path. */
+  readonly advancedInputs: AdvancedInputRegistry
+  /** Phase 2: the ADVANCED interactive-overlay mount seam (wired by the
+   * runner; the host owns the screen + broker). SURFACE-scoped like the
+   * stable overlay seam: bound per attachment through a surfaceId lease —
+   * a stale old-generation detach never unbinds a newer surface's seam. */
+  private advancedOverlayMount: {
+    surfaceId: string
+    mount(component: AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions): AdvancedOverlayLease
+  } | undefined
+  /** Phase 2: the ADVANCED editor-control seam (wired by the runner; the
+   * host owns the editor seat). SURFACE-scoped like the overlay seam. */
+  private advancedEditorSeam: {
+    surfaceId: string
+    controls: AdvancedEditorControls
+  } | undefined
+  /** Phase 4: the ADVANCED imperative UI seam (wired by the runner; the
+   * host owns the picker/question/notify infrastructure). SURFACE-scoped
+   * like the other seams. */
+  private advancedUiSeam: {
+    surfaceId: string
+    select(options: AdvancedSelectOptions): Promise<string | undefined>
+    confirm(options: AdvancedConfirmOptions): Promise<boolean>
+    input(options: AdvancedInputOptions): Promise<string | undefined>
+    notify(message: string, options?: AdvancedNotifyOptions): void
+    custom(factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
+  } | undefined
+  /** Phase 4: the ADVANCED host-state seam (wired by the runner; the host
+   * owns theme/title/working/tools-expanded state). SURFACE-scoped. */
+  private advancedHostSeam: {
+    surfaceId: string
+    state: AdvancedHostState
+  } | undefined
+  /** Phase 3: the UNSTABLE raw input capture registry. Registrations are
+   * caller-fiber-owned; the registry is service-lifetime — captures
+   * survive surface recreate and are consulted by the CURRENT surface's
+   * input path BEFORE terminal protocol decoding. */
+  readonly unstableInputs: UnstableInputRegistry
+  /** Phase 3: the UNSTABLE low-level surface seam (wired by the runner;
+   * the host owns the screens). SURFACE-scoped like the other seams. */
+  private unstableSurfaceSeam: {
+    surfaceId: string
+    handle: UnstableSurfaceHandle
+  } | undefined
+  /** Phase 3: the still-open UNSTABLE mount close functions (closed by
+   * the emergency fail-safe and by owner unload). */
+  private readonly unstableMounts = new Set<() => void>()
   /** Track health for one external registry contribution. */
   private trackRegistryHealth(slot: string, id: string, owner: string): void {
     this.ledger.trackHealth(slot, id, owner)
@@ -305,6 +479,31 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.keybindings = new KeybindingRegistry(() => this.batcher.invalidate())
     this.renderers = new RendererRegistry(() => this.batcher.invalidate())
     this.editors = new EditorRegistry(() => this.batcher.invalidate())
+    // Phase 2: the advanced input capture registry. Health rides the
+    // ledger (the plan's "no new Advanced health system" rule): a
+    // throwing capture handler/gate is recorded under
+    // 'advanced.input.capture' and cleared on the next successful consume.
+    this.advancedInputs = new AdvancedInputRegistry(
+      () => this.batcher.invalidate(),
+      {
+        track: (id, owner) => this.ledger.trackHealth('advanced.input.capture', id, owner),
+        untrack: (id) => this.ledger.untrackHealth('advanced.input.capture', id),
+        recordError: (id, message) => this.ledger.recordExternalError('advanced.input.capture', id, message),
+        clearError: (id) => this.ledger.clearExternalError('advanced.input.capture', id),
+      },
+    )
+    // Phase 3: the unstable raw capture registry. Health rides the ledger
+    // ('unstable.input.raw' slot) — a throwing raw handler is recorded and
+    // cleared on the next successful decision.
+    this.unstableInputs = new UnstableInputRegistry(
+      () => this.batcher.invalidate(),
+      {
+        track: (id, owner) => this.ledger.trackHealth('unstable.input.raw', id, owner),
+        untrack: (id) => this.ledger.untrackHealth('unstable.input.raw', id),
+        recordError: (id, message) => this.ledger.recordExternalError('unstable.input.raw', id, message),
+        clearError: (id) => this.ledger.clearExternalError('unstable.input.raw', id),
+      },
+    )
   }
 
   api(): PiTuiApiInfo {
@@ -527,6 +726,27 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // service never mounts on a dead surface.
     if (this.overlayMount !== undefined && this.overlayMount.surfaceId === detachingId) {
       this.overlayMount = undefined
+    }
+    // Phase 2: unbind the ADVANCED seams with the same lease — a stale
+    // old-generation detach never unbinds a newer surface's advanced
+    // overlay mount or editor controls.
+    if (this.advancedOverlayMount !== undefined && this.advancedOverlayMount.surfaceId === detachingId) {
+      this.advancedOverlayMount = undefined
+    }
+    if (this.advancedEditorSeam !== undefined && this.advancedEditorSeam.surfaceId === detachingId) {
+      this.advancedEditorSeam = undefined
+    }
+    // Phase 4: unbind the ADVANCED imperative-UI and host-state seams with
+    // the same lease.
+    if (this.advancedUiSeam !== undefined && this.advancedUiSeam.surfaceId === detachingId) {
+      this.advancedUiSeam = undefined
+    }
+    if (this.advancedHostSeam !== undefined && this.advancedHostSeam.surfaceId === detachingId) {
+      this.advancedHostSeam = undefined
+    }
+    // Phase 3: unbind the UNSTABLE surface seam with the same lease.
+    if (this.unstableSurfaceSeam !== undefined && this.unstableSurfaceSeam.surfaceId === detachingId) {
+      this.unstableSurfaceSeam = undefined
     }
     // P1-3: unbind every live bridge subscription — the RECORDS stay
     // (caller-fiber-owned); a later attachSurface re-binds them. A
@@ -917,6 +1137,463 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** The ledger behind the service (SurfaceHost access in M2). */
   _ledger(): ExtensionLedger {
     return this.ledger
+  }
+
+  // ── Phase 2: the ADVANCED seam (consumed by `extensions/advanced`) ──────
+
+  /**
+   * Register a normalized input capture (plan §5). Caller-fiber-owned:
+   * owner unload removes the capture. A duplicate id or a second live
+   * exclusive capture is an explicit error (the registry's rules — never
+   * a load-order winner). A stale service handle's call is rejected by
+   * the fiber check (INACTIVE_EFFECT) and rolled back.
+   */
+  _advancedCaptureInput(spec: AdvancedInputCaptureSpec): AdvancedInputCaptureHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.advancedInputs.register(spec, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.advanced.input.capture()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /**
+   * Open an interactive managed overlay (plan §8). The returned lease is
+   * CALLER-FIBER-OWNED: its physical mount is surface-owned, but its
+   * LIFETIME is bound to the calling fiber — the fiber's unload/HMR/
+   * disable closes the overlay automatically. A lease without a mounted
+   * host surface is inert (registration-before-surface). Three paths
+   * close the lease, all idempotent: explicit close(), the caller fiber's
+   * unload, and the surface's own dispose.
+   */
+  _advancedShowInteractiveOverlay(
+    component: AdvancedInteractiveComponent,
+    options?: import('./public-types.ts').TuiOverlayOptions,
+  ): AdvancedOverlayLease {
+    const caller = this.ctx
+    const seam = this.advancedOverlayMount
+    if (seam === undefined) return inertAdvancedOverlayLease()
+    const mounted = seam.mount(component, options)
+    let closed = false
+    const close = (): void => {
+      if (closed) return
+      closed = true
+      try {
+        mounted.close()
+      } catch {
+        // The host's lease close is idempotent; a throwing close must
+        // never escape into the fiber disposer or the public close path.
+      }
+    }
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => close, 'piTuiExtensions.advanced.ui.showInteractiveOverlay()')
+    } catch (error) {
+      close()
+      throw error
+    }
+    return {
+      id: mounted.id,
+      get active() {
+        return !closed && mounted.active
+      },
+      get focused() {
+        return !closed && mounted.focused
+      },
+      focus: () => {
+        if (closed) return
+        try {
+          mounted.focus()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+      blur: () => {
+        if (closed) return
+        try {
+          mounted.blur()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+      invalidate: () => {
+        if (closed) return
+        try {
+          mounted.invalidate()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+      close: () => {
+        close()
+        effectDispose()
+      },
+      hide: () => {
+        if (closed) return
+        try {
+          mounted.hide()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+      show: () => {
+        if (closed) return
+        try {
+          mounted.show()
+        } catch {
+          // Best effort: a dead surface's lease is inert.
+        }
+      },
+    }
+  }
+
+  /** The CURRENT surface's advanced editor controls (plan §9), or an
+   * inert object when no surface is attached / the seam is detached. The
+   * controls follow the live attachment: a stale old-generation detach
+   * never unbinds a newer surface's seam (the surfaceId lease). */
+  _advancedEditorControls(): AdvancedEditorControls {
+    return this.advancedEditorSeam?.controls ?? inertAdvancedEditorControls()
+  }
+
+  /** Consult the advanced captures for one raw input chunk. The Host's
+   * input path calls this AFTER its own capturing flows (questions,
+   * approvals, overlays) and reserved lifecycle keys, and BEFORE the
+   * editor and the Stable keybindings (plan §5/§11 — the Phase-2
+   * contract: advanced plugins preempt ordinary editor/panel input, never
+   * Host questions/approvals/overlays or fatal-recovery shortcuts). */
+  _advancedInputRoute(data: string): 'consumed' | 'passed' {
+    return this.advancedInputs.route(data, normalizeInputEvent)
+  }
+
+  /** Runner-only: wire the ADVANCED interactive-overlay mount seam
+   * (Phase 2). SURFACE-scoped like the stable overlay seam: bound to the
+   * CURRENT attachment's surfaceId — a later attach replaces it, and a
+   * stale old-generation detach never unbinds a newer surface's seam. */
+  setAdvancedOverlayMount(
+    surfaceId: string,
+    mount: (component: AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions) => AdvancedOverlayLease,
+  ): void {
+    this.advancedOverlayMount = { surfaceId, mount }
+  }
+
+  /** Runner-only: wire the ADVANCED editor-control seam (Phase 2).
+   * SURFACE-scoped like the overlay seam. */
+  setAdvancedEditorSeam(surfaceId: string, controls: AdvancedEditorControls): void {
+    this.advancedEditorSeam = { surfaceId, controls }
+  }
+
+  // ── Phase 4: the ADVANCED imperative UI + host-state seams ───────────────
+
+  /**
+   * Imperative selection (plan §4A). Caller-fiber-owned: owner unload
+   * aborts the prompt (the promise resolves undefined). The caller's own
+   * signal (if any) is combined with the fiber signal. Without a mounted
+   * surface the prompt resolves undefined immediately.
+   */
+  _advancedUiSelect(options: AdvancedSelectOptions): Promise<string | undefined> {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return Promise.resolve(undefined)
+    const caller = this.ctx
+    const controller = new AbortController()
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => () => controller.abort(), 'piTuiExtensions.advanced.ui.select()')
+    } catch (error) {
+      controller.abort()
+      throw error
+    }
+    const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
+    return seam.select({ ...options, signal }).finally(() => effectDispose())
+  }
+
+  /** Imperative confirmation (plan §4A). Same ownership as select;
+   * cancel/abort resolves false. */
+  _advancedUiConfirm(options: AdvancedConfirmOptions): Promise<boolean> {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return Promise.resolve(false)
+    const caller = this.ctx
+    const controller = new AbortController()
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => () => controller.abort(), 'piTuiExtensions.advanced.ui.confirm()')
+    } catch (error) {
+      controller.abort()
+      throw error
+    }
+    const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
+    return seam.confirm({ ...options, signal }).finally(() => effectDispose())
+  }
+
+  /** Imperative free-text input (plan §4A). Same ownership as select;
+   * cancel/abort resolves undefined. */
+  _advancedUiInput(options: AdvancedInputOptions): Promise<string | undefined> {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return Promise.resolve(undefined)
+    const caller = this.ctx
+    const controller = new AbortController()
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => () => controller.abort(), 'piTuiExtensions.advanced.ui.input()')
+    } catch (error) {
+      controller.abort()
+      throw error
+    }
+    const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
+    return seam.input({ ...options, signal }).finally(() => effectDispose())
+  }
+
+  /** Imperative notification (plan §4A). Bounded, no raw ANSI, surface-
+   * detach safe. */
+  _advancedUiNotify(message: string, options?: AdvancedNotifyOptions): void {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return
+    try {
+      seam.notify(message, options)
+    } catch {
+      // Best effort: a dead surface's notify is inert.
+    }
+  }
+
+  /**
+   * Custom interactive UI (plan §4B). The factory receives ONLY the public
+   * host facade; the promise resolves with the result reported through
+   * done(), or undefined on close/cancel. Caller-fiber-owned: owner
+   * unload aborts the prompt (the promise settles undefined and the
+   * surface closes) — the fiber signal rides into the seam.
+   */
+  _advancedUiCustom(
+    factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent,
+    options?: import('./public-types.ts').TuiOverlayOptions,
+  ): Promise<unknown> {
+    const seam = this.advancedUiSeam
+    if (seam === undefined) return Promise.resolve(undefined)
+    const caller = this.ctx
+    const controller = new AbortController()
+    let effectDispose: () => void
+    try {
+      effectDispose = caller.fiber.effect(() => () => controller.abort(), 'piTuiExtensions.advanced.ui.custom()')
+    } catch (error) {
+      controller.abort()
+      throw error
+    }
+    return seam.custom(factory, options, controller.signal).finally(() => effectDispose())
+  }
+
+  /** The Phase-4 host-state facade (plan §4D), or an inert object when no
+   * surface is attached / the seam is detached. */
+  _advancedHostState(): AdvancedHostState {
+    return this.advancedHostSeam?.state ?? inertAdvancedHostState()
+  }
+
+  /** Runner-only: wire the ADVANCED imperative UI seam (Phase 4).
+   * SURFACE-scoped like the other seams. */
+  setAdvancedUiSeam(
+    surfaceId: string,
+    ui: {
+      select(options: AdvancedSelectOptions): Promise<string | undefined>
+      confirm(options: AdvancedConfirmOptions): Promise<boolean>
+      input(options: AdvancedInputOptions): Promise<string | undefined>
+      notify(message: string, options?: AdvancedNotifyOptions): void
+      custom(factory: (host: AdvancedCustomHost) => AdvancedInteractiveComponent, options?: import('./public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
+    },
+  ): void {
+    this.advancedUiSeam = { surfaceId, ...ui }
+  }
+
+  /** Runner-only: wire the ADVANCED host-state seam (Phase 4).
+   * SURFACE-scoped like the other seams. */
+  setAdvancedHostSeam(surfaceId: string, state: AdvancedHostState): void {
+    this.advancedHostSeam = { surfaceId, state }
+  }
+
+  // ── Phase 3: the UNSTABLE seam (consumed by `extensions/unstable`) ──────
+
+  /**
+   * Register a raw input capture (plan §5). Caller-fiber-owned: owner
+   * unload removes the capture. A duplicate id or a second live exclusive
+   * capture is an explicit error (the registry's rules — never a
+   * load-order winner). A stale service handle's call is rejected by the
+   * fiber check (INACTIVE_EFFECT) and rolled back.
+   */
+  _unstableCaptureRaw(spec: UnstableRawInputSpec): UnstableRawInputHandle {
+    const caller = this.ctx
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const handle = this.unstableInputs.register(spec, owner)
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => () => {
+        handle.dispose()
+      }, 'piTuiExtensions.unstable.input.captureRaw()')
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    return {
+      id: handle.id,
+      dispose: () => {
+        handle.dispose()
+        dispose()
+      },
+    }
+  }
+
+  /** The CURRENT surface's low-level handle (plan §10), or an inert
+   * handle when no surface is attached / the seam is detached. The
+   * handle follows the live attachment (the surfaceId lease). Mounts
+   * created through it are caller-fiber-owned AND tracked for the
+   * emergency fail-safe. */
+  _unstableSurfaceHandle(): UnstableSurfaceHandle {
+    const seam = this.unstableSurfaceSeam
+    if (seam === undefined) return inertUnstableSurfaceHandle()
+    const caller = this.ctx
+    const service = this
+    return {
+      surfaceId: seam.handle.surfaceId,
+      generation: seam.handle.generation,
+      get width() {
+        return seam.handle.width
+      },
+      get height() {
+        return seam.handle.height
+      },
+      requestRender: () => {
+        try {
+          seam.handle.requestRender()
+        } catch {
+          // Best effort: a dead surface's handle is inert.
+        }
+      },
+      mountComponent: (component, options) => {
+        const mounted = seam.handle.mountComponent(component, options)
+        let closed = false
+        const close = (): void => {
+          if (closed) return
+          closed = true
+          service.unstableMounts.delete(close)
+          try {
+            mounted.close()
+          } catch {
+            // The host's lease close is idempotent; a throwing close must
+            // never escape into the fiber disposer or the public close
+            // path.
+          }
+        }
+        let effectDispose: () => void
+        try {
+          effectDispose = caller.fiber.effect(() => close, 'piTuiExtensions.unstable.surface.mountComponent()')
+        } catch (error) {
+          close()
+          throw error
+        }
+        service.unstableMounts.add(close)
+        return {
+          id: mounted.id,
+          get active() {
+            return !closed && mounted.active
+          },
+          get focused() {
+            return !closed && mounted.focused
+          },
+          focus: () => {
+            if (closed) return
+            try {
+              mounted.focus()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+          blur: () => {
+            if (closed) return
+            try {
+              mounted.blur()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+          invalidate: () => {
+            if (closed) return
+            try {
+              mounted.invalidate()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+          close: () => {
+            close()
+            effectDispose()
+          },
+          hide: () => {
+            if (closed) return
+            try {
+              mounted.hide()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+          show: () => {
+            if (closed) return
+            try {
+              mounted.show()
+            } catch {
+              // Best effort: a dead surface's lease is inert.
+            }
+          },
+        }
+      },
+    }
+  }
+
+  /** Consult the raw captures for one chunk. The Host's input path calls
+   * this BEFORE terminal protocol decoding (plan §4) — a capture can see,
+   * consume or rewrite ANY raw chunk. The returned outcome is applied
+   * exactly once (a rewrite goes straight to the Host decoder). */
+  _unstableInputRoute(data: string, surfaceId: string): import('./internal/unstable-input.ts').UnstableRawRouteResult {
+    return this.unstableInputs.route({ data, surfaceId })
+  }
+
+  /** Whether any raw capture is live (the app arms the emergency
+   * fail-safe only while captures exist). */
+  _unstableInputsLive(): boolean {
+    return this.unstableInputs.hasAny()
+  }
+
+  /** The raw capture registry revision (the app's fail-safe tracker
+   * stamps each Esc press with it — presses from a previous capture
+   * session never count toward a new session's triple-Esc). */
+  _unstableInputsRevision(): number {
+    return this.unstableInputs.revisionOf()
+  }
+
+  /**
+   * The Host emergency fail-safe (plan §7): release every unstable raw
+   * capture and close every unstable mount, restoring Host input. This is
+   * Host recovery — it is NOT part of the Unstable plugin API and cannot
+   * be rewritten or consumed by a capture (the Host detects the fail-safe
+   * pattern before consulting the captures). Idempotent.
+   */
+  _unstableEmergencyRelease(): void {
+    this.unstableInputs.disposeAll()
+    for (const close of [...this.unstableMounts]) close()
+    this.unstableMounts.clear()
+  }
+
+  /** Runner-only: wire the UNSTABLE low-level surface seam (Phase 3).
+   * SURFACE-scoped like the other seams. */
+  setUnstableSurfaceSeam(surfaceId: string, handle: UnstableSurfaceHandle): void {
+    this.unstableSurfaceSeam = { surfaceId, handle }
   }
 
   /** Runner-only callback health bridges. */

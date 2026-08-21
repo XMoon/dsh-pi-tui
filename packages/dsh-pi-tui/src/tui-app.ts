@@ -88,6 +88,9 @@ import { OverlayBroker } from './overlay-broker.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
+import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
+import { UnstableMountedComponentAdapter } from './extension/internal/unstable-mount.ts'
+import { normalizeInputEvent } from './extension/internal/input-events.ts'
 import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
@@ -544,6 +547,13 @@ export interface TuiAppEventsBase {
   /** M11: extension callback health transitions from the editor seat. */
   onExtensionError?: (record: { slot: string; id: string; error: unknown }) => void
   onExtensionRecovered?: (record: { slot: string; id: string }) => void
+  /**
+   * Phase 4: the advanced host-state setTheme for a NON-built-in theme
+   * name (a registered plugin theme). The runner resolves the palette
+   * through the theme registry and applies it; unknown names are a no-op.
+   * Optional.
+   */
+  onAdvancedSetTheme?: (name: string) => void
 }
 
 /**
@@ -661,6 +671,8 @@ export interface PickerOptions {
   maxHeight?: number
   /** Render the key-hint footer line. */
   showHint?: boolean
+  /** Phase 4: abort the picker (closes it and fires onCancel). */
+  signal?: AbortSignal
 }
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
@@ -687,6 +699,10 @@ export interface PickerHandle {
   close(): void
   /** Replace the rows while the picker is open; the active query re-applies. */
   setItems(items: readonly PickerItem[]): void
+  /** Host-internal: drop the abort listener (the imperative select
+   * broker's settle path — a settled promise must not retain the
+   * listener on the caller's signal). */
+  _removeAbortListener?(): void
 }
 
 /** Live control of an open task browser (rows carry status/startedAt). */
@@ -786,6 +802,46 @@ export interface TuiAppOptions {
    * identically without it.
    */
   editorRegistry?: EditorRegistry
+  /**
+   * Phase 2: the ADVANCED normalized input capture route (wired by the
+   * runner from the service's advanced registry). Consulted by the host
+   * input path AFTER its own capturing flows (questions, approvals,
+   * overlays) and reserved lifecycle keys, and BEFORE the editor and the
+   * Stable keybindings — an advanced plugin can preempt ordinary
+   * editor/panel input, never a Host question/approval/overlay or a
+   * fatal-recovery shortcut. Optional — the surface works identically
+   * without it.
+   */
+  advancedInputRoute?: (data: string) => 'consumed' | 'passed'
+  /**
+   * Phase 3: the UNSTABLE raw input route (wired by the runner from the
+   * service's unstable registry). Consulted by the host input path BEFORE
+   * terminal protocol decoding — a raw capture can see, consume or rewrite
+   * ANY chunk. The returned outcome is applied exactly once (a rewrite
+   * goes straight to the host decoder, never re-entering the chain).
+   * Optional — the surface works identically without it.
+   */
+  unstableInputRoute?: (data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult
+  /**
+   * Phase 3: whether any raw capture is live (the host arms the emergency
+   * fail-safe only while captures exist, so the fail-safe never changes
+   * ordinary Esc behavior). Optional.
+   */
+  unstableInputsLive?: () => boolean
+  /**
+   * Phase 3: the raw capture registry revision (the fail-safe tracker
+   * stamps each Esc press with it — a release/re-register bumps the
+   * revision, so presses from a previous capture session never count
+   * toward a new session's triple-Esc). Optional.
+   */
+  unstableInputsRevision?: () => number
+  /**
+   * Phase 3: the Host emergency fail-safe release (wired by the runner to
+   * the service's `_unstableEmergencyRelease`). Triggered by the
+   * host-owned triple-Esc pattern BEFORE the captures are consulted — it
+   * cannot be rewritten or consumed by a capture. Optional.
+   */
+  unstableFailSafeRelease?: () => void
 }
 
 /**
@@ -989,6 +1045,36 @@ export class TuiApp {
   /** M8: still-owned plugin overlay leases (closed by the final dispose —
    * plan §13.3: leases are generation-scoped). */
   private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle>()
+  /** Phase 2: still-owned ADVANCED interactive overlay leases (closed by
+   * the final dispose; re-mounted across fullscreen screen swaps). */
+  private readonly advancedOverlayLeases = new Set<import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void }>()
+  /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
+   * resize so the plugin's render(ctx) sees the new geometry). */
+  private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
+  /** Phase 2: the ADVANCED normalized input capture route (wired by the
+   * runner; consulted after host capturing flows + reserved keys). */
+  private readonly advancedInputRoute: ((data: string) => 'consumed' | 'passed') | undefined
+  /** Phase 3: the UNSTABLE raw input route (wired by the runner; consulted
+   * BEFORE terminal protocol decoding). */
+  private readonly unstableInputRoute: ((data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult) | undefined
+  /** Phase 3: whether any raw capture is live (arms the fail-safe). */
+  private readonly unstableInputsLive: (() => boolean) | undefined
+  /** Phase 3: the raw capture registry revision (stale-press invalidation
+   * for the fail-safe tracker). */
+  private readonly unstableInputsRevision: (() => number) | undefined
+  /** Phase 3: the Host emergency fail-safe release (triple-Esc). */
+  private readonly unstableFailSafeRelease: (() => void) | undefined
+  /** Phase 3: the fail-safe Esc-press stamps (timestamp + capture-session
+   * revision; triple-Esc within the window at the SAME revision triggers
+   * the release). */
+  private unstableEscPresses: { at: number; revision: number }[] = []
+  /** Phase 3: still-owned UNSTABLE mount leases (closed by the final
+   * dispose; re-mounted across fullscreen screen swaps). */
+  private readonly unstableMountLeases = new Set<import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void }>()
+  /** Phase 3: the live UNSTABLE mount adapters (dropped on remount). */
+  private readonly unstableMountAdapters = new Set<import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter>()
+  /** Phase 3: the UNSTABLE mount lease id counter. */
+  private unstableMountCounter = 0
   // M8: the overlay graph (handles/dependents) lives in the broker — the
   // host reads it through the accessors below. The old private sets were
   // removed; every use now goes through this.overlayBroker.
@@ -1122,6 +1208,11 @@ export class TuiApp {
     this.present = options.present
     this.pluginActionFor = options.pluginActionFor
     this.pluginActionIdFor = options.pluginActionIdFor
+    this.advancedInputRoute = options.advancedInputRoute
+    this.unstableInputRoute = options.unstableInputRoute
+    this.unstableInputsLive = options.unstableInputsLive
+    this.unstableInputsRevision = options.unstableInputsRevision
+    this.unstableFailSafeRelease = options.unstableFailSafeRelease
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
@@ -1345,6 +1436,21 @@ export class TuiApp {
     this.localMessages.length = 0
     for (const lease of this.extensionOverlayLeases) lease.close()
     this.extensionOverlayLeases.clear()
+    // Phase 2: close every still-owned ADVANCED interactive overlay lease
+    // (the wrappers die with the surface; the plugin's dispose() runs).
+    for (const lease of this.advancedOverlayLeases) lease.close()
+    this.advancedOverlayLeases.clear()
+    this.advancedOverlayWrappers.clear()
+    // Phase 3: close every still-owned UNSTABLE mount lease (the adapters
+    // die with the surface; the plugin's dispose() runs).
+    for (const lease of this.unstableMountLeases) lease.close()
+    this.unstableMountLeases.clear()
+    this.unstableMountAdapters.clear()
+    // Phase 4: settle every still-open imperative broker promise (select/
+    // custom) — the picker/overlay dies with the surface; the promises
+    // must not hang.
+    for (const settle of [...this.pendingBrokerSettles]) settle()
+    this.pendingBrokerSettles.clear()
     this.overlayBroker.clear()
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
@@ -1404,19 +1510,10 @@ export class TuiApp {
    *   keeps it; a plugin editor never sees it).
    */
   private editorInputEventOf(data: string): import('./extension/public-types.ts').EditorInputEvent | undefined {
-    if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
-    // Bracketed paste: the fork re-wraps paste content with the markers,
-    // so a paste arrives here as ONE bracketed chunk.
-    const paste = parseBracketedPaste(data)
-    if (paste !== undefined) return { kind: 'paste', text: paste }
-    const key = this.inputRouter.normalize(data)
-    if (key !== undefined) return { kind: 'key', key }
-    // A plain printable run: multi-char chunks that are not a single key
-    // (fast typing / non-bracketed paste heuristic) are TEXT.
-    if (data.length > 0 && [...data].every(char => char.charCodeAt(0) >= 32 && char.charCodeAt(0) < 127)) {
-      return { kind: 'text', text: data }
-    }
-    return undefined
+    // Phase 2: ONE shared classification (extension/internal/input-events.ts)
+    // serves the editor channel, the advanced captures and the advanced
+    // interactive components — never two decoders that can drift.
+    return normalizeInputEvent(data)
   }
 
   /**
@@ -1515,6 +1612,50 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
+    // Phase 3: the UNSTABLE raw interception stage — BEFORE terminal
+    // protocol decoding (plan §4). A raw capture can see, consume or
+    // rewrite ANY chunk (Enter, Esc, Ctrl+C, paste, CSI-u, terminal-
+    // specific protocols). The Host emergency fail-safe is detected FIRST
+    // (host-owned, not rewritable by the Unstable API): triple-Esc within
+    // the window releases every raw capture and closes every unstable
+    // mount, restoring Host input. The fail-safe is armed only while
+    // captures are live, so ordinary Esc behavior is unchanged otherwise.
+    if (this.unstableInputRoute !== undefined) {
+      if (this.unstableInputsLive?.() !== true) {
+        // No captures are live: the fail-safe is disarmed — drop any
+        // stale Esc stamps (hygiene; the revision stamp already
+        // invalidates them on the next registration).
+        this.unstableEscPresses = []
+      } else if (this.unstableFailSafe(data)) {
+        try {
+          this.unstableFailSafeRelease?.()
+        } catch {
+          // The release is Host recovery; a throwing release must never
+          // escape the input path.
+        }
+        this.notify('unstable captures released (emergency fail-safe)', 'info')
+        return { consume: true }
+      }
+      const outcome = this.unstableInputRoute(data, this.extensionHost?.surfaceId ?? 'tui')
+      if (outcome.action === 'consume') return { consume: true }
+      if (outcome.action === 'rewrite') {
+        // The rewritten chunk flows through the host's OWN processing AND
+        // propagates to the focused component (the fork's listener-result
+        // `data` field). Each terminal chunk passes the interception chain
+        // at most once: the rewrite goes straight to the host decoder and
+        // never re-enters the raw stage (handleInputCore has no raw
+        // stage).
+        const result = this.handleInputCore(outcome.data)
+        if (result === undefined) return { data: outcome.data }
+        return result
+      }
+    }
+    return this.handleInputCore(data)
+  }
+
+  /** The host's own input precedence ladder (the raw stage has already
+   * run — see {@link handleInput}). */
+  private handleInputCore(data: string): TuiInputListenerResult {
     // Kitty-protocol terminals report press, repeat, and release events as
     // separate sequences; the app must act on the PRESS only. A release of
     // Ctrl+O would otherwise double-toggle the fold (press expands, release
@@ -1711,6 +1852,17 @@ export class TuiApp {
     // seat editor or plugin bindings here; returning undefined lets pi-tui
     // dispatch the raw key to the overlay component (including reserved keys).
     if (context.hasOverlay) return undefined
+    // Phase 2: the ADVANCED normalized captures (plan §5/§11). Consulted
+    // AFTER the host's own capturing flows (questions, approvals, overlays)
+    // and reserved lifecycle keys, BEFORE the editor and the Stable
+    // keybindings — an advanced plugin can preempt ordinary editor/panel
+    // input, but never a Host question/approval/overlay or a fatal-recovery
+    // shortcut (session safety stays Host-owned). The registry normalizes
+    // the raw chunk itself (the shared Host decoder); a consuming capture
+    // stops the event here.
+    if (this.advancedInputRoute !== undefined && this.advancedInputRoute(data) === 'consumed') {
+      return { consume: true }
+    }
     const route = this.inputRouter.route(data, context, (key) => this.pluginActionForFor(key))
     if (route.kind === 'protocol') return undefined
     if (route.kind === 'consumed') {
@@ -2119,8 +2271,11 @@ export class TuiApp {
     this.events.onFullscreenChange?.(enabled)
     // M8 (round-1 finding 2): still-open plugin overlay leases re-mount on
     // the CURRENT active screen (their raw handles died with the old
-    // screen's teardown above).
+    // screen's teardown above). Phase 2: the ADVANCED interactive overlay
+    // leases follow the same migration.
     this.remountExtensionOverlays()
+    this.remountAdvancedOverlays()
+    this.remountUnstableMounts()
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -2533,6 +2688,9 @@ export class TuiApp {
 
   /** Theme revision for render-cache invalidation; bumped on every switch. */
   private themeRevision = 0
+  /** Phase 4: the current theme id ('dark' | 'light' | 'custom'), tracked
+   * by applyTheme/applyPalette (the advanced host-state getTheme). */
+  private currentThemeId: string = 'dark'
 
   /** Persistent components per transcript message (stage J cache). */
   private readonly messageComponents = new Map<TranscriptMessage, MessageComponentEntry>()
@@ -2664,6 +2822,666 @@ export class TuiApp {
   ownedExtensionOverlayLeasesForTest(): number {
     return this.extensionOverlayLeases.size
   }
+
+  // ── Phase 2: ADVANCED interactive overlays (plan §6/§8) ─────────────────
+
+  /**
+   * Phase 2: mount an INTERACTIVE managed overlay hosting a plugin's
+   * focused interactive component (plan §8). The host wraps the plugin
+   * component (render compiled through the M4 kit, input normalized by
+   * the shared Host decoder, focus via the fork's Focusable protocol),
+   * mounts it through the overlay broker (modal stacking, focus,
+   * fullscreen migration, teardown) and returns a generation-scoped
+   * lease. The surface's final dispose closes every still-owned lease.
+   * @param component - the plugin's interactive component.
+   * @param options - sizing/positioning hints.
+   */
+  showAdvancedInteractiveOverlay(
+    component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): import('./extension/advanced-types.ts').AdvancedOverlayLease {
+    // A finally-disposed surface is inert: a late plugin call must never
+    // mount on the dead app or mint a new lease (same rule as the stable
+    // overlay path).
+    if (this.disposed) {
+      return {
+        id: 'inert',
+        active: false,
+        focused: false,
+        focus: () => {},
+        blur: () => {},
+        invalidate: () => {},
+        close: () => {},
+        hide: () => {},
+        show: () => {},
+      }
+    }
+    const mountOptions = this.overlayOptionsOf(options)
+    const id = `adv-overlay-${++this.advancedOverlayCounter}`
+    // The lease KEEPS the component + options so a fullscreen screen swap
+    // can RE-MOUNT it on the new active screen (the raw handle dies with
+    // the old screen — same contract as the stable overlay lease).
+    let wrapper: import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent | undefined
+    let raw: OverlayHandle | undefined
+    let hiddenByLease = false
+    let closed = false
+    const mount = (): void => {
+      if (closed || raw !== undefined) return
+      const created = new AdvancedOverlayComponent(
+        component,
+        () => this.advancedRenderContext(),
+        (message: string) => this.notify(`advanced overlay: ${message}`, 'error'),
+      )
+      wrapper = created
+      this.advancedOverlayWrappers.add(created)
+      raw = this.showOverlayOnHost(created, mountOptions)
+      if (hiddenByLease) raw.setHidden(true)
+    }
+    mount()
+    const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
+      id,
+      get active() {
+        return !closed
+      },
+      get focused() {
+        return raw?.isFocused() ?? false
+      },
+      focus: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+        raw?.focus()
+      },
+      blur: () => {
+        if (closed) return
+        raw?.unfocus()
+      },
+      invalidate: () => {
+        if (closed) return
+        wrapper?.invalidate()
+        this.requestRender()
+      },
+      close: () => {
+        if (closed) return
+        closed = true
+        this.advancedOverlayLeases.delete(lease)
+        if (wrapper !== undefined) {
+          this.advancedOverlayWrappers.delete(wrapper)
+          // The wrapper's dispose() runs the plugin's dispose() (isolated
+          // inside the wrapper) — the plugin component never outlives its
+          // overlay.
+          wrapper.dispose()
+        }
+        raw?.hide()
+        raw = undefined
+        wrapper = undefined
+      },
+      hide: () => {
+        if (closed) return
+        hiddenByLease = true
+        raw?.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+      },
+      // Host-internal: re-create the raw handle on the CURRENT active
+      // screen after a fullscreen swap (the old raw handle died with the
+      // old screen). Idempotent (a live raw handle skips). The OLD wrapper
+      // is dropped from the live set WITHOUT disposing it — the plugin
+      // component must survive the screen migration (the lease stays
+      // live); the dead screen's overlay stack is the only remaining
+      // reference and dies with the screen.
+      _remount: () => {
+        if (closed) return
+        if (wrapper !== undefined) {
+          this.advancedOverlayWrappers.delete(wrapper)
+        }
+        raw = undefined
+        mount()
+      },
+      // Host-internal: recompile the plugin's render() output (terminal
+      // resize — the plugin's render(ctx) must see the new geometry).
+      _recompile: () => {
+        if (closed) return
+        wrapper?.invalidate()
+      },
+    }
+    // The surface's dispose closes every still-owned lease: track it.
+    this.advancedOverlayLeases.add(lease)
+    return lease
+  }
+
+  /** Phase 2: re-mount every still-open ADVANCED lease on the CURRENT
+   * active screen (fullscreen toggle — the old screen's overlays died
+   * with it; a managed lease survives the screen migration). */
+  private remountAdvancedOverlays(): void {
+    for (const lease of this.advancedOverlayLeases) {
+      lease._remount()
+    }
+  }
+
+  /** Phase 2: recompile every live ADVANCED overlay wrapper (terminal
+   * resize — the plugin's render(ctx) sees the new geometry). */
+  private recompileAdvancedOverlays(): void {
+    for (const wrapper of this.advancedOverlayWrappers) {
+      wrapper.invalidate()
+    }
+  }
+
+  /** Phase 2 test hook: the number of still-owned ADVANCED overlay leases. */
+  ownedAdvancedOverlayLeasesForTest(): number {
+    return this.advancedOverlayLeases.size
+  }
+
+  /** Phase 2 test hook: the number of live ADVANCED overlay wrappers
+   * (asserts a fullscreen remount drops the old wrapper — the set must
+   * not grow across screen migrations). */
+  advancedOverlayWrappersForTest(): number {
+    return this.advancedOverlayWrappers.size
+  }
+
+  /** Phase 2: the live render context for ADVANCED interactive overlays
+   * (surfaceId/generation/geometry; `focused` is added by the wrapper). */
+  private advancedRenderContext(): Omit<import('./extension/advanced-types.ts').AdvancedRenderContext, 'focused'> {
+    return {
+      surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+      generation: this.generation,
+      width: this.terminal.columns,
+      height: this.terminal.rows,
+    }
+  }
+
+  // ── Phase 3: UNSTABLE raw input + low-level surface seam (plan §4–§10) ──
+
+  /** The emergency fail-safe window (ms): three Esc presses within this
+   * window trigger the release. */
+  private static readonly UNSTABLE_FAILSAFE_WINDOW_MS = 1500
+
+  /**
+   * The Host emergency fail-safe detector (plan §7): triple-Esc within
+   * {@link UNSTABLE_FAILSAFE_WINDOW_MS} at the SAME capture-session
+   * revision. Runs BEFORE the raw captures are consulted, so it cannot be
+   * rewritten or consumed by a capture. The first two Esc presses pass
+   * through (a plugin surface may use Esc normally); the third is
+   * consumed and triggers the release.
+   *
+   * Stale-press invalidation (round-1 finding): each press is stamped
+   * with the raw capture registry revision, which bumps on EVERY
+   * register/dispose. A release (fail-safe, owner unload) followed by a
+   * re-register therefore invalidates every earlier press — a stale pair
+   * from a previous capture session can never make the first Esc of a
+   * new session count as the third press.
+   * @param data - the raw chunk.
+   * @returns true when the fail-safe fired (the caller must consume the
+   *   chunk and run the release).
+   */
+  private unstableFailSafe(data: string): boolean {
+    // Only a PRESS counts: Kitty CSI-u release/repeat events
+    // (`\x1b[27;1:3u` / `\x1b[27;1:2u`) match matchesKey('escape') but
+    // must never increment the fail-safe tracker (round-2 finding — a
+    // release/repeat would otherwise make the third press fire early).
+    if (isKeyRelease(data) || isKeyRepeat(data) || !matchesKey(data, 'escape')) return false
+    const revision = this.unstableInputsRevision?.() ?? 0
+    const now = Date.now()
+    this.unstableEscPresses = this.unstableEscPresses.filter(press =>
+      now - press.at < TuiApp.UNSTABLE_FAILSAFE_WINDOW_MS && press.revision === revision)
+    this.unstableEscPresses.push({ at: now, revision })
+    if (this.unstableEscPresses.length >= 3) {
+      this.unstableEscPresses = []
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Phase 3: the UNSTABLE low-level surface handle (plan §10) — a
+   * SELECTED set of host surface capabilities for low-level plugins. It
+   * NEVER exposes `TuiApp`, `TuiMainScreen`, `TuiAltScreen` or the
+   * terminal object. A finally-disposed surface is inert.
+   */
+  unstableSurfaceHandle(): import('./extension/unstable-types.ts').UnstableSurfaceHandle {
+    const app = this
+    return {
+      surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+      generation: this.generation,
+      get width() {
+        return app.terminal.columns
+      },
+      get height() {
+        return app.terminal.rows
+      },
+      requestRender: () => {
+        if (app.disposed) return
+        app.requestRender()
+      },
+      mountComponent: (component, options) => app.showUnstableMount(component, options),
+    }
+  }
+
+  /**
+   * Phase 3: mount a low-level component (plan §9 option A) as a capturing
+   * overlay. The plugin renders RAW lines and receives RAW input (the
+   * Unstable contract — no sanitization); the host owns the physical
+   * mount, focus, stacking, fullscreen migration and teardown. The
+   * surface's final dispose closes every still-owned lease.
+   */
+  showUnstableMount(
+    component: import('./extension/unstable-types.ts').UnstableMountedComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): import('./extension/unstable-types.ts').UnstableMountLease {
+    if (this.disposed) {
+      return {
+        id: 'inert',
+        active: false,
+        focused: false,
+        focus: () => {},
+        blur: () => {},
+        invalidate: () => {},
+        close: () => {},
+        hide: () => {},
+        show: () => {},
+      }
+    }
+    const mountOptions = this.overlayOptionsOf(options)
+    const id = `unstable-mount-${++this.unstableMountCounter}`
+    let adapter: import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter | undefined
+    let raw: OverlayHandle | undefined
+    let hiddenByLease = false
+    let closed = false
+    const mount = (): void => {
+      if (closed || raw !== undefined) return
+      const created = new UnstableMountedComponentAdapter(
+        component,
+        (message: string) => this.notify(`unstable mount: ${message}`, 'error'),
+      )
+      adapter = created
+      this.unstableMountAdapters.add(created)
+      raw = this.showOverlayOnHost(created, mountOptions)
+      if (hiddenByLease) raw.setHidden(true)
+    }
+    mount()
+    const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
+      id,
+      get active() {
+        return !closed
+      },
+      get focused() {
+        return raw?.isFocused() ?? false
+      },
+      focus: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+        raw?.focus()
+      },
+      blur: () => {
+        if (closed) return
+        raw?.unfocus()
+      },
+      invalidate: () => {
+        if (closed) return
+        this.requestRender()
+      },
+      close: () => {
+        if (closed) return
+        closed = true
+        this.unstableMountLeases.delete(lease)
+        if (adapter !== undefined) {
+          this.unstableMountAdapters.delete(adapter)
+          adapter.dispose()
+        }
+        raw?.hide()
+        raw = undefined
+        adapter = undefined
+      },
+      hide: () => {
+        if (closed) return
+        hiddenByLease = true
+        raw?.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+      },
+      // Host-internal: re-create the raw handle on the CURRENT active
+      // screen after a fullscreen swap. The OLD adapter is dropped from
+      // the live set WITHOUT disposing it (the plugin component must
+      // survive the screen migration).
+      _remount: () => {
+        if (closed) return
+        if (adapter !== undefined) {
+          this.unstableMountAdapters.delete(adapter)
+        }
+        raw = undefined
+        mount()
+      },
+    }
+    this.unstableMountLeases.add(lease)
+    return lease
+  }
+
+  /** Phase 3: re-mount every still-open UNSTABLE lease on the CURRENT
+   * active screen (fullscreen toggle). */
+  private remountUnstableMounts(): void {
+    for (const lease of this.unstableMountLeases) {
+      lease._remount()
+    }
+  }
+
+  /** Phase 3 test hook: the number of still-owned UNSTABLE mount leases. */
+  ownedUnstableMountLeasesForTest(): number {
+    return this.unstableMountLeases.size
+  }
+
+  /** Phase 3 test hook: the number of live UNSTABLE mount adapters
+   * (asserts a fullscreen remount drops the old adapter). */
+  unstableMountAdaptersForTest(): number {
+    return this.unstableMountAdapters.size
+  }
+
+  /** Phase 2: the ADVANCED editor controls (plan §9) — direct semantic
+   * editor actions through the host's editor seat. The host owns
+   * submission/session safety; these controls only carry text/cursor/
+   * focus. A disposed surface is inert. */
+  advancedEditorControls(): import('./extension/advanced-types.ts').AdvancedEditorControls {
+    const app = this
+    return {
+      getEditorState: () => app.editorSeatHolder.snapshot(),
+      setEditorText: (text) => {
+        if (app.disposed) return
+        app.seatEditor().setText(text)
+        app.editorSeatHolder.notifyChanged()
+      },
+      setEditorCursor: (offset) => {
+        if (app.disposed) return
+        app.seatEditor().setCursor(offset)
+        app.editorSeatHolder.notifyChanged()
+      },
+      insertEditorText: (text, at) => {
+        if (app.disposed) return
+        const current = app.seatEditor()
+        const offset = at ?? current.getCursor()
+        const draft = current.getText()
+        const next = draft.slice(0, offset) + text + draft.slice(offset)
+        current.setText(next)
+        current.setCursor(offset + text.length)
+        app.editorSeatHolder.notifyChanged()
+      },
+      pasteToEditor: (text) => {
+        if (app.disposed) return
+        const current = app.seatEditor()
+        const offset = current.getCursor()
+        const draft = current.getText()
+        const next = draft.slice(0, offset) + text + draft.slice(offset)
+        current.setText(next)
+        current.setCursor(offset + text.length)
+        app.editorSeatHolder.notifyChanged()
+      },
+      requestEditorFocus: () => {
+        if (app.disposed) return
+        // Best-effort: focus the seat component only when no capturing
+        // flow (question/approval/overlay) owns the seat — those flows
+        // restore their own focus and must never be stolen.
+        if (app.activeQuestions !== undefined || app.activeApproval !== undefined
+          || app.activeScreen.hasOverlayEntries) return
+        app.activeScreen.setFocus(app.seatEditor().component)
+      },
+    }
+  }
+
+  /** Phase 2 test hook: the current ADVANCED editor controls (probes the
+   * seam without going through the service). */
+  advancedEditorControlsForTest(): import('./extension/advanced-types.ts').AdvancedEditorControls {
+    return this.advancedEditorControls()
+  }
+
+  // ── Phase 4: the imperative UI broker + host-state facade (plan §4A/§4D) ─
+
+  /**
+   * Phase 4: the ADVANCED imperative UI broker (plan §4A) — select/
+   * confirm/input/notify/custom built on the Host's OWN picker, question
+   * flow and notify infrastructure (never a second modal manager). A
+   * disposed surface settles every prompt immediately.
+   */
+  advancedUiBroker(): {
+    select(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined>
+    confirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean>
+    input(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined>
+    notify(message: string, options?: import('./extension/advanced-types.ts').AdvancedNotifyOptions): void
+    custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
+  } {
+    const app = this
+    return {
+      select: (options) => app.advancedSelect(options),
+      confirm: (options) => app.advancedConfirm(options),
+      input: (options) => app.advancedInput(options),
+      notify: (message, options) => {
+        if (app.disposed) return
+        app.notify(message, options?.type ?? 'info')
+      },
+      custom: (factory, options, signal) => app.advancedCustom(factory, options, signal),
+    }
+  }
+
+  /** Phase 4: imperative selection — a picker overlay resolving with the
+   * selected value, or undefined on cancel/abort/dispose. */
+  private advancedSelect(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined> {
+    if (this.disposed) return Promise.resolve(undefined)
+    return new Promise<string | undefined>((resolve) => {
+      let settled = false
+      // Declared BEFORE settle: an already-aborted signal fires onCancel
+      // SYNCHRONOUSLY inside openPicker, so settle must not hit a TDZ
+      // reference to handle (round-6 finding — the promise would reject
+      // with a ReferenceError instead of resolving undefined).
+      let handle: PickerHandle | undefined
+      // The zero-arg settle registered in pendingBrokerSettles (the
+      // surface-dispose path) — removed on a normal select/cancel/abort
+      // (round-2 finding: an anonymous entry would retain the closed
+      // picker until surface dispose). Routes through settle() so the
+      // dispose path shares the same single-settle semantics (round-3
+      // follow-up).
+      const brokerSettle = (): void => settle(undefined)
+      const settle = (value: string | undefined): void => {
+        if (settled) return
+        settled = true
+        this.pendingBrokerSettles.delete(brokerSettle)
+        // Round-5 asymmetry: a settled promise must not retain the
+        // picker's abort listener on the caller's signal (the dispose
+        // path routes through settle too). Optional-chained: the
+        // already-aborted path never registered a listener.
+        handle?._removeAbortListener?.()
+        resolve(value)
+      }
+      handle = this.openPicker(
+        options.items.map(item => ({ ...item })),
+        (value) => settle(value),
+        () => settle(undefined),
+        {
+          header: options.header,
+          enableSearch: options.enableSearch,
+          width: options.width,
+          maxHeight: options.maxHeight,
+          signal: options.signal,
+        },
+      )
+      // The surface's dispose settles the prompt (the picker overlay dies
+      // with the surface; the promise must not hang). Guarded: an
+      // already-aborted signal settles synchronously inside openPicker —
+      // the entry must not be added afterwards.
+      if (!settled) this.pendingBrokerSettles.add(brokerSettle)
+    })
+  }
+
+  /** Phase 4: imperative confirmation — a yes/no question resolving with
+   * the choice; cancel/abort/dispose resolves false. */
+  private advancedConfirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean> {
+    const approve = options.approveLabel ?? 'Yes'
+    const reject = options.rejectLabel ?? 'No'
+    return this.askQuestions([{
+      id: 'advanced-confirm',
+      question: options.question,
+      ...(options.detail === undefined ? {} : { detail: options.detail }),
+      options: [{ label: approve }, { label: reject }],
+    }], options.signal)
+      .then(answers => answers[0]?.selected[0] === approve)
+      .catch(() => false)
+  }
+
+  /** Phase 4: imperative free-text input — a question with a free-text
+   * row resolving with the text; cancel/abort/dispose resolves
+   * undefined. */
+  private advancedInput(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined> {
+    return this.askQuestions([{
+      id: 'advanced-input',
+      question: options.question,
+      ...(options.detail === undefined ? {} : { detail: options.detail }),
+    }], options.signal)
+      .then(answers => answers[0]?.custom)
+      .catch(() => undefined)
+  }
+
+  /**
+   * Phase 4: custom interactive UI (plan §4B) — mount a factory-built
+   * interactive component and resolve with the result reported through
+   * the public host facade's done(), or undefined on close/cancel/
+   * dispose. The factory receives ONLY the public facade — never a
+   * private TUI object. A throwing factory is isolated (resolves
+   * undefined).
+   */
+  private advancedCustom(
+    factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (this.disposed) return Promise.resolve(undefined)
+    const app = this
+    return new Promise<unknown>((resolve) => {
+      let settled = false
+      // Declared BEFORE the factory call: a factory that synchronously
+      // calls host.done()/close() must not hit a TDZ reference.
+      let lease: import('./extension/advanced-types.ts').AdvancedOverlayLease | undefined
+      // The zero-arg settle registered in pendingBrokerSettles (the
+      // surface-dispose path) — the set holds `() => void` entries.
+      const brokerSettle = (): void => settle(undefined)
+      const settle = (result: unknown): void => {
+        if (settled) return
+        settled = true
+        this.pendingBrokerSettles.delete(brokerSettle)
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+        lease?.close()
+        resolve(result)
+      }
+      // The fiber-cancellation path (round-1 finding): owner unload aborts
+      // the signal — the promise settles undefined and the surface closes.
+      const onAbort = (): void => settle(undefined)
+      if (signal !== undefined) {
+        if (signal.aborted) {
+          resolve(undefined)
+          return
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+      const host: import('./extension/advanced-types.ts').AdvancedCustomHost = {
+        surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+        generation: this.generation,
+        get width() { return app.terminal.columns },
+        get height() { return app.terminal.rows },
+        done: (result) => settle(result),
+        close: () => settle(undefined),
+      }
+      let component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent
+      try {
+        component = factory(host)
+      } catch (error) {
+        // Round-4 follow-up: drop the abort listener before returning —
+        // a throwing factory never mounts, so the listener must not stay
+        // registered on the caller's signal.
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+        this.notify(`custom UI failed: ${safeErrorMessage(error)}`, 'error')
+        resolve(undefined)
+        return
+      }
+      // Round-2 finding: a factory that settles SYNCHRONOUSLY (calls
+      // host.done()/close() during the factory call) must not mount the
+      // overlay afterwards — the settle already resolved the promise and
+      // the lease was still undefined, so the mount would leak forever
+      // (the surface-dispose path cannot clean it up either: settle
+      // returns early on `settled`).
+      if (!settled) {
+        lease = this.showAdvancedInteractiveOverlay(component, options)
+        // The surface's dispose settles the promise (the overlay dies with
+        // the surface).
+        this.pendingBrokerSettles.add(brokerSettle)
+      }
+    })
+  }
+
+  /** Phase 4: the pending broker settles (run on the surface's final
+   * dispose — every still-open select/custom promise settles instead of
+   * hanging). */
+  private readonly pendingBrokerSettles = new Set<() => void>()
+
+  /** Phase 4 test hook: the number of still-pending broker settles
+   * (asserts a normal select/custom completion leaves none behind). */
+  pendingBrokerSettlesForTest(): number {
+    return this.pendingBrokerSettles.size
+  }
+
+  /**
+   * Phase 4: the ADVANCED host-state facade (plan §4D) — theme query/
+   * select, title override, working-indicator override and tool-expansion
+   * preference. A disposed surface is inert.
+   */
+  advancedHostState(): import('./extension/advanced-types.ts').AdvancedHostState {
+    const app = this
+    return {
+      getTheme: () => app.currentThemeId,
+      setTheme: (name) => {
+        if (app.disposed) return
+        if (name === 'dark' || name === 'light') {
+          app.applyTheme(name)
+          return
+        }
+        // A registered plugin theme name: the runner resolves the palette
+        // through the theme registry (wired below); unknown names are a
+        // no-op.
+        app.events.onAdvancedSetTheme?.(name)
+      },
+      setTitle: (title) => {
+        if (app.disposed) return
+        app.setSessionTitle(title)
+      },
+      setWorkingMessage: (message) => {
+        if (app.disposed) return
+        app.working.setMessage(message ?? '')
+        app.requestRender()
+      },
+      setToolsExpanded: (expanded) => {
+        if (app.disposed) return
+        app.setToolOutputExpanded(expanded)
+      },
+    }
+  }
+
+  /** Phase 4 test hook: the current ADVANCED host-state facade. */
+  advancedHostStateForTest(): import('./extension/advanced-types.ts').AdvancedHostState {
+    return this.advancedHostState()
+  }
+
+  /** Phase 4 test hook: the working indicator's current label (probes the
+   * working-message override). */
+  workingTextForTest(): string {
+    return this.working.messageText()
+  }
+
+  /** Phase 2: the ADVANCED overlay lease id counter. */
+  private advancedOverlayCounter = 0
+  /** Phase 2: the last geometry the ADVANCED overlays were recompiled at
+   * (the resize latch — recompile only on an actual geometry change). */
+  private lastAdvancedGeometry: { width: number; height: number } = { width: -1, height: -1 }
 
   /** M9: the host default editor adapted to the seat surface. The fork's
    * cursor is `{line, col}`; the seat uses a flat OFFSET (line lengths
@@ -3561,11 +4379,21 @@ export class TuiApp {
     if (this.syncingSurfaceGeometry) return
     this.syncingSurfaceGeometry = true
     try {
+      const width = this.terminal.columns
+      const height = this.terminal.rows
+      // Phase 2: a terminal resize recompiles every live ADVANCED overlay
+      // wrapper — the plugin's render(ctx) must see the new geometry (the
+      // compiled view itself re-wraps at the current width per frame, but
+      // the plugin's render() output is only re-read on invalidate). Runs
+      // even without an extension host (tests mount advanced overlays
+      // directly on the app); the last-geometry latch keeps it resize-only.
+      if (width !== this.lastAdvancedGeometry.width || height !== this.lastAdvancedGeometry.height) {
+        this.lastAdvancedGeometry = { width, height }
+        this.recompileAdvancedOverlays()
+      }
       const host = this.extensionHost
       if (host === undefined) return
       const current = host.state().surface
-      const width = this.terminal.columns
-      const height = this.terminal.rows
       // focusedSeat derives from the actual focus state (follow-up P1): the
       // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
       // question/approval/fullscreen entry; the requestRender mirror only
@@ -4191,20 +5019,50 @@ export class TuiApp {
       },
     )
     const handle = this.showOverlayOnHost(new Frame(list), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    // Phase 4: an abort signal closes the picker and fires onCancel (the
+    // imperative select broker's fiber-cancellation path). The listener
+    // is removed on a normal select/cancel AND on the handle's close
+    // (round-1 finding 4 + round-5 asymmetry: a settled promise must not
+    // retain the listener on the caller's signal).
+    let onAbort: (() => void) | undefined
+    const removeAbortListener = (): void => {
+      if (onAbort !== undefined && options.signal !== undefined) {
+        options.signal.removeEventListener('abort', onAbort)
+        onAbort = undefined
+      }
+    }
+    if (options.signal !== undefined) {
+      onAbort = (): void => {
+        handle.hide()
+        onCancel()
+      }
+      if (options.signal.aborted) {
+        onAbort()
+        onAbort = undefined
+      } else {
+        options.signal.addEventListener('abort', onAbort, { once: true })
+      }
+    }
     list.onSelect = (item) => {
+      removeAbortListener()
       handle.hide()
       onSelect(item.value)
     }
     list.onCancel = () => {
+      removeAbortListener()
       handle.hide()
       onCancel()
     }
     return {
-      close: () => handle.hide(),
+      close: () => {
+        removeAbortListener()
+        handle.hide()
+      },
       setItems: (next) => {
         list.setItems(next.map(item => ({ ...item })))
         this.requestRender()
       },
+      _removeAbortListener: removeAbortListener,
     }
   }
 
@@ -4357,6 +5215,9 @@ export class TuiApp {
    * they pick up the new palette on their next render too.) */
   applyTheme(theme: 'dark' | 'light'): void {
     setTheme(theme)
+    // Phase 4: track the current theme id (the advanced host-state
+    // facade's getTheme).
+    this.currentThemeId = theme
     // Rendered ANSI is baked into cached components: bump the revision so
     // the per-message render cache rebuilds on the next paint.
     this.themeRevision += 1
@@ -4370,6 +5231,8 @@ export class TuiApp {
   /** Apply a resolved custom palette and repaint everything. */
   applyPalette(palette: ColorPalette): void {
     setTheme('custom', palette)
+    // Phase 4: track the current theme id.
+    this.currentThemeId = 'custom'
     this.themeRevision += 1
     // Same ordering as applyTheme (F-14).
     this.extensionHost?.updateSurface({ themeId: 'custom', themeRevision: this.themeRevision })
@@ -4830,18 +5693,4 @@ export function startProcessTui(events: TuiAppEvents, options: TuiAppOptions = {
   const app = new TuiApp(new ProcessTerminal(), events, options)
   app.start()
   return app
-}
-
-/** The bracketed-paste open marker. */
-const BRACKETED_PASTE_START = '\x1b[200~'
-/** The bracketed-paste close marker. */
-const BRACKETED_PASTE_END = '\x1b[201~'
-
-/** Parse a bracketed-paste chunk into its content, or undefined when the
- * data is not a bracketed paste (P1-5: the host classifies pastes for the
- * semantic editor input events). The fork re-wraps pastes with the
- * markers, so one paste arrives as one bracketed chunk. */
-function parseBracketedPaste(data: string): string | undefined {
-  if (!data.startsWith(BRACKETED_PASTE_START) || !data.endsWith(BRACKETED_PASTE_END)) return undefined
-  return data.slice(BRACKETED_PASTE_START.length, data.length - BRACKETED_PASTE_END.length)
 }

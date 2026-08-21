@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real-plugin validation (Phase 5).** The tier selection is proven by
+  real consumers in `packages/dsh-pi-tui/examples/plugins/`, gated by
+  `scripts/examples-plugin-smoke.mjs` against the packed tarball: a
+  **production-class vim modal editor** (insert/normal modes, h/j/k/l,
+  word movement, x/d/c, i/a/o, undo/redo, yank/paste, multi-line,
+  cursor sync, submit integration — all through semantic
+  `EditorInputEvent`s, never raw bytes; the Advanced editor SDK is
+  sufficient, no Unstable usage), a **questionnaire form** (the Phase-4
+  imperative UI broker: select → free text → confirm → notify) and an
+  **interactive shell** (the Unstable raw seam: exclusive raw ownership
+  + a raw-rendering low-level mount; `exit` or the Host emergency
+  fail-safe returns). The authoring decision tree lives in
+  `docs/plugin-authoring.md`; the API gap process and the Stable
+  promotion review are recorded in `examples/README.md`.
+- **Pi capability parity (Phase 4).** The ADVANCED tier gains the
+  high-value Pi-style capabilities: the **imperative UI broker**
+  (`advanced.ui.select/confirm/input/notify` — promise-based prompts built
+  on the Host's own picker/question/notify infrastructure, caller-fiber
+  cancellation, surface-disposal settlement), **custom interactive UI**
+  (`advanced.ui.custom` — a factory-built interactive component mounted
+  by the Host, resolving with the result reported through the public
+  `AdvancedCustomHost` facade, never a private TUI object), and the
+  **host-state facade** (`advanced.host` — theme query/select, title
+  override, working-indicator override, tool-expansion preference). The
+  Pi capability matrix (`docs/extension-capability-matrix.md`) records
+  the tier mapping as a roadmap reference. Packed acceptance: the new
+  `phase4-plugin` fixture + `scripts/phase4-plugin-smoke.mjs` gate.
+- **Unstable extension tier (Phase 3).** `@xmoon76/dsh-pi-tui/extensions/unstable`
+  is now a usable tier (`UNSTABLE_API_LEVEL = 1`) with NO compatibility
+  guarantee: **raw input interception** (`unstable.input.raw` —
+  observe/consume/rewrite of RAW terminal chunks BEFORE the Host decodes
+  anything, exclusive raw ownership with explicit conflict errors,
+  fail-open on throwing handlers, each chunk passes the chain at most
+  once), the **Host emergency fail-safe** (triple-Esc within 1.5s
+  releases every raw capture and closes every unstable mount — detected
+  before the captures, so it cannot be rewritten or consumed by a
+  plugin), and the **low-level surface seam** (`unstable.surface.handle`
+  — requestRender/geometry/mountComponent for raw-rendering components;
+  never exposes TuiApp/screens/terminal). The facade is
+  `unstable(service)` — the Stable service interface is untouched. All
+  resources stay caller-fiber-owned and surface-generation-scoped;
+  failures ride the shared health ledger. Author guide:
+  `docs/extension-unstable.md`. Packed acceptance: the new `unstable-plugin`
+  fixture + `scripts/unstable-plugin-smoke.mjs` gate.
+- **Advanced extension tier (Phase 2).** `@xmoon76/dsh-pi-tui/extensions/advanced`
+  is now a usable tier (`ADVANCED_API_LEVEL = 1`) with three capabilities,
+  all still Host-mediated (never raw terminal bytes, never private
+  screens): **normalized input capture** (`advanced.input.capture` —
+  observe/capture/exclusive modes, deterministic priority ordering,
+  explicit exclusive-conflict errors, fail-open on throwing handlers),
+  **focused interactive surfaces** (`advanced.ui.interactive` — interactive
+  managed overlays hosting plugin-owned interactive components with
+  Host-compiled rendering, normalized input, focus/blur, resize
+  recompilation and fullscreen migration), and **advanced editor control**
+  (`advanced.editor.control` — get/set/cursor/insert/paste/focus through
+  the host's editor seat). The facade is `advanced(service)` — the Stable
+  service interface is untouched. All resources stay caller-fiber-owned
+  and surface-generation-scoped; failures ride the shared health ledger.
+  Author guide: `docs/extension-advanced.md`. Packed acceptance: the new
+  `advanced-plugin` fixture + `scripts/advanced-plugin-smoke.mjs` gate.
 - **Tiered extension surface.** The public extension SDK now ships three tiers:
   the stable `@xmoon76/dsh-pi-tui/extensions` entry keeps its compatibility
   contract, and the new `extensions/advanced` (experimental; minor releases may

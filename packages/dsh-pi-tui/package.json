@@ -151,7 +151,11 @@
     "smoke": "node scripts/tarball-smoke.mjs",
     "smoke:fixture": "node scripts/extension-fixture-smoke.mjs",
     "prepack": "pnpm clean && pnpm --dir ../pi-tui clean && pnpm build:package && pnpm typecheck && pnpm test",
-    "postpack": "node scripts/tarball-smoke.mjs && node scripts/extension-fixture-smoke.mjs && node scripts/vim-plugin-smoke.mjs",
+    "postpack": "node scripts/tarball-smoke.mjs && node scripts/extension-fixture-smoke.mjs && node scripts/advanced-plugin-smoke.mjs && node scripts/phase4-plugin-smoke.mjs && node scripts/unstable-plugin-smoke.mjs && node scripts/vim-plugin-smoke.mjs && node scripts/examples-plugin-smoke.mjs",
+    "smoke:advanced": "node scripts/advanced-plugin-smoke.mjs",
+    "smoke:phase4": "node scripts/phase4-plugin-smoke.mjs",
+    "smoke:unstable": "node scripts/unstable-plugin-smoke.mjs",
+    "smoke:examples": "node scripts/examples-plugin-smoke.mjs",
     "smoke:vim": "node scripts/vim-plugin-smoke.mjs"
   }
 }
