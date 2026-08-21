@@ -535,6 +535,19 @@ export class TranscriptFolder {
     kind: string,
   ): void {
     const data = event.data as { compactionId?: unknown } & Record<string, unknown>
+    // A seed boundary makes EVERY compaction/start still open at it STALE
+    // (the upstream invariant — inheritedOrphanStartSeqs): all open cards
+    // settle silently, never a forever-running "Compacting context…" on a
+    // resumed session. Handled before the per-id lookup: an end-seed
+    // carries no compactionId.
+    if (kind === 'session/end-seed') {
+      for (const [id, openIndex] of this.compacting) {
+        const open = this.items[openIndex]
+        if (open !== undefined && open.kind === 'compaction') open.running = false
+        this.compacting.delete(id)
+      }
+      return
+    }
     const compactionId = typeof data.compactionId === 'string' ? data.compactionId : undefined
     let index = compactionId === undefined ? undefined : this.compacting.get(compactionId)
     if (index === undefined) {
@@ -569,7 +582,7 @@ export class TranscriptFolder {
     // enters our type graph (the same pattern as the structural service
     // types). An unknown event type is otherwise skipped by the switch.
     const kind = event.type as string
-    if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end') {
+    if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end' || kind === 'session/end-seed') {
       this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
       return
     }

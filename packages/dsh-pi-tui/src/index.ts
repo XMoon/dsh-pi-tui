@@ -800,18 +800,55 @@ export function foldCompactionEvent(
   }
   if (event.type === 'compaction/end') {
     const error = typeof event.data.error === 'string' && event.data.error !== '' ? event.data.error : undefined
-    const matched = typeof event.data.compactionId !== 'string' || event.data.compactionId === state.id
+    // ONLY an end whose id matches the in-flight compaction settles it:
+    // a stale end (another compaction's, or an id-less orphan from a
+    // foreign/corrupt log) must neither clear the state nor notify.
+    const matched = typeof event.data.compactionId === 'string' && event.data.compactionId === state.id
     return {
       id: matched ? undefined : state.id,
       active: false,
       clear: matched,
-      notify: {
-        text: error === undefined ? 'Context compacted' : `Compaction failed: ${error}`,
-        kind: error === undefined ? 'info' : 'error',
-      },
+      notify: matched
+        ? {
+          text: error === undefined ? 'Context compacted' : `Compaction failed: ${error}`,
+          kind: error === undefined ? 'info' : 'error',
+        }
+        : undefined,
     }
   }
   return { id: state.id, active: false, clear: false, notify: undefined }
+}
+
+/** The busy flag after a turn-boundary event: a turn end must NOT clear
+ * the busy state while a compaction is still in flight — an interrupted
+ * turn can close (turn/end) before its compaction settles, and the
+ * single-Esc cancel must stay armed until compaction/end. */
+export function busyAfterTurnBoundary(eventType: 'turn/start' | 'turn/end', compacting: boolean): boolean {
+  return eventType === 'turn/start' || compacting
+}
+
+/**
+ * The in-flight compaction state a resumed session log implies: the newest
+ * compaction bracket decides. A `session/end-seed` boundary makes any
+ * EARLIER unmatched `compaction/start` STALE — the upstream invariant
+ * (inheritedOrphanStartSeqs) treats seed compactions that never settled
+ * inside the seed as abandoned, so they must not re-arm the compacting
+ * surface on resume.
+ */
+export function compactingFromLog(
+  events: readonly { type: unknown; data?: unknown }[],
+): { active: boolean; id: string | undefined } {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined) break
+    const kind = typeof event.type === 'string' ? event.type : ''
+    if (kind === 'compaction/start') {
+      const data = (event as { data?: { compactionId?: unknown } }).data
+      return { active: true, id: typeof data?.compactionId === 'string' ? data.compactionId : undefined }
+    }
+    if (kind === 'compaction/end' || kind === 'session/end-seed') break
+  }
+  return { active: false, id: undefined }
 }
 
 /** One agent's preset composition: the id to record and the setup that installs it. */
@@ -3646,7 +3683,10 @@ export function apply(ctx: Context, config: Config): void {
       } else if (event.type === 'turn/end') {
         guardToken = undefined
         app.setWorking(false)
-        app.setBusy(false)
+        // A turn end must not clear the busy flag while a compaction is
+        // still in flight (an interrupted turn can close before its
+        // compaction settles) — the single-Esc cancel stays armed.
+        app.setBusy(busyAfterTurnBoundary('turn/end', compactingId !== undefined))
         paintNow()
         refreshStatus()
         // Persist each completed turn so a crash loses at most the live
@@ -3701,20 +3741,15 @@ export function apply(ctx: Context, config: Config): void {
       // Initial compaction state: a resumed session may be persisted
       // MID-compaction (compaction/start without a matching end) — the
       // working row shows the unified label and the busy flag keeps the
-      // single-Esc cancel armed. The newest compaction bracket decides.
-      for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
-        const event = liveAgent.session.events[index]
-        if (event === undefined) break
-        const kind = event.type as string
-        if (kind === 'compaction/start') {
-          const data = (event as { data?: { compactionId?: unknown } }).data
-          if (typeof data?.compactionId === 'string') compactingId = data.compactionId
-          app.setCompacting(true)
-          app.setBusy(true)
-          app.setWorking(true)
-          break
-        }
-        if (kind === 'compaction/end') break
+      // single-Esc cancel armed. A session/end-seed boundary makes any
+      // EARLIER unmatched start stale (upstream invariant), so only a
+      // bracket in the LIVE part of the log re-arms the surface.
+      const resumedCompaction = compactingFromLog(liveAgent.session.events)
+      if (resumedCompaction.active) {
+        compactingId = resumedCompaction.id
+        app.setCompacting(true)
+        app.setBusy(true)
+        app.setWorking(true)
       }
       // Initial todo state: the last todo/write snapshot in the log.
       for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {

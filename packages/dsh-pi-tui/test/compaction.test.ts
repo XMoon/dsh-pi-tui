@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { foldCompactionEvent, type CompactionFold } from '../src/index.ts'
+import { busyAfterTurnBoundary, compactingFromLog, foldCompactionEvent, type CompactionFold } from '../src/index.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -165,20 +165,108 @@ test('foldCompactionEvent pairs start/end by id and notifies the settle', () => 
   assert.deepEqual(errEnd.notify, { text: 'Compaction failed: boom', kind: 'error' })
 })
 
-test('a STALE compaction/end never clears a newer compaction', () => {
+test('a STALE compaction/end neither clears nor notifies', () => {
   const state = { id: 'c2' as string | undefined }
   const stale = foldCompactionEvent(state, { type: 'compaction/end', data: { compactionId: 'c1' } })
   assert.equal(stale.clear, false, 'a stale end must not clear the newer compaction')
   assert.equal(stale.id, 'c2', 'the newer compaction id survives')
-  assert.ok(stale.notify !== undefined, 'the settle still notifies')
-  // The newer compaction's own end clears it.
+  assert.equal(stale.notify, undefined, 'a stale end must not notify the settle')
+  // The newer compaction's own end clears it and notifies.
   const fresh = foldCompactionEvent(state, { type: 'compaction/end', data: { compactionId: 'c2' } })
   assert.equal(fresh.clear, true)
   assert.equal(fresh.id, undefined)
+  assert.ok(fresh.notify !== undefined)
+})
+
+test('an ID-LESS compaction/end never clears an active compaction', () => {
+  const state = { id: 'c2' as string | undefined }
+  const orphan = foldCompactionEvent(state, { type: 'compaction/end', data: {} })
+  assert.equal(orphan.clear, false, 'an id-less end must not clear the active compaction')
+  assert.equal(orphan.id, 'c2')
+  assert.equal(orphan.notify, undefined)
+  // With NO compaction active, an id-less end is a foreign event: no-op.
+  const idle = foldCompactionEvent({ id: undefined }, { type: 'compaction/end', data: {} })
+  assert.equal(idle.clear, false)
+  assert.equal(idle.notify, undefined)
+})
+
+test('busyAfterTurnBoundary keeps busy while a compaction is in flight', () => {
+  assert.equal(busyAfterTurnBoundary('turn/start', false), true)
+  assert.equal(busyAfterTurnBoundary('turn/start', true), true)
+  assert.equal(busyAfterTurnBoundary('turn/end', true), true, 'an interrupted turn must keep the compaction cancel armed')
+  assert.equal(busyAfterTurnBoundary('turn/end', false), false)
+})
+
+test('compactingFromLog re-arms only a LIVE unclosed compaction', () => {
+  const ev = (type: string, compactionId?: string): never =>
+    ({ type, seq: 1, time: 1, data: compactionId === undefined ? {} : { compactionId } }) as never
+  // Unclosed start in the live part: active.
+  assert.deepEqual(compactingFromLog([ev('compaction/start', 'c1')]), { active: true, id: 'c1' })
+  // Closed bracket: idle.
+  assert.deepEqual(compactingFromLog([ev('compaction/start', 'c1'), ev('compaction/end', 'c1')]), { active: false, id: undefined })
+  // An unclosed start BEFORE a session/end-seed boundary is STALE (the
+  // upstream invariant): the seed's compaction never survives the seed.
+  assert.deepEqual(
+    compactingFromLog([ev('compaction/start', 'c1'), ev('session/end-seed')]),
+    { active: false, id: undefined },
+  )
+  // A start AFTER the boundary stays live.
+  assert.deepEqual(
+    compactingFromLog([ev('session/end-seed'), ev('compaction/start', 'c2')]),
+    { active: true, id: 'c2' },
+  )
+  // A start in the seed settled in the live part: idle.
+  assert.deepEqual(
+    compactingFromLog([ev('compaction/start', 'c1'), ev('session/end-seed'), ev('compaction/end', 'c1')]),
+    { active: false, id: undefined },
+  )
 })
 
 test('foldCompactionEvent ignores unrelated events', () => {
   const state = { id: 'c1' as string | undefined }
   const folded = foldCompactionEvent(state, { type: 'turn/end', data: {} })
   assert.deepEqual(folded, { id: 'c1', active: false, clear: false, notify: undefined } satisfies CompactionFold)
+})
+
+test('a session/end-seed settles stale open compaction cards', () => {
+  const folder = new TranscriptFolder()
+  // The seed's unclosed compaction/start, then the seed boundary: the
+  // card must settle (never a forever-running "Compacting context…").
+  folder.apply([compactionEvent('compaction/start', { compactionId: 'c1', turn: null })])
+  folder.apply([{ type: 'session/end-seed', seq: 2, time: 1, data: {} } as never])
+  const card = folder.messages()[0]!
+  assert.equal(card.kind, 'compaction')
+  if (card.kind !== 'compaction') return
+  assert.equal(card.running, false, 'the seed-boundary must settle the stale card')
+  assert.equal(card.error, undefined, 'a stale start is not a failure')
+  // A compaction started AFTER the boundary stays live until its end.
+  const folder2 = new TranscriptFolder()
+  folder2.apply([compactionEvent('compaction/start', { compactionId: 'c1', turn: null })])
+  folder2.apply([{ type: 'session/end-seed', seq: 2, time: 1, data: {} } as never])
+  folder2.apply([compactionEvent('compaction/start', { compactionId: 'c2', turn: null })])
+  const live = folder2.messages()
+  assert.equal(live.length, 2, 'the live compaction adds its own card')
+  const second = live[1]!
+  assert.equal(second.kind, 'compaction')
+  if (second.kind === 'compaction') assert.equal(second.running, true)
+})
+
+test('a turn end while compacting keeps the working row and label live', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setWorking(true)
+  app.setCompacting(true)
+  await vt.waitForRender()
+  // An interrupted turn closes (turn/end) BEFORE the compaction settles:
+  // the row must survive with the unified label (the busy flag stays
+  // armed — busyAfterTurnBoundary covers the runner side).
+  app.setWorking(false)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Working... · Compacting context…'), `the row must survive a turn end while compacting:\n${view}`)
+  app.setCompacting(false)
+  await vt.waitForRender()
+  const after = vt.getViewport().join('\n')
+  assert.ok(!after.includes('Compacting'), `the row must clear once the compaction settles:\n${after}`)
+  app.stop()
 })

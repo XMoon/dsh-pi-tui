@@ -5374,9 +5374,13 @@ export class TuiApp {
     }
     // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
     // onCancel. The listener lives once on the signal — category switches
-    // replace the overlay, never the listener.
+    // replace the overlay, never the listener. An ALREADY-aborted signal
+    // settles synchronously: the picker must never mount (activate) after
+    // its own cancellation.
+    let aborted = false
     if (options.signal !== undefined) {
       onAbort = (): void => {
+        aborted = true
         state.close()
         onCancel()
       }
@@ -5388,10 +5392,12 @@ export class TuiApp {
       }
     }
     // The caller's items are the initial rows; the first category's factory
-    // re-runs on activation and wins.
+    // re-runs on activation and wins. A pre-aborted signal never mounts.
     void items
-    activate()
-    this.activeCategorizedPicker = state
+    if (!aborted) {
+      activate()
+      this.activeCategorizedPicker = state
+    }
     return {
       close: () => state.close(),
       setItems: () => {

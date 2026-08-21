@@ -156,3 +156,32 @@ test('headerToPickerRow + sessionPickerItem feed the Main category without subag
   assert.equal(main.length, 1, 'the Main category keeps only non-subagent rows')
   assert.equal(main[0]!.id, 'session-root-1')
 })
+
+test('an ALREADY-aborted signal never mounts the categorized picker', async () => {
+  const { vt, app } = startApp()
+  let cancelled = 0
+  const controller = new AbortController()
+  controller.abort()
+  const categories: PickerCategory[] = [
+    {
+      id: 'main',
+      label: 'Main',
+      header: 'sessions · Main',
+      items: () => [{ value: 'session-root', label: 'alpha', description: '', group: 'w' }],
+    },
+  ]
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => { cancelled += 1 }, {
+    enableSearch: true,
+    header: categories[0]!.header,
+    categories,
+    signal: controller.signal,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(cancelled, 1, 'the pre-aborted signal must cancel immediately')
+  assert.ok(!view.includes('alpha'), `a cancelled picker must never mount:\n${view}`)
+  assert.ok(!view.includes('sessions · Main'), `the cancelled picker frame must not render:\n${view}`)
+  // The handle is inert but safe to close.
+  handle.close()
+  app.stop()
+})
