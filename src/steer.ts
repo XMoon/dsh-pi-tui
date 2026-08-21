@@ -186,7 +186,11 @@ export async function steerAll(deps: SteerDeps, text: string, options: SteerAllO
   const draft = text.trim()
   const messages = [
     ...current,
-    ...(draft === '' ? [] : [deps.createDraft(draft)]),
+    // The draft message is built from the ORIGINAL text (never the trim):
+    // the runner prepares one message whose content must match the guarded
+    // payload identity exactly (round-4 finding 2). The trim only decides
+    // whether a whitespace-only draft rides along.
+    ...(draft === '' ? [] : [deps.createDraft(text)]),
   ]
   // Remove ONLY the confirmed messages — never clear() — so anything
   // spliced in DURING the guard survives untouched.

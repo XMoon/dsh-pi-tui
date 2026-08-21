@@ -18,6 +18,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { LOCAL_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** The TUI-owned command names registered by registerTuiCommands (commands.ts). */
@@ -129,6 +130,9 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     sessions: { flush: async () => {} },
     cwd: '/ws',
     sessionCwd: () => '/ws',
+    imageStore: new DraftImageStore(),
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
     signal: new AbortController().signal,
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),

@@ -36,6 +36,7 @@ import { providerOptionsFor, type ProviderCatalogEntry } from '../src/provider-c
 import { QuestionFlow, type QuestionFlowQuestion } from '../src/question.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 process.env.NO_COLOR = ''
@@ -146,6 +147,9 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     sessions: { flush: async () => {} },
     cwd: '/ws',
     sessionCwd: () => '/ws',
+    imageStore: new DraftImageStore(),
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
     signal: new AbortController().signal,
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),

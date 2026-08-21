@@ -30,6 +30,8 @@ import type { Diag } from './diag.ts'
 import { dshHome } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import { readImageFile } from './image/intake.ts'
+import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
 import { resolveFdPath } from './mentions.ts'
 import { ModelSubmenu } from './model-menu.ts'
@@ -205,6 +207,16 @@ export interface TuiCommandRunner {
    * Command handlers must NEVER stop the app, flush or exit themselves. */
   requestExit(): void
   cwd: string
+  /** The per-TUI draft image registry (image pipeline, plan M1). Shared by
+   * the /image command, the clipboard intake and the submission path; the
+   * runner clears it on submit/session-switch/dispose, never on durable
+   * attachments. */
+  imageStore: import('./image/draft-store.ts').DraftImageStore
+  /** The deployment image policy (`ctx.attachments.imageLimits`), re-read
+   * dynamically; undefined when the attachment service is unavailable. */
+  imageLimits(): import('./image/intake.ts').ImageLimitsLike | undefined
+  /** Insert text at the editor cursor (the image placeholder path). */
+  insertIntoEditor(text: string): void
   /**
    * The live session's workspace (its header cwd), falling back to the
    * process cwd before any session exists. The editor autocomplete, the
@@ -1869,6 +1881,9 @@ export function registerTuiCommands(
     name: 'new',
     description: 'Start a fresh session in this workspace',
     handler: async () => {
+      // Staged drafts are per-TUI-run UI state: a fresh session never
+      // carries them over (durable attachments are untouched — plan §14).
+      runner.imageStore.clear()
       const liveAgent = runner.liveAgent
       const composition = await runner.compose(runner.pendingPreset)
       const presetId = composition.agentPreset
@@ -2206,6 +2221,67 @@ export function registerTuiCommands(
       if (process.stdout.isTTY !== true) return { kind: 'error', text: 'clipboard needs a TTY (OSC 52)' }
       process.stdout.write(`\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`)
       return { kind: 'success', text: 'copied last assistant message' }
+    },
+  })
+
+  commands.register({
+    name: 'image',
+    description: 'Attach an image file to the draft ([image #N (W×H)] placeholder)',
+    input: { hint: '<path>' },
+    handler: (invocation) => {
+      // The /image command is a TUI-LOCAL UI action (plan M2): it stages
+      // the file into the draft store and inserts its placeholder into the
+      // editor — it NEVER submits, so no session is created (deferred
+      // start preserved) and no model call happens here.
+      const words = parseShellWords(invocation.rawInput)
+      if (words.length !== 1 || words[0] === '') {
+        return { kind: 'error', text: 'Usage: /image <path>' }
+      }
+      const raw = words[0]!
+      // The intake is ASYNC: capture the session identity at launch and
+      // discard the result if the user switched sessions meanwhile — a late
+      // intake must never stage an image into the NEW session's draft
+      // (round-5 finding 2).
+      const intakeGeneration = runner.sessionGeneration
+      const detach = (label: string, task: () => unknown): void => {
+        runDetached(label, task, {
+          diag: runner.diag,
+          sessionId: () => runner.liveAgent?.session.id,
+          notify: (message) => app.notify(message, 'error'),
+          recoverable: () => true,
+        })
+      }
+      detach('image intake', () => {
+        // An owned workflow: the intake outcome decides the notice and the
+        // draft insertion — runOwned (AGENTS.md), never a bare void. The
+        // limits are read INSIDE the task so a mid-run policy change is
+        // honored (round-2 finding 5).
+        runOwned('image intake', () => {
+          const intake = readImageFile(raw, runner.sessionCwd(), runner.imageLimits())
+          if (runner.sessionGeneration !== intakeGeneration) {
+            app.notify('the session changed while reading the image — try again', 'error')
+            return undefined
+          }
+          const draft = runner.imageStore.add({
+            bytes: intake.bytes,
+            mediaType: intake.mediaType,
+            width: intake.width,
+            height: intake.height,
+            source: { type: 'path', path: intake.path },
+            name: intake.name,
+          })
+          runner.insertIntoEditor(`${draft.placeholder} `)
+          app.notify(`attached ${draft.placeholder} — Enter to send`)
+          return undefined
+        }, {
+          diag: runner.diag,
+          sessionId: () => runner.liveAgent?.session.id,
+          onError: (error) => {
+            app.notify(safeErrorMessage(error), 'error')
+          },
+        })
+      })
+      return { kind: 'success' }
     },
   })
 

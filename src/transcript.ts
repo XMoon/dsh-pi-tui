@@ -30,8 +30,18 @@ import type {} from '@deepseek-ai/dsh-llm-retry'
 
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage =
-  | { kind: 'user'; turn: number; text: string }
-  | { kind: 'assistant'; turn: number; text: string }
+  /**
+   * A direct human prompt. `text` is the flat text (search/title/queue
+   * recall); `content` carries the FULL ordered blocks when the message had
+   * images — the image pipeline renders them in order (plan §15).
+   */
+  | { kind: 'user'; turn: number; text: string; content?: readonly ContentBlock[] }
+  /**
+   * One step's model output. `text` is the flat markdown; `content` is the
+   * settled message's full blocks when the step carried any (role-neutral
+   * `ImageBlock`s render rather than crash, plan §15.3).
+   */
+  | { kind: 'assistant'; turn: number; text: string; content?: readonly ContentBlock[] }
   | { kind: 'thinking'; turn: number; text: string; /** Still streaming reasoning deltas for its step. */ running?: boolean }
   /**
    * Injected context (system reminders, skill content) from non-user sources.
@@ -592,13 +602,14 @@ export class TranscriptFolder {
         break
       }
       case 'user/message': {
-        const text = textOf(event.data.content)
-        if (text === '') break
+        const blocks = event.data.content
+        const text = textOf(blocks)
+        if (text === '' && !blocks.some(block => block.type === 'image')) break
         // Only direct human prompts are user messages; plugin-injected
         // context (system reminders, skill content) folds into a collapsible
         // system entry.
         if (event.data.source.kind === 'user') {
-          this.appendItem({ kind: 'user', turn: this.currentTurn, text })
+          this.appendItem({ kind: 'user', turn: this.currentTurn, text, content: blocks })
         } else {
           // Injected context: name the producer the way the Web row does
           // (contextProvenance), plus a notice form's one-line account.
@@ -631,12 +642,16 @@ export class TranscriptFolder {
       }
       case 'assistant/message': {
         const key = stepKey(event.data.turn, event.data.step)
-        const text = textOf(event.data.message.content)
+        const messageBlocks = event.data.message.content
+        const text = textOf(messageBlocks)
         const entry = this.assistantEntries.get(key)
         if (entry !== undefined) {
           entry.text = text
-        } else if (text !== '') {
-          const created: TranscriptMessage = { kind: 'assistant', turn: event.data.turn, text }
+          // The settled full blocks (kept when the step carried images or
+          // other non-text blocks — text-only steps stay on the text path).
+          if (messageBlocks.some(block => block.type !== 'text')) entry.content = messageBlocks
+        } else if (text !== '' || messageBlocks.some(block => block.type !== 'text')) {
+          const created: TranscriptMessage = { kind: 'assistant', turn: event.data.turn, text, ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}) }
           this.assistantEntries.set(key, created)
           this.appendItem(created)
         }

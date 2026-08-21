@@ -1202,3 +1202,64 @@ test('openSettings revert() restores a rejected row display (M5 gate)', async ()
   assert.ok(stripped.includes('old'), `rejected row must show the previous value:\n${stripped}`)
   app.stop()
 })
+
+test('submitDraft with an empty draft and a staged image submits (image-only gate)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    isImageDraft: () => true,
+  })
+  app.start()
+  await vt.waitForRender()
+  // The runner resolves the placeholders to image blocks (plan §11.1): an
+  // empty-text draft with images is NOT empty.
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [''])
+  app.stop()
+})
+
+test('submitDraft with an empty draft and no image stays a no-op even with the gate wired', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    isImageDraft: () => false,
+  })
+  app.start()
+  await vt.waitForRender()
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [])
+  app.stop()
+})
+
+test('ctrl+v routes to onClipboardPaste and consumes the key', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let pasted = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onClipboardPaste: () => { pasted += 1 },
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x16') // legacy Ctrl+V byte
+  await vt.waitForRender()
+  assert.equal(pasted, 1, 'ctrl+v fires the clipboard paste event')
+  assert.ok(!vt.getViewport().join('\n').includes('^V'), 'the key is consumed, never inserted')
+  // Kitty-protocol Ctrl+V press routes the same way.
+  const { setKittyProtocolActive } = await import('@xmoon76/pi-tui')
+  setKittyProtocolActive(true)
+  try {
+    vt.sendInput('\x1b[118;5u') // ctrl+v press
+    await vt.waitForRender()
+    assert.equal(pasted, 2)
+  } finally {
+    setKittyProtocolActive(false)
+  }
+  app.stop()
+})

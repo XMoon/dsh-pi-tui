@@ -16,6 +16,7 @@ import { createDiag } from '../src/diag.ts'
 import { shouldConsumeAdvertisedMiss } from '../src/index.ts'
 import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A minimal fake agent whose identity marks which session a refresh ran for.
@@ -65,6 +66,9 @@ function stubRunner(
     sessions: { flush: async () => {} },
     cwd: '/ws',
     sessionCwd: () => '/ws',
+    imageStore: new DraftImageStore(),
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
     signal: new AbortController().signal,
     get sessionGeneration() { return 1 },
     compose: async () => ({ setup: () => {} }),
