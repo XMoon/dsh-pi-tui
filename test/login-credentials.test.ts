@@ -97,6 +97,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
+    openTasksBrowser: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

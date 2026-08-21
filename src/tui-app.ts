@@ -66,6 +66,7 @@ import {
   relativizeToCwd,
   foldedCallPreview,
   genericRawInputLines,
+  subagentModelDisplay,
   resultTextLines,
   askAnswersSummary,
   toolCardHeader,
@@ -724,6 +725,10 @@ export interface TaskBrowserOptions {
   maxHeight?: number
   /** Rows visible before the list scrolls (default 10). */
   maxVisible?: number
+  /** Row-level action (e.g. `i` = interrupt a subagent). Fires for the
+   * selected row while the search box is closed; the row value carries the
+   * picker identity (`agent:…` / `job:…`). */
+  onAction?: (value: string, action: 'interrupt') => void
 }
 
 /** Live control of an open picker. */
@@ -1009,6 +1014,9 @@ export class TuiApp {
   private todoItems: readonly TodoItem[] = []
   /** Ctrl+T: whether the todo panel between transcript and editor is shown. */
   private todoPanelVisible = false
+  /** Fullscreen click on the todo panel (or the panel's own expand verb):
+   * whether the panel shows the FULL list or the compact five rows. */
+  private todoExpanded = false
   /** The todo panel Text; empty when hidden. */
   private readonly todoPanel: Text
   /**
@@ -1909,10 +1917,13 @@ export class TuiApp {
       this.events.onSteer?.(draft)
       return { consume: true }
     }
-    if (matchesKey(data, 'down') || matchesKey(data, 'ctrl+j')) {
-      // Task browser: with active background tasks and an EMPTY editor, ↓ /
-      // Ctrl+J open the task list (nothing to move the cursor through). With
-      // text present the keys keep their editing meaning; overlays own them.
+    if (matchesKey(data, 'down')) {
+      // Task browser: with active background tasks and an EMPTY editor, ↓
+      // opens the task list (nothing to move the cursor through). With text
+      // present the key keeps its editing meaning; overlays own it. (The
+      // former Ctrl+J chord is gone: legacy terminals send Ctrl+J as LF,
+      // which the editor treats as Enter — the key was unreliable, and ↓
+      // plus `/tasks` remain the two entries.)
       if (this.tasksActive && !this.activeScreen.hasOverlayEntries && this.seatEditor().getText().trim() === '') {
         this.events.onOpenTasks?.()
         return { consume: true }
@@ -2685,6 +2696,29 @@ export class TuiApp {
     }
     void x
     const width = this.terminal.columns
+    // Fullscreen layout, bottom-up: footer, editor seat, working row, queue
+    // pane, goal line, todo panel, dock, scroll pane, header. A click on
+    // the todo panel's own rows toggles its compact/full expansion
+    // (click-to-disclose, like the question frame's expand marker).
+    if (this.todoPanelVisible) {
+      const height = this.terminal.rows
+      const footerHeight = this.footer.render(width).length
+      const editorHeight = this.editorSeat.render(width).length
+      const workingHeight = this.working.render(width).length
+      const queueHeight = this.queuePane.render(width).length
+      const goalHeight = this.goalLine.render(width).length
+      const todoHeight = this.todoPanel.render(width).length
+      // Bottom-up geometry, clamped to the terminal: a tiny terminal (or a
+      // tall editor/queue) can push the derived rows off-screen, in which
+      // case no click maps onto the panel — never a negative or inverted
+      // region.
+      const todoBottom = Math.max(0, Math.min(height, height - footerHeight - editorHeight - workingHeight - queueHeight - goalHeight))
+      const todoTop = Math.max(0, todoBottom - todoHeight)
+      if (todoTop < todoBottom && y >= todoTop && y < todoBottom) {
+        this.toggleTodoExpanded()
+        return
+      }
+    }
     // Fullscreen layout: header row(s), then the transcript scroll pane.
     const headerHeight = this.header.render(width).length
     const rowInScroll = y - headerHeight
@@ -4347,6 +4381,11 @@ export class TuiApp {
     // call-time diff (old_string → new_string / the written content) right
     // away instead of an empty body.
     if (message.status === 'running') {
+      // A subagent-family call with an explicit model/provider override
+      // shows it immediately (subagentModelDisplay renders nothing when the
+      // call carries no override — official subagent calls stay unchanged).
+      const modelLine = subagentModelDisplay(message.name, message.args)
+      if (modelLine !== undefined) card.addChild(new Text(color.textDim(modelLine), 0, 0))
       const callView = this.present?.call(message.name, message.args)
       if (callView !== undefined) {
         if (callView.card === 'diff' && callView.diffs.length > 0) {
@@ -4404,6 +4443,10 @@ export class TuiApp {
       // Unparseable or failed: fall through to the generic presentation.
     }
     if (message.result === '' && (message.resultBlocks?.length ?? 0) === 0) return
+    // A settled subagent-family call keeps its model/provider line above the
+    // result (only when the call args carried an explicit override).
+    const settledModelLine = subagentModelDisplay(message.name, message.args)
+    if (settledModelLine !== undefined) card.addChild(new Text(color.textDim(settledModelLine), 0, 0))
     const resultView = this.present?.result(message.name, message.args, {
       content: message.resultBlocks ?? [],
       isError: message.status === 'error',
@@ -4711,6 +4754,8 @@ export class TuiApp {
   /** Toggle the todo panel between the transcript and the editor. */
   toggleTodoPanel(): boolean {
     this.todoPanelVisible = !this.todoPanelVisible
+    // Hiding resets the expansion: the next Ctrl+T shows the compact panel.
+    if (!this.todoPanelVisible) this.todoExpanded = false
     this.renderTodoPanel()
     // The dock summary hides while the panel is expanded (it would sit on
     // top of the full list); restore it on collapse.
@@ -4719,15 +4764,31 @@ export class TuiApp {
     return this.todoPanelVisible
   }
 
+  /** Toggle the todo panel between the compact five rows and the full list
+   * (fullscreen click on the panel's area). */
+  toggleTodoExpanded(): boolean {
+    if (!this.todoPanelVisible) return false
+    this.todoExpanded = !this.todoExpanded
+    this.renderTodoPanel()
+    this.requestRender()
+    return this.todoExpanded
+  }
+
   /** Whether the todo panel is currently shown. */
   isTodoPanelVisible(): boolean {
     return this.todoPanelVisible
   }
 
+  /** Whether the todo panel is showing the full list (headless-test hook). */
+  isTodoPanelExpanded(): boolean {
+    return this.todoExpanded
+  }
+
   /**
    * Rebuild the todo panel text: a border rule + `Todo` title (both indented
-   * one cell) plus up to five rows, in_progress first, then pending, then
-   * completed (strikethrough).
+   * one cell) plus up to five rows by default (in_progress first, then
+   * pending, then completed (strikethrough)); the full list when expanded
+   * (fullscreen click on the panel toggles).
    */
   private renderTodoPanel(): void {
     if (!this.todoPanelVisible) {
@@ -4741,16 +4802,17 @@ export class TuiApp {
       ...this.todoItems.filter(todo => todo.status === 'in_progress'),
       ...this.todoItems.filter(todo => todo.status === 'pending'),
       ...this.todoItems.filter(todo => todo.status === 'completed'),
-    ].slice(0, 5)
+    ]
+    const shown = this.todoExpanded ? ordered : ordered.slice(0, 5)
     const width = Math.max(1, this.terminal.columns)
     const border = color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)
     // Title: bold, two-cell indent.
     const title = color.textStrong('  Todo')
-    if (ordered.length === 0) {
+    if (shown.length === 0) {
       this.todoPanel.setText([border, title].join('\n'))
       return
     }
-    const lines = ordered.map(todo => {
+    const lines = shown.map(todo => {
       const body = todo.status === 'completed' ? `\x1b[9m${todo.content}\x1b[29m` : todo.content
       return `${mark(todo)} ${body}`
     })
@@ -4924,10 +4986,16 @@ export class TuiApp {
     this.syncExtensionState()
   }
 
+  /** Notice rows shown in full before the `+N more` fold (user rows are never folded). */
+  private static readonly MAX_NOTICE_ROWS = 5
+
   /** Rebuild the queue pane text from the current inbox rows. */
   private renderQueuePane(): void {
     const items = this.queueItems
     if (items.length === 0) {
+      // An emptied pane must not leave its previously painted rows behind
+      // (fork trap): the empty Text renders no lines and the requested
+      // frame repaints the region.
       this.queuePane.setText('')
       this.requestRender()
       return
@@ -4936,21 +5004,41 @@ export class TuiApp {
     // Panel border rules indent one cell on each side so the boundary never
     // reads as the editor's full-width border.
     const lines = [color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)]
-    for (const item of items) {
-      // Plugin notices (background-job completions etc.) are NOT steerable:
-      // they carry their own ⏳ marker so they never read as user input, and
-      // the hint below drops the steer/edit verbs when nothing else is queued.
-      const prefix = item.notice === true
-        ? `${color.textDim('⏳')} `
-        : `${color.accent('❯')} `
+    // User-origin rows are the user's OWN queued input: always fully
+    // visible, never folded. Notice rows (plugin notifications, subagent
+    // reports, injected instructions) are at-a-glance transport only:
+    // beyond MAX_NOTICE_ROWS they collapse into one `+N more` line, so a
+    // backlog of child settlements can never flood the pane — the task
+    // browser remains their browse surface, and each claimed notice drops
+    // the count (and eventually the group) automatically.
+    const userRows = items.filter(item => item.notice !== true)
+    const noticeRows = items.filter(item => item.notice === true)
+    const shownNotices = noticeRows.slice(0, TuiApp.MAX_NOTICE_ROWS)
+    for (const item of userRows) {
       const text = item.text.replace(/\s+/g, ' ').trim()
-      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth(prefix)), '…')
-      lines.push(prefix + (item.notice === true ? color.textDim(truncated) : truncated))
+      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth('❯ ')), '…')
+      lines.push(`${color.accent('❯')} ${truncated}`)
     }
-    const hasSteerable = items.some(item => item.notice !== true)
+    for (const item of shownNotices) {
+      // Notices are NOT steerable: they carry their own ⏳ marker so they
+      // never read as user input, and the hint below drops the steer/edit
+      // verbs when nothing else is queued.
+      const text = item.text.replace(/\s+/g, ' ').trim()
+      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth('⏳ ')), '…')
+      lines.push(`${color.textDim('⏳')} ${color.textDim(truncated)}`)
+    }
+    const folded = noticeRows.length - shownNotices.length
+    if (folded > 0) {
+      lines.push(color.textDim(truncateToWidth(
+        `  +${folded} more notices pending · they deliver as the next turn runs`,
+        Math.max(1, width - 2),
+        '…',
+      )))
+    }
+    const hasSteerable = userRows.length > 0
     const hint = hasSteerable
-      ? 'ctrl+s to steer all · alt+↑ to edit all · /queue for per-item actions'
-      : 'job notices deliver after the current task · /tasks to view'
+      ? 'ctrl+s to steer all · alt+↑ to edit all'
+      : 'notices deliver after the current task · /tasks to view'
     lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, width - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
     this.requestRender()
@@ -5486,6 +5574,7 @@ export class TuiApp {
         noMatchText: options.noMatchText,
         enableSearch: options.enableSearch,
         initialQuery: options.initialQuery,
+        onAction: options.onAction,
       },
       (value) => {
         close()

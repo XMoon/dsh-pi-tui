@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { foldQueueRows, isPlainExitPrompt, isSubagentSettlementNotice, subagentNoticeIsFailure, type QueueNoticeSource } from '../src/index.ts'
+import { foldQueueRows, isPlainExitPrompt, isSubagentSettlementNotice, isUserQueueInput, subagentNoticeIsFailure, type QueueNoticeSource } from '../src/index.ts'
 
 const notice = (source: QueueNoticeSource): QueueNoticeSource => source
 
@@ -118,6 +118,68 @@ test('foldQueueRows keeps plugin-notice marking on surviving rows', () => {
     new Set<string>(),
   )
   assert.equal(result.rows[0]?.notice, true, 'bash notices stay marked as notices')
+})
+
+test('foldQueueRows marks every non-user-origin message as a notice, only user rows steer', () => {
+  const batch = [
+    msg('u1', { kind: 'user' }, 'my queued message'),
+    msg('u2', undefined),
+    // A child's active report: delivered as a relay, never a user input.
+    msg('r1', { kind: 'subagent-report', form: 'relay', senderSessionId: 'child-1' }),
+    // Injected skill/agent instructions.
+    msg('i1', { kind: 'agent-instructions', form: 'instructions' }),
+    // Goal messages ride the inbox too.
+    msg('g1', { kind: 'goal' }),
+  ]
+  const result = foldQueueRows(batch, 'followup', new Set<string>())
+  assert.deepEqual(result.rows.map(row => row.id), ['u1', 'u2', 'r1', 'i1', 'g1'], 'all five survive the fold')
+  assert.deepEqual(result.rows.map(row => row.notice), [false, false, true, true, true],
+    'only user-origin rows are steerable; relay/instructions/goal are notices')
+})
+
+test('isUserQueueInput: only user-origin (or sourceless) rows are user input', () => {
+  assert.ok(isUserQueueInput(undefined), 'a sourceless plain row is user input')
+  assert.ok(isUserQueueInput({ kind: 'user' }), 'user origin is user input')
+  assert.ok(!isUserQueueInput({ kind: 'subagent-report', form: 'relay' }), 'a relay is not user input')
+  assert.ok(!isUserQueueInput({ kind: 'agent-instructions', form: 'instructions' }), 'instructions are not user input')
+  assert.ok(!isUserQueueInput({ kind: 'goal' }), 'goal messages are not user input')
+  assert.ok(!isUserQueueInput({ kind: 'plugin', form: 'notice', summary: 'bash build [status: completed]' }), 'plugin notices are not user input')
+  assert.ok(!isUserQueueInput({ kind: 'subagent-settled', form: 'notice' }), 'settlement notices are not user input')
+})
+
+test('foldQueueRows returns an empty pane once the agent claims the inbox (acceptance anchor)', () => {
+  // The runner's refreshQueue re-folds the live inbox on every
+  // agent/inbox/spliced event; a claim splices the batch out (removedCount),
+  // so the next fold sees an empty batch and the pane clears. This pins the
+  // user acceptance: once the main agent has received the pending notices,
+  // they disappear from the queue pane.
+  const notified = new Set<string>()
+  const pending = [
+    msg('r1', { kind: 'subagent-report', form: 'relay', senderSessionId: 'child-1' }),
+    msg('b1', { form: 'notice', kind: 'plugin', summary: 'bash build [status: completed]' }),
+    msg('u1', { kind: 'user' }),
+  ]
+  const before = foldQueueRows(pending, 'steer', notified)
+  assert.equal(before.rows.length, 3, 'the pending batch renders')
+  // Claimed: the inbox no longer holds the messages.
+  const after = foldQueueRows([], 'steer', notified)
+  assert.deepEqual(after.rows, [], 'a claimed inbox folds to an empty pane')
+  assert.deepEqual(after.failures, [], 'no failures on an empty batch')
+})
+
+test('Alt+Up dequeue pulls back only user-origin rows (relay/instructions/goal stay)', () => {
+  // The runner's onDequeue filters the inbox with isUserQueueInput — the
+  // SAME predicate as the pane classification. This pins the round-1 review
+  // repro: an injected relay/instruction/goal message must never land in
+  // the editor draft as editable user text.
+  const inbox = [
+    msg('u1', { kind: 'user' }, 'my queued message'),
+    msg('r1', { kind: 'subagent-report', form: 'relay', senderSessionId: 'child-1' }),
+    msg('i1', { kind: 'agent-instructions', form: 'instructions' }),
+    msg('g1', { kind: 'goal' }),
+  ]
+  const pulled = inbox.filter(message => isUserQueueInput(message.source))
+  assert.deepEqual(pulled.map(message => message.id), ['u1'], 'only the user row is pulled back')
 })
 
 test('isPlainExitPrompt matches only the exact trimmed lowercase word', () => {

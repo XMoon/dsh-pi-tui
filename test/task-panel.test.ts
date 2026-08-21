@@ -163,6 +163,100 @@ test('search filters by label/status and restores selection on setItems', () => 
   assert.ok(reapplied.includes('bash · lint'), `query must re-apply on setItems:\n${reapplied}`)
 })
 
+test('search matches the GROUP name too (the merged /tasks surface)', () => {
+  const { panel, rendered } = makePanel(
+    [runningJob(), doneJob(), subagent()],
+    { enableSearch: true },
+  )
+  panel.handleInput('s')
+  panel.handleInput('u')
+  panel.handleInput('b')
+  const filtered = rendered().map(strip).join('\n')
+  assert.ok(filtered.includes('subagent · research'), `group query must keep the subagent row:\n${filtered}`)
+  assert.ok(!filtered.includes('pnpm build'), `job rows must be filtered by the group query:\n${filtered}`)
+})
+
+test('i on a selected subagent row fires the interrupt action while search is closed', () => {
+  let acted: { value: string; action: string } | undefined
+  const panel = new TaskBrowserPanel(
+    [runningJob(), subagent()],
+    10,
+    {
+      header: 'tasks · subagents',
+      onAction: (value, action) => { acted = { value, action } },
+    },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.render(100)
+  // The subagent row is second; move the cursor onto it, then press i.
+  panel.handleInput('\x1b[B')
+  panel.handleInput('i')
+  assert.deepEqual(acted, { value: 'agent:child-1', action: 'interrupt' }, 'i must interrupt the selected subagent')
+  // A job row under the cursor: the action still fires with the job value
+  // (the host ignores non-subagent rows).
+  panel.handleInput('\x1b[A')
+  panel.handleInput('i')
+  assert.deepEqual(acted, { value: 'job:bash-1', action: 'interrupt' }, 'i reports the selected row whatever its kind')
+})
+
+test('i is a query character once a search query is active, never an action', () => {
+  let acted = 0
+  const panel = new TaskBrowserPanel(
+    [subagent()],
+    10,
+    {
+      header: 'tasks · subagents',
+      enableSearch: true,
+      onAction: () => { acted += 1 },
+    },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.render(100)
+  // With a query in flight, `i` is an ordinary query letter ("task",
+  // "git") even on a subagent row.
+  panel.handleInput('t')
+  panel.handleInput('i')
+  assert.equal(acted, 0, 'i must go to the search input while a query is active')
+})
+
+test('i interrupts a subagent row from the empty search state (the /tasks production path)', () => {
+  let acted: { value: string; action: string } | undefined
+  const panel = new TaskBrowserPanel(
+    [runningJob(), subagent()],
+    10,
+    {
+      header: 'tasks · subagents',
+      enableSearch: true,
+      onAction: (value, action) => { acted = { value, action } },
+    },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.render(100)
+  // The browser opens with an EMPTY query: move onto the subagent row and
+  // press i — the interrupt must fire even though search is enabled (the
+  // real /tasks surface configures enableSearch: true).
+  panel.handleInput('\x1b[B')
+  panel.handleInput('i')
+  assert.deepEqual(acted, { value: 'agent:child-1', action: 'interrupt' }, 'empty-query i must interrupt the selected subagent')
+  // A job row under the cursor with an empty query: i starts a search
+  // instead of firing (no subagent selected — no interrupt intent).
+  acted = undefined
+  panel.handleInput('\x1b[A')
+  panel.handleInput('i')
+  assert.equal(acted, undefined, 'i on a job row with an empty query must go to the search input')
+  // Once the query is non-empty, i is a letter everywhere.
+  panel.handleInput('\x1b[B')
+  panel.handleInput('b') // query "ib"
+  panel.handleInput('i')
+  assert.equal(acted, undefined, 'i with a non-empty query must stay a query letter')
+})
+
 test('search input is editable: backspace removes characters and re-filters', () => {
   const { panel, rendered } = makePanel(
     [runningJob(), doneJob(), subagent()],

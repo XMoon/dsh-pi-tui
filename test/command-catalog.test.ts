@@ -78,6 +78,7 @@ function stubRunner(
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
+    openTasksBrowser: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import {
-  foldedCallPreview, genericRawInputLines, parseReadEnvelopes, resultTextLines, toolPresenterFrom, webCardLines,
+  foldedCallPreview, genericRawInputLines, parseReadEnvelopes, resultTextLines, subagentModelDisplay, toolPresenterFrom, webCardLines,
 } from '../src/present.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { TuiApp, BulletedComponent } from '../src/tui-app.ts'
@@ -2344,6 +2344,31 @@ test('webCardLines pure helper renders both search and fetch shapes', () => {
   assert.deepEqual(webCardLines({
     card: 'web', kind: 'fetch', url: 'https://e.com', statusCode: 404, truncated: false,
   }), ['https://e.com — HTTP 404'])
+})
+
+test('subagentModelDisplay extracts model/provider from subagent-family calls only', () => {
+  // subagent_route top-level shape: both parts present.
+  assert.equal(
+    subagentModelDisplay('subagent_route', JSON.stringify({ description: 'x', prompt: 'y', provider: 'ollama', model: 'deepseek-v4' })),
+    'deepseek-v4 · ollama',
+  )
+  // Either part alone renders alone.
+  assert.equal(subagentModelDisplay('subagent_router', JSON.stringify({ model: 'm1' })), 'm1')
+  assert.equal(subagentModelDisplay('subagent_route', JSON.stringify({ provider: 'p1' })), 'p1')
+  // agentOptions shape (compat with other dispatchers).
+  assert.equal(subagentModelDisplay('subagent_fork', JSON.stringify({ agentOptions: { provider: 'p', model: 'm' } })), 'm · p')
+  // No override in the args → undefined (the official subagent tool's model
+  // lives in deployment config and never renders).
+  assert.equal(subagentModelDisplay('subagent', JSON.stringify({ description: 'a', prompt: 'b' })), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', JSON.stringify({ description: 'a', prompt: 'b' })), undefined)
+  // Unknown names / malformed / non-object args → undefined (compat: zero
+  // rendering change for every other tool).
+  assert.equal(subagentModelDisplay('bash', JSON.stringify({ model: 'x' })), undefined)
+  assert.equal(subagentModelDisplay('workflow', JSON.stringify({ model: 'x' })), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', 'not-json'), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', ''), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', '[]'), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', 'null'), undefined)
 })
 
 test('genericRawInputLines structures todo/session/terminal payloads', () => {

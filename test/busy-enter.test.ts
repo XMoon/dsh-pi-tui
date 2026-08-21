@@ -23,6 +23,8 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** The TUI-owned command names registered by registerTuiCommands (commands.ts). */
 const TUI_OWNED = [
   'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
+  // 'queue' is the removed-panel compatibility stub: still host-owned so
+  // the name stays reserved and old input gets an explicit error.
   'model', 'new', 'preset', 'queue', 'quit', 'reload', 'rename', 'resume',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
@@ -53,7 +55,7 @@ test('shouldSteerOnEnter: plain prompts and skill commands steer; local commands
   // Local commands ALWAYS execute, even with the preference set.
   assert.equal(shouldSteerOnEnter(cmd('status'), true, 'steer', false), false, '/status must execute')
   assert.equal(shouldSteerOnEnter(cmd('settings'), true, 'steer', false), false, '/settings must execute')
-  assert.equal(shouldSteerOnEnter(cmd('queue'), true, 'steer', false), false, '/queue must execute')
+  assert.equal(shouldSteerOnEnter(cmd('subagents'), true, 'steer', false), false, '/subagents alias must execute (alias of /tasks)')
   assert.equal(shouldSteerOnEnter(cmd('skill'), true, 'steer', false), false, '/skill picker must execute')
   // Non-local commands (per-skill slash commands) steer like plain prompts:
   // the raw `/name` line lands in the running turn and the host's pre-step
@@ -141,6 +143,7 @@ function setup(options: { busyEnter?: string } = {}) {
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
+    openTasksBrowser: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

@@ -1,6 +1,6 @@
 /**
  * The TUI-owned slash commands (/exit /settings /sessions /skill /model
- * /new /tasks /preset /subagents /search /title /rename /copy /export
+ * /new /tasks /preset /search /title /copy /export
  * /fork /status /login /logout /help), extracted from the runner's
  * monolithic apply() so the registration surface is testable and the runner
  * closure shrinks. Every command reads the live runner state through the
@@ -238,6 +238,12 @@ export interface TuiCommandRunner {
    * browser and `/tasks`.
    */
   openJobView(jobId: string): void
+  /**
+   * Open the MERGED task browser (jobs + subagents, searchable, row-level
+   * interrupt on subagent rows). The single command-side entry behind
+   * `/tasks` (and its `subagents` alias) — identical to the ↓ trigger.
+   */
+  openTasksBrowser(): void
   enterView(childId: SessionId, label?: string): Promise<void>
   exit(code: number): void
   /**
@@ -761,6 +767,43 @@ export function registerTuiCommands(
   // the snapshot/wrapper bulk commits use withCommandCommit instead.
   refreshCompletions()
 
+  /**
+   * Register one TUI command plus its aliases (kimi parity: an alias is
+   * another NAME of the same logical command). Every alias registers with
+   * the host commands service — the shared handler by default, or its own
+   * handler when the alias keeps a fast path (e.g. /resume's direct-resume
+   * lookup) — so host dispatch, the completion catalog (aliases are
+   * searchable: typing `resume` completes `/resume`) and the busy-Enter
+   * gate all see it, while the command surface lists one logical command
+   * and the docs mark the alias.
+   * @param spec - the primary command; `aliases` register with the shared
+   *   handler unless `aliasHandlers` overrides one.
+   */
+  const registerTuiCommand = (spec: {
+    name: string
+    description: string
+    aliases?: readonly string[]
+    input?: { hint: string }
+    handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>
+    aliasHandlers?: Record<string, (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>>
+  }): void => {
+    commands.register({
+      name: spec.name,
+      description: spec.description,
+      ...(spec.input === undefined ? {} : { input: spec.input }),
+      handler: spec.handler,
+    })
+    for (const alias of spec.aliases ?? []) {
+      const handler = spec.aliasHandlers?.[alias] ?? spec.handler
+      commands.register({
+        name: alias,
+        description: `${spec.description} (alias of /${spec.name})`,
+        ...(spec.input === undefined ? {} : { input: spec.input }),
+        handler,
+      })
+    }
+  }
+
   // Shared by /exit and its /quit alias. The exit orchestration lives in
   // the runner (createExitController): flush with a hard timeout, idempotent
   // cleanup, warning, resume hint, process exit. Handlers never stop the app
@@ -771,15 +814,10 @@ export function registerTuiCommands(
     return { kind: 'success' }
   }
 
-  commands.register({
+  registerTuiCommand({
     name: 'exit',
     description: 'Quit the terminal UI (flush and exit)',
-    handler: exitHandler,
-  })
-
-  commands.register({
-    name: 'quit',
-    description: 'Quit the terminal UI (flush and exit) — alias of /exit',
+    aliases: ['quit'],
     handler: exitHandler,
   })
 
@@ -1131,43 +1169,42 @@ export function registerTuiCommands(
     return { kind: 'success' }
   }
 
-  commands.register({
+  registerTuiCommand({
     name: 'sessions',
     description: 'List, search, and switch persisted sessions',
     input: { hint: '[query]' },
     handler: (invocation) => openSessionPicker(invocation, 'sessions'),
-  })
-
-  commands.register({
-    name: 'resume',
-    description: 'Resume a session by id or pick from the list (alias of /sessions)',
-    input: { hint: '[id|query]' },
-    handler: async (invocation) => {
-      const raw = invocation.rawInput.trim()
-      if (raw !== '') {
-        // Direct resume: exact id, a session- prefixed prefix, or the short
-        // id prefix. Falls back to the picker when nothing matches.
-        const currentId = runner.liveAgent?.session.id
-        const persistence = ctx.get('sessionPersistence')
-        if (persistence !== undefined) {
-          const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-          let rows: SessionPickerRow[]
-          if (query !== undefined) {
-            rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
-          } else {
-            rows = (await persistence.list()).map(header =>
-              headerToPickerRow(header, header.id === currentId))
-          }
-          rows.sort((a, b) => b.createdAt - a.createdAt)
-          const match = findSessionMatch(rows, raw)
-          if (match !== undefined) {
-            if (match.id === currentId) return { kind: 'error', text: 'already on this session' }
-            switchSession(match.id)
-            return { kind: 'success' }
+    aliases: ['resume'],
+    // /resume keeps its direct-resume fast path (exact/prefix id match);
+    // without a match it falls back to the same picker under its own name.
+    aliasHandlers: {
+      resume: async (invocation) => {
+        const raw = invocation.rawInput.trim()
+        if (raw !== '') {
+          // Direct resume: exact id, a session- prefixed prefix, or the short
+          // id prefix. Falls back to the picker when nothing matches.
+          const currentId = runner.liveAgent?.session.id
+          const persistence = ctx.get('sessionPersistence')
+          if (persistence !== undefined) {
+            const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
+            let rows: SessionPickerRow[]
+            if (query !== undefined) {
+              rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
+            } else {
+              rows = (await persistence.list()).map(header =>
+                headerToPickerRow(header, header.id === currentId))
+            }
+            rows.sort((a, b) => b.createdAt - a.createdAt)
+            const match = findSessionMatch(rows, raw)
+            if (match !== undefined) {
+              if (match.id === currentId) return { kind: 'error', text: 'already on this session' }
+              switchSession(match.id)
+              return { kind: 'success' }
+            }
           }
         }
-      }
-      return openSessionPicker(invocation, 'resume')
+        return openSessionPicker(invocation, 'resume')
+      },
     },
   })
 
@@ -1656,126 +1693,34 @@ export function registerTuiCommands(
     },
   })
 
+  // `/queue` compatibility stub: the per-item management panel was removed
+  // (the queue pane above the editor is the single queue surface, kimi
+  // parity — Ctrl+S steers all, Alt+↑ pulls back to edit). The NAME stays
+  // host-owned (LOCAL_COMMANDS + the command catalog): old muscle memory
+  // gets an explicit answer instead of the text being steered to the model,
+  // and no plugin can silently claim the published name (AGENTS.md
+  // deprecation-before-removal rule). Remove the stub in a future breaking
+  // release.
   commands.register({
     name: 'queue',
-    description: 'Manage queued input: edit, delete, steer, or insert',
-    handler: async () => {
-      const liveAgent = await requireAgent()
-      const inbox = liveAgent.inbox
-      // Each row remembers which pending list it lives in, so "Insert
-      // before" can splice at the exact spot instead of prepending to the
-      // head of the queue.
-      const queued = [
-        ...inbox.nextTurn.map((message, index) => ({ message, slot: `next ${index + 1}`, list: 'next-turn' as const })),
-        ...inbox.nextStep.map((message, index) => ({ message, slot: `steer ${index + 1}`, list: 'next-step' as const })),
-      ]
-      if (queued.length === 0) return { kind: 'success', text: 'no queued input' }
-      // The pane covers the fine-grained verbs; the queue strip above the
-      // editor handles the at-a-glance view and Alt+↑ pulls everything back.
-      app.openSettings(
-        queued.map(({ message, slot }) => ({
-          id: message.id,
-          label: `[${slot}] ${textOf(message.content).replace(/\s+/g, ' ').trim().slice(0, 40)}`,
-          description: message.id,
-          currentValue: '',
-          submenu: (value, done) => new SettingsList(
-            [
-              { id: 'edit', label: 'Edit', description: 'Rewrite this queued message', currentValue: '', values: ['✓'] },
-              { id: 'delete', label: 'Delete', description: 'Remove it from the queue', currentValue: '', values: ['✓'] },
-              { id: 'steer', label: 'Steer', description: 'Send it now: into the running turn, or start one when idle', currentValue: '', values: ['✓'] },
-              { id: 'insert', label: 'Insert before', description: 'Queue a new message ahead of this one', currentValue: '', values: ['✓'] },
-            ],
-            6,
-            settingsListTheme(),
-            (action) => done(action),
-            () => done(),
-            {},
-          ),
-        })),
-        (id, action) => {
-          const target = queued.find(item => item.message.id === id)
-          if (target === undefined) return
-          const message = target.message
-          if (action === 'delete') {
-            inbox.remove(message.id)
-            app.notify('queued message deleted', 'info')
-          } else if (action === 'steer') {
-            // Mirrors Ctrl+S on a single message: a running turn takes the
-            // steer immediately; an idle agent starts a fresh turn with it.
-            inbox.remove(message.id)
-            if (liveAgent.status === 'running') {
-              liveAgent.steer(message)
-            } else {
-              liveAgent.followup(message)
-            }
-            app.notify('steering queued message', 'info')
-          } else if (action === 'edit' || action === 'insert') {
-            // The free-text question flow collects the replacement/new text;
-            // every mutation commits an inbox splice that refreshes the
-            // pane. An owned workflow: the answers drive the splice —
-            // runOwned (AGENTS.md), never a bare void. The question flow
-            // rejects with a cancellation-shaped error on Esc/abort (so the
-            // user cancel is debug-only through runOwned) and with a real
-            // error otherwise (default error diagnostics — no silent
-            // swallowing); either way the queue stays untouched.
-            runOwned('queued message edit', () => app.askQuestions([{ id: 'q', question: action === 'edit' ? 'Edit queued message:' : 'New message to insert:' }]), {
-              diag: runner.diag,
-              sessionId: () => runner.liveAgent?.session.id,
-              onResult: (answers) => {
-                const text = answers[0]?.custom?.trim() ?? ''
-                if (text === '') return
-                const next = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
-                if (action === 'edit') {
-                  inbox.replace(message.id, next)
-                  app.notify('queued message updated', 'info')
-                } else {
-                  // Insert at the selected message's CURRENT position: the
-                  // queue may have shifted while the panel was open (a claim
-                  // or another splice), so re-locate instead of trusting the
-                  // snapshot index. A consumed message has nothing left to
-                  // insert before.
-                  const list = target.list === 'next-turn' ? inbox.nextTurn : inbox.nextStep
-                  const position = list.findIndex(item => item.id === message.id)
-                  if (position < 0) return
-                  inbox.splice(target.list, position, 0, [next])
-                  app.notify('message inserted before the selected one', 'info')
-                }
-              },
-            })
-          }
-        },
-        () => {},
-      )
-      return { kind: 'success' }
-    },
+    description: 'Removed: the queue pane above the editor is the single queue surface (Ctrl+S steers all, Alt+↑ pulls back)',
+    handler: () => ({
+      kind: 'error',
+      text: '/queue was removed — the queue pane above the editor is the single queue surface (Ctrl+S steers all, Alt+↑ pulls back to edit)',
+    }),
   })
 
-  commands.register({
+  registerTuiCommand({
     name: 'tasks',
-    description: 'List background jobs for this session',
+    description: 'Browse background jobs and subagents for this session (search filters rows)',
+    aliases: ['subagents'],
     handler: async () => {
-      const liveAgent = await requireAgent()
-      const jobs = ctx.get('jobs')
-      if (jobs === undefined) return { kind: 'error', text: 'jobs service unavailable' }
-      const snapshots = jobs.list(liveAgent)
-      if (snapshots.length === 0) return { kind: 'error', text: 'no background jobs' }
-      app.openTaskBrowser(
-        snapshots.map(job => ({
-          value: job.id,
-          label: `${job.kind} · ${job.label}`,
-          status: job.status,
-          detail: job.detail,
-          startedAt: job.startedAt,
-          group: 'jobs',
-        })),
-        // Enter on a row opens the SAME detail as the ↓ browser: the status
-        // viewer for bash jobs, the child transcript for subagent jobs.
-        // (Completed jobs are reachable exactly through this path — the ↓
-        // trigger only arms while a task is running.)
-        (jobId) => runner.openJobView(jobId),
-        () => {},
-        { header: 'tasks', enableSearch: true },
-      )
+      // The merged browser: jobs + subagents in one searchable list, with
+      // row-level interrupt on subagent rows — the same surface as the ↓
+      // trigger (runner.openTasksBrowser). Completed jobs and finished
+      // one-shot children are reachable exactly through this path.
+      await requireAgent()
+      runner.openTasksBrowser()
       return { kind: 'success' }
     },
   })
@@ -1980,60 +1925,6 @@ export function registerTuiCommands(
   })
 
   commands.register({
-    name: 'subagents',
-    description: 'List child agents; view a transcript or interrupt one',
-    handler: async () => {
-      const liveAgent = await requireAgent()
-      const subagents = ctx.get('subagents')
-      if (subagents === undefined) return { kind: 'error', text: 'subagent service unavailable' }
-      const children = (await subagents.listChildren(liveAgent.session.id))
-        .filter(child => child.kind === 'child')
-      if (children.length === 0) return { kind: 'success', text: 'no subagents for this session' }
-      const labelOf = (child: (typeof children)[number]): string => child.label ?? child.id
-      const closeSubagents = app.openSettings(
-        children.map(child => ({
-          id: child.id,
-          label: labelOf(child),
-          description: `${child.mode} · ${child.activity}${child.hasChildren ? ' · has children' : ''}`,
-          currentValue: '',
-          // The submenu is rendered INSIDE the list (SettingsList mounts
-          // the returned component in place); picking an action reports
-          // it through the list's onChange. Opening a second panel here
-          // would leave this list mounted as a ghost overlay that eats
-          // every later Esc.
-          submenu: (value, done) => new SettingsList(
-            [
-              { id: 'view', label: 'View transcript', description: 'Watch this session read-only (Esc to return)', currentValue: '', values: ['✓'] },
-              { id: 'interrupt', label: 'Interrupt', description: 'Cancel the child agent', currentValue: '', values: ['✓'] },
-            ],
-            6,
-            settingsListTheme(),
-            // The action is the row ID; the cycled value is a checkmark.
-            (id) => done(id),
-            () => done(),
-            {},
-          ),
-        })),
-        (childId, action) => {
-          const child = children.find(candidate => candidate.id === childId)
-          if (child === undefined) return
-          // Action-style row: dismiss the list AFTER the action so it never
-          // stays mounted as a ghost overlay eating every later key.
-          closeSubagents()
-          if (action === 'view') {
-            detach('subagent view', () => runner.enterView(child.id, labelOf(child)), { notify: true })
-          } else if (action === 'interrupt') {
-            subagents.interrupt(child.id, { kind: 'user', parentSessionId: liveAgent.session.id })
-            app.notify(`interrupting ${labelOf(child)}`, 'info')
-          }
-        },
-        () => {},
-      )
-      return { kind: 'success' }
-    },
-  })
-
-  commands.register({
     name: 'search',
     description: 'Search persisted sessions for text and switch to a hit',
     input: { hint: '<query>' },
@@ -2113,17 +2004,11 @@ export function registerTuiCommands(
     }
   }
 
-  commands.register({
+  registerTuiCommand({
     name: 'title',
     description: 'Set the session title; without an argument, regenerate it from the conversation (overwrites the current title)',
     input: { hint: '<title>' },
-    handler: titleHandler,
-  })
-
-  commands.register({
-    name: 'rename',
-    description: 'Alias of /title: set the session title, or regenerate it without an argument (overwrites the current title)',
-    input: { hint: '<title>' },
+    aliases: ['rename'],
     handler: titleHandler,
   })
 

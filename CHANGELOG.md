@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Merged task browser as the single background surface.** `/tasks` now
+  opens one searchable list over jobs AND subagents (type to filter by
+  kind/label/status — `subagent`, `bash`, `failed`…); `Enter` opens the
+  detail (child transcript for a subagent, status viewer for a job) and
+  `i` interrupts the selected subagent. `/subagents` became an alias of
+  `/tasks`, and the old per-row submenu panel (and its ghost-overlay trap)
+  is gone. The ↓/Ctrl+J empty-editor trigger opens the same browser.
+- **Alias registration for TUI commands (kimi parity).** `/quit`, `/resume`,
+  `/rename` and `/subagents` are aliases of `/exit`, `/sessions`, `/title`
+  and `/tasks` — registered with the host commands service, so dispatch,
+  the completion catalog (typing `resume` completes `/resume`) and the
+  busy-Enter gate all see them, while the command surface lists one
+  logical command.
+- **Subagent-family tool cards show their model.** A card for
+  `subagent`/`subagent_route`/`subagent_router`/`subagent_fork` renders a
+  `model · provider` line when the call args carry an explicit override
+  (top-level or `agentOptions`); without one, nothing changes (the official
+  subagent tool's model lives in config and never renders).
+
+### Changed
+
+- **Queue pane notice classification (web parity).** Only user-origin
+  messages render as steerable `❯` rows; subagent-report relays, injected
+  instructions, goal messages and plugin notices render as `⏳` notice
+  rows. Notice rows fold beyond five into one `+N more notices pending`
+  line (user rows never fold), and claimed notices disappear once the
+  agent has received them — no more backlog flood from settled children.
+- **Todo panel fullscreen click.** In fullscreen, clicking the todo panel
+  expands it to the full list and back (geometry clamped on tiny
+  terminals); Ctrl+T still toggles the panel itself.
+- **Ctrl+J is no longer a host keybinding.** Legacy terminals send Ctrl+J
+  as LF (the editor's Enter), so the task-browser chord was unreliable;
+  the browser is reached via ↓ (empty editor) and `/tasks`, and a plugin
+  may now bind Ctrl+J itself.
+- **`/queue` answers with an explicit removal error.** The per-item panel
+  is gone (the queue pane is the single surface), but the name stays
+  host-owned so old input is never steered to the model and no plugin can
+  silently claim the published name (deprecation-before-removal; drop the
+  stub in a future breaking release).
+
 ### Fixed
+
+- **Alt+↑ dequeue only pulls the user's own messages back.** The filter
+  previously matched `source.form === 'notice'`, so subagent-report
+  relays, injected instructions and goal messages could land in the
+  editor draft as editable user text; the pane classification
+  (`isUserQueueInput`) now drives both the pane and the dequeue.
+- **The double-Ctrl+C exit chord is now visible and forgiving.** The first
+  Ctrl+C on an empty editor silently armed a 500ms exit window with no
+  feedback, so a human-paced "double press" (often 0.6–1s apart) silently
+  re-armed and never exited — the next Enter then sent an empty draft,
+  looking exactly like the chord had broken. The window is now 1.5s and
+  the first press shows `Press Ctrl+C again to exit`, so the armed state
+  is discoverable and a natural double press exits.
+- **Ctrl+C clearing the editor now repaints immediately.** The pi-parity
+  first-press clear emptied the draft in memory but never scheduled a new
+  frame — the key is consumed at the app level, so the fork's input path
+  never reaches the focused editor and its render never fires. In a real
+  terminal the old text stayed visible until the next keypress, making the
+  clear look dead (and a hasty second Ctrl+C would then exit, per the
+  clear-then-exit chord). The Ctrl+S steer and Ctrl+Enter queue chords
+  received the same explicit repaint for their draft clears.
+
 
 - **The double-Ctrl+C exit chord is now visible and forgiving.** The first
   Ctrl+C on an empty editor silently armed a 500ms exit window with no

@@ -605,3 +605,51 @@ export function toolPresenterFrom(get: (name: string) => ToolDefinitionLike | un
     },
   }
 }
+/**
+ * Subagent-family tool names whose call args may carry an explicit
+ * model/provider override. Matched by REGISTERED name; unknown names are
+ * ignored so third-party subagent-like tools keep their default rendering.
+ */
+const SUBAGENT_TOOL_NAMES = new Set([
+  'subagent',
+  'subagent_route',
+  'subagent_router',
+  'subagent_fork',
+])
+
+/**
+ * Extract the model · provider display line for a subagent-family tool call.
+ *
+ * COMPATIBILITY CONTRACT: the line renders ONLY when the call args actually
+ * carry a model/provider — the top-level `model`/`provider` shape
+ * (subagent_route / subagent_router) or the `agentOptions.model/provider`
+ * shape. Every other call returns `undefined` and the card renders exactly
+ * as before; unknown tool names and unparseable args are ignored. The
+ * official `subagent` tool's model lives in deployment config (never in
+ * the call args), so it naturally renders nothing.
+ * @param name - the tool's registered name.
+ * @param argsRaw - the raw tool-call arguments JSON ('' or malformed → none).
+ * @returns `model · provider` (either part alone when only one is present),
+ *   or undefined when the call carries no model/provider.
+ */
+export function subagentModelDisplay(name: string, argsRaw: string): string | undefined {
+  if (!SUBAGENT_TOOL_NAMES.has(name)) return undefined
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const args = parsed as Record<string, unknown>
+  const opts = typeof args.agentOptions === 'object' && args.agentOptions !== null
+    ? args.agentOptions as Record<string, unknown>
+    : undefined
+  const model = typeof args.model === 'string' && args.model !== ''
+    ? args.model
+    : typeof opts?.model === 'string' && opts.model !== ''
+      ? opts.model
+      : undefined
+  const provider = typeof args.provider === 'string' && args.provider !== ''
+    ? args.provider
+    : typeof opts?.provider === 'string' && opts.provider !== ''
+      ? opts.provider
+      : undefined
+  const parts = [model, provider].filter((part): part is string => part !== undefined)
+  return parts.length === 0 ? undefined : parts.join(' · ')
+}

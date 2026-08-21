@@ -388,14 +388,14 @@ export function subagentJobTranscriptId(snapshot: unknown): string | undefined {
 /** Viewer body for a subagent job with no uniquely matched child. */
 export function subagentJobViewHint(status: string, detail: string | undefined): string {
   const tail = status === 'running' || status === 'stopping'
-    ? ' — running in the background; its transcript updates live in /subagents'
+    ? ' — running in the background; its transcript updates live in /tasks'
     : ` — this subagent finished${detail === undefined ? '' : ` (${detail})`}`
   return [
     `status: ${status}${tail}`,
     '',
     'The job record does not carry the child session id, so this job cannot',
     'be matched to its child from the task browser (a same-label foreground',
-    'run would be indistinguishable). Open /subagents and pick the child by',
+    'run would be indistinguishable). Open /tasks and pick the child by',
     'its label to read the transcript.',
   ].join('\n')
 }
@@ -406,6 +406,24 @@ export interface QueueNoticeSource {
   readonly form?: string
   readonly kind?: string
   readonly summary?: string
+  /** The reporting child's session id (subagent-report relays). */
+  readonly senderSessionId?: string
+}
+
+/**
+ * Whether an inbox message is USER-ORIGIN input — the queue pane's steerable
+ * `❯` rows. Everything else is injected context, not the user's own queued
+ * input, and must never read as one: plugin notices (background-job
+ * completions), `subagent-report` relays (a child's active report, e.g.
+ * "Background subagent X reported:"), injected skill/agent instructions,
+ * goal messages. The web makes the same cut (`placement: source.kind ===
+ * 'user' ? 'steering' : 'context'`), and this deployment's queue pane has
+ * the same rule: only user-origin rows are steerable. A sourceless row
+ * (undefined) is treated as user input — plain rows never carry a source.
+ * @param source - the message source projection, or undefined for a plain row.
+ */
+export function isUserQueueInput(source: QueueNoticeSource | undefined): boolean {
+  return source === undefined || source.kind === 'user'
 }
 
 /**
@@ -507,10 +525,13 @@ export function foldQueueRows(
       id: message.id,
       text: textOf(message.content),
       mode,
-      // Plugin notices (background-job completions, plan-mode toasts) are
-      // NOT steerable user input: the queue pane marks them and drops the
-      // steer hints (see QueueItem.notice).
-      notice: source?.form === 'notice',
+      // Only user-origin (or sourceless plain) rows are steerable user
+      // input. Everything else — plugin notices, subagent-report relays,
+      // injected instructions, goal messages — is a NOTICE: the queue pane
+      // marks it with the ⏳ prefix and drops the steer hints (see
+      // QueueItem.notice), so it can never read as the user's own queued
+      // input (web parity: only user-origin messages render as steering).
+      notice: !isUserQueueInput(source),
     })
   }
   return { rows, failures }
@@ -2677,16 +2698,16 @@ export function apply(ctx: Context, config: Config): void {
         refreshStatus()
       },
       // Alt+↑: pull every QUEUED USER message back into the editor draft
-      // (pi's dequeue). Plugin notices (job completions etc.) are NOT
-      // steerable user input: they stay in the inbox — pulling one back and
-      // resubmitting it as plain text would drop its provenance and turn a
-      // background notification into an editable user message. The current
-      // draft rides along below the pulled-back queue.
+      // (pi's dequeue). Only user-origin rows are the user's own input —
+      // notices, subagent-report relays, injected instructions and goal
+      // messages stay in the inbox: pulling one back and resubmitting it as
+      // plain text would drop its provenance and turn a background
+      // notification into an editable user message. The current draft rides
+      // along below the pulled-back queue.
       onDequeue: () => {
         if (liveAgent === undefined) return
-        const isNotice = (message: { source?: { form?: string } }): boolean => message.source?.form === 'notice'
         const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
-          .filter(message => !isNotice(message as { source?: { form?: string } }))
+          .filter(message => isUserQueueInput(message.source as QueueNoticeSource | undefined))
         if (queued.length === 0) return
         // Remove exactly the pulled-back messages (durable splice), keeping
         // any notices queued behind them.
@@ -2711,74 +2732,14 @@ export function apply(ctx: Context, config: Config): void {
       // the more useful one. The children half enriches asynchronously:
       // listChildren may read persistence for cold children, so the picker
       // opens on the jobs half and setItems merges the rest in.
-      onOpenTasks: () => {
-        if (liveAgent === undefined) return
-        let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
-        if (jobs !== undefined) {
-          try {
-            jobSnapshots = jobs.list(liveAgent)
-          } catch {
-            // The registry read is best-effort; the jobs half stays empty.
-          }
-        }
-        // The trigger only fires while something is ACTIVE (jobs or live
-        // children), so an empty jobs half is NOT an empty browser: the
-        // children half enriches below. Never early-return on row count —
-        // a children-only session would never open the browser.
-        let rows: TaskBrowserRow[] = buildTaskRows(jobSnapshots, [])
-        const selectRow = (value: string): void => {
-          const row = rows.find(candidate => candidate.value === value)
-          if (row === undefined) return
-          if (row.kind === 'subagent') {
-            runOwned('subagent view from tasks', () => enterView(row.childId as SessionId, row.label), {
-              diag,
-              sessionId: () => liveAgent?.session.id,
-              onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
-            })
-            return
-          }
-          openJobView(row.jobId)
-        }
-        const taskPanelItems = (target: readonly TaskBrowserRow[]): TaskPanelItem[] =>
-          target.map(row => row.kind === 'job'
-            ? {
-                value: row.value,
-                label: taskRowLabel(row),
-                status: row.status,
-                detail: row.detail,
-                startedAt: row.startedAt,
-                group: rowGroup(row),
-              }
-            : {
-                value: row.value,
-                label: taskRowLabel(row),
-                status: row.activity,
-                detail: row.hasChildren ? 'has children' : undefined,
-                group: rowGroup(row),
-              })
-        const handle = app.openTaskBrowser(
-          taskPanelItems(rows),
-          selectRow,
-          () => {},
-          { header: 'tasks · subagents', enableSearch: true },
-        )
-        if (subagents !== undefined) {
-          const sessionId = liveAgent.session.id
-          const generation = sessionGeneration
-          runOwned('task browser children', () => subagents.listChildren(sessionId), {
-            diag,
-            sessionId: () => liveAgent?.session.id,
-            onResult: (entries) => {
-              // The browser belongs to the session it was opened for; a
-              // switch while the listing was in flight must not repaint it.
-              if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
-              rows = buildTaskRows(jobSnapshots, entries)
-              handle.setItems(taskPanelItems(rows))
-            },
-          })
-        }
-      },
+      //
+      // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
+      // the merged list + search is the single command-side entry, with
+      // row-level `i` = interrupt on subagent rows (kimi's stop-on-row
+      // pattern; the old /subagents SettingsList-submenu panel is gone).
+      onOpenTasks: () => openTasksBrowser(),
     }, {
+
       present,
       workspaceRoot: cwd,
       extensionHost,
@@ -2821,6 +2782,105 @@ export function apply(ctx: Context, config: Config): void {
       unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
       unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
     })
+    // ↓ with an empty editor: the task browser over BOTH background
+    // surfaces. Job rows (bash + background one-shot subagent jobs) are
+    // status-only: the bash output read cursor belongs to the model's
+    // job_output and a subagent job record carries no child session id, so
+    // Enter opens the status viewer (never the output). Subagent rows (live
+    // children from the subagent registry) deliver no result to the parent,
+    // so Enter opens the child transcript directly: continuable children
+    // always, and one-shot children while RUNNING (a foreground delegation
+    // is the parent's pending tool call, so the trigger would otherwise
+    // look dead). A running BACKGROUND one-shot appears twice — its job row
+    // and its child row — because the two records have no cross-reference
+    // to dedup; the viewable child row is the more useful one. The children
+    // half enriches asynchronously: listChildren may read persistence for
+    // cold children, so the picker opens on the jobs half and setItems
+    // merges the rest in.
+    //
+    // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
+    // the merged list + search is the single command-side entry, with
+    // row-level `i` = interrupt on subagent rows (kimi's stop-on-row
+    // pattern; the old /subagents SettingsList-submenu panel is gone).
+    const openTasksBrowser = (): void => {
+      if (liveAgent === undefined) return
+      let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
+      if (jobs !== undefined) {
+        try {
+          jobSnapshots = jobs.list(liveAgent)
+        } catch {
+          // The registry read is best-effort; the jobs half stays empty.
+        }
+      }
+      // The trigger only fires while something is ACTIVE (jobs or live
+      // children), so an empty jobs half is NOT an empty browser: the
+      // children half enriches below. Never early-return on row count —
+      // a children-only session would never open the browser.
+      let rows: TaskBrowserRow[] = buildTaskRows(jobSnapshots, [])
+      const selectRow = (value: string): void => {
+        const row = rows.find(candidate => candidate.value === value)
+        if (row === undefined) return
+        if (row.kind === 'subagent') {
+          runOwned('subagent view from tasks', () => enterView(row.childId as SessionId, row.label), {
+            diag,
+            sessionId: () => liveAgent?.session.id,
+            onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
+          })
+          return
+        }
+        openJobView(row.jobId)
+      }
+      const actionRow = (value: string, action: 'interrupt'): void => {
+        const row = rows.find(candidate => candidate.value === value)
+        if (row === undefined || row.kind !== 'subagent') return
+        const service = ctx.get('subagents')
+        if (service === undefined || liveAgent === undefined) {
+          app.notify('subagent service unavailable', 'error')
+          return
+        }
+        service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: liveAgent.session.id })
+        app.notify(`interrupting ${row.label}`, 'info')
+      }
+      const taskPanelItems = (target: readonly TaskBrowserRow[]): TaskPanelItem[] =>
+        target.map(row => row.kind === 'job'
+          ? {
+              value: row.value,
+              label: taskRowLabel(row),
+              status: row.status,
+              detail: row.detail,
+              startedAt: row.startedAt,
+              group: rowGroup(row),
+            }
+          : {
+              value: row.value,
+              label: taskRowLabel(row),
+              status: row.activity,
+              detail: row.hasChildren ? 'has children' : undefined,
+              group: rowGroup(row),
+            })
+      const handle = app.openTaskBrowser(
+        taskPanelItems(rows),
+        selectRow,
+        () => {},
+        { header: 'tasks · subagents', enableSearch: true, onAction: actionRow },
+      )
+      if (subagents !== undefined) {
+        const sessionId = liveAgent.session.id
+        const generation = sessionGeneration
+        runOwned('task browser children', () => subagents.listChildren(sessionId), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onResult: (entries) => {
+            // The browser belongs to the session it was opened for; a
+            // switch while the listing was in flight must not repaint it.
+            if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
+            rows = buildTaskRows(jobSnapshots, entries)
+            handle.setItems(taskPanelItems(rows))
+          },
+        })
+      }
+    }
+
     // M3: attach the extension host to the surface chrome once per
     // generation (F-1): the header/dock/footer merge extension content, and
     // the service's capability set + state bridge become live.
@@ -3112,7 +3172,7 @@ export function apply(ctx: Context, config: Config): void {
      * (never the output — the job's single read cursor belongs to the agent's
      * job_output; consuming it from the UI would leave the model an
      * incomplete result and could swallow the completion notice); a subagent
-     * job shows the status viewer with a /subagents hint. The job record
+     * job shows the status viewer with a /tasks hint. The job record
      * carries no child session id, so label/order/time heuristics cannot
      * distinguish a background child from a same-label foreground one-shot;
      * the task browser therefore never opens a transcript by guess.
@@ -3139,7 +3199,8 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         // Current JobSnapshot has no stable child id. Use the reliable status
-        // fallback and let /subagents (which owns child identities) perform
+        // fallback and let /tasks (which owns child identities through
+        // the merged browser) perform
         // transcript selection; never substitute label/order/time matching.
         openJobStatusViewer(jobId, `subagent ${snapshot.id} · ${snapshot.label}`, snapshot)
         return
@@ -3148,7 +3209,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     /**
      * Status-only viewer for one job (never touches the read cursor). The
-     * subagent variant appends the /subagents hint because a transcript
+     * subagent variant appends the /tasks hint because a transcript
      * cannot always be matched; the bash variant is pure status.
      */
     const openJobStatusViewer = (
@@ -3469,6 +3530,7 @@ export function apply(ctx: Context, config: Config): void {
       refreshStatus,
       updateWelcomeCard,
       openJobView,
+      openTasksBrowser,
       enterView,
       requestExit,
       exit,

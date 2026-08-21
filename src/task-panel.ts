@@ -41,6 +41,10 @@ export interface TaskPanelOptions {
   enableSearch?: boolean
   /** Pre-fill the search input. */
   initialQuery?: string
+  /** Row-level action: `i` on a selected row while the search box is
+   * closed (a subagent interrupt; `i` stays a search letter when the box
+   * is open, same rule as the `k`/`j` navigation aliases). */
+  onAction?: (value: string, action: 'interrupt') => void
 }
 
 /**
@@ -79,6 +83,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   private searchEnabled: boolean
   private readonly onSelect: (value: string) => void
   private readonly onCancel: () => void
+  private readonly onAction: ((value: string, action: 'interrupt') => void) | undefined
   /** Live tick: bumped every second while a running row is visible. */
   private now = Date.now()
   private tickTimer: NodeJS.Timeout | undefined
@@ -101,6 +106,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.options = options
     this.onSelect = onSelect
     this.onCancel = onCancel
+    this.onAction = options.onAction
     this.requestRender = requestRender
     this.searchEnabled = options.enableSearch ?? false
     this.searchInput.onEscape = () => this.onCancel()
@@ -196,6 +202,27 @@ export class TaskBrowserPanel implements Component, Focusable {
     const isNavUp = matchesKey(data, 'up') || (!this.searchEnabled && data === 'k')
     const isNavDown = matchesKey(data, 'down') || (!this.searchEnabled && data === 'j')
     const isPage = matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')
+    // Row-level interrupt (`i`): fires while the search box is CLOSED, or
+    // while it is open but EMPTY and the selection sits on a subagent row
+    // (`agent:` value). An empty query means no filtering is in progress —
+    // `i` on a subagent row is the interrupt intent, not a query letter.
+    // With a non-empty query (or a job row selected) `i` stays a query
+    // character, exactly like `k`/`j` while search is on.
+    if (data === 'i' && this.onAction !== undefined && !this.searchEnabled) {
+      const item = this.filtered[this.selected]
+      if (item !== undefined) this.onAction(item.value, 'interrupt')
+      return
+    }
+    if (
+      data === 'i' && this.onAction !== undefined && this.searchEnabled
+      && (this.searchInput.getValue() ?? '') === ''
+    ) {
+      const item = this.filtered[this.selected]
+      if (item !== undefined && item.value.startsWith('agent:')) {
+        this.onAction(item.value, 'interrupt')
+        return
+      }
+    }
     if (!isNavUp && !isNavDown && !isPage && !matchesKey(data, 'enter') && !matchesKey(data, 'escape') && this.searchEnabled) {
       this.searchInput.handleInput(data)
       this.applyFilter(this.searchInput.getValue() ?? '')
@@ -242,7 +269,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     } else {
       const needle = query.toLowerCase()
       this.filtered = this.items.filter(item =>
-        `${item.value}\n${item.label}\n${item.status}\n${item.detail ?? ''}`.toLowerCase().includes(needle))
+        `${item.value}\n${item.label}\n${item.status}\n${item.detail ?? ''}\n${item.group ?? ''}`.toLowerCase().includes(needle))
     }
     this.selected = 0
     this.scroll = 0

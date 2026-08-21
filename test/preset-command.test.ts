@@ -136,6 +136,7 @@ function stubRunner(options: {
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
+    openTasksBrowser: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: options.extensions,

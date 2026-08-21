@@ -348,7 +348,49 @@ test('job notices in the queue render with their own marker and drop the steer h
   assert.ok(!vt.getViewport().join('\n').includes('⏳ bash-2'), `cleared notice survived:\n${view}`)
 })
 
-test('down and ctrl+j open the task browser only with active tasks and an empty editor', async () => {
+test('notice rows beyond the fold collapse into a +N more line; user rows never fold', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // A backlog of notices (e.g. a batch of subagent settlements/reports):
+  // only the first MAX_NOTICE_ROWS render, the rest collapse into one line.
+  const notices = Array.from({ length: 8 }, (_, i) => ({
+    id: `n-${i}`, text: `notice ${i} text`, mode: 'steer' as const, notice: true,
+  }))
+  app.setQueueItems(notices)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('⏳ notice 0 text'), `first notice visible:\n${view}`)
+  assert.ok(view.includes('⏳ notice 4 text'), `fifth notice visible:\n${view}`)
+  assert.ok(!view.includes('⏳ notice 5 text'), `sixth notice must fold:\n${view}`)
+  assert.ok(view.includes('+3 more notices pending'), `fold line missing:\n${view}`)
+  assert.ok(!view.includes('ctrl+s to steer all'), 'notices alone must not advertise steer verbs')
+  assert.ok(view.includes('notices deliver after the current task · /tasks to view'), `notices hint missing:\n${view}`)
+  // User rows mixed in: every user row shows, notices still fold.
+  app.setQueueItems([
+    ...notices,
+    { id: 'm-1', text: 'my first queued message', mode: 'followup' },
+    { id: 'm-2', text: 'my second queued message', mode: 'steer' },
+  ])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ my first queued message'), `user row 1 missing:\n${view}`)
+  assert.ok(view.includes('❯ my second queued message'), `user row 2 missing:\n${view}`)
+  assert.ok(view.includes('+3 more notices pending'), `fold line must survive mixed queue:\n${view}`)
+  assert.ok(view.includes('ctrl+s to steer all'), 'steer hint must survive mixed queue:\n${view}')
+  // Claims drain the backlog: two notices gone, the fold shrinks.
+  app.setQueueItems([...notices.slice(0, 6), { id: 'm-1', text: 'my first queued message', mode: 'followup' }])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('+1 more notices pending'), `fold count must shrink after claims:\n${view}`)
+  // Full drain: the group disappears entirely.
+  app.setQueueItems([{ id: 'm-1', text: 'my first queued message', mode: 'followup' }])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('more notices pending'), `fold line must vanish after drain:\n${view}`)
+  assert.ok(view.includes('❯ my first queued message'), `user row must survive the drain:\n${view}`)
+})
+
+test('down opens the task browser only with active tasks and an empty editor; ctrl+j is inert', async () => {
   const vt = new VirtualTerminal(80, 24)
   let opened = 0
   const app = new TuiApp(vt, {
@@ -360,32 +402,35 @@ test('down and ctrl+j open the task browser only with active tasks and an empty 
   app.start()
   const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
   await vt.waitForRender()
-  // No active tasks: ↓ and Ctrl+J are inert.
+  // No active tasks: ↓ is inert.
   vt.sendInput('\x1b[B')
   await sleep(20)
   assert.equal(opened, 0, `no tasks means no browser`)
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
-  // Empty editor + active tasks: both keys open the browser.
+  // Empty editor + active tasks: ↓ opens the browser.
   vt.sendInput('\x1b[B')
   await sleep(20)
   assert.equal(opened, 1, `down must open the task browser with an empty editor`)
+  // Ctrl+J is deliberately unbound: legacy terminals send it as LF, which
+  // the editor treats as Enter — it must NOT open the browser (the task
+  // surface is ↓ + `/tasks`).
   vt.sendInput('\n') // ctrl+j is LF
   await sleep(20)
-  assert.equal(opened, 2, `ctrl+j must open the task browser with an empty editor`)
-  // Non-empty draft: the keys keep their editing meaning (no browser).
+  assert.equal(opened, 1, `ctrl+j must not open the task browser`)
+  // Non-empty draft: the key keeps its editing meaning (no browser).
   app.setDraft('ls -la')
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 2, `down must not open the browser while a draft is being edited`)
+  assert.equal(opened, 1, `down must not open the browser while a draft is being edited`)
   // Tasks cleared: the trigger disarms.
   app.setTasks([])
   app.setDraft('')
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 2, `the trigger must disarm when no tasks are active`)
+  assert.equal(opened, 1, `the trigger must disarm when no tasks are active`)
   app.stop()
 })
 
@@ -426,16 +471,17 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   vt.sendInput('\x1b[B')
   await sleep(20)
   assert.equal(opened, 1, `down must open the task browser with a live subagent`)
+  // Ctrl+J is deliberately unbound (legacy LF ambiguity): inert here too.
   vt.sendInput('\n') // ctrl+j is LF
   await sleep(20)
-  assert.equal(opened, 2, `ctrl+j must open the task browser with a live subagent`)
+  assert.equal(opened, 1, `ctrl+j must not open the task browser with a live subagent`)
   // Clearing agents disarms; clearing jobs while agents live must not.
   app.setAgents([])
   app.setTasks([])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 2, `the trigger must disarm when no agents are active`)
+  assert.equal(opened, 1, `the trigger must disarm when no agents are active`)
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   app.setAgents([])
   await vt.waitForRender()
@@ -444,8 +490,47 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 3, `agents must keep the trigger armed when tasks clear`)
+  assert.equal(opened, 2, `agents must keep the trigger armed when tasks clear`)
   app.stop()
+})
+
+test('fullscreen click on the todo panel toggles its compact/full expansion', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('todo item 0'), `compact panel must show the first rows:\n${view}`)
+  assert.ok(!view.includes('todo item 8'), `compact panel must hide later rows:\n${view}`)
+  assert.ok(!app.isTodoPanelExpanded(), 'starts compact')
+  // SGR click (press + release on the same cell) inside the todo panel
+  // area. Fullscreen layout on the 80x24 test terminal: footer (1) +
+  // editor seat (1) sit at the bottom, so the todo panel (border + title +
+  // 5 rows = 7) occupies 0-based rows 15..21 — click row 18.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(app.isTodoPanelExpanded(), 'click must expand the panel')
+  assert.ok(view.includes('todo item 8'), `expanded panel must show the full list:\n${view}`)
+  // Click again (a DIFFERENT cell — same-cell rapid clicks read as a
+  // double-click word selection, never a disclosure). The layout must have
+  // repainted after the expansion (the expanded panel moves rows), or the
+  // click still lands on the stale scroll pane rect.
+  await vt.waitForRender()
+  vt.sendInput('\x1b[<0;30;20M')
+  vt.sendInput('\x1b[<0;30;20m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelExpanded(), 'second click must collapse the panel')
+  assert.ok(!vt.getViewport().join('\n').includes('todo item 8'), 'collapsed panel must hide later rows')
+  app.setFullscreen(false)
 })
 
 test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
@@ -467,6 +552,38 @@ test('the footer badge combines tasks and live agents, hint only on an empty edi
   app.setAgents([])
   await vt.waitForRender()
   assert.ok(!vt.getViewport().join('\n').includes('agent ·'), `badge survived clearing:\n${view}`)
+})
+
+test('a tiny terminal clamps the todo click geometry to the visible screen', async () => {
+  // Bottom-up geometry on a 6-row terminal: footer + editor seat take the
+  // bottom rows, so the todo panel's top overflows the screen and clamps
+  // to row 0 — the derived region is [0, todoBottom), never negative or
+  // inverted, and clicks outside it are ignored.
+  const vt = new VirtualTerminal(80, 6)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 3 }, (_, i) => ({
+    id: `t-${i}`, content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelExpanded(), 'starts compact')
+  // Row 2 (SGR y=3) sits inside the clamped region [0, todoBottom): expand.
+  vt.sendInput('\x1b[<0;40;3M')
+  vt.sendInput('\x1b[<0;40;3m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), 'a click inside the clamped region must expand')
+  // Row 6 (SGR y=6) sits in the editor/footer rows below the region: ignored.
+  vt.sendInput('\x1b[<0;40;6M')
+  vt.sendInput('\x1b[<0;40;6m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), 'a click outside the clamped region must be ignored')
+  app.setFullscreen(false)
+  app.stop()
 })
 
 test('live subagents render as a footer badge only (no dock detail lines)', async () => {
@@ -677,6 +794,32 @@ function diffResultEvent(seq: number, callId: string, text: string): SessionEven
   }
 }
 
+function subagentRouteCallEvent(seq: number, callId: string, args: string): SessionEvent {
+  return {
+    type: 'tool/call',
+    seq,
+    time: 1_700_000_000_000 + seq,
+    data: { turn: 0, step: 0, callId: CallId(callId), name: 'subagent_route', arguments: args },
+  }
+}
+
+function subagentRouteResultEvent(seq: number, callId: string): SessionEvent {
+  return {
+    type: 'tool/result',
+    seq,
+    time: 1_700_000_000_000 + seq,
+    data: {
+      turn: 0,
+      step: 0,
+      message: createToolResultMessage({
+        callId: CallId(callId),
+        content: [{ type: 'text', text: 'started background subagent job job-1' }],
+        isError: false,
+      }),
+    },
+  }
+}
+
 test('a running edit card renders its call-time diff', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -700,6 +843,47 @@ test('a running edit card renders its call-time diff', async () => {
   assert.ok(view.includes('+1 -1 src/foo.ts'), `diff header missing:\n${view}`)
   assert.ok(view.includes('- b'), `delete row missing:\n${view}`)
   assert.ok(view.includes('+ B'), `add row missing:\n${view}`)
+  app.stop()
+})
+
+test('subagent-family tool cards show the model/provider line when the call carries it', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setToolOutputExpanded(true)
+  // A running subagent_route dispatch with an explicit model/provider.
+  const args = JSON.stringify({ description: 'research', prompt: 'look it up', provider: 'ollama', model: 'deepseek-v4' })
+  const folder = new TranscriptFolder()
+  folder.apply([subagentRouteCallEvent(0, 'call-route-1', args)])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('deepseek-v4 · ollama'), `running card must show the model line:\n${view}`)
+  // Settled: the line survives above the result.
+  const settled = new TranscriptFolder()
+  settled.apply([subagentRouteCallEvent(0, 'call-route-1', args), subagentRouteResultEvent(1, 'call-route-1')])
+  app.setTranscript(settled.messages())
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('deepseek-v4 · ollama'), `settled card must keep the model line:\n${view}`)
+  app.stop()
+})
+
+test('subagent-family cards without an explicit model render unchanged (compatibility)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setToolOutputExpanded(true)
+  // The official subagent tool never carries model/provider in the args
+  // (deployment config owns the route): no model line, no extra row.
+  const args = JSON.stringify({ description: 'research', prompt: 'deep dive', run_in_background: false })
+  const folder = new TranscriptFolder()
+  folder.apply([subagentRouteCallEvent(0, 'call-route-2', args)])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('· ollama'), `no provider must not render a model line:\n${view}`)
+  assert.ok(view.includes('subagent_route'), `the card itself must still render:\n${view}`)
   app.stop()
 })
 

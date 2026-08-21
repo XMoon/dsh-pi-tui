@@ -494,7 +494,9 @@ test('KeybindingRegistry: reserved host keys are rejected (full lifecycle invent
     { key: 'o', ctrl: true, shift: false },
     { key: 't', ctrl: true, shift: false },
     { key: 'g', ctrl: true, shift: false },
-    { key: 'j', ctrl: true, shift: false },
+    // Ctrl+J is deliberately NOT reserved anymore: legacy terminals send
+    // it as LF (the editor's Enter), so the host dropped the binding and a
+    // plugin may claim the chord itself.
     { key: 'enter', ctrl: true, shift: false },
   ]
   for (let index = 0; index < reserved.length; index++) {
@@ -531,6 +533,15 @@ test('KeybindingRegistry: reserved host keys are rejected (full lifecycle invent
       action: 'open-search',
     }, 'o'), /reserved/, `${binding.alt ? 'Alt+' : 'Shift+'}${binding.key} must be reserved`)
   }
+  // Ctrl+J is free for plugins: the host no longer binds it (legacy LF
+  // ambiguity), so a plugin registration must NOT be rejected.
+  const handle = registry.register({
+    id: 'k-ctrl-j',
+    key: { key: 'j', ctrl: true, alt: false, shift: false, super: false },
+    action: 'open-search',
+  }, 'o')
+  assert.ok(handle !== undefined, 'a plugin must be able to claim Ctrl+J')
+  handle.dispose()
 })
 
 test('KeybindingRegistry: duplicate keys conflict; unload removes bindings', () => {

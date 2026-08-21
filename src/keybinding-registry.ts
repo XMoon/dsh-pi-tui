@@ -38,9 +38,9 @@ interface BindingRecord {
  * This inventory is the SINGLE authoritative list, kept in sync with the
  * host's `matchesKey` lifecycle checks in tui-app.ts (Ctrl+C/D exit,
  * Ctrl+S steer-all, Ctrl+F transcript search, Ctrl+Shift+F search, Ctrl+O
- * expand, Ctrl+T todo panel, Ctrl+G external editor, Ctrl+J task
- * browser, Ctrl+Enter queue, Enter submit, Esc cancel, Shift+Tab
- * permission cycle, Alt+Up dequeue, Alt+T thinking toggle). Every
+ * expand, Ctrl+T todo panel, Ctrl+G external editor, Ctrl+Enter queue,
+ * Enter submit, Esc cancel, Shift+Tab permission cycle, Alt+Up dequeue,
+ * Alt+T thinking toggle). Every
  * reserved binding here must match a host `matchesKey(data, ...)` call;
  * when a new host lifecycle key lands, extend THIS list in the same
  * commit.
@@ -54,7 +54,10 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'o', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+O expand
   { key: 't', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+T todo panel
   { key: 'g', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+G external editor
-  { key: 'j', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+J task browser
+  // Ctrl+J is deliberately NOT reserved/bound: legacy terminals send it
+  // as LF, which the editor treats as Enter, so the chord was unreliable
+  // in practice — the task browser is reached via ↓ (empty editor) and
+  // `/tasks` instead, and a plugin may bind Ctrl+J itself.
   { key: 'enter', ctrl: true, alt: false, shift: false, super: false }, // Ctrl+Enter queue
   { key: 'enter', ctrl: false, alt: false, shift: false, super: false }, // Enter submit
   { key: 'escape', ctrl: false, alt: false, shift: false, super: false }, // Esc cancel

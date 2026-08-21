@@ -74,6 +74,27 @@ function stubRunner(
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
+    // The merged /tasks browser: jobs + subagents, Enter routes to
+    // openJobView through `this` so a Proxy-wrapped runner can spy on it.
+    openTasksBrowser() {
+      const jobs = ctx.get('jobs') as
+        | { list: (agent: never) => { id: string; kind: string; label: string; status: string; startedAt: number; detail?: string }[] }
+        | undefined
+      const snapshots = jobs?.list(state.agent as never) ?? []
+      app.openTaskBrowser(
+        snapshots.map(job => ({
+          value: job.id,
+          label: `${job.kind} · ${job.label}`,
+          status: job.status,
+          detail: job.detail,
+          startedAt: job.startedAt,
+          group: 'jobs',
+        })),
+        (value) => this.openJobView(value),
+        () => {},
+        { header: 'tasks', enableSearch: true },
+      )
+    },
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,
@@ -260,6 +281,40 @@ test('/quit is a registered alias of /exit sharing its handler', () => {
   assert.ok(exitDef !== undefined, '/exit must be registered')
   assert.ok(quitDef !== undefined, '/quit must be registered')
   assert.equal(quitDef!.handler, exitDef!.handler, '/quit must share the /exit handler')
+  app.stop()
+})
+
+test('/subagents is a registered alias of /tasks sharing its handler', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  registerTuiCommands(stubRunner(ctx, app, state))
+  const tasksDef = services.defs.find(def => def.name === 'tasks')
+  const subagentsDef = services.defs.find(def => def.name === 'subagents')
+  assert.ok(tasksDef !== undefined, '/tasks must be registered')
+  assert.ok(subagentsDef !== undefined, '/subagents must be registered as an alias')
+  assert.equal(subagentsDef!.handler, tasksDef!.handler, '/subagents must share the /tasks handler')
+  app.stop()
+})
+
+test('/queue is a host-owned compatibility stub answering with an explicit removal error', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  registerTuiCommands(stubRunner(ctx, app, state))
+  const queueDef = services.defs.find(def => def.name === 'queue')
+  assert.ok(queueDef !== undefined, '/queue must stay registered (host-owned name)')
+  const result = await (queueDef!.handler as () => Promise<{ kind: string; text: string }>)()
+  assert.equal(result.kind, 'error', 'the stub must answer with an error')
+  assert.match(result.text, /removed/, 'the stub must name the removal explicitly')
   app.stop()
 })
 

@@ -34,7 +34,7 @@ test('an explicit child session id is the only accepted transcript target', () =
 test('the subagent status fallback points at the identity-owning browser', () => {
   const hint = subagentJobViewHint('completed', 'exit code: 0')
   assert.ok(hint.includes('status: completed'), `status line missing:\n${hint}`)
-  assert.ok(hint.includes('/subagents'), `the hint must direct to /subagents:\n${hint}`)
+  assert.ok(hint.includes('/tasks'), `the hint must direct to /tasks:\n${hint}`)
   assert.ok(hint.includes('does not carry the child session id'), `stable-id explanation missing:\n${hint}`)
   assert.ok(hint.includes('same-label foreground'), `the unsafe label fallback must stay documented:\n${hint}`)
 })
@@ -42,7 +42,7 @@ test('the subagent status fallback points at the identity-owning browser', () =>
 test('running subagent fallback explains that the transcript remains available', () => {
   const hint = subagentJobViewHint('running', undefined)
   assert.ok(hint.includes('running in the background'), `running state missing:\n${hint}`)
-  assert.ok(hint.includes('/subagents'), `transcript route missing:\n${hint}`)
+  assert.ok(hint.includes('/tasks'), `transcript route missing:\n${hint}`)
 })
 
 test('an exact label matches the most recent pending call and removes it', () => {

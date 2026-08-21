@@ -327,19 +327,24 @@ the Advanced/Unstable roadmap).
   read. Enter switches to the selected session.
 - `/search <query>` — full-text search over persisted session logs, then
   switch to a hit.
-- `/title [title]` / `/rename [title]` — with an argument, set the current
-  session's title (pins it against automatic generation; titles appear in
-  the `/sessions` picker); **without an argument, regenerate the title from
-  the conversation — this overwrites the current title, including one you
-  pinned earlier**.
+- `/title [title]` — with an argument, set the current session's title
+  (pins it against automatic generation; titles appear in the `/sessions`
+  picker); **without an argument, regenerate the title from the
+  conversation — this overwrites the current title, including one you
+  pinned earlier** (`/rename` is an alias).
+- `/tasks` — the merged task browser: background jobs AND subagents in one
+  searchable list (type to filter rows by kind/label/status — `subagent`,
+  `bash`, `failed`…). `Enter` opens the detail (child transcript for a
+  subagent, status viewer for a job), `i` interrupts the selected subagent.
+  `/subagents` is an alias.
 - `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
-- `/queue` — per-item queue management: edit, delete, steer one, or insert a
-  message into the agent's inbox (the queue pane above the editor shows
-  pending messages; `Ctrl+S` steers them all at once, `Alt+↑` pulls them all
-  back into the editor).
+- `/queue` — removed: the queue pane above the editor is the single queue
+  surface (`Ctrl+S` steers all, `Alt+↑` pulls the user's queued messages
+  back into the editor). The name stays host-owned and answers with an
+  explicit error so old input never reaches the model.
 - `/status` — show the current session's stats and identity (turn counts,
   token usage, workspace, installed dsh version).
-- `/preset`, `/model`, `/settings`, `/export`, `/fork`, `/subagents` — see
+- `/preset`, `/model`, `/settings`, `/export`, `/fork` — see
   `dsh --profile pi-tui`'s command autocomplete (`/` + Tab).
 
 ## Keybindings (selection)
@@ -354,23 +359,30 @@ the Advanced/Unstable roadmap).
   draft, if any) into the running turn at once; otherwise sends the draft
   alone. An idle agent starts a fresh turn with everything.
 - `Alt+↑` — dequeue: pull every queued message back into the editor draft.
-- `Ctrl+T` — toggle the full todo list; the dock above the editor always shows
-  the todo summary and background tasks, and queued input renders between
-  them.
+- `Ctrl+T` — toggle the full todo list (in fullscreen, clicking the panel
+  expands it to the full list and back); the dock above the editor always
+  shows the todo summary and background tasks, and queued input renders
+  between them.
 - `@` — file/folder mentions in the editor: `@` + Tab completes files from the
   whole workspace (fd-backed when `fd` is on PATH, with a built-in recursive
   fallback otherwise). The literal `@path` is submitted and the model reads
-  the file itself. With background work running, an empty editor's `↓` or
-  `Ctrl+J` opens the task browser over both surfaces:
+  the file itself. With background work running, an empty editor's `↓` opens
+  the same merged task browser as `/tasks`:
   - **subagent rows** (live continuable children) — `Enter` opens the child's
-    transcript read-only (`Esc` returns); they never register jobs records, so
-    this browser is their only glanceable home.
+    transcript read-only (`Esc` returns); `i` interrupts the selected child.
+    They never register jobs records, so this browser is their only glanceable
+    home.
   - **job rows** (bash and one-shot subagent jobs) — `Enter` shows the status
     viewer only: a bash job's output read cursor belongs to the model's
     `job_output`, and a one-shot subagent job record carries no child session
-    id, so the transcript is reached via `/subagents` (`s` stops a job).
+    id, so a subagent job's transcript is reached through `/tasks` by picking
+    the child by its label.
   The footer badge shows `[N tasks running · M agents · ↓ view]` while any
-  background work is live.
+  background work is live. The queue pane above the editor shows pending
+  input: user messages as `❯` rows, everything else (job notices, subagent
+  reports, injected instructions) as `⏳` notices that fold into a
+  `+N more` line beyond five — and disappear once the agent has received
+  them.
 
 ## Launch options
 
