@@ -137,28 +137,40 @@ importers:
         version: 5.9.3
 
   packages/dsh-pi-tui/examples/plugins/interactive-shell:
-    devDependencies:
+    dependencies:
       '@xmoon76/dsh-pi-tui':
         specifier: workspace:*
         version: link:../../..
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       typescript:
         specifier: ^5.9.0
         version: 5.9.3
 
   packages/dsh-pi-tui/examples/plugins/questionnaire:
-    devDependencies:
+    dependencies:
       '@xmoon76/dsh-pi-tui':
         specifier: workspace:*
         version: link:../../..
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       typescript:
         specifier: ^5.9.0
         version: 5.9.3
 
   packages/dsh-pi-tui/examples/plugins/vim:
-    devDependencies:
+    dependencies:
       '@xmoon76/dsh-pi-tui':
         specifier: workspace:*
         version: link:../../..
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       typescript:
         specifier: ^5.9.0
         version: 5.9.3

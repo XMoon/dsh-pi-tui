@@ -1,10 +1,13 @@
 {
-  "name": "dsh-pi-example-$p",
+  "name": "dsh-pi-example-questionnaire",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "devDependencies": {
-    "@xmoon76/dsh-pi-tui": "workspace:*",
+    "@deepseek-ai/cordis": "^4.0.1",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@xmoon76/dsh-pi-tui": "workspace:*"
   }
 }
