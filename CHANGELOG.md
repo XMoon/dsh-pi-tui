@@ -7,8 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-21
+
 ### Added
 
+- **Extension platform v1 — the headline of this release.** The TUI is now
+  extensible: a third-party Cordis plugin can contribute chrome (header
+  badge, dock items, footer segments), widgets above/below the editor,
+  slash commands, themes, settings rows, autocomplete providers,
+  keybindings, transcript/tool renderers, managed overlays, and even
+  replace the editor itself — without touching TUI internals. Plugins
+  import only `@xmoon76/dsh-pi-tui/extensions`, feature-detect
+  capabilities (API version 1), and are fully lifecycle-owned: plugin
+  unload/HMR removes exactly that plugin's contributions, and a stale
+  surface can never be mutated after disposal. The built-in version badge
+  and turn/step counters now dogfood the same public API
+  (`@xmoon76/dsh-pi-tui/builtins`). The author guide lives in
+  `docs/extension-api.md`.
+- `/login` can now add a provider the deployment has never configured. The
+  credential picker merges the llm configurable-provider directory (every
+  installed pi-ai catalog route plus hand-declared profiles) with the
+  settings section, groups rows by configured / available / custom, and
+  offers an `[ Add New Platform ]` action that runs a guided wizard — route,
+  wire protocol, base URL, display name and API key — probes the endpoint
+  for its advertised models (falling back to hand entry), and persists the
+  profile through `settings.mutate` plus the credential. `/login <route>`
+  for a brand-new route starts the same wizard with the route pre-filled.
+  Catalog routes stay one-step: `/login anthropic` still just asks for the
+  key. The footer model row and welcome card refresh when the provider
+  topology, the llm-pi-ai/llm-deepseek settings, or any credential changes
+  (including external `settings.yaml` / `.credentials.yaml` edits).
 - **Real-plugin validation (Phase 5).** The tier selection is proven by
   real consumers in `packages/dsh-pi-tui/examples/plugins/`, gated by
   `scripts/examples-plugin-smoke.mjs` against the packed tarball: a
@@ -77,37 +105,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   All tiers share ONE extension runtime (caller-fiber ownership, surface lifecycle,
   invalidation). The vim fixture no longer doubles as a production-Stable-API
   proof; full modal editors move to the advanced/unstable roadmap.
-
-## [0.2.0] - 2026-08-20
-
-### Added
-
-- **Extension platform v1 — the headline of this release.** The TUI is now
-  extensible: a third-party Cordis plugin can contribute chrome (header
-  badge, dock items, footer segments), widgets above/below the editor,
-  slash commands, themes, settings rows, autocomplete providers,
-  keybindings, transcript/tool renderers, managed overlays, and even
-  replace the editor itself — without touching TUI internals. Plugins
-  import only `@xmoon76/dsh-pi-tui/extensions`, feature-detect
-  capabilities (API version 1), and are fully lifecycle-owned: plugin
-  unload/HMR removes exactly that plugin's contributions, and a stale
-  surface can never be mutated after disposal. The built-in version badge
-  and turn/step counters now dogfood the same public API
-  (`@xmoon76/dsh-pi-tui/builtins`). The author guide lives in
-  `docs/extension-api.md`.
-- `/login` can now add a provider the deployment has never configured. The
-  credential picker merges the llm configurable-provider directory (every
-  installed pi-ai catalog route plus hand-declared profiles) with the
-  settings section, groups rows by configured / available / custom, and
-  offers an `[ Add New Platform ]` action that runs a guided wizard — route,
-  wire protocol, base URL, display name and API key — probes the endpoint
-  for its advertised models (falling back to hand entry), and persists the
-  profile through `settings.mutate` plus the credential. `/login <route>`
-  for a brand-new route starts the same wizard with the route pre-filled.
-  Catalog routes stay one-step: `/login anthropic` still just asks for the
-  key. The footer model row and welcome card refresh when the provider
-  topology, the llm-pi-ai/llm-deepseek settings, or any credential changes
-  (including external `settings.yaml` / `.credentials.yaml` edits).
+- **dsh 0.1.0-rc.8 adaptation.** The dependency baseline moves to rc.8
+  (every `@deepseek-ai/*` peer and dev dependency), the `commands.execute`
+  calls pass the rc.8 image-array argument, and the bundled agent presets
+  align with rc.8: the `minimal` preset gains its Windows/PowerShell twin
+  shell rows (bash gates off win32, the pwsh pair gates on), and the
+  `codex`/`claude-code` subagent rows migrate from `enableRunInBackground`
+  to `backgroundMode: one-shot` (the spawn/fork rows keep `continuable`).
+- **`@dir/` mention completion reopens after Tab (kimi parity).**
+  Tab-accepting a directory (`@src` → `@src/`) immediately re-shows the
+  dropdown at its children instead of waiting for another Tab, and Esc
+  closes the dropdown without re-triggering it. Implemented consumer-side
+  in a new `TuiEditor` host subclass — the vendored fork stays pristine.
+- **`/sessions` and `/resume` categorize the session list.** The default
+  view hides subagent sessions (the resume surface is for humans); Tab
+  cycles Main / All / Subagents while the picker is open (the live search
+  query carries across the switch), and the All view indents subagents
+  under their parent session (`└─` tree). Direct `/resume <subagent-id>`
+  still matches any session.
+- **Faster session-title loading.** The picker's title reads are
+  progressive — the first 20 rows land immediately, then 50-row batches
+  refresh behind them — and a local cache
+  (`$DSH_HOME/cache/pi-tui-session-titles.json`, 0600) serves titles whose
+  session logs are unchanged, so the expensive full-log title scans only
+  run for genuinely new or changed sessions.
+- **Context-compaction progress and results.** While a compaction runs the
+  working row shows `Working... · Compacting context…` (a single Esc
+  cancels it — pi parity); on settle a `Context compacted` /
+  `Compaction failed` notice fires and the transcript gains an expandable
+  compaction card (title + `Compacted N history items (~M tokens)` + the
+  summary body — web CompactionItem parity). Resuming mid-compaction
+  restores the in-flight state.
+- **`/model` dismisses after applying an effort.** Picking an effort (or
+  Default) closes the whole model overlay in one step (web ModelSelect
+  parity); Esc still walks back level by level, and models without effort
+  options keep the panel open.
+- **The footer wraps on narrow terminals.** The host status line is no
+  longer hard-truncated to the terminal width: it wraps across rows
+  (bounded — ≤3 host rows + ≤1 stats row, the tail cut with `…`), so the
+  model, cwd, branch, context bar and turn/step counters survive on
+  phone-narrow screens. The `/settings footer` density semantics are
+  unchanged.
+- **Fullscreen drag-copy drops the emoji-column indent.** Copied
+  transcript lines no longer carry the bullet column's padding spaces
+  (`❯ ` / `🐋  ` / `🐳  ` continuation indent) when the selection starts
+  at the line head; content indents of 4+ spaces (code blocks) survive,
+  and mid-line selections are untouched.
 
 ### Changed
 
@@ -120,6 +163,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `/preset` picker's English name for the `code` preset is now
   `PTC mode`, following the upstream dsh 0.1.0-rc.7 rename (the preset id
   is unchanged, so existing compositions keep working).
+- **Ctrl+C and Esc follow pi's editor semantics.** A first Ctrl+C clears
+  a non-empty editor (recording the time); a second Ctrl+C within 500ms on
+  the now-empty editor exits. Esc closes an open autocomplete dropdown
+  (previously the app-level handler swallowed it, so the dropdown could
+  not be dismissed), and while the agent is busy a single Esc stops the
+  current activity — turn, tool run or compaction — with partial content
+  staying on screen (idle keeps the double-Esc cancel). The working row's
+  label is now `Working...`.
 
 ### Security
 

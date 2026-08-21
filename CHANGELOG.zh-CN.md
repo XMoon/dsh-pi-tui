@@ -68,7 +68,7 @@
   surface 生命周期、失效机制)。vim fixture 不再兼任生产级 Stable-API
   的证明;完整模态编辑器移入 advanced/unstable 路线图。
 
-## [0.2.0] - 2026-08-20
+## [0.2.0] - 2026-08-21
 
 ### 新增
 
@@ -92,6 +92,99 @@
   `/login anthropic` 仍只询问 key。供应商拓扑、llm-pi-ai/llm-deepseek
   settings 或任何凭据变化时(包括外部编辑 `settings.yaml` /
   `.credentials.yaml`),footer 模型行与欢迎卡片即时刷新。
+- **真实插件验证(Phase 5)。**层级选择由真实消费者验证,见
+  `packages/dsh-pi-tui/examples/plugins/`,由
+  `scripts/examples-plugin-smoke.mjs` 对打包 tarball 门禁:
+  **生产级 vim 模态编辑器**(insert/normal 模式、h/j/k/l、词移动、
+  x/d/c、i/a/o、undo/redo、yank/paste、多行、光标同步、提交集成——
+  全部经语义化 `EditorInputEvent`,绝不接触 raw 字节;Advanced editor
+  SDK 足够,无需 Unstable)、**questionnaire 表单**(Phase-4 命令式 UI
+  broker:select → 自由文本 → confirm → notify)与**交互式 shell**
+  (Unstable raw seam:exclusive raw 所有权 + raw 渲染低层 mount;
+  `exit` 或 Host 紧急 fail-safe 返回)。作者决策树见
+  `docs/plugin-authoring.md`;API gap 过程与 Stable promotion review
+  记录在 `examples/README.md`。
+- **Pi 能力对齐(Phase 4)。** Advanced 层新增高价值 Pi 风格能力:
+  **命令式 UI broker**(`advanced.ui.select/confirm/input/notify`——
+  基于 Host 自有 picker/question/notify 基础设施的 Promise 化提示,
+  caller-fiber 取消、surface 销毁结算)、**自定义交互 UI**
+  (`advanced.ui.custom`——由 Host 挂载工厂构建的交互组件,通过公开的
+  `AdvancedCustomHost` facade 报告结果,绝不传私有 TUI 对象)、
+  **host-state facade**(`advanced.host`——theme 查询/选择、title
+  覆盖、working 指示覆盖、tool 展开偏好)。Pi 能力矩阵
+  (`docs/extension-capability-matrix.md`)记录层级映射作为路线图参考。
+  打包验收:新增 `phase4-plugin` fixture + `scripts/phase4-plugin-smoke.mjs`
+  门禁。
+- **Unstable 扩展层(Phase 3)。** `@xmoon76/dsh-pi-tui/extensions/unstable`
+  现在是可用层级(`UNSTABLE_API_LEVEL = 1`),不保证兼容:
+  **raw 输入拦截**(`unstable.input.raw`——在 Host 解码之前对 RAW
+  terminal 块做 observe/consume/rewrite、exclusive raw 所有权且冲突
+  显式报错、handler 抛错 fail-open、每个块最多过一次拦截链)、
+  **Host 紧急 fail-safe**(1.5 秒内三连 Esc 释放全部 raw capture 并
+  关闭全部 unstable mount——在 capture 之前检测,插件无法改写或消费)、
+  **低层 surface seam**(`unstable.surface.handle`——requestRender/
+  几何/mountComponent 承载 raw 渲染组件;绝不暴露 TuiApp/屏幕/
+  terminal)。facade 为 `unstable(service)`——Stable service 接口未动。
+  所有资源仍为 caller-fiber 所有、surface generation 作用域;失败进入
+  共享 health ledger。作者指南:`docs/extension-unstable.md`。打包验收:
+  新增 `unstable-plugin` fixture + `scripts/unstable-plugin-smoke.mjs`
+  门禁。
+- **Advanced 扩展层(Phase 2)。** `@xmoon76/dsh-pi-tui/extensions/advanced`
+  现在是可用层级(`ADVANCED_API_LEVEL = 1`),提供三类能力,全部仍由
+  Host 中介(绝不接触 raw terminal 字节、绝不暴露私有屏幕):
+  **规范化输入捕获**(`advanced.input.capture`——observe/capture/
+  exclusive 模式、确定性优先级排序、exclusive 冲突显式报错、handler
+  抛错 fail-open)、**聚焦交互表面**(`advanced.ui.interactive`——交互式
+  托管 overlay 承载插件自有的交互组件,渲染由 Host 编译、输入由 Host
+  归一化、focus/blur、resize 重编译与全屏迁移)、**高级编辑器控制**
+  (`advanced.editor.control`——经 Host 编辑器座位的 get/set/cursor/
+  insert/paste/focus)。facade 为 `advanced(service)`——Stable service
+  接口未动。所有资源仍为 caller-fiber 所有、surface generation 作用域;
+  失败进入共享 health ledger。作者指南:`docs/extension-advanced.md`。
+  打包验收:新增 `advanced-plugin` fixture + `scripts/advanced-plugin-smoke.mjs`
+  门禁。
+- **分层扩展面。** 公开扩展 SDK 现在分三个层级:稳定的
+  `@xmoon76/dsh-pi-tui/extensions` 入口保持其兼容契约,新增的
+  `extensions/advanced`(实验性;minor 版本可破坏)与 `extensions/unstable`
+  (不保证兼容)入口携带层级元数据与保留的能力命名空间(`advanced.` /
+  `unstable.`)。所有层级共享同一个扩展运行时(caller-fiber 所有权、
+  surface 生命周期、失效机制)。vim fixture 不再兼任生产级 Stable-API
+  的证明;完整模态编辑器移入 advanced/unstable 路线图。
+- **dsh 0.1.0-rc.8 适配。** 依赖基线整体升至 rc.8(全部
+  `@deepseek-ai/*` peer 与 dev 依赖),`commands.execute` 调用补齐 rc.8
+  新增的图片数组参数,内置 agent presets 对齐 rc.8:`minimal` 预设新增
+  Windows/PowerShell 双胞胎 shell 行(bash 在 win32 关闭、pwsh 对
+  win32 开启),`codex`/`claude-code` 子代理行从 `enableRunInBackground`
+  迁移到 `backgroundMode: one-shot`(spawn/fork 行保持 `continuable`)。
+- **`@dir/` 补全 Tab 接受后自动展开(kimi 对齐)。** Tab 接受目录
+  (`@src` → `@src/`)后立即在子项上重新打开下拉,无需再按一次 Tab;
+  Esc 关闭下拉且不重新触发。消费侧新 `TuiEditor` 宿主子类实现——
+  vendored fork 保持原样。
+- **`/sessions` 与 `/resume` 对会话列表分类。** 默认视图隐藏 subagent
+  会话(resume 面是给人用的);picker 打开期间 Tab 在 Main / All /
+  Subagents 间循环(实时搜索词跨类别保留),All 视图把 subagent 缩进到
+  其父会话之下(`└─` 树形)。直接 `/resume <subagent-id>` 仍可精确匹配
+  任意会话。
+- **会话标题加载更快。** picker 的标题读取改为分批渐进——前 20 行立即
+  落地,其后按 50 行一批刷新——并引入本地缓存
+  (`$DSH_HOME/cache/pi-tui-session-titles.json`,0600):会话日志未变时
+  直接用缓存标题,昂贵的全量日志标题扫描只对真正新增或变化的会话执行。
+- **上下文压缩的进度与结果。** 压缩进行中 working 行显示
+  `Working... · Compacting context…`(单次 Esc 取消——pi 对齐);结束时
+  弹出 `Context compacted` / `Compaction failed` 通知,transcript 新增
+  可展开的压缩卡片(标题 + `Compacted N history items (~M tokens)` +
+  摘要正文——web CompactionItem 对齐)。中途压缩的会话恢复时还原进行中
+  状态。
+- **`/model` 选择 effort 后自动关闭。** 选定 effort(或 Default)后整个
+  模型 overlay 一步关闭(web ModelSelect 对齐);Esc 仍逐级回退,无
+  effort 选项的模型保持面板打开。
+- **footer 在窄终端自动换行。** 宿主状态行不再硬截断到终端宽度:自动
+  换行跨行显示(有界——宿主 ≤3 行 + stats ≤1 行,尾部以 `…` 截断),
+  模型、cwd、分支、上下文条与轮次/步骤计数在手机窄屏上不再丢失。
+  `/settings footer` 密度语义不变。
+- **fullscreen 拖选复制去掉 emoji 列空格。** 选择从行首开始时,复制出的
+  transcript 行不再携带 bullet 列的填充空格(`❯ ` / `🐋  ` / `🐳  `
+  续行缩进);4 格及以上的内容缩进(代码块)保留,行中开始的选择不受影响。
 
 ### 变更
 
@@ -102,6 +195,11 @@
   工作不应用任何结果)。这是扩展平台陈旧句柄契约所依赖的基础。
 - `/preset` 选择器中 `code` 预设的英文名改为 `PTC mode`,与上游 dsh
   0.1.0-rc.7 的重命名保持一致(预设 id 未变,已有组合不受影响)。
+- **Ctrl+C 与 Esc 改为 pi 的编辑器语义。** 第一次 Ctrl+C 清空非空编辑器
+  (并记录时间);500ms 内第二次按下(此时编辑器已空)退出。Esc 关闭打开
+  中的自动补全下拉(此前被 app 级处理吞掉,下拉无法关闭),agent 忙碌时
+  单次 Esc 停止当前活动——转、工具运行或压缩——部分内容保留在屏幕上
+  (空闲时保持双击 Esc 取消)。working 行标签改为 `Working...`。
 
 ### 安全
 
