@@ -150,6 +150,15 @@ export function convertAnsiToHtml(raw) {
         open = false
       }
       html += '\n'
+      // SGR state survives a line break in the terminal (tmux's
+      // incremental captures omit a redundant background re-open on a
+      // continuation row), so re-open a span for the current state —
+      // otherwise a bubble background silently vanishes after the wrap.
+      const css = styleCss(state)
+      if (css !== '') {
+        html += `<span style="${css}">`
+        open = true
+      }
     } else {
       html += esc(ch)
     }

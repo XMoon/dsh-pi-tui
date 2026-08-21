@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-08-21
+### Added
+
+- **User input renders as a brand-blue bubble; the input box carries a
+  matching `❯` prompt.** The user's own words in the transcript now paint
+  the whole row with the role bubble background (dsh-web
+  `--dsw-specific-bubble` parity — `#2C2C2F` dark / `#E4EDFD` light) and
+  lead it with a DeepSeek brand-blue `❯` (`#679EFE` dark / `#4177E6`
+  light) instead of kimi's amber, so real user input reads as a floating
+  block and never blends into tool cards, context rows or thinking. The
+  queue pane and the editor prompt use the same brand-blue `❯`: one marker
+  for the user's own input everywhere. The bubble background is an
+  optional palette token (`roleUserBg`) custom themes can override.
 
 ## [0.3.1] - 2026-08-21
 
@@ -23,21 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version constraints are added as table entries, each with its own
   incompatible range, the release line that first imposed it, and its
   guidance.
+- **The `/login` surface separates the two credential planes in its
+  copy.** Picker groups prefix API-key targets with the `API key ·`
+  category (provider sign-in targets keep their own group), the command
+  description leads with both verbs ("Sign in with a provider or set an
+  API key"), the key-entry question asks you to "Enter" the key, and
+  success/logout copy names the plane ("API key X set" / "API key X
+  cleared").
 
-## [Unreleased]
-
-### Changed
-
-- **A startup gate explains an unsupported harness.** Running on a DeepSeek
-  Harness older than `dsh-v0.1.1-rc.1` now prints an actionable message
-  (the detected version, the minimum version, and the upgrade command)
-  before the loader's own failure — instead of a raw
-  `ERR_MODULE_NOT_FOUND` stack for the authorization row the profile
-  mounts, which the old harness cannot resolve. The message is generated
-  from a declarative compatibility table (`HARNESS_COMPAT`): future
-  version constraints are added as table entries, each with its own
-  incompatible range, the release line that first imposed it, and its
-  guidance.
 ## [0.3.0] - 2026-08-21
 
 ### Changed

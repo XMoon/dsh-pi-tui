@@ -36,6 +36,9 @@ export interface TuiColorPalette {
   diffGutter: string
   diffMeta: string
   roleUser: string
+  /** Optional user-bubble background (dsh-web `--dsw-specific-bubble`
+   * parity); absent = no bubble block. */
+  roleUserBg?: string
   shellMode: string
 }
 

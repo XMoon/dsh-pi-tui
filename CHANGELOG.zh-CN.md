@@ -7,7 +7,16 @@
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-08-21
+### 新增
+
+- **用户输入渲染为品牌蓝气泡,输入框附带同款 `❯` 提示符。** transcript
+  中用户自己的输入现在整行铺角色气泡背景(dsh-web
+  `--dsw-specific-bubble` 同源:dark `#2C2C2F` / light `#E4EDFD`),并以
+  DeepSeek 品牌蓝 `❯`(#679EFE dark / #4177E6 light)引导,取代 kimi 的
+  琥珀色——真实用户输入呈现为浮起的色块,不再与工具卡片、上下文注入或
+  思考行混淆。队列窗格与编辑器 prompt 使用同一品牌蓝 `❯`:用户自己的
+  输入在界面各处都是同一个标记。气泡背景是可选的调色板 token
+  (`roleUserBg`),自定义主题可覆盖。
 
 ## [0.3.1] - 2026-08-21
 
@@ -19,17 +28,12 @@
   `ERR_MODULE_NOT_FOUND` 堆栈(旧宿主无法解析 profile 挂载的
   authorization 行)。提示按声明式兼容表(`HARNESS_COMPAT`)生成,后续
   版本约束只需在表中增加条目。
+- **`/login` 的文案区分两个凭据平面。** 选择器分组为 API-key 目标加
+  `API key ·` 类别前缀(provider 登录目标保留自己的分组),命令描述同时
+  点明两种动词("Sign in with a provider or set an API key"),密钥输入
+  问题改为 "Enter",成功/退出文案点名所在平面("API key X set" /
+  "API key X cleared")。
 
-## [Unreleased]
-
-### Changed
-
-- **不支持的宿主版本现在有明确的启动提示。** 在早于 `dsh-v0.1.1-rc.1` 的
-  DeepSeek Harness 上运行时,会先打印可操作的提示(检测到的版本、最低
-  版本与升级命令),再出现 loader 自身的失败——而不再是一段原始的
-  `ERR_MODULE_NOT_FOUND` 堆栈(旧宿主无法解析 profile 挂载的
-  authorization 行)。提示按声明式兼容表(`HARNESS_COMPAT`)生成,后续
-  版本约束只需在表中增加条目。
 ## [0.3.0] - 2026-08-21
 
 ### Changed

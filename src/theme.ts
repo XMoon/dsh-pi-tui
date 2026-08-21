@@ -53,8 +53,11 @@ export interface ColorPalette {
   diffGutter: string
   /** Diff: meta / hunk headers. */
   diffMeta: string
-  /** User-message role colour. */
+  /** User-message role colour: the ❯ marker (brand blue, not kimi amber). */
   roleUser: string
+  /** User-message bubble background (dsh-web `--dsw-specific-bubble`
+   * parity). Absent = no bubble, the role text colours the body instead. */
+  roleUserBg?: string
   /** Shell-mode accent (reserved for `!` shell mode). */
   shellMode: string
 }
@@ -78,8 +81,10 @@ export const darkColors: ColorPalette = {
   diffRemovedStrong: '#F08585',
   diffGutter: '#6B6B6B',
   diffMeta: '#888888',
-  roleUser: '#FFCB6B',
+  roleUser: '#679EFE',
   shellMode: '#BD93F9',
+  /** dsh-web `--dsw-specific-bubble` (dark): neutral bluish-850. */
+  roleUserBg: '#2C2C2F',
 }
 
 /** Light palette, tuned for ≥ 4.5:1 contrast on white (pi's values). */
@@ -101,8 +106,10 @@ export const lightColors: ColorPalette = {
   diffRemovedStrong: '#B91C1C',
   diffGutter: '#737373',
   diffMeta: '#5F5F5F',
-  roleUser: '#9A4A00',
+  roleUser: '#4177E6',
   shellMode: '#7C3AED',
+  /** dsh-web `--dsw-specific-bubble` (light): deepseek-100. */
+  roleUserBg: '#E4EDFD',
 }
 
 /** The active palette; style helpers read it on every call, so swapping is live. */
@@ -166,7 +173,7 @@ const PALETTE_KEYS: readonly (keyof ColorPalette)[] = [
   'borderFocus', 'success', 'warning', 'error',
   'diffAdded', 'diffRemoved', 'diffAddedStrong', 'diffRemovedStrong',
   'diffGutter', 'diffMeta',
-  'roleUser', 'shellMode',
+  'roleUser', 'roleUserBg', 'shellMode',
 ]
 
 /**
@@ -273,6 +280,12 @@ export const color = {
   diffGutter: (text: string) => hex('diffGutter')(text),
   diffMeta: (text: string) => hex('diffMeta')(text),
   roleUser: (text: string) => hex('roleUser')(text),
+  /** User-bubble background paint (dsh-web `--dsw-specific-bubble`
+   * parity): the whole user row reads as a floating block. The token is
+   * optional — an absent `roleUserBg` makes this an identity function. */
+  roleUserBg: (text: string) => currentPalette.roleUserBg === undefined
+    ? text
+    : chalk.bgHex(currentPalette.roleUserBg)(text),
   shellMode: (text: string) => hex('shellMode')(text),
   /** Plain italics (kimi thinking parity). */
   italic: (text: string) => chalk.italic(text),

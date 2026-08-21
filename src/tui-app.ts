@@ -384,6 +384,63 @@ export class BulletedComponent implements Component {
 }
 
 /**
+ * User-message bubble: the whole row is painted with the role background
+ * (dsh-web `--dsw-specific-bubble` parity — user input is a floating
+ * block, NOT a text colour, so it never collides with the assistant's
+ * brand-blue whale or kimi's amber), the ❯ marker leads the FIRST line in
+ * the role colour, and wrapped continuation lines indent under it with the
+ * background kept across the row.
+ *
+ * The child stays LIVE (a resize re-wraps at the new width — the 5a76526
+ * rule) and the prefixed output is REFERENCE-STABLE like BulletedComponent:
+ * same child array + same width → same prefixed array, so the fork's
+ * per-frame processed-line reuse keeps hitting on steady frames.
+ */
+export class UserBubbleComponent implements Component {
+  private readonly child: Component
+  private readonly marker: string
+  private readonly markerWidth: number
+  private readonly bg: (text: string) => string
+  private lastChild: string[] | undefined
+  private lastWidth = -1
+  private cached: string[] | undefined
+
+  constructor(child: Component, marker: string, bg: (text: string) => string) {
+    this.child = child
+    this.marker = marker
+    this.markerWidth = visibleWidth(marker)
+    this.bg = bg
+  }
+
+  invalidate(): void {
+    this.child.invalidate?.()
+  }
+
+  dispose(): void {
+    this.child.dispose?.()
+  }
+
+  render(width: number): string[] {
+    const inner = Math.max(1, width - this.markerWidth)
+    const child = this.child.render(inner)
+    if (child === this.lastChild && width === this.lastWidth && this.cached !== undefined) {
+      return this.cached
+    }
+    this.lastChild = child
+    this.lastWidth = width
+    const indent = ' '.repeat(this.markerWidth)
+    this.cached = child.map((line, index) => {
+      const prefix = index === 0 ? this.marker : indent
+      // Pad to the full row so the bubble background covers the whole
+      // line, wrapped continuation rows included.
+      const pad = ' '.repeat(Math.max(0, inner - visibleWidth(line)))
+      return this.bg(prefix + line + pad)
+    })
+    return this.cached
+  }
+}
+
+/**
  * Longest prefix of `text` whose WRAPPED height fits `budget` rows at
  * `width`, with an ellipsis marking a cut — the approval dialog's height
  * budget must count wrapped rows, not raw lines, because a single long
@@ -4072,10 +4129,17 @@ export class TuiApp {
    */
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
     if (message.kind === 'user') {
-      // Terminal-prompt style: the user's line reads like a shell command.
-      // The ❯ leads the FIRST line; wrapped continuation lines indent under
-      // it (kimi prefix+indent parity), so multi-line input stays aligned.
-      return new BulletedComponent(new Text(message.text, 0, 0), `${color.roleUser('❯')} `)
+      // dsh-web parity: the user's own input is a floating BUBBLE (its
+      // `--dsw-specific-bubble` background block) with a brand-blue ❯ —
+      // never kimi's amber text colour, and never the assistant's whale
+      // blue. The ❯ leads the FIRST line; wrapped continuation lines keep
+      // the background and indent under the marker, so multi-line input
+      // stays aligned inside one block.
+      return new UserBubbleComponent(
+        new Text(message.text, 0, 0),
+        `${color.roleUser('❯')} `,
+        color.roleUserBg,
+      )
     }
     if (message.kind === 'assistant') {
       // The whale bullet leads the FIRST markdown line; wrapped continuation
@@ -5113,7 +5177,10 @@ export class TuiApp {
     for (const item of userRows) {
       const text = item.text.replace(/\s+/g, ' ').trim()
       const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth('❯ ')), '…')
-      lines.push(`${color.accent('❯')} ${truncated}`)
+      // User-origin rows carry the SAME brand-blue ❯ as the transcript
+      // bubbles and the editor prompt — one marker for the user's own
+      // input everywhere (pending here, delivered up there).
+      lines.push(`${color.roleUser('❯')} ${truncated}`)
     }
     for (const item of shownNotices) {
       // Notices are NOT steerable: they carry their own ⏳ marker so they

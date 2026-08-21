@@ -1976,6 +1976,48 @@ test('assistant and user messages align continuation lines under the bullet', as
   assert.ok(lines[paraTwo]!.startsWith('    '), `continuation must indent under the bullet:\n${view}`)
 })
 
+test('user messages render as brand-blue bubbles (dsh-web parity)', async () => {
+  const { vt, app } = startApp()
+  // Explicit palettes: the headless terminal's OSC 11 autodetect reply can
+  // pick either family, so pin dark first, then verify light below.
+  app.applyTheme('dark')
+  app.setTranscript([
+    { kind: 'user', turn: 0, text: 'line one' },
+    { kind: 'assistant', turn: 0, text: 'reply' },
+  ])
+  let view = await viewport(vt)
+  const rowOf = (needle: string): number => {
+    const index = view.split('\n').findIndex(line => line.includes(needle))
+    assert.ok(index >= 0, `${needle} row missing:\n${view}`)
+    return index
+  }
+  // The user's own words are a floating BUBBLE: the ❯ marker is brand
+  // blue (#679EFE), the whole row carries the bubble background
+  // (#2C2C2F), and the body stays in the terminal default foreground —
+  // never kimi's amber, never the assistant's whale blue.
+  const user = rowOf('❯ line one')
+  const userRow = view.split('\n')[user]!
+  const bodyCol = userRow.indexOf('line one')
+  assert.equal(vt.getCellFgRgb(user, 0), 0x679efe, `user ❯ must be brand blue:\n${view}`)
+  assert.notEqual(vt.getCellFgRgb(user, bodyCol), 0x679efe, `user body must NOT be role-coloured:\n${view}`)
+  // The bubble background covers the marker, the body AND the row tail.
+  assert.equal(vt.getCellBgRgb(user, 0), 0x2c2c2f, `bubble must start at column 0:\n${view}`)
+  assert.equal(vt.getCellBgRgb(user, bodyCol), 0x2c2c2f, `bubble must cover the body:\n${view}`)
+  assert.equal(vt.getCellBgRgb(user, userRow.length - 1), 0x2c2c2f, `bubble must cover the row tail:\n${view}`)
+  const assistant = rowOf('reply')
+  const replyCol = view.split('\n')[assistant]!.indexOf('reply')
+  assert.equal(vt.getCellBgRgb(assistant, replyCol), undefined, `assistant rows must have no bubble:\n${view}`)
+  // Light palette: the role tokens follow the theme (themeRevision
+  // rebuilds the message component, so the baked ANSI is not frozen).
+  app.applyTheme('light')
+  view = await viewport(vt)
+  const lightUser = rowOf('❯ line one')
+  const lightCol = view.split('\n')[lightUser]!.indexOf('line one')
+  assert.equal(vt.getCellFgRgb(lightUser, 0), 0x4177e6, `light ❯ must be deep brand-blue:\n${view}`)
+  assert.equal(vt.getCellBgRgb(lightUser, lightCol), 0xe4edfd, `light bubble must be pale brand-blue:\n${view}`)
+  app.stop()
+})
+
 test('BulletedComponent keeps a live child with reference-stable output', () => {
   const child = new Text('hello world', 0, 0)
   const bullet = new BulletedComponent(child, '❯ ')

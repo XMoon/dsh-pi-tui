@@ -179,6 +179,20 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Get the truecolor background (0xRRGGBB) of one viewport cell, or
+	 * undefined when the cell has no RGB background (default/palette) —
+	 * used by the user-bubble tests to observe the row's background block.
+	 */
+	getCellBgRgb(row: number, col: number): number | undefined {
+		const buffer = this.xterm.buffer.active;
+		const line = buffer.getLine(buffer.viewportY + row);
+		if (line === undefined) return undefined;
+		const cell = line.getCell(col);
+		if (cell === undefined || !cell.isBgRGB()) return undefined;
+		return cell.getBgColor();
+	}
+
+	/**
 	 * Get the entire scroll buffer
 	 */
 	getScrollBuffer(): string[] {

@@ -6,10 +6,19 @@
  * Tab-accepting a directory immediately shows its children (kimi's
  * reopenAutocompleteAfterInput). Esc while autocomplete is active closes
  * it WITHOUT re-triggering (kimi parity).
+ *
+ * The editor also carries the terminal-prompt `❯ ` prefix: the fork's
+ * Editor is constructed with `paddingX: 2` (kimi's CustomEditor reserves
+ * padding for its `>` prompt the same way), and render() paints the
+ * prompt over the first content row's leading padding — kimi's
+ * injectPromptSymbol pattern, consumer-side only. The prompt reads like
+ * the transcript's user messages (`❯ text`), so what the user is about
+ * to send matches what their sent input looks like.
  * @module @xmoon76/dsh-pi-tui/tui-editor
  */
 
-import { Editor, matchesKey } from '@xmoon76/pi-tui'
+import { Editor, matchesKey, type EditorTheme, type TUI } from '@xmoon76/pi-tui'
+import { color } from './theme.ts'
 import { extractAtPrefix } from './mentions.ts'
 
 /** The fork's private autocomplete surface (runtime methods; kimi's
@@ -19,7 +28,54 @@ interface AutocompleteInternals {
   requestAutocomplete(options: { force: boolean; explicitTab: boolean }): void
 }
 
+/** Visible width of the `❯ ` prompt — must equal the editor's paddingX,
+ * so content and wrapped continuations start right after the prompt. */
+const PROMPT_WIDTH = 2
+
+/**
+ * Paint the terminal-prompt `❯ ` over the first content row of the fork's
+ * editor render. The fork renders every content row with `paddingX` spaces
+ * on each side; the first visible content row's leading padding is replaced
+ * by the prompt (kimi's injectPromptSymbol, which requires the same leading
+ * padding). Wrapped continuation rows keep their padding, so they indent
+ * under the prompt exactly like the transcript's user-message bullet
+ * (BulletedComponent). No SGR is emitted for the trailing space, so the
+ * text after the prompt keeps its own colouring.
+ *
+ * When the draft is scrolled (the fork paints `↑ N more` as the top row),
+ * the first visible row is NOT the first line of the draft, so no prompt is
+ * painted — a floating `❯` on a continuation line would lie about where the
+ * input starts (kimi paints unconditionally; the scroll indicator makes the
+ * skip unambiguous here).
+ */
+function injectEditorPrompt(lines: string[]): string[] {
+  if (lines.length < 3) return lines
+  // Top row: a plain border when the editor is at the top of the draft, a
+  // `─── ↑ N more ───` scroll indicator when scrolled. The ↑ never appears
+  // in a plain border.
+  if (lines[0]!.includes('↑')) return lines
+  const first = lines[1]!
+  if (first.length < PROMPT_WIDTH) return lines
+  for (let i = 0; i < PROMPT_WIDTH; i++) {
+    if (first[i] !== ' ') return lines
+  }
+  lines[1] = `${color.roleUser('❯')} ${first.slice(PROMPT_WIDTH)}`
+  return lines
+}
+
 export class TuiEditor extends Editor {
+  constructor(tui: TUI, theme: EditorTheme) {
+    // paddingX: 2 reserves the left two cells for the `❯ ` prompt painted
+    // by render(). Content and wrapped continuations start at column 2,
+    // matching the transcript's user-message bullet indent, and the layout
+    // width the fork uses for cursor navigation/wrapping stays in sync.
+    super(tui, theme, { paddingX: PROMPT_WIDTH })
+  }
+
+  override render(width: number): string[] {
+    return injectEditorPrompt(super.render(width))
+  }
+
   override handleInput(data: string): void {
     // Esc + autocomplete activity: close WITHOUT re-triggering (kimi
     // parity — otherwise Esc would immediately reopen the list).

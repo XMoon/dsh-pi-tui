@@ -40,6 +40,36 @@ test('renders the header and the editor frame', async () => {
   assert.ok(viewport.includes('─'), `editor border missing from viewport:\n${viewport}`)
 })
 
+test('the editor carries a terminal-prompt ❯ with continuation indent', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setDraft('line one\nline two')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  const lines = view.split('\n')
+  const promptRow = lines.findIndex(line => line.includes('❯ line one'))
+  assert.ok(promptRow >= 0, `editor prompt row missing:\n${view}`)
+  // The prompt reads exactly like the transcript's user messages: the ❯
+  // leads the FIRST line, continuation lines indent under it and never
+  // repeat the marker.
+  assert.ok(lines[promptRow + 1]?.includes('line two'), `continuation row missing:\n${view}`)
+  assert.ok(lines[promptRow + 1]!.startsWith('  '), `continuation must indent under the prompt:\n${view}`)
+  assert.ok(!lines[promptRow + 1]!.includes('❯'), `continuation must not repeat the prompt:\n${view}`)
+})
+
+test('a scrolled draft drops the editor prompt (top row is a continuation)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // 10 draft lines exceed the editor's 7 visible rows: the draft scrolls and
+  // the fork paints an `↑ N more` indicator as the top border. The first
+  // visible row is then a continuation, so no prompt may float on it.
+  app.setDraft(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n'))
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('↑'), `scrolled editor must show the ↑ indicator:\n${view}`)
+  assert.equal((view.match(/❯/g) ?? []).length, 0, 'a scrolled draft must not show a floating prompt:\n${view}')
+})
+
 test('submits editor content to the onSubmit event', async () => {
   const { vt, submitted } = startApp()
   await vt.waitForRender()
@@ -305,7 +335,9 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('❯'), `empty queue must render no pane:\n${view}`)
+  // The editor prompt is the only `❯` on screen: the empty queue must
+  // render no pane rows.
+  assert.equal((view.match(/❯/g) ?? []).length, 1, `empty queue must leave only the editor prompt:\n${view}`)
   app.setQueueItems([
     { id: 'm-1', text: 'follow up on the audit', mode: 'followup' },
     { id: 'm-2', text: 'steer a correction', mode: 'steer' },
@@ -319,7 +351,7 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   app.setQueueItems([])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('❯ follow up'), `cleared queue still rendered:\n${view}`)
+  assert.equal((view.match(/❯/g) ?? []).length, 1, `cleared queue still rendered:\n${view}`)
 })
 
 test('job notices in the queue render with their own marker and drop the steer hints', async () => {
@@ -330,7 +362,9 @@ test('job notices in the queue render with their own marker and drop the steer h
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('⏳ bash-2 pnpm build finished'), `notice row missing its marker:\n${view}`)
-  assert.ok(!view.includes('❯'), `a notice must not render as steerable input:\n${view}`)
+  // Only the editor prompt may carry a ❯ — a notice must never render as
+  // steerable input.
+  assert.equal((view.match(/❯/g) ?? []).length, 1, `a notice must not render as steerable input:\n${view}`)
   assert.ok(!view.includes('ctrl+s to steer all'), `steer hints must not advertise for notices:\n${view}`)
   assert.ok(view.includes('/tasks to view'), `jobs hint missing:\n${view}`)
   // A notice alongside real user input keeps the steer verbs.
@@ -704,7 +738,7 @@ test('resetInputHistory replaces the recall history wholesale (session switch)',
   app.setDraft('')
   vt.sendInput('\x1b[A')
   await vt.waitForRender()
-  assert.equal(editorLine(), 'new cmd', 'the OLD workspace entry must not be recalled')
+  assert.equal(editorLine(), '❯ new cmd', 'the OLD workspace entry must not be recalled')
   // An empty reset clears the mirror, and a later seed recalls ONLY the new
   // entries (nothing of the old workspace survives).
   app.resetInputHistory([])
@@ -714,7 +748,7 @@ test('resetInputHistory replaces the recall history wholesale (session switch)',
   app.setDraft('')
   vt.sendInput('\x1b[A')
   await vt.waitForRender()
-  assert.equal(editorLine(), 'fresh cmd', 'only the newest workspace entries must be recallable')
+  assert.equal(editorLine(), '❯ fresh cmd', 'only the newest workspace entries must be recallable')
   app.stop()
 })
 
