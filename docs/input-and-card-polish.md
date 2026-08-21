@@ -59,7 +59,10 @@ Decisions that matter:
   sources `.bash_profile`-class files only; aliases are therefore NOT
   completed. Documented limitation, accepted: alias completion would require
   `-ic` and its startup cost.
-- **One spawn per request, hard-capped.** `timeoutMs` 300ms, `AbortSignal`
+- **One spawn per request, hard-capped.** `timeoutMs` 300ms locally,
+  1500ms under GitHub Actions (a runner `bash -lc` cold start measured
+  260-310ms — the tight cap made the suite flaky there; local stays tight),
+  `AbortSignal`
   wired to the editor's suggestion signal, and the result commits
   latest-only (same epoch discipline as `AutocompleteRegistry.suggest`). A
   slow or missing `bash` degrades to `null` — the editor simply shows no

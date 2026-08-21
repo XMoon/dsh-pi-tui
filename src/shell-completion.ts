@@ -23,8 +23,15 @@ import { spawn } from 'node:child_process'
 import type { AutocompleteSuggestions } from '@xmoon76/pi-tui'
 import { parseShellWords } from './shell-words.ts'
 
-/** Hard cap on one compgen spawn (ms). */
-const COMPGEN_TIMEOUT_MS = 300
+/**
+ * Hard cap on one compgen spawn (ms). GitHub Actions runners are markedly
+ * slower at a `bash -lc` cold start (measured 260-310ms in CI vs ~60ms
+ * locally — a login shell sources /etc/profile, which is heavy on the
+ * runner image), so a single tight cap made the suite flaky there (three
+ * CI failures, every one at the 300ms boundary). The cap is therefore
+ * raised under GitHub Actions only; local runs keep the tight cap.
+ */
+const COMPGEN_TIMEOUT_MS = process.env.GITHUB_ACTIONS === 'true' ? 1500 : 300
 /** Command-name cache TTL (ms): command sets change rarely. */
 const COMMAND_CACHE_TTL_MS = 30_000
 /** Suggestion cap per request (the fork's own lists are capped too). */
