@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-21
+
+### Changed
+
+- **Minimum compatible DeepSeek Harness is now `dsh-v0.1.1-rc.1` or later on
+  the same compat line** — this release no longer supports `dsh-v0.1.0-rc.8`
+  (the split credential events, the dual credential planes and the
+  `ctx.authorization` seam it consumes do not exist there).
+
 ### Added
 
 - **Provider-native sign-in through the dsh authorization seam.** `/login`
@@ -47,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   masked by default.
 - **The header version badge shows the dsh version first, then the TUI
   bundle version under the `tui-` label** — `[dsh-0.1.1-rc.1 ·
-  tui-v0.2.2]` — degrading to `[tui-vX.Y.Z]` alone when the installed
+  tui-v0.3.0]` — degrading to `[tui-vX.Y.Z]` alone when the installed
   dsh launcher's version cannot be resolved.
 
 ### Security
@@ -669,7 +678,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0

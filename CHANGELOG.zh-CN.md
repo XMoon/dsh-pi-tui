@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-21
+
+### Changed
+
+- **Minimum compatible DeepSeek Harness is now `dsh-v0.1.1-rc.1` or later on
+  the same compat line** — this release no longer supports `dsh-v0.1.0-rc.8`
+  (the split credential events, the dual credential planes and the
+  `ctx.authorization` seam it consumes do not exist there).
+
 ### 新增
 
 - **兼容 dsh authorization 的 provider-native 登录。** `/login` 现在识别
@@ -36,7 +45,7 @@
   显式注入——llm-pi-ai 的 provider 登录 flow 随之注册。
 - `/login` 的 API-key 输入框与 authorization secret 提示默认掩码显示。
 - **header 版本徽标先显示 dsh 版本,再显示 `tui-` 前缀的插件版本**——
-  `[dsh-0.1.1-rc.1 · tui-v0.2.2]`;当无法解析已安装 dsh 启动器版本时
+  `[dsh-0.1.1-rc.1 · tui-v0.3.0]`;当无法解析已安装 dsh 启动器版本时
   降级为仅显示 `[tui-vX.Y.Z]`。
 
 ### 安全
@@ -547,7 +556,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0

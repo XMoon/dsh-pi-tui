@@ -53,7 +53,7 @@ export function apply(ctx: Context): void {
   if (service === undefined) return
 
   // Version header badge: the installed dsh version first, then the bundle
-  // version prefixed `tui-` — `[dsh-0.1.1-rc.1 · tui-v0.2.2]` (read live
+  // version prefixed `tui-` — `[dsh-0.1.1-rc.1 · tui-v0.3.0]` (read live
   // from the launcher + the installed package.json — never hardcode either
   // version here). Without a resolvable dsh launcher the badge degrades to
   // the bundle version alone.
