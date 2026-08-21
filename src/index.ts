@@ -144,6 +144,20 @@ export const Config: z<Config> = z.object({
   sessionId: z.string(),
 })
 
+/**
+ * Wire the credential surface refresh to the dsh 0.1.1-rc.1 credential
+ * events. The old single `credentials/updated` event was split into the
+ * reference half and the durable-record half; both change what the footer
+ * model row and the welcome card show (a /login /logout, an external
+ * .credentials.yaml edit, or an authorization flow committing a record), so
+ * they share one best-effort callback. The callback must not read secrets
+ * or mutate providers — it only re-reads describe-level state.
+ */
+export function registerCredentialSurfaceRefresh(ctx: Context, refresh: () => void): void {
+  ctx.on('credentials/reference-updated', refresh)
+  ctx.on('credentials/record-updated', refresh)
+}
+
 /** The launcher's bounded exit request; the TUI asks for it on Ctrl+C. */
 interface AppExit {
   (code: number): void
@@ -3807,6 +3821,9 @@ export function apply(ctx: Context, config: Config): void {
     // selection. All three events are capability-optional: an absent llm /
     // settings / credentials service never mounts them, and a throwing
     // listener is contained by the event bus (the refresh is best-effort).
+    // dsh 0.1.1-rc.1 split `credentials/updated` into the reference half and
+    // the durable-record half; both change the same surface, so they share
+    // one refresh callback.
     ctx.on('llm/adapters-updated', () => { refreshStatus(); updateWelcomeCard() })
     ctx.on('settings/document-updated', (ns) => {
       if (ns === settingsNamespace('llm-pi-ai') || ns === settingsNamespace('llm-deepseek')) {
@@ -3814,7 +3831,8 @@ export function apply(ctx: Context, config: Config): void {
         updateWelcomeCard()
       }
     })
-    ctx.on('credentials/updated', () => { refreshStatus(); updateWelcomeCard() })
+    const refreshCredentialSurface = (): void => { refreshStatus(); updateWelcomeCard() }
+    registerCredentialSurfaceRefresh(ctx, refreshCredentialSurface)
     // Initial plan badge, busy indicator, and auto title from the log (a
     // resumed session may be persisted mid-turn). Without a session the
     // surfaces stay at their idle defaults.

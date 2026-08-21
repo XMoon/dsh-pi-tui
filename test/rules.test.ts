@@ -115,3 +115,24 @@ test('every production `void <promise>` discard is in detached.ts or an explicit
     'hand-written `void` promise chains are only legal inside detached.ts or with an explicit `allowlist` marker (AGENTS.md hard rule)',
   )
 })
+
+test('no production code listens to the removed credentials/updated event', () => {
+  // dsh 0.1.1-rc.1 split `credentials/updated` into
+  // `credentials/reference-updated` + `credentials/record-updated`; the old
+  // name no longer exists in the upstream event map and must never come
+  // back into running code (a stale listener would silently refresh
+  // nothing). Docs may still describe the old name historically.
+  const violations: string[] = []
+  for (const path of listSourceFiles(srcDir)) {
+    const file = relative(srcDir, path)
+    const source = readFileSync(path, 'utf8')
+    if (source.includes("'credentials/updated'") || source.includes('"credentials/updated"')) {
+      violations.push(file)
+    }
+  }
+  assert.deepEqual(
+    violations,
+    [],
+    'the old credentials/updated event name is removed in dsh 0.1.1-rc.1; listen to credentials/reference-updated and credentials/record-updated',
+  )
+})
