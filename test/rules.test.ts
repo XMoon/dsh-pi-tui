@@ -126,7 +126,10 @@ test('no production code listens to the removed credentials/updated event', () =
   for (const path of listSourceFiles(srcDir)) {
     const file = relative(srcDir, path)
     const source = readFileSync(path, 'utf8')
-    if (source.includes("'credentials/updated'") || source.includes('"credentials/updated"')) {
+    // ANY occurrence is refused — comments included — so the old name can
+    // never re-enter the source in a form a later grep-based migration
+    // would trip on (the docs may still describe it historically).
+    if (source.includes('credentials/updated')) {
       violations.push(file)
     }
   }

@@ -146,7 +146,7 @@ export const Config: z<Config> = z.object({
 
 /**
  * Wire the credential surface refresh to the dsh 0.1.1-rc.1 credential
- * events. The old single `credentials/updated` event was split into the
+ * events. The rc.1 release split the credential update event into the
  * reference half and the durable-record half; both change what the footer
  * model row and the welcome card show (a /login /logout, an external
  * .credentials.yaml edit, or an authorization flow committing a record), so
@@ -3821,9 +3821,9 @@ export function apply(ctx: Context, config: Config): void {
     // selection. All three events are capability-optional: an absent llm /
     // settings / credentials service never mounts them, and a throwing
     // listener is contained by the event bus (the refresh is best-effort).
-    // dsh 0.1.1-rc.1 split `credentials/updated` into the reference half and
-    // the durable-record half; both change the same surface, so they share
-    // one refresh callback.
+    // dsh 0.1.1-rc.1 split the credential update event into the reference
+    // half and the durable-record half; both change the same surface, so
+    // they share one refresh callback.
     ctx.on('llm/adapters-updated', () => { refreshStatus(); updateWelcomeCard() })
     ctx.on('settings/document-updated', (ns) => {
       if (ns === settingsNamespace('llm-pi-ai') || ns === settingsNamespace('llm-deepseek')) {

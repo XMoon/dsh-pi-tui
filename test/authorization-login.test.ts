@@ -53,7 +53,7 @@ const LLM_PI_AI_SECTION = {
 }
 
 /** A fake credentials service recording set/unset/deleteRecord. */
-function fakeCredentials() {
+function fakeCredentials(records: { key: string; kind?: string }[] = [{ key: 'llm-pi-ai/openai', kind: 'api-key' }]) {
   const sets: string[] = []
   const unsets: string[] = []
   const deletes: string[] = []
@@ -65,7 +65,7 @@ function fakeCredentials() {
       set: async (ref: string, key: string): Promise<void> => { sets.push(`${ref}=${key}`) },
       unset: async (ref: string): Promise<void> => { unsets.push(ref) },
       describe: async (): Promise<{ configured: boolean; source?: string }> => ({ configured: true }),
-      listRecords: async (): Promise<{ key: string; kind?: string }[]> => [{ key: 'llm-pi-ai/openai', kind: 'api-key' }],
+      listRecords: async (): Promise<{ key: string; kind?: string }[]> => [...records],
       deleteRecord: async (key: string): Promise<void> => { deletes.push(key) },
     },
   }
@@ -181,7 +181,8 @@ function invoke(rawInput: string): CommandInvocation {
 /** Register the TUI commands with fake services and return the handlers. */
 function setup(options: {
   flows?: FakeFlow[]
-  beginResult?: { status: 'authorized' | 'cancelled' }
+  records?: { key: string; kind?: string }[]
+  begin?: { status: 'authorized' | 'cancelled' }
   beginError?: Error & { code?: string }
   pick?: (items: readonly { value: string; label?: string; group?: string }[]) => string
 } = {}) {
@@ -199,7 +200,7 @@ function setup(options: {
     },
   }
   ctx.provide('commands', commands.service as never)
-  const credentials = fakeCredentials()
+  const credentials = fakeCredentials(options.records)
   ctx.provide('credentials', credentials.service as never)
   const settings = fakeSettings()
   ctx.provide('settings', settings.service as never)
@@ -207,7 +208,7 @@ function setup(options: {
   ctx.provide('llm', llm.service as never)
   const authorization = fakeAuthorization({
     flows: options.flows,
-    beginResult: options.beginResult,
+    beginResult: options.begin,
     beginError: options.beginError,
   })
   ctx.provide('authorization', authorization.service as never)
@@ -323,7 +324,7 @@ test('notices reuse one durable panel and refresh its body; close hides it', () 
       return () => { closed += 1 }
     },
     askQuestions: async () => [{ id: 'answer', selected: [], custom: 'x' }],
-    openPicker: () => {},
+    openPicker: () => ({ close: () => {} }),
   }
   const { interaction, close } = createAuthorizationInteraction(surface)
   interaction.notify({ message: 'first progress' })
@@ -345,7 +346,7 @@ test('a text prompt returns the typed text', async () => {
       asked.push(questions)
       return [{ id: 'answer', selected: [], custom: 'the-code' }]
     },
-    openPicker: () => {},
+    openPicker: () => ({ close: () => {} }),
   }
   const { interaction } = createAuthorizationInteraction(surface)
   const value = await interaction.prompt({ kind: 'text', message: 'Enter the code', placeholder: 'ABCD' })
@@ -362,7 +363,7 @@ test('a secret prompt is masked and returns the value', async () => {
       asked.push(questions)
       return [{ id: 'answer', selected: [], custom: 'sk-test-secret' }]
     },
-    openPicker: () => {},
+    openPicker: () => ({ close: () => {} }),
   }
   const { interaction } = createAuthorizationInteraction(surface)
   const value = await interaction.prompt({ kind: 'secret', message: 'Paste the API key' })
@@ -396,7 +397,7 @@ test('the user cancelling a prompt is a decline (AuthorizationDeclinedError)', a
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async () => { throw new Error('question flow cancelled') },
-    openPicker: () => {},
+    openPicker: () => ({ close: () => {} }),
   }
   const { interaction } = createAuthorizationInteraction(surface)
   await assert.rejects(
@@ -410,7 +411,7 @@ test('an empty typed answer is a decline, not an empty string', async () => {
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async () => [{ id: 'answer', selected: [], custom: '' }],
-    openPicker: () => {},
+    openPicker: () => ({ close: () => {} }),
   }
   const { interaction } = createAuthorizationInteraction(surface)
   await assert.rejects(
@@ -429,13 +430,59 @@ test('a prompt withdrawn by its own signal is NOT a decline', async () => {
       controller.abort(new Error('losing race'))
       throw new Error('question flow cancelled')
     },
-    openPicker: () => {},
+    openPicker: () => ({ close: () => {} }),
   }
   const { interaction } = createAuthorizationInteraction(surface)
   await assert.rejects(
     interaction.prompt({ kind: 'text', message: 'enter', signal: controller.signal }),
     (error) => !(error instanceof AuthorizationDeclinedError),
     'a withdrawn prompt must reject with a non-decline error',
+  )
+})
+
+test('a select prompt withdrawn by its signal closes the picker, non-decline', async () => {
+  const controller = new AbortController()
+  let closed = 0
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [],
+    openPicker: (items, onSelect, onCancel) => {
+      // The flow withdraws the losing prompt while the picker is open.
+      controller.abort(new Error('browser callback won'))
+      return { close: () => { closed += 1 } }
+    },
+  }
+  const { interaction } = createAuthorizationInteraction(surface)
+  await assert.rejects(
+    interaction.prompt({
+      kind: 'select',
+      message: 'How?',
+      options: [{ id: 'oauth', label: 'OAuth' }],
+      signal: controller.signal,
+    }),
+    (error) => !(error instanceof AuthorizationDeclinedError),
+    'a withdrawn select prompt must reject with a non-decline error',
+  )
+  assert.equal(closed, 1, 'the open picker must be closed on withdrawal')
+})
+
+test('the user cancelling a select prompt is a decline', async () => {
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [],
+    openPicker: (items, onSelect, onCancel) => {
+      onCancel()
+      return { close: () => {} }
+    },
+  }
+  const { interaction } = createAuthorizationInteraction(surface)
+  await assert.rejects(
+    interaction.prompt({
+      kind: 'select',
+      message: 'How?',
+      options: [{ id: 'oauth', label: 'OAuth' }],
+    }),
+    (error) => error instanceof AuthorizationDeclinedError,
   )
 })
 
@@ -604,6 +651,31 @@ test('/logout with no argument picks stored records and clears them', async () =
   const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
   assert.equal(result.kind, 'success')
   assert.deepEqual(t.credentials.deletes, ['llm-pi-ai/openai'])
+  t.app.stop()
+})
+
+test('/logout picker deduplicates records and labels flow-owned ones', async () => {
+  let rows: { value: string; label?: string; group?: string }[] | undefined
+  const t = setup({
+    // The store reports the same record twice (a hostile/duplicated store
+    // must not produce two rows), and the key belongs to a registered flow.
+    records: [
+      { key: 'llm-pi-ai/anthropic', kind: 'grant' },
+      { key: 'llm-pi-ai/anthropic', kind: 'grant' },
+    ],
+    flows: [flow('llm-pi-ai/anthropic', 'Anthropic', [{ id: 'oauth', label: 'OAuth' }])],
+    pick: (items) => {
+      rows = items.map(item => ({ ...item }))
+      return items.find(item => item.value.includes('llm-pi-ai/anthropic'))!.value
+    },
+  })
+  const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(t.credentials.deletes, ['llm-pi-ai/anthropic'])
+  const recordRows = rows!.filter(row => row.value.includes('llm-pi-ai/anthropic'))
+  assert.equal(recordRows.length, 1, 'duplicate records must collapse to one row')
+  assert.ok(recordRows[0]!.label?.includes('Anthropic'), `flow label must name the owner: ${recordRows[0]!.label}`)
+  assert.ok(recordRows[0]!.label?.includes('stored credential'), recordRows[0]!.label)
   t.app.stop()
 })
 

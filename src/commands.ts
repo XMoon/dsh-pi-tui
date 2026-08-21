@@ -587,7 +587,9 @@ const LOGOUT_RECORD_VALUE = '\u0000record:'
 
 /** Build the /logout picker rows: every stored credential record plus every
  * configured reference (presence only — a secret's value never leaves the
- * credentials service). */
+ * credentials service). Records are deduplicated by key and labelled with
+ * the authorization flow's user-facing name when one owns the key (a
+ * record row must say what signing out actually clears). */
 async function logoutPickerRows(
   credentials: LogoutCredentialsLike,
   options: readonly ProviderOption[],
@@ -608,12 +610,15 @@ async function logoutPickerRows(
     }
   }
   const records = await credentials.listRecords()
+  const seenKeys = new Set<string>()
   for (const record of records) {
-    rows.push({
-      value: LOGOUT_RECORD_VALUE + record.key,
-      label: `${record.key}${record.kind === undefined ? '' : ` (${record.kind})`}`,
-      group: 'stored credentials',
-    })
+    if (seenKeys.has(record.key)) continue
+    seenKeys.add(record.key)
+    const owner = targets.find(target => target.key === record.key)
+    const label = owner !== undefined
+      ? `${owner.label} — stored credential${record.kind === undefined ? '' : ` (${record.kind})`}`
+      : `${record.key}${record.kind === undefined ? '' : ` (${record.kind})`}`
+    rows.push({ value: LOGOUT_RECORD_VALUE + record.key, label, group: 'stored credentials' })
   }
   return rows
 }

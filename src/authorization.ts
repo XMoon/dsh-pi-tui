@@ -31,6 +31,7 @@ import {
   credentialKeyScope,
   type CredentialKey,
 } from '@deepseek-ai/dsh-credentials'
+import { cancellationError } from './detached.ts'
 import type { ProviderOption } from './provider-catalog.ts'
 import type { TuiApp } from './tui-app.ts'
 
@@ -190,7 +191,7 @@ export interface AuthorizationSurface {
     onSelect: (value: string) => void,
     onCancel: () => void,
     options?: { header?: string; enableSearch?: boolean },
-  ): unknown
+  ): { close?: () => void }
 }
 
 /**
@@ -233,8 +234,31 @@ export function createAuthorizationInteraction(app: AuthorizationSurface): {
     notify: (notice) => { showNotice(notice) },
     prompt: async (prompt: AuthorizationPrompt) => {
       if (prompt.kind === 'select') {
-        const picked = await new Promise<string | undefined>((resolve) => {
-          app.openPicker(
+        // The picker is a plain promise with no built-in abort: race it
+        // against the prompt's own signal so a withdrawn prompt closes the
+        // picker and rejects with a NON-decline cancellation (the flow
+        // decides what to do next — a user closing the picker is the only
+        // decline).
+        const signal = prompt.signal
+        const picked = await new Promise<string>((resolve, reject) => {
+          if (signal?.aborted === true) {
+            reject(cancellationError('authorization prompt withdrawn'))
+            return
+          }
+          let settled = false
+          let handle: { close?: () => void } | undefined
+          const cleanup = (): void => {
+            if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+          }
+          const onAbort = (): void => {
+            if (settled) return
+            settled = true
+            cleanup()
+            handle?.close?.()
+            reject(cancellationError('authorization prompt withdrawn'))
+          }
+          if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true })
+          handle = app.openPicker(
             prompt.options.map(option => ({
               value: option.id,
               label: option.label,
@@ -242,12 +266,25 @@ export function createAuthorizationInteraction(app: AuthorizationSurface): {
                 ? { description: option.description }
                 : {}),
             })),
-            (value) => resolve(value),
-            () => resolve(undefined),
+            (value) => {
+              if (settled) return
+              settled = true
+              cleanup()
+              resolve(value)
+            },
+            () => {
+              if (settled) return
+              settled = true
+              cleanup()
+              reject(new AuthorizationDeclinedError())
+            },
             { header: prompt.message, enableSearch: true },
           )
+          // The signal may have fired SYNCHRONOUSLY while openPicker ran
+          // (before `handle` was assigned) — settle already happened, so
+          // close the now-known handle here instead of in onAbort.
+          if (settled) handle?.close?.()
         })
-        if (picked === undefined) throw new AuthorizationDeclinedError()
         return picked
       }
       try {
