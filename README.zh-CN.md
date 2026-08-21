@@ -117,6 +117,174 @@ profile 上,使用方式 B 的 `link:` 说明符安装
 ——实时符号链接,`pnpm build` 后无需重新 add 即可生效——而 `pi-tui`
 profile 保持安装已发布的 registry 包用于真实使用。
 
+## 扩展(早期,稳定化中)
+
+自 `0.2.0` 起,该 bundle 携带一个小的、带版本号的扩展面,让第三方
+Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、稳定化中**:
+下面的能力是当前集合;API 版本(`1`)只在破坏性变更时递增,插件必须
+**按能力特性检测**,而不是解析包版本。
+
+所有扩展插件仍是标准 DeepSeek Harness / Cordis 插件,使用 `name` /
+`inject` / `apply(ctx)`,统一依赖唯一的 `piTuiExtensions` 服务;三层
+只是该单一 Service 上的能力 facade,而非独立的插件系统或 runtime。
+
+扩展面分为三个层级:插件只导入**公开入口**——绝不导入 Stable 入口的
+内部(`TuiApp`、`TuiMainScreen`、`TuiAltScreen`)或仓库相对路径。
+
+| 层级 | 入口 | 契约 |
+|---|---|---|
+| Stable | `@xmoon76/dsh-pi-tui/extensions` | 面向兼容;只增不改;既有语义永不静默变更;删除需计划内破坏性变更 |
+| Advanced | `@xmoon76/dsh-pi-tui/extensions/advanced` | 实验性;minor 版本可破坏;需迁移说明;不做长期 shim |
+| Unstable | `@xmoon76/dsh-pi-tui/extensions/unstable` | 不保证兼容;实现可随时变更 |
+
+所有层级复用同一个共享 Extension Runtime:caller-fiber 所有权、surface
+生命周期、失效机制、能力发现。不要按层级复制第二套所有权/生命周期
+模型。第一阶段之后各层级已逐步落地:
+
+- **Advanced**(`ADVANCED_API_LEVEL = 1`,Phase 2 + Phase 4):规范化输入捕获、
+  聚焦交互表面(交互式托管 overlay)、高级编辑器控制、命令式 UI broker
+  (select/confirm/input/notify)、自定义交互 UI 与 host-state facade
+  (theme/title/working/tools-expanded)——仍由 Host 中介,绝不接触 raw
+  terminal 字节。作者指南:`docs/extension-advanced.md`;Pi 能力参考:
+  `docs/extension-capability-matrix.md`。
+- **Unstable**(`UNSTABLE_API_LEVEL = 1`,Phase 3):raw 输入拦截
+  (observe/consume/rewrite、exclusive raw 所有权)、Host 紧急 fail-safe
+  (三连 Esc)与精选低层 surface seam——不保证兼容;损坏的插件可能
+  破坏 Host 行为。作者指南:`docs/extension-unstable.md`。
+- **真实插件验证(Phase 5):**层级选择由真实消费者验证,见
+  `packages/dsh-pi-tui/examples/plugins/`——生产级 vim 模态编辑器
+  (Advanced editor SDK)、questionnaire 表单(Advanced 命令式 UI
+  broker)与交互式 shell(Unstable raw seam)。"该用哪一层?"决策树:
+  `docs/plugin-authoring.md`。
+
+插件只导入公开入口:
+
+```ts
+import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '@xmoon76/dsh-pi-tui/extensions'
+
+export const name = 'my-plugin'
+export const inject = ['tuiStartup', PI_TUI_EXTENSIONS_SERVICE]
+
+export function apply(ctx: Context): void {
+  const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService
+  if (!service.api().capabilities.has('slot.chrome.header.badge')) return
+  service.register<{ text: string; tone?: 'info' | 'warning' | 'error' | 'success' }>(
+    'chrome.header.badge',
+    { id: 'my-badge', order: 100, description: 'A header badge from my plugin.' },
+    { text: 'my-badge', tone: 'info' },
+  )
+}
+```
+
+当前扩展点(v1):
+
+| Slot | 语义 | 贡献 |
+|---|---|---|
+| `chrome.header.badge` | list | host 标题后的短 `[badge]` |
+| `input.dock.item` | list | todo 面板上方的一行 dock |
+| `chrome.footer.status` | list | 一个 footer 段(host 拥有宽度/截断) |
+| `input.widget.above` / `input.widget.below` | list | 编辑器周围的有界 widget(M4 组件套件) |
+
+贡献是**纯数据**,不是 render 函数:插件提供 `HeaderBadge` / `DockItem` /
+`FooterSegment` / `InputWidget` 值(文本 + 语义 tone spans,或 widget 的
+结构化 `ExtensionView` 树),渲染、ANSI 编译、宽度预算与截断全部由 host
+负责。v1 刻意没有 `render(context)` 回调——插件从不持有渲染上下文,
+贡献永远无法捕获或修改 host 内部。
+
+自 `0.2.0` 起,`input.widget.above` / `input.widget.below` 两个 widget slot
+接受有界组件套件:`ExtensionView` 是结构化视图树(`text` / `markdown` /
+`spacer` / `stack` / `frame` / `rows` 视图 + 语义样式 token),由 host 编译
+成私有组件。插件可以在编辑器上方或下方添加辅助行——例如状态 widget
+或快捷参考行——而不接触根布局、编辑器或焦点。行预算由 host 拥有:
+高度不足时先折叠低 importance 的 widget,编辑器永远存活。
+
+```ts
+service.register<InputWidget>('input.widget.below', {
+  id: 'my-widget',
+  order: 100,
+}, {
+  view: {
+    kind: 'text',
+    spans: [{ text: 'my-plugin ready', tone: 'success' }],
+  },
+})
+```
+
+自 M5 起,扩展面还覆盖注册表(计划 §10):
+
+- `registerCommand(contribution)` — 斜杠命令的**所有权**元数据
+  (`execution: 'local' | 'submission'`):插件声明的 local 命令始终直接
+  执行(永不被 busy-Enter 偏好 steer);submission 命令走会话投递策略。
+  实际执行仍在 host 的 commands 服务中;`/name args...` 保持 `rawInput`
+  原样。名称冲突被报告,绝不猜测。
+- `registerTheme(contribution)` — 一个具名语义调色板,可在 /settings
+  主题选择器中选择;owner 卸载时回退到内置调色板(选中的插件主题
+  绝不悬空)。
+- `registerSetting(contribution)` — 追加到 /settings 面板的设置行
+  (标签 + 当前值 + 选项 + 可选拒绝);面板由 host 拥有。
+- `registerAutocomplete(contribution)` — 自动补全 provider,在 host 自身
+  provider 返回 null 之后按确定性顺序咨询(逐 provider 隔离、
+  latest-only commit)。
+- `registerKeybinding(contribution)` — 归一化按键 → 语义动作的绑定,
+  由 host 的 InputRouter(M6)路由。插件用公开的 `NormalizedKey` 形状
+  (key + ctrl/alt/shift/super)声明按键和 host 动作列表中的语义动作
+  (`submit-draft`、`queue-draft`、`steer-draft`、`cancel-activity`、
+  `open-search`、`toggle-fullscreen`、`cycle-permission`)。host 统一归一化
+  所有终端输入(Kitty CSI-u、modifyOtherKeys、legacy 序列)——插件永远
+  看不到原始 escape 数据。保留的 host 生命周期按键(Ctrl+C/D/S/F/O/T/G/J、
+  Ctrl+Enter、Enter、Esc)不可被占用;纯可打印按键永不触发绑定(输入
+  永远优先);绑定是非捕获的,在优先级梯子的最后触发(question、approval、
+  overlay、编辑器之后)。动作通过 host 自己的路径执行——提交/会话安全
+  永不被绕过。
+- `registerMessageRenderer(contribution)` — TRANSCRIPT 消息渲染器(M7,
+  chain slot):接收语义 `MessagePresentationSnapshot`(不可变;绝不是可变
+  message 或容器),返回 `ExtensionView` 或 `undefined`(弃权 → 下一个
+  渲染器 → host 回退)。按 kind 限定的渲染器只作用于对应消息类型。
+- `registerToolRenderer(contribution)` — 工具卡片渲染器(M7,keyed slot):
+  从 `ToolPresentationSnapshot`(callId、toolName、status、arguments、
+  result、expanded)呈现一个工具名的卡片;winner(最低 priority)弃权后
+  落到下一个渲染器,再到 host 回退。同一工具名的 priority 平局是显式
+  错误。渲染器绝不会卡住 transcript:抛错的渲染器被隔离、链继续,
+  消息缓存内嵌渲染器身份 + 注册表 revision,因此 HMR/unload 只重建
+  受影响的组件。
+- `showOverlay(view, options)` — 受管 overlay 租约(M8):插件提供
+  `ExtensionView` + 尺寸提示;host 通过其 overlay broker 挂载(模态堆叠、
+  焦点、fullscreen 迁移)。返回的租约是 generation 限定的(表面最终
+  dispose 会关闭所有仍在持有的租约),close() 幂等,hide()/show() 切换
+  可见性而不关闭。插件永远不能挂载原始组件或抢焦点——终端和 overlay
+  栈由 host 拥有。
+[扩展 API v1 作者指南](docs/extension-api.md)记录了导入规则、完整
+surface 表、生命周期/渲染契约、M11 弃用策略与稳定性契约。
+
+M10 验收 fixture(计划 §15):仓库附带一个 vim-mode fixture
+(`test/fixtures/vim-plugin/`),用于验证编辑器扩展接缝——第三方 Cordis
+插件可消费打包后的公开 SDK,其替换编辑器通过**语义化** `EditorInputEvent`
+接收输入(绝不接触原始终端字节),编辑器的 `create()`/`dispose()` 正常
+工作——只导入 `@xmoon76/dsh-pi-tui/extensions`。它**不是**生产级 Vim,
+也**不是** Stable API 完整性的证明:模态模式行为(insert/normal)不属于
+Stable 契约,其余公开能力(命令、主题、设置、自动补全、按键绑定、渲染器、
+overlay、widget)都有各自的独立测试。它的 CI 门禁禁止 `@xmoon76/pi-tui`、
+`src/tui-app` 和仓库相对内部路径:如果 Stable 插件需要私有导入,说明 SDK
+缺 capability(没有 `unsafeGetTuiApp()` 逃生舱)。
+
+- `registerEditor(contribution)` — 编辑器 SDK(M9,计划 §14):按 priority
+  单选(平局是显式错误);winner 通过 host 的**原子交接**占据编辑器座席
+  (create → 转移 draft/cursor → mount → focus → dispose 旧编辑器)。
+  create 抛错时当前编辑器继续工作;winner 卸载恢复下一个 winner / host
+  默认编辑器,**保留 draft**。插件编辑器收到 `EditorHost`(surfaceId、
+  generation、getSnapshot、replaceText、语义动作 dispatch submit/
+  queue-submit/steer/open-external-editor、subscribe、invalidate)——但
+  host 仍然拥有 busy-Enter、Ctrl+Enter、local 命令分类、粘贴保护、
+  approval/question 捕获、会话 guard/lock、外部编辑器和退出:插件编辑器
+  永远不能绕过这些。
+
+生命周期由 host 拥有:插件 Cordis fiber 卸载(HMR、禁用)时注册自动清理,
+regular/fullscreen 都会刷新,`handle.invalidate()/replace()` 通过活动屏幕
+重渲染。`@xmoon76/dsh-pi-tui/builtins` 入口是仅 Loader 使用的一方贡献者
+(版本徽标、轮次/步骤计数器、todo 摘要 dock 项)——不是稳定的第三方
+SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属于 Stable
+层级**(见 Advanced/Unstable 路线图)。
+
 ## 斜杠命令(节选)
 
 - `/sessions [query]` — 打开会话选择器:对会话 id、标题和工作区进行

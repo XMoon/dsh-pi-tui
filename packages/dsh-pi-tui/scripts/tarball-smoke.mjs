@@ -149,10 +149,12 @@ function main() {
     // --- structure ---
     const files = walkFiles(extracted)
     const has = (path) => files.includes(path)
-    check('exports entry dist/index.mjs', has('dist/index.mjs'))
-    check('exports entry dist/startup.mjs', has('dist/startup.mjs'))
-    check('types dist/index.d.mts', has('dist/index.d.mts'))
-    check('types dist/startup.d.mts', has('dist/startup.d.mts'))
+    check('exports entry dist/extension/advanced.mjs', has('dist/extension/advanced.mjs'))
+    check('exports entry dist/extension/unstable.mjs', has('dist/extension/unstable.mjs'))
+    check('types dist/extension/advanced.d.mts', has('dist/extension/advanced.d.mts'))
+    check('types dist/extension/unstable.d.mts', has('dist/extension/unstable.d.mts'))
+    check('exports entry dist/builtins.mjs', has('dist/builtins.mjs'))
+    check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('cordis.patch.yml included', has('cordis.patch.yml'))
     check('config/ included', files.some(name => name.startsWith('config/')))
     check('repair-session.mjs included', has('scripts/repair-session.mjs'))
@@ -225,6 +227,62 @@ function main() {
       checks.push(`skip .d.mts parse — typescript unavailable`)
     }
 
+    // --- public .d.mts leak gate (M3/E, round-1/2 review): the shipped
+    // declarations must not reference the vendored fork, TuiApp, private
+    // screens, or repository source paths. tsdown INLINES types into the
+    // .d.mts with `//#region <path>` markers; a fork leak shows up as a
+    // region pointing OUTSIDE the package's own src/ (`../pi-tui/...`,
+    // `node_modules/@xmoon76/pi-tui/...`) or as fork module names
+    // (`src/tui-main-screen.d.ts`), often inside an auto-generated SHARED
+    // CHUNK that the SDK entries only re-export. The gate therefore:
+    //   (a) scans EVERY dist/*.d.mts (entries AND chunks);
+    //   (b) treats any region marker whose path is not this package's own
+    //       src/ as a leak (allowlist by construction);
+    //   (c) bans fork imports and fork module names anywhere;
+    //   (d) bans the bare private identifiers (TuiMainScreen/TuiAltScreen/
+    //       TuiApp) line-scoped over every file, skipping comment lines.
+    const dtsAll = files.filter(name => name.startsWith('dist/') && name.endsWith('.d.mts'))
+    const sdkIdentifiers = [/\bTuiMainScreen\b/, /\bTuiAltScreen\b/, /\bTuiApp\b/]
+    const dtsLeaks = []
+    for (const name of dtsAll) {
+      const text = readFileSync(join(extracted, name), 'utf8')
+      const lines = text.split('\n')
+      // (b) region markers: allow only `//#region src/<public module>.d.ts`.
+      // The ROOT entry (dist/index.d.mts) is the runner's own surface: it
+      // legitimately inlines the TuiApp implementation (src/tui-app.d.ts)
+      // for the Loader row — it is NOT a third-party SDK entry. Its region
+      // is exempted; everything else (chunks, extensions, builtins) must
+      // name only the public modules below.
+      const isRoot = name === 'dist/index.d.mts'
+      for (const line of lines) {
+        const match = /\/\/#region\s+(\S+)/.exec(line)
+        if (match) {
+          const regionPath = match[1]
+          const allowed = /^src\/(builtins|commands|diag|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
+          const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
+          if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
+        }
+      }
+      // (c) fork imports and fork module names anywhere.
+      if (/from\s*["']@xmoon76\/pi-tui["']/.test(text)) dtsLeaks.push(`${name}: fork import`)
+      if (/packages\/pi-tui/.test(text)) dtsLeaks.push(`${name}: packages/pi-tui path`)
+      if (/\b(tui-main-screen|tui-alt-screen)\.d\.ts\b/.test(text)) dtsLeaks.push(`${name}: fork screen module`)
+      // (d) bare private identifiers, line-scoped (comments skipped). No
+      // exemption: the clean dist has zero TuiApp identifiers anywhere
+      // (round-3 finding 1 — the old root exemption was dead code).
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) continue
+        for (const pattern of sdkIdentifiers) {
+          if (pattern.test(trimmed)) dtsLeaks.push(`${name}: bare ${pattern}`)
+        }
+      }
+    }
+    check('every public .d.mts leaks no private pi-tui / internal paths', dtsLeaks.length === 0,
+      dtsLeaks.length === 0 ? '' : dtsLeaks.join('; '))
+    // The .mjs bodies must not import the fork externally either (it is
+    // bundled) — the existing dist check below covers every .mjs.
+
     // --- install + runtime ---
     if (skipInstall) {
       checks.push('skip npm install (TARBALL_SMOKE_SKIP_INSTALL=1)')
@@ -242,10 +300,14 @@ function main() {
         const installed = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
         check('installed package contains dist', existsSync(join(installed, 'dist', 'index.mjs')))
         const importRun = run(process.execPath, ['--input-type=module', '-e',
-          "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup')])"
-            + ".then(m => console.log('imports-ok')).catch(e => { console.error(e.message); process.exit(1) })",
+          "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup'),"
+            + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
+            + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable')])"
+            + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
+            + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL'); console.log('imports-ok') })"
+            + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })
-        check('both exports entries import', importRun.status === 0 && importRun.stdout.includes('imports-ok'),
+        check('all exports entries import', importRun.status === 0 && importRun.stdout.includes('imports-ok'),
           importRun.status === 0 ? '' : importRun.stderr.slice(0, 200))
         const forkRun = run(process.execPath, ['--input-type=module', '-e',
           "import('@xmoon76/pi-tui').then(() => process.exit(0)).catch(() => process.exit(3))",

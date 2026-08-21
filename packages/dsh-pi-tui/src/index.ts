@@ -77,6 +77,9 @@ import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type QueueItem, type TuiApp } from './tui-app.ts'
+import { Text } from '@xmoon76/pi-tui'
+import { SurfaceHost } from './extension/internal/surface-host.ts'
+import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import { buildTaskRows, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
 import type { TaskPanelItem } from './task-panel.ts'
 import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
@@ -186,6 +189,24 @@ export const LOCAL_COMMANDS = new Set([
 ])
 
 /**
+ * The AUTHORITATIVE host-owned command catalog (P1-04): every command name
+ * the TUI registers itself (registerTuiCommands in commands.ts) plus the
+ * ownership sets (LOCAL_COMMANDS and SESSIONLESS_COMMANDS — /kill and
+ * other core commands the TUI does not register but dispatches locally).
+ * A plugin command contribution is validated against this catalog at
+ * register time: an exact or near-synonym collision is rejected loudly,
+ * so a plugin can never shadow a built-in command.
+ */
+export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
+  ...LOCAL_COMMANDS,
+  ...SESSIONLESS_COMMANDS,
+  // `/plan` is handled specially by the runner (bare form toggles plan mode)
+  // and must remain host-owned even though it is not registered by the TUI
+  // command list.
+  'plan',
+])
+
+/**
  * Whether one submission steers under the busy-Enter preference: NOT a
  * force-queued chord, NOT a TUI-owned local command, and the agent is
  * running with the preference set to 'steer'. Pure so the dispatch gate
@@ -194,15 +215,21 @@ export const LOCAL_COMMANDS = new Set([
  * @param running - whether the live agent reports running.
  * @param busyEnter - the persisted preference value (''/undefined = queue).
  * @param forceQueue - the Ctrl+Enter chord: always queue, never steer.
+ * @param isDynamicLocal - M5: the CommandBridge's effective-local check for
+ *   plugin-declared local commands (absent = static set only).
  */
 export function shouldSteerOnEnter(
   parsed: { name: string } | undefined,
   running: boolean,
   busyEnter: string | undefined,
   forceQueue: boolean,
+  isDynamicLocal?: (name: string) => boolean,
 ): boolean {
   if (forceQueue) return false
-  if (parsed !== undefined && LOCAL_COMMANDS.has(parsed.name)) return false
+  if (parsed !== undefined) {
+    if (LOCAL_COMMANDS.has(parsed.name)) return false
+    if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return false
+  }
   return running && busyEnter === 'steer'
 }
 
@@ -1458,6 +1485,55 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     let app: TuiApp
+    // The extension service + surface host (M3 wiring); declared here so
+    // the cleanup closure can detach them.
+    let extensionService: (PiTuiExtensionService & {
+      /** The CONCRETE registries (the runner's dispatch/pickers need the
+       * full read methods — handlerFor, isSessionless, etc. — beyond the
+       * public narrow views). */
+      readonly commands: import('./command-bridge.ts').CommandBridge
+      readonly themes: import('./theme-registry.ts').ThemeRegistry
+      readonly autocomplete: import('./autocomplete-registry.ts').AutocompleteRegistry
+      readonly settings: import('./settings-registry.ts').SettingsRegistry
+      readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
+      readonly renderers: import('./renderer-registry.ts').RendererRegistry
+      readonly editors: import('./editor-registry.ts').EditorRegistry
+      _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
+      _recordRegistryError(slot: string, id: string, error: unknown): void
+      _clearRegistryError(slot: string, id: string): void
+      attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string, requestRender?: (force?: boolean) => void): void
+      detachSurface(surfaceId?: string): void
+      // Phase 2: the ADVANCED seam (the `extensions/advanced` facade's
+      // internal surface — the runner wires the app's input path and the
+      // interactive-overlay/editor-control seams through it).
+      _advancedInputRoute(data: string): 'consumed' | 'passed'
+      setAdvancedOverlayMount(
+        surfaceId: string,
+        mount: (component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions) => import('./extension/advanced-types.ts').AdvancedOverlayLease,
+      ): void
+      setAdvancedEditorSeam(surfaceId: string, controls: import('./extension/advanced-types.ts').AdvancedEditorControls): void
+      // Phase 4: the ADVANCED imperative-UI + host-state seams.
+      setAdvancedUiSeam(
+        surfaceId: string,
+        ui: {
+          select(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined>
+          confirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean>
+          input(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined>
+          notify(message: string, options?: import('./extension/advanced-types.ts').AdvancedNotifyOptions): void
+          custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
+        },
+      ): void
+      setAdvancedHostSeam(surfaceId: string, state: import('./extension/advanced-types.ts').AdvancedHostState): void
+      // Phase 3: the UNSTABLE seam (the `extensions/unstable` facade's
+      // internal surface — the runner wires the raw input route, the
+      // fail-safe release and the low-level surface seam through it).
+      _unstableInputRoute(data: string, surfaceId: string): import('./extension/internal/unstable-input.ts').UnstableRawRouteResult
+      _unstableInputsLive(): boolean
+      _unstableInputsRevision(): number
+      _unstableEmergencyRelease(): void
+      setUnstableSurfaceSeam(surfaceId: string, handle: import('./extension/unstable-types.ts').UnstableSurfaceHandle): void
+    }) | undefined
+    let extensionHost: SurfaceHost | undefined
     // Tool-card presentation bridge: the Web's render intents resolved from
     // the LIVE tool registry as the agent sees it (scoped lookup), so the
     // rendered card matches the definition that actually executed. The scope
@@ -1510,7 +1586,12 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       shellTempFiles.clear()
-      app?.stop()
+      app?.dispose()
+      // Detach the extension service's surface bridge (its capability set
+      // and state listeners die with the surface). The surfaceId lease
+      // makes a stale detach a no-op (P1).
+      extensionService?.detachSurface(extensionHost?.surfaceId)
+      extensionHost = undefined
       diag.dispose()
     }
     // The ONE exit orchestration, shared by every exit entry (Ctrl+C, Ctrl+D,
@@ -1918,6 +1999,9 @@ export function apply(ctx: Context, config: Config): void {
       // with an explicit error below — it must never fall through to the
       // model as a plain user message.
       const parsedAtSubmit = parseCommand(text)
+      const extensionCommandId = parsedAtSubmit === undefined
+        ? undefined
+        : extensionService?.commands.idFor(parsedAtSubmit.name)
       const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
@@ -1977,6 +2061,9 @@ export function apply(ctx: Context, config: Config): void {
             diag,
             sessionId: () => agent.session.id,
             onResult: (execution) => {
+              if (extensionCommandId !== undefined && execution !== undefined) {
+                extensionService?._clearRegistryError('command', extensionCommandId)
+              }
               // A command the surface advertised (e.g. from the startup
               // probe) but the real session's catalog lacks: consume the
               // slash input with an explicit error — never a plain model
@@ -2006,6 +2093,7 @@ export function apply(ctx: Context, config: Config): void {
               }
             },
             onError: (error) => {
+              if (extensionCommandId !== undefined) extensionService?._recordRegistryError('command', extensionCommandId, error)
               const message = safeErrorMessage(error)
               try {
                 ctx.logger.error(`tui-runner: command execution failed: ${message}`)
@@ -2037,9 +2125,15 @@ export function apply(ctx: Context, config: Config): void {
      * to the session dispatch, which reports unknown commands as messages.
      */
     const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string): void => {
+      // M5: a plugin-declared local command with a bridge handler routes
+      // to the bridge FIRST (its rawInput is passed verbatim — never
+      // re-parsed or rewritten, the skill rawInput regression gate); the
+      // commands service is the fallback for core commands.
+      const bridgeHandler = extensionService?.commands.handlerFor(parsed.name)
+      const bridgeCommandId = extensionService?.commands.idFor(parsed.name)
       const commands = ctx.get('commands')
       const definition = commands?.find(undefined as unknown as Agent, parsed.name)
-      if (commands === undefined || definition === undefined) {
+      if (bridgeHandler === undefined && (commands === undefined || definition === undefined)) {
         dispatchViaSession(text)
         return
       }
@@ -2049,17 +2143,28 @@ export function apply(ctx: Context, config: Config): void {
         rawInput: parsed.rawInput,
         signal,
       } as CommandInvocation
+      const handler = bridgeHandler ?? definition?.handler
+      if (handler === undefined) {
+        dispatchViaSession(text)
+        return
+      }
       // An owned workflow: the result decides the notify, the failure lands
       // in diagnostics — runOwned (AGENTS.md), never a bare void. The
       // handler may be a SYNC implementation, so the factory must run inside
       // runOwned (a sync throw would otherwise escape before the entry).
-      runOwned('local command', () => definition.handler(invocation), {
+      runOwned('local command', () => handler(invocation), {
         diag,
         sessionId: () => liveAgent?.session.id,
         onResult: (result) => {
-          if (result !== undefined && result.kind === 'error') app.notify(result.text)
+          if (result !== undefined && result.kind === 'error') {
+            if (bridgeCommandId !== undefined) extensionService?._recordRegistryError('command', bridgeCommandId, new Error(result.text))
+            app.notify(result.text)
+          } else if (bridgeCommandId !== undefined) {
+            extensionService?._clearRegistryError('command', bridgeCommandId)
+          }
         },
         onError: (error) => {
+          if (bridgeCommandId !== undefined) extensionService?._recordRegistryError('command', bridgeCommandId, error)
           const message = safeErrorMessage(error)
           try {
             ctx.logger.error(`tui-runner: local command failed: ${message}`)
@@ -2234,9 +2339,14 @@ export function apply(ctx: Context, config: Config): void {
       // A sessionless slash command runs locally BEFORE any session exists:
       // typing /exit, /settings, /help, ... must not create one (deferred
       // start). Everything else — session-backed commands, core commands
-      // like /plan, and plain prompts — creates the session lazily.
+      // like /plan, and plain prompts — creates the session lazily. M5: a
+      // plugin-declared sessionless command (CommandBridge) joins the set.
       const parsed = parseCommand(text)
-      if (parsed !== undefined && liveAgent === undefined && SESSIONLESS_COMMANDS.has(parsed.name)) {
+      const isSessionless = parsed !== undefined && (
+        SESSIONLESS_COMMANDS.has(parsed.name)
+        || (extensionService?.commands.isSessionless(parsed.name, SESSIONLESS_COMMANDS) ?? false)
+      )
+      if (parsed !== undefined && liveAgent === undefined && isSessionless) {
         runLocalCommand(parsed, text)
         return
       }
@@ -2247,13 +2357,25 @@ export function apply(ctx: Context, config: Config): void {
       // host's pre-step listener resolves into the injected skill body
       // (dsh-tool-skill) — exactly like the web's `session.prompt`, which
       // has no command-execution wire for skills. TUI-owned LOCAL commands
-      // (/status, /settings, ...) always execute directly; `!` shells and
+      // (/status, /settings, ...) always execute directly; plugin-declared
+      // local commands (M5 CommandBridge) join the same set; `!` shells and
       // sessionless commands returned before this gate.
-      if (shouldSteerOnEnter(parsed, liveAgent?.status === 'running', tuiSettings?.get().busyEnter, forceQueue)) {
+      if (shouldSteerOnEnter(parsed, liveAgent?.status === 'running', tuiSettings?.get().busyEnter, forceQueue,
+        // M5: the CommandBridge's effective-local check (dynamic plugin
+        // local commands are local while registered).
+        name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)) {
         steerNow(text, true)
         return
       }
       dispatchViaSession(text)
+    }
+    // M3 runner wiring (F-1): when the extension host service is mounted,
+    // the TUI surface attaches a SurfaceHost over its ledger — extensions
+    // (including the first-party builtins) render into the chrome. Without
+    // the service the surface runs exactly as before (host fallbacks).
+    extensionService = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
+    if (extensionService !== undefined) {
+      extensionHost = new SurfaceHost(extensionService._ledger(), () => app.requestRender())
     }
     app = startProcessTui({
       onSubmit: (text) => dispatchUserInput(text),
@@ -2279,7 +2401,83 @@ export function apply(ctx: Context, config: Config): void {
         localShellController?.abort()
         liveAgent?.cancel({ kind: 'user' })
       },
+      // M6: execute a plugin keybinding's SEMANTIC action through the
+      // host's own paths (plan §2.2 — the host never lets a plugin bypass
+      // submission/session safety).
+      onExtensionAction: (action) => {
+        switch (action) {
+          case 'submit-draft': {
+            // Host-owned submit path: history + notify clear + draft
+            // clear, exactly like a normal Enter (round-1 P2).
+            app.submitDraft(false)
+            break
+          }
+          case 'queue-draft': {
+            app.submitDraft(true)
+            break
+          }
+          case 'steer-draft': {
+            const text = app.getDraft()
+            app.setDraft('')
+            steerNow(text)
+            break
+          }
+          case 'cancel-activity': {
+            guardToken = undefined
+            localShellController?.abort()
+            liveAgent?.cancel({ kind: 'user' })
+            break
+          }
+          case 'open-search': {
+            app.startTranscriptSearch()
+            break
+          }
+          case 'toggle-fullscreen': {
+            app.setFullscreen(!app.isFullscreen())
+            break
+          }
+          case 'cycle-permission': {
+            if (liveAgent === undefined) break
+            const permission = ctx.get('permissionPresets')
+            if (permission === undefined) break
+            const names = permission.names
+            if (names.length === 0) break
+            const current = permission.current(liveAgent.session.events)
+            const index = names.indexOf(current)
+            const next = names[(index + 1) % names.length] ?? names[0]
+            if (next === undefined || next === current) break
+            permission.set(liveAgent.session, next)
+            app.notify(next === 'danger-full-access'
+              ? `⚠ ${next} — no approvals`
+              : `permission: ${next}`,
+            next === 'danger-full-access' ? 'error' : 'info')
+            refreshStatus()
+            break
+          }
+        }
+      },
       onSteer: (text) => steerNow(text),
+      onExtensionError: ({ slot, id, error }) => {
+        try { extensionService?._recordRegistryError(slot, id, error) } catch {}
+      },
+      onExtensionRecovered: ({ slot, id }) => {
+        try { extensionService?._clearRegistryError(slot, id) } catch {}
+      },
+      // Phase 4: the advanced host-state setTheme for a NON-built-in name
+      // (a registered plugin theme). The runner resolves the palette
+      // through the theme registry; unknown names are a no-op; a throwing
+      // palette is recorded in the theme health slot.
+      onAdvancedSetTheme: (name) => {
+        const palette = extensionService?.themes.paletteFor(name)
+        if (palette === undefined) return
+        try {
+          app.applyPalette(palette)
+          extensionService?._clearRegistryError('theme', name)
+        } catch (error) {
+          extensionService?._recordRegistryError('theme', name, error)
+          app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+        }
+      },
       openExternalEditor: async (draft) => {
         // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
         // parse with a real shell-word parser, never a plain split.
@@ -2493,7 +2691,129 @@ export function apply(ctx: Context, config: Config): void {
     }, {
       present,
       workspaceRoot: cwd,
+      extensionHost,
+      // M7: the transcript/tool renderer registry. Renderer failures are
+      // isolated per contribution (the registry catches throws and the
+      // host falls back); the health sink records them for /status.
+      renderers: extensionService?.renderers,
+      // M9 (round-1 finding 1): the editor registry MUST reach TuiApp —
+      // without it the SDK is inert (reconcileEditorWinner never fires).
+      editorRegistry: extensionService?.editors,
+      // M6: non-capturing plugin keybindings. The resolver reads the
+      // extensionService LAZILY (it is fetched below the app construction)
+      // and normalizes through the InputRouter — a plugin binding resolves
+      // against normalized keys only, never raw terminal data. Reserved
+      // host lifecycle keys are rejected by the registry at register time
+      // and handled by the host ladder before this stage.
+      pluginActionFor: (normalized) => {
+        // The InputRouter has already normalized the raw input and applied
+        // the reserved-key + printable guards; this resolver only maps the
+        // NORMALIZED key to a plugin semantic action.
+        const keybindings = extensionService?.keybindings
+        if (keybindings === undefined) return undefined
+        return keybindings.actionFor(normalized)
+      },
+      pluginActionIdFor: (normalized) => extensionService?.keybindings.idFor(normalized),
+      // Phase 2: the ADVANCED normalized input capture route. The host
+      // input path consults it AFTER its own capturing flows (questions,
+      // approvals, overlays) and reserved lifecycle keys, and BEFORE the
+      // editor and the Stable keybindings — an advanced plugin can preempt
+      // ordinary editor/panel input, never a Host question/approval/overlay
+      // or a fatal-recovery shortcut (session safety stays Host-owned).
+      advancedInputRoute: (data) => extensionService?._advancedInputRoute(data) ?? 'passed',
+      // Phase 3: the UNSTABLE raw input route — consulted BEFORE terminal
+      // protocol decoding (a raw capture can see, consume or rewrite ANY
+      // chunk). The emergency fail-safe is armed only while captures are
+      // live and releases them all (Host recovery, not rewritable by the
+      // Unstable API).
+      unstableInputRoute: (data, surfaceId) => extensionService?._unstableInputRoute(data, surfaceId) ?? { action: 'pass' },
+      unstableInputsLive: () => extensionService?._unstableInputsLive() ?? false,
+      unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
+      unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
     })
+    // M3: attach the extension host to the surface chrome once per
+    // generation (F-1): the header/dock/footer merge extension content, and
+    // the service's capability set + state bridge become live.
+    if (extensionHost !== undefined && extensionService !== undefined) {
+      // M7 (round-1 finding 3): renderer failures land in the extension
+      // health ledger — observable via /status diagnostics, never
+      // swallowed. Safe single-line message (no stack traces, hostile
+      // toString handled — the plan's error policy §18).
+      app.setRendererErrorSink(({ id, error, slot }) => {
+        const message = safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200)
+        const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
+        extensionService._ledger().recordError(healthSlot, id, message)
+      })
+      // M7 (P1-08): a renderer that renders successfully after a failure
+      // RECOVERS — clear its health record (the next failure starts a NEW
+      // error generation).
+      app.setRendererRecoveredSink(({ id, slot }) => {
+        const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
+        extensionService._ledger().clearError(healthSlot, id)
+      })
+      // M8: the managed-overlay mount seam (plan §13.3) — the plugin
+      // supplies an ExtensionView; the host compiles + mounts it through
+      // its overlay broker (modal stacking, focus, migration, teardown).
+      // The seam is SURFACE-scoped (P1-4): bound to THIS attachment's
+      // surfaceId so a stale old-generation detach never unbinds a newer
+      // surface's seam.
+      extensionService.setOverlayMount(extensionHost.surfaceId, (view, options) => app.showExtensionOverlay(view, options))
+      // Phase 2: the ADVANCED seams (plan §4/§8/§9) — interactive overlay
+      // mounts and editor controls, both SURFACE-scoped like the stable
+      // overlay seam (a stale old-generation detach never unbinds a newer
+      // surface's seam).
+      extensionService.setAdvancedOverlayMount(extensionHost.surfaceId, (component, options) =>
+        app.showAdvancedInteractiveOverlay(component, options))
+      extensionService.setAdvancedEditorSeam(extensionHost.surfaceId, app.advancedEditorControls())
+      // Phase 4: the ADVANCED imperative UI seam (plan §4A/§4B) — the
+      // broker reuses the host's own picker/question/notify infrastructure.
+      extensionService.setAdvancedUiSeam(extensionHost.surfaceId, app.advancedUiBroker())
+      // Phase 4: the ADVANCED host-state seam (plan §4D). The seam
+      // DELEGATES to the app's host-state facade (single source of
+      // truth); the app fires onAdvancedSetTheme for non-built-in theme
+      // names and THIS handler resolves the palette through the theme
+      // registry (a registered plugin theme; unknown names are a no-op).
+      extensionService.setAdvancedHostSeam(extensionHost.surfaceId, {
+        getTheme: () => app.advancedHostState().getTheme(),
+        setTheme: (name) => app.advancedHostState().setTheme(name),
+        setTitle: (title) => app.advancedHostState().setTitle(title),
+        setWorkingMessage: (message) => app.advancedHostState().setWorkingMessage(message),
+        setToolsExpanded: (expanded) => app.advancedHostState().setToolsExpanded(expanded),
+      })
+      // Phase 3: the UNSTABLE low-level surface seam (plan §10) — the
+      // selected host surface capabilities for low-level plugins (never
+      // TuiApp/screens/terminal). SURFACE-scoped like the other seams.
+      extensionService.setUnstableSurfaceSeam(extensionHost.surfaceId, app.unstableSurfaceHandle())
+      extensionHost.attach(
+        { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
+        {
+          surfaceId: extensionHost.surfaceId,
+          generation: app.getSurfaceGeneration(),
+          width: process.stdout.columns ?? 80,
+          height: process.stdout.rows ?? 24,
+          fullscreen: false,
+          focusedSeat: 'editor',
+          themeId: 'dark',
+          themeRevision: 0,
+        },
+      )
+      app.refreshChrome()
+      const attached = extensionHost
+      // P1-1: attach the surface's RENDER SINK to the extension service —
+      // registry invalidations (register/unload/replace on commands,
+      // themes, autocomplete, settings, keybindings, renderers, editors
+      // and the ledger slots) flush through the service batcher into THIS
+      // surface's render path, so a dynamic registration repaints without
+      // any user input. The stale-detach lease protects a newer surface.
+      extensionService.attachSurface(
+        { subscribe: (listener) => attached.subscribeState(listener as never) },
+        extensionHost.capabilitiesOf() as ReadonlySet<string>,
+        // The attachment lease (P1): a stale detachSurface from an older
+        // generation must not tear down THIS surface's bridge.
+        attached.surfaceId,
+        (force) => app.requestRender(force),
+      )
+    }
     // Persisted TUI preferences: register the namespace and restore the
     // theme + footer preset. Theme values: auto | dark | light | custom:<name>.
     const tuiSettings = ctx.get('settings')?.register(
@@ -2539,8 +2859,27 @@ export function apply(ctx: Context, config: Config): void {
       app.applyTheme(storedTheme)
       app.trackTerminalTheme(false)
     } else if (storedTheme?.startsWith('custom:')) {
-      const palette = loadCustomTheme(storedTheme.slice('custom:'.length))
-      if (palette !== undefined) app.applyPalette(palette)
+      const name = storedTheme.slice('custom:'.length)
+      // M5: a plugin-registered theme resolves through the ThemeRegistry
+      // FIRST; custom files are the fallback. A selected plugin theme whose
+      // owner unloaded resolves undefined and falls back to the built-in
+      // palette (the M5 gate: selected theme unload → built-in fallback).
+      const pluginPalette = extensionService?.themes.paletteFor(name)
+      const customPalette = loadCustomTheme(name)
+      const palette = pluginPalette ?? customPalette
+      if (palette !== undefined) {
+        try {
+          app.applyPalette(palette)
+          if (pluginPalette !== undefined) extensionService?._clearRegistryError('theme', name)
+        } catch (error) {
+          if (pluginPalette !== undefined) extensionService?._recordRegistryError('theme', name, error)
+          app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+        }
+      } else {
+        // Neither a plugin theme nor a custom file: the selection is gone
+        // (unloaded plugin) — fall back to the built-in dark palette.
+        app.applyTheme('dark')
+      }
       app.trackTerminalTheme(false)
     }
     const storedFooter = tuiSettings?.get().footer
@@ -2991,6 +3330,27 @@ export function apply(ctx: Context, config: Config): void {
       agents: agents as unknown as TuiCommandRunner['agents'],
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       cwd,
+      // M5: the extension registries (commands/themes/settings/autocomplete/
+      // keybindings), when the extension service is mounted. The /settings
+      // and /theme pickers read them; undefined degrades to the host-only
+      // panel.
+      get extensions() {
+        return extensionService === undefined ? undefined : {
+          commands: extensionService.commands,
+          themes: extensionService.themes,
+          settings: extensionService.settings,
+          autocomplete: extensionService.autocomplete,
+          keybindings: extensionService.keybindings,
+          renderers: extensionService.renderers,
+          editors: extensionService.editors,
+          api: () => extensionService.api(),
+          // P1-08: the live contribution-health snapshot (failed/shadowed
+          // states + lastError across every registry incl. renderers).
+          health: () => extensionService._ledger().healthSnapshot(),
+        }
+      },
+      recordExtensionError: (slot, id, error) => extensionService?._recordRegistryError(slot, id, error),
+      clearExtensionError: (slot, id) => extensionService?._clearRegistryError(slot, id),
       /** The live session's workspace cwd (header), falling back to the
        * process cwd before any session exists; the footer/welcome/
        * completions/history follow it so a session switch updates the

@@ -197,6 +197,9 @@ export interface TuiCommandRunner {
    */
   sessionCwd(): string
   signal: AbortSignal
+  /** M11: callback-health bridge for extension registries. */
+  recordExtensionError?: (slot: string, id: string, error: unknown) => void
+  clearExtensionError?: (slot: string, id: string) => void
   /** The runner's monotonic session generation; bumped on every session
    * swap. Late async work must re-check it before committing state. */
   readonly sessionGeneration: number
@@ -232,10 +235,110 @@ export interface TuiCommandRunner {
   openJobView(jobId: string): void
   enterView(childId: SessionId, label?: string): Promise<void>
   exit(code: number): void
+  /**
+   * The M5 extension registries (commands/themes/settings/autocomplete/
+   * keybindings), when the extension service is mounted. Undefined
+   * degrades to the host-only surface.
+   */
+  readonly extensions: {
+    readonly commands: import('./command-bridge.ts').CommandBridge
+    readonly themes: import('./theme-registry.ts').ThemeRegistry
+    readonly settings: import('./settings-registry.ts').SettingsRegistry
+    readonly autocomplete: import('./autocomplete-registry.ts').AutocompleteRegistry
+    readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
+    readonly renderers: import('./renderer-registry.ts').RendererRegistry
+    readonly editors: import('./editor-registry.ts').EditorRegistry
+    /** The live extension API info (capabilities + deprecations — M11). */
+    readonly api: (() => import('./extension/public-types.ts').PiTuiApiInfo) | undefined
+    /** P1-08: the live contribution-health snapshot (failed/shadowed
+     * states + lastError across EVERY registry incl. renderers/editors).
+     * Undefined without the extension service. */
+    readonly health: (() => readonly import('./extension/public-types.ts').ContributionHealth[]) | undefined
+  } | undefined
 }
 
 /** The sentinel picker value for the "add a brand-new provider" action row. */
 const ADD_PROVIDER_VALUE = '\u0000add-provider'
+
+/**
+ * M11: the /status extension-health rows (plan §16 — /status extension
+ * health). Reads the extension registries' live snapshots: contribution
+ * health (failed/shadowed states + last error), the registry revision
+ * counts, and the capability set. Renders as read-only settings rows.
+ * @param runner - the TuiCommandRunner (its extensions accessor is
+ *   undefined without the extension service — the rows vanish).
+ */
+export function extensionHealthRows(runner: TuiCommandRunner): { id: string; label: string; description: string; currentValue: string }[] {
+  const extensions = runner.extensions
+  if (extensions === undefined) return []
+  const rows: { id: string; label: string; description: string; currentValue: string }[] = []
+  const health = extensions.commands.snapshot()
+  const commandCount = health.entries.length
+  // P1-08: the LIVE contribution-health snapshot (failed/shadowed states
+  // + lastError) — the M11 health requirement is a real observable
+  // surface, not registry counts only.
+  const healthRecords = extensions.health?.() ?? []
+  const themeCount = extensions.themes.snapshot().themes.length
+  const settingCount = extensions.settings.snapshot().rows.length
+  const autocompleteCount = extensions.autocomplete.snapshot().providers.length
+  const bindingCount = extensions.keybindings.snapshot().bindings.length
+  const rendererCount = extensions.renderers.snapshot().messageRenderers.length
+    + extensions.renderers.snapshot().toolRenderers.length
+  const editorCount = extensions.editors.snapshot().editors.length
+  rows.push({
+    id: 'ext-registry-counts',
+    label: color.textDim('Extensions'),
+    description: 'Live contributions across every registry (M1–M9)',
+    currentValue: color.textDim(
+      `cmd ${commandCount} · theme ${themeCount} · set ${settingCount} · ac ${autocompleteCount} · kb ${bindingCount} · ren ${rendererCount} · ed ${editorCount}`,
+    ),
+  })
+  // The capability row must reflect the REAL capability set (round-1
+  // finding 1): the live PiTuiApiInfo.capabilities — never a hardcoded
+  // or count-inferred list (the registry presence is a separate
+  // diagnostic, not a capability claim).
+  const api = extensions.api
+  const capabilities = api === undefined ? [] : [...api().capabilities].sort()
+  rows.push({
+    id: 'ext-capabilities',
+    label: color.textDim('Capabilities'),
+    description: 'The host extension capabilities (feature-detect, never parse versions)',
+    currentValue: color.textDim(capabilities.length === 0 ? 'none' : capabilities.join(' · ')),
+  })
+  // The registry-type diagnostic (separate from capabilities — a
+  // registry with live contributions is a FACT, not a capability).
+  const registryTypes = [
+    commandCount > 0 ? 'commands' : '',
+    themeCount > 0 ? 'themes' : '',
+    settingCount > 0 ? 'settings' : '',
+    autocompleteCount > 0 ? 'autocomplete' : '',
+    bindingCount > 0 ? 'keybindings' : '',
+    rendererCount > 0 ? 'renderers' : '',
+    editorCount > 0 ? 'editors' : '',
+  ].filter(Boolean)
+  rows.push({
+    id: 'ext-registries',
+    label: color.textDim('Registries'),
+    description: 'Live registries with contributions (diagnostic, not capabilities)',
+    currentValue: color.textDim(registryTypes.length === 0 ? 'none' : registryTypes.join(' · ')),
+  })
+  // P1-08: the live health row — failed/shadowed contributions with their
+  // last error, across EVERY registry (incl. transcript renderers). A
+  // healthy surface shows 'all active'; failures are surfaced verbatim
+  // (single-line, bounded — the ledger's error policy).
+  const failed = healthRecords.filter(record => record.state !== 'active')
+  rows.push({
+    id: 'ext-health',
+    label: color.textDim('Health'),
+    description: 'Live contribution states (failed/shadowed + last error; recovery clears)',
+    currentValue: failed.length === 0
+      ? color.textDim('all active')
+      : failed.map(record =>
+          `${record.extensionPoint}:${record.id} ${record.state}${record.lastError === undefined ? '' : ` — ${record.lastError}`}`,
+        ).join(' · '),
+  })
+  return rows
+}
 
 /** The structural llm model-discovery surface /login probes. */
 interface ProviderCatalogDiscovery {
@@ -504,6 +607,8 @@ export function registerTuiCommands(
   // without it the MentionProvider falls back to a bounded recursive scan.
   const fdPath = resolveFdPath()
   const commands = ctx.get('commands')
+  const recordExtensionError = runner.recordExtensionError
+  const clearExtensionError = runner.clearExtensionError
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
@@ -567,6 +672,10 @@ export function registerTuiCommands(
    */
   const installCompletions = (entries: readonly SurfaceCommandSummary[]): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
+    // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
+    // after the host's own provider returns null. The registry's suggest()
+    // handles cancellation (latest-only commit) and per-provider isolation.
+    const extensionAutocomplete = runner.extensions?.autocomplete
     app.setCommandCompletions(
       sorted.map(command => ({
         name: command.name,
@@ -575,6 +684,20 @@ export function registerTuiCommands(
       })),
       runner.sessionCwd(),
       fdPath,
+      extensionAutocomplete === undefined
+        ? undefined
+        : async (query) => {
+            const result = await extensionAutocomplete.suggest(query, (id, error) => {
+              recordExtensionError?.('autocomplete', id, error)
+              try {
+                ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
+              } catch {
+                // The cordis logger must not block completion.
+              }
+            }, id => clearExtensionError?.('autocomplete', id))
+            if (result === null) return null
+            return { items: [...result.items], prefix: result.prefix }
+          },
     )
     claims = new Set(sorted.map(command => command.name))
   }
@@ -708,7 +831,9 @@ export function registerTuiCommands(
             label: 'Theme',
             description: 'Palette: auto follows the terminal; custom from ~/.dsh-pi-tui/themes',
             currentValue: themeValue,
-            values: ['auto', 'dark', 'light', ...customThemeNames()],
+            // M5: plugin-registered themes (ThemeRegistry) join the
+            // picker's built-in auto/dark/light + custom list.
+            values: ['auto', 'dark', 'light', ...customThemeNames(), ...(runner.extensions?.themes.names() ?? [])],
           },
           {
             id: 'expand',
@@ -777,8 +902,16 @@ export function registerTuiCommands(
             description: color.textDim('The live session workspace (follows session switches)'),
             currentValue: color.textDim(runner.sessionCwd()),
           },
+          // ── M5: plugin-registered settings rows ───────────────────
+          ...(runner.extensions?.settings.rows() ?? []).map(row => ({
+            id: `ext-setting:${row.id}`,
+            label: row.label,
+            description: row.description,
+            currentValue: row.currentValue,
+            ...(row.values.length > 0 ? { values: [...row.values] } : {}),
+          })),
         ],
-        (id, value) => {
+        (id, value, revert) => {
           if (id === 'approval') {
             if ((value === 'ask' || value === 'never') && liveAgent !== undefined) {
               ctx.get('approval')?.setPolicy(liveAgent, value)
@@ -792,7 +925,8 @@ export function registerTuiCommands(
               detach('permission default write', () => settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }]) as Promise<unknown>, { notify: true })
             }
           } else if (id === 'theme') {
-            if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)) {
+            if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)
+              || runner.extensions?.themes.byName(value) !== undefined) {
               lastThemeChoice = value
               if (value === 'auto') {
                 // The settled detection applies only while the preference is
@@ -809,11 +943,25 @@ export function registerTuiCommands(
                 app.applyTheme(value)
                 app.trackTerminalTheme(false)
               } else {
-                const palette = loadCustomTheme(value)
+                // M5: a plugin-registered theme applies through the host's
+                // applyPalette (the ONLY application path — the registry
+                // never applies itself). Custom files resolve as before.
+                const themes = runner.extensions?.themes
+                const pluginPalette = themes?.paletteFor(value)
+                const pluginId = pluginPalette === undefined ? undefined : ((themes as { idFor?: (name: string) => string | undefined }).idFor?.(value) ?? value)
+                const palette = pluginPalette ?? loadCustomTheme(value)
                 if (palette !== undefined) {
-                  app.applyPalette(palette)
-                  app.trackTerminalTheme(false)
+                  try {
+                    app.applyPalette(palette)
+                    if (pluginId !== undefined) clearExtensionError?.('theme', pluginId)
+                    app.trackTerminalTheme(false)
+                  } catch (error) {
+                    if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, error)
+                    app.notify(`theme ${value} failed: ${safeErrorMessage(error)}`, 'error')
+                    return
+                  }
                 } else {
+                  if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, new Error('theme not found'))
                   app.notify(`theme ${value} not found`, 'error')
                   return
                 }
@@ -824,6 +972,30 @@ export function registerTuiCommands(
               if (settings !== undefined) {
                 detach('settings theme write', () => settings.replace({ ...settings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` }) as Promise<unknown>, { notify: true })
               }
+            }
+          } else if (id.startsWith('ext-setting:')) {
+            // M5: a plugin-registered settings row change. The row's own
+            // onChange decides acceptance; the panel value follows the
+            // accepted value. Detached (AGENTS.md — never a bare void).
+            // The fork optimistically mutated the row BEFORE this callback:
+            // on rejection, revert() restores the previous DISPLAYED value
+            // so the open panel never shows a value the registry rejected.
+            const extSettings = runner.extensions?.settings
+            const settingId = id.slice('ext-setting:'.length)
+            const previous = extSettings?.rows().find(row => row.id === settingId)?.currentValue
+            if (extSettings !== undefined) {
+              detach('extension setting apply', () => extSettings.apply(settingId, value).then(accepted => {
+                if (!accepted) {
+                  recordExtensionError?.('setting', settingId, new Error('setting rejected'))
+                  if (previous !== undefined) revert(previous)
+                  app.notify('setting rejected', 'error')
+                } else {
+                  clearExtensionError?.('setting', settingId)
+                }
+              }).catch(error => {
+                recordExtensionError?.('setting', settingId, error)
+                throw error
+              }))
             }
           } else if (id === 'expand') {
             app.setToolOutputExpanded(value === 'expanded')
@@ -1305,15 +1477,36 @@ export function registerTuiCommands(
         const reloadTheme = doc.theme
         if (reloadTheme === 'auto') {
           detach('theme autodetect', () => app.autoDetectTheme({
-            shouldApply: () => reloadTheme === 'auto',
+            // A settings panel write may complete while OSC 11 is in flight;
+            // only apply the late result if auto is still the latest choice.
+            shouldApply: () => settings.get().theme === 'auto',
           }))
           app.trackTerminalTheme(true)
         } else if (reloadTheme === 'dark' || reloadTheme === 'light') {
           app.applyTheme(reloadTheme)
           app.trackTerminalTheme(false)
         } else if (reloadTheme.startsWith('custom:')) {
-          const palette = loadCustomTheme(reloadTheme.slice('custom:'.length))
-          if (palette !== undefined) app.applyPalette(palette)
+          const name = reloadTheme.slice('custom:'.length)
+          const themes = runner.extensions?.themes
+          const pluginPalette = themes?.paletteFor(name)
+          const pluginId = pluginPalette === undefined
+            ? undefined
+            : (themes?.idFor?.(name) ?? name)
+          const customPalette = loadCustomTheme(name)
+          const palette = pluginPalette ?? customPalette
+          if (palette !== undefined) {
+            try {
+              app.applyPalette(palette)
+              if (pluginId !== undefined) clearExtensionError?.('theme', pluginId)
+            } catch (error) {
+              if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, error)
+              else app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+            }
+          } else {
+            // A missing custom selection is a host settings problem, not a
+            // plugin contribution failure. Do not create a theme health row.
+            app.notify(`theme ${name} not found`, 'error')
+          }
           app.trackTerminalTheme(false)
         }
         app.setFooterPreset(doc.footer === 'compact' ? 'compact' : 'full')
@@ -1985,6 +2178,8 @@ export function registerTuiCommands(
             description: contextTokens === undefined ? 'unmeasured' : `${Math.round(contextTokens / 1000)}k tokens in window`,
             currentValue: '',
           },
+          // ── M11: extension health (plan §16) ───────────────────
+          ...extensionHealthRows(runner),
         ],
         () => {},
         () => {},

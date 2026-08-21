@@ -1,0 +1,9 @@
+{
+  "name": "dsh-pi-phase4-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

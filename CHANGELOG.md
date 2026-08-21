@@ -9,6 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real-plugin validation (Phase 5).** The tier selection is proven by
+  real consumers in `packages/dsh-pi-tui/examples/plugins/`, gated by
+  `scripts/examples-plugin-smoke.mjs` against the packed tarball: a
+  **production-class vim modal editor** (insert/normal modes, h/j/k/l,
+  word movement, x/d/c, i/a/o, undo/redo, yank/paste, multi-line,
+  cursor sync, submit integration — all through semantic
+  `EditorInputEvent`s, never raw bytes; the Advanced editor SDK is
+  sufficient, no Unstable usage), a **questionnaire form** (the Phase-4
+  imperative UI broker: select → free text → confirm → notify) and an
+  **interactive shell** (the Unstable raw seam: exclusive raw ownership
+  + a raw-rendering low-level mount; `exit` or the Host emergency
+  fail-safe returns). The authoring decision tree lives in
+  `docs/plugin-authoring.md`; the API gap process and the Stable
+  promotion review are recorded in `examples/README.md`.
+- **Pi capability parity (Phase 4).** The ADVANCED tier gains the
+  high-value Pi-style capabilities: the **imperative UI broker**
+  (`advanced.ui.select/confirm/input/notify` — promise-based prompts built
+  on the Host's own picker/question/notify infrastructure, caller-fiber
+  cancellation, surface-disposal settlement), **custom interactive UI**
+  (`advanced.ui.custom` — a factory-built interactive component mounted
+  by the Host, resolving with the result reported through the public
+  `AdvancedCustomHost` facade, never a private TUI object), and the
+  **host-state facade** (`advanced.host` — theme query/select, title
+  override, working-indicator override, tool-expansion preference). The
+  Pi capability matrix (`docs/extension-capability-matrix.md`) records
+  the tier mapping as a roadmap reference. Packed acceptance: the new
+  `phase4-plugin` fixture + `scripts/phase4-plugin-smoke.mjs` gate.
+- **Unstable extension tier (Phase 3).** `@xmoon76/dsh-pi-tui/extensions/unstable`
+  is now a usable tier (`UNSTABLE_API_LEVEL = 1`) with NO compatibility
+  guarantee: **raw input interception** (`unstable.input.raw` —
+  observe/consume/rewrite of RAW terminal chunks BEFORE the Host decodes
+  anything, exclusive raw ownership with explicit conflict errors,
+  fail-open on throwing handlers, each chunk passes the chain at most
+  once), the **Host emergency fail-safe** (triple-Esc within 1.5s
+  releases every raw capture and closes every unstable mount — detected
+  before the captures, so it cannot be rewritten or consumed by a
+  plugin), and the **low-level surface seam** (`unstable.surface.handle`
+  — requestRender/geometry/mountComponent for raw-rendering components;
+  never exposes TuiApp/screens/terminal). The facade is
+  `unstable(service)` — the Stable service interface is untouched. All
+  resources stay caller-fiber-owned and surface-generation-scoped;
+  failures ride the shared health ledger. Author guide:
+  `docs/extension-unstable.md`. Packed acceptance: the new `unstable-plugin`
+  fixture + `scripts/unstable-plugin-smoke.mjs` gate.
+- **Advanced extension tier (Phase 2).** `@xmoon76/dsh-pi-tui/extensions/advanced`
+  is now a usable tier (`ADVANCED_API_LEVEL = 1`) with three capabilities,
+  all still Host-mediated (never raw terminal bytes, never private
+  screens): **normalized input capture** (`advanced.input.capture` —
+  observe/capture/exclusive modes, deterministic priority ordering,
+  explicit exclusive-conflict errors, fail-open on throwing handlers),
+  **focused interactive surfaces** (`advanced.ui.interactive` — interactive
+  managed overlays hosting plugin-owned interactive components with
+  Host-compiled rendering, normalized input, focus/blur, resize
+  recompilation and fullscreen migration), and **advanced editor control**
+  (`advanced.editor.control` — get/set/cursor/insert/paste/focus through
+  the host's editor seat). The facade is `advanced(service)` — the Stable
+  service interface is untouched. All resources stay caller-fiber-owned
+  and surface-generation-scoped; failures ride the shared health ledger.
+  Author guide: `docs/extension-advanced.md`. Packed acceptance: the new
+  `advanced-plugin` fixture + `scripts/advanced-plugin-smoke.mjs` gate.
+- **Tiered extension surface.** The public extension SDK now ships three tiers:
+  the stable `@xmoon76/dsh-pi-tui/extensions` entry keeps its compatibility
+  contract, and the new `extensions/advanced` (experimental; minor releases may
+  break) and `extensions/unstable` (NO compatibility guarantee) entries carry
+  tier metadata plus the reserved capability namespaces (`advanced.` / `unstable.`).
+  All tiers share ONE extension runtime (caller-fiber ownership, surface lifecycle,
+  invalidation). The vim fixture no longer doubles as a production-Stable-API
+  proof; full modal editors move to the advanced/unstable roadmap.
+
+## [0.2.0] - 2026-08-20
+
+### Added
+
+- **Extension platform v1 — the headline of this release.** The TUI is now
+  extensible: a third-party Cordis plugin can contribute chrome (header
+  badge, dock items, footer segments), widgets above/below the editor,
+  slash commands, themes, settings rows, autocomplete providers,
+  keybindings, transcript/tool renderers, managed overlays, and even
+  replace the editor itself — without touching TUI internals. Plugins
+  import only `@xmoon76/dsh-pi-tui/extensions`, feature-detect
+  capabilities (API version 1), and are fully lifecycle-owned: plugin
+  unload/HMR removes exactly that plugin's contributions, and a stale
+  surface can never be mutated after disposal. The built-in version badge
+  and turn/step counters now dogfood the same public API
+  (`@xmoon76/dsh-pi-tui/builtins`). The author guide lives in
+  `docs/extension-api.md`.
 - `/login` can now add a provider the deployment has never configured. The
   credential picker merges the llm configurable-provider directory (every
   installed pi-ai catalog route plus hand-declared profiles) with the
@@ -25,19 +111,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A TUI surface now has an explicit lifetime.** One surface GENERATION
+  survives `start()`/`stop()`, fullscreen toggles and the external-editor
+  round-trip; only a final `dispose()` bumps it, and after disposal every
+  interactive capability is a benign no-op (approvals settle cancelled,
+  question flows settle rejected, in-flight work applies nothing). This is
+  the foundation the extension platform's stale-handle contract builds on.
 - The `/preset` picker's English name for the `code` preset is now
   `PTC mode`, following the upstream dsh 0.1.0-rc.7 rename (the preset id
   is unchanged, so existing compositions keep working).
 
+### Security
+
+- **Plugin text can no longer inject terminal control sequences.** Plugin
+  text was the one channel that reached the terminal verbatim; C0
+  controls, 8-bit CSI, C1 controls and complete ESC-led sequences
+  (CSI/OSC/DCS/PM/APC) are now stripped at the public boundary before
+  rendering, in both plain and markdown views. The host's own styling is
+  the only ANSI in the output.
+
 ### Fixed
 
+- **The host can never be shadowed or stalled by a plugin.** Plugin
+  commands are validated against the authoritative host catalog (exact and
+  near-synonym collisions are rejected, including the special-cased
+  `/plan`); reserved host lifecycle keys cannot be claimed by keybindings;
+  a plugin keybinding only fires when the focused editor declines the key;
+  and a throwing renderer or callback is isolated to its own contribution,
+  recorded in the `/status` health rows, and never escapes the render or
+  input path.
+- **Editor replacement is safe.** While a plugin editor occupies the seat
+  it receives real input through its `handleInput` channel and Enter
+  submits through the host path; a display-only editor (no input hook)
+  never silently routes typing into the hidden host editor; handoff is
+  atomic (a throwing create/transfer/compile keeps the current editor
+  working); and every capability captured by a stale editor becomes inert
+  after handoff or disposal.
+- **Narrow terminals stay intact.** Horizontal stacks render side by side,
+  frames clamp to the host budget with cell-exact ANSI/CJK padding, and
+  one- or two-cell-wide frames abdicate safely instead of overflowing.
 - A settled `ask_user_question` card no longer shows the raw
   `{"answers":[…]}` JSON: it renders an answered-count summary
   (`2/3 answered`, skipped questions excluded), and a cancelled or aborted
   flow shows the structured error identity (`UserQuestionError:
   ASK_CANCELLED` / `ASK_ABORTED`) instead of an empty or JSON body — web
-  AskQuestionRow parity, since the questions themselves were already shown
-  in the dialog.
+  AskQuestionRow parity.
 
 ## [0.1.8] - 2026-08-18
 
@@ -309,7 +427,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6

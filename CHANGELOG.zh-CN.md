@@ -9,6 +9,79 @@
 
 ### 新增
 
+- **真实插件验证(Phase 5)。**层级选择由真实消费者验证,见
+  `packages/dsh-pi-tui/examples/plugins/`,由
+  `scripts/examples-plugin-smoke.mjs` 对打包 tarball 门禁:
+  **生产级 vim 模态编辑器**(insert/normal 模式、h/j/k/l、词移动、
+  x/d/c、i/a/o、undo/redo、yank/paste、多行、光标同步、提交集成——
+  全部经语义化 `EditorInputEvent`,绝不接触 raw 字节;Advanced editor
+  SDK 足够,无需 Unstable)、**questionnaire 表单**(Phase-4 命令式 UI
+  broker:select → 自由文本 → confirm → notify)与**交互式 shell**
+  (Unstable raw seam:exclusive raw 所有权 + raw 渲染低层 mount;
+  `exit` 或 Host 紧急 fail-safe 返回)。作者决策树见
+  `docs/plugin-authoring.md`;API gap 过程与 Stable promotion review
+  记录在 `examples/README.md`。
+- **Pi 能力对齐(Phase 4)。** Advanced 层新增高价值 Pi 风格能力:
+  **命令式 UI broker**(`advanced.ui.select/confirm/input/notify`——
+  基于 Host 自有 picker/question/notify 基础设施的 Promise 化提示,
+  caller-fiber 取消、surface 销毁结算)、**自定义交互 UI**
+  (`advanced.ui.custom`——由 Host 挂载工厂构建的交互组件,通过公开的
+  `AdvancedCustomHost` facade 报告结果,绝不传私有 TUI 对象)、
+  **host-state facade**(`advanced.host`——theme 查询/选择、title
+  覆盖、working 指示覆盖、tool 展开偏好)。Pi 能力矩阵
+  (`docs/extension-capability-matrix.md`)记录层级映射作为路线图参考。
+  打包验收:新增 `phase4-plugin` fixture + `scripts/phase4-plugin-smoke.mjs`
+  门禁。
+- **Unstable 扩展层(Phase 3)。** `@xmoon76/dsh-pi-tui/extensions/unstable`
+  现在是可用层级(`UNSTABLE_API_LEVEL = 1`),不保证兼容:
+  **raw 输入拦截**(`unstable.input.raw`——在 Host 解码之前对 RAW
+  terminal 块做 observe/consume/rewrite、exclusive raw 所有权且冲突
+  显式报错、handler 抛错 fail-open、每个块最多过一次拦截链)、
+  **Host 紧急 fail-safe**(1.5 秒内三连 Esc 释放全部 raw capture 并
+  关闭全部 unstable mount——在 capture 之前检测,插件无法改写或消费)、
+  **低层 surface seam**(`unstable.surface.handle`——requestRender/
+  几何/mountComponent 承载 raw 渲染组件;绝不暴露 TuiApp/屏幕/
+  terminal)。facade 为 `unstable(service)`——Stable service 接口未动。
+  所有资源仍为 caller-fiber 所有、surface generation 作用域;失败进入
+  共享 health ledger。作者指南:`docs/extension-unstable.md`。打包验收:
+  新增 `unstable-plugin` fixture + `scripts/unstable-plugin-smoke.mjs`
+  门禁。
+- **Advanced 扩展层(Phase 2)。** `@xmoon76/dsh-pi-tui/extensions/advanced`
+  现在是可用层级(`ADVANCED_API_LEVEL = 1`),提供三类能力,全部仍由
+  Host 中介(绝不接触 raw terminal 字节、绝不暴露私有屏幕):
+  **规范化输入捕获**(`advanced.input.capture`——observe/capture/
+  exclusive 模式、确定性优先级排序、exclusive 冲突显式报错、handler
+  抛错 fail-open)、**聚焦交互表面**(`advanced.ui.interactive`——交互式
+  托管 overlay 承载插件自有的交互组件,渲染由 Host 编译、输入由 Host
+  归一化、focus/blur、resize 重编译与全屏迁移)、**高级编辑器控制**
+  (`advanced.editor.control`——经 Host 编辑器座位的 get/set/cursor/
+  insert/paste/focus)。facade 为 `advanced(service)`——Stable service
+  接口未动。所有资源仍为 caller-fiber 所有、surface generation 作用域;
+  失败进入共享 health ledger。作者指南:`docs/extension-advanced.md`。
+  打包验收:新增 `advanced-plugin` fixture + `scripts/advanced-plugin-smoke.mjs`
+  门禁。
+- **分层扩展面。** 公开扩展 SDK 现在分三个层级:稳定的
+  `@xmoon76/dsh-pi-tui/extensions` 入口保持其兼容契约,新增的
+  `extensions/advanced`(实验性;minor 版本可破坏)与 `extensions/unstable`
+  (不保证兼容)入口携带层级元数据与保留的能力命名空间(`advanced.` /
+  `unstable.`)。所有层级共享同一个扩展运行时(caller-fiber 所有权、
+  surface 生命周期、失效机制)。vim fixture 不再兼任生产级 Stable-API
+  的证明;完整模态编辑器移入 advanced/unstable 路线图。
+
+## [0.2.0] - 2026-08-20
+
+### 新增
+
+- **扩展平台 v1——本版本的重头戏。** TUI 现在可扩展:第三方 Cordis
+  插件可以贡献 chrome(标题徽标、dock 项、footer 段)、编辑器上下的
+  widget、斜杠命令、主题、设置行、自动补全 provider、按键绑定、
+  transcript/工具渲染器、托管 overlay,甚至替换编辑器本身——无需接触
+  TUI 内部。插件只导入 `@xmoon76/dsh-pi-tui/extensions`,按能力特性
+  检测(API 版本 1),并且完全生命周期化:插件卸载/HMR 只移除该插件
+  的贡献,表面销毁后陈旧句柄永远无法再变更它。内置的版本徽标与
+  轮次/步骤计数器现在也通过同一公开 API 自证
+  (`@xmoon76/dsh-pi-tui/builtins`)。作者指南见
+  `docs/extension-api.md`。
 - `/login` 现在可以新增部署从未配置过的供应商。凭据选择器合并了 llm
   configurable-provider 目录(所有内置 pi-ai catalog 路由 + 手写 profile)
   与 settings section,按 已配置 / 可用 / 自定义 分组,并提供
@@ -22,16 +95,40 @@
 
 ### 变更
 
+- **TUI surface 现在有显式的生命周期。** 一个 surface GENERATION 跨越
+  `start()`/`stop()`、fullscreen 切换与外部编辑器往返;只有最终
+  `dispose()` 才递增它,dispose 之后所有交互能力都是良性 no-op
+  (approval 以 cancelled 结算、question flow 以 rejected 结算、进行中的
+  工作不应用任何结果)。这是扩展平台陈旧句柄契约所依赖的基础。
 - `/preset` 选择器中 `code` 预设的英文名改为 `PTC mode`,与上游 dsh
   0.1.0-rc.7 的重命名保持一致(预设 id 未变,已有组合不受影响)。
 
+### 安全
+
+- **插件文本不再能注入终端控制序列。** 插件文本曾是唯一原样到达终端
+  的通道;现在 C0 控制符、8-bit CSI、C1 控制符与完整 ESC 引导序列
+  (CSI/OSC/DCS/PM/APC)都会在渲染前的公开边界被剥离,纯文本与
+  markdown 视图均生效。宿主自身的样式是输出中唯一的 ANSI。
+
 ### 修复
 
+- **宿主永不会被插件遮蔽或拖垮。** 插件命令会对照权威宿主目录校验
+  (精确与近义冲突都被拒绝,包括特殊处理的 `/plan`);保留的宿主
+  生命周期键不能被按键绑定占用;插件按键绑定只在聚焦编辑器拒绝该键
+  时才触发;抛错的渲染器或回调被隔离到它自己的贡献,记录在
+  `/status` 健康行中,永不逃出渲染或输入路径。
+- **编辑器替换是安全的。** 插件编辑器占席时,通过其 `handleInput`
+  通道接收真实输入,Enter 走宿主提交路径;display-only 编辑器(无输入
+  钩子)绝不会把普通打字静默路由进隐藏的宿主编辑器;交接是原子的
+  (create/transfer/compile 抛错时当前编辑器继续工作);陈旧编辑器捕获
+  的每个能力在交接或销毁后都变为惰性。
+- **窄终端保持完好。** 水平 stack 真正并排渲染,frame 按显示单元格
+  精确钳制到宿主预算(ANSI/CJK 精确),一到两格宽的 frame 安全让位
+  而不是溢出。
 - 已结算的 `ask_user_question` 卡片不再显示原始 `{"answers":[…]}` JSON:
   改为显示已答计数摘要(`2/3 answered`,跳过的题目不计入),取消或中断的
   流程显示结构化错误标识(`UserQuestionError: ASK_CANCELLED` /
-  `ASK_ABORTED`),而不是空白或 JSON 正文——与 web AskQuestionRow 对齐,
-  因为问题本身已在对话框中展示过。
+  `ASK_ABORTED`),而不是空白或 JSON 正文——与 web AskQuestionRow 对齐。
 
 ## [0.1.8] - 2026-08-18
 
@@ -265,7 +362,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.5...v0.1.6

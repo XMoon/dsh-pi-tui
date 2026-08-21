@@ -167,7 +167,7 @@ const HEAP_REBUILDS = FAST ? 300 : 2000
 
 // --- the benchmark ----------------------------------------------------------
 
-function main(): void {
+async function main(): Promise<void> {
   const rows: string[] = []
   const row = (label: string, value: string): void => { rows.push(`${label.padEnd(58)} ${value}`) }
 
@@ -250,12 +250,47 @@ function main(): void {
     row('heap (rerun with --expose-gc)', 'skipped')
   }
 
+  // 5. extension plugin overhead (M11, plan §23): the frame cost with N
+  //    widget/list contributions — no-plugin baseline vs 10 vs 50 — and a
+  //    streaming-invalidation case (the batcher must coalesce bursts).
+  const { ExtensionLedger } = await import('../src/extension/internal/ledger.ts')
+  const { SurfaceHost } = await import('../src/extension/internal/surface-host.ts')
+  const { WidgetOutlet } = await import('../src/extension/internal/widget-outlet.ts')
+  for (const count of [0, 10, 50]) {
+    const ledger = new ExtensionLedger()
+    const host = new SurfaceHost(ledger, () => {})
+    let renders = 0
+    const outlet = new WidgetOutlet(ledger, { requestRender: () => { renders += 1 } }, 'input.widget.below')
+    for (let index = 0; index < count; index++) {
+      ledger.register('input.widget.below', { id: `w${index}`, order: index }, {
+        view: { kind: 'text', spans: [{ text: `widget ${index}` }] },
+        importance: index,
+        maxHeight: 1,
+      }, `owner-${index}`)
+    }
+    const t0 = process.hrtime.bigint()
+    for (let frame = 0; frame < 200; frame += 1) outlet.refresh(0, 120, 4)
+    const elapsed = Number(process.hrtime.bigint() - t0) / 200
+    row(`widget outlet refresh ×${count} contributions (200 frames)`, `${elapsed.toFixed(0)} ns/frame`)
+    void host
+  }
+  // Invalidation coalescing: 100 replaces in one tick → ONE flush.
+  const { InvalidateBatcher } = await import('../src/extension/internal/batcher.ts')
+  let flushCount = 0
+  const batcher = new InvalidateBatcher({ requestRender: () => { flushCount += 1 } })
+  for (let index = 0; index < 100; index += 1) batcher.invalidate()
+  await Promise.resolve()
+  row('invalidation burst coalescing (100 in one tick)', `${flushCount} flush(es)`)
+
   console.log(rows.join('\n'))
 }
 
-try {
-  main()
-} catch (error) {
+// Round-1 finding 2 (fixed in round 2 — the previous attempt silently
+// failed to write): main() is async — dynamic imports and awaited stages
+// reject ASYNCHRONOUSLY. A try/catch cannot observe a rejection; catch
+// the PROMISE explicitly so any async failure exits non-zero (never an
+// unhandled rejection with a zero exit code).
+main().catch((error) => {
   console.error(`bench: ${error instanceof Error ? error.message : String(error)}`)
   process.exit(1)
-}
+})

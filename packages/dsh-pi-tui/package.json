@@ -1,6 +1,6 @@
 {
   "name": "@xmoon76/dsh-pi-tui",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "The dsh-pi-tui bundle: a TUI surface for DeepSeek Harness profiles (dsh --profile pi-tui)",
   "license": "MIT",
   "author": "XMoon <xmoonox@gmail.com>",
@@ -32,6 +32,22 @@
     "./startup": {
       "types": "./dist/startup.d.mts",
       "default": "./dist/startup.mjs"
+    },
+    "./extensions": {
+      "types": "./dist/extensions.d.mts",
+      "default": "./dist/extensions.mjs"
+    },
+    "./extensions/advanced": {
+      "types": "./dist/extension/advanced.d.mts",
+      "default": "./dist/extension/advanced.mjs"
+    },
+    "./extensions/unstable": {
+      "types": "./dist/extension/unstable.d.mts",
+      "default": "./dist/extension/unstable.mjs"
+    },
+    "./builtins": {
+      "types": "./dist/builtins.d.mts",
+      "default": "./dist/builtins.mjs"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
@@ -133,7 +149,13 @@
     "test": "node --test test/*.test.ts test/*.test.mjs",
     "clean": "rm -rf dist",
     "smoke": "node scripts/tarball-smoke.mjs",
+    "smoke:fixture": "node scripts/extension-fixture-smoke.mjs",
     "prepack": "pnpm clean && pnpm --dir ../pi-tui clean && pnpm build:package && pnpm typecheck && pnpm test",
-    "postpack": "node scripts/tarball-smoke.mjs"
+    "postpack": "node scripts/tarball-smoke.mjs && node scripts/extension-fixture-smoke.mjs && node scripts/advanced-plugin-smoke.mjs && node scripts/phase4-plugin-smoke.mjs && node scripts/unstable-plugin-smoke.mjs && node scripts/vim-plugin-smoke.mjs && node scripts/examples-plugin-smoke.mjs",
+    "smoke:advanced": "node scripts/advanced-plugin-smoke.mjs",
+    "smoke:phase4": "node scripts/phase4-plugin-smoke.mjs",
+    "smoke:unstable": "node scripts/unstable-plugin-smoke.mjs",
+    "smoke:examples": "node scripts/examples-plugin-smoke.mjs",
+    "smoke:vim": "node scripts/vim-plugin-smoke.mjs"
   }
 }

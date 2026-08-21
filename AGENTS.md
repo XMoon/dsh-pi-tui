@@ -97,6 +97,138 @@ packages/dsh-pi-tui/   The dsh bundle (the only published package). cordis.patch
 9. **Busy-Enter preference mirrors the web's `busyEnter`** (`ui-conversation` submission policy): while the agent is running, plain Enter uses the configured mode (`queue` default | `steer`) and Ctrl+Enter ALWAYS forces queue mode (the anti-steer chord — it only differs from Enter when the configured mode is `steer`). Enter-steer sends the DRAFT ONLY (`steerAll` `onlyDraft`) — explicitly queued messages are never swept along, because already-steered input cannot be pulled back. **Local commands** (the TUI-owned set, `LOCAL_COMMANDS` in index.ts: /status, /settings, /queue, ...) always execute directly and are never steered; everything else — plain prompts AND per-skill slash commands — steers as its raw `/name` line, which the host's pre-step listener (dsh-tool-skill) resolves into the injected skill body: web parity, where a skill invocation is a plain `session.prompt` with no command-execution wire. **Skill invocations never drop the user's arguments**: a per-skill wrapper forwards `invocation.rawInput` VERBATIM as a plain user message (the user's own words stay on the original `/name args` line), and the loaded body follows as injected instructions context — rendered by the host's dsh-tool-skill pre-step listener when its `skill` tool is visible to the agent, else injected by the TUI itself as a fallback (official `<skill_content>` rendering + `skill-invocation` source), never both (double injection would duplicate the body). The queue-pane hint and Ctrl+S are unchanged (the steer verb is always advertised).
 10. **Question dialogs live in the editor SEAT, never a centered overlay.** `ask_user_question` renders inside `editorSeat` (kimi's `mountEditorReplacement` pattern): full width, above the footer, capped at 60% of the terminal height when COLLAPSED (8..24 content rows, re-derived on EVERY render by `QuestionFrame` — resize- and queue-safe). The flow is a logical capturing modal: `presentQuestion` suspends visible overlays, `settleQuestions` restores them, and overlays created during a question join the suspension graph (`closeOverlayHandle`) so reverse modal order survives. `QuestionFlow`'s budget math (required-first question row, pinned free-text input, hint) is proven against actual chrome — do not reintroduce a fixed `budget - N` body formula. **The whole page — question, detail, EVERY option with its description, the free-text row — is ONE unified scrollport** (PageUp/PageDown page it; the `↓ N more lines`/`↑ M up` marker reports the remainder), so on any screen size the question starts at the top and every description is reachable by scrolling; cursor moves (↑↓/digits/click) follow the pointer into view. An explicit expand (`e` or a fullscreen click on the marker) grows the frame toward 80% (budget up to 38) — the 60% cap is the DEFAULT, not a hard ceiling — and is a no-op when everything fits; it KEEPS the scroll position (reveals more where the user is looking), and scroll + expand reset on every tab change. The hint fit loop RESERVES `esc cancel` (it always survives; other verbs drop from the end), and empty free-text rows show a dim placeholder instead of a bare cursor block. Fullscreen clicks inside the frame route through the seat's bottom-derived geometry (`QuestionFrame.rows` + footer height) to `QuestionFlow.clickRow`. **↑↓ scroll at the scrollport EDGES** (the less/scrolloff pattern): ↑ on the FIRST row scrolls the body up until the question overview returns, ↓ on the LAST row scrolls it down when the page overflows — without edge scrolling, walking the cursor into the options made the question unreachable (the old cursor wrap stole the ↑). The wrap-around survives when the page fits. Full rationale: `temp/question-dialog.md` (gitignored; on the implementing machine).
 11. **Surface catalog: prefetch + coordinator + STANDING-SCOPE cold skills, no probe code.** The first input must eventually see the effective agent-scoped command + human-skill catalog, but opening the TUI must not create a chat session: `--session` PREFETCHES the resumed agent's catalog before mount (synchronous install during command registration); the deferred start reads the cold HUMAN SKILL catalog through the effective preset's STANDING SCOPE (`agentPresets.standingKeyFor(id)` → `skills.snapshot({cwd, scope})` — no Agent, no session, no turn). **Composition probes are REMOVED** (module + tests deleted): host-level `session/created` observers (dsh-permission-presets) write durable knob events into every fresh session, so any probe fails the zero-event gate and materializes a session artifact (200ms write-behind) — verified empirically; never reintroduce `agents.create()` for catalog discovery. Post-mount refreshes go through ONE `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; agent targets install the live surface, preset targets install standing skills only; target changes turn old skill wrappers into revalidating transitions; a standing degradation rides the applied outcome as a one-shot notice; `skills/change` bursts are coalesced by `CoalescingRefreshGate` and always re-read the CURRENT ownership). All upstream service access is isolated in `src/skill-catalog.ts` (structural types; `standingKeyFor`/`snapshot` are capability-detected — an upstream change degrades to missing commands, never a crash). Full contract: `docs/surface-catalog.md`.
+12. **Extension API is a compatibility boundary.** `@xmoon76/dsh-pi-tui/extensions` is a public plugin SDK; Host changes must preserve existing public extension semantics and third-party lifecycle behavior. See `docs/extension-api.md` and the **Extension compatibility (hard rules)** section below; never fix a STABLE extension limitation by exposing private TUI/terminal internals — lower-level access, when genuinely required, belongs to the Advanced/Unstable entries via their supported package boundary (never repository-private imports).
+13. **Advanced captures sit AFTER host flows, BEFORE the editor (Phase 2 contract).** The advanced normalized input capture stage runs in `TuiApp.handleInput` after the host's own capturing flows (questions, approvals, overlays) and reserved lifecycle keys, and before the editor and the Stable keybindings — an advanced plugin can preempt ordinary editor/panel input, but never a Host question/approval/overlay or a fatal-recovery shortcut (session safety stays Host-owned). The plan's ladder sketch places captures before host flows; the "Host 保底" section explicitly leaves the contract to the phase, and session safety wins. Do not move the stage without re-reviewing that tradeoff. The interactive overlay's focused component receives input through pi-tui's focused-component dispatch (the app listener returns undefined while an overlay is up) — that is the "focused advanced component" stage, and it DOES see Esc and other keys the global captures never see.
+14. **Advanced exclusive = sole capture consumer, explicit conflict.** A second live exclusive capture registration is an explicit error (never a load-order winner); observers still run under exclusive (they never consume); a throwing exclusive handler fails open to the Host. The registry's ordering is priority ASC then id ASC — the ledger's rule, load order never decides.
+15. **Unstable raw stage sits BEFORE everything; the fail-safe is triple-Esc (Phase 3 contract).** The unstable raw interception runs at the TOP of `TuiApp.handleInput` (before protocol filtering, questions, reserved keys — a raw capture can see/consume/rewrite ANY chunk, including Esc/Ctrl+C/CSI-u). The Host emergency fail-safe is detected FIRST (before the captures): three Esc presses within 1.5s release every raw capture and close every unstable mount, restoring Host input. The first two Esc presses pass through (a plugin surface may use Esc); the third is consumed by the Host. The fail-safe is armed only while captures are live, so ordinary Esc behavior is unchanged otherwise. A rewrite re-runs the host's own processing with the replacement AND propagates it to the focused component via the fork's listener-result `data` field — each chunk passes the interception chain at most once (the rewrite never re-enters the raw stage). The low-level surface seam never exposes TuiApp/screens/terminal.
+16. **Phase 4 broker reuses the Host's own modal infrastructure; prompts are fiber-cancelled (Phase 4 contract).** The imperative UI broker (`advanced.ui.select/confirm/input/notify/custom`) is built on the Host's OWN picker/question/notify infrastructure — never a second modal manager. Every prompt is caller-fiber-owned: the service creates an AbortController per call, registers a fiber effect that aborts it (combined with the caller's signal via `AbortSignal.any`), and the app's implementations settle the promise on abort; the surface's final dispose settles every still-open broker promise (`pendingBrokerSettles`). `ui.custom`'s factory receives ONLY the public `AdvancedCustomHost` facade (never a private TUI object) and resolves via `done(result)`/`close()`. The host-state facade (`advanced.host`) is a LIVE override surface — theme persistence stays with the user's `/settings` picker; `setTheme` for a non-built-in name resolves the palette through the theme registry in the runner (unknown names are a no-op).
+17. **Phase 5 examples prove the tiers; the vim editor uses the GETTER pattern (Phase 5 contract).** The real-plugin validation lives in `packages/dsh-pi-tui/examples/plugins/` (vim — Advanced editor SDK; questionnaire — Advanced imperative UI broker; interactive-shell — Unstable raw seam), gated by `scripts/examples-plugin-smoke.mjs` against the packed tarball. The vim example's live repaint uses `get component()` on the ExtensionEditor (the seat recompiles `editor.component` on every `host.invalidate()` — the getter returns the CURRENT buffer view; `ExtensionEditor.component` is readonly, so the getter is the clean live-repaint path, never a mutation of a readonly-typed object). The API gap process and the Stable promotion review are recorded in `examples/README.md`; the authoring decision tree lives in `docs/plugin-authoring.md`. Do not expand Stable to make a Phase-5 example work — the tier selection is the point.
+
+### Extension API tiers
+
+The extension platform has three tiers:
+
+- `extensions`: Stable, semantic, compatibility-oriented.
+- `extensions/advanced`: Experimental higher-level interactive APIs; minor releases may break.
+- `extensions/unstable`: Low-level escape hatches with no compatibility guarantee.
+
+Do not expand the Stable API solely to support a plugin that inherently
+requires low-level input, custom component, or Host-policy bypass behavior.
+Place such capabilities in Advanced or Unstable instead.
+
+All tiers must reuse the shared Cordis ownership and surface lifecycle model.
+
+All extension plugins remain standard DeepSeek Harness / Cordis plugins using
+`name`, `inject`, and `apply(ctx)`. API tiers are capability facades over the
+single `piTuiExtensions` service, not separate plugin systems or runtimes.
+
+### Extension API tier boundaries
+
+- Stable extension APIs must remain semantic and Host-controlled. They must
+  not expose raw terminal input, private Host objects, private screen/layout
+  objects, or repository-internal imports.
+- Advanced extension APIs may expose experimental interactive abstractions,
+  normalized input ownership, custom editor/component contracts, and other
+  higher-freedom capabilities.
+- Unstable extension APIs may deliberately expose low-level input,
+  Host-policy bypass, exclusive ownership, or selected implementation-coupled
+  primitives when required by the feature.
+- Advanced and Unstable do not permit arbitrary repository-private imports.
+  Low-level access must still be exposed through the supported package entry.
+- Do not expand Stable only to make a plugin work when the capability
+  naturally belongs in Advanced or Unstable.
+
+## Extension compatibility (hard rules)
+
+`@xmoon76/dsh-pi-tui/extensions` is a public plugin SDK. Changes to the
+host must preserve existing extension behavior unless the change is an
+explicitly planned breaking API change.
+
+- **Treat extension compatibility as part of every TUI change.** Before
+  changing editor input, commands, themes, settings, autocomplete,
+  keybindings, transcript/tool rendering, overlays, chrome slots, surface
+  state, focus/lifecycle handling, or root composition, check whether the
+  behavior is exposed through the extension SDK or consumed by first-party
+  builtins / the acceptance plugin.
+- **Do not bypass the public extension path for new extensible features.**
+  If a feature belongs to an existing extension point, extend/reuse that
+  extension point instead of adding a parallel host-only implementation.
+  First-party extensible behavior should use the same public composition
+  path as third-party plugins where practical.
+- **Never expose host internals to fix a plugin limitation (Stable tier).**
+  Stable public APIs must not expose `@xmoon76/pi-tui`, `TuiApp`,
+  `TuiMainScreen`, `TuiAltScreen`, raw screen/terminal objects, private
+  components, or repository-internal paths. Do not add
+  `unsafeGetTuiApp()`, `unsafeGetTerminal()`, raw-component escape
+  hatches, or equivalent APIs to the Stable surface. Add a semantic
+  capability instead; lower-level access, when genuinely required,
+  belongs to the Advanced/Unstable entries (via their supported package
+  boundary — never repository-private imports).
+- **Preserve caller-owned registration lifetime.** Plugin registrations
+  and subscriptions belong to the calling Cordis fiber. Recreating,
+  stopping, restarting, or replacing a TUI surface must not silently
+  remove registrations owned by a still-live plugin fiber. Surface-owned
+  resources such as physical overlay mounts and editor-host capabilities
+  must become inert when that surface dies.
+- **Plugin unload/HMR must leave no residue.** Every plugin-owned
+  registration, subscription, overlay lease, editor contribution,
+  renderer, keybinding, command metadata, setting, theme and autocomplete
+  provider must be cleaned up when its owner fiber unloads. Explicit
+  disposal and owner disposal must be idempotent.
+- **Host input policy stays Host-owned (Stable tier).** Terminal protocol
+  decoding (including Kitty CSI-u / modifyOtherKeys), reserved lifecycle
+  shortcuts, question/approval capture, submission policy and session
+  safety must not be delegated to third-party plugins on the Stable
+  surface. Stable public input APIs expose normalized semantic events, not
+  terminal escape sequences. (A future Unstable tier may deliberately
+  provide input interception/ownership through its own supported entry —
+  never as a Stable addition, and never through repository-private
+  imports.)
+- **Do not create parallel execution paths.** Extension bridges should add
+  metadata/composition around the host's canonical services rather than
+  reimplementing them. In particular, commands must continue through the
+  canonical commands service and submission/session safety must continue
+  through Host-owned paths.
+- **Public API changes require compatibility review.** Before changing any
+  exported type, method, capability id, slot semantics, snapshot field, or
+  lifecycle behavior under `@xmoon76/dsh-pi-tui/extensions`, determine
+  whether the change is:
+  1. backward-compatible additive;
+  2. deprecation with a migration path; or
+  3. breaking.
+  Never silently change existing semantics.
+- **Prefer additive evolution.** New optional behavior should normally be
+  introduced through a new semantic field, action, slot, registry, or
+  capability while preserving existing behavior. Do not repurpose an
+  existing field or capability to mean something different.
+- **Deprecate before removal.** Follow `docs/extension-api.md`: deprecated
+  API remains functional for the current API version and carries a
+  migration note. Removal requires the next breaking API version.
+- **Keep capability detection truthful.** When adding or removing optional
+  extension behavior, update the capability contract, public types,
+  documentation and tests together. A capability must not be advertised
+  before the corresponding behavior actually works.
+- **First-party success is not sufficient.** Any change touching an
+  extension point must include or update a third-party-style regression
+  test using only public package exports. Do not rely solely on direct
+  tests of internal registries/classes.
+- **Test dynamic lifecycle, not only startup.** Relevant extension changes
+  must cover, as applicable:
+  register-before-surface, register-after-surface, owner unload/HMR,
+  surface dispose/recreate while the owner survives, stale-handle safety,
+  fallback restoration, and dynamic invalidation without unrelated user
+  input.
+- **Protect the packed SDK.** Changes to the extension surface must keep
+  the packed declaration leak gate and external fixture tests green.
+  Fixtures must consume the packed tarball through public exports only,
+  never repository-relative source paths.
+- **Keep the contract synchronized.** Changes affecting the extension SDK
+  must update `docs/extension-api.md`, public types/capabilities, relevant
+  fixtures/tests, and the changelog together. README updates follow the
+  repository's bilingual-sync rule.
+
+When unsure whether a Host change affects extensions, assume it does and
+trace the corresponding public capability/slot/registry before editing.
 
 ## Development
 

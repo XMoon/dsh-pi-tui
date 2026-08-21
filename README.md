@@ -120,6 +120,203 @@ installed with Option B's `link:` specifier
 — a live symlink, so `pnpm build` is picked up without re-adding — while the
 `pi-tui` profile stays on the published registry package for real use.
 
+## Extensions (early, stabilizing)
+
+Since `0.2.0` the bundle ships a small, versioned extension surface so a
+third-party Cordis plugin can contribute chrome without touching the TUI
+internals. It is **early and stabilizing**: the capabilities below are the
+current set; the API version (`1`) is bumped only on breaking changes, and
+plugins must **feature-detect** capabilities instead of parsing the package
+version.
+
+All extension plugins remain standard DeepSeek Harness / Cordis plugins using
+`name`, `inject`, and `apply(ctx)` against the single `piTuiExtensions`
+service; the tiers are capability facades over that one service, not separate
+plugin systems or runtimes.
+
+The extension surface ships three tiers: a plugin imports ONLY the
+public entry — never the stable entry's internals (`TuiApp`,
+`TuiMainScreen`, `TuiAltScreen`) nor repository-relative paths.
+
+| Tier | Entry | Contract |
+|---|---|---|
+| Stable | `@xmoon76/dsh-pi-tui/extensions` | compatibility-oriented; additive-first; existing semantics never silently change; removal requires a planned breaking change |
+| Advanced | `@xmoon76/dsh-pi-tui/extensions/advanced` | experimental; minor releases may break; a migration note is required; no long-term shims |
+| Unstable | `@xmoon76/dsh-pi-tui/extensions/unstable` | NO compatibility guarantee; implementation may change anytime |
+
+All tiers reuse the SAME shared extension runtime: caller-fiber ownership,
+surface lifecycle, invalidation, capability discovery. Do not fork a second
+ownership/lifecycle model per tier. The tiers have grown since Phase 1:
+
+- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2 + Phase 4): normalized
+  input capture, focused interactive surfaces (interactive managed
+  overlays), advanced editor control, the imperative UI broker
+  (select/confirm/input/notify), custom interactive UI and the host-state
+  facade (theme/title/working/tools-expanded) — still Host-mediated,
+  never raw terminal bytes. Author guide: `docs/extension-advanced.md`;
+  Pi capability reference: `docs/extension-capability-matrix.md`.
+- **Unstable** (`UNSTABLE_API_LEVEL = 1`, Phase 3): raw input
+  interception (observe/consume/rewrite, exclusive raw ownership), the
+  Host emergency fail-safe (triple-Esc), and a selected low-level surface
+  seam — NO compatibility guarantee; a broken plugin can disrupt Host
+  behavior. Author guide: `docs/extension-unstable.md`.
+- **Real-plugin validation (Phase 5):** the tier selection is proven by
+  real consumers in `packages/dsh-pi-tui/examples/plugins/` — a
+  production-class vim modal editor (Advanced editor SDK), a
+  questionnaire form (Advanced imperative UI broker) and an interactive
+  shell (Unstable raw seam). The "which tier should I use?" decision
+  tree: `docs/plugin-authoring.md`.
+
+A plugin imports only the public entry:
+
+```ts
+import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '@xmoon76/dsh-pi-tui/extensions'
+
+export const name = 'my-plugin'
+export const inject = ['tuiStartup', PI_TUI_EXTENSIONS_SERVICE]
+
+export function apply(ctx: Context): void {
+  const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService
+  if (!service.api().capabilities.has('slot.chrome.header.badge')) return
+  service.register<{ text: string; tone?: 'info' | 'warning' | 'error' | 'success' }>(
+    'chrome.header.badge',
+    { id: 'my-badge', order: 100, description: 'A header badge from my plugin.' },
+    { text: 'my-badge', tone: 'info' },
+  )
+}
+```
+
+Current extension points (v1):
+
+| Slot | Semantics | Contribution |
+|---|---|---|
+| `chrome.header.badge` | list | a short `[badge]` after the host title |
+| `input.dock.item` | list | a dock line above the todo panel |
+| `chrome.footer.status` | list | a footer segment (host owns width/truncation) |
+| `input.widget.above` / `input.widget.below` | list | a bounded widget around the editor (M4 component kit) |
+
+Contributions are **plain data**, not render functions: a plugin supplies
+`HeaderBadge` / `DockItem` / `FooterSegment` / `InputWidget` values (text +
+semantic tone spans, or a structured `ExtensionView` tree for widgets) and
+the host owns rendering, ANSI compilation, width budgets and truncation.
+There is deliberately no `render(context)` callback in v1 — plugins never
+hold a rendering context, so a contribution can never capture or mutate
+host internals.
+
+Since `0.2.0` the widget slots (`input.widget.above` / `input.widget.below`)
+accept a bounded component kit: `ExtensionView` is a structured view tree
+(`text` / `markdown` / `spacer` / `stack` / `frame` / `rows` views with
+semantic style tokens) that the host compiles into private components. A
+plugin can add helper rows above or below the editor — for example a status
+widget or a quick-reference line — without touching the root layout, the
+editor, or focus. The host owns the row budgets: under height pressure the
+lowest-importance widgets collapse first, and the editor always survives.
+
+```ts
+service.register<InputWidget>('input.widget.below', {
+  id: 'my-widget',
+  order: 100,
+}, {
+  view: {
+    kind: 'text',
+    spans: [{ text: 'my-plugin ready', tone: 'success' }],
+  },
+})
+```
+
+Since M5 the extension surface also covers registries (plan §10):
+
+- `registerCommand(contribution)` — slash-command OWNERSHIP metadata
+  (`execution: 'local' | 'submission'`): a plugin-declared local command
+  always executes directly (never steered by the busy-Enter preference);
+  a submission command flows through the session policy. Actual execution
+  stays in the host's commands service; `/name args...` keeps
+  `rawInput` verbatim. Name conflicts are reported, never guessed.
+- `registerTheme(contribution)` — a named semantic palette selectable
+  from the /settings theme picker; the owner's unload falls back to the
+  built-in palette (a selected plugin theme never dangles).
+- `registerSetting(contribution)` — a settings row appended to the
+  /settings panel (label + current value + choices + optional rejection);
+  the host owns the panel.
+- `registerAutocomplete(contribution)` — an autocomplete provider
+  consulted after the host's own provider returns null (deterministic
+  order, per-provider isolation, latest-only commit).
+- `registerKeybinding(contribution)` — normalized-key → semantic-action
+  binding, routed by the host's InputRouter (M6). A plugin declares a key
+  with the public `NormalizedKey` shape (key + ctrl/alt/shift/super) and
+  a semantic action from the host's list (`submit-draft`, `queue-draft`,
+  `steer-draft`, `cancel-activity`, `open-search`, `toggle-fullscreen`,
+  `cycle-permission`). The host normalizes ALL terminal input (Kitty
+  CSI-u, modifyOtherKeys, legacy sequences) — a plugin never sees raw
+  escape data. Reserved host lifecycle keys (Ctrl+C/D/S/F/O/T/G/J,
+  Ctrl+Enter, Enter, Esc) cannot be claimed; plain printable keys never
+  fire a binding (typing always wins); bindings are non-capturing and
+  fire LAST in the precedence ladder (after questions, approvals,
+  overlays and the editor). The action executes through the host's own
+  paths — submission/session safety is never bypassed.
+- `registerMessageRenderer(contribution)` — a TRANSCRIPT message renderer
+  (M7, chain slot): receives a semantic `MessagePresentationSnapshot`
+  (immutable; never the mutable message or the container) and returns an
+  `ExtensionView` or `undefined` (abdicate → the next renderer → the host
+  fallback). Kind-scoped renderers apply to one message kind.
+- `registerToolRenderer(contribution)` — a TOOL card renderer (M7, keyed
+  slot): presents the card for ONE tool name from a
+  `ToolPresentationSnapshot` (callId, toolName, status, arguments,
+  result, expanded); the winner (lowest priority) abdicates to the next
+  renderer, then the host fallback. A priority tie on the same tool name
+  is an explicit error.
+  Renderers never stall the transcript: a throwing renderer is isolated
+  and the chain continues, and the message cache embeds the renderer
+  identity + registry revision, so an HMR/unload rebuilds exactly the
+  affected components.
+- `showOverlay(view, options)` — a MANAGED overlay lease (M8): the plugin
+  supplies an `ExtensionView` + sizing hints; the host mounts it through
+  its overlay broker (modal stacking, focus, fullscreen migration). The
+  returned lease is generation-scoped (the surface's final dispose closes
+  every still-owned lease), close() is idempotent, and hide()/show()
+  toggle visibility without closing. A plugin can never mount a raw
+  component or steal focus — the host owns the terminal and the overlay
+  stack.
+The [extension API v1 author guide](docs/extension-api.md) records the
+import rules, the full surface table, the lifecycle/render contracts, the
+M11 deprecation policy and the stability contract.
+
+The M10 acceptance fixture (plan §15): the repo ships a vim-mode fixture
+(`test/fixtures/vim-plugin/`) that validates the editor-extension seam — the
+packed public SDK is consumable by a third-party Cordis plugin, its
+replacement editor receives SEMANTIC `EditorInputEvent`s (never raw terminal
+bytes), and editor `create()`/`dispose()` work — importing ONLY
+`@xmoon76/dsh-pi-tui/extensions`. It is NOT a production Vim and NOT a
+Stable-API completeness proof: modal-mode behavior (insert/normal) is not
+part of the Stable contract, and the other public surfaces (commands,
+themes, settings, autocomplete, keybindings, renderers, overlays, widgets)
+have their own dedicated tests. Its CI gate forbids `@xmoon76/pi-tui`,
+`src/tui-app` and repository-relative internal paths: if a STABLE plugin
+ever needs a private import, the SDK is missing a capability (there is no
+`unsafeGetTuiApp()` escape hatch).
+
+- `registerEditor(contribution)` — the EDITOR SDK (M9, plan §14):
+  single-winner by priority (a tie is an explicit error); the winner
+  occupies the editor seat through the host's ATOMIC handoff (create →
+  transfer draft/cursor → mount → focus → dispose old). A creation throw
+  keeps the current editor working; winner unload restores the next
+  winner / the host default editor WITH the draft preserved. The plugin
+  editor receives an `EditorHost` (surfaceId, generation, getSnapshot,
+  replaceText, dispatch of semantic actions submit/queue-submit/steer/
+  open-external-editor, subscribe, invalidate) — but the host still owns
+  busy-Enter, Ctrl+Enter, local-command classification, paste protection,
+  approval/question capture, session guard/lock, external editor and
+  exit: a plugin editor can never bypass those.
+
+Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
+fiber unloads (HMR, disable), regular and fullscreen both refresh, and
+`handle.invalidate()/replace()` re-render through the active screen. The
+`@xmoon76/dsh-pi-tui/builtins` entry is the Loader-only first-party
+contributor (version badge, turn/step counters, todo-summary dock item) —
+not a stable third-party SDK. Raw terminal access, pre-host input
+interception and full input ownership are NOT part of the Stable tier (see
+the Advanced/Unstable roadmap).
+
 ## Slash commands (selection)
 
 - `/sessions [query]` — open the session picker: search-as-you-type over

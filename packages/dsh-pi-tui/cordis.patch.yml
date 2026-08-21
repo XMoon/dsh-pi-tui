@@ -11,9 +11,22 @@
     - id: tui-startup
       name: '@xmoon76/dsh-pi-tui/startup'
 
+    # The extension platform (M3/E): the host provides the piTuiExtensions
+    # service (third-party plugins inject it), the builtins row registers
+    # the first-party chrome contributions through the SAME public API, and
+    # the runner row attaches the surface host over the service's ledger.
+    # All three gate on tuiStartup, so `--help` mounts none of them.
+    - id: pi-tui-extension-host
+      name: '@xmoon76/dsh-pi-tui/extensions'
+      inject: [tuiStartup]
+
+    - id: pi-tui-builtins
+      name: '@xmoon76/dsh-pi-tui/builtins'
+      inject: [tuiStartup, piTuiExtensions]
+
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
-      inject: [tuiStartup]
+      inject: [tuiStartup, piTuiExtensions]
       config:
         sessionId: ''
 

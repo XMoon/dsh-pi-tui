@@ -512,6 +512,67 @@ describe("Editor component", () => {
 			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 });
 		});
 
+		it("sets and clamps the cursor without firing onChange", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let changes = 0;
+			editor.onChange = () => { changes++; };
+			editor.setText("ab\n界‍👩x");
+			changes = 0;
+			editor.setCursor({ line: 1, col: 1 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
+			assert.strictEqual(changes, 0);
+			editor.setCursor({ line: 99, col: 99 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: "界‍👩x".length });
+		});
+
+		it("stages text and cursor with normalized line endings and tabs", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setTextAndCursor("a\r\nb\tc", { line: 1, col: 2 });
+			assert.strictEqual(editor.getText(), "a\nb    c");
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 2 });
+		});
+
+		it("stages text and cursor without resetting transient editor state", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let changes = 0;
+			editor.onChange = () => { changes++; };
+			editor.addToHistory("older");
+			editor.addToHistory("newer");
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "newer");
+			const changesBeforeStage = changes;
+			const staged = "one\n界👩‍💻x";
+			editor.setTextAndCursor(staged, { line: 1, col: "界👩‍💻".length });
+			assert.strictEqual(editor.getText(), staged);
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: "界👩‍💻".length });
+			assert.strictEqual(changes, changesBeforeStage, "staging must not fire onChange");
+			// The history index remains live even though the staged text is now the
+			// visible draft; a subsequent Up continues from the current entry.
+			editor.setTextAndCursor("draft", { line: 0, col: 0 });
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "older", "staging must preserve history navigation state");
+
+			// A valid large-paste marker proves that staging does not clear the
+			// paste registry, and the second undo proves staging added no snapshot.
+			let submitted = "";
+			editor.onSubmit = (text) => { submitted = text; };
+			editor.setText("");
+			const paste = Array.from({ length: 20 }, (_, index) => `alpha${index}`).join("\n");
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			const marker = editor.getText();
+			editor.setTextAndCursor(marker, { line: 0, col: marker.length });
+			editor.handleInput("\x7f");
+			assert.strictEqual(editor.getText(), "");
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), marker, "staging must preserve paste-marker state");
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), "", "staging must not add an undo snapshot");
+			editor.setTextAndCursor(marker, { line: 0, col: marker.length });
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, marker, "staging must preserve paste-marker text for the host submit path");
+		});
+
 		it("returns lines as a defensive copy", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			editor.setText("a\nb");

@@ -27,6 +27,7 @@ import {
   TuiAltScreen,
   TuiMainScreen,
   VStack,
+  getKeybindings,
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
@@ -79,6 +80,18 @@ import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import type { SurfaceHost } from './extension/internal/surface-host.ts'
+import { InputRouter } from './input-router.ts'
+import { RESERVED_HOST_KEYS } from './keybinding-registry.ts'
+import type { RendererRegistry } from './renderer-registry.ts'
+import { OverlayBroker } from './overlay-broker.ts'
+import { EditorSeatHolder } from './editor-seat-holder.ts'
+import type { EditorRegistry } from './editor-registry.ts'
+import { compileView } from './extension/internal/component-compiler.ts'
+import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
+import { UnstableMountedComponentAdapter } from './extension/internal/unstable-mount.ts'
+import { normalizeInputEvent } from './extension/internal/input-events.ts'
+import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
@@ -524,6 +537,23 @@ export interface TuiAppEventsBase {
    * draft lands via {@link TuiApp.setDraft}. Optional.
    */
   onDequeue?: () => void
+  /**
+   * M6: a plugin keybinding fired (the InputRouter mapped a normalized
+   * key to a SEMANTIC action). The host executes the action through its
+   * own paths — the plugin never receives raw input or a live object.
+   * Optional.
+   */
+  onExtensionAction?: (action: import('./extension/public-types.ts').TuiAction) => void
+  /** M11: extension callback health transitions from the editor seat. */
+  onExtensionError?: (record: { slot: string; id: string; error: unknown }) => void
+  onExtensionRecovered?: (record: { slot: string; id: string }) => void
+  /**
+   * Phase 4: the advanced host-state setTheme for a NON-built-in theme
+   * name (a registered plugin theme). The runner resolves the palette
+   * through the theme registry and applies it; unknown names are a no-op.
+   * Optional.
+   */
+  onAdvancedSetTheme?: (name: string) => void
 }
 
 /**
@@ -641,6 +671,8 @@ export interface PickerOptions {
   maxHeight?: number
   /** Render the key-hint footer line. */
   showHint?: boolean
+  /** Phase 4: abort the picker (closes it and fires onCancel). */
+  signal?: AbortSignal
 }
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
@@ -667,6 +699,10 @@ export interface PickerHandle {
   close(): void
   /** Replace the rows while the picker is open; the active query re-applies. */
   setItems(items: readonly PickerItem[]): void
+  /** Host-internal: drop the abort listener (the imperative select
+   * broker's settle path — a settled promise must not retain the
+   * listener on the caller's signal). */
+  _removeAbortListener?(): void
 }
 
 /** Live control of an open task browser (rows carry status/startedAt). */
@@ -734,6 +770,78 @@ export interface TuiAppOptions {
   present?: ToolPresenter
   /** Working-indicator frame interval in ms; injectable so tests stay fast. */
   workingIntervalMs?: number
+  /**
+   * The extension surface host (M2). When attached, the header/dock/footer
+   * renders merge the extension outlets' content (header badges, dock
+   * items, footer segments) into the host chrome. Optional — the surface
+   * works identically without extensions.
+   */
+  extensionHost?: SurfaceHost
+  /**
+   * M6: the plugin keybinding resolver (wired by the runner from the M5
+   * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
+   * already decoded raw terminal input) → a plugin SEMANTIC action —
+   * plugins never see raw terminal data. Optional — the surface works
+   * identically without it.
+   */
+  pluginActionFor?: (key: import('./extension/public-types.ts').NormalizedKey) => import('./extension/public-types.ts').TuiAction | undefined
+  /** M6: resolves the contribution id for keybinding health diagnostics. */
+  pluginActionIdFor?: (key: import('./extension/public-types.ts').NormalizedKey) => string | undefined
+  /**
+   * M7: the transcript/tool renderer registry (wired by the runner).
+   * When present, tool cards and (optionally) messages may be rendered by
+   * plugins; the host fallback stays when no renderer produces a view or
+   * a renderer throws. Optional — the surface works identically without
+   * it.
+   */
+  renderers?: RendererRegistry
+  /**
+   * M9: the editor registry (single-winner). When present, a plugin
+   * editor may occupy the editor seat through the atomic handoff; the
+   * host default editor is the fallback. Optional — the surface works
+   * identically without it.
+   */
+  editorRegistry?: EditorRegistry
+  /**
+   * Phase 2: the ADVANCED normalized input capture route (wired by the
+   * runner from the service's advanced registry). Consulted by the host
+   * input path AFTER its own capturing flows (questions, approvals,
+   * overlays) and reserved lifecycle keys, and BEFORE the editor and the
+   * Stable keybindings — an advanced plugin can preempt ordinary
+   * editor/panel input, never a Host question/approval/overlay or a
+   * fatal-recovery shortcut. Optional — the surface works identically
+   * without it.
+   */
+  advancedInputRoute?: (data: string) => 'consumed' | 'passed'
+  /**
+   * Phase 3: the UNSTABLE raw input route (wired by the runner from the
+   * service's unstable registry). Consulted by the host input path BEFORE
+   * terminal protocol decoding — a raw capture can see, consume or rewrite
+   * ANY chunk. The returned outcome is applied exactly once (a rewrite
+   * goes straight to the host decoder, never re-entering the chain).
+   * Optional — the surface works identically without it.
+   */
+  unstableInputRoute?: (data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult
+  /**
+   * Phase 3: whether any raw capture is live (the host arms the emergency
+   * fail-safe only while captures exist, so the fail-safe never changes
+   * ordinary Esc behavior). Optional.
+   */
+  unstableInputsLive?: () => boolean
+  /**
+   * Phase 3: the raw capture registry revision (the fail-safe tracker
+   * stamps each Esc press with it — a release/re-register bumps the
+   * revision, so presses from a previous capture session never count
+   * toward a new session's triple-Esc). Optional.
+   */
+  unstableInputsRevision?: () => number
+  /**
+   * Phase 3: the Host emergency fail-safe release (wired by the runner to
+   * the service's `_unstableEmergencyRelease`). Triggered by the
+   * host-owned triple-Esc pattern BEFORE the captures are consulted — it
+   * cannot be rewritten or consumed by a capture. Optional.
+   */
+  unstableFailSafeRelease?: () => void
 }
 
 /**
@@ -742,6 +850,32 @@ export interface TuiAppOptions {
  * overlay; input routing and rendering decisions live here so they are
  * testable without a real terminal.
  */
+/** Parse a tool args/result string as JSON for the semantic snapshot
+ * (best-effort: an unparsable raw string is passed through as-is). */
+function safeParseArgs(raw: string): unknown {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+/** Deep-freeze a parsed JSON value (round-1 finding 4: the public
+ * snapshot contract is deeply immutable — a renderer must never mutate
+ * the arguments/result it received, and a mutation must never leak into
+ * a later renderer in the same chain). */
+function deepFreeze(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) return value
+  if (Array.isArray(value)) {
+    for (const item of value) deepFreeze(item)
+    return Object.freeze(value)
+  }
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    deepFreeze((value as Record<string, unknown>)[key])
+  }
+  return Object.freeze(value)
+}
+
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
@@ -765,12 +899,31 @@ interface MessageComponentEntry {
   meta?: unknown
   members?: unknown
   error?: { name: string; code: string }
+  /** M7: the renderer that produced this component, when one did (the
+   * cache identity — plan §12.1: a renderer HMR/unload must rebuild). */
+  rendererId?: string
+  /** M7: the renderer registry revision at build time. */
+  rendererRevision?: number
 }
 
 export class TuiApp {
   private readonly terminal: Terminal
+  /** The extension surface host (M2), when the runner attached one. */
+  private readonly extensionHost: SurfaceHost | undefined
   private readonly tui: TuiMainScreen
   private readonly editor: Editor
+  /**
+   * The surface GENERATION: incremented only when a genuinely NEW surface
+   * attaches (a fresh TuiApp / SurfaceHost), never by start/stop, fullscreen
+   * toggles, or the external-editor stop/start round-trip. Async work that
+   * outlives the surface (extension callbacks, pending promises) captures
+   * the generation at dispatch time and becomes a benign no-op when it no
+   * longer matches — the stale-generation contract (M0).
+   */
+  private generation = 1
+  /** Latched by dispose(): after the final teardown, interactive
+   * capabilities fail benignly instead of touching a dead terminal. */
+  private disposed = false
   /**
    * The editor's SEAT (kimi's editorContainer): holds the editor normally,
    * the QuestionFrame while a question flow is active — so the dialog
@@ -781,6 +934,9 @@ export class TuiApp {
   private readonly header: Text
   private readonly messagesView: Container
   private readonly footer: Text
+  /** The M4 widget zones (extension widgets around the editor seat). */
+  private readonly widgetsAbove: Text
+  private readonly widgetsBelow: Text
   private readonly events: TuiAppEvents
   /** Prompts awaiting the user's decision; one is shown at a time. */
   private readonly approvalQueue: PendingApproval[] = []
@@ -834,6 +990,25 @@ export class TuiApp {
   /** Whether any background task is running/stopping. */
   private tasksActive = false
 
+  /**
+   * The seat currently owning keyboard focus, derived from the ACTUAL
+   * focused capturing surface (follow-up P1): any capturing overlay — not
+   * just question/approval — reports 'overlay' while it owns the screen.
+   * `none` means nothing captures input (a stopped surface or a focus
+   * that belongs to no seat).
+   */
+  private focusSeat: 'editor' | 'overlay' | 'editor-panel' | 'none' = 'editor'
+  /** The seat value the snapshot last published (mutation guard for the
+   * microtask-coalesced publish below). */
+  private publishedFocusSeat: 'editor' | 'overlay' | 'editor-panel' | 'none' = 'editor'
+  /** A focus-seat change publishes through one coalesced microtask so a
+   * burst of mount/close calls in one tick delivers ONE snapshot update. */
+  private focusSeatPublishScheduled = false
+  /** Re-entrancy guard for syncSurfaceGeometry (review finding 4): a
+   * resize callback can fire while a width change is already being
+   * applied; the nested call is dropped. */
+  private syncingSurfaceGeometry = false
+
   /** Whether the Ctrl+O expansion master switch is on. */
   isToolOutputExpanded(): boolean {
     return this.toolOutputExpanded
@@ -863,11 +1038,46 @@ export class TuiApp {
   private searchOverlay: OverlayHandle | undefined
   /** The search input component, while one is open (for match counts). */
   private searchComponent: TranscriptSearchComponent | undefined
-  /** Overlay handles currently mounted on the active screen, for mode switches. */
-  private readonly overlayHandles = new Set<OverlayHandle>()
-  /** Capturing overlays hidden beneath a newer one (modal stacking), keyed by
-   * the newer overlay's handle; restored when it hides. */
-  private readonly overlayDependents = new Map<OverlayHandle, Set<OverlayHandle>>()
+  /** M8: the overlay stacking graph (extracted from TuiApp — plan §13).
+   * The broker owns the modal-stacking + question-suspension rules; the
+   * host keeps the physical screen mounts. */
+  private readonly overlayBroker: OverlayBroker
+  /** M8: still-owned plugin overlay leases (closed by the final dispose —
+   * plan §13.3: leases are generation-scoped). */
+  private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle>()
+  /** Phase 2: still-owned ADVANCED interactive overlay leases (closed by
+   * the final dispose; re-mounted across fullscreen screen swaps). */
+  private readonly advancedOverlayLeases = new Set<import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void }>()
+  /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
+   * resize so the plugin's render(ctx) sees the new geometry). */
+  private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
+  /** Phase 2: the ADVANCED normalized input capture route (wired by the
+   * runner; consulted after host capturing flows + reserved keys). */
+  private readonly advancedInputRoute: ((data: string) => 'consumed' | 'passed') | undefined
+  /** Phase 3: the UNSTABLE raw input route (wired by the runner; consulted
+   * BEFORE terminal protocol decoding). */
+  private readonly unstableInputRoute: ((data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult) | undefined
+  /** Phase 3: whether any raw capture is live (arms the fail-safe). */
+  private readonly unstableInputsLive: (() => boolean) | undefined
+  /** Phase 3: the raw capture registry revision (stale-press invalidation
+   * for the fail-safe tracker). */
+  private readonly unstableInputsRevision: (() => number) | undefined
+  /** Phase 3: the Host emergency fail-safe release (triple-Esc). */
+  private readonly unstableFailSafeRelease: (() => void) | undefined
+  /** Phase 3: the fail-safe Esc-press stamps (timestamp + capture-session
+   * revision; triple-Esc within the window at the SAME revision triggers
+   * the release). */
+  private unstableEscPresses: { at: number; revision: number }[] = []
+  /** Phase 3: still-owned UNSTABLE mount leases (closed by the final
+   * dispose; re-mounted across fullscreen screen swaps). */
+  private readonly unstableMountLeases = new Set<import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void }>()
+  /** Phase 3: the live UNSTABLE mount adapters (dropped on remount). */
+  private readonly unstableMountAdapters = new Set<import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter>()
+  /** Phase 3: the UNSTABLE mount lease id counter. */
+  private unstableMountCounter = 0
+  // M8: the overlay graph (handles/dependents) lives in the broker — the
+  // host reads it through the accessors below. The old private sets were
+  // removed; every use now goes through this.overlayBroker.
   /** Footer state. */
   private status: StatusData = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
   /** Plan-mode badge state; appended to the header and footer when active. */
@@ -896,6 +1106,33 @@ export class TuiApp {
   private readonly workspaceRoot: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
   private readonly present: ToolPresenter | undefined
+  /**
+   * M6: the plugin keybinding resolver. Maps a RAW input sequence to a
+   * plugin SEMANTIC action via the InputRouter's normalization — a plugin
+   * never sees raw terminal data, only the normalized key → action. Wired
+   * by the runner from the M5 KeybindingRegistry; undefined = no plugin
+   * keybindings (the surface runs exactly as before).
+   */
+  private readonly pluginActionFor: ((key: import('./extension/public-types.ts').NormalizedKey) => import('./extension/public-types.ts').TuiAction | undefined) | undefined
+  private readonly pluginActionIdFor: ((key: import('./extension/public-types.ts').NormalizedKey) => string | undefined) | undefined
+  /** M6: the host-owned input precedence router (normalization + rules). */
+  private readonly inputRouter: InputRouter
+  /** M7: the transcript/tool renderer registry (optional). */
+  private readonly renderers: RendererRegistry | undefined
+  /** M9: the editor registry (optional). */
+  private readonly editorRegistry: EditorRegistry | undefined
+  /**
+   * P1-1: the renderer registry revision observed by the LAST render pass.
+   * When the registry revision moves (a renderer registered/unloaded —
+   * HMR, dynamic registration), the transcript message cache MUST be
+   * rebuilt on the next render: the cache identity embeds the revision
+   * (componentForMessage), but a plain repaint reuses the old cached
+   * components. The check is O(1) per render (revisionOf()), and the
+   * rebuild only re-runs renderers for entries whose identity changed.
+   */
+  private lastRendererRevision = -1
+  /** M9: the editor seat holder (the atomic handoff + current occupant). */
+  private readonly editorSeatHolder: EditorSeatHolder
   /** The busy indicator row directly above the editor border; idle renders nothing. */
   private readonly working: WorkingIndicator
   /** The fullscreen transcript ScrollView, for click hit-testing offsets. */
@@ -931,13 +1168,60 @@ export class TuiApp {
     if (events.openExternalEditor !== undefined && events.runOwned === undefined) {
       throw new Error('openExternalEditor requires runOwned (the owned-task entry — AGENTS.md)')
     }
-    this.terminal = terminal
+    // Resize-aware terminal wrapper (follow-up P1): the fork consumes the
+    // terminal's resize callback INTERNALLY (its own requestRender), so
+    // `app.requestRender` — where syncSurfaceGeometry lives — never fires
+    // on a resize. The wrapper captures the onResize hook at start() and
+    // funnels it through the app's geometry mirror, so a width change
+    // re-bakes the width-budgeted outlets (dock/footer) and re-merges the
+    // chrome immediately instead of keeping the old segment set baked at
+    // the stale width.
+    //
+    // Receiver fidelity (review finding 3): callable members are bound to
+    // the TARGET — `this.terminal` consumers (both TuiMainScreen and
+    // TuiAltScreen) and any captured-method callback must observe the
+    // implementation's own `this`, never the Proxy receiver. Getter-only
+    // members (columns/rows) read through the target.
+    const resizeAware: Terminal = new Proxy(terminal, {
+      get: (target, prop, receiver) => {
+        if (prop === 'start') {
+          return (onInput: (data: string) => void, onResize: () => void): void => {
+            target.start(onInput, () => {
+              // The app may be disposed before the terminal stops.
+              if (!this.disposed) this.syncSurfaceGeometry()
+              onResize()
+            })
+          }
+        }
+        const value = Reflect.get(target, prop, receiver)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    this.terminal = resizeAware
     this.events = events
+    this.extensionHost = options.extensionHost
+    // F-17: an invalidation batch re-bakes the outlets; the host then
+    // re-merges its chrome rows so the new content reaches the screen.
+    this.extensionHost?.setChromeRefresher(() => this.refreshChrome())
     this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS
     this.workspaceRoot = options.workspaceRoot
     this.present = options.present
+    this.pluginActionFor = options.pluginActionFor
+    this.pluginActionIdFor = options.pluginActionIdFor
+    this.advancedInputRoute = options.advancedInputRoute
+    this.unstableInputRoute = options.unstableInputRoute
+    this.unstableInputsLive = options.unstableInputsLive
+    this.unstableInputsRevision = options.unstableInputsRevision
+    this.unstableFailSafeRelease = options.unstableFailSafeRelease
+    this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
+    this.renderers = options.renderers
+    this.editorRegistry = options.editorRegistry
+    this.overlayBroker = new OverlayBroker({
+      question: () => this.activeQuestions,
+      setFocusSeat: (seat) => this.setFocusSeat(seat),
+    })
 
-    this.tui = new TuiMainScreen(terminal)
+    this.tui = new TuiMainScreen(resizeAware)
     this.editor = new Editor(this.tui, editorTheme)
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
@@ -952,7 +1236,76 @@ export class TuiApp {
       // editor is empty; the editor mutates without going through
       // setStatus, so keep the badge truthful while tasks are active.
       if (this.tasksActive) this.renderFooter()
+      // P1-11: every HOST-driven editor mutation notifies the seat
+      // holder's subscribers (the fork Editor's own typing/editing flows
+      // through onChange — the plugin subscription protocol must observe
+      // host-driven draft/cursor changes).
+      this.editorSeatHolder.notifyChanged()
     }
+    // M9: the editor seat holder — the atomic handoff + current occupant.
+    // The host default editor is the adapter source; a plugin editor
+    // (single-winner from the editor registry) can replace it.
+    this.editorSeatHolder = new EditorSeatHolder({
+      hostAdapter: () => this.hostEditorAdapter(),
+      surfaceId: `tui-${Date.now().toString(36)}`,
+      generation: () => this.generation,
+      // Round-2 P1: a plugin editor's invalidate() recompiles its view and
+      // swaps the child in the seat (the M4 compiler caches at
+      // construction — a live plugin view needs a recompile to repaint).
+      viewSwap: (component) => {
+        if (this.disposed) return
+        this.editorSeat.clear()
+        this.editorSeat.addChild(component)
+        this.requestRender()
+      },
+      actionSink: (action) => {
+        // The sink routes through the HOST-OWNED paths (round-1 finding
+        // 2): submit/queue-submit go through submitDraft (history +
+        // notify clear + seat draft clear, exactly like a normal Enter),
+        // steer through the host steer, external editor through the
+        // owned entry. The plugin never bypasses submission/session
+        // safety.
+        switch (action) {
+          case 'submit': {
+            const text = this.seatEditor().getText()
+            if (text.trim() === '') return false
+            this.submitDraft(false)
+            return true
+          }
+          case 'queue-submit': {
+            const text = this.seatEditor().getText()
+            if (text.trim() === '') return false
+            this.submitDraft(true)
+            return true
+          }
+          case 'steer': {
+            const text = this.seatEditor().getText()
+            this.seatEditor().setText('')
+            this.editorSeatHolder.notifyChanged()
+            this.events.onSteer?.(text)
+            return true
+          }
+          case 'open-external-editor': {
+            if (this.events.openExternalEditor === undefined || this.externalEditorInFlight) return false
+            this.events.runOwned('external editor', () => this.launchExternalEditor(), {
+              onError: (error: unknown) => {
+                this.notify(`external editor failed: ${safeErrorMessage(error)}`, 'error')
+              },
+            })
+            return true
+          }
+        }
+      },
+      notifyError: (message) => this.notify(`editor failed: ${message}`, 'error'),
+      recordError: (id, message) => {
+        try { this.events.onExtensionError?.({ slot: 'editor', id, error: message }) } catch {}
+      },
+      clearError: (id) => {
+        try { this.events.onExtensionRecovered?.({ slot: 'editor', id }) } catch {}
+      },
+    })
+    // M9: the editor seat holder's host adapter + view swap were built
+    // above; the seat child mounts later (editorSeat is created below).
     this.header = new Text('🐋  dsh-pi-tui', 0, 0)
     this.messagesView = new Container()
     this.dock = new Text('', 0, 0)
@@ -967,11 +1320,23 @@ export class TuiApp {
       ? {}
       : { intervalMs: options.workingIntervalMs })
     this.footer = new Text('', 0, 0)
+    // The M4 widget zones: bounded rows above and below the editor seat,
+    // fed by the extension widget outlets. Host-owned Text components — a
+    // plugin can never touch the editor seat or the root layout.
+    this.widgetsAbove = new Text('', 0, 0)
+    this.widgetsBelow = new Text('', 0, 0)
     this.editorSeat = new Container()
     this.editorSeat.addChild(this.editor)
+    // If a plugin editor already won the registry (registration before
+    // the surface), hand off immediately. MUST run after editorSeat
+    // exists — the handoff re-mounts the seat child (mountSeatChild
+    // clears/refills this.editorSeat).
+    this.reconcileEditorWinner()
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
-    // statusContainer).
+    // statusContainer). The widget zones sit directly around the editor
+    // seat: above between the working row and the seat, below between the
+    // seat and the footer.
     this.tui.addChild(this.header)
     this.tui.addChild(this.messagesView)
     this.tui.addChild(this.dock)
@@ -979,7 +1344,9 @@ export class TuiApp {
     this.tui.addChild(this.goalLine)
     this.tui.addChild(this.queuePane)
     this.tui.addChild(this.working)
+    this.tui.addChild(this.widgetsAbove)
     this.tui.addChild(this.editorSeat)
+    this.tui.addChild(this.widgetsBelow)
     this.tui.addChild(this.footer)
     this.tui.setFocus(this.editor)
     // Input routes through routeInput (see its doc): the autocomplete
@@ -1034,8 +1401,261 @@ export class TuiApp {
     this.fullscreen = undefined
   }
 
+  /**
+   * FINAL surface disposal: the last lifecycle boundary (M0). Idempotent;
+   * detaches the surface so old-generation callbacks become benign no-ops;
+   * cancels every still-owned interactive resource (question flows, notify
+   * timer, overlay graph, terminal-theme tracking). An ordinary `stop()`
+   * (external-editor round-trip, mode switches) is NOT disposal — the
+   * surface generation survives stop/start, so extension registrations stay
+   * valid across the round-trip.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    // Settle every pending approval BEFORE stop(): settling hides overlay
+    // handles (hideCursor), and stop() ends with showCursor — the reverse
+    // order would leave the user's cursor hidden after exit. Iterate a COPY:
+    // settleApproval splices the item out of approvalQueue, so walking the
+    // live array would skip every other queued prompt and leave its promise
+    // hanging forever (the round-2 review catch — same defect class the
+    // cancelQuestionFlows sibling already avoided with its own copy).
+    for (const pending of [...this.approvalQueue]) this.settleApproval(pending, 'cancelled')
+    this.approvalQueue.length = 0
+    if (this.activeApproval !== undefined) this.settleApproval(this.activeApproval, 'cancelled')
+    this.stop()
+    this.generation += 1
+    this.clearNotify()
+    if (this.notifyTimer !== undefined) {
+      clearTimeout(this.notifyTimer)
+      this.notifyTimer = undefined
+    }
+    this.terminalSchemeListeners.clear()
+    this.expandedOverride.clear()
+    this.messageComponents.clear()
+    this.localMessages.length = 0
+    for (const lease of this.extensionOverlayLeases) lease.close()
+    this.extensionOverlayLeases.clear()
+    // Phase 2: close every still-owned ADVANCED interactive overlay lease
+    // (the wrappers die with the surface; the plugin's dispose() runs).
+    for (const lease of this.advancedOverlayLeases) lease.close()
+    this.advancedOverlayLeases.clear()
+    this.advancedOverlayWrappers.clear()
+    // Phase 3: close every still-owned UNSTABLE mount lease (the adapters
+    // die with the surface; the plugin's dispose() runs).
+    for (const lease of this.unstableMountLeases) lease.close()
+    this.unstableMountLeases.clear()
+    this.unstableMountAdapters.clear()
+    // Phase 4: settle every still-open imperative broker promise (select/
+    // custom) — the picker/overlay dies with the surface; the promises
+    // must not hang.
+    for (const settle of [...this.pendingBrokerSettles]) settle()
+    this.pendingBrokerSettles.clear()
+    this.overlayBroker.clear()
+    // The transcript-search overlay dies with the surface: stale handles
+    // must never focus() or repaint a dead component.
+    this.searchOverlay = undefined
+    this.searchComponent = undefined
+    this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
+    // Detach the extension surface host: its subscriptions and capability
+    // set die with the surface (M2 stale-generation contract).
+    this.extensionHost?.dispose()
+    // P1-12: the editor seat holder's FINAL disposal — every host
+    // capability a plugin editor captured (replaceText, dispatch,
+    // subscribe, invalidate) becomes inert; a late plugin callback can no
+    // longer mutate the seat or dispatch a real submission.
+    this.editorSeatHolder.dispose()
+  }
+
+  /** The surface generation (M0): stable across start/stop/fullscreen/
+   * external-editor round-trips, bumped only by a final dispose. */
+  getSurfaceGeneration(): number {
+    return this.generation
+  }
+
+  /** Whether this surface has been finally disposed (M0). */
+  isDisposed(): boolean {
+    return this.disposed
+  }
+
+  /**
+   * M6: normalize raw terminal input to the public key identity (the ONLY
+   * key shape a plugin ever sees). Returns undefined for protocol
+   * artifacts (Kitty press/repeat/release), paste bursts and multi-char
+   * input.
+   * @param data - the raw terminal data.
+   */
+  normalizeKey(data: string): import('./extension/public-types.ts').NormalizedKey | undefined {
+    // Protocol artifacts are filtered by the router FIRST (plan §11.2):
+    // press/repeat/release events never reach plugin code.
+    if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
+    return this.inputRouter.normalize(data)
+  }
+
+  /**
+   * P1-5: normalize raw terminal input into a SEMANTIC editor input event
+   * (the ONLY input shape a plugin editor ever sees — never raw terminal
+   * bytes). Terminal protocol decoding (legacy + Kitty CSI-u +
+   * modifyOtherKeys encodings) happens HERE in the host; a plugin editor
+   * behaves identically on every terminal.
+   *
+   * Classification:
+   * - bracketed paste (`\x1b[200~...\x1b[201~`, the fork re-wraps pastes
+   *   this way) → `{ kind: 'paste', text }`;
+   * - one key press (parseKey resolves legacy/CSI-u/modifyOtherKeys) →
+   *   `{ kind: 'key', key: NormalizedKey }`;
+   * - a plain printable run (multi-char chunk that is not a single key) →
+   *   `{ kind: 'text', text }`;
+   * - anything else (unparseable control sequences) → undefined (the host
+   *   keeps it; a plugin editor never sees it).
+   */
+  private editorInputEventOf(data: string): import('./extension/public-types.ts').EditorInputEvent | undefined {
+    // Phase 2: ONE shared classification (extension/internal/input-events.ts)
+    // serves the editor channel, the advanced captures and the advanced
+    // interactive components — never two decoders that can drift.
+    return normalizeInputEvent(data)
+  }
+
+  /**
+   * P1-5: route one raw input through a REPLACEMENT editor as a SEMANTIC
+   * event. The replacement hook receives {@link EditorInputEvent} — never
+   * raw terminal bytes (the host decoded the protocol in
+   * editorInputEventOf). Returning true CONSUMES the event (the plugin
+   * owns it); the seat adapter already isolates a throwing handler (the
+   * plugin can never crash the host input path).
+   *
+   * When the replacement DECLINES the event:
+   * - `forceEscapeRoute` (the Esc pre-route): return undefined so the
+   *   caller's post-if host fallback runs (overlay Esc handling and the
+   *   host's own single-Esc arming mint on re-entry);
+   * - otherwise (the route.kind === 'editor' branch): the declined event
+   *   is retried against plugin keybindings first (editorReplacement is
+   *   flipped off so a binding may claim it), then Enter submits through
+   *   the normal host path, and only then does the HOST EDITING fallback
+   *   run — the vendored Editor at the replacement's current text/cursor,
+   *   with the resulting draft/cursor copied back into the visible
+   *   replacement (the P1-5 contract).
+   */
+  private handleReplacementEditorInput(
+    data: string,
+    context: Parameters<InputRouter['route']>[1],
+    forceEscapeRoute: boolean,
+  ): TuiInputListenerResult {
+    const replacement = this.seatEditor().handleInput
+    if (replacement === undefined) return undefined
+    const event = this.editorInputEventOf(data)
+    if (event === undefined) return undefined
+    if (replacement(event)) return { consume: true }
+    if (forceEscapeRoute) return undefined
+    // Declined regular editor input: retry against plugin bindings only
+    // after the replacement editor has explicitly handed it back.
+    const retry = this.inputRouter.route(data, { ...context, editorReplacement: false }, (key) => this.pluginActionForFor(key))
+    if (retry.kind === 'plugin-action') {
+      try {
+        this.events.onExtensionAction?.(retry.action)
+        this.recoverKeybinding(retry.key)
+      } catch (error) {
+        this.reportKeybindingError(retry.key, error)
+      }
+      return { consume: true }
+    }
+    if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+      this.submitDraft(false)
+      return { consume: true }
+    }
+    // ExtensionEditor's false result follows the public contract: let the
+    // vendored host editor process the event at the replacement's current
+    // text/cursor, then copy the result back into the visible seat. The
+    // replacement remains the owner of the draft; the host is only the
+    // editing-semantics fallback for this one declined event.
+    this.editorSeatHolder.handleHostFallbackInput(data)
+    return { consume: true }
+  }
+
+  /** Resolve a normalized key through the runner's resolver (M6). */
+  private pluginActionForFor(key: import('./extension/public-types.ts').NormalizedKey): import('./extension/public-types.ts').TuiAction | undefined {
+    try {
+      return this.pluginActionFor?.(key)
+    } catch (error) {
+      this.reportKeybindingError(key, error)
+      return undefined
+    }
+  }
+
+  private keybindingIdFor(key: import('./extension/public-types.ts').NormalizedKey): string | undefined {
+    try {
+      return this.pluginActionIdFor?.(key)
+    } catch {
+      return undefined
+    }
+  }
+
+  private reportKeybindingError(key: import('./extension/public-types.ts').NormalizedKey, error: unknown): void {
+    try {
+      const id = this.keybindingIdFor(key)
+      if (id === undefined) return
+      this.events.onExtensionError?.({ slot: 'keybinding', id, error })
+    } catch {
+      // Diagnostics are observational and must never escape the input path.
+    }
+  }
+
+  private recoverKeybinding(key: import('./extension/public-types.ts').NormalizedKey): void {
+    try {
+      const id = this.keybindingIdFor(key)
+      if (id === undefined) return
+      this.events.onExtensionRecovered?.({ slot: 'keybinding', id })
+    } catch {
+      // Diagnostics are observational and must never escape the input path.
+    }
+  }
+
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
+    // Phase 3: the UNSTABLE raw interception stage — BEFORE terminal
+    // protocol decoding (plan §4). A raw capture can see, consume or
+    // rewrite ANY chunk (Enter, Esc, Ctrl+C, paste, CSI-u, terminal-
+    // specific protocols). The Host emergency fail-safe is detected FIRST
+    // (host-owned, not rewritable by the Unstable API): triple-Esc within
+    // the window releases every raw capture and closes every unstable
+    // mount, restoring Host input. The fail-safe is armed only while
+    // captures are live, so ordinary Esc behavior is unchanged otherwise.
+    if (this.unstableInputRoute !== undefined) {
+      if (this.unstableInputsLive?.() !== true) {
+        // No captures are live: the fail-safe is disarmed — drop any
+        // stale Esc stamps (hygiene; the revision stamp already
+        // invalidates them on the next registration).
+        this.unstableEscPresses = []
+      } else if (this.unstableFailSafe(data)) {
+        try {
+          this.unstableFailSafeRelease?.()
+        } catch {
+          // The release is Host recovery; a throwing release must never
+          // escape the input path.
+        }
+        this.notify('unstable captures released (emergency fail-safe)', 'info')
+        return { consume: true }
+      }
+      const outcome = this.unstableInputRoute(data, this.extensionHost?.surfaceId ?? 'tui')
+      if (outcome.action === 'consume') return { consume: true }
+      if (outcome.action === 'rewrite') {
+        // The rewritten chunk flows through the host's OWN processing AND
+        // propagates to the focused component (the fork's listener-result
+        // `data` field). Each terminal chunk passes the interception chain
+        // at most once: the rewrite goes straight to the host decoder and
+        // never re-enters the raw stage (handleInputCore has no raw
+        // stage).
+        const result = this.handleInputCore(outcome.data)
+        if (result === undefined) return { data: outcome.data }
+        return result
+      }
+    }
+    return this.handleInputCore(data)
+  }
+
+  /** The host's own input precedence ladder (the raw stage has already
+   * run — see {@link handleInput}). */
+  private handleInputCore(data: string): TuiInputListenerResult {
     // Kitty-protocol terminals report press, repeat, and release events as
     // separate sequences; the app must act on the PRESS only. A release of
     // Ctrl+O would otherwise double-toggle the fold (press expands, release
@@ -1053,7 +1673,7 @@ export class TuiApp {
     // Esc (exit) and Ctrl+O (fold toggle — the viewed transcript still
     // folds) is inert — no typing into the placeholder bar, no Enter
     // submit, no Ctrl+S steer, no ↓ browser. Overlays keep their keys.
-    if (this.viewerMode !== undefined && !this.overlayHost.hasOverlayEntries
+    if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries
       && !matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
       return { consume: true }
     }
@@ -1079,20 +1699,35 @@ export class TuiApp {
       }
       return undefined
     }
+    // A managed non-search overlay owns the focused component. App-level
+    // lifecycle handlers must not consume its keys before pi-tui dispatches
+    // them to that component.
+    if (this.activeScreen.hasOverlayEntries) return undefined
     if (matchesKey(data, 'ctrl+shift+f') || matchesKey(data, 'ctrl+f')) {
       this.startTranscriptSearch()
       return { consume: true }
     }
+    // P1-10: a PLUGIN editor occupying the seat receives editor-routed input
+    // before plugin keybindings. Enter remains host-owned: forward it through
+    // the hidden host editor so active autocomplete gets its normal confirm /
+    // submit semantics before the resulting draft is synchronized back. The
+    // plugin editor never receives host-owned Enter; Shift+Enter stays with
+    // the plugin (its own multiline editing).
+    if (this.seatEditor().handleInput !== undefined
+      && matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+      this.editorSeatHolder.handleHostFallbackInput(data)
+      return { consume: true }
+    }
     if (matchesKey(data, 'shift+tab')) {
       // Cycle the permission preset; overlays keep Shift+Tab for themselves.
-      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.activeScreen.hasOverlayEntries) return undefined
       this.events.onCyclePermission?.()
       return { consume: true }
     }
     if (matchesKey(data, 'alt+up')) {
       // Dequeue (Alt+↑): pull queued input back into the editor; overlays
       // keep the key for themselves.
-      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.activeScreen.hasOverlayEntries) return undefined
       this.events.onDequeue?.()
       return { consume: true }
     }
@@ -1107,19 +1742,28 @@ export class TuiApp {
       // dropping the draft; an EMPTY draft falls through too — plain Enter
       // on an empty editor does not submit, and an empty chord would
       // otherwise dispatch a session-creating empty followup.
-      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.activeScreen.hasOverlayEntries) return undefined
       if (this.events.onQueueSubmit === undefined) return undefined
-      const text = this.editor.getText()
+      const text = this.seatEditor().getText()
       if (text.trim() === '') return undefined
       this.rememberInput(text)
       this.clearNotify()
-      this.editor.setText('')
+      this.seatEditor().setText('')
+      this.editorSeatHolder.notifyChanged()
       this.events.onQueueSubmit(text)
       return { consume: true }
     }
     if (matchesKey(data, 'escape')) {
       // Overlays (pickers, settings) own Esc while they are up.
-      if (this.overlayHost.hasOverlayEntries) return undefined
+      if (this.activeScreen.hasOverlayEntries) return undefined
+      // P1-6: a REPLACEMENT editor owns Esc for its own modal state
+      // machine (vim normal-mode entry) — route it through the editor
+      // channel below instead of the host's double-Esc cancel. If the
+      // plugin DECLINES it, the editor route hands it back to the host
+      // fallback (which includes this cancel path on re-entry).
+      if (this.seatEditor().handleInput !== undefined) {
+        return this.handleReplacementEditorInput(data, this.inputRouterContext(), true)
+      }
       // The host may consume the first Esc (runner-owned modes like the
       // subagent viewer); otherwise it arms the double-Esc cancel.
       if (this.events.onSingleEscape?.() === true) return { consume: true }
@@ -1152,9 +1796,10 @@ export class TuiApp {
       // An empty draft still fires the event — the runner steers every
       // queued message when the queue is non-empty, and only ignores the
       // key when there is nothing to send at all.
-      if (this.overlayHost.hasOverlayEntries) return { consume: true }
-      const draft = this.editor.getText()
-      this.editor.setText('')
+      if (this.activeScreen.hasOverlayEntries) return { consume: true }
+      const draft = this.seatEditor().getText()
+      this.seatEditor().setText('')
+      this.editorSeatHolder.notifyChanged()
       this.events.onSteer?.(draft)
       return { consume: true }
     }
@@ -1162,7 +1807,7 @@ export class TuiApp {
       // Task browser: with active background tasks and an EMPTY editor, ↓ /
       // Ctrl+J open the task list (nothing to move the cursor through). With
       // text present the keys keep their editing meaning; overlays own them.
-      if (this.tasksActive && !this.overlayHost.hasOverlayEntries && this.editor.getText().trim() === '') {
+      if (this.tasksActive && !this.activeScreen.hasOverlayEntries && this.seatEditor().getText().trim() === '') {
         this.events.onOpenTasks?.()
         return { consume: true }
       }
@@ -1177,7 +1822,7 @@ export class TuiApp {
       // Single-flight: while one launch is pending (the latch inside
       // launchExternalEditor is set synchronously), further Ctrl+G presses
       // are consumed without starting another editor.
-      if (this.overlayHost.hasOverlayEntries) return { consume: true }
+      if (this.activeScreen.hasOverlayEntries) return { consume: true }
       if (this.events.openExternalEditor !== undefined && !this.externalEditorInFlight) {
         this.events.runOwned('external editor', () => this.launchExternalEditor(), {
           onError: (error: unknown) => {
@@ -1197,11 +1842,127 @@ export class TuiApp {
       this.events.onExit()
       return { consume: true }
     }
+    // M6: the router first determines whether a capturing path owns the key.
+    // A replacement editor gets the first chance for editor-routed input;
+    // only an explicit decline is eligible for a plugin binding. The host
+    // editor keeps the normal last-stage plugin binding behavior.
+    const context = this.inputRouterContext()
+    const replacement = this.seatEditor().handleInput
+    // A generic managed overlay owns the focused component. Do not probe the
+    // seat editor or plugin bindings here; returning undefined lets pi-tui
+    // dispatch the raw key to the overlay component (including reserved keys).
+    if (context.hasOverlay) return undefined
+    // Phase 2: the ADVANCED normalized captures (plan §5/§11). Consulted
+    // AFTER the host's own capturing flows (questions, approvals, overlays)
+    // and reserved lifecycle keys, BEFORE the editor and the Stable
+    // keybindings — an advanced plugin can preempt ordinary editor/panel
+    // input, but never a Host question/approval/overlay or a fatal-recovery
+    // shortcut (session safety stays Host-owned). The registry normalizes
+    // the raw chunk itself (the shared Host decoder); a consuming capture
+    // stops the event here.
+    if (this.advancedInputRoute !== undefined && this.advancedInputRoute(data) === 'consumed') {
+      return { consume: true }
+    }
+    const route = this.inputRouter.route(data, context, (key) => this.pluginActionForFor(key))
+    if (route.kind === 'protocol') return undefined
+    if (route.kind === 'consumed') {
+      // A generic overlay is the focused owner. The app listener must not
+      // consume its key before pi-tui dispatches to that component; this also
+      // lets reserved overlay keys (Esc, Ctrl+Enter, etc.) reach the overlay.
+      if (context.hasOverlay) return undefined
+      // With the host editor in the seat, a reserved key that was not
+      // handled by the app ladder must still reach the fork Editor (notably
+      // Enter, whose onSubmit lives on the focused component). A replacement
+      // editor has no host onSubmit, so its reserved fallback remains inert.
+      return replacement === undefined ? undefined : { consume: true }
+    }
+    if (replacement !== undefined && route.kind === 'editor') {
+      return this.handleReplacementEditorInput(data, context, false)
+    }
+    if (route.kind === 'editor' && replacement === undefined) {
+      // P2-R5: only the HOST seat may forward to the hidden host editor. A
+      // display-only replacement editor (no handleInput hook) owns the seat
+      // too: the public contract (public-types.ts) says ordinary typing is
+      // NOT silently routed into the hidden host editor while it is
+      // visible. Consume the key so the focused replacement component (or
+      // the app's own listeners) keep it, and the hidden host draft never
+      // diverges from what the user sees.
+      if (this.seatEditor().id !== 'host') return { consume: true }
+      // Leave normal host editing to pi-tui's focused-component dispatch.
+      // Returning undefined is important: TuiBase then calls Editor.handleInput
+      // and schedules its immediate active-screen repaint. Calling the editor
+      // here and returning consume=true would update the draft but skip that
+      // framework repaint, making typed characters appear to be swallowed.
+      return undefined
+    }
+    if (route.kind === 'plugin-action') {
+      try {
+        this.events.onExtensionAction?.(route.action)
+          this.recoverKeybinding(route.key)
+      } catch (error) {
+        this.reportKeybindingError(route.key, error)
+      }
+      return { consume: true }
+    }
     return undefined
   }
 
-  /** The screen currently rendering: the alt screen in fullscreen mode. */
-  private get overlayHost(): TuiMainScreen | TuiAltScreen {
+  /** The live surface context the InputRouter reads (M6). */
+  private inputRouterContext(): Parameters<InputRouter['route']>[1] {
+    return {
+      questionActive: this.activeQuestions !== undefined,
+      approvalActive: this.activeApproval !== undefined,
+      viewerLocked: this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries,
+      hasOverlay: this.activeScreen.hasOverlayEntries,
+      searchActive: this.searchOverlay !== undefined,
+      editorReplacement: this.seatEditor().handleInput !== undefined,
+      // P1-06: the focused EDITOR owns its keys. The fork dispatches to
+      // app-level listeners BEFORE the focused component, so the router
+      // must ask the seat editor directly whether it would consume this
+      // input; a plugin binding may only claim a key the editor declines
+      // (arrows/Tab/multiline movement stay with the editor while it is
+      // focused — never stolen by a plugin binding). The probe asks the
+      // fork's GLOBAL keybinding manager whether the raw input matches ANY
+      // editor-owned binding (navigation, editing, submit, tab, select) —
+      // the exact set the focused Editor consumes. It never executes the
+      // editor (no double-handling); a chord the editor has no binding for
+      // (e.g. Ctrl+Alt+X) is NOT editor-owned and may fire a plugin
+      // binding.
+      editorAccepts: (data) => {
+        const focused = this.activeScreen.getFocusedComponent()
+        if (focused === undefined || focused === null) return false
+        if (focused !== this.seatEditor().component) return false
+        // The seat editor is focused: it owns every key its binding set
+        // defines. (The seat editor's component is either the fork Editor
+        // or a plugin editor's compiled view — a plugin editor that wants
+        // its own keys must provide a handleInput component; until then
+        // the host's keybinding set is the conservative ownership rule.)
+        const kb = getKeybindings()
+        return [
+          'tui.editor.cursorUp', 'tui.editor.cursorDown', 'tui.editor.cursorLeft',
+          'tui.editor.cursorRight', 'tui.editor.cursorWordLeft', 'tui.editor.cursorWordRight',
+          'tui.editor.cursorLineStart', 'tui.editor.cursorLineEnd', 'tui.editor.pageUp',
+          'tui.editor.pageDown', 'tui.editor.jumpForward', 'tui.editor.jumpBackward',
+          'tui.editor.historyPrevious', 'tui.editor.historyNext',
+          'tui.editor.deleteCharBackward', 'tui.editor.deleteCharForward',
+          'tui.editor.deleteWordBackward', 'tui.editor.deleteWordForward',
+          'tui.editor.deleteToLineStart', 'tui.editor.deleteToLineEnd',
+          'tui.editor.yank', 'tui.editor.yankPop', 'tui.editor.undo',
+          'tui.input.newLine', 'tui.input.submit', 'tui.input.tab', 'tui.input.copy',
+          'tui.select.up', 'tui.select.down', 'tui.select.pageUp', 'tui.select.pageDown',
+          'tui.select.confirm', 'tui.select.cancel',
+        ].some(binding => kb.matches(data, binding as never))
+      },
+    }
+  }
+
+  /**
+   * The screen currently rendering: the alt screen in fullscreen mode, the
+   * main screen otherwise. Every render request, terminal query and overlay
+   * mount routes through this accessor so regular and fullscreen modes
+   * always target the ACTIVE screen (M0 naming; previously overlayHost).
+   */
+  private get activeScreen(): TuiMainScreen | TuiAltScreen {
     return this.fullscreen ?? this.tui
   }
 
@@ -1226,46 +1987,18 @@ export class TuiApp {
    * @returns the handle; hide() also forgets the handle.
    */
   private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
-    const handle = this.overlayHost.showOverlay(component, options)
-    this.overlayHandles.add(handle)
-    const question = this.activeQuestions
-    if (question !== undefined) {
-      // Sweep: any tracked overlay still visible (normally none — the
-      // question suspended every visible one at present) joins the
-      // suspension alongside the new overlay.
-      for (const other of this.overlayHandles) {
-        if (other !== handle && !other.isHidden()) {
-          other.setHidden(true)
-          question.suspendedOverlays.add(other)
-        }
-      }
-      if (options?.nonCapturing !== true) {
-        // The new capturing overlay takes the modal front: the question's
-        // directly suspended handles become its dependents (kept hidden),
-        // so settling the question reveals IT, and settling it reveals the
-        // overlays beneath — in reverse arrival order.
-        const dependents = new Set<OverlayHandle>()
-        for (const other of question.suspendedOverlays) dependents.add(other)
-        if (dependents.size > 0) {
-          for (const other of dependents) question.suspendedOverlays.delete(other)
-          this.overlayDependents.set(handle, dependents)
-        }
-      }
-      handle.setHidden(true)
-      question.suspendedOverlays.add(handle)
-      return { ...handle, hide: () => this.closeOverlayHandle(handle) }
+    // P1-09: never mount on a finally-disposed surface (the plugin lease
+    // path guards earlier; this is the last-chance guard for every other
+    // caller — a stopped screen's showOverlay would otherwise revive a
+    // dead surface's overlay stack).
+    if (this.disposed) {
+      return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false }
     }
-    if (options?.nonCapturing !== true) {
-      const hidden = new Set<OverlayHandle>()
-      for (const other of this.overlayHandles) {
-        if (other !== handle && !other.isHidden()) {
-          other.setHidden(true)
-          hidden.add(other)
-        }
-      }
-      if (hidden.size > 0) this.overlayDependents.set(handle, hidden)
-    }
-    return { ...handle, hide: () => this.closeOverlayHandle(handle) }
+    const handle = this.activeScreen.showOverlay(component, options)
+    // M8: the stacking graph + suspension rules live in the broker (plan
+    // §13 — behavior identical; the existing modal-stacking tests gate
+    // the extraction).
+    return this.overlayBroker.track(handle, { nonCapturing: options?.nonCapturing === true })
   }
 
   /**
@@ -1279,20 +2012,12 @@ export class TuiApp {
    * while the question is still up.
    */
   private closeOverlayHandle(handle: OverlayHandle): void {
-    const question = this.activeQuestions
-    if (question !== undefined) question.suspendedOverlays.delete(handle)
-    for (const dependents of this.overlayDependents.values()) dependents.delete(handle)
-    const owned = this.overlayDependents.get(handle)
-    if (owned !== undefined) {
-      this.overlayDependents.delete(handle)
-      if (question !== undefined) {
-        for (const dependent of owned) question.suspendedOverlays.add(dependent)
-      } else {
-        for (const dependent of owned) dependent.setHidden(false)
-      }
-    }
-    this.overlayHandles.delete(handle)
-    handle.hide()
+    // M8: the broker owns the graph + question-aware close; the host
+    // recomputes the focused seat from the live state after (follow-up
+    // P1 — the broker's editor-seat report is a coarse signal, the host
+    // re-derives the truth).
+    this.overlayBroker.closeForHost(handle)
+    this.publishFocusSeat()
   }
 
   /**
@@ -1310,18 +2035,22 @@ export class TuiApp {
    */
   async launchExternalEditor(): Promise<void> {
     const open = this.events.openExternalEditor
-    if (open === undefined || this.externalEditorInFlight) return
+    if (open === undefined || this.externalEditorInFlight || this.disposed) return
     this.externalEditorInFlight = true
     try {
-      const draft = this.editor.getText()
+      const draft = this.seatEditor().getText()
       this.stop()
       try {
         const next = await open(draft)
+        if (this.disposed) return
         // No redundant editor update when the editor saved the draft
         // unchanged (an update would bump history/undo and repaint).
-        if (next !== '' && next !== draft) this.editor.setText(next)
+        if (next !== '' && next !== draft) {
+          this.seatEditor().setText(next)
+          this.editorSeatHolder.notifyChanged()
+        }
       } finally {
-        this.start()
+        if (!this.disposed) this.start()
       }
     } finally {
       this.externalEditorInFlight = false
@@ -1448,6 +2177,7 @@ export class TuiApp {
    * overlay; a pending approval prompt is re-rendered on the new screen.
    */
   toggleFullscreen(): void {
+    if (this.disposed) return
     this.setFullscreen(this.fullscreen === undefined)
   }
 
@@ -1462,6 +2192,7 @@ export class TuiApp {
    * @param enabled - true renders the alt screen, false returns to the main screen.
    */
   setFullscreen(enabled: boolean): void {
+    if (this.disposed) return
     const active = this.fullscreen !== undefined
     if (enabled === active) return
     const pending = this.activeApproval
@@ -1473,9 +2204,8 @@ export class TuiApp {
     // is then cleared wholesale — every one of those handles is dead, and
     // the pending-approval rebuild re-suspends a fresh handle on the new
     // screen.
-    for (const handle of this.overlayHandles) handle.hide()
-    this.overlayHandles.clear()
-    this.overlayDependents.clear()
+    for (const handle of this.overlayBroker.handles()) handle.hide()
+    this.overlayBroker.clear()
     if (this.activeQuestions !== undefined) this.activeQuestions.suspendedOverlays.clear()
     if (enabled) {
       // The alt screen owns mouse handling (wheel scroll, drag selection,
@@ -1517,8 +2247,9 @@ export class TuiApp {
       alt.start()
       // The alt screen starts with NO focused component: without this, every
       // key after Ctrl+F is dropped (the app-level listener still sees
-      // shortcuts, but the editor never receives text or Enter).
-      alt.setFocus(this.editor)
+      // shortcuts, but the editor never receives text or Enter). M9: focus
+      // the CURRENT seat occupant (round-2 finding 2).
+      alt.setFocus(this.seatEditor().component)
       this.fullscreen = alt
       // The alt screen now owns the terminal input handler: scheme reports
       // arrive THERE, so re-register the fan-out on both screens.
@@ -1531,13 +2262,20 @@ export class TuiApp {
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
       // the terminal buffer. Force a full repaint so the regular surface
-      // redraws cleanly from row 0.
+      // redraws cleanly from row 0. M9: focus the current seat occupant.
       this.tui.requestRender(true)
-      this.tui.setFocus(this.editor)
+      this.tui.setFocus(this.seatEditor().component)
       // The main screen owns the terminal input handler again.
       this.refreshSchemeRegistrations()
     }
     this.events.onFullscreenChange?.(enabled)
+    // M8 (round-1 finding 2): still-open plugin overlay leases re-mount on
+    // the CURRENT active screen (their raw handles died with the old
+    // screen's teardown above). Phase 2: the ADVANCED interactive overlay
+    // leases follow the same migration.
+    this.remountExtensionOverlays()
+    this.remountAdvancedOverlays()
+    this.remountUnstableMounts()
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -1549,6 +2287,12 @@ export class TuiApp {
     if (question?.frame !== undefined) {
       (this.fullscreen ?? this.tui).setFocus(question.frame)
     }
+    // The surface slice tracks the mode switch (plan §7.1).
+    this.extensionHost?.updateSurface({ fullscreen: enabled })
+    // The screen swap re-established focus (or re-mounted the approval
+    // dialog): re-derive the seat from the live state (follow-up P1).
+    this.setFocusSeat('editor')
+    this.publishFocusSeat()
   }
 
   /**
@@ -1557,6 +2301,7 @@ export class TuiApp {
    * surface only collects the query and reports navigation keys.
    */
   startTranscriptSearch(): void {
+    if (this.disposed) return
     if (this.searchOverlay !== undefined) {
       this.searchOverlay.focus()
       return
@@ -1696,6 +2441,7 @@ export class TuiApp {
       this.working.setText('')
     }
     this.requestRender()
+    this.syncExtensionState()
   }
 
   /**
@@ -1720,6 +2466,7 @@ export class TuiApp {
   setSessionTitle(title: string | undefined): void {
     this.sessionTitleText = title ?? ''
     this.renderHeader()
+    this.extensionHost?.updateSession({ title: title ?? '' })
   }
 
   /**
@@ -1802,9 +2549,11 @@ export class TuiApp {
     this.planMode = active
     this.renderHeader()
     this.renderFooter()
-    this.editor.borderColor = active ? color.warning : this.editorBorder
-    this.editor.invalidate()
+    const seat = this.seatEditor()
+    seat.borderColor = active ? color.warning : this.editorBorder
+    seat.invalidate()
     this.requestRender()
+    this.syncExtensionState()
   }
 
   /**
@@ -1853,7 +2602,11 @@ export class TuiApp {
       this.draftBeforeViewer = text
       return
     }
-    this.editor.setText(text)
+    // M9: every public draft mutation targets the visible seat occupant, not
+    // the hidden host editor left behind by an editor handoff.
+    this.seatEditor().setText(text)
+    this.editorSeatHolder.notifyChanged()
+    this.requestRender()
   }
 
   /**
@@ -1868,23 +2621,35 @@ export class TuiApp {
     if (mode === undefined) {
       if (this.viewerMode === undefined) return
       this.viewerMode = undefined
-      this.editor.borderColor = this.editorBorder
-      this.editor.setText(this.draftBeforeViewer ?? '')
+      // M9 (round-2 finding 1): the viewer restore writes the preserved
+      // draft to the CURRENT seat occupant (a plugin editor's draft
+      // returns to the plugin, never to a hidden host editor).
+      const seat = this.seatEditor()
+      seat.borderColor = this.editorBorder
+      seat.setText(this.draftBeforeViewer ?? '')
       this.draftBeforeViewer = undefined
-      this.editor.invalidate()
+      seat.invalidate()
+      this.editorSeatHolder.notifyChanged()
       this.renderHeader()
       this.requestRender()
+      this.syncExtensionState()
       return
     }
     if (this.viewerMode === undefined) {
-      this.draftBeforeViewer = this.editor.getText()
+      this.draftBeforeViewer = this.seatEditor().getText()
     }
     this.viewerMode = mode
-    this.editor.borderColor = color.accent
-    this.editor.setText(`viewing subagent: ${mode.label} — read-only · Esc returns`)
-    this.editor.invalidate()
+    // M9: cover the CURRENT seat occupant with the placeholder (a plugin
+    // editor's component receives the placeholder; the preserved draft
+    // stays in draftBeforeViewer).
+    const seat = this.seatEditor()
+    seat.borderColor = color.accent
+    seat.setText(`viewing subagent: ${mode.label} — read-only · Esc returns`)
+    seat.invalidate()
+    this.editorSeatHolder.notifyChanged()
     this.renderHeader()
     this.requestRender()
+    this.syncExtensionState()
   }
 
   /**
@@ -1896,6 +2661,12 @@ export class TuiApp {
   setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
     this.welcomeCard.setFacts(facts)
     this.rebuildMessages()
+    // Session identity mirrors into the extension snapshot (plan §7.2).
+    this.extensionHost?.updateSession({
+      sessionId: facts.sessionId,
+      workspaceRoot: facts.cwd,
+      ...facts.model === '' ? {} : { model: facts.model },
+    })
   }
 
   /**
@@ -1917,9 +2688,997 @@ export class TuiApp {
 
   /** Theme revision for render-cache invalidation; bumped on every switch. */
   private themeRevision = 0
+  /** Phase 4: the current theme id ('dark' | 'light' | 'custom'), tracked
+   * by applyTheme/applyPalette (the advanced host-state getTheme). */
+  private currentThemeId: string = 'dark'
 
   /** Persistent components per transcript message (stage J cache). */
   private readonly messageComponents = new Map<TranscriptMessage, MessageComponentEntry>()
+
+
+  /** M7: a renderer failure sink (the runner wires the extension
+   * service's health ledger — round-1 finding 3: failures must be
+   * observable, never swallowed). Optional. */
+  private rendererError: ((record: { id: string; error: unknown; slot?: 'message' | 'tool' }) => void) | undefined
+
+  /** M7 (P1-08): a renderer RECOVERY sink — called when a renderer that
+   * previously failed renders successfully again, so its health record
+   * clears (the next failure starts a NEW error generation). */
+  private rendererRecovered: ((record: { id: string; slot?: 'message' | 'tool' }) => void) | undefined
+
+  /** M7: wire the renderer-failure sink (the runner calls this with the
+   * extension service's health recording). */
+  setRendererErrorSink(sink: (record: { id: string; error: unknown; slot?: 'message' | 'tool' }) => void): void {
+    this.rendererError = sink
+  }
+
+  /** M7 (P1-08): wire the renderer-recovery sink. */
+  setRendererRecoveredSink(sink: (record: { id: string; slot?: 'message' | 'tool' }) => void): void {
+    this.rendererRecovered = sink
+  }
+
+  /**
+   * M8: mount a MANAGED overlay for a plugin (plan §13.3). The view is the
+   * M4 component kit — the host compiles it, mounts it through the overlay
+   * broker (modal stacking, focus, fullscreen migration, teardown) and
+   * returns a generation-scoped lease whose close() is idempotent. The
+   * surface's final dispose closes every still-owned lease.
+   * @param view - the ExtensionView to present.
+   * @param options - sizing/positioning hints.
+   */
+  showExtensionOverlay(
+    view: import('./extension/public-types.ts').ExtensionView,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): import('./extension/public-types.ts').TuiOverlayHandle {
+    // P1-09: a surface that was FINALLY disposed is inert — a late plugin
+    // call must never mount on the dead app or mint a new lease (the
+    // dispose cleanup already closed every owned lease; a new one would
+    // resurrect a handle after teardown). The inert-lease shape matches
+    // the no-surface-host path below.
+    if (this.disposed) {
+      return { close: () => {}, hide: () => {}, show: () => {} }
+    }
+    const mountOptions = this.overlayOptionsOf(options)
+    // The lease KEEPS the view + options so a fullscreen screen swap can
+    // RE-MOUNT it on the new active screen (round-1 finding 2 — a plugin
+    // overlay must survive a fullscreen toggle, not become a stale handle
+    // on the dead screen). The raw handle dies with the old screen; the
+    // lease re-creates it after the swap.
+    let raw: OverlayHandle | undefined
+    let hiddenByLease = false
+    let closed = false
+    const mount = (): void => {
+      if (closed || raw !== undefined) return
+      const compiled = compileView(view)
+      const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
+      raw = this.showOverlayOnHost(component, mountOptions)
+      if (hiddenByLease) raw.setHidden(true)
+    }
+    mount()
+    const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void } = {
+      close: () => {
+        if (closed) return
+        closed = true
+        // Drop the lease from the owned set (round-1 finding 1: a closed
+        // lease must not leak until dispose).
+        this.extensionOverlayLeases.delete(lease)
+        raw?.hide()
+        raw = undefined
+      },
+      hide: () => {
+        if (closed) return
+        hiddenByLease = true
+        raw?.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+      },
+      // Host-internal: re-create the raw handle on the CURRENT active
+      // screen after a fullscreen swap (the old raw handle died with the
+      // old screen). Idempotent (a live raw handle skips).
+      _remount: () => {
+        if (closed) return
+        raw = undefined
+        mount()
+      },
+    }
+    // The surface's dispose closes every still-owned lease: track it.
+    this.extensionOverlayLeases.add(lease)
+    return lease
+  }
+
+  /** Map the public overlay options onto the host's mount options. */
+  private overlayOptionsOf(options: import('./extension/public-types.ts').TuiOverlayOptions): OverlayOptions {
+    return {
+      ...(options.width === undefined ? {} : { width: options.width }),
+      ...(options.minWidth === undefined ? {} : { minWidth: options.minWidth }),
+      ...(options.maxHeight === undefined ? {} : { maxHeight: options.maxHeight }),
+      ...(options.anchor === undefined ? {} : { anchor: options.anchor }),
+      ...(options.offsetX === undefined ? {} : { offsetX: options.offsetX }),
+      ...(options.offsetY === undefined ? {} : { offsetY: options.offsetY }),
+      ...(options.row === undefined ? {} : { row: options.row }),
+      ...(options.col === undefined ? {} : { col: options.col }),
+      ...(options.margin === undefined ? {} : { margin: options.margin }),
+      nonCapturing: options.nonCapturing === true,
+    }
+  }
+
+  /**
+   * M8: re-mount every still-open plugin lease on the CURRENT active
+   * screen. Called by the host after a fullscreen toggle (the old screen's
+   * overlays died with it — plan §13.3: a managed lease survives the
+   * screen migration).
+   */
+  private remountExtensionOverlays(): void {
+    for (const lease of this.extensionOverlayLeases) {
+      ;(lease as unknown as { _remount(): void })._remount()
+    }
+  }
+
+  /** M8 test hook: the number of still-owned plugin overlay leases
+   * (asserts a closed lease is dropped and dispose clears the set). */
+  ownedExtensionOverlayLeasesForTest(): number {
+    return this.extensionOverlayLeases.size
+  }
+
+  // ── Phase 2: ADVANCED interactive overlays (plan §6/§8) ─────────────────
+
+  /**
+   * Phase 2: mount an INTERACTIVE managed overlay hosting a plugin's
+   * focused interactive component (plan §8). The host wraps the plugin
+   * component (render compiled through the M4 kit, input normalized by
+   * the shared Host decoder, focus via the fork's Focusable protocol),
+   * mounts it through the overlay broker (modal stacking, focus,
+   * fullscreen migration, teardown) and returns a generation-scoped
+   * lease. The surface's final dispose closes every still-owned lease.
+   * @param component - the plugin's interactive component.
+   * @param options - sizing/positioning hints.
+   */
+  showAdvancedInteractiveOverlay(
+    component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): import('./extension/advanced-types.ts').AdvancedOverlayLease {
+    // A finally-disposed surface is inert: a late plugin call must never
+    // mount on the dead app or mint a new lease (same rule as the stable
+    // overlay path).
+    if (this.disposed) {
+      return {
+        id: 'inert',
+        active: false,
+        focused: false,
+        focus: () => {},
+        blur: () => {},
+        invalidate: () => {},
+        close: () => {},
+        hide: () => {},
+        show: () => {},
+      }
+    }
+    const mountOptions = this.overlayOptionsOf(options)
+    const id = `adv-overlay-${++this.advancedOverlayCounter}`
+    // The lease KEEPS the component + options so a fullscreen screen swap
+    // can RE-MOUNT it on the new active screen (the raw handle dies with
+    // the old screen — same contract as the stable overlay lease).
+    let wrapper: import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent | undefined
+    let raw: OverlayHandle | undefined
+    let hiddenByLease = false
+    let closed = false
+    const mount = (): void => {
+      if (closed || raw !== undefined) return
+      const created = new AdvancedOverlayComponent(
+        component,
+        () => this.advancedRenderContext(),
+        (message: string) => this.notify(`advanced overlay: ${message}`, 'error'),
+      )
+      wrapper = created
+      this.advancedOverlayWrappers.add(created)
+      raw = this.showOverlayOnHost(created, mountOptions)
+      if (hiddenByLease) raw.setHidden(true)
+    }
+    mount()
+    const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
+      id,
+      get active() {
+        return !closed
+      },
+      get focused() {
+        return raw?.isFocused() ?? false
+      },
+      focus: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+        raw?.focus()
+      },
+      blur: () => {
+        if (closed) return
+        raw?.unfocus()
+      },
+      invalidate: () => {
+        if (closed) return
+        wrapper?.invalidate()
+        this.requestRender()
+      },
+      close: () => {
+        if (closed) return
+        closed = true
+        this.advancedOverlayLeases.delete(lease)
+        if (wrapper !== undefined) {
+          this.advancedOverlayWrappers.delete(wrapper)
+          // The wrapper's dispose() runs the plugin's dispose() (isolated
+          // inside the wrapper) — the plugin component never outlives its
+          // overlay.
+          wrapper.dispose()
+        }
+        raw?.hide()
+        raw = undefined
+        wrapper = undefined
+      },
+      hide: () => {
+        if (closed) return
+        hiddenByLease = true
+        raw?.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+      },
+      // Host-internal: re-create the raw handle on the CURRENT active
+      // screen after a fullscreen swap (the old raw handle died with the
+      // old screen). Idempotent (a live raw handle skips). The OLD wrapper
+      // is dropped from the live set WITHOUT disposing it — the plugin
+      // component must survive the screen migration (the lease stays
+      // live); the dead screen's overlay stack is the only remaining
+      // reference and dies with the screen.
+      _remount: () => {
+        if (closed) return
+        if (wrapper !== undefined) {
+          this.advancedOverlayWrappers.delete(wrapper)
+        }
+        raw = undefined
+        mount()
+      },
+      // Host-internal: recompile the plugin's render() output (terminal
+      // resize — the plugin's render(ctx) must see the new geometry).
+      _recompile: () => {
+        if (closed) return
+        wrapper?.invalidate()
+      },
+    }
+    // The surface's dispose closes every still-owned lease: track it.
+    this.advancedOverlayLeases.add(lease)
+    return lease
+  }
+
+  /** Phase 2: re-mount every still-open ADVANCED lease on the CURRENT
+   * active screen (fullscreen toggle — the old screen's overlays died
+   * with it; a managed lease survives the screen migration). */
+  private remountAdvancedOverlays(): void {
+    for (const lease of this.advancedOverlayLeases) {
+      lease._remount()
+    }
+  }
+
+  /** Phase 2: recompile every live ADVANCED overlay wrapper (terminal
+   * resize — the plugin's render(ctx) sees the new geometry). */
+  private recompileAdvancedOverlays(): void {
+    for (const wrapper of this.advancedOverlayWrappers) {
+      wrapper.invalidate()
+    }
+  }
+
+  /** Phase 2 test hook: the number of still-owned ADVANCED overlay leases. */
+  ownedAdvancedOverlayLeasesForTest(): number {
+    return this.advancedOverlayLeases.size
+  }
+
+  /** Phase 2 test hook: the number of live ADVANCED overlay wrappers
+   * (asserts a fullscreen remount drops the old wrapper — the set must
+   * not grow across screen migrations). */
+  advancedOverlayWrappersForTest(): number {
+    return this.advancedOverlayWrappers.size
+  }
+
+  /** Phase 2: the live render context for ADVANCED interactive overlays
+   * (surfaceId/generation/geometry; `focused` is added by the wrapper). */
+  private advancedRenderContext(): Omit<import('./extension/advanced-types.ts').AdvancedRenderContext, 'focused'> {
+    return {
+      surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+      generation: this.generation,
+      width: this.terminal.columns,
+      height: this.terminal.rows,
+    }
+  }
+
+  // ── Phase 3: UNSTABLE raw input + low-level surface seam (plan §4–§10) ──
+
+  /** The emergency fail-safe window (ms): three Esc presses within this
+   * window trigger the release. */
+  private static readonly UNSTABLE_FAILSAFE_WINDOW_MS = 1500
+
+  /**
+   * The Host emergency fail-safe detector (plan §7): triple-Esc within
+   * {@link UNSTABLE_FAILSAFE_WINDOW_MS} at the SAME capture-session
+   * revision. Runs BEFORE the raw captures are consulted, so it cannot be
+   * rewritten or consumed by a capture. The first two Esc presses pass
+   * through (a plugin surface may use Esc normally); the third is
+   * consumed and triggers the release.
+   *
+   * Stale-press invalidation (round-1 finding): each press is stamped
+   * with the raw capture registry revision, which bumps on EVERY
+   * register/dispose. A release (fail-safe, owner unload) followed by a
+   * re-register therefore invalidates every earlier press — a stale pair
+   * from a previous capture session can never make the first Esc of a
+   * new session count as the third press.
+   * @param data - the raw chunk.
+   * @returns true when the fail-safe fired (the caller must consume the
+   *   chunk and run the release).
+   */
+  private unstableFailSafe(data: string): boolean {
+    // Only a PRESS counts: Kitty CSI-u release/repeat events
+    // (`\x1b[27;1:3u` / `\x1b[27;1:2u`) match matchesKey('escape') but
+    // must never increment the fail-safe tracker (round-2 finding — a
+    // release/repeat would otherwise make the third press fire early).
+    if (isKeyRelease(data) || isKeyRepeat(data) || !matchesKey(data, 'escape')) return false
+    const revision = this.unstableInputsRevision?.() ?? 0
+    const now = Date.now()
+    this.unstableEscPresses = this.unstableEscPresses.filter(press =>
+      now - press.at < TuiApp.UNSTABLE_FAILSAFE_WINDOW_MS && press.revision === revision)
+    this.unstableEscPresses.push({ at: now, revision })
+    if (this.unstableEscPresses.length >= 3) {
+      this.unstableEscPresses = []
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Phase 3: the UNSTABLE low-level surface handle (plan §10) — a
+   * SELECTED set of host surface capabilities for low-level plugins. It
+   * NEVER exposes `TuiApp`, `TuiMainScreen`, `TuiAltScreen` or the
+   * terminal object. A finally-disposed surface is inert.
+   */
+  unstableSurfaceHandle(): import('./extension/unstable-types.ts').UnstableSurfaceHandle {
+    const app = this
+    return {
+      surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+      generation: this.generation,
+      get width() {
+        return app.terminal.columns
+      },
+      get height() {
+        return app.terminal.rows
+      },
+      requestRender: () => {
+        if (app.disposed) return
+        app.requestRender()
+      },
+      mountComponent: (component, options) => app.showUnstableMount(component, options),
+    }
+  }
+
+  /**
+   * Phase 3: mount a low-level component (plan §9 option A) as a capturing
+   * overlay. The plugin renders RAW lines and receives RAW input (the
+   * Unstable contract — no sanitization); the host owns the physical
+   * mount, focus, stacking, fullscreen migration and teardown. The
+   * surface's final dispose closes every still-owned lease.
+   */
+  showUnstableMount(
+    component: import('./extension/unstable-types.ts').UnstableMountedComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+  ): import('./extension/unstable-types.ts').UnstableMountLease {
+    if (this.disposed) {
+      return {
+        id: 'inert',
+        active: false,
+        focused: false,
+        focus: () => {},
+        blur: () => {},
+        invalidate: () => {},
+        close: () => {},
+        hide: () => {},
+        show: () => {},
+      }
+    }
+    const mountOptions = this.overlayOptionsOf(options)
+    const id = `unstable-mount-${++this.unstableMountCounter}`
+    let adapter: import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter | undefined
+    let raw: OverlayHandle | undefined
+    let hiddenByLease = false
+    let closed = false
+    const mount = (): void => {
+      if (closed || raw !== undefined) return
+      const created = new UnstableMountedComponentAdapter(
+        component,
+        (message: string) => this.notify(`unstable mount: ${message}`, 'error'),
+      )
+      adapter = created
+      this.unstableMountAdapters.add(created)
+      raw = this.showOverlayOnHost(created, mountOptions)
+      if (hiddenByLease) raw.setHidden(true)
+    }
+    mount()
+    const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
+      id,
+      get active() {
+        return !closed
+      },
+      get focused() {
+        return raw?.isFocused() ?? false
+      },
+      focus: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+        raw?.focus()
+      },
+      blur: () => {
+        if (closed) return
+        raw?.unfocus()
+      },
+      invalidate: () => {
+        if (closed) return
+        this.requestRender()
+      },
+      close: () => {
+        if (closed) return
+        closed = true
+        this.unstableMountLeases.delete(lease)
+        if (adapter !== undefined) {
+          this.unstableMountAdapters.delete(adapter)
+          adapter.dispose()
+        }
+        raw?.hide()
+        raw = undefined
+        adapter = undefined
+      },
+      hide: () => {
+        if (closed) return
+        hiddenByLease = true
+        raw?.setHidden(true)
+      },
+      show: () => {
+        if (closed) return
+        hiddenByLease = false
+        raw?.setHidden(false)
+      },
+      // Host-internal: re-create the raw handle on the CURRENT active
+      // screen after a fullscreen swap. The OLD adapter is dropped from
+      // the live set WITHOUT disposing it (the plugin component must
+      // survive the screen migration).
+      _remount: () => {
+        if (closed) return
+        if (adapter !== undefined) {
+          this.unstableMountAdapters.delete(adapter)
+        }
+        raw = undefined
+        mount()
+      },
+    }
+    this.unstableMountLeases.add(lease)
+    return lease
+  }
+
+  /** Phase 3: re-mount every still-open UNSTABLE lease on the CURRENT
+   * active screen (fullscreen toggle). */
+  private remountUnstableMounts(): void {
+    for (const lease of this.unstableMountLeases) {
+      lease._remount()
+    }
+  }
+
+  /** Phase 3 test hook: the number of still-owned UNSTABLE mount leases. */
+  ownedUnstableMountLeasesForTest(): number {
+    return this.unstableMountLeases.size
+  }
+
+  /** Phase 3 test hook: the number of live UNSTABLE mount adapters
+   * (asserts a fullscreen remount drops the old adapter). */
+  unstableMountAdaptersForTest(): number {
+    return this.unstableMountAdapters.size
+  }
+
+  /** Phase 2: the ADVANCED editor controls (plan §9) — direct semantic
+   * editor actions through the host's editor seat. The host owns
+   * submission/session safety; these controls only carry text/cursor/
+   * focus. A disposed surface is inert. */
+  advancedEditorControls(): import('./extension/advanced-types.ts').AdvancedEditorControls {
+    const app = this
+    return {
+      getEditorState: () => app.editorSeatHolder.snapshot(),
+      setEditorText: (text) => {
+        if (app.disposed) return
+        app.seatEditor().setText(text)
+        app.editorSeatHolder.notifyChanged()
+      },
+      setEditorCursor: (offset) => {
+        if (app.disposed) return
+        app.seatEditor().setCursor(offset)
+        app.editorSeatHolder.notifyChanged()
+      },
+      insertEditorText: (text, at) => {
+        if (app.disposed) return
+        const current = app.seatEditor()
+        const offset = at ?? current.getCursor()
+        const draft = current.getText()
+        const next = draft.slice(0, offset) + text + draft.slice(offset)
+        current.setText(next)
+        current.setCursor(offset + text.length)
+        app.editorSeatHolder.notifyChanged()
+      },
+      pasteToEditor: (text) => {
+        if (app.disposed) return
+        const current = app.seatEditor()
+        const offset = current.getCursor()
+        const draft = current.getText()
+        const next = draft.slice(0, offset) + text + draft.slice(offset)
+        current.setText(next)
+        current.setCursor(offset + text.length)
+        app.editorSeatHolder.notifyChanged()
+      },
+      requestEditorFocus: () => {
+        if (app.disposed) return
+        // Best-effort: focus the seat component only when no capturing
+        // flow (question/approval/overlay) owns the seat — those flows
+        // restore their own focus and must never be stolen.
+        if (app.activeQuestions !== undefined || app.activeApproval !== undefined
+          || app.activeScreen.hasOverlayEntries) return
+        app.activeScreen.setFocus(app.seatEditor().component)
+      },
+    }
+  }
+
+  /** Phase 2 test hook: the current ADVANCED editor controls (probes the
+   * seam without going through the service). */
+  advancedEditorControlsForTest(): import('./extension/advanced-types.ts').AdvancedEditorControls {
+    return this.advancedEditorControls()
+  }
+
+  // ── Phase 4: the imperative UI broker + host-state facade (plan §4A/§4D) ─
+
+  /**
+   * Phase 4: the ADVANCED imperative UI broker (plan §4A) — select/
+   * confirm/input/notify/custom built on the Host's OWN picker, question
+   * flow and notify infrastructure (never a second modal manager). A
+   * disposed surface settles every prompt immediately.
+   */
+  advancedUiBroker(): {
+    select(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined>
+    confirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean>
+    input(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined>
+    notify(message: string, options?: import('./extension/advanced-types.ts').AdvancedNotifyOptions): void
+    custom(factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent, options?: import('./extension/public-types.ts').TuiOverlayOptions, signal?: AbortSignal): Promise<unknown>
+  } {
+    const app = this
+    return {
+      select: (options) => app.advancedSelect(options),
+      confirm: (options) => app.advancedConfirm(options),
+      input: (options) => app.advancedInput(options),
+      notify: (message, options) => {
+        if (app.disposed) return
+        app.notify(message, options?.type ?? 'info')
+      },
+      custom: (factory, options, signal) => app.advancedCustom(factory, options, signal),
+    }
+  }
+
+  /** Phase 4: imperative selection — a picker overlay resolving with the
+   * selected value, or undefined on cancel/abort/dispose. */
+  private advancedSelect(options: import('./extension/advanced-types.ts').AdvancedSelectOptions): Promise<string | undefined> {
+    if (this.disposed) return Promise.resolve(undefined)
+    return new Promise<string | undefined>((resolve) => {
+      let settled = false
+      // Declared BEFORE settle: an already-aborted signal fires onCancel
+      // SYNCHRONOUSLY inside openPicker, so settle must not hit a TDZ
+      // reference to handle (round-6 finding — the promise would reject
+      // with a ReferenceError instead of resolving undefined).
+      let handle: PickerHandle | undefined
+      // The zero-arg settle registered in pendingBrokerSettles (the
+      // surface-dispose path) — removed on a normal select/cancel/abort
+      // (round-2 finding: an anonymous entry would retain the closed
+      // picker until surface dispose). Routes through settle() so the
+      // dispose path shares the same single-settle semantics (round-3
+      // follow-up).
+      const brokerSettle = (): void => settle(undefined)
+      const settle = (value: string | undefined): void => {
+        if (settled) return
+        settled = true
+        this.pendingBrokerSettles.delete(brokerSettle)
+        // Round-5 asymmetry: a settled promise must not retain the
+        // picker's abort listener on the caller's signal (the dispose
+        // path routes through settle too). Optional-chained: the
+        // already-aborted path never registered a listener.
+        handle?._removeAbortListener?.()
+        resolve(value)
+      }
+      handle = this.openPicker(
+        options.items.map(item => ({ ...item })),
+        (value) => settle(value),
+        () => settle(undefined),
+        {
+          header: options.header,
+          enableSearch: options.enableSearch,
+          width: options.width,
+          maxHeight: options.maxHeight,
+          signal: options.signal,
+        },
+      )
+      // The surface's dispose settles the prompt (the picker overlay dies
+      // with the surface; the promise must not hang). Guarded: an
+      // already-aborted signal settles synchronously inside openPicker —
+      // the entry must not be added afterwards.
+      if (!settled) this.pendingBrokerSettles.add(brokerSettle)
+    })
+  }
+
+  /** Phase 4: imperative confirmation — a yes/no question resolving with
+   * the choice; cancel/abort/dispose resolves false. */
+  private advancedConfirm(options: import('./extension/advanced-types.ts').AdvancedConfirmOptions): Promise<boolean> {
+    const approve = options.approveLabel ?? 'Yes'
+    const reject = options.rejectLabel ?? 'No'
+    return this.askQuestions([{
+      id: 'advanced-confirm',
+      question: options.question,
+      ...(options.detail === undefined ? {} : { detail: options.detail }),
+      options: [{ label: approve }, { label: reject }],
+    }], options.signal)
+      .then(answers => answers[0]?.selected[0] === approve)
+      .catch(() => false)
+  }
+
+  /** Phase 4: imperative free-text input — a question with a free-text
+   * row resolving with the text; cancel/abort/dispose resolves
+   * undefined. */
+  private advancedInput(options: import('./extension/advanced-types.ts').AdvancedInputOptions): Promise<string | undefined> {
+    return this.askQuestions([{
+      id: 'advanced-input',
+      question: options.question,
+      ...(options.detail === undefined ? {} : { detail: options.detail }),
+    }], options.signal)
+      .then(answers => answers[0]?.custom)
+      .catch(() => undefined)
+  }
+
+  /**
+   * Phase 4: custom interactive UI (plan §4B) — mount a factory-built
+   * interactive component and resolve with the result reported through
+   * the public host facade's done(), or undefined on close/cancel/
+   * dispose. The factory receives ONLY the public facade — never a
+   * private TUI object. A throwing factory is isolated (resolves
+   * undefined).
+   */
+  private advancedCustom(
+    factory: (host: import('./extension/advanced-types.ts').AdvancedCustomHost) => import('./extension/advanced-types.ts').AdvancedInteractiveComponent,
+    options: import('./extension/public-types.ts').TuiOverlayOptions = {},
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (this.disposed) return Promise.resolve(undefined)
+    const app = this
+    return new Promise<unknown>((resolve) => {
+      let settled = false
+      // Declared BEFORE the factory call: a factory that synchronously
+      // calls host.done()/close() must not hit a TDZ reference.
+      let lease: import('./extension/advanced-types.ts').AdvancedOverlayLease | undefined
+      // The zero-arg settle registered in pendingBrokerSettles (the
+      // surface-dispose path) — the set holds `() => void` entries.
+      const brokerSettle = (): void => settle(undefined)
+      const settle = (result: unknown): void => {
+        if (settled) return
+        settled = true
+        this.pendingBrokerSettles.delete(brokerSettle)
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+        lease?.close()
+        resolve(result)
+      }
+      // The fiber-cancellation path (round-1 finding): owner unload aborts
+      // the signal — the promise settles undefined and the surface closes.
+      const onAbort = (): void => settle(undefined)
+      if (signal !== undefined) {
+        if (signal.aborted) {
+          resolve(undefined)
+          return
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+      const host: import('./extension/advanced-types.ts').AdvancedCustomHost = {
+        surfaceId: this.extensionHost?.surfaceId ?? 'tui',
+        generation: this.generation,
+        get width() { return app.terminal.columns },
+        get height() { return app.terminal.rows },
+        done: (result) => settle(result),
+        close: () => settle(undefined),
+      }
+      let component: import('./extension/advanced-types.ts').AdvancedInteractiveComponent
+      try {
+        component = factory(host)
+      } catch (error) {
+        // Round-4 follow-up: drop the abort listener before returning —
+        // a throwing factory never mounts, so the listener must not stay
+        // registered on the caller's signal.
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+        this.notify(`custom UI failed: ${safeErrorMessage(error)}`, 'error')
+        resolve(undefined)
+        return
+      }
+      // Round-2 finding: a factory that settles SYNCHRONOUSLY (calls
+      // host.done()/close() during the factory call) must not mount the
+      // overlay afterwards — the settle already resolved the promise and
+      // the lease was still undefined, so the mount would leak forever
+      // (the surface-dispose path cannot clean it up either: settle
+      // returns early on `settled`).
+      if (!settled) {
+        lease = this.showAdvancedInteractiveOverlay(component, options)
+        // The surface's dispose settles the promise (the overlay dies with
+        // the surface).
+        this.pendingBrokerSettles.add(brokerSettle)
+      }
+    })
+  }
+
+  /** Phase 4: the pending broker settles (run on the surface's final
+   * dispose — every still-open select/custom promise settles instead of
+   * hanging). */
+  private readonly pendingBrokerSettles = new Set<() => void>()
+
+  /** Phase 4 test hook: the number of still-pending broker settles
+   * (asserts a normal select/custom completion leaves none behind). */
+  pendingBrokerSettlesForTest(): number {
+    return this.pendingBrokerSettles.size
+  }
+
+  /**
+   * Phase 4: the ADVANCED host-state facade (plan §4D) — theme query/
+   * select, title override, working-indicator override and tool-expansion
+   * preference. A disposed surface is inert.
+   */
+  advancedHostState(): import('./extension/advanced-types.ts').AdvancedHostState {
+    const app = this
+    return {
+      getTheme: () => app.currentThemeId,
+      setTheme: (name) => {
+        if (app.disposed) return
+        if (name === 'dark' || name === 'light') {
+          app.applyTheme(name)
+          return
+        }
+        // A registered plugin theme name: the runner resolves the palette
+        // through the theme registry (wired below); unknown names are a
+        // no-op.
+        app.events.onAdvancedSetTheme?.(name)
+      },
+      setTitle: (title) => {
+        if (app.disposed) return
+        app.setSessionTitle(title)
+      },
+      setWorkingMessage: (message) => {
+        if (app.disposed) return
+        app.working.setMessage(message ?? '')
+        app.requestRender()
+      },
+      setToolsExpanded: (expanded) => {
+        if (app.disposed) return
+        app.setToolOutputExpanded(expanded)
+      },
+    }
+  }
+
+  /** Phase 4 test hook: the current ADVANCED host-state facade. */
+  advancedHostStateForTest(): import('./extension/advanced-types.ts').AdvancedHostState {
+    return this.advancedHostState()
+  }
+
+  /** Phase 4 test hook: the working indicator's current label (probes the
+   * working-message override). */
+  workingTextForTest(): string {
+    return this.working.messageText()
+  }
+
+  /** Phase 2: the ADVANCED overlay lease id counter. */
+  private advancedOverlayCounter = 0
+  /** Phase 2: the last geometry the ADVANCED overlays were recompiled at
+   * (the resize latch — recompile only on an actual geometry change). */
+  private lastAdvancedGeometry: { width: number; height: number } = { width: -1, height: -1 }
+
+  /** M9: the host default editor adapted to the seat surface. The fork's
+   * cursor is `{line, col}`; the seat uses a flat OFFSET (line lengths
+   * summed + col), so plugin editors and the host agree on one shape. */
+  private hostEditorAdapter(): import('./editor-seat-holder.ts').HostEditorAdapter {
+    // Capture the editor so object-literal getters keep the right `this`.
+    const editor = this.editor
+    return {
+      getText: () => editor.getText(),
+      setText: (text) => editor.setText(text),
+      getCursor: () => {
+        const cursor = editor.getCursor()
+        const lines = editor.getText().split('\n')
+        let offset = 0
+        for (let line = 0; line < cursor.line && line < lines.length; line++) {
+          offset += lines[line]!.length + 1
+        }
+        return offset + cursor.col
+      },
+      setCursor: (offset) => {
+        const text = editor.getText()
+        const lines = text.split('\n')
+        let remaining = Math.max(0, Math.min(offset, text.length))
+        for (let line = 0; line < lines.length; line++) {
+          const length = lines[line]?.length ?? 0
+          if (remaining <= length) {
+            editor.setCursor?.({ line, col: remaining })
+            return
+          }
+          remaining -= length + 1
+        }
+        const line = Math.max(0, lines.length - 1)
+        editor.setCursor?.({ line, col: lines[line]?.length ?? 0 })
+      },
+      setTextAndCursor: (text, offset) => {
+        // Editor.setTextAndCursor normalizes CRLF/CR and expands tabs before
+        // clamping the cursor. Convert the flat replacement offset against
+        // that same stored representation, otherwise a tab/newline before
+        // the cursor would shift the host position by a different amount.
+        const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ')
+        const lines = normalized.split('\n')
+        let remaining = Math.max(0, Math.min(offset, text.length))
+        const rawPrefix = text.slice(0, remaining)
+        remaining = rawPrefix.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ').length
+        let line = 0
+        for (; line < lines.length; line++) {
+          const length = lines[line]?.length ?? 0
+          if (remaining <= length) break
+          remaining -= length + 1
+        }
+        const targetLine = Math.min(line, Math.max(0, lines.length - 1))
+        editor.setTextAndCursor(normalized, { line: targetLine, col: remaining })
+      },
+      handleInput: (data) => editor.handleInput(data),
+      runWithoutChange: <T>(task: () => T): T => {
+        const onChange = editor.onChange
+        editor.onChange = undefined
+        try {
+          return task()
+        } finally {
+          editor.onChange = onChange
+        }
+      },
+      get focused() { return editor.focused },
+      borderColor: (text) => editor.borderColor(text),
+      invalidate: () => editor.invalidate(),
+      addToHistory: (text) => editor.addToHistory(text),
+      clearHistory: () => editor.clearHistory(),
+      component: editor,
+    }
+  }
+
+  /**
+   * M9: reconcile the seat with the editor registry's current winner —
+   * perform the atomic handoff when the winner changed. Called after the
+   * registry revision changes (the runner wires it) and at construction.
+   */
+  reconcileEditorWinner(): void {
+    const registry = this.editorRegistry
+    if (registry === undefined) return
+    const winner = registry.winner()
+    const current = this.editorSeatHolder.currentEditor()
+    const targetId = winner?.id
+    if (current.id === (targetId ?? 'host')) return
+    // Perform the atomic handoff (create → transfer → mount → dispose).
+    // The registry revision rides along so a failed target's guard clears
+    // on a same-id re-registration (round-1 finding 4).
+    this.editorSeatHolder.handoff(winner === undefined ? undefined : {
+      id: winner.id,
+      create: (host) => winner.create(host),
+    }, registry.snapshot().revision)
+    // Re-mount the seat child: the editor seat now holds the new
+    // occupant's component (the host default editor or the plugin's).
+    this.mountSeatChild()
+  }
+
+  /**
+   * M9: mount the CURRENT seat occupant's component into the editor seat
+   * (the host default editor or the plugin winner's compiled view). The
+   * question flow's seat restore uses the same path, so a plugin editor
+   * survives a question round-trip.
+   *
+   * P1-06/P1-10: the mount ALSO transfers focus to the new occupant when
+   * the editor seat currently owns input — after a handoff the plugin
+   * editor's component must actually receive keys (typing, arrows), not
+   * leave the old host Editor focused. Focus transfer is skipped while a
+   * capturing flow (question/approval) owns the seat — those flows
+   * restore their own focus.
+   */
+  private mountSeatChild(): void {
+    const component = this.seatEditor().component
+    this.editorSeat.clear()
+    this.editorSeat.addChild(component)
+    // Focus follows the occupant: if the seat owns input right now (no
+    // question/approval/overlay is capturing), the NEW component must be
+    // the focused component — otherwise every key after a handoff still
+    // targets the old host Editor (P1-06 probe would see the WRONG
+    // focused component and plugin bindings would steal editor keys).
+    if (this.activeQuestions === undefined && this.activeApproval === undefined
+      && !this.activeScreen.hasOverlayEntries) {
+      this.activeScreen.setFocus(component)
+    }
+  }
+
+  /**
+   * M9: the CURRENT seat editor (all host editor access routes through
+   * this — plan §14: business code stops scattering this.editor.*).
+   */
+  private seatEditor(): import('./editor-seat-holder.ts').SeatEditor {
+    return this.editorSeatHolder.currentEditor()
+  }
+
+  /** M9 public hook: reconcile the seat with the registry's winner NOW
+   * (tests + the runner call it after a winner change; the render-path
+   * reconcile is the live fallback). */
+  reconcileEditorNow(): void {
+    this.reconcileEditorWinner()
+  }
+
+  /** M9 test hook: the CURRENT seat occupant's text (probes what the
+   * seat actually renders — getDraft preserves the viewer draft). */
+  seatTextForTest(): string {
+    return this.seatEditor().getText()
+  }
+
+  /** M9 test hook: the CURRENT seat occupant (component rendering probe). */
+  seatEditorForTest(): import('./editor-seat-holder.ts').SeatEditor {
+    return this.seatEditor()
+  }
+
+  /** P2-R5 test hook: the HIDDEN host editor's live text (probes that a
+   * display-only replacement editor never silently routes typing into the
+   * hidden host editor while the plugin seat is visible). */
+  hostEditorTextForTest(): string {
+    return this.editor.getText()
+  }
+
+  /** M7 test hook: build (or fetch) the cached component entry for one
+   * message at a fold boundary, exposing the renderer identity. */
+  messageCacheEntryForTest(message: TranscriptMessage, boundary = 0): MessageComponentEntry | undefined {
+    this.componentForMessage(message, boundary)
+    return this.messageComponents.get(message)
+  }
+
+  /**
+   * M7: build the semantic presentation snapshot for one message (plan
+   * §12 — renderers receive ONLY semantic snapshots, never mutable
+   * messages or containers). Returns undefined for kinds a renderer
+   * cannot present.
+   */
+  private semanticSnapshotOf(message: TranscriptMessage): MessagePresentationSnapshot | undefined {
+    switch (message.kind) {
+      case 'user':
+      case 'assistant':
+        return { kind: message.kind, turn: message.turn, text: message.text }
+      case 'thinking':
+        return { kind: 'thinking', turn: message.turn, text: message.text, running: message.running }
+      case 'system':
+        return { kind: 'system', turn: message.turn, text: message.text, label: message.label, summary: message.summary }
+      case 'tool': {
+        return {
+          kind: 'tool',
+          turn: message.turn,
+          tool: Object.freeze({
+            callId: `${message.turn}:${message.name}:${message.args.slice(0, 32)}`,
+            toolName: message.name,
+            status: message.status,
+            arguments: message.args === '' ? undefined : deepFreeze(safeParseArgs(message.args)),
+            result: message.result === '' ? undefined : deepFreeze(safeParseArgs(message.result)),
+            expanded: message.turn >= 0,
+          }),
+        }
+      }
+      case 'summary':
+        return { kind: 'summary', turn: 0, text: message.text }
+    }
+  }
 
   /**
    * Get (or rebuild) the component for one message at this fold boundary.
@@ -1934,27 +3693,61 @@ export class TuiApp {
   private componentForMessage(message: TranscriptMessage, boundary: number): Component {
     const expanded = (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool')
       && (message.turn >= boundary || this.expandedOverride.get(message) === true)
+    // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
+    // registry revision — a renderer registering/unloading rebuilds the
+    // affected components (an HMR must never hit an old component).
     const entry = this.messageComponents.get(message)
     if (entry === undefined) {
-      const built: MessageComponentEntry = {
-        component: this.renderMessage(message, boundary),
-        boundary,
-        themeRev: this.themeRevision,
-        expanded,
-      }
+      const built = this.buildMessage(message, boundary, expanded)
       this.captureComponentState(built, message)
       this.messageComponents.set(message, built)
       return built.component
     }
+    // Staleness: fold boundary, theme revision, expansion, the RENDERER
+    // identity (registry revision changed → the winner may differ), or
+    // the message's own content. The registry revision comparison is the
+    // CHEAP gate (plan §23): renderer functions run only inside
+    // buildMessage, never for unchanged content.
+    const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
     if (entry.boundary !== boundary || entry.themeRev !== this.themeRevision
-      || entry.expanded !== expanded || this.componentStale(entry, message)) {
-      entry.component = this.renderMessage(message, boundary)
-      entry.boundary = boundary
-      entry.themeRev = this.themeRevision
-      entry.expanded = expanded
+      || entry.expanded !== expanded || rendererRevisionChanged
+      || this.componentStale(entry, message)) {
+      const rebuilt = this.buildMessage(message, boundary, expanded)
+      entry.component = rebuilt.component
+      entry.boundary = rebuilt.boundary
+      entry.themeRev = rebuilt.themeRev
+      entry.expanded = rebuilt.expanded
+      entry.rendererId = rebuilt.rendererId
+      entry.rendererRevision = rebuilt.rendererRevision
       this.captureComponentState(entry, message)
     }
     return entry.component
+  }
+
+  /**
+   * Build one message's component + renderer identity in a SINGLE pass
+   * (round-1 finding 1: the recorded identity always matches the view
+   * actually built). When the renderer registry is present, the plugin
+   * chain runs ONCE here and its result — view + rendererId + the
+   * registry revision (even for a HOST-fallback entry — round-1 finding
+   * 2) — is what the cache stores. Renderers never run in the frame loop
+   * for unchanged content (plan §23).
+   */
+  private buildMessage(
+    message: TranscriptMessage,
+    boundary: number,
+    expanded: boolean,
+  ): MessageComponentEntry {
+    const registry = this.renderers
+    const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, boundary)
+    return {
+      component: rendered === undefined ? this.renderMessage(message, boundary) : rendered.component,
+      boundary,
+      themeRev: this.themeRevision,
+      expanded,
+      rendererId: rendered?.rendererId,
+      rendererRevision: registry === undefined ? undefined : registry.snapshot().revision,
+    }
   }
 
   /** Record the message values a component was built from. */
@@ -2001,7 +3794,13 @@ export class TuiApp {
     }
   }
 
-  /** Render one transcript message as a pi-tui component. */
+  /**
+   * Render one transcript message as a pi-tui component — the HOST
+   * renderer (M7: extensions are consulted by buildMessage, which owns
+   * the plugin chain + identity; renderMessage itself never re-runs a
+   * renderer, so a throwing renderer is invoked exactly once per build
+   * and the host fallback is single-path).
+   */
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
     if (message.kind === 'user') {
       // Terminal-prompt style: the user's line reads like a shell command.
@@ -2159,6 +3958,72 @@ export class TuiApp {
       card.addChild(new Text(rows.join('\n'), 0, 0))
     }
     return card
+  }
+
+  /**
+   * M7: present one message through the plugin renderer registry. Returns
+   * the compiled component, or undefined (host fallback). The tool branch
+   * uses the keyed tool renderer; other kinds use the message chain.
+   * @param message - the transcript message.
+   * @param boundary - the fold boundary (the snapshot's expanded state).
+   */
+  private renderThroughExtensions(
+    message: TranscriptMessage,
+    boundary: number,
+  ): { component: Component; rendererId: string } | undefined {
+    const registry = this.renderers
+    if (registry === undefined) return undefined
+    const snapshot = this.semanticSnapshotOf(message)
+    if (snapshot === undefined) return undefined
+    if (snapshot.kind === 'tool' && snapshot.tool !== undefined) {
+      // The tool snapshot's expanded state follows the fold boundary +
+      // click override (the host's own card does the same).
+      const tool = { ...snapshot.tool, expanded: snapshot.turn >= boundary || this.expandedOverride.get(message) === true }
+      const compiled = new Map<string, Component>()
+      const rendered = registry.renderTool(tool, (id, error) => this.rendererError?.({ id, error, slot: 'tool' }), (id, view) => {
+        const component = this.compileExtensionViewIsolated(view, id, 'tool')
+        if (component === undefined) return false
+        compiled.set(id, component)
+        return true
+      })
+      if (rendered === undefined) return undefined
+      const component = compiled.get(rendered.rendererId) ?? this.compileExtensionViewIsolated(rendered.view, rendered.rendererId, 'tool')
+      if (component === undefined) return undefined
+      // P1-08: a SUCCESSFUL render clears the renderer's failure record.
+      this.rendererRecovered?.({ id: rendered.rendererId, slot: 'tool' })
+      return { component, rendererId: rendered.rendererId }
+    }
+    const compiled = new Map<string, Component>()
+    const rendered = registry.renderMessage(snapshot, (id, error) => this.rendererError?.({ id, error, slot: 'message' }), (id, view) => {
+      const component = this.compileExtensionViewIsolated(view, id, 'message')
+      if (component === undefined) return false
+      compiled.set(id, component)
+      return true
+    })
+    if (rendered === undefined) return undefined
+    const component = compiled.get(rendered.rendererId) ?? this.compileExtensionViewIsolated(rendered.view, rendered.rendererId, 'message')
+    if (component === undefined) return undefined
+    // P1-08: a SUCCESSFUL render clears the renderer's failure record.
+    this.rendererRecovered?.({ id: rendered.rendererId, slot: 'message' })
+    return { component, rendererId: rendered.rendererId }
+  }
+
+  /**
+   * M7 (P1-07): compile a renderer-returned view INSIDE the per-renderer
+   * isolation boundary. `RendererRegistry.render*` catches throws from
+   * `record.render()`, but the returned view's compilation is a separate
+   * hostile surface (a throwing `spans` getter, a broken tree shape) — a
+   * compile failure must ABDICATE to the host card (undefined) like a
+   * render throw, never escape into the render path. The failure is
+   * recorded through the same bounded health sink.
+   */
+  private compileExtensionViewIsolated(view: ExtensionView, rendererId: string, slot?: 'message' | 'tool'): Component | undefined {
+    try {
+      return compileView(view).component
+    } catch (error) {
+      this.rendererError?.({ id: rendererId, error, slot })
+      return undefined
+    }
   }
 
   /**
@@ -2467,9 +4332,132 @@ export class TuiApp {
   /** Request a render on the active screen. Public so in-place submenu
    * components (async content swaps) can trigger the next frame. `force`
    * bypasses the render throttle (used to repaint the autocomplete list on
-   * the keystroke's own frame). */
+   * the keystroke's own frame). After a final dispose the request is a
+   * benign no-op (M0 stale-generation contract). */
   requestRender(force = false): void {
+    if (this.disposed) return
+    // M9: a cheap editor-winner reconciliation on every render request —
+    // the registry's invalidation (register/unload) funnels here through
+    // the service batcher → SurfaceHost sink. The compare is O(1) when
+    // unchanged (id comparison), so the frame loop cost is negligible
+    // (plan §23).
+    this.reconcileEditorWinner()
+    // P1-1: a renderer register/unload bumps the registry revision — the
+    // message cache embeds it, so the affected transcript components must
+    // be REBUILT on this render (never waiting for a key, resize, session
+    // event or setStatus). O(1) gate; the rebuild itself only re-runs
+    // renderers for entries whose identity changed (plan §23).
+    if (this.renderers !== undefined) {
+      const revision = this.renderers.revisionOf()
+      if (revision !== this.lastRendererRevision) {
+        this.lastRendererRevision = revision
+        this.rebuildMessages()
+      }
+    }
+    // Live surface geometry (P1-1): the fork consumes the terminal resize
+    // callback internally, so the extension surface slice is refreshed
+    // from the CURRENT terminal geometry on every render — a resize lands
+    // here on the first repaint after the event.
+    this.syncSurfaceGeometry()
     ;(this.fullscreen ?? this.tui).requestRender(force)
+  }
+
+  /** Mirror the live terminal geometry into the extension surface slice
+   * (width/height) when it changed; also refreshes focusedSeat from the
+   * current mode. Cheap: no-op unless a value differs. A WIDTH change
+   * re-bakes the width-budgeted outlets (dock/footer) and re-merges the
+   * chrome on the spot, so a resize lands on the first repaint after the
+   * event (follow-up P1: the footer must not keep the old segment set at
+   * the new width). */
+  private syncSurfaceGeometry(): void {
+    // Re-entrancy guard (review finding 4): the resize callback can fire
+    // while a width change is already being applied (a terminal that
+    // re-reports size during start/restart, or refreshChrome's own render
+    // request). A nested call would re-bake the outlets and re-merge the
+    // chrome mid-pass; the outer pass already reads the CURRENT geometry,
+    // so the nested call has nothing new to add — drop it.
+    if (this.syncingSurfaceGeometry) return
+    this.syncingSurfaceGeometry = true
+    try {
+      const width = this.terminal.columns
+      const height = this.terminal.rows
+      // Phase 2: a terminal resize recompiles every live ADVANCED overlay
+      // wrapper — the plugin's render(ctx) must see the new geometry (the
+      // compiled view itself re-wraps at the current width per frame, but
+      // the plugin's render() output is only re-read on invalidate). Runs
+      // even without an extension host (tests mount advanced overlays
+      // directly on the app); the last-geometry latch keeps it resize-only.
+      if (width !== this.lastAdvancedGeometry.width || height !== this.lastAdvancedGeometry.height) {
+        this.lastAdvancedGeometry = { width, height }
+        this.recompileAdvancedOverlays()
+      }
+      const host = this.extensionHost
+      if (host === undefined) return
+      const current = host.state().surface
+      // focusedSeat derives from the actual focus state (follow-up P1): the
+      // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
+      // question/approval/fullscreen entry; the requestRender mirror only
+      // publishes it here (plus the stale-frame safety net below). The LIVE
+      // focusSeat (not the microtask-published copy) is authoritative — a
+      // publish that changed nothing must still mirror the real seat.
+      this.publishFocusSeat()
+      const focusedSeat = this.focusSeat
+      if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
+        host.updateSurface({ width, height, focusedSeat })
+        if (current.width !== width) {
+          // The outlet budgets are baked from the snapshot width: re-bake
+          // the width-budgeted outlets (dock + footer) and re-merge the
+          // chrome rows NOW, so the new width takes effect immediately —
+          // waiting for the next extension invalidation would keep the old
+          // low/high segment set baked at the stale width (follow-up P1).
+          host.refreshOutlets()
+          this.refreshChrome()
+        }
+      }
+    } finally {
+      this.syncingSurfaceGeometry = false
+    }
+  }
+
+  /**
+   * Recompute the focused seat from the live focus state and publish it
+   * through one coalesced microtask. The seat is derived from the ACTUAL
+   * focused capturing surface (follow-up P1): the search input, a picker,
+   * settings, the task browser, an approval dialog or a question flow all
+   * report 'overlay' while they own input — never a stale 'editor'.
+   */
+  private publishFocusSeat(): void {
+    const question = this.activeQuestions
+    if (question !== undefined) {
+      this.setFocusSeat('overlay')
+      return
+    }
+    if (this.activeApproval !== undefined) {
+      this.setFocusSeat('overlay')
+      return
+    }
+    const screen = this.activeScreen
+    if (!this.disposed && screen.hasOverlayEntries && screen.getFocusedComponent() !== null) {
+      this.setFocusSeat('overlay')
+      return
+    }
+    this.setFocusSeat('editor')
+  }
+
+  /** Set the current focus seat and schedule one coalesced snapshot publish
+   * when it changed (a burst of mount/close calls in one tick delivers ONE
+   * update — same batching contract as the state store). */
+  private setFocusSeat(seat: 'editor' | 'overlay' | 'editor-panel' | 'none'): void {
+    if (this.focusSeat === seat) return
+    this.focusSeat = seat
+    if (this.focusSeatPublishScheduled || this.disposed) return
+    this.focusSeatPublishScheduled = true
+    queueMicrotask(() => {
+      this.focusSeatPublishScheduled = false
+      if (this.disposed) return
+      this.publishedFocusSeat = this.focusSeat
+      this.extensionHost?.updateSurface({ focusedSeat: this.publishedFocusSeat })
+    })
   }
 
   /**
@@ -2481,6 +4469,7 @@ export class TuiApp {
     this.todoItems = todos
     this.renderDock()
     if (this.todoPanelVisible) this.renderTodoPanel()
+    this.syncExtensionState()
   }
 
   /** Toggle the todo panel between the transcript and the editor. */
@@ -2539,22 +4528,107 @@ export class TuiApp {
     return this.hideThinking
   }
 
+  /** The todo summary line text (`☑ N active · first`), or '' when the
+   * list is empty or the panel is expanded (the summary would sit on the
+   * full list). Shared by renderDock and the extension state mirror
+   * (P1-5). */
+  private todoSummaryText(): string {
+    if (this.todoPanelVisible || this.todoItems.length === 0) return ''
+    const active = this.todoItems.filter(todo => todo.status !== 'completed')
+    const done = this.todoItems.length - active.length
+    const first = active[0]
+    const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
+    return [
+      done > 0 ? `${done} todo done` : '',
+      active.length > 0 ? `${active.length} active` : '',
+      label,
+    ].filter(part => part !== '').join(' · ')
+  }
+
+  /**
+   * Mirror the host's live state into the extension SurfaceStateStore (M2):
+   * activity counts (working, queue, tasks, agents, todos) and session mode
+   * (plan mode, viewer). Called from the setters so extension outlets and
+   * subscribers see the same truth the host chrome renders. No-ops without
+   * an attached extension host; batch delivery coalesces within a tick.
+   */
+  private syncExtensionState(): void {
+    const host = this.extensionHost
+    if (host === undefined) return
+    host.updateActivity({
+      working: this.working.isActive(),
+      queuedCount: this.queueItems.length,
+      taskCount: this.dockTasks.length,
+      childAgentCount: this.dockAgents.length,
+      todoCount: this.todoItems.length,
+      // The rendered todo summary (P1-5: the first-party builtin dock item
+      // renders it through the public slot API; the host provides the
+      // TEXT, the extension owns the presentation). Always written — an
+      // empty string CLEARS a previous summary (the store merge is
+      // per-field monotonic, so omitting it would leave the stale text).
+      todoSummary: this.todoSummaryText(),
+    })
+    host.updateSession({
+      planMode: this.planMode,
+      viewerMode: this.viewerMode !== undefined,
+      busy: this.working.isActive(),
+      turns: this.status.turns,
+      steps: this.status.steps,
+      ...this.status.model === '' ? {} : { model: this.status.model },
+      ...this.status.cwd === '' ? {} : { cwd: this.status.cwd },
+      ...this.status.branch === '' ? {} : { branch: this.status.branch },
+      ...this.status.permission === undefined ? {} : { permission: this.status.permission },
+    })
+  }
+
+  /**
+   * Rebuild the chrome rows from the CURRENT semantic state (M2). The
+   * runner calls this after attaching an extension host, so extension
+   * badges/dock/footer content renders immediately; also called after
+   * extension invalidations that changed chrome content.
+   */
+  refreshChrome(): void {
+    // Layout budgets are host-owned (plan §19, follow-up P1): renderHeader
+    // derives the header badge budget from the CURRENT terminal width on
+    // every render, renderDock owns the dock row budget, and the footer
+    // outlet is bounded by the terminal width inside its own refresh.
+    this.renderHeader()
+    this.renderFooter()
+    this.renderDock()
+    this.renderGoalLine()
+    this.renderWidgets()
+    this.requestRender()
+  }
+
   /** Whether thinking entries are currently hidden. */
   isThinkingHidden(): boolean {
     return this.hideThinking
   }
 
-  /** Rebuild the header from base + session title + plan badge.
-   * Colours are applied AT RENDER TIME from the live palette — the semantic
-   * state (plan mode, title) is stored separately, so a theme switch only
-   * has to re-run this. */
+  /** Rebuild the header from base + session title + plan badge + extension
+   * badges. Colours are applied AT RENDER TIME from the live palette — the
+   * semantic state (plan mode, title) is stored separately, so a theme
+   * switch only has to re-run this. */
   private renderHeader(): void {
+    // Host-owned header budget (plan §19, follow-up P1): the badge run gets
+    // the width the HOST'S OWN header content leaves free — the fixed
+    // prefix PLUS the session/viewer title and the plan/viewer badges
+    // (a long title would otherwise consume the row and make the final
+    // header wrap even though the badge run fits its own budget). Re-derived
+    // on EVERY render so a resize or a title change re-bakes the budget.
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
     const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent('[viewing subagent]')}`
     const title = this.viewerMode !== undefined
       ? ` · ${color.textMuted(this.viewerMode.label)}`
       : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    this.header.setText(`🐋  dsh-pi-tui${title}${badge}${viewerBadge}`)
+    const hostOwned = `🐋  dsh-pi-tui${title}${badge}${viewerBadge}`
+    // The badge run gets what the host chrome leaves; -2 reserves the
+    // trailing space + a safety cell so the composed row never wraps.
+    this.extensionHost?.setHeaderBudget(Math.max(1, this.terminal.columns - visibleWidth(hostOwned) - 2))
+    // Extension header badges append after the host chrome (M2): the host
+    // title stays host-owned; badges add semantics like `[plan]`.
+    const extensionBadges = this.extensionHost?.headerBadgeText() ?? ''
+    this.header.setText(`${hostOwned}${extensionBadges}`)
     this.requestRender()
   }
 
@@ -2569,6 +4643,7 @@ export class TuiApp {
     this.renderFooter()
     this.renderDock()
     this.renderGoalLine()
+    this.syncExtensionState()
   }
 
   /**
@@ -2580,6 +4655,7 @@ export class TuiApp {
     this.dockTasks = tasks
     this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
     this.renderFooter()
+    this.syncExtensionState()
   }
 
   /**
@@ -2592,6 +4668,7 @@ export class TuiApp {
     this.dockAgents = agents
     this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
     this.renderFooter()
+    this.syncExtensionState()
   }
 
   /** Whether background tasks are active (drives the ↓/Ctrl+J trigger). */
@@ -2608,6 +4685,7 @@ export class TuiApp {
   setQueueItems(items: readonly QueueItem[]): void {
     this.queueItems = items
     this.renderQueuePane()
+    this.syncExtensionState()
   }
 
   /** Rebuild the queue pane text from the current inbox rows. */
@@ -2652,7 +4730,9 @@ export class TuiApp {
       this.draftBeforeViewer = text
       return
     }
-    this.editor.setText(text)
+    // M9: write the CURRENT seat occupant (host default or plugin editor).
+    this.seatEditor().setText(text)
+    this.editorSeatHolder.notifyChanged()
     this.requestRender()
   }
 
@@ -2661,7 +4741,41 @@ export class TuiApp {
   getDraft(): string {
     return this.viewerMode !== undefined && this.draftBeforeViewer !== undefined
       ? this.draftBeforeViewer
-      : this.editor.getText()
+      : this.seatEditor().getText()
+  }
+
+  /**
+   * M6 host-owned draft submission (the semantic actions submit-draft /
+   * queue-draft route through this, NOT a raw dispatch): mirrors the
+   * editor's Enter-submit path exactly — history, notify clear and draft
+   * clear — then fires the submit/queue event through the runner. The
+   * plugin never touches the editor directly.
+   * @param forceQueue - Ctrl+Enter parity: queue delivery regardless of
+   *   the busyEnter preference.
+   */
+  submitDraft(forceQueue = false): void {
+    // P1-12: a finally-disposed surface never submits — a late plugin
+    // callback (or a stale host dispatch) must not produce a real
+    // session-side effect after teardown.
+    if (this.disposed) return
+    const text = this.getDraft()
+    if (text.trim() === '') return
+    this.rememberInput(text)
+    this.clearNotify()
+    // Clear the draft like a normal Enter submit (the runner's dispatch
+    // owns the session/guard path). M9: clear the CURRENT seat occupant.
+    if (this.viewerMode === undefined) {
+      this.seatEditor().setText('')
+      this.editorSeatHolder.notifyChanged()
+    } else {
+      this.draftBeforeViewer = ''
+    }
+    if (forceQueue) {
+      this.events.onQueueSubmit?.(text)
+    } else {
+      this.events.onSubmit(text)
+    }
+    this.requestRender()
   }
 
   /**
@@ -2673,8 +4787,8 @@ export class TuiApp {
    */
   overlayGraphState(): { handles: number; dependents: number; suspended: number } {
     return {
-      handles: this.overlayHandles.size,
-      dependents: this.overlayDependents.size,
+      handles: this.overlayBroker.graphState().handles,
+      dependents: this.overlayBroker.graphState().dependents,
       suspended: this.activeQuestions?.suspendedOverlays.size ?? 0,
     }
   }
@@ -2692,21 +4806,22 @@ export class TuiApp {
     // While the todo panel is expanded the summary would sit directly on
     // top of the full list it summarizes — drop it so the panel's own
     // border rule is the single boundary.
-    if (this.todoPanelVisible || this.todoItems.length === 0) {
-      this.dock.setText('')
+    const extensionDock = this.extensionHost?.dockText() ?? ''
+    const summary = this.todoSummaryText()
+    const hostLine = summary === '' ? '' : color.textDim(`☑  ${summary}`)
+    // The dock strip is ONE summary row zone (label + at most one detail
+    // line): host-owned row budget (plan §19).
+    this.extensionHost?.setDockMaxRows(2)
+    // With an extension host the FIRST-PARTY builtin dock item renders the
+    // todo summary through the public slot API (P1-5); the host renders it
+    // directly only when no host is attached (fallback, not a competing
+    // registration).
+    if (this.extensionHost !== undefined) {
+      this.dock.setText(extensionDock)
       this.requestRender()
       return
     }
-    const active = this.todoItems.filter(todo => todo.status !== 'completed')
-    const done = this.todoItems.length - active.length
-    const first = active[0]
-    const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
-    const summary = [
-      done > 0 ? `${done} todo done` : '',
-      active.length > 0 ? `${active.length} active` : '',
-      label,
-    ].filter(part => part !== '').join(' · ')
-    this.dock.setText(color.textDim(`☑  ${summary}`))
+    this.dock.setText(hostLine)
     this.requestRender()
   }
 
@@ -2718,12 +4833,47 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /**
+   * Rebuild the M4 widget zones around the editor seat. The host owns the
+   * row budget (plan §19 — minimum editor usability always wins): the above
+   * zone gets a fixed budget, the below zone gets the remaining rows before
+   * the footer. An empty zone renders NOTHING (the fork's emptied-pane quirk
+   * means an empty Text would keep its old rows — the outlet text is
+   * rewrittten wholesale on every refresh, and an empty text hides the
+   * zone).
+   */
+  private renderWidgets(): void {
+    const host = this.extensionHost
+    if (host === undefined) {
+      this.widgetsAbove.setText('')
+      this.widgetsBelow.setText('')
+      this.requestRender()
+      return
+    }
+    // Host-owned budgets (plan §19): the above zone gets a fixed 3 rows,
+    // the below zone the rows between the seat and the footer (a footer
+    // recovery/status line always survives — the plan's height priority).
+    const width = Math.max(1, this.terminal.columns)
+    const belowBudget = Math.max(1, Math.min(3, Math.max(1, Math.floor(this.terminal.rows / 4))))
+    host.setWidgetRowsAbove(3)
+    host.setWidgetRowsBelow(belowBudget)
+    const above = host.widgetsAboveText()
+    const below = host.widgetsBelowText()
+    this.widgetsAbove.setText(above)
+    this.widgetsBelow.setText(below)
+    void width
+    this.requestRender()
+  }
+
   /** Footer density presets: full keeps the stats line, compact drops it. */
   private footerPreset: 'full' | 'compact' = 'full'
 
   /** Set the footer density preset and repaint. */
   setFooterPreset(preset: 'full' | 'compact'): void {
     this.footerPreset = preset
+    // Extension footer segments honor the density preset (F-18): low-
+    // importance segments drop in compact mode.
+    this.extensionHost?.setFooterCompact(preset === 'compact')
     this.renderFooter()
   }
 
@@ -2773,11 +4923,26 @@ export class TuiApp {
       this.status.cwd,
       this.status.branch === '' ? '' : this.status.branch,
       context,
-      `t${this.status.turns}/s${this.status.steps}`,
+      // Turn/step counters: the first-party builtin provides them through
+      // the extension footer segment (M3 dogfood). The host fallback stays
+      // on whenever NO footer segment provides them (F3: a host attached
+      // without the builtin — third-party-only or unloaded — must not lose
+      // the counters).
+      this.extensionHost?.hasFooterSegments() ? '' : `t${this.status.turns}/s${this.status.steps}`,
+      // Extension footer segments append after the host status (M2); the
+      // host owns ordering/truncation of its own parts, extensions join at
+      // the end so host state always reads first.
+      this.extensionHost?.footerText() ?? '',
     ].filter(part => part !== '')
     // Line 2: the stats line only; context pressure is the bar on line 1.
     const line2 = this.footerPreset === 'compact' ? '' : this.status.statsLine
-    this.footer.setText([dim(line1.join('  ')), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n'))
+    // Host-owned width budget (plan §8.3): the assembled line-1 is
+    // truncated to the terminal width so extension segments can never
+    // overflow the footer (truncateToWidth is ANSI-safe — it strips
+    // styling, measures the visible width, and re-applies the style).
+    const width = Math.max(1, this.terminal.columns)
+    const line1Text = truncateToWidth(line1.join('  '), width, '…')
+    this.footer.setText([dim(line1Text), line2 === '' ? '' : dim(line2)].filter(line => line !== '').join('\n'))
     this.requestRender()
   }
 
@@ -2785,9 +4950,43 @@ export class TuiApp {
    * Install slash-command + file-path autocompletion on the editor, plus
    * `@`-file mentions (fd-backed when `fdPath` is provided; a bounded
    * recursive fallback otherwise — see mentions.ts).
+   * @param extensionSuggest - M5: consulted AFTER the host provider returns
+   *   null (the plugin autocomplete chain). Receives the same editor
+   *   position; returns suggestions or null.
    */
-  setCommandCompletions(commands: readonly SlashCommand[], cwd: string, fdPath: string | null = null): void {
-    this.editor.setAutocompleteProvider(new MentionProvider([...commands], cwd, fdPath))
+  setCommandCompletions(
+    commands: readonly SlashCommand[],
+    cwd: string,
+    fdPath: string | null = null,
+    extensionSuggest?: (query: {
+      lines: readonly string[]
+      cursorLine: number
+      cursorCol: number
+      signal: AbortSignal
+      force?: boolean
+    }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
+  ): void {
+    const base = new MentionProvider([...commands], cwd, fdPath)
+    if (extensionSuggest === undefined) {
+      this.editor.setAutocompleteProvider(base)
+      return
+    }
+    // A delegating provider: the host's own completions run FIRST; the
+    // plugin chain (M5 AutocompleteRegistry) is consulted only when the
+    // host provider has nothing. applyCompletion always delegates to the
+    // host provider (the fork's completion semantics own the editor).
+    const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
+      async getSuggestions(lines, cursorLine, cursorCol, options) {
+        const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
+        if (host !== null) return host
+        return extensionSuggest({ lines, cursorLine, cursorCol, signal: options.signal, force: options.force })
+      },
+      applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
+        base.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+      shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
+        base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol),
+    }
+    this.editor.setAutocompleteProvider(delegated)
   }
 
   /**
@@ -2820,20 +5019,50 @@ export class TuiApp {
       },
     )
     const handle = this.showOverlayOnHost(new Frame(list), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    // Phase 4: an abort signal closes the picker and fires onCancel (the
+    // imperative select broker's fiber-cancellation path). The listener
+    // is removed on a normal select/cancel AND on the handle's close
+    // (round-1 finding 4 + round-5 asymmetry: a settled promise must not
+    // retain the listener on the caller's signal).
+    let onAbort: (() => void) | undefined
+    const removeAbortListener = (): void => {
+      if (onAbort !== undefined && options.signal !== undefined) {
+        options.signal.removeEventListener('abort', onAbort)
+        onAbort = undefined
+      }
+    }
+    if (options.signal !== undefined) {
+      onAbort = (): void => {
+        handle.hide()
+        onCancel()
+      }
+      if (options.signal.aborted) {
+        onAbort()
+        onAbort = undefined
+      } else {
+        options.signal.addEventListener('abort', onAbort, { once: true })
+      }
+    }
     list.onSelect = (item) => {
+      removeAbortListener()
       handle.hide()
       onSelect(item.value)
     }
     list.onCancel = () => {
+      removeAbortListener()
       handle.hide()
       onCancel()
     }
     return {
-      close: () => handle.hide(),
+      close: () => {
+        removeAbortListener()
+        handle.hide()
+      },
       setItems: (next) => {
         list.setItems(next.map(item => ({ ...item })))
         this.requestRender()
       },
+      _removeAbortListener: removeAbortListener,
     }
   }
 
@@ -2903,18 +5132,34 @@ export class TuiApp {
    * dismiss itself after the action — without it the list stays mounted as
    * a ghost overlay that eats every later key (the /subagents trap).
    * @param items - setting rows.
-   * @param onChange - called with (id, newValue) on confirm.
+   * @param onChange - called with (id, newValue) on confirm. The third
+   *   argument `revert` restores a row's DISPLAYED value (used by the M5
+   *   plugin-settings path when the row's onChange rejects — the fork
+   *   optimistically mutates the row before the callback runs).
    * @param onCancel - called when the user closes without applying.
    * @returns a function that closes the overlay.
    */
-  openSettings(items: SettingItem[], onChange: (id: string, value: string) => void, onCancel: () => void): () => void {
+  openSettings(
+    items: SettingItem[],
+    onChange: (id: string, value: string, revert: (previousValue: string) => void) => void,
+    onCancel: () => void,
+  ): () => void {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
     // so the cancel callback closes the handle captured after mounting.
     let handle: OverlayHandle | undefined
     // The settings theme is constructed PER OPEN: its cursor is a rendered
     // ANSI string, so a module-level constant would freeze the cursor
     // colour at import time and never follow a live theme switch.
-    const settings = new SettingsList(items, 6, settingsListTheme(), onChange, () => {
+    const settings = new SettingsList(items, 6, settingsListTheme(), (id, value) => {
+      // The fork has ALREADY mutated the row's currentValue before calling
+      // onChange. The revert callback restores a row's DISPLAYED value
+      // through the SettingsList's own updateValue (used by the M5
+      // plugin-settings path when the row's onChange rejects — the open
+      // panel must not keep the rejected value). The CALLER supplies the
+      // previous value (the registry still holds it before apply commits).
+      const revert = (previousValue: string): void => settings.updateValue(id, previousValue)
+      onChange(id, value, revert)
+    }, () => {
       handle?.hide()
       onCancel()
     }, { enableSearch: true })
@@ -2970,16 +5215,27 @@ export class TuiApp {
    * they pick up the new palette on their next render too.) */
   applyTheme(theme: 'dark' | 'light'): void {
     setTheme(theme)
+    // Phase 4: track the current theme id (the advanced host-state
+    // facade's getTheme).
+    this.currentThemeId = theme
     // Rendered ANSI is baked into cached components: bump the revision so
     // the per-message render cache rebuilds on the next paint.
     this.themeRevision += 1
+    // Publish the theme into the surface slice BEFORE the repaint: the
+    // outlet refresh reads the revision from the store, so the order
+    // matters (F-14 — a theme switch must re-bake extension ANSI).
+    this.extensionHost?.updateSurface({ themeId: theme, themeRevision: this.themeRevision })
     this.repaintAllSurfaces()
   }
 
   /** Apply a resolved custom palette and repaint everything. */
   applyPalette(palette: ColorPalette): void {
     setTheme('custom', palette)
+    // Phase 4: track the current theme id.
+    this.currentThemeId = 'custom'
     this.themeRevision += 1
+    // Same ordering as applyTheme (F-14).
+    this.extensionHost?.updateSurface({ themeId: 'custom', themeRevision: this.themeRevision })
     this.repaintAllSurfaces()
   }
 
@@ -2991,6 +5247,8 @@ export class TuiApp {
     // OLD palette. Drop the cache here.
     this.welcomeCard.invalidate()
     this.rebuildMessages()
+    // Extension outlets re-render with the live palette (theme revision).
+    this.extensionHost?.refreshOutlets()
     this.renderHeader()
     this.renderFooter()
     this.renderDock()
@@ -3023,7 +5281,7 @@ export class TuiApp {
    *   instead of applying it (default: always apply).
    */
   async autoDetectTheme(options?: { shouldApply?: () => boolean }): Promise<void> {
-    if (themeOptOut()) return
+    if (themeOptOut() || this.disposed) return
     if (options?.shouldApply !== undefined) this.autoDetectGuard = options.shouldApply
     if (this.autoDetectInFlight === undefined) {
       this.autoDetectInFlight = this.runAutoDetect().finally(() => {
@@ -3035,7 +5293,8 @@ export class TuiApp {
   }
 
   private async runAutoDetect(): Promise<void> {
-    const rgb = await this.overlayHost.queryTerminalBackgroundColor({ timeoutMs: 800 })
+    const rgb = await this.activeScreen.queryTerminalBackgroundColor({ timeoutMs: 800 })
+    if (this.disposed) return
     const guard = this.autoDetectGuard
     const apply = (): boolean => guard === undefined || guard()
     if (rgb !== undefined) {
@@ -3059,7 +5318,7 @@ export class TuiApp {
     if (following === this.followingTerminalTheme) return
     this.followingTerminalTheme = following
     if (!following) return
-    this.overlayHost.queryTerminalColorScheme({ timeoutMs: 800 })
+    this.activeScreen.queryTerminalColorScheme({ timeoutMs: 800 })
       .then((scheme) => {
         if (scheme === undefined || !this.followingTerminalTheme) return
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
@@ -3107,6 +5366,10 @@ export class TuiApp {
    * @returns the user's decision.
    */
   showApprovalPrompt(request: ApprovalPromptRequest): Promise<ApprovalOutcome> {
+    // A disposed surface must never leave the caller hanging: settle
+    // cancelled immediately (M0 stale-generation contract — the runner's
+    // approval handler may fire during exit teardown).
+    if (this.disposed) return Promise.resolve('cancelled')
     return new Promise<ApprovalOutcome>((resolve) => {
       const pending: PendingApproval = { request, resolve }
       if (request.signal !== undefined) {
@@ -3220,7 +5483,10 @@ export class TuiApp {
     if (this.activeApproval === pending) {
       this.activeApproval = undefined
       pending.handle?.hide()
-      this.overlayHost.setFocus(this.editor)
+      this.activeScreen.setFocus(this.seatEditor().component)
+      // The approval dialog is gone: the seat is the editor again (or the
+      // next queued prompt's — showNextApproval re-derives it) (follow-up P1).
+      this.setFocusSeat('editor')
     } else {
       const queued = this.approvalQueue.indexOf(pending)
       if (queued !== -1) this.approvalQueue.splice(queued, 1)
@@ -3242,6 +5508,12 @@ export class TuiApp {
    * @returns the answers, in question order.
    */
   askQuestions(questions: readonly TuiQuestion[], signal?: AbortSignal): Promise<TuiQuestionAnswer[]> {
+    // A disposed surface must never leave the caller hanging: settle
+    // rejected immediately (M0 stale-generation contract — the runner's
+    // questions provider may fire during exit teardown).
+    if (this.disposed) {
+      return Promise.reject(cancellationError('question flow cancelled'))
+    }
     return new Promise<TuiQuestionAnswer[]>((resolve, reject) => {
       if (questions.length === 0) {
         resolve([])
@@ -3294,7 +5566,7 @@ export class TuiApp {
     // A question is a logical capturing modal: every visible overlay is
     // suspended (hidden, state intact) until the flow settles — the same
     // stacking rule showOverlayOnHost applies to a new overlay.
-    for (const handle of this.overlayHandles) {
+    for (const handle of this.overlayBroker.handles()) {
       if (!handle.isHidden()) {
         handle.setHidden(true)
         state.suspendedOverlays.add(handle)
@@ -3306,6 +5578,8 @@ export class TuiApp {
     this.editorSeat.addChild(frame)
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(frame)
+    // The question flow owns the seat (follow-up P1).
+    this.setFocusSeat('overlay')
     screen.requestRender()
   }
 
@@ -3367,22 +5641,32 @@ export class TuiApp {
       this.activeQuestions = next
       const screen = this.fullscreen ?? this.tui
       screen.setFocus(frame)
+      // The next queued flow owns the seat (follow-up P1).
+      this.setFocusSeat('overlay')
       screen.requestRender()
       this.settle(state, answers)
       return
     }
     // Final restoration: the editor FIRST, then the suspended overlays — a
     // restored capturing overlay focuses itself through setHidden(false),
-    // so the editor must not be re-focused afterwards.
-    this.editorSeat.clear()
-    this.editorSeat.addChild(this.editor)
+    // so the editor must not be re-focused afterwards. M9: restore the
+    // CURRENT seat occupant (host default or plugin editor).
+    this.mountSeatChild()
     this.activeQuestions = undefined
     const screen = this.fullscreen ?? this.tui
-    screen.setFocus(this.editor)
+    // M9 (round-1 finding 5): focus the CURRENT seat occupant (the host
+    // default or the plugin editor's component) — never a hardcoded host
+    // editor.
+    screen.setFocus(this.seatEditor().component)
     for (const handle of state.suspendedOverlays) {
-      if (this.overlayHandles.has(handle)) handle.setHidden(false)
+      if (this.overlayBroker.isTracked(handle)) handle.setHidden(false)
     }
     state.suspendedOverlays.clear()
+    // The flow released the seat: re-derive it from the live focus AFTER
+    // the overlays were restored (a restored capturing overlay owns the
+    // seat again) (follow-up P1).
+    this.setFocusSeat('editor')
+    this.publishFocusSeat()
     screen.requestRender()
     this.settle(state, answers)
   }

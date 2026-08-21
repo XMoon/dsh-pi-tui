@@ -105,6 +105,27 @@ jobs:
       # resolution, repair CLI help + read-only scan.
       - run: node packages/dsh-pi-tui/scripts/tarball-smoke.mjs tarball/xmoon76-dsh-pi-tui-*.tgz
 
+  vim-plugin-smoke:
+    needs: build-and-pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+      # The vim acceptance gate (plan §15) runs on the EXACT tarball CI
+      # will publish — the import bans, the SDK-surface coverage, the
+      # typecheck against the packed .d.mts, the runtime load and the
+      # duplicate-runtime audit.
+      - run: node packages/dsh-pi-tui/scripts/vim-plugin-smoke.mjs tarball/xmoon76-dsh-pi-tui-*.tgz
+
   naming-gate:
     runs-on: ubuntu-latest
     steps:
@@ -139,7 +160,7 @@ jobs:
   # smoke verified — with OIDC provenance, never a rebuild.
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [typecheck, test-pi-tui, test-dsh-pi-tui, build-and-pack, tarball-smoke, naming-gate, npm-audit-prod]
+    needs: [typecheck, test-pi-tui, test-dsh-pi-tui, build-and-pack, tarball-smoke, vim-plugin-smoke, naming-gate, npm-audit-prod]
     runs-on: ubuntu-latest
     permissions:
       id-token: write # npm provenance (OIDC)

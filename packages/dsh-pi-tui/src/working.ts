@@ -33,7 +33,7 @@ export class WorkingIndicator extends Text {
   private readonly requestRender: () => void
   private readonly frames: string[]
   private readonly intervalMs: number
-  private readonly message: string
+  private message: string
   private currentFrame = 0
   private intervalId: NodeJS.Timeout | undefined
   private active = false
@@ -44,6 +44,19 @@ export class WorkingIndicator extends Text {
     this.frames = options.frames ?? ['🐋', '🐳']
     this.intervalMs = options.intervalMs ?? 500
     this.message = options.message ?? 'Working'
+  }
+
+  /** Override the label after the animated frame (Phase 4: the advanced
+   * host-state working override). An active indicator repaints with the
+   * new label immediately. */
+  setMessage(message: string): void {
+    this.message = message
+    if (this.active) this.updateDisplay()
+  }
+
+  /** The current label (Phase 4 test hook — probes the override). */
+  messageText(): string {
+    return this.message
   }
 
   /** Show the indicator and start alternating frames. Idempotent: a second
@@ -59,6 +72,11 @@ export class WorkingIndicator extends Text {
   stop(): void {
     this.active = false
     this.clearTimer()
+  }
+
+  /** Whether the indicator is currently animating (extension activity state). */
+  isActive(): boolean {
+    return this.active
   }
 
   /** Re-render the current frame with the LIVE palette (theme switches). */
