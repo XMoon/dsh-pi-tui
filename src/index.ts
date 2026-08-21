@@ -88,6 +88,7 @@ import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
@@ -552,39 +553,10 @@ export function foldQueueRows(
 }
 
 /**
- * The installed dsh version (e.g. `0.1.0-rc.6`), resolved from the launcher's
- * real path: `process.argv[1]` is the `dsh` bin, whose realpath walks up to
- * the `@deepseek-ai/dsh/package.json` that owns it. The version the welcome
- * card shows is the harness the TUI runs on, not this bundle's own patch
- * level. Undefined when the launcher path is unreadable.
- * @returns the installed dsh version string, or undefined.
- */
-function dshVersion(): string | undefined {
-  const bin = process.argv[1]
-  if (bin === undefined) return undefined
-  try {
-    let dir = dirname(realpathSync(bin))
-    for (let depth = 0; depth < 8; depth += 1) {
-      try {
-        const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string }
-        if (pkg.name === '@deepseek-ai/dsh' && typeof pkg.version === 'string') return pkg.version
-      } catch {
-        // Not a manifest directory; keep walking up.
-      }
-      const parent = dirname(dir)
-      if (parent === dir) return undefined
-      dir = parent
-    }
-  } catch {
-    // Unreadable launcher path: fall back to the bundle version.
-  }
-  return undefined
-}
-
-/**
  * The bundle's own version, read from package.json at runtime so the welcome
  * card never drifts from the shipped version. The DISPLAYED version prefers
- * the installed dsh version (`dshVersion`), falling back to this one.
+ * the installed dsh version (`dshVersion` — shared with the header badge
+ * via src/dsh-version.ts), falling back to this one.
  * @returns the version string, or a fallback when the file is unreadable.
  */
 function packageVersion(): string {

@@ -35,6 +35,9 @@
   层提供 `ctx.authorization`,因此 `cordis.patch.yml` 插入该行,runner
   显式注入——llm-pi-ai 的 provider 登录 flow 随之注册。
 - `/login` 的 API-key 输入框与 authorization secret 提示默认掩码显示。
+- **header 版本徽标先显示 dsh 版本,再显示 `tui-` 前缀的插件版本**——
+  `[dsh-0.1.1-rc.1 · tui-v0.2.2]`;当无法解析已安装 dsh 启动器版本时
+  降级为仅显示 `[tui-vX.Y.Z]`。
 
 ### 安全
 

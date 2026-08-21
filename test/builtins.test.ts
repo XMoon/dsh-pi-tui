@@ -13,6 +13,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { Text } from '@xmoon76/pi-tui'
@@ -98,7 +101,10 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
     // Version badge after the host title; the footer shows t0/s0 from the
     // builtin segment (the host's hardcoded path is OFF with a host).
     assert.ok(view.includes('dsh-pi-tui'), `host title missing:\n${view}`)
-    assert.ok(/\[v\d+\.\d+\.\d+\]/.test(view), `version badge missing:\n${view}`)
+    // Version badge: the installed dsh version first, then the bundle
+    // version prefixed `tui-` (`[dsh-… · tui-vX.Y.Z]`); without a dsh
+    // launcher (as in tests) it degrades to `[tui-vX.Y.Z]`.
+    assert.ok(/\[tui-v\d+\.\d+\.\d+\]/.test(view), `version badge missing:\n${view}`)
     assert.ok(view.includes('t0/s0'), `initial turn/step counter missing:\n${view}`)
 
     // State change: the builtin segment re-bakes (async producer → replace).
@@ -221,5 +227,51 @@ test('P0-1: a plugin following the README example registers BEFORE any surface e
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
     }
+  }
+})
+
+test('the version badge shows the dsh version first, then the tui- bundle version', async () => {
+  // Point the launcher at a fabricated @deepseek-ai/dsh package so the
+  // shared dshVersion() resolves: bin → ../../package.json named dsh.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-version-badge-'))
+  const dshDir = join(root, 'node_modules', '@deepseek-ai', 'dsh')
+  mkdirSync(join(dshDir, 'bin'), { recursive: true })
+  writeFileSync(join(dshDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.1' }))
+  const bin = join(dshDir, 'bin', 'dsh')
+  writeFileSync(bin, '')
+  const previousArgv = process.argv[1]
+  process.argv[1] = bin
+  try {
+    const ctx = new Context()
+    try {
+      await mountTree(ctx)
+      const service = ctx.get('piTuiExtensions') as {
+        _ledger(): import('../src/extension/internal/ledger.ts').ExtensionLedger
+      }
+      const host = new SurfaceHost(service._ledger(), () => app.requestRender())
+      const vt = new VirtualTerminal(90, 24)
+      const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
+      app.start()
+      await vt.waitForRender()
+      host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+        surfaceId: host.surfaceId, generation: 1, width: 90, height: 24, fullscreen: false,
+        focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+      })
+      app.refreshChrome()
+      await settle()
+      await vt.waitForRender()
+      const view = vt.getViewport().join('\n')
+      assert.ok(
+        /\[dsh-0\.1\.1-rc\.1 · tui-v\d+\.\d+\.\d+\]/.test(view),
+        `dsh-first badge missing:\n${view}`,
+      )
+      app.stop()
+    } finally {
+      for (const runtime of [...ctx.registry.values()]) {
+        for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+      }
+    }
+  } finally {
+    process.argv[1] = previousArgv
   }
 })

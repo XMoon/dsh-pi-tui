@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once it is up.
 - The `/login` API-key question and authorization secret prompts are
   masked by default.
+- **The header version badge shows the dsh version first, then the TUI
+  bundle version under the `tui-` label** — `[dsh-0.1.1-rc.1 ·
+  tui-v0.2.2]` — degrading to `[tui-vX.Y.Z]` alone when the installed
+  dsh launcher's version cannot be resolved.
 
 ### Security
 
