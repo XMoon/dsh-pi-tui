@@ -7,67 +7,6 @@
 
 ## [Unreleased]
 
-### 新增
-
-- **真实插件验证(Phase 5)。**层级选择由真实消费者验证,见
-  `packages/dsh-pi-tui/examples/plugins/`,由
-  `scripts/examples-plugin-smoke.mjs` 对打包 tarball 门禁:
-  **生产级 vim 模态编辑器**(insert/normal 模式、h/j/k/l、词移动、
-  x/d/c、i/a/o、undo/redo、yank/paste、多行、光标同步、提交集成——
-  全部经语义化 `EditorInputEvent`,绝不接触 raw 字节;Advanced editor
-  SDK 足够,无需 Unstable)、**questionnaire 表单**(Phase-4 命令式 UI
-  broker:select → 自由文本 → confirm → notify)与**交互式 shell**
-  (Unstable raw seam:exclusive raw 所有权 + raw 渲染低层 mount;
-  `exit` 或 Host 紧急 fail-safe 返回)。作者决策树见
-  `docs/plugin-authoring.md`;API gap 过程与 Stable promotion review
-  记录在 `examples/README.md`。
-- **Pi 能力对齐(Phase 4)。** Advanced 层新增高价值 Pi 风格能力:
-  **命令式 UI broker**(`advanced.ui.select/confirm/input/notify`——
-  基于 Host 自有 picker/question/notify 基础设施的 Promise 化提示,
-  caller-fiber 取消、surface 销毁结算)、**自定义交互 UI**
-  (`advanced.ui.custom`——由 Host 挂载工厂构建的交互组件,通过公开的
-  `AdvancedCustomHost` facade 报告结果,绝不传私有 TUI 对象)、
-  **host-state facade**(`advanced.host`——theme 查询/选择、title
-  覆盖、working 指示覆盖、tool 展开偏好)。Pi 能力矩阵
-  (`docs/extension-capability-matrix.md`)记录层级映射作为路线图参考。
-  打包验收:新增 `phase4-plugin` fixture + `scripts/phase4-plugin-smoke.mjs`
-  门禁。
-- **Unstable 扩展层(Phase 3)。** `@xmoon76/dsh-pi-tui/extensions/unstable`
-  现在是可用层级(`UNSTABLE_API_LEVEL = 1`),不保证兼容:
-  **raw 输入拦截**(`unstable.input.raw`——在 Host 解码之前对 RAW
-  terminal 块做 observe/consume/rewrite、exclusive raw 所有权且冲突
-  显式报错、handler 抛错 fail-open、每个块最多过一次拦截链)、
-  **Host 紧急 fail-safe**(1.5 秒内三连 Esc 释放全部 raw capture 并
-  关闭全部 unstable mount——在 capture 之前检测,插件无法改写或消费)、
-  **低层 surface seam**(`unstable.surface.handle`——requestRender/
-  几何/mountComponent 承载 raw 渲染组件;绝不暴露 TuiApp/屏幕/
-  terminal)。facade 为 `unstable(service)`——Stable service 接口未动。
-  所有资源仍为 caller-fiber 所有、surface generation 作用域;失败进入
-  共享 health ledger。作者指南:`docs/extension-unstable.md`。打包验收:
-  新增 `unstable-plugin` fixture + `scripts/unstable-plugin-smoke.mjs`
-  门禁。
-- **Advanced 扩展层(Phase 2)。** `@xmoon76/dsh-pi-tui/extensions/advanced`
-  现在是可用层级(`ADVANCED_API_LEVEL = 1`),提供三类能力,全部仍由
-  Host 中介(绝不接触 raw terminal 字节、绝不暴露私有屏幕):
-  **规范化输入捕获**(`advanced.input.capture`——observe/capture/
-  exclusive 模式、确定性优先级排序、exclusive 冲突显式报错、handler
-  抛错 fail-open)、**聚焦交互表面**(`advanced.ui.interactive`——交互式
-  托管 overlay 承载插件自有的交互组件,渲染由 Host 编译、输入由 Host
-  归一化、focus/blur、resize 重编译与全屏迁移)、**高级编辑器控制**
-  (`advanced.editor.control`——经 Host 编辑器座位的 get/set/cursor/
-  insert/paste/focus)。facade 为 `advanced(service)`——Stable service
-  接口未动。所有资源仍为 caller-fiber 所有、surface generation 作用域;
-  失败进入共享 health ledger。作者指南:`docs/extension-advanced.md`。
-  打包验收:新增 `advanced-plugin` fixture + `scripts/advanced-plugin-smoke.mjs`
-  门禁。
-- **分层扩展面。** 公开扩展 SDK 现在分三个层级:稳定的
-  `@xmoon76/dsh-pi-tui/extensions` 入口保持其兼容契约,新增的
-  `extensions/advanced`(实验性;minor 版本可破坏)与 `extensions/unstable`
-  (不保证兼容)入口携带层级元数据与保留的能力命名空间(`advanced.` /
-  `unstable.`)。所有层级共享同一个扩展运行时(caller-fiber 所有权、
-  surface 生命周期、失效机制)。vim fixture 不再兼任生产级 Stable-API
-  的证明;完整模态编辑器移入 advanced/unstable 路线图。
-
 ## [0.2.0] - 2026-08-21
 
 ### 新增
