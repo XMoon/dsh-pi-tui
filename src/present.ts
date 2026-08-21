@@ -78,7 +78,16 @@ const TUI_TOOL_TITLES: Record<string, string> = {
   // names the interaction (Web AskQuestionRow parity) instead of the generic
   // "Tool call" row.
   ask_user_question: 'Question',
+  // The goal tools have no presentResult either; their cards name the
+  // action (the same "read/create/update" vocabulary as the tool-side
+  // presentCall titles) instead of the generic "Tool call" row.
+  get_goal: 'Read Goal',
+  create_goal: 'Create Goal',
+  update_goal: 'Update Goal',
 }
+
+/** The goal tool family (all three share the `{"goal":…}` result shape). */
+export const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set(['get_goal', 'create_goal', 'update_goal'])
 
 /** Summary key preference per variant (args-derived). */
 const SUMMARY_KEYS: Record<string, string[]> = {
@@ -172,6 +181,23 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
     const question = (first as Record<string, unknown>).question
     if (typeof question !== 'string' || question === '') return undefined
     return firstLine(question)
+  }
+  if (name === 'create_goal') {
+    // The objective is the goal's one-line identity (a raw args dump would
+    // leak the whole JSON object).
+    const objective = args.objective
+    return typeof objective === 'string' && objective !== '' ? firstLine(objective) : undefined
+  }
+  if (name === 'update_goal') {
+    // The action names the update (`edit` / `pause` / `resume` / …); the
+    // goal_id and revision are bookkeeping, not identity.
+    const action = args.action
+    return typeof action === 'string' && action !== '' ? action : undefined
+  }
+  if (name === 'get_goal') {
+    // Empty args: an empty summary keeps the header to the title alone
+    // instead of leaking the raw `{}`.
+    return ''
   }
   if (name !== 'todo_write') return undefined
   const todos = args.todos
@@ -564,6 +590,119 @@ export function askAnswersLines(text: string): AskAnswerLine[] | undefined {
     else if (custom !== '') lines.push({ text: `● ${id} → ${custom}`, skipped: false })
     else lines.push({ text: `○ ${id} — skipped`, skipped: true })
   }
+  return lines
+}
+
+/** The parsed `{"goal":…}` result shape the three goal tools share. */
+interface GoalResultValue {
+  readonly goal: null | {
+    readonly id?: unknown
+    readonly revision?: unknown
+    readonly objective?: unknown
+    readonly phase?: unknown
+    readonly roundsStarted?: unknown
+    readonly maxGoalRounds?: unknown
+    readonly blockedReason?: { code?: unknown; message?: unknown }
+  }
+  readonly activation?: unknown
+}
+
+/** Parse a settled goal-tool result text, or undefined when it is not the
+ * expected `{"goal":…}` JSON (the caller then falls back to the generic
+ * presentation). */
+function parseGoalResult(text: string): GoalResultValue | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const value = parsed as Record<string, unknown>
+  if (value.goal === null) return { goal: null }
+  if (typeof value.goal !== 'object' || value.goal === null) return undefined
+  const goal = value.goal as Record<string, unknown>
+  const blocked = typeof goal.blockedReason === 'object' && goal.blockedReason !== null
+    ? goal.blockedReason as Record<string, unknown>
+    : undefined
+  return {
+    goal: {
+      ...typeof goal.id === 'string' ? { id: goal.id } : {},
+      ...typeof goal.revision === 'number' ? { revision: goal.revision } : {},
+      ...typeof goal.objective === 'string' ? { objective: goal.objective } : {},
+      ...typeof goal.phase === 'string' ? { phase: goal.phase } : {},
+      ...typeof goal.roundsStarted === 'number' ? { roundsStarted: goal.roundsStarted } : {},
+      ...typeof goal.maxGoalRounds === 'number' ? { maxGoalRounds: goal.maxGoalRounds } : {},
+      ...(blocked !== undefined)
+        ? {
+          blockedReason: {
+            ...typeof blocked.code === 'string' ? { code: blocked.code } : {},
+            ...typeof blocked.message === 'string' ? { message: blocked.message } : {},
+          },
+        }
+        : {},
+    },
+    ...typeof value.activation === 'string' ? { activation: value.activation } : {},
+  }
+}
+
+/**
+ * The one-line folded summary for a settled goal-tool result: `phase … ·
+ * revision N · N/M rounds`, or `no goal set` for `{"goal":null}`.
+ * Returns undefined when the text is not the expected result JSON (the
+ * caller then falls back to the generic preview instead of inventing one).
+ * @param text - the settled result text.
+ */
+export function goalResultSummary(text: string): string | undefined {
+  const value = parseGoalResult(text)
+  if (value === undefined) return undefined
+  const goal = value.goal
+  if (goal === null) return 'no goal set'
+  const parts: string[] = []
+  if (goal.phase !== undefined) parts.push(`phase ${goal.phase}`)
+  if (goal.revision !== undefined) parts.push(`revision ${goal.revision}`)
+  if (goal.roundsStarted !== undefined) {
+    parts.push(goal.maxGoalRounds === undefined
+      ? `${goal.roundsStarted} rounds`
+      : `${goal.roundsStarted}/${goal.maxGoalRounds} rounds`)
+  }
+  return parts.length === 0 ? 'goal' : parts.join(' · ')
+}
+
+/**
+ * The expanded-card display lines for a settled goal-tool result: one field
+ * per line (`● objective: …`, `● phase: … · revision N`, `● rounds: N/M`,
+ * `● activation: …`, `● blocked: code — message`), or a single `no goal
+ * set` line for `{"goal":null}`. Returns undefined when the text is not the
+ * expected result JSON (the caller falls back to the generic presentation).
+ * @param text - the settled result text.
+ */
+export function goalResultLines(text: string): string[] | undefined {
+  const value = parseGoalResult(text)
+  if (value === undefined) return undefined
+  const goal = value.goal
+  if (goal === null) return ['no goal set']
+  const lines: string[] = []
+  if (goal.objective !== undefined && goal.objective !== '') {
+    lines.push(`● objective: ${goal.objective}`)
+  }
+  const identity: string[] = []
+  if (typeof goal.phase === 'string' && goal.phase !== '') identity.push(goal.phase)
+  if (goal.revision !== undefined) identity.push(`revision ${goal.revision}`)
+  if (identity.length > 0) lines.push(`● ${identity.join(' · ')}`)
+  if (goal.roundsStarted !== undefined) {
+    lines.push(goal.maxGoalRounds === undefined
+      ? `● rounds: ${goal.roundsStarted}`
+      : `● rounds: ${goal.roundsStarted}/${goal.maxGoalRounds}`)
+  }
+  const blocked = goal.blockedReason
+  if (blocked !== undefined && (blocked.code !== undefined || blocked.message !== undefined)) {
+    const detail = [blocked.code, blocked.message]
+      .filter((part): part is string => typeof part === 'string' && part !== '')
+      .join(' — ')
+    lines.push(`● blocked: ${detail}`)
+  }
+  if (value.activation !== undefined) lines.push(`● activation: ${value.activation}`)
   return lines
 }
 

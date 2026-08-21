@@ -70,6 +70,9 @@ import {
   resultTextLines,
   askAnswersSummary,
   askAnswersLines,
+  goalResultSummary,
+  goalResultLines,
+  GOAL_TOOL_NAMES,
   toolCardHeader,
   toolEmoji,
   webCardLines,
@@ -4206,6 +4209,14 @@ export class TuiApp {
         resultPreview = summary === undefined
           ? message.result === '' ? '' : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
           : ` — ${summary}`
+      } else if (GOAL_TOOL_NAMES.has(message.name)) {
+        // Same rule for the goal family: the folded preview summarizes the
+        // `{"goal":…}` result (`phase active · revision 3 · 2/6 rounds`,
+        // `no goal set`) instead of dumping raw JSON.
+        const summary = goalResultSummary(message.result)
+        resultPreview = summary === undefined
+          ? message.result === '' ? '' : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
+          : ` — ${summary}`
       } else {
         resultPreview = message.result === ''
           ? ''
@@ -4467,6 +4478,24 @@ export class TuiApp {
           for (const line of answerLines) {
             card.addChild(new Text(`  ${line.skipped ? color.textMuted(line.text) : color.textDim(line.text)}`, 0, 0))
           }
+        }
+        return
+      }
+      // Unparseable or failed: fall through to the generic presentation.
+    }
+    // A settled goal tool (get_goal/create_goal/update_goal) renders its
+    // `{"goal":…}` result as field lines (`● objective: …`, `● phase: … ·
+    // revision N`, …), never the raw JSON the tool's render text carries.
+    // A cancelled/aborted call shows the structured error identity instead.
+    if (GOAL_TOOL_NAMES.has(message.name)) {
+      if (message.error !== undefined) {
+        card.addChild(new Text(color.textDim(`${message.error.name}: ${message.error.code}`), 0, 0))
+        return
+      }
+      const goalLines = message.status === 'ok' ? goalResultLines(message.result) : undefined
+      if (goalLines !== undefined) {
+        for (const line of goalLines) {
+          card.addChild(new Text(color.textDim(line), 0, 0))
         }
         return
       }

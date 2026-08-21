@@ -2157,6 +2157,95 @@ test('folded ask_user_question cards preview the answered count, never raw JSON'
   app.stop()
 })
 
+const GOAL_RESULT = JSON.stringify({
+  goal: {
+    id: 'goal-1234', revision: 3, objective: 'ship the polish release',
+    phase: 'active', roundsStarted: 2, maxGoalRounds: 6,
+  },
+  activation: 'armed',
+})
+
+test('settled goal cards show field lines, never the raw goal JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: GOAL_RESULT, status: 'ok' },
+  ])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('● objective: ship the polish release'), `objective line missing:\n${view}`)
+  assert.ok(view.includes('● active · revision 3'), `identity line missing:\n${view}`)
+  assert.ok(view.includes('● rounds: 2/6'), `rounds line missing:\n${view}`)
+  assert.ok(view.includes('● activation: armed'), `activation line missing:\n${view}`)
+  assert.ok(!view.includes('"goal"'), `raw goal JSON leaked:\n${view}`)
+  assert.ok(!view.includes('goal-1234'), `raw goal id leaked:\n${view}`)
+  app.stop()
+})
+
+test('folded goal cards preview the summary, never the raw goal JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: GOAL_RESULT, status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('— phase active · revision 3 · 2/6 rounds'), `folded goal summary missing:\n${view}`)
+  assert.ok(!view.includes('"goal"'), `raw goal JSON leaked into the fold:\n${view}`)
+  app.stop()
+})
+
+test('goal cards without a goal say no goal set', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: JSON.stringify({ goal: null }), status: 'ok' },
+  ])
+  app.setToolOutputExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('no goal set'), `empty-goal verdict missing:\n${view}`)
+  assert.ok(!view.includes('"goal"'), `raw goal JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('goal card headers carry the goal identity, not the generic Tool call row', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: GOAL_RESULT, status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'update_goal', args: '{"goal_id":"goal-1234","revision":3,"action":"edit","objective":"new"}', result: GOAL_RESULT, status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'create_goal', args: '{"objective":"ship it"}', result: GOAL_RESULT, status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Read Goal'), `get_goal identity missing:\n${view}`)
+  assert.ok(view.includes('Update Goal edit'), `update_goal identity missing:\n${view}`)
+  assert.ok(view.includes('Create Goal ship it'), `create_goal identity missing:\n${view}`)
+  assert.ok(!view.includes('Tool call get_goal'), `generic row leaked:\n${view}`)
+  app.stop()
+})
+
+test('goalResultSummary and goalResultLines parse the shared goal shape', async () => {
+  const { goalResultSummary, goalResultLines } = await import('../src/present.ts')
+  assert.equal(goalResultSummary(GOAL_RESULT), 'phase active · revision 3 · 2/6 rounds')
+  assert.equal(goalResultSummary(JSON.stringify({ goal: null })), 'no goal set')
+  assert.equal(goalResultSummary('oops'), undefined)
+  assert.equal(goalResultSummary('{"other":1}'), undefined)
+  assert.deepEqual(goalResultLines(GOAL_RESULT), [
+    '● objective: ship the polish release',
+    '● active · revision 3',
+    '● rounds: 2/6',
+    '● activation: armed',
+  ])
+  assert.deepEqual(goalResultLines(JSON.stringify({ goal: null })), ['no goal set'])
+  assert.equal(goalResultLines('oops'), undefined)
+  // A blocked goal carries the reason line.
+  const blocked = JSON.stringify({
+    goal: { id: 'g', revision: 1, phase: 'blocked', roundsStarted: 3, maxGoalRounds: 6, blockedReason: { code: 'GOAL_ROUND', message: 'no progress' } },
+    activation: 'disarmed',
+  })
+  assert.deepEqual(goalResultLines(blocked), [
+    '● blocked · revision 1',
+    '● rounds: 3/6',
+    '● blocked: GOAL_ROUND — no progress',
+    '● activation: disarmed',
+  ])
+})
+
 test('cancelled ask_user_question cards show the structured error identity', async () => {
   const { vt, app } = startApp()
   app.setTranscript([

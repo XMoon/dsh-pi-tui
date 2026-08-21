@@ -1,6 +1,6 @@
-# Input and card polish: bash completion, local-shell sandbox, question answers, todo dock click
+# Input and card polish: bash completion, local-shell sandbox, question answers, goal cards, todo dock click
 
-Four small, independent surface improvements, designed together because they
+Five small, independent surface improvements, designed together because they
 land in the same release cycle. Each section records the decision, the
 rationale, the exact touch points, and the guarding tests. Workflow card
 rendering (`tool-workflow/*`) is deliberately **out of scope** — reviewed and
@@ -11,7 +11,8 @@ kept as-is.
 | 1 | `!` / `!!` bash completion | Real-shell `compgen` bridge (command names + paths + a small subcommand table) |
 | 2 | `!` / `!!` sandbox | New `/settings` row, default **bypass** (pi/kimi parity), opt-in sandbox |
 | 3 | `ask_user_question` answers card | Folded: `N/M answered` summary; expanded: per-question answer lines |
-| 4 | Todo dock click (fullscreen) | Map the dock summary row to `toggleTodoPanel()` |
+| 4 | Goal cards (`get_goal`/`create_goal`/`update_goal`) | Folded: goal summary; expanded: field lines; named headers |
+| 5 | Todo dock click (fullscreen) | Map the dock summary row to `toggleTodoPanel()` |
 
 ---
 
@@ -238,7 +239,57 @@ Two rendering gaps, both visible in the transcript:
 
 ---
 
-## 4. Todo dock click (fullscreen)
+## 4. Goal cards (`get_goal` / `create_goal` / `update_goal`)
+
+### Why
+
+The three goal tools ship `presentCall` but no `presentResult`, and their
+render text is the raw `{"goal":…}` JSON — so every settled goal card showed
+the bare JSON (folded preview AND expanded body), under the generic
+"Tool call" header. The `todo_write` tool was audited alongside: its render
+text is already friendly ("Updated todo list: N pending, …") and its header
+carries the `done/total` summary — **no gap there**; only the goal family
+needs the treatment.
+
+### Design
+
+All TUI-side (the tool definitions are upstream; the pattern is the same as
+the `ask_user_question` card — `present.ts` helpers + `tui-app.ts` special
+cases):
+
+- **Headers** (`TUI_TOOL_TITLES`): `Read Goal` / `Create Goal` / `Update
+  Goal` — the same read/create/update vocabulary as the tool-side
+  `presentCall` titles. Args summaries (`summarizeToolArgs`): `create_goal`
+  shows the objective, `update_goal` shows the action, `get_goal` shows
+  nothing (an empty summary keeps the header to the title instead of
+  leaking `{}`).
+- **Folded preview** (`goalResultSummary`): `phase active · revision 3 ·
+  2/6 rounds`, or `no goal set` for `{"goal":null}` — never the raw JSON.
+- **Expanded body** (`goalResultLines`): one field line per fact —
+  `● objective: …`, `● phase · revision N`, `● rounds: N/M`,
+  `● blocked: code — message` (when a blocked reason is present),
+  `● activation: …`; a single `no goal set` line for an empty goal.
+  Cancelled/aborted calls keep the error-identity branch.
+
+Both helpers parse the shared `{"goal":…}` shape leniently (missing fields
+are omitted, malformed text returns undefined → generic fallback).
+
+**Touch points**
+
+- `src/present.ts` — `GOAL_TOOL_NAMES`, titles, `summarizeToolArgs` goal
+  branches, `goalResultSummary`, `goalResultLines`.
+- `src/tui-app.ts` — folded `resultPreview` special case; expanded body
+  renders the field lines.
+
+**Tests**
+
+- `present` unit tests: summary/lines for a full goal, `goal: null`, a
+  blocked goal, malformed JSON → `undefined`.
+- Headless: folded card shows the summary (never `"goal"`), expanded card
+  shows the field lines, `no goal set` verdict, and the named headers
+  (`Update Goal edit`, `Create Goal ship it`).
+
+## 5. Todo dock click (fullscreen)
 
 ### Why
 
