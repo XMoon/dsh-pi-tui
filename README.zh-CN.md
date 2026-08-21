@@ -20,10 +20,11 @@
 ## 目录结构
 
 完整的仓库布局见 [AGENTS.md](AGENTS.md)(贡献者操作手册)。一句话概括:
+**仓库根目录就是发布的 `@xmoon76/dsh-pi-tui` 包**(唯一发布的包——其
+清单声明 `dsh.bundle.patch`,`exports` 指向构建后的 `dist/`),而
 `packages/pi-tui/` 是 `@moonshot-ai/pi-tui` 的内置 fork(重命名为
 `@xmoon76/pi-tui`,私有,永不发布——其分叉修改清单见
-`packages/pi-tui/AGENTS.md`),`packages/dsh-pi-tui/` 是 dsh 包
-(`@xmoon76/dsh-pi-tui`,唯一发布的包),构建时把 fork 打进自己的产物。
+`packages/pi-tui/AGENTS.md`),构建时被打进根包产物。
 
 ## 前置要求
 
@@ -64,14 +65,14 @@ dsh --profile pi-tui
 git clone https://github.com/XMoon/dsh-pi-tui
 cd dsh-pi-tui
 pnpm install
-pnpm build        # pi-tui tsdown (dist/) + dsh-pi-tui tsdown (dist/, 打入 pi-tui)
+pnpm build        # pi-tui tsdown (packages/pi-tui/dist/) + 根 tsdown (dist/, 打入 pi-tui)
 
 # file: — 添加时把包复制进 profile;重新构建后需重新 add 以刷新
 #(见下方"更新 / 卸载")
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD
 
 # link: — 使用实时符号链接;`pnpm build` 的产物会被直接读取
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@link:$PWD
 ```
 
 ### 验证安装
@@ -88,7 +89,7 @@ dsh --profile pi-tui                         # 启动的是 TUI 而不是 Web GU
 dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
 # file: 源码安装在 add 时复制——重新构建并重新 add 以刷新
 #(link: 安装实时跟踪仓库,只需 `pnpm build`):
-pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
+pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD
 
 dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
 ```
@@ -97,14 +98,14 @@ dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
 
 ```sh
 pnpm install
-pnpm build        # pi-tui tsdown (dist/) + dsh-pi-tui tsdown (dist/, 打入 pi-tui)
+pnpm build        # pi-tui tsdown (packages/pi-tui/dist/) + 根 tsdown (dist/, 打入 pi-tui)
 pnpm test         # pi-tui 自带套件 (node --test) + dsh-pi-tui 无头测试
 pnpm typecheck
-node --expose-gc packages/dsh-pi-tui/scripts/bench.mts   # 性能基线(可选)
+node --expose-gc scripts/bench.mts   # 性能基线(可选)
 ```
 
 测试通过 `@xterm/headless` 驱动 UI(见
-`packages/dsh-pi-tui/test/virtual-terminal.ts`),因此无需 TTY 或模型连接
+`test/virtual-terminal.ts`),因此无需 TTY 或模型连接
 即可验证渲染与输入路由。
 
 ### 开发历史(dogfooding)
@@ -113,7 +114,7 @@ node --expose-gc packages/dsh-pi-tui/scripts/bench.mts   # 性能基线(可选)
 自己:自 2026 年 8 月 15 日起,所有修复与功能都在这个 TUI 内部完成,就像
 本 README 与代码库的维护一样。开发循环运行在专用的 `pi-tui-dev`
 profile 上,使用方式 B 的 `link:` 说明符安装
-(`dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui`)
+(`dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD`)
 ——实时符号链接,`pnpm build` 后无需重新 add 即可生效——而 `pi-tui`
 profile 保持安装已发布的 registry 包用于真实使用。
 
@@ -152,7 +153,7 @@ Cordis 插件无需接触 TUI 内部即可贡献 chrome。它**处于早期、�
   (三连 Esc)与精选低层 surface seam——不保证兼容;损坏的插件可能
   破坏 Host 行为。作者指南:`docs/extension-unstable.md`。
 - **真实插件验证(Phase 5):**层级选择由真实消费者验证,见
-  `packages/dsh-pi-tui/examples/plugins/`——生产级 vim 模态编辑器
+  `examples/plugins/`——生产级 vim 模态编辑器
   (Advanced editor SDK)、questionnaire 表单(Advanced 命令式 UI
   broker)与交互式 shell(Unstable raw seam)。"该用哪一层?"决策树:
   `docs/plugin-authoring.md`。
@@ -354,6 +355,30 @@ TUI 的启动行新增了 `--preset <id>`——新会话启动时使用的 agent
   能在 tsx ESM 钩子下加载——即 dsh 源码启动契约。
 - 原生修饰键扩展是可选的:在 Linux 上加载器返回 `undefined` 而不尝试
   加载,非 TTY 的 stdin 路径有守卫。
+
+## 诊断日志
+
+TUI 把自身诊断写到 stderr 和一个日志文件(`ctx.logger` 在此进程中不可见
+——没有 exporter):
+
+- 默认文件:`$DSH_HOME/logs/pi-tui-<pid>.log`(默认 `~/.dsh/logs/`);
+- 行格式:`[tui] <ISO time> <level> <message> k=v ...`;
+- 默认级别 `info`:只记录关键生命周期事件(启动/恢复/切换/退出、
+  跨进程 guard 警告、错误);`debug` 额外记录每次发送前的 guard 检查。
+
+配置(环境变量):
+
+| 变量 | 含义 | 默认值 |
+|---|---|---|
+| `DSH_PI_TUI_LOG` | 日志文件路径;`off` 关闭文件日志 | `$DSH_HOME/logs/pi-tui-<pid>.log` |
+| `DSH_PI_TUI_LOG_LEVEL` | `debug` / `info` / `warn` / `error` | `info` |
+
+排障示例:
+
+```sh
+DSH_PI_TUI_LOG_LEVEL=debug dsh --profile pi-tui
+tail -f ~/.dsh/logs/pi-tui-*.log
+```
 
 ## 安全与运维说明
 

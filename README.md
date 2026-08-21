@@ -20,11 +20,13 @@ Run `dsh --profile pi-tui` for a terminal UI instead of the browser GUI (`dsh --
 ## Layout
 
 The full repository layout lives in [AGENTS.md](AGENTS.md) (the contributor
-operating manual). In one line: `packages/pi-tui/` is the vendored
-`@moonshot-ai/pi-tui` fork (rescoped to `@xmoon76/pi-tui`, private, never
-published — its divergence ledger lives in `packages/pi-tui/AGENTS.md`), and
-`packages/dsh-pi-tui/` is the dsh bundle (`@xmoon76/dsh-pi-tui`, the only
-published package) that bundles the fork into its build output.
+operating manual). In one line: the **repository root is the published
+`@xmoon76/dsh-pi-tui` bundle** (the only published package — its manifest
+declares `dsh.bundle.patch` and the `exports` point at the built `dist/`),
+and `packages/pi-tui/` is the vendored `@moonshot-ai/pi-tui` fork (rescoped
+to `@xmoon76/pi-tui`, private, never published — its divergence ledger lives
+in `packages/pi-tui/AGENTS.md`), bundled into the root package's build
+output.
 
 ## Prerequisites
 
@@ -67,14 +69,14 @@ from a clone:
 git clone https://github.com/XMoon/dsh-pi-tui
 cd dsh-pi-tui
 pnpm install
-pnpm build        # pi-tui tsdown (dist/) + dsh-pi-tui tsdown (dist/, bundles pi-tui)
+pnpm build        # pi-tui tsdown (packages/pi-tui/dist/) + root tsdown (dist/, bundles pi-tui)
 
 # file: — the bundle is copied into the profile at add time; rebuild + re-add
 # to refresh (see "Update / uninstall" below)
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD
 
 # link: — a live symlink instead; `pnpm build` output is picked up directly
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@link:$PWD
 ```
 
 ### Verify the install
@@ -91,7 +93,7 @@ dsh --profile pi-tui                         # TUI starts instead of the web GUI
 dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
 # file: source installs copy at add time — rebuild + re-add to refresh
 # (link: installs track the repo live and need only `pnpm build`):
-pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD/packages/dsh-pi-tui
+pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD
 
 dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
 ```
@@ -100,13 +102,13 @@ dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
 
 ```sh
 pnpm install
-pnpm build        # pi-tui tsdown (dist/) + dsh-pi-tui tsdown (dist/, bundles pi-tui)
+pnpm build        # pi-tui tsdown (packages/pi-tui/dist/) + root tsdown (dist/, bundles pi-tui)
 pnpm test         # pi-tui's own suite (node --test) + dsh-pi-tui headless tests
 pnpm typecheck
-node --expose-gc packages/dsh-pi-tui/scripts/bench.mts   # performance baseline (optional)
+node --expose-gc scripts/bench.mts   # performance baseline (optional)
 ```
 
-Tests drive the UI through `@xterm/headless` (see `packages/dsh-pi-tui/test/virtual-terminal.ts`),
+Tests drive the UI through `@xterm/headless` (see `test/virtual-terminal.ts`),
 so rendering and input routing are verified without a TTY or a model connection.
 
 ### Development history (dogfooding)
@@ -116,7 +118,7 @@ switched to building itself with itself: since August 15 2026, all fixes and
 features are developed inside this TUI, the same way this README and the
 codebase are maintained. The dev loop runs on a dedicated `pi-tui-dev` profile
 installed with Option B's `link:` specifier
-(`dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD/packages/dsh-pi-tui`)
+(`dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD`)
 — a live symlink, so `pnpm build` is picked up without re-adding — while the
 `pi-tui` profile stays on the published registry package for real use.
 
@@ -161,7 +163,7 @@ ownership/lifecycle model per tier. The tiers have grown since Phase 1:
   seam — NO compatibility guarantee; a broken plugin can disrupt Host
   behavior. Author guide: `docs/extension-unstable.md`.
 - **Real-plugin validation (Phase 5):** the tier selection is proven by
-  real consumers in `packages/dsh-pi-tui/examples/plugins/` — a
+  real consumers in `examples/plugins/` — a
   production-class vim modal editor (Advanced editor SDK), a
   questionnaire form (Advanced imperative UI broker) and an interactive
   shell (Unstable raw seam). The "which tier should I use?" decision
@@ -395,6 +397,31 @@ runs without needing a session.
   loads under the tsx ESM hook — the dsh source-launch contract.
 - Native modifier-key addons are optional: on Linux the loader returns `undefined`
   without attempting a load, and the non-TTY stdin path is guarded.
+
+## Diagnostic log
+
+The TUI writes its own diagnostics to stderr and a log file (`ctx.logger` is
+invisible in this process — no exporter):
+
+- Default file: `$DSH_HOME/logs/pi-tui-<pid>.log` (default `~/.dsh/logs/`);
+- Line format: `[tui] <ISO time> <level> <message> k=v ...`;
+- Default level `info`: key lifecycle events only (boot/resume/switch/exit,
+  divergence-guard warnings, errors); `debug` additionally logs every guard
+  check before a send.
+
+Configuration (environment variables):
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `DSH_PI_TUI_LOG` | Log file path; `off` disables file logging | `$DSH_HOME/logs/pi-tui-<pid>.log` |
+| `DSH_PI_TUI_LOG_LEVEL` | `debug` / `info` / `warn` / `error` | `info` |
+
+Troubleshooting example:
+
+```sh
+DSH_PI_TUI_LOG_LEVEL=debug dsh --profile pi-tui
+tail -f ~/.dsh/logs/pi-tui-*.log
+```
 
 ## Safety & operational notes
 

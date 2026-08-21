@@ -4,7 +4,7 @@
 > the optimization (incremental read grouping + per-message render cache) ·
 > Node v26.7.0 · headless xterm at 24 rows · `BENCH_FAST=1` iteration counts.
 >
-> Re-run: `node --expose-gc packages/dsh-pi-tui/scripts/bench.mts`
+> Re-run: `node --expose-gc scripts/bench.mts`
 > (full sweep without `BENCH_FAST`). The benchmark is NOT part of the test
 > suite — it is a manual, non-default tool by design.
 

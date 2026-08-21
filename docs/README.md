@@ -41,8 +41,8 @@ Other documentation, and why it is not here:
 - `packages/pi-tui/package.json` → `repository.note` — the single source of
   truth for the vendored upstream version/commit (deliberately not copied
   into any other doc).
-- `packages/dsh-pi-tui/README.md` — the published package's npm page
-  (user-facing install instructions).
+- `README.md` — the repository root is the published package, so the root
+  README is the npm page (user-facing install instructions).
 - `.agents/AGENTS.md` — private, gitignored environment handbook for this
   machine only; never commit it.
 

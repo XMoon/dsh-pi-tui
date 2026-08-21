@@ -3,7 +3,7 @@
 ## When to use tmux, and when to use headless
 
 **Use headless tests for routine development and regression**
-(`packages/dsh-pi-tui/test/`, `@xterm/headless` drives real rendering and
+(`test/`, `@xterm/headless` drives real rendering and
 input routing): fast, deterministic, no TTY or model dependency, CI-runnable.
 Feature changes must be covered by headless tests first.
 
@@ -168,7 +168,7 @@ tasks-browser.ts.
    PTY (not tmux, no terminal emulator in front) leaves OSC 11 (background
    color) and DA (capability) queries unanswered, so theme autodetect
    times out (800ms) and never fires, and capability-dependent paths never
-   run. Use tmux or `packages/dsh-pi-tui/demo.ts` for real-terminal runs —
+   run. Use tmux or `demo.ts` for real-terminal runs —
    both answer the queries.
 10. **A crash can leave a DA2 reply in the pty**: if the TUI dies before
     answering its own `\x1b[>c` DA2 query, the terminal's `\x1b[>1;2;4c`

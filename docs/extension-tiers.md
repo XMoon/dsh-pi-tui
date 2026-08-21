@@ -47,7 +47,7 @@ with their APIs; Stable capabilities never silently change semantics.
 ## Real-plugin validation (Phase 5)
 
 The tier selection is proven by real consumers in
-`packages/dsh-pi-tui/examples/plugins/` (vim — Advanced editor SDK;
+`examples/plugins/` (vim — Advanced editor SDK;
 questionnaire — Advanced imperative UI broker; interactive-shell —
 Unstable raw seam), gated by `scripts/examples-plugin-smoke.mjs` against
 the packed tarball. The authoring decision tree lives in
