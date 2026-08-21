@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `— Created` / `— Updated` the way read cards show their line summary,
   and the no-presenter fallback renders the verb + path line — the raw
   envelope never leaks into the transcript.
+- **Skill and read_image cards fold their envelope content too.** The
+  skill tool's `<skill_content>` instruction block and read_image's
+  `<path>/<type>image/<content>` envelope never appear in the transcript:
+  folded rows show `— N lines of instructions` and the image summary,
+  expanded cards render the instruction body (+ decoded skill name) and
+  the image summary + path, and image payload blocks render as `[image]`
+  instead of dumping base64. A defensive backstop
+  (`XML_ENVELOPE_RESULT_TOOLS`) keeps any future envelope tool from
+  leaking raw XML tags into folded previews, and malformed envelopes on
+  successful calls render nothing instead of the raw text.
 
 ## [0.3.1] - 2026-08-21
 

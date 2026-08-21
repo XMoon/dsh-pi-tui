@@ -25,6 +25,14 @@
   file</content>`);折叠行现在像 read 卡片显示行数摘要那样显示
   `— Created` / `— Updated`,无 presenter 的降级展开也渲染动词+路径行
   ——原始信封不再泄漏进 transcript。
+- **skill 与 read_image 卡片同样折叠信封内容。** skill 工具的
+  `<skill_content>` 指令块与 read_image 的
+  `<path>/<type>image/<content>` 信封不再出现在 transcript 中:折叠行
+  显示 `— N lines of instructions` 与图片摘要,展开卡片渲染指令正文
+  (含解码后的 skill 名)与图片摘要+路径,image 载荷块渲染为 `[image]`
+  而非倾倒 base64。防御性登记表(`XML_ENVELOPE_RESULT_TOOLS`)确保未来
+  新增的信封工具不会把原始 XML 标签泄漏进折叠预览;成功调用但信封
+  畸形时渲染为空,而非原始文本。
 
 ## [0.3.1] - 2026-08-21
 

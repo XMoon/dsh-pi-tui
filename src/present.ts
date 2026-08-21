@@ -506,6 +506,78 @@ export function writeFoldedPreview(result: string): string {
 }
 
 /**
+ * Parse the skill tool's XML instruction envelope (`<skill_content
+ * name="…"> <skill_resources>…</skill_resources> <skill_instructions>…
+ * </skill_instructions> </skill_content>`). The name attribute is XML-
+ * escaped by the producer (escapeAttr: `&amp;`/`&quot;`/`&lt;`) and is
+ * decoded here; the instructions body is embedded VERBATIM by the producer
+ * (skills are trusted local content), so it is returned unmodified.
+ * @param result - the tool result text.
+ * @returns the envelope's name and instruction body, or undefined when the
+ * result is not a well-formed skill envelope (a blank name is malformed).
+ */
+export function parseSkillEnvelope(result: string): { name: string; instructions: string } | undefined {
+  const match = /<skill_content name="([^"]*)">[\s\S]*?<skill_instructions>\n?([\s\S]*?)\n?<\/skill_instructions>[\s\S]*?<\/skill_content>/.exec(result)
+  if (match === null) return undefined
+  const rawName = (match[1] ?? '').trim()
+  if (rawName === '') return undefined
+  // Decode the producer's attribute escaping (&quot; → ", &lt; → <, &amp;
+  // → & — in that order, so an originally-escaped literal like &amp;quot;
+  // round-trips to &quot; instead of being double-decoded).
+  const name = rawName
+    .replaceAll('&quot;', '"')
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&amp;', '&')
+  return { name, instructions: match[2] ?? '' }
+}
+
+/**
+ * The folded preview suffix for a skill card: ` — N lines` (the instruction
+ * body's line count — the header already carries `skill · <name>`), empty
+ * otherwise. The folded row never dumps the raw `<skill_content>` block.
+ * @param result - the tool result text.
+ * @returns the line-count suffix, or '' when the result is not a skill
+ * envelope.
+ */
+export function skillFoldedPreview(result: string): string {
+  const envelope = parseSkillEnvelope(result)
+  if (envelope === undefined) return ''
+  const lines = envelope.instructions.split('\n').filter(line => line !== '').length
+  return lines === 0 ? '' : ` — ${lines} lines of instructions`
+}
+
+/**
+ * Parse the read_image tool's XML confirmation envelope (`<path>…</path>
+ * <type>image</type> <content>PNG image, 800x600 px, … bytes</content>`).
+ * @param result - the tool result text.
+ * @returns the envelope's path and the content summary line, or undefined
+ * when the result is not a well-formed image envelope (blank path or blank
+ * summary are malformed).
+ */
+export function parseImageEnvelope(result: string): { path: string; summary: string } | undefined {
+  const match = /<path>([\s\S]*?)<\/path>\s*<type>image<\/type>\s*<content>\s*\n?\s*([\s\S]*?)\s*\n?\s*<\/content>/.exec(result)
+  if (match === null) return undefined
+  const path = (match[1] ?? '').trim()
+  const summary = (match[2] ?? '').trim()
+  if (path === '' || summary === '') return undefined
+  return { path, summary }
+}
+
+/**
+ * The folded preview suffix for a read_image card: ` — <summary>` (e.g.
+ * `PNG image · 800x600 px`), empty otherwise. The folded row never dumps
+ * the raw envelope (the read-card no-XML rule).
+ * @param result - the tool result text.
+ * @returns the summary suffix, or '' when the result is not an image
+ * envelope.
+ */
+export function imageFoldedPreview(result: string): string {
+  const envelope = parseImageEnvelope(result)
+  return envelope === undefined ? '' : ` — ${firstLine(envelope.summary)}`
+}
+
+/**
  * The folded preview suffix for a read card: `— {N} lines` when the envelope
  * reports a total (or a line count), empty otherwise. A merged group card
  * (multiple envelopes) yields nothing — its head already carries "N files".
@@ -659,6 +731,10 @@ export function resultTextLines(blocks: readonly ContentBlock[], error?: { name:
   const lines: string[] = []
   for (const block of blocks) {
     if (block.type === 'text') lines.push(...block.text.split('\n'))
+    // An image block carries base64 payload: never dump it into the
+    // transcript as pretty JSON (read_image cards render their envelope
+    // summary instead). Other non-text blocks keep the JSON projection.
+    else if (block.type === 'image') lines.push('[image]')
     else lines.push(JSON.stringify(block, null, 2))
   }
   if (lines.length === 0 && error !== undefined) lines.push(`${error.name}: ${error.code}`)

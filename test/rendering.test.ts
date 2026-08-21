@@ -1839,13 +1839,13 @@ test('tool cards degrade to generic rendering when the registry lookup is absent
   app.start()
   app.setToolOutputExpanded(true)
   app.setTranscript([{
-    kind: 'tool', turn: 0, name: 'read',
-    args: '{"file_path":"/ws/src/foo.ts"}',
+    kind: 'tool', turn: 0, name: 'grep',
+    args: '{"pattern":"foo"}',
     result: 'line one', status: 'ok', resultBlocks: [],
   }])
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Read /ws/src/foo.ts [ok]'), `generic header missing:\n${view}`)
+  assert.ok(view.includes('Search foo [ok]'), `generic header missing:\n${view}`)
   assert.ok(view.includes('line one'), `generic body missing:\n${view}`)
   app.stop()
 })
@@ -1905,6 +1905,129 @@ test('read envelopes parse single, merged, and non-envelope results', () => {
   // Not an envelope: no entries, no throw.
   assert.equal(parseReadEnvelopes('plain output').length, 0)
   assert.equal(parseReadEnvelopes('').length, 0)
+})
+
+test('skill and read_image cards fold their envelope summaries, never the raw XML', async () => {
+  const { vt, app } = startApp()
+  const skillBody = 'Follow these instructions.\n\nStep one.\nStep two.'
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'skill',
+    args: '{"name":"review-fix-loop"}',
+    result: [
+      '<skill_content name="review-fix-loop">',
+      '<skill_resources>',
+      'Base directory for this skill: /home/x/.dsh/skills/review-fix-loop',
+      '</skill_resources>',
+      '',
+      '<skill_instructions>',
+      skillBody,
+      '</skill_instructions>',
+      '</skill_content>',
+    ].join('\n'),
+    status: 'ok',
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('skill · review-fix-loop'), `skill header missing:\n${view}`)
+  assert.ok(view.includes('— 3 lines of instructions'), `skill instruction count missing:\n${view}`)
+  assert.ok(!view.includes('<skill_content'), `raw skill envelope leaked:\n${view}`)
+  assert.ok(!view.includes('<skill_instructions'), `raw skill envelope leaked:\n${view}`)
+  assert.ok(!view.includes('<skill_resources'), `raw skill envelope leaked:\n${view}`)
+
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read_image',
+    args: '{"file_path":"/ws/img.png"}',
+    result: `<path>/ws/img.png</path>\n<type>image</type>\n<content>\nPNG image, 800x600 px, 2048 bytes\n</content>`,
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(view.includes('PNG image, 800x600 px'), `image summary missing:\n${view}`)
+  assert.ok(!view.includes('<type>image</type>'), `raw image envelope leaked:\n${view}`)
+  assert.ok(!view.includes('<path>'), `raw image envelope leaked:\n${view}`)
+  // Malformed envelopes: no preview, no XML, on both tools.
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'skill',
+    args: '{"name":"x"}',
+    result: '<skill_content name="">broken',
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('<skill'), `malformed skill result leaked:\n${view}`)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read_image',
+    args: '{"file_path":"/ws/b.png"}',
+    result: '<path>   </path>\n<type>image</type>\n<content>\nPNG image, 1x1 px, 1 bytes\n</content>',
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('<'), `malformed image result leaked:\n${view}`)
+})
+
+test('expanded skill and read_image cards render their content, never the envelope', async () => {
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  // The name attribute is producer-escaped (&quot;) and must decode back;
+  // the body is embedded verbatim — angle brackets stay as written.
+  const skillBody = 'Follow the loop.\n\nRound until accepted.\n\nKeep <tag> verbatim.'
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'skill',
+    args: '{"name":"review-fix-loop"}',
+    result: [
+      '<skill_content name="review&quot;fix-loop">',
+      '<skill_resources>',
+      'Base directory for this skill: /home/x/.dsh/skills/review-fix-loop',
+      '</skill_resources>',
+      '',
+      '<skill_instructions>',
+      skillBody,
+      '</skill_instructions>',
+      '</skill_content>',
+    ].join('\n'),
+    status: 'ok',
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('skill: review"fix-loop'), `escaped skill name must decode:\n${view}`)
+  assert.ok(view.includes('Follow the loop.'), `instructions body missing:\n${view}`)
+  assert.ok(view.includes('<tag>'), `verbatim body must keep its angle brackets:\n${view}`)
+  assert.ok(!view.includes('<skill_instructions'), `envelope tags leaked into the expanded card:\n${view}`)
+  assert.ok(!view.includes('<skill_resources'), `envelope tags leaked into the expanded card:\n${view}`)
+  assert.ok(!view.includes('&quot;'), `unescaped attribute leaked:\n${view}`)
+
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read_image',
+    args: '{"file_path":"/ws/img.png"}',
+    result: `<path>/ws/img.png</path>\n<type>image</type>\n<content>\nPNG image, 800x600 px, 2048 bytes\n</content>`,
+    resultBlocks: [
+      { type: 'text', text: `<path>/ws/img.png</path>\n<type>image</type>\n<content>\nPNG image, 800x600 px, 2048 bytes\n</content>` },
+      { type: 'image', image: { data: 'AQIDBA==', mimeType: 'image/png' } },
+    ] as never,
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(view.includes('PNG image, 800x600 px'), `image summary missing:\n${view}`)
+  assert.ok(view.includes('path: /ws/img.png'), `image path row missing:\n${view}`)
+  assert.ok(!view.includes('AQIDBA=='), `image payload base64 dumped into the card:\n${view}`)
+  assert.ok(!view.includes('<path>'), `expanded image envelope leaked:\n${view}`)
+})
+
+test('malformed read/write results render nothing expanded, never the raw envelope', async () => {
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read',
+    args: '{"file_path":"/ws/a.ts"}',
+    result: '<path>/ws/a.ts</path> but no closing content',
+    status: 'ok',
+  }])
+  let view = await viewport(vt)
+  assert.ok(!view.includes('<path>'), `malformed read envelope leaked:\n${view}`)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/a.ts","content":"x"}',
+    result: '<path>/ws/a.ts</path> truncated',
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('<path>'), `malformed write envelope leaked:\n${view}`)
 })
 
 test('write cards preview the envelope verb, never the raw XML', async () => {

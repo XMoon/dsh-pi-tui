@@ -63,8 +63,12 @@ import {
   parseCallPreview,
   parseReadEnvelopes,
   parseWriteEnvelope,
+  parseSkillEnvelope,
+  parseImageEnvelope,
   readFoldedPreview,
   writeFoldedPreview,
+  skillFoldedPreview,
+  imageFoldedPreview,
   relativizeToCwd,
   foldedCallPreview,
   genericRawInputLines,
@@ -113,6 +117,14 @@ export const DIFF_PREVIEW_LINES = 10
 export const FOLDED_COMMAND_LINES = 3
 /** Folded diff preview rows (header + cap + footer; kimi COMMAND_PREVIEW_LINES scale). */
 export const FOLDED_DIFF_LINES = 4
+/**
+ * Tools whose result is a structured XML envelope (read/write/read_image/
+ * skill). Each has its own parser branch in the folded-card logic; this
+ * set is the DEFENSIVE backstop: if a future envelope tool is added
+ * without its parser, its raw `<…>` result never leaks into the folded
+ * preview. Register new envelope tools here AND add their parser branch.
+ */
+export const XML_ENVELOPE_RESULT_TOOLS: ReadonlySet<string> = new Set(['read', 'write', 'read_image', 'skill'])
 
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
@@ -4293,6 +4305,17 @@ export class TuiApp {
         // never the raw envelope — the same no-XML rule as read cards; a
         // malformed envelope shows no preview at all.
         resultPreview = writeFoldedPreview(message.result)
+      } else if (message.name === 'skill') {
+        // The skill tool's result is a `<skill_content>` instruction block.
+        // The folded row shows the instruction size (` — N lines of
+        // instructions`); the header already carries `skill · <name>`.
+        resultPreview = skillFoldedPreview(message.result)
+      } else if (message.name === 'read_image') {
+        // read_image's result is a `<path>/<type>image/<content>` envelope
+        // (the companion block is the image payload, never text). The
+        // folded row shows the content summary (e.g. ` — PNG image ·
+        // 800x600 px`), never the raw envelope.
+        resultPreview = imageFoldedPreview(message.result)
       } else if (message.name === 'ask_user_question') {
         // The folded preview never shows the raw `{"answers":[…]}` JSON the
         // tool's render text carries (Web AskQuestionRow parity): the
@@ -4318,6 +4341,13 @@ export class TuiApp {
         // schedule error object's code), so it is NOT suppressed.
         const summary = foldedResultSummaryFor(message.name, message.result)
         resultPreview = summary === undefined || summary === '' ? '' : ` — ${summary}`
+      } else if (XML_ENVELOPE_RESULT_TOOLS.has(message.name) && message.result.trimStart().startsWith('<')) {
+        // Defensive: every XML-envelope tool above (read/write/skill/
+        // read_image) has its own parser branch, so this arm only fires
+        // when a NEW envelope tool is added without registering its parser
+        // here. Register it in XML_ENVELOPE_RESULT_TOOLS and add the
+        // branch — never let an envelope fall through to the raw preview.
+        resultPreview = ''
       } else {
         resultPreview = message.result === ''
           ? ''
@@ -4730,6 +4760,35 @@ export class TuiApp {
         }
         return
       }
+      // Malformed read result on a SUCCESSFUL call: render nothing rather
+      // than the raw envelope (an error call falls through to the error
+      // text below, which is not an envelope).
+      if (message.status === 'ok') return
+    }
+    if (message.name === 'skill') {
+      // Without a presenter (replay edge), the skill instruction envelope
+      // renders its instructions body + name, never the raw XML.
+      const envelope = parseSkillEnvelope(message.result)
+      if (envelope !== undefined) {
+        card.addChild(new Text(color.textMuted(`  skill: ${envelope.name}`), 0, 0))
+        for (const line of envelope.instructions.split('\n')) {
+          card.addChild(new Text(color.textDim(line), 0, 0))
+        }
+        return
+      }
+      if (message.status === 'ok') return
+    }
+    if (message.name === 'read_image') {
+      // Without a presenter, the image envelope renders its summary + path,
+      // never the raw XML; the image payload block is never dumped as JSON
+      // (resultTextLines projects image blocks to a placeholder).
+      const envelope = parseImageEnvelope(message.result)
+      if (envelope !== undefined) {
+        card.addChild(new Text(color.textDim(`  ${envelope.summary}`), 0, 0))
+        card.addChild(new Text(color.textMuted(`  path: ${relativizeToCwd(envelope.path, this.workspaceRoot)}`), 0, 0))
+        return
+      }
+      if (message.status === 'ok') return
     }
     if (message.name === 'write') {
       // Without a presenter (replay edge), the write confirmation envelope
@@ -4741,6 +4800,7 @@ export class TuiApp {
         ), 0, 0))
         return
       }
+      if (message.status === 'ok') return
     }
     if (isDiffResult(message.name, message.result)) {
       for (const line of renderDiffLines(message.result)) {
