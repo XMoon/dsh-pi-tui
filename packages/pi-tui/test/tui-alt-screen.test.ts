@@ -1358,3 +1358,56 @@ describe("TuiAltScreen", () => {
 	});
 });
 
+
+	it("copies line-head selections without the emoji-column indent", async () => {
+		const terminal = new RecordingTerminal(20, 5);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("🐋  first line\n   second line\n    indented\nlast line", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Drag from (col 1, row 1) to (col 1, row 4): the selection covers
+		// all four rows from their line heads. Continuation lines carry the
+		// emoji-column padding (3 spaces) — those must be dropped, while a
+		// 4+ space content indent (the code-block case) keeps its extra.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;1;4M");
+		terminal.sendInput("\x1b[<0;1;4m");
+		await terminal.waitForRender();
+
+		const expectedClipboard = Buffer.from("🐋  first line\nsecond line\n indented\nl").toString("base64");
+		const clipboardWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b]52;c;"),
+		);
+		assert.ok(
+			clipboardWrites.some((event) => event.type === "write" && event.data.includes(`\x1b]52;c;${expectedClipboard}\x07`)),
+			JSON.stringify(clipboardWrites),
+		);
+		tui.stop();
+	});
+
+	it("keeps leading spaces when the selection starts mid-line", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("aa   second line", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Drag from (col 4, row 1) to (col 10, row 1): the selection starts
+		// INSIDE the line — its leading spaces are content, not the emoji
+		// column, and must be copied verbatim.
+		terminal.sendInput("\x1b[<0;4;1M");
+		terminal.sendInput("\x1b[<32;10;1M");
+		terminal.sendInput("\x1b[<0;10;1m");
+		await terminal.waitForRender();
+
+		const expectedClipboard = Buffer.from("  secon").toString("base64");
+		const clipboardWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b]52;c;"),
+		);
+		assert.ok(
+			clipboardWrites.some((event) => event.type === "write" && event.data.includes(`\x1b]52;c;${expectedClipboard}\x07`)),
+			JSON.stringify(clipboardWrites),
+		);
+		tui.stop();
+	});

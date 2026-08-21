@@ -1091,11 +1091,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		for (let row = selection.start.row; row <= selection.end.row; row++) {
 			const line = sourceLines[row] ?? "";
 			const columns = this.getSelectionColumns(line, row, selection);
-			lines.push(
-				stripTerminalSequences(
-					sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
-				).trimEnd(),
-			);
+			const sliced = stripTerminalSequences(
+				sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
+			).trimEnd();
+			// dsh-pi-tui extension: when the selection starts at the line
+			// head, drop the emoji-column indent (1-3 cells) so copied
+			// transcript lines do not carry the bullet column's padding.
+			// Content indentation of 4+ cells (code blocks) survives;
+			// 1-2 cell content indents are rare and dropped.
+			lines.push(columns.start === 0 ? sliced.replace(/^ {1,3}/, "") : sliced);
 		}
 		const text = lines.join("\n");
 		if (text.length === 0) return;
