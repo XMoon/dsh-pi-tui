@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-21
+
 ### 新增
 
 - **合并任务浏览器成为唯一的后台表面。** `/tasks` 现在打开一个可搜索的
@@ -24,6 +26,26 @@
   `subagent_router`/`subagent_fork` 的卡片在调用参数带显式覆盖
   (顶层或 `agentOptions`)时渲染一行 `model · provider`;没有则完全
   不变(官方 subagent 工具的模型在配置侧,永不渲染)。
+- **`!` / `!!` 行像真实 shell 一样补全。** 命令名来自 `compgen -A
+  command` 桥(按工作目录 + PATH 缓存 30 秒),`$` 后补全 `$VAR` 名,
+  `git` 子命令实时列出(带 git < 2.18 的静态回退);`!<Tab>` 列出缓存的
+  命令。路径仍走现有 fd 补全。设计:`docs/input-and-card-polish.md` §1。
+- **本地 shell 沙箱偏好。** `/settings` → Local shell sandbox:用户手动
+  执行的 `!`/`!!` 命令默认不再经过 dsh 沙箱(bypass——pi/kimi 对齐:
+  沙箱保护的是模型自动执行的命令,不是用户自己敲的),可选的 `sandbox`
+  模式恢复策略路径。§2。
+- **问题卡展示答案。** 折叠的 `ask_user_question` 卡预览 `N/M
+  answered`(绝不显示裸 answers JSON),展开卡逐条列出答案(`● id →
+  答案`,跳过的题目暗色显示)。§3。
+- **Goal 卡可读。** `get_goal`/`create_goal`/`update_goal` 卡带命名标题
+  (Read/Create/Update Goal)、折叠摘要(`phase active · revision 3 ·
+  2/6 rounds`、`no goal set`)与展开字段行——绝不显示裸 goal JSON。§4。
+- **schedule、cordis-inspect 与 ralph 的折叠预览不再泄露 JSON。** 结果
+  预览行显示解析出的摘要(`1 scheduled`、`mode plugins`、ralph 的友好
+  首行),解析不出就整行消失——展开体保持原样,与 web 对齐。§6。
+- **全屏 todo dock 点击。** 点击 `☑` 摘要行打开 todo 面板;点击面板在
+  紧凑 → 完整列表 → 回到摘要 之间循环,鼠标即可开关面板,无需 Ctrl+T。
+  任务浏览器的提示行在存在可选子代理行时显示 `i interrupt`。
 
 ### 变更
 
@@ -37,6 +59,11 @@
 - **Ctrl+J 不再是 host 键位。** 传统终端把 Ctrl+J 当作 LF(编辑器的
   回车),任务浏览器和弦不可靠;浏览器改由 ↓(空编辑器)与 `/tasks`
   进入,插件现在可以自行绑定 Ctrl+J。
+- **`!` / `!!` 在会话工作区执行。** Shell 命令在 live 会话的 cwd 中
+  执行(pi 对齐)而不是启动目录,切换会话后补全与执行保持一致。
+- **用户手动执行的 `!`/`!!` 命令默认绕过 dsh 沙箱。** 沙箱偏好默认
+  `bypass`(见上方新设置行);设为 `sandbox` 可让用户命令重新走 dsh
+  shell 能力的策略。
 
 ### 移除
 
@@ -53,8 +80,6 @@
   拉进编辑器草稿变成可编辑的用户文本;窗格的分类(`isUserQueueInput`)
   现在同时驱动窗格与出队。
 - **双击 Ctrl+C 退出和弦现在可见且更宽容。** 空输入时第一次 Ctrl+C 只会
-
-- **双击 Ctrl+C 退出和弦现在可见且更宽容。** 空输入时第一次 Ctrl+C 只会
   在静默中武装一个 500ms 的退出窗口,没有任何提示——人手的"连按"间隔
   往往在 0.6–1s,第二次按键会静默地重新武装而不会退出,紧接着按 Enter
   还会发出空消息,看起来就像和弦坏了。现在窗口改为 1.5s,第一次按键会
@@ -65,6 +90,18 @@
   下一次按键,清空看起来像没生效(紧接着再按一次 Ctrl+C 反而会按
   "清空后退出" 和弦直接退出)。Ctrl+S steer 与 Ctrl+Enter queue 的草稿
   清空也补上了同样的显式重绘。
+- **折叠卡不再泄露裸 JSON。** `ask_user_question` 与 goal 卡在结果无法
+  解析出安全摘要时整行去掉折叠预览(失败调用也绝不显示成功摘要);
+  schedule、cordis-inspect 与 ralph 的预览遵循同一规则。
+- **问题答案计数与渲染行永远一致。** 畸形答案条目现在使整组作废(web
+  `every-isAnswer` 对齐),而不是"计入总数却不渲染"。
+- **失败的补全运行不再被缓存。** 超时、中止或失败的 `compgen` 运行不再
+  让 `!` 补全在整个缓存 TTL 内失效——下一次按键会重试 shell。
+- **无法提供的沙箱偏好会被提示。** Local shell sandbox 设为 `sandbox`
+  但组合中没有 shell 能力时,每次 `!` 运行都会提示命令在无沙箱下执行,
+  而不是静默降级。
+- **问题模态期间的所有点击都被捕获。** 问题框外的点击(含宽度 resize
+  后的过期几何)不再穿透到模态后面的 todo 面板或消息展开。
 
 ## [0.2.1] - 2026-08-21
 
@@ -473,7 +510,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8

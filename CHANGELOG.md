@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-21
+
 ### Added
 
 - **Merged task browser as the single background surface.** `/tasks` now
@@ -27,6 +29,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `model · provider` line when the call args carry an explicit override
   (top-level or `agentOptions`); without one, nothing changes (the official
   subagent tool's model lives in config and never renders).
+- **`!` / `!!` shell lines complete like a real shell.** Command names come
+  from a `compgen -A command` bridge (cached per working directory + PATH
+  for 30s), `$VAR` names complete after `$`, and `git` subcommands list
+  live with a static fallback for git < 2.18; `!<Tab>` lists the cached
+  commands. Paths still complete through the existing fd provider. Design:
+  `docs/input-and-card-polish.md` §1.
+- **Local shell sandbox preference.** `/settings` → Local shell sandbox:
+  user-typed `!`/`!!` commands now run outside the dsh sandbox by default
+  (bypass — pi/kimi parity: the sandbox guards the model's autonomous
+  commands, not the user's own), with an opt-in `sandbox` mode that
+  restores the policy path. §2.
+- **Question cards show their answers.** The folded `ask_user_question`
+  card previews `N/M answered` (never the raw answers JSON), and the
+  expanded card lists every answer (`● id → answer`, skipped questions
+  dimmed). §3.
+- **Goal cards are readable.** `get_goal`/`create_goal`/`update_goal`
+  cards carry named headers (Read/Create/Update Goal), a folded summary
+  (`phase active · revision 3 · 2/6 rounds`, `no goal set`) and expanded
+  field lines — never the raw goal JSON. §4.
+- **Folded previews never leak JSON for schedule, cordis-inspect and
+  ralph.** The result-preview row shows a parsed summary (`1 scheduled`,
+  `mode plugins`, ralph's friendly first line) or nothing at all — the
+  expanded body stays verbatim, aligning with the web. §6.
+- **Fullscreen todo dock click.** Clicking the `☑` summary row opens the
+  todo panel; clicking the panel cycles compact → full list → back to the
+  summary, so the mouse opens and closes the panel without Ctrl+T. The
+  task browser's hint row now advertises `i interrupt` while a subagent row
+  is selectable.
 
 ### Changed
 
@@ -43,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as LF (the editor's Enter), so the task-browser chord was unreliable;
   the browser is reached via ↓ (empty editor) and `/tasks`, and a plugin
   may now bind Ctrl+J itself.
+- **`!` / `!!` run in the session workspace.** Shell commands execute in
+  the live session's cwd (pi parity) instead of the launch directory, so
+  completion and execution agree after a session switch.
+- **User-typed `!`/`!!` commands bypass the dsh sandbox by default.** The
+  sandbox preference defaults to `bypass` (see the new settings row above);
+  set it to `sandbox` to route user commands through the dsh shell
+  capability's policy again.
 
 ### Removed
 
@@ -75,23 +112,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clear look dead (and a hasty second Ctrl+C would then exit, per the
   clear-then-exit chord). The Ctrl+S steer and Ctrl+Enter queue chords
   received the same explicit repaint for their draft clears.
-
-
-- **The double-Ctrl+C exit chord is now visible and forgiving.** The first
-  Ctrl+C on an empty editor silently armed a 500ms exit window with no
-  feedback, so a human-paced "double press" (often 0.6–1s apart) silently
-  re-armed and never exited — the next Enter then sent an empty draft,
-  looking exactly like the chord had broken. The window is now 1.5s and
-  the first press shows `Press Ctrl+C again to exit`, so the armed state
-  is discoverable and a natural double press exits.
-- **Ctrl+C clearing the editor now repaints immediately.** The pi-parity
-  first-press clear emptied the draft in memory but never scheduled a new
-  frame — the key is consumed at the app level, so the fork's input path
-  never reaches the focused editor and its render never fires. In a real
-  terminal the old text stayed visible until the next keypress, making the
-  clear look dead (and a hasty second Ctrl+C would then exit, per the
-  clear-then-exit chord). The Ctrl+S steer and Ctrl+Enter queue chords
-  received the same explicit repaint for their draft clears.
+- **Folded cards never leak raw JSON.** The `ask_user_question` and goal
+  cards now drop the folded result-preview row entirely when the result
+  cannot be parsed into a safe summary (and never show a success summary
+  for a failed call); schedule, cordis-inspect and ralph previews follow
+  the same rule.
+- **Question answer counts always match the rendered lines.** A malformed
+  answer entry now invalidates the whole set (web `every-isAnswer`
+  parity) instead of being counted but not rendered.
+- **Failed completion runs are never cached.** A timed-out, aborted or
+  failing `compgen` run no longer suppresses `!` completion for the whole
+  cache TTL — the next keystroke retries the shell.
+- **An opted-in sandbox that the composition cannot provide is surfaced.**
+  With the Local shell sandbox preference set to `sandbox` but no shell
+  capability in the composition, every `!` run notifies that the command
+  executes unsandboxed instead of downgrading silently.
+- **Every click while a question is up stays captured.** Clicks outside
+  the question frame (including stale geometry after a width resize) no
+  longer fall through to the todo panel or transcript expansion behind
+  the modal.
 
 ## [0.2.1] - 2026-08-21
 
@@ -581,7 +620,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.8...v0.2.0
 [0.1.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.1.7...v0.1.8
