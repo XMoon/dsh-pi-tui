@@ -302,9 +302,6 @@ SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属
   `/subagents` 是别名。
 - `/yolo` — 切换到 `danger-full-access`(`/permission danger-full-access`
   的别名)。
-- `/queue` — 已移除:编辑器上方的队列窗格是唯一的队列面(`Ctrl+S`
-  全部 steer,`Alt+↑` 把用户的排队消息拉回编辑器)。名称仍归 host
-  所有,输入会得到明确的错误提示,旧输入绝不会被当作消息发给模型。
 - `/status` — 显示当前会话的统计与身份信息(回合数、token 用量、
   工作区、已安装的 dsh 版本)。
 - `/preset`、`/model`、`/settings`、`/export`、`/fork` —

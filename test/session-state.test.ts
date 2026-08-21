@@ -10,6 +10,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { TuiApp } from '../src/tui-app.ts'
+import { LOCAL_COMMANDS } from '../src/index.ts'
 import { CatalogRefreshCoordinator } from '../src/skill-catalog-refresh.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { readSurfaceCatalog, type SurfaceCatalogContext } from '../src/surface-catalog.ts'
@@ -301,7 +302,7 @@ test('/subagents is a registered alias of /tasks sharing its handler', () => {
   app.stop()
 })
 
-test('/queue is a host-owned compatibility stub answering with an explicit removal error', async () => {
+test('/queue is fully removed: the name is no longer host-owned or registered', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -311,10 +312,9 @@ test('/queue is a host-owned compatibility stub answering with an explicit remov
   const state = { agent: fakeAgent('session-a'), generation: 1 }
   registerTuiCommands(stubRunner(ctx, app, state))
   const queueDef = services.defs.find(def => def.name === 'queue')
-  assert.ok(queueDef !== undefined, '/queue must stay registered (host-owned name)')
-  const result = await (queueDef!.handler as () => Promise<{ kind: string; text: string }>)()
-  assert.equal(result.kind, 'error', 'the stub must answer with an error')
-  assert.match(result.text, /removed/, 'the stub must name the removal explicitly')
+  assert.equal(queueDef, undefined,
+    '/queue must not be registered — the name is released (input steers to the model like any unknown /line)')
+  assert.ok(!LOCAL_COMMANDS.has('queue'), '/queue must be gone from LOCAL_COMMANDS')
   app.stop()
 })
 

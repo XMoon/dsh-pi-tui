@@ -338,10 +338,6 @@ the Advanced/Unstable roadmap).
   subagent, status viewer for a job), `i` interrupts the selected subagent.
   `/subagents` is an alias.
 - `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
-- `/queue` — removed: the queue pane above the editor is the single queue
-  surface (`Ctrl+S` steers all, `Alt+↑` pulls the user's queued messages
-  back into the editor). The name stays host-owned and answers with an
-  explicit error so old input never reaches the model.
 - `/status` — show the current session's stats and identity (turn counts,
   token usage, workspace, installed dsh version).
 - `/preset`, `/model`, `/settings`, `/export`, `/fork` — see

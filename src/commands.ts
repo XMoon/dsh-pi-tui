@@ -1309,7 +1309,7 @@ export function registerTuiCommands(
     const tools = ctx.get('tools') as { get?(name: string, agent: Agent): { execute?: unknown; parameters?: unknown } | undefined } | undefined
     const hostSkillLoader = tools?.get?.('skill', agent)
     const hostLoadsSkillBody = hostSkillLoader !== undefined && typeof hostSkillLoader.execute === 'function'
-    // Deliver the batch like the /queue steer action (and unlike
+    // Deliver the batch through the steer path (and unlike
     // agent.inject alone, which queues for the next pre-step WITHOUT waking
     // the driver): the ORIGINAL line is steered — a running turn takes it
     // at the next step boundary, an idle agent's steer wakes the driver and
@@ -1691,23 +1691,6 @@ export function registerTuiCommands(
       if (error !== undefined) app.notify(error, 'error')
       return { kind: 'success', text: 'started a fresh session' }
     },
-  })
-
-  // `/queue` compatibility stub: the per-item management panel was removed
-  // (the queue pane above the editor is the single queue surface, kimi
-  // parity — Ctrl+S steers all, Alt+↑ pulls back to edit). The NAME stays
-  // host-owned (LOCAL_COMMANDS + the command catalog): old muscle memory
-  // gets an explicit answer instead of the text being steered to the model,
-  // and no plugin can silently claim the published name (AGENTS.md
-  // deprecation-before-removal rule). Remove the stub in a future breaking
-  // release.
-  commands.register({
-    name: 'queue',
-    description: 'Removed: the queue pane above the editor is the single queue surface (Ctrl+S steers all, Alt+↑ pulls back)',
-    handler: () => ({
-      kind: 'error',
-      text: '/queue was removed — the queue pane above the editor is the single queue surface (Ctrl+S steers all, Alt+↑ pulls back to edit)',
-    }),
   })
 
   registerTuiCommand({

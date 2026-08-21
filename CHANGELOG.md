@@ -43,11 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as LF (the editor's Enter), so the task-browser chord was unreliable;
   the browser is reached via ↓ (empty editor) and `/tasks`, and a plugin
   may now bind Ctrl+J itself.
-- **`/queue` answers with an explicit removal error.** The per-item panel
-  is gone (the queue pane is the single surface), but the name stays
-  host-owned so old input is never steered to the model and no plugin can
-  silently claim the published name (deprecation-before-removal; drop the
-  stub in a future breaking release).
+
+### Removed
+
+- **`/queue` command removed outright.** The per-item management panel
+  and its compatibility stub are gone — the queue pane above the editor
+  is the single queue surface (`Ctrl+S` steers all, `Alt+↑` pulls queued
+  messages back to edit). The name is released from the host-owned
+  command catalog: typing `/queue` now steers to the model like any
+  unknown `/line`, and a plugin may claim the name from the next release.
 
 ### Fixed
 

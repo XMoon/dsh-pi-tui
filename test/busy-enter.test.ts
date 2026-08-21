@@ -23,9 +23,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** The TUI-owned command names registered by registerTuiCommands (commands.ts). */
 const TUI_OWNED = [
   'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
-  // 'queue' is the removed-panel compatibility stub: still host-owned so
-  // the name stays reserved and old input gets an explicit error.
-  'model', 'new', 'preset', 'queue', 'quit', 'reload', 'rename', 'resume',
+  'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
 ]

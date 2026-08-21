@@ -183,7 +183,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  */
 export const LOCAL_COMMANDS = new Set([
   'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
-  'model', 'new', 'preset', 'queue', 'quit', 'reload', 'rename', 'resume',
+  'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
 ])
@@ -3702,7 +3702,7 @@ export function apply(ctx: Context, config: Config): void {
       if (isKnob) {
         refreshStatus()
       }
-      // Every durable inbox mutation (followup, steer, /queue edits) commits
+      // Every durable inbox mutation (followup, steer, splice) commits
       // an agent/inbox/spliced event. The upstream Inbox commits the event
       // BEFORE its live projection mutates (synchronous observers see the
       // pre-splice lists), so the pane must read the inbox on the next
