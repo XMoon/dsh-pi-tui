@@ -2794,6 +2794,12 @@ export class TuiApp {
     }
     if (this.viewerMode === undefined) {
       this.draftBeforeViewer = this.seatEditor().getText()
+      // The viewer renders ONLY the child transcript: the main session's
+      // local cards (`!` shell runs) must never leak into it. The runner
+      // repaints the child folder right after, so the cleared list is
+      // rebuilt from the child content.
+      this.localMessages.length = 0
+      this.rebuildMessages()
     }
     this.viewerMode = mode
     // M9: cover the CURRENT seat occupant with the placeholder (a plugin

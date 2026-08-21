@@ -84,3 +84,33 @@ test('the viewer transcript never shows a seeded parent completion notice', () =
   assert.ok(!text.includes('subagent-settled'), `the parent's completion notice must NOT render in the viewer:\n${text}`)
   assert.ok(!text.includes('Background subagent parent-child'), `the notice body must not leak:\n${text}`)
 })
+
+// ── viewer content isolation (TuiApp level) ──────────────────────────────
+
+import { TuiApp } from '../src/tui-app.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
+
+test('entering the viewer clears the main session local cards', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+  // A main-session `!` shell card exists before the viewer opens.
+  app.pushLocalMessage({ kind: 'tool', turn: 0, name: 'bash', args: '!ls', result: 'done', status: 'ok' })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('!ls'), `the local card must render before the viewer:\n${view}`)
+
+  app.setViewerMode({ id: 'session-child', label: 'child' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('!ls'), `the main session local card must not leak into the viewer:\n${view}`)
+
+  // Exiting restores the main transcript; the cleared local cards stay gone
+  // (the runner repaints the main folder on exit).
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('!ls'), `the local card must not reappear after the viewer:\n${view}`)
+  app.stop()
+})
