@@ -55,7 +55,7 @@ jobs:
       # Both dists are gitignored: the tests import the fork at runtime and
       # the tarball smoke resolves the bundle's dist realpath.
       - run: pnpm build
-      - run: pnpm --filter @xmoon76/dsh-pi-tui test
+      - run: pnpm test:bundle
 
   build-and-pack:
     runs-on: ubuntu-latest
@@ -71,15 +71,15 @@ jobs:
       # and runs the tests; postpack runs the tarball smoke test. A fresh
       # checkout with no dist therefore produces a verified tarball in one
       # command. --pack-destination puts the tarball where postpack's smoke
-      # and the artifact upload expect it (pnpm would otherwise leave it in
-      # the invocation's cwd — the repo root).
-      - run: pnpm --filter @xmoon76/dsh-pi-tui pack --pack-destination packages/dsh-pi-tui
+      # and the artifact upload expect it (the repo root is the package
+      # root after the root-package migration).
+      - run: pnpm pack --pack-destination .
       - uses: actions/upload-artifact@v4
         with:
           name: dsh-pi-tui-tarball
           # npm/pnpm strip the `@` scope from tarball filenames, so the
           # packed file is xmoon76-dsh-pi-tui-<version>.tgz.
-          path: packages/dsh-pi-tui/xmoon76-dsh-pi-tui-*.tgz
+          path: xmoon76-dsh-pi-tui-*.tgz
           if-no-files-found: error
 
   tarball-smoke:
@@ -103,7 +103,7 @@ jobs:
       # Smoke the EXACT artifact build-and-pack produced: structure, leaks,
       # parse, standalone install, exports import, no external fork
       # resolution, repair CLI help + read-only scan.
-      - run: node packages/dsh-pi-tui/scripts/tarball-smoke.mjs tarball/xmoon76-dsh-pi-tui-*.tgz
+      - run: node scripts/tarball-smoke.mjs tarball/xmoon76-dsh-pi-tui-*.tgz
 
   vim-plugin-smoke:
     needs: build-and-pack
@@ -124,7 +124,7 @@ jobs:
       # will publish — the import bans, the SDK-surface coverage, the
       # typecheck against the packed .d.mts, the runtime load and the
       # duplicate-runtime audit.
-      - run: node packages/dsh-pi-tui/scripts/vim-plugin-smoke.mjs tarball/xmoon76-dsh-pi-tui-*.tgz
+      - run: node scripts/vim-plugin-smoke.mjs tarball/xmoon76-dsh-pi-tui-*.tgz
 
   naming-gate:
     runs-on: ubuntu-latest
@@ -138,7 +138,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # Naming decisions are hard rules (AGENTS.md): package names, private
       # flags, onlyBundle, patch row ids, startup service, committed dist.
-      - run: node packages/dsh-pi-tui/scripts/naming-gate.mjs
+      - run: node scripts/naming-gate.mjs
 
   npm-audit-prod:
     runs-on: ubuntu-latest
@@ -180,9 +180,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="$(node -e "console.log(JSON.parse(require('fs').readFileSync('packages/dsh-pi-tui/package.json', 'utf8')).version)")"
+          VERSION="$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version)")"
           if [ "$TAG" != "v$VERSION" ]; then
-            echo "tag $TAG does not match packages/dsh-pi-tui version v$VERSION" >&2
+            echo "tag $TAG does not match package.json version v$VERSION" >&2
             exit 1
           fi
       # Publish the EXACT CI-verified bytes; never rebuild, never repack.

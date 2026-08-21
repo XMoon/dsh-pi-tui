@@ -180,7 +180,9 @@ function main() {
     // the generic patterns: its source deliberately assembles the old
     // /home/xmoon/ marker at runtime (the literal would otherwise trip the
     // check on its own file). The dynamic-root checks still apply to it.
-    const repoRoot = realpathSync(join(SCRIPT_DIR, '..', '..', '..'))
+    // After the root-package migration the repository root IS the package
+    // root, so both resolve from SCRIPT_DIR with a single `..`.
+    const repoRoot = realpathSync(join(SCRIPT_DIR, '..'))
     const packageRoot = realpathSync(PACKAGE_ROOT)
     // The bundle dist may be absent (a smoke run on a raw checkout); the
     // structure checks below already fail loudly for that, so never crash

@@ -41,7 +41,7 @@ const SHORT_STATUS: StatusData = {
  * the cap must cut the tail with '…'. */
 const EXTREME_STATUS: StatusData = {
   model: 'deepseek/deepseek-v4-flash',
-  cwd: '/home/xmoon/project/dsh-pi-tui/packages/dsh-pi-tui/src',
+  cwd: '/home/xmoon/project/dsh-pi-tui/src',
   branch: 'feat/pluginization-phase2-5-with-a-very-long-name',
   turns: 3,
   steps: 7,

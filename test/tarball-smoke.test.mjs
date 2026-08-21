@@ -16,7 +16,9 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const SMOKE = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'tarball-smoke.mjs')
-const ROOT = join(SMOKE, '..', '..', '..')
+// The repository root IS the package root after the root-package migration:
+// scripts/ sits directly under it, so two `..` from the smoke file.
+const ROOT = join(SMOKE, '..', '..')
 
 /** Build a minimal tarball whose dist/index.mjs carries `leakText`. */
 function leakTarball(leakText) {
