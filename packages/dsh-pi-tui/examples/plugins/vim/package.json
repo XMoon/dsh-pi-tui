@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "devDependencies": {
-    "@xmoon76/dsh-pi-tui": "workspace:^0.2.0",
+    "@xmoon76/dsh-pi-tui": "workspace:*",
     "typescript": "^5.9.0"
   }
 }

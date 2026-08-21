@@ -139,7 +139,7 @@ importers:
   packages/dsh-pi-tui/examples/plugins/interactive-shell:
     devDependencies:
       '@xmoon76/dsh-pi-tui':
-        specifier: workspace:^0.2.0
+        specifier: workspace:*
         version: link:../../..
       typescript:
         specifier: ^5.9.0
@@ -148,7 +148,7 @@ importers:
   packages/dsh-pi-tui/examples/plugins/questionnaire:
     devDependencies:
       '@xmoon76/dsh-pi-tui':
-        specifier: workspace:^0.2.0
+        specifier: workspace:*
         version: link:../../..
       typescript:
         specifier: ^5.9.0
@@ -157,7 +157,7 @@ importers:
   packages/dsh-pi-tui/examples/plugins/vim:
     devDependencies:
       '@xmoon76/dsh-pi-tui':
-        specifier: workspace:^0.2.0
+        specifier: workspace:*
         version: link:../../..
       typescript:
         specifier: ^5.9.0
