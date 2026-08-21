@@ -28,7 +28,9 @@
 
 ## 前置要求
 
-- 一个支持 profile 的 DeepSeek Harness 安装(`dsh` 已在 `PATH` 中)。
+- 一个支持 profile 的 DeepSeek Harness 安装(`dsh` 已在 `PATH` 中),版本
+  `0.1.1-rc.1` 或同一兼容线上的更新版本——TUI 消费该版本的拆分凭据事件
+  与 `ctx.authorization` 服务。
 - Node >= 22.19(`^22.19.0 || >=24`,与 dsh 相同范围)。从源码运行需要
   原生支持 TypeScript 的 Node(>= 23.6)或 tsx ESM 钩子
   (`node --import tsx/esm`,dsh 自身源码启动的方式)。

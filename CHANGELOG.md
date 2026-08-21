@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Provider-native sign-in through the dsh authorization seam.** `/login`
+  now understands the two credential planes of DeepSeek Harness
+  `dsh-v0.1.1-rc.1`: a route whose profile explicitly names `apiKeyEnv`
+  keeps the classic API-key path (even when the same route has a provider
+  login flow), while a keyless route with a flow signs in provider-natively
+  — OAuth / device-code / interactive API key. Notices (the page to open,
+  the device code) stay visible in a durable panel, text/select prompts use
+  the existing question and picker surfaces, and **secret prompts render
+  masked** (the value stays in the input's memory, stays masked on the
+  review page, and never reaches history, logs, the transcript or
+  `/status`). A successful sign-in for an unconfigured catalog route
+  records a minimal keyless provider profile (never `apiKeyEnv`, so the
+  runtime keeps reading the credential record); hand-declared routes still
+  go through the add-provider wizard.
+- **`/logout` clears both credential planes.** A named-key route unsets
+  the reference as before; a keyless route deletes the stored credential
+  record and says "signed out locally" — it never claims server-side
+  OAuth revocation. The no-argument `/logout` now opens a picker over the
+  stored records plus the configured references (presence and kind only;
+  secret values never leave the credentials service).
+
+### Changed
+
+- **Compatible with DeepSeek Harness `dsh-v0.1.1-rc.1`.** Every
+  `@deepseek-ai/dsh-*` peer and dev range moved from `^0.1.0-rc.8` to
+  `^0.1.1-rc.1`, and `@deepseek-ai/dsh-authorization` joined the peer set.
+  The old `credentials/updated` event no longer exists upstream; the
+  surface now follows `credentials/reference-updated` and
+  `credentials/record-updated` (both refresh the footer model row and the
+  welcome card).
+- **The TUI profile mounts the authorization seam itself.** No dsh bundle
+  ships `ctx.authorization`, so `cordis.patch.yml` inserts the service row
+  and the runner injects it — llm-pi-ai's provider login flows register
+  once it is up.
+- The `/login` API-key question and authorization secret prompts are
+  masked by default.
+
+### Security
+
+- Authorization secrets are never printed, logged, put in input history,
+  written to the session transcript, or shown in `/status`; notice and
+  error paths never echo token material.
+
 ## [0.2.2] - 2026-08-21
 
 ### Added

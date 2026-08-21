@@ -7,6 +7,40 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **兼容 dsh authorization 的 provider-native 登录。** `/login` 现在识别
+  DeepSeek Harness `dsh-v0.1.1-rc.1` 的两个凭据平面:profile 显式声明
+  `apiKeyEnv` 的路由保持原有 API-key 流程(即使同名 provider 存在
+  authorization flow),而 keyless 路由则走 provider 原生登录——OAuth /
+  device-code / 交互式 API key。notice(要打开的 URL、设备码)显示在常驻
+  面板中,text/select 提示复用现有 question 与 picker 表面,且 **secret
+  提示默认掩码显示**(真实值只留在输入内存,确认页同样掩码,绝不进入
+  历史、日志、转录或 `/status`)。对尚未配置的 catalog 路由,登录成功后
+  写入最小 keyless profile(绝不写 `apiKeyEnv`,运行时继续读取凭据
+  record);手工声明的路由仍走 add-provider 向导。
+- **`/logout` 覆盖两个凭据平面。** 命名 key 的路由照旧 unset 引用;
+  keyless 路由删除已存凭据 record,并提示"signed out locally"——绝不明示
+  服务端 OAuth 撤销。无参数的 `/logout` 现在打开一个选择器,聚合已存
+  record 与已配置引用(只显示存在性与 key;secret 值绝不离开凭据服务)。
+
+### 变更
+
+- **兼容 DeepSeek Harness `dsh-v0.1.1-rc.1`。** 所有 `@deepseek-ai/dsh-*`
+  peer 与 dev 依赖从 `^0.1.0-rc.8` 提升到 `^0.1.1-rc.1`,并新增
+  `@deepseek-ai/dsh-authorization` peer。旧事件 `credentials/updated`
+  已不存在——现在监听 `credentials/reference-updated` 与
+  `credentials/record-updated`(两者都会刷新 footer 模型行与欢迎卡片)。
+- **TUI profile 自行挂载 authorization 服务。** 没有任何 dsh bundle
+  层提供 `ctx.authorization`,因此 `cordis.patch.yml` 插入该行,runner
+  显式注入——llm-pi-ai 的 provider 登录 flow 随之注册。
+- `/login` 的 API-key 输入框与 authorization secret 提示默认掩码显示。
+
+### 安全
+
+- authorization 的 secret 永不写入日志、输入历史、会话转录或 `/status`;
+  掩码错误与提示载荷不回显 secret。
+
 ## [0.2.2] - 2026-08-21
 
 ### 新增

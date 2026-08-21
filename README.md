@@ -30,7 +30,9 @@ output.
 
 ## Prerequisites
 
-- A DeepSeek Harness installation with profiles support (`dsh` on your `PATH`).
+- A DeepSeek Harness installation with profiles support (`dsh` on your `PATH`),
+  version `0.1.1-rc.1` or later on the same compat line (the TUI consumes the
+  split credential events and the `ctx.authorization` seam of that release).
 - Node >= 22.19 (`^22.19.0 || >=24`, same range as dsh). Running from source
   needs Node with native TypeScript support (>= 23.6) or the tsx ESM hook
   (`node --import tsx/esm`, how dsh's own source launch works).
