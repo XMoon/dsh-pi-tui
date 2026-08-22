@@ -44,6 +44,7 @@ import {
   MAX_PICKER_SESSIONS,
   TITLE_BATCH_SIZE,
   TITLE_FIRST_BATCH,
+  buildSessionTree,
   findSessionMatch,
   headerToPickerRow,
   loadSessionTitleBatch,
@@ -146,7 +147,11 @@ export function sessionPickerCategories(
       id: 'all',
       label: 'All directories',
       header: `${header} · All directories`,
-      items: () => mainRows.map(row => itemFor(row)),
+      // The lineage tree (plan §20): fork/rewind children and subagents
+      // hang under their parentSession chain with a └─ prefix — never flat
+      // roots. Orphans sit at depth 1; the tree's `placed` guard keeps
+      // corrupt metadata from looping.
+      items: () => buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth)),
     },
   ]
 }
