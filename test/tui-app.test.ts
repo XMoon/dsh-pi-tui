@@ -1263,3 +1263,50 @@ test('ctrl+v routes to onClipboardPaste and consumes the key', async () => {
   }
   app.stop()
 })
+
+test('a multimodal submission refused by shouldRememberInput never recalls (review finding)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    // The runner refuses lines carrying image placeholders: their drafts
+    // die on consume, so ↑ must never resurrect them as plain text.
+    shouldRememberInput: (text) => !text.includes('[image #'),
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('分析 [image #1 (800×600)]')
+  await vt.waitForRender()
+  vt.sendInput('\r') // submit
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['分析 [image #1 (800×600)]'])
+  // ↑ (history previous): the multimodal line must NOT come back.
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('[image #1'), `dead placeholder recalled:\n${view}`)
+  app.stop()
+})
+
+test('a plain-text submission still recalls through the editor history', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    shouldRememberInput: (text) => !text.includes('[image #'),
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('plain prompt')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['plain prompt'])
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('plain prompt'), `plain text recalls:\n${view}`)
+  app.stop()
+})

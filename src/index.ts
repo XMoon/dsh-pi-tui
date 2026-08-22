@@ -2713,6 +2713,11 @@ export function apply(ctx: Context, config: Config): void {
       // The image-only submit gate (plan §11.1): an empty-text draft with
       // staged images is a real submission.
       isImageDraft: () => draftHasImages(app.getDraft(), draftImages),
+      // The in-process EDITOR history must never recall a multimodal line
+      // after its drafts were consumed — the placeholders would re-send as
+      // plain text (the persisted JSONL history has the same guard; review
+      // finding: the memory side was missing it).
+      shouldRememberInput: (text) => !draftHasImages(text, draftImages),
       // Ctrl+V (plan M3): probe the clipboard ONCE per paste — an image
       // lands as a draft placeholder, plain text as an editor insert,
       // unsupported/empty silently (a text paste must never error).

@@ -584,6 +584,15 @@ export interface TuiAppEventsBase {
    */
   onClipboardPaste?: () => void
   /**
+   * Whether a submitted line may enter the EDITOR history (both the
+   * in-memory recall and the editor's own stack; the runner's persisted
+   * JSONL history has its own guard). A multimodal line whose image
+   * placeholders die with their drafts must NOT be recalled as text —
+   * re-sending it would silently drop the images (review finding).
+   * Optional; absent keeps the unconditional behavior.
+   */
+  shouldRememberInput?: (text: string) => boolean
+  /**
    * Whether the current draft references a staged image (the image-only
    * submit gate: an empty-text draft with images is NOT empty). Optional —
    * absent means the draft text is the only emptiness authority.
@@ -2342,10 +2351,14 @@ export class TuiApp {
     }
   }
 
-  /** Record a submitted line into the editor history and the persistence mirror. */
+  /** Record a submitted line into the editor history and the persistence
+   * mirror. The host may REFUSE via `shouldRememberInput` (e.g. a
+   * multimodal draft whose placeholders die with their drafts — recalling
+   * it would re-send dead placeholders as plain text; review finding). */
   private rememberInput(text: string): void {
     const trimmed = text.trim()
     if (trimmed === '') return
+    if (this.events.shouldRememberInput?.(text) === false) return
     this.editor.addToHistory(trimmed)
     if (this.inputHistory[0] === trimmed) return
     this.inputHistory.unshift(trimmed)
