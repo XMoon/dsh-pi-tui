@@ -16,7 +16,7 @@
 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { rmSync, readFileSync } from 'node:fs'
+import { existsSync, rmSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { ClipboardImageError } from './errors.ts'
 import { parseImageMetadata } from './intake.ts'
@@ -44,6 +44,37 @@ export interface ClipboardEnvironment {
   readonly platform: string
   readonly env: Record<string, string | undefined>
   readonly exists: (path: string) => boolean
+}
+
+/**
+ * Whether a command is available on $PATH (review finding): a bare
+ * `existsSync(command)` only checks the CURRENT directory, so normal
+ * Wayland/X11 installations would look "helper missing". Walks the PATH
+ * entries; empty entries fall back to the CWD like a real shell.
+ * - a command containing a path separator resolves DIRECTLY (shell lookup
+ *   semantics: `./wl-paste` never walks PATH);
+ * - win32 PATH entries split on `;` ONLY — drive-letter colons (`C:\…`)
+ *   survive (follow-up finding); POSIX splits on `:`.
+ */
+export function commandOnPath(command: string, pathVar: string | undefined, platform: string): boolean {
+  if (command.includes('/') || (platform === 'win32' && command.includes('\\'))) {
+    return existsSync(command)
+  }
+  const separator = platform === 'win32' ? ';' : ':'
+  const dirs = (pathVar ?? '').split(separator)
+  // An empty PATH entry (leading/trailing/double separator) means the CWD.
+  if (dirs.length === 0 || dirs.some(dir => dir === '')) {
+    if (existsSync(command)) return true
+  }
+  for (const dir of dirs) {
+    if (dir === '') continue
+    try {
+      if (existsSync(join(dir, command))) return true
+    } catch {
+      // Unreadable directory entries are skipped, never fatal.
+    }
+  }
+  return false
 }
 
 /** WSL detection: the interop marker env or the kernel banner. */

@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clipboardBackendOf, readClipboardImage, type ClipboardEnvironment, type RunCommand } from '../src/image/clipboard.ts'
+import { clipboardBackendOf, commandOnPath, readClipboardImage, type ClipboardEnvironment, type RunCommand } from '../src/image/clipboard.ts'
 
 /** A tiny valid PNG header (1×1). */
 function pngBytes(): Buffer {
@@ -159,4 +159,30 @@ test('missing wl-paste/xclip resolves to unsupported instead of a raw exec error
 test('Wayland probes when wl-paste exists', async () => {
   const result = await readClipboardImage(waylandMock(pngBytes()), envOf({ env: { WAYLAND_DISPLAY: 'wayland-0' }, exists: () => true }))
   assert.equal(result.kind, 'image')
+})
+
+test('commandOnPath walks $PATH, never just the CWD (review finding)', () => {
+  // A known binary resolves through the REAL path.
+  assert.equal(commandOnPath('node', process.env.PATH, 'linux'), true)
+  assert.equal(commandOnPath('definitely-not-a-real-binary-xyz', process.env.PATH, 'linux'), false)
+  // An explicit directory list resolves only entries present in it.
+  assert.equal(commandOnPath('node', '', 'linux'), false, 'no PATH, no CWD hit for a non-CWD binary')
+  // Windows-style separators are honored only for ';'-separated PATHs.
+  const windowsPath = 'C:\\NoSuchDir;' + process.env.PATH!.split(':').filter(Boolean).join(';')
+  assert.equal(commandOnPath('node', windowsPath, 'win32'), true)
+})
+
+test('commandOnPath keeps win32 drive-letter colons and honors separators', () => {
+  // A Windows-style PATH: only ';' splits, so drive-letter colons survive
+  // as part of an entry (unreachable directories are simply missed).
+  const windowsStyle = process.env.PATH!.split(':').filter(Boolean).join(';')
+  assert.equal(commandOnPath('node', windowsStyle, 'win32'), true)
+  assert.equal(commandOnPath('node', 'C:\\NoSuchDir;C:\\AlsoMissing', 'win32'), false)
+  // POSIX keeps ':' splitting.
+  assert.equal(commandOnPath('node', process.env.PATH, 'linux'), true)
+})
+
+test('commandOnPath resolves separator-bearing commands directly (shell lookup semantics)', () => {
+  assert.equal(commandOnPath('./node', process.env.PATH, 'linux'), false, 'a CWD-relative name is checked directly, not under PATH dirs')
+  assert.equal(commandOnPath('/bin/sh', undefined, 'linux'), true, 'an absolute path resolves directly')
 })

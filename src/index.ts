@@ -91,7 +91,7 @@ import { safeErrorMessage } from './error-boundary.ts'
 import { execFile } from 'node:child_process'
 import { DraftImageStore } from './image/draft-store.ts'
 import { ImageInputError } from './image/errors.ts'
-import { clipboardBackendOf, readClipboardImage, type ClipboardEnvironment, type RunCommand } from './image/clipboard.ts'
+import { clipboardBackendOf, commandOnPath, readClipboardImage, type ClipboardEnvironment, type RunCommand } from './image/clipboard.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
 import { ImageLoader } from './image/loader.ts'
@@ -2703,7 +2703,10 @@ export function apply(ctx: Context, config: Config): void {
     const clipboardEnv: ClipboardEnvironment = {
       platform: process.platform,
       env: process.env as Record<string, string | undefined>,
-      exists: existsSync,
+      // PATH-aware helper detection — a bare existsSync only checks the
+      // CWD and would declare installed wl-paste/xclip "missing" (review
+      // finding).
+      exists: (command) => commandOnPath(command, process.env.PATH, process.platform),
     }
     app = startProcessTui({
       onSubmit: (text) => dispatchUserInput(text),
