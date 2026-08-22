@@ -90,23 +90,33 @@ test/image-thumbnail.test.ts.
 
 ### Why
 
-Submitting expands `[image #N (W×H)]` into ordered `ContentBlock`s, and the
-transcript renders them in order (text → thumbnail → text) whenever the
-loader is wired — position was preserved on screen. But the FLAT text
-(`message.text`, built with `textOf`) joined only the text blocks: the
+Submitting expands `[image #N (W×H)]` into ordered `ContentBlock`s, but the
+user BUBBLE rendered only the text runs — the thumbnail sat on its own row
+between them, so a message read as `❯ 这张图是啥` followed by an image line,
+with no trace of the image inside the user's own message. The FLAT text
+(`message.text`, built with `textOf`) joined only the text blocks too: the
 search overlay matched `'check   done'` — no image identity, no position —
-and a loader-less host rendered mixed messages with the image silently
-dropped. The queue preview already had the right convention (`🖼️ shot.png`
-inline).
+and a loader-less host dropped the image entirely. The queue preview already
+had the right convention (`🖼️ shot.png` inline).
 
 ### Fix
 
 - `textWithImageMarkers(blocks)` (src/transcript.ts): text blocks verbatim,
-  image blocks as an inline `🖼️ name` marker AT their position. Identical to
-  `textOf` for text-only content.
+  image blocks as an inline `🖼️ name` marker AT their position. A marker
+  boundary always carries one separating space — the `/image` insertion
+  leaves NO space before the placeholder, so `这张图是啥[image…]` must not
+  read as `这张图是啥🖼️ shot.png` — while a space the user already typed is
+  never doubled. Identical to `textOf` for text-only content.
 - The user-message fold (`TranscriptFolder`, `user/message`) uses it for
   `message.text`, so search finds image-bearing messages by name and no
   consumer ever sees a mixed message reduced to its text alone.
+- The transcript BUBBLE renders the marker inline too
+  (`TuiApp.renderUserBlocks`): one bubble whose text reads like the draft
+  the user submitted (`❯ 这张图是啥 🖼️ shot.png`), with the thumbnails
+  following as attachment rows in block order — the bubble carries the
+  position, the thumbnail carries the picture. (The earlier ordered layout
+  split the text into separate bubbles around each thumbnail, so the bubble
+  itself never showed where the image sat.)
 - `TuiApp.renderBlockSequence`'s loader-less fallback uses the same
   projection — an image is never silently dropped.
 - `textOf` is unchanged: assistant/tool text paths (markdown rendering,

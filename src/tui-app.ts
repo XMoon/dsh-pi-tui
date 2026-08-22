@@ -4296,6 +4296,35 @@ export class TuiApp {
     return container
   }
 
+  /**
+   * A user message with images: ONE bubble whose text keeps an inline
+   * `🖼️ name` placeholder at every image's ORIGINAL position — the user's
+   * own words then read like the draft they submitted (`这张图是啥 🖼️
+   * shot.png`), instead of a bubble with the image silently moved to its
+   * own row. The thumbnails follow as attachment rows in block order; the
+   * bubble marker carries the position, the thumbnail carries the picture.
+   */
+  private renderUserBlocks(
+    content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
+  ): Component {
+    const container = new Container()
+    container.addChild(new UserBubbleComponent(
+      new Text(textWithImageMarkers(content), 0, 0),
+      `${color.roleUser('❯')} `,
+      color.roleUserBg,
+    ))
+    for (const block of content) {
+      if (block.type === 'image') {
+        container.addChild(new ImageThumbnail(
+          block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+          this.imageLoader!,
+          this.imageTheme!,
+        ))
+      }
+    }
+    return container
+  }
+
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
@@ -4305,12 +4334,7 @@ export class TuiApp {
       // the background and indent under the marker, so multi-line input
       // stays aligned inside one block.
       if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
-        return this.renderBlockSequence(message.content, (text) =>
-          new UserBubbleComponent(
-            new Text(text, 0, 0),
-            `${color.roleUser('❯')} `,
-            color.roleUserBg,
-          ))
+        return this.renderUserBlocks(message.content)
       }
       return new UserBubbleComponent(
         new Text(message.text, 0, 0),

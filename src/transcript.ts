@@ -127,17 +127,31 @@ export function textOf(blocks: readonly ContentBlock[]): string {
 
 /** Flat text with image positions preserved: text blocks verbatim, image
  * blocks as an inline `🖼️ name` marker AT their position (the queue-preview
- * format; U+FE0F keeps the marker 2 cells wide in emoji fonts). The
- * structured `content` blocks stay the canonical form for thumbnail
- * rendering; this projection feeds the flat-text consumers (transcript
- * search, loader-less fallback rendering) so a mixed message never reads
- * as if the image was not there, and an image-only message is not empty.
- * Identical to {@link textOf} for text-only content. */
+ * format; U+FE0F keeps the marker 2 cells wide in emoji fonts). A marker
+ * boundary always carries a single separating space — the /image insertion
+ * leaves NO space before the placeholder, so `这张图是啥[image…]` must not
+ * read as `这张图是啥🖼️ shot.png` — while a space the user already typed is
+ * never doubled. The structured `content` blocks stay the canonical form
+ * for thumbnail rendering; this projection feeds the flat-text consumers
+ * (transcript search, loader-less fallback rendering, the user bubble's
+ * inline marker) so a mixed message never reads as if the image was not
+ * there, and an image-only message is not empty. Identical to
+ * {@link textOf} for text-only content. */
 export function textWithImageMarkers(blocks: readonly ContentBlock[]): string {
   let text = ''
+  // A marker boundary: the previous block was an image and the next text
+  // block needs a separator unless it brings its own whitespace.
+  let boundary = false
   for (const block of blocks) {
-    if (block.type === 'text') text += block.text
-    else if (block.type === 'image') text += `🖼️ ${block.attachment.name ?? 'image'}`
+    if (block.type === 'text') {
+      if (boundary && text !== '' && !/\s$/.test(text) && !/^\s/.test(block.text)) text += ' '
+      boundary = false
+      text += block.text
+    } else if (block.type === 'image') {
+      if (text !== '' && !/\s$/.test(text)) text += ' '
+      text += `🖼️ ${block.attachment.name ?? 'image'}`
+      boundary = true
+    }
   }
   return text
 }

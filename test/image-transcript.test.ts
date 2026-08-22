@@ -70,6 +70,22 @@ test('an image-only user message folds (never dropped as empty text)', () => {
   assert.equal(messages[0]!.kind, 'user')
 })
 
+test('a glued draft still gets a separating space around the inline marker', () => {
+  // The /image insertion leaves NO space before the placeholder
+  // (`这张图是啥[image…]`), so the flat projection must add one — the
+  // marker must never glue to the preceding text.
+  const folder = new TranscriptFolder()
+  folder.apply([userMessageEvent([
+    { type: 'text', text: '这张图是啥' },
+    { type: 'image', attachment: IMAGE_REF },
+    { type: 'text', text: '看看' },
+  ])])
+  const message = folder.messages()[0]!
+  assert.equal(message.kind, 'user')
+  if (message.kind !== 'user') return
+  assert.equal(message.text, '这张图是啥 🖼️ shot.png 看看')
+})
+
 test('an assistant image block folds without crashing and keeps its blocks', () => {
   const folder = new TranscriptFolder()
   folder.apply([assistantMessageEvent([
@@ -129,6 +145,10 @@ test('the TUI renders a user message with an image (fallback line, then inline-r
   // the first frame shows the pending text).
   assert.ok(view.includes('🖼️ '), `thumbnail fallback visible:\n${view}`)
   assert.ok(view.includes('800×600'), `dimensions in fallback:\n${view}`)
+  // The user BUBBLE itself keeps an inline `🖼️ name` marker at the image's
+  // position — the message never reads as text-only with the picture
+  // silently moved to its own row.
+  assert.ok(view.includes('check 🖼️ shot.png'), `bubble marker missing:\n${view}`)
   // After the loader settles, a notified repaint keeps the fallback for
   // non-inline terminals (headless caps default to no images).
   await new Promise(resolve => setTimeout(resolve, 30))

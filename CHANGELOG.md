@@ -27,10 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had. `~`, absolute and relative forms are all supported; the completion
   rides the fork's own `getArgumentCompletions` extension point, so no
   vendored code changed.
-- **Mixed image messages keep an inline `🖼️` placeholder in their flat
-  text.** A user message like `check [image] done` no longer reads as
-  `check  done` anywhere: the transcript search can find it by image name,
-  and hosts without image rendering still show where the image was.
+- **Mixed image messages keep an inline `🖼️` placeholder in their text —
+  the transcript bubble included.** A user message like `check [image] done`
+  now reads `check 🖼️ shot.png done` in the bubble itself (with the
+  thumbnails following as attachment rows), never as text-only with the
+  picture silently moved to its own row: the transcript search can find it
+  by image name, and hosts without image rendering still show where the
+  image was. A marker boundary always carries one separating space, so a
+  draft without a space before the placeholder never glues the marker to
+  the text.
 
 ### Fixed
 
