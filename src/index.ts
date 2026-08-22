@@ -265,7 +265,7 @@ export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
  *   plugin-declared local commands (absent = static set only).
  */
 export function shouldSteerOnEnter(
-  parsed: { name: string } | undefined,
+  parsed: { name: string; rawInput?: string } | undefined,
   running: boolean,
   busyEnter: string | undefined,
   forceQueue: boolean,
@@ -273,6 +273,11 @@ export function shouldSteerOnEnter(
 ): boolean {
   if (forceQueue) return false
   if (parsed !== undefined) {
+    // `/skill <name> [args...]` is an AGENT-facing invocation (loadSkill),
+    // NOT the local picker: it steers like any other prompt. Only the bare
+    // `/skill` picker counts as local (review finding — same classification
+    // as the image-rejection gate).
+    if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return running && busyEnter === 'steer'
     if (LOCAL_COMMANDS.has(parsed.name)) return false
     if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return false
   }
@@ -2916,6 +2921,7 @@ export function apply(ctx: Context, config: Config): void {
         // never re-uploads the bytes. The queue is spliced ONLY after the
         // drafts are staged (a failure keeps the queue intact).
         let recalledText = ''
+        const staged: number[] = []
         try {
           const lines: string[] = []
           for (const message of queued) {
@@ -2933,6 +2939,7 @@ export function apply(ctx: Context, config: Config): void {
                   source: { type: 'recalled' },
                   recalledRef: attachment,
                 })
+                staged.push(draft.id)
                 parts.push(draft.placeholder)
               }
             }
@@ -2940,8 +2947,10 @@ export function apply(ctx: Context, config: Config): void {
           }
           recalledText = lines.join('\n\n')
         } catch (error) {
-          // The recalled drafts could not be staged (capacity): keep the
-          // queue fully intact — nothing was removed, nothing is lost.
+          // The recalled drafts could not be staged (capacity): roll back
+          // the drafts staged so far and keep the queue fully intact —
+          // nothing removed, no capacity leaked (follow-up finding).
+          for (const id of staged) draftImages.remove(id)
           app.notify(safeErrorMessage(error), 'error')
           return
         }
