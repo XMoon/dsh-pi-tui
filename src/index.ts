@@ -96,6 +96,7 @@ import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
 import { ImageLoader } from './image/loader.ts'
 import { consumeDraftImages, draftHasImages, prepareUserMessage, pruneUnreferencedDrafts, type PrepareInputDeps } from './image/submit.ts'
+import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
@@ -2224,7 +2225,11 @@ export function apply(ctx: Context, config: Config): void {
       } catch {
         // The cordis logger must not block the notice.
       }
-      app.notify(`could not start a session: ${message}`, 'error')
+      // A followup/steer against an EXISTING session is not a session
+      // creation failure — "could not start a session" would mislead
+      // (review finding).
+      const prefix = liveAgent === undefined ? 'could not start a session' : 'submission failed'
+      app.notify(`${prefix}: ${message}`, 'error')
     }
     /** The image submission surface (plan §13): the live attachment/llm
      * services + the CURRENT provider/model, re-read at submit time (the
@@ -2269,14 +2274,15 @@ export function apply(ctx: Context, config: Config): void {
       // already cleared — an attach-time prune during session creation must
       // not delete the images this submission is about to admit. No await
       // may precede the reservation.
-      const releasePin = draftImages.pinReferenced(text)
-      runOwned('submit', async () => {
-        try {
+      // The submit-flow core owns the ordering contract (reserve →
+      // run → failure-restore-before-release → release), shared with the
+      // integration tests — never hand-rolled per path.
+      runOwned('submit', () => runReservedSubmit({
+        reserve: (t) => draftImages.pinReferenced(t),
+        run: async () => {
         await ensureSession()
         const agent = liveAgent
         if (agent === undefined) return
-        // (the whole body below; the catch restores BEFORE the pin
-        // releases — review finding)
         // The guard checks THIS agent's session; capture the identity so
         // the write below can never target a session the guard did not see
         // (a session switch while the file read is in flight).
@@ -2364,8 +2370,9 @@ export function apply(ctx: Context, config: Config): void {
                   // consumes the handoff pin across the async admission
                   // and releases it in its own finally (review finding 1
                   // follow-up).
-                  runOwned('image submit', async () => {
-                    try {
+                  runOwned('image submit', () => runReservedSubmit({
+                    reserve: (t) => draftImages.pinReferenced(t),
+                    run: async () => {
                       const message = await prepareUserMessage(text, draftImages, submitDeps)
                       // Re-check the captured session identity AFTER the
                       // async admission (the guard-window rule, AGENTS.md).
@@ -2381,18 +2388,12 @@ export function apply(ctx: Context, config: Config): void {
                       // Consume ONLY the referenced drafts — a concurrent
                       // intake's newer image survives (round-5 finding 1).
                       consumeDraftImages(text, draftImages)
-                    } catch (error: unknown) {
-                      // Failure: restore the editor draft BEFORE the
-                      // handoff pin releases (review finding).
-                      restoreSubmissionDraft(text)
-                      throw error
-                    } finally {
-                      fallbackPin()
-                    }
-                  }, {
+                    },
+                    restore: (t) => restoreSubmissionDraft(t),
+                  }, text), {
                     diag,
                     sessionId: () => agent.session.id,
-                    // The task's catch already restored; this sink only
+                    // The flow restored the editor; this sink only
                     // notifies.
                     onError: notifySubmissionFailure,
                   })
@@ -2442,19 +2443,12 @@ export function apply(ctx: Context, config: Config): void {
         // Consume ONLY the referenced drafts — a concurrent intake's newer
         // image survives (round-5 finding 1).
         consumeDraftImages(text, draftImages)
-        } catch (error: unknown) {
-          // Failure: restore the editor draft BEFORE the reservation
-          // releases — the restored placeholders must keep their backing
-          // drafts against concurrent attach-time prunes (review finding).
-          restoreSubmissionDraft(text)
-          throw error
-        } finally {
-          releasePin()
-        }
-      }, {
+        },
+        restore: (t) => restoreSubmissionDraft(t),
+      }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,
-        // The task's catch already restored; this sink only notifies.
+        // The flow restored the editor; this sink only notifies.
         onError: notifySubmissionFailure,
       })
     }
@@ -2562,9 +2556,11 @@ export function apply(ctx: Context, config: Config): void {
       // referenced drafts SYNCHRONOUSLY (same call stack that left the
       // editor — review finding): ensureSession() is async on a deferred
       // start, and no await may precede the reservation.
-      const releasePin = draftImages.pinReferenced(text)
-      runOwned('steer', async () => {
-        try {
+      // The submit-flow core owns the ordering contract (shared with the
+      // integration tests).
+      runOwned('steer', () => runReservedSubmit({
+        reserve: (t) => draftImages.pinReferenced(t),
+        run: async () => {
         await ensureSession()
         if (liveAgent === undefined) return
         // The draft message is prepared BEFORE the guard: admission is
@@ -2611,19 +2607,12 @@ export function apply(ctx: Context, config: Config): void {
         // per-reference, so a concurrent intake's newer draft survives
         // (round-5 finding 1).
         if (outcome === 'ok') consumeDraftImages(text, draftImages)
-        } catch (error: unknown) {
-          // Failure: restore the editor draft BEFORE the reservation
-          // releases (review finding — the restored placeholders must keep
-          // their backing drafts against concurrent prunes).
-          restoreSubmissionDraft(text)
-          throw error
-        } finally {
-          releasePin()
-        }
-      }, {
+        },
+        restore: (t) => restoreSubmissionDraft(t),
+      }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,
-        // The task's catch already restored; this sink only notifies.
+        // The flow restored the editor; this sink only notifies.
         onError: notifySubmissionFailure,
       })
     }
