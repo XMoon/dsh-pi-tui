@@ -20,6 +20,7 @@ import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor } from '@deepseek-ai/dsh-commands'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import { createForkedAgent } from './session-fork.ts'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
@@ -2429,20 +2430,13 @@ export function registerTuiCommands(
     name: 'fork',
     description: 'Fork this session at the last completed turn',
     handler: async () => {
-      const liveAgent = runner.liveAgent
-      const seed = liveAgent === undefined ? undefined : forkSeed(liveAgent.session.events)
-      if (seed === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
-      // The child inherits the parent's recorded preset (official fork
-      // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
-      const composition = await runner.compose(resolveSessionPreset(liveAgent!.session))
-      const presetId = composition.agentPreset
-      const next = await runner.agents.create({
-        sessionId: SessionId(`session-${randomUUID()}`),
-        meta: { ...metaOf(cwd, presetId), parentSession: liveAgent!.session.id, seedLength: seed.length },
-        agentOptions: { provider: liveAgent!.options.provider, model: liveAgent!.options.model },
-        setup: composition.setup,
-        seed,
-      })
+      const source = runner.liveAgent
+      const seed = source === undefined ? undefined : forkSeed(source.session.events)
+      if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
+      // Shared child creation with rewind (plan §6.2): preset inheritance,
+      // live session cwd, provider/model inheritance, parentSession +
+      // seedLength metadata — one chain, no drift between the two surfaces.
+      const next = await createForkedAgent(runner, source, seed)
       const error = await runner.swapTo(next)
       if (error !== undefined) {
         // A failed swap keeps the CURRENT session: report the failure and
