@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`Home/End keys` are now configurable in `/settings`.** Two habits
+  exist for Home/End in fullscreen: some expect them to move within the
+  input, others expect them to scroll the conversation. The new
+  `Home/End keys` row picks the behavior — `Input` (Home/End move within
+  the input, Ctrl+Home/End scroll the conversation) or `Viewport`
+  (default; Home/End scroll the conversation, Ctrl+Home/End move within
+  the input). The choice applies immediately and persists across
+  restarts; existing behavior is unchanged by default.
+
+### Fixed
+
+- **Fullscreen drag selection and `/copy` no longer fake a successful
+  copy.** A bare OSC 52 write silently left the system clipboard
+  untouched under tmux (`set-clipboard external`), SSH chains without
+  passthrough, and terminals that restrict OSC 52 (VTE, Terminal.app) —
+  while the UI flashed `Copied!`. Both paths now share one clipboard
+  policy: `tmux load-buffer -w -` when inside tmux, then the platform
+  helper (`pbcopy` / `wl-copy` / `xclip` / `xsel` / `clip`), then a
+  TTY-gated OSC 52 best-effort fallback (inside tmux the sequence rides a
+  DCS passthrough). Failures report `Copy failed` / `failed to copy last
+  assistant message` instead of a false success.
+- **The `Press Ctrl+C again to exit` hint now lives in the footer for
+  exactly the exit window.** The old transcript notify lingered ~8s while
+  the 1500ms exit window was already dead, advertising an actionable
+  state that no longer existed. The hint now shares one timer with the
+  exit window — it appears on the first Ctrl+C (even with text in the
+  editor, and in the compact footer preset) and disappears the moment
+  the window expires or the app exits.
+
 ## [0.3.2] - 2026-08-22
 
 ### Added

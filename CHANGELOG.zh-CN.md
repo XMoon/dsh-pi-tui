@@ -5,6 +5,33 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **`/settings` 新增 `Home/End keys` 可配置项。** fullscreen 下 Home/End
+  存在两种用户习惯:有人期望它们控制输入框,有人期望它们滚动对话。新的
+  `Home/End keys` 行选择行为——`Input`(Home/End 在输入框内移动,
+  Ctrl+Home/End 滚动对话)或 `Viewport`(默认;Home/End 滚动对话,
+  Ctrl+Home/End 在输入框内移动)。选择立即生效并跨重启持久化;默认行为
+  保持不变。
+
+### 修复
+
+- **fullscreen 拖选与 `/copy` 不再假报复制成功。** 裸 OSC 52 写入在
+  tmux(`set-clipboard external`)、无透传的 SSH 链路以及限制 OSC 52 的
+  终端(VTE、Terminal.app)下会静默地不触碰系统剪贴板——而界面却闪烁
+  `Copied!`。两条路径现在共用同一套剪贴板策略:tmux 内优先
+  `tmux load-buffer -w -`,其次平台工具(`pbcopy` / `wl-copy` / `xclip` /
+  `xsel` / `clip`),最后是 TTY 门控的 OSC 52 best-effort 兜底(tmux 内
+  序列走 DCS passthrough)。失败时显示 `Copy failed` / `failed to copy
+  last assistant message`,不再假成功。
+- **`Press Ctrl+C again to exit` 提示现在只存在于 footer,且生命周期与
+  退出窗口完全一致。** 旧的 transcript notify 会残留约 8 秒,而 1500ms
+  退出窗口早已失效——界面展示了一个不再成立的可操作状态。提示现在与
+  退出窗口共用同一个 timer:第一次 Ctrl+C 时出现(编辑器有文本时、compact
+  footer 下同样显示),窗口过期或应用退出的瞬间即消失。
+
 ## [0.3.2] - 2026-08-22
 
 ### 新增
