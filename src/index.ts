@@ -92,6 +92,7 @@ import { DraftImageStore } from './image/draft-store.ts'
 import { ImageInputError } from './image/errors.ts'
 import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, type ClipboardEnvironment } from './image/clipboard.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from './clipboard.ts'
+import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
 import { ImageLoader } from './image/loader.ts'
@@ -3394,12 +3395,16 @@ export function apply(ctx: Context, config: Config): void {
         // user's own), 'sandbox' routes them through the dsh shell
         // capability's policy for deployments that want it applied.
         localShellSandbox: z.string(),
+        // Home/End navigation behavior (issue #9): 'viewport' (default)
+        // keeps Home/End scrolling the fullscreen conversation; 'input'
+        // makes Home/End move within the input (Ctrl+Home/End scroll).
+        homeEndKeys: z.string(),
       }),
       // `history` used to live here (a per-cwd map in the settings
       // document). It moved to $DSH_HOME/user-history/*.jsonl (see
       // history.ts); the schema deliberately no longer carries it, so the
       // stored section drops the key on the next settings write.
-      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass' } },
+      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport' } },
     )
     // Fullscreen is a persisted preference like the theme and the footer
     // (new installs default to 'on' — alt screen by default): boot applies
@@ -3407,6 +3412,10 @@ export function apply(ctx: Context, config: Config): void {
     // theme query below targets "the active screen" — a query sent while the
     // main screen still owned input would have its reply swallowed by the
     // alt screen's OSC 11 consumer and time out, silently disabling `auto`.
+    // Issue #9: the Home/End navigation preset is applied BEFORE the first
+    // fullscreen frame so the first frame and later behavior agree (plan
+    // §4.8); an invalid persisted value falls back to `viewport`.
+    applyHomeEndKeyMode(homeEndKeysModeOf(tuiSettings?.get().homeEndKeys))
     if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
     const storedTheme = tuiSettings?.get().theme
     if (storedTheme === 'auto') {

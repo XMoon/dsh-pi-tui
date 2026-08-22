@@ -24,6 +24,7 @@ import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
@@ -159,12 +160,12 @@ export function presetDisplayText(preset: {
 }
 
 /** The TUI settings document surface (theme/footer/fullscreen/busyEnter/
- * localShellSandbox). The old `history` field moved to
+ * localShellSandbox/homeEndKeys). The old `history` field moved to
  * $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
  * document anymore. */
 export interface TuiSettingsLike {
-  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string }
-  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string }): unknown
+  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string }
+  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string }): unknown
 }
 
 /** The agents-service surface /new and /fork create sessions through. */
@@ -1127,6 +1128,16 @@ export function registerTuiCommands(
             values: ['bypass', 'sandbox'],
           },
           {
+            id: 'home-end-keys',
+            label: 'Home/End keys',
+            description: 'Input: Home/End move within the input; Ctrl+Home/End scroll the conversation. Viewport: Home/End scroll the conversation; Ctrl+Home/End move within the input',
+            // The fallback applies HERE too: an invalid persisted value
+            // must never render a row outside the values list (round-1
+            // finding).
+            currentValue: homeEndKeysModeOf(tuiSettings?.get().homeEndKeys),
+            values: ['input', 'viewport'],
+          },
+          {
             id: 'fullscreen',
             label: 'Fullscreen',
             description: 'Alt-screen mode: on keeps the terminal clean (default); off keeps the scrollback',
@@ -1284,6 +1295,16 @@ export function registerTuiCommands(
               const settings = tuiSettings
               if (settings !== undefined) {
                 detach('settings local shell sandbox write', () => settings.replace({ ...settings.get(), localShellSandbox: value }) as Promise<unknown>, { notify: true })
+              }
+            }
+          } else if (id === 'home-end-keys') {
+            if (value === 'input' || value === 'viewport') {
+              // Issue #9: apply immediately (no restart, no fullscreen
+              // round-trip) and persist.
+              applyHomeEndKeyMode(value)
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings home end keys write', () => settings.replace({ ...settings.get(), homeEndKeys: value }) as Promise<unknown>, { notify: true })
               }
             }
           } else if (id === 'fullscreen') {
