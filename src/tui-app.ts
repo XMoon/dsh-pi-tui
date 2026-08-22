@@ -1361,8 +1361,21 @@ export class TuiApp {
    * keyboard behavior is unaffected by mouse toggles.
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
+  /**
+   * Per-attachment image-display collapse overrides from fullscreen clicks:
+   * a collapsed attachment renders its constant info bar (`🖼️ name · W×H ·
+   * bytes`) only — the image rows collapse, the identity never does.
+   * Absent = expanded. Cleared on session switch with the other click
+   * overrides.
+   */
+  private readonly collapsedImages = new Set<string>()
   /** Rendered row heights per transcript message, for mouse hit-testing. */
-  private messageRows: ReadonlyArray<{ message: TranscriptMessage; height: number }> = []
+  private messageRows: ReadonlyArray<{
+    message: TranscriptMessage
+    height: number
+    /** The row span (message-relative) of every attachment's click region. */
+    attachments: ReadonlyArray<{ attachmentId: string; start: number; end: number }>
+  }> = []
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
@@ -2692,7 +2705,11 @@ export class TuiApp {
     // Row heights for mouse hit-testing: components render (and cache) at
     // the same width the frame pass uses, so the heights match the screen.
     const width = this.terminal.columns
-    const rows: Array<{ message: TranscriptMessage; height: number }> = []
+    const rows: Array<{
+      message: TranscriptMessage
+      height: number
+      attachments: ReadonlyArray<{ attachmentId: string; start: number; end: number }>
+    }> = []
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
     // a session never reads as one undifferentiated wall of text. The spacer
     // row is charged to the preceding message's height, keeping the fullscreen
@@ -2710,7 +2727,7 @@ export class TuiApp {
       const component = this.componentForMessage(message, boundary)
       this.messagesView.addChild(component)
       const height = component.render(width).length + (index < blocks.length - 1 ? 1 : 0)
-      rows.push({ message, height })
+      rows.push({ message, height, attachments: this.attachmentRangesOf(component, width) })
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
     })
     if (this.notifyText !== '') {
@@ -2748,6 +2765,64 @@ export class TuiApp {
     this.compacting = active
     this.reconcileWorkingRow()
     this.requestRender()
+  }
+
+  /** The per-attachment click regions inside one message component: the row
+   * span (message-relative) of every ImageThumbnail child. User messages
+   * (renderUserBlocks) and assistant messages (renderBlockSequence) render
+   * their attachment rows as DIRECT container children, so the walk is
+   * exact; every other child's height still advances the row counter, so
+   * the spans line up with the rendered layout. */
+  private attachmentRangesOf(
+    component: Component,
+    width: number,
+  ): ReadonlyArray<{ attachmentId: string; start: number; end: number }> {
+    if (!(component instanceof Container)) return []
+    const ranges: Array<{ attachmentId: string; start: number; end: number }> = []
+    let row = 0
+    for (const child of component.children) {
+      const height = child.render(width).length
+      if (child instanceof ImageThumbnail) {
+        ranges.push({ attachmentId: child.attachmentId, start: row, end: row + height })
+      }
+      row += height
+    }
+    return ranges
+  }
+
+  /** Re-measure the message row map (heights + attachment spans) from the
+   * cached components — called before a fullscreen click hit-test so a
+   * thumbnail that just finished loading (1 row → image rows) never shifts
+   * the hit map. Cached renders make this cheap (reference-stable lines). */
+  private refreshMessageRows(): void {
+    const width = this.terminal.columns
+    const boundary = this.expandBoundary()
+    const blocks: TranscriptMessage[] = [
+      ...this.messages.filter(message => !(message.kind === 'thinking' && this.hideThinking)),
+      ...this.localMessages,
+    ]
+    const rows: Array<{
+      message: TranscriptMessage
+      height: number
+      attachments: ReadonlyArray<{ attachmentId: string; start: number; end: number }>
+    }> = []
+    blocks.forEach((message, index) => {
+      const component = this.componentForMessage(message, boundary)
+      const height = component.render(width).length + (index < blocks.length - 1 ? 1 : 0)
+      rows.push({ message, height, attachments: this.attachmentRangesOf(component, width) })
+    })
+    this.messageRows = rows
+  }
+
+  /** Toggle one attachment's image display (fullscreen click). The info
+   * bar stays constant — only the image rows collapse/expand. */
+  private toggleAttachmentCollapsed(attachmentId: string): void {
+    if (this.collapsedImages.has(attachmentId)) this.collapsedImages.delete(attachmentId)
+    else this.collapsedImages.add(attachmentId)
+    // Rebuild so the row map reflects the new heights immediately (the
+    // thumbnail's render cache key carries the collapse bit, so the cached
+    // message component re-renders in place).
+    this.rebuildMessages()
   }
 
   /**
@@ -2889,9 +2964,24 @@ export class TuiApp {
     const welcomeHeight = this.welcomeCard.render(width).length
     const messageRow = rowInScroll + scrollTop - welcomeHeight
     if (messageRow < 0) return
+    // Re-measure first: a thumbnail that just finished loading grew from
+    // its 1-row info bar to info + image rows — a stale map would misplace
+    // the click (cached renders make this cheap).
+    this.refreshMessageRows()
     let row = 0
     for (const entry of this.messageRows) {
       if (messageRow < row + entry.height) {
+        const inMessage = messageRow - row
+        // Attachment rows win: a click on an image's info bar or its image
+        // rows toggles THAT attachment's display — the identity stays, the
+        // picture collapses/expands. Rows outside every attachment span
+        // fall through to the message-level toggle (cards/thinking).
+        for (const attachment of entry.attachments) {
+          if (inMessage >= attachment.start && inMessage < attachment.end) {
+            this.toggleAttachmentCollapsed(attachment.attachmentId)
+            return
+          }
+        }
         this.toggleMessageExpanded(entry.message)
         return
       }
@@ -2914,6 +3004,9 @@ export class TuiApp {
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
     this.expandedOverride.clear()
+    // The attachment collapse toggles are session-scoped too: a switched-in
+    // session's attachments start expanded (the click state must never leak).
+    this.collapsedImages.clear()
     // The per-message render cache is session-scoped too: old messages are
     // unreachable after a switch, so drop their cached components — with
     // disposal so thumbnail loader subscriptions never leak (round-2
@@ -4289,6 +4382,7 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader,
           this.imageTheme,
+          () => this.collapsedImages.has((block.attachment as import('./image/admission.ts').ImageAttachmentRefLike).attachmentId),
         ))
       }
     }
@@ -4319,6 +4413,7 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader!,
           this.imageTheme!,
+          () => this.collapsedImages.has((block.attachment as import('./image/admission.ts').ImageAttachmentRefLike).attachmentId),
         ))
       }
     }

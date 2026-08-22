@@ -101,6 +101,9 @@ test('kitty-capable terminals render the inline sequence', async () => {
   const lines = component.render(80)
   const joined = lines.join('\n')
   assert.ok(joined.includes('\x1b_G'), `kitty sequence present: ${JSON.stringify(joined.slice(0, 40))}`)
+  // The constant info bar leads the image rows — the attachment identity
+  // never disappears, even while the picture is showing.
+  assert.ok(lines[0]!.includes('🖼️ shot.png · 800×600 · 16 B'), `info bar above the image: ${lines[0]}`)
 })
 
 test('iTerm2 terminals render the OSC 1337 inline sequence', async () => {
@@ -171,4 +174,28 @@ test('a capability flip (kitty → unsupported) drops the cached inline lines', 
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const again = component.render(80)
   assert.ok(again.join('\n').includes('\x1b_G'), 'kitty returns after the flip')
+})
+
+test('collapsed mode keeps the info bar and drops only the image rows', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const loader = loaderOf(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))
+  loader.load(REF)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  let collapsed = false
+  const component = new ImageThumbnail(REF, loader, THEME, () => collapsed)
+  const expanded = component.render(80)
+  assert.ok(expanded.join('\n').includes('\x1b_G'), 'expanded renders the image rows')
+  assert.ok(expanded[0]!.includes('🖼️ shot.png · 800×600 · 16 B'), 'the info bar leads the expanded rows')
+  // The toggle is read at render time: the cache key carries the bit, so a
+  // flipped getter re-renders WITHOUT invalidate.
+  collapsed = true
+  const collapsedLines = component.render(80)
+  assert.equal(collapsedLines.length, 1, 'collapsed renders exactly the info bar')
+  assert.ok(collapsedLines[0]!.includes('🖼️ shot.png · 800×600 · 16 B'), 'the info bar survives the collapse')
+  assert.ok(!collapsedLines.join('\n').includes('\x1b_G'), 'no image placement while collapsed')
+  // And back: the same instance expands again.
+  collapsed = false
+  const again = component.render(80)
+  assert.ok(again.join('\n').includes('\x1b_G'), 're-expand restores the image rows')
 })

@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   image was. A marker boundary always carries one separating space, so a
   draft without a space before the placeholder never glues the marker to
   the text.
+- **Fullscreen: click an attachment to collapse the picture back to its
+  info bar, click again to expand.** On image-capable terminals every
+  thumbnail now leads with a CONSTANT identity line
+  (`🖼️ shot.png · 1490×1284 · 392.2 KiB`) — you always know which image
+  it is — and the picture itself renders below it. A click on the
+  attachment (info bar or image) collapses just that image's rows; a
+  second click expands them again. Multiple attachments collapse
+  independently, the toggle is session-scoped (a session switch
+  re-expands), and collapsing a kitty image erases its tile through the
+  fork's existing diff machinery — no vendored code changed. Regular
+  (non-fullscreen) mode stays mouse-free by design.
 
 ### Fixed
 

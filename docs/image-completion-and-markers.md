@@ -123,6 +123,49 @@ had the right convention (`🖼️ shot.png` inline).
   their search text) are not polluted. Assistant image blocks still render
   via thumbnails; their flat text keeps the old join.
 
+## 4. Fullscreen attachment collapse (click to hide/show the image)
+
+### Why
+
+On image-capable terminals the thumbnail renders the picture itself — but
+with no caption, nothing on the row says WHICH attachment it is, and a tall
+image monopolizes the transcript. The ask: click the attachment to collapse
+the picture back to its identity line, click again to expand. Scope:
+**fullscreen only** — the regular surface deliberately stays mouse-free
+(fork divergence 25, guarded by tests), so enabling clicks there would need
+a fork change AND would suppress terminal-native text selection.
+
+### Design
+
+- **The info bar is CONSTANT.** `ImageThumbnail` renders
+  `🖼️ name · W×H · bytes` as its first line in EVERY state — unsupported
+  terminals, loading, error, ready, collapsed, expanded. Only the IMAGE
+  rows come and go; the identity never disappears, and the collapsed form
+  is byte-identical to what non-image terminals already see.
+- **Live `collapsedRef` getter.** The host passes
+  `() => collapsedImages.has(attachmentId)`; the render cache key carries
+  the bit, so a fullscreen click only repaints (no rebuild, no invalidate).
+  A collapsed image creates no placement; the fork's differential renderer
+  deletes the previous frame's vanished kitty tile automatically (the alt
+  screen's `prepareKittyScreen` eviction path).
+- **Hit-testing.** `rebuildMessages` records each attachment's row span
+  (message-relative) inside `messageRows` (walking the direct
+  `ImageThumbnail` children of the message container). `handleFullscreenClick`
+  re-measures the map first (`refreshMessageRows` — a thumbnail that just
+  finished loading grew from 1 row to image rows), then attachment rows
+  WIN over the message-level card toggle. `toggleAttachmentCollapsed` flips
+  the set and rebuilds (fresh heights immediately).
+- **Lifecycle.** `collapsedImages` is cleared by `clearSessionOverrides`
+  like the card expansion overrides — a session switch never leaks click
+  state.
+
+### Re-expand cost
+
+A collapsed image's placement is deleted; re-expanding re-uploads the
+base64 (a few hundred KB — the alt screen re-uploads through
+`prepareKittyScreen`). Acceptable; a "keep the upload, drop only the
+placement" optimization is possible later.
+
 ## Guarding tests
 
 - `test/mentions.test.ts` — suggestPathArgument (bare prefix, directory
@@ -131,7 +174,13 @@ had the right convention (`🖼️ shot.png` inline).
 - `test/tui-editor.test.ts` — headless: `/image sh` natural dropdown, Tab on
   an empty argument lists the cwd, Tab-accepting a directory reopens at its
   children, and the non-mention trailing-slash regression stays closed.
-- `test/image-thumbnail.test.ts` — the `🖼️ ` marker + width math.
+- `test/image-thumbnail.test.ts` — the `🖼️ ` marker + width math; the
+  collapsed mode keeps the info bar and drops only the image rows (the
+  cache key flips with the getter).
+- `test/image-collapse.test.ts` — fullscreen: click collapses the image
+  rows (the NEXT message moves up), a second click re-expands, one
+  attachment's collapse never touches the other, and
+  `clearSessionOverrides` re-expands (session-scoped state).
 - `test/image-transcript.test.ts` — the fold's flat text interleaves
   `🖼️ shot.png` between the text runs.
 - `test/queue-notices.test.ts`, `test/folding.test.ts` — the updated marker

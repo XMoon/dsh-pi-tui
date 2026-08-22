@@ -6,6 +6,12 @@
  * a one-line text summary otherwise (unsupported terminal, tmux, narrow
  * terminal, still-loading, or a failed read — §17.1-§17.3).
  *
+ * The INFO BAR (`🖼️ name · W×H · bytes`) is CONSTANT: it renders above the
+ * image in every state, so an attachment is always identifiable. The image
+ * rows themselves collapse on demand — the fullscreen click toggle passes a
+ * live `collapsedRef` (read at render time, so a toggle only repaints; the
+ * render cache key carries the bit).
+ *
  * The component never awaits: it consults the loader synchronously and
  * asks the loader to fire the async read on first render; the loader's
  * subscriber notification invalidates the component, which repaints with
@@ -35,20 +41,37 @@ export class ImageThumbnail implements Component {
   private readonly loader: ImageLoader
   private readonly theme: ImageThumbnailTheme
   private readonly ref: ImageAttachmentRefLike
+  private readonly collapsedRef: (() => boolean) | undefined
   private unsubscribe: (() => void) | undefined
   private instance: Image | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
 
-  constructor(ref: ImageAttachmentRefLike, loader: ImageLoader, theme: ImageThumbnailTheme) {
+  constructor(
+    ref: ImageAttachmentRefLike,
+    loader: ImageLoader,
+    theme: ImageThumbnailTheme,
+    collapsedRef?: () => boolean,
+  ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
     this.loader = loader
     this.theme = theme
+    this.collapsedRef = collapsedRef
     // Subscribe to THIS attachment's settles only: N thumbnails loading in
     // parallel never invalidate each other (review finding 8 — no O(N²)
     // repaint churn, no kitty image-id churn).
     this.unsubscribe = loader.subscribe(ref.attachmentId, () => this.invalidate())
+  }
+
+  /** The durable attachment id (the fullscreen click hit-testing key). */
+  get attachmentId(): string {
+    return this.ref.attachmentId
+  }
+
+  /** Whether the image rows are collapsed (the info line stays constant). */
+  private collapsed(): boolean {
+    return this.collapsedRef?.() === true
   }
 
   /** Fallback display name (never a path). */
@@ -67,13 +90,14 @@ export class ImageThumbnail implements Component {
     this.invalidate()
   }
 
-  /** The one-line text fallback (plan §17.1). The marker is `🖼️` WITH the
-   * U+FE0F variation selector: U+1F5BC alone has no default emoji
+  /** The constant info line (§17.1): the attachment's identity — name +
+   * dimensions + size — visible in EVERY state. The marker is `🖼️` WITH
+   * the U+FE0F variation selector: U+1F5BC alone has no default emoji
    * presentation, so the width math measures it as ONE cell while fonts
    * with an emoji face render it TWO cells wide — the glyph overhang then
    * eats the space and overlaps the name (font-dependent). VS16 forces the
    * wide 2-cell rendering the measurement expects. */
-  private fallbackText(): string {
+  private infoLine(): string {
     return `🖼️ ${this.label()} · ${this.ref.width}×${this.ref.height} · ${formatBytes(this.ref.bytes)}`
   }
 
@@ -87,9 +111,11 @@ export class ImageThumbnail implements Component {
     // Width + capability-stable cache: the fork's per-frame processed-line
     // reuse keeps hitting when the same lines come back, while a terminal
     // capability flip (kitty → unsupported) invalidates the cache so a
-    // stale inline sequence never survives (round-3 finding 2).
+    // stale inline sequence never survives (round-3 finding 2). The
+    // collapse bit rides the key too: a fullscreen click only repaints —
+    // no rebuild, no invalidate — and the flipped bit misses the cache.
     const capabilities = getCapabilities().images ?? 'none'
-    const key = `${width}:${capabilities}`
+    const key = `${width}:${capabilities}:${this.collapsed() ? 'collapsed' : 'expanded'}`
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
     const lines = this.renderLines(width)
     this.cachedLines = lines
@@ -100,27 +126,33 @@ export class ImageThumbnail implements Component {
   private renderLines(width: number): string[] {
     // Narrow terminals fall back BEFORE any load (round-2 finding 4).
     if (width < NARROW_WIDTH_THRESHOLD) {
-      return [this.theme.fallbackColor(this.fallbackText())]
+      return [this.theme.fallbackColor(this.infoLine())]
     }
     // Inline graphics only when the terminal reports them; tmux and other
     // unsupported terminals keep the text fallback AND never trigger a
     // pointless read of the full bytes (§17.3, round-2 finding 4).
     if (getCapabilities().images === null) {
-      return [this.theme.fallbackColor(this.fallbackText())]
+      return [this.theme.fallbackColor(this.infoLine())]
     }
     const state = this.loader.get(this.ref)
     if (state.state === 'idle') {
       // Fire the read; the settle notification invalidates this component.
       this.loader.load(this.ref)
-      return [this.theme.fallbackColor(this.fallbackText())]
+      return [this.theme.fallbackColor(this.infoLine())]
     }
     if (state.state === 'loading') {
-      return [this.theme.fallbackColor(`${this.fallbackText()} …`)]
+      return [this.theme.fallbackColor(`${this.infoLine()} …`)]
     }
     if (state.state === 'error') {
-      return [this.theme.fallbackColor(`${this.fallbackText()} — ${state.error.message}`)]
+      return [this.theme.fallbackColor(`${this.infoLine()} — ${state.error.message}`)]
     }
-    // Ready: inline render.
+    // Ready: the info line stays constant — only the image rows collapse
+    // (the fullscreen click toggle). A collapsed image needs no placement;
+    // the fork's differential renderer deletes the vanished kitty tile of
+    // the previous frame automatically.
+    if (this.collapsed()) {
+      return [this.theme.fallbackColor(this.infoLine())]
+    }
     if (this.instance === undefined) {
       this.instance = new Image(
         state.base64,
@@ -134,6 +166,6 @@ export class ImageThumbnail implements Component {
         { widthPx: this.ref.width, heightPx: this.ref.height },
       )
     }
-    return this.instance.render(width)
+    return [this.theme.fallbackColor(this.infoLine()), ...this.instance.render(width)]
   }
 }
