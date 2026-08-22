@@ -14,6 +14,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
+import { consumeDraftImages, pruneUnreferencedDrafts } from '../src/image/submit.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -240,4 +241,44 @@ test('orchestration: a real submit flow restores BEFORE unpin and survives a con
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('command fallback SUCCESS: the handoff pin transfers and releases exactly once', async () => {
+  const { app, imageStore } = setup()
+  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  const draft = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const text = `look at ${draft.placeholder}`
+  // The handoff pin is acquired synchronously BEFORE commands.execute()
+  // launches (the outer submission pin releases when its task returns).
+  const handoff = imageStore.pinReferenced(text)
+  // The nested flow TRANSFERS that reservation — a second pin here would
+  // leak the handoff forever (review finding).
+  await runReservedSubmit({
+    reserve: () => handoff,
+    run: async () => { consumeDraftImages(text, imageStore) },
+    restore: () => {},
+  }, text)
+  assert.equal(imageStore.isPinned(draft.id), false, 'the handoff pin is released after the nested submit')
+  assert.equal(imageStore.get(draft.id), undefined, 'the consumed draft is gone')
+})
+
+test('command fallback FAILURE: restore keeps the draft; the pin releases; prune can collect it after the placeholder leaves', async () => {
+  const { app, imageStore } = setup()
+  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  const draft = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const text = `look at ${draft.placeholder}`
+  const handoff = imageStore.pinReferenced(text)
+  await assert.rejects(() => runReservedSubmit({
+    reserve: () => handoff,
+    run: async () => { throw new Error('admission failed (simulated)') },
+    restore: () => { app.setEditorText(text) },
+  }, text), /admission failed/)
+  // Restored draft survives (referenced by the editor) and the pin is gone.
+  assert.equal(imageStore.isPinned(draft.id), false, 'the handoff pin released after the failure')
+  assert.equal(imageStore.get(draft.id), draft, 'the restored draft is still backed')
+  // The user deletes the placeholder: prune can now collect it (no stale
+  // pin holds it forever).
+  app.setEditorText('')
+  pruneUnreferencedDrafts('', imageStore)
+  assert.equal(imageStore.get(draft.id), undefined, 'the released draft is prunable after the placeholder leaves')
 })

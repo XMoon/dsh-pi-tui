@@ -2371,7 +2371,13 @@ export function apply(ctx: Context, config: Config): void {
                   // and releases it in its own finally (review finding 1
                   // follow-up).
                   runOwned('image submit', () => runReservedSubmit({
-                    reserve: (t) => draftImages.pinReferenced(t),
+                    // TRANSFER the handoff reservation, never a second
+                    // pin: fallbackPin was acquired synchronously before
+                    // commands.execute() launched (covering the outer
+                    // release window); the nested flow releases it in its
+                    // finally (review finding — double pinning leaked the
+                    // handoff pin forever).
+                    reserve: () => fallbackPin,
                     run: async () => {
                       const message = await prepareUserMessage(text, draftImages, submitDeps)
                       // Re-check the captured session identity AFTER the
