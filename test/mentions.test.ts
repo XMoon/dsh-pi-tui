@@ -163,6 +163,31 @@ test('suggestPathArgument tolerates leading separator whitespace (multi-space / 
   assert.equal(suggestPathArgument('   ', root), null, 'separator-only arguments complete nothing')
 })
 
+test('suggestPathArgument treats Windows drive and UNC tokens as absolute', () => {
+  const root = fixtureWorkspace()
+  const savedCwd = process.cwd()
+  try {
+    // win32-absolute tokens resolve against the process CWD on POSIX (a
+    // backslash is an ordinary character there), so literal
+    // backslash-named directories stand in for the Windows drive/share.
+    // chdir is safe here: node --test runs each FILE in its own process
+    // and this test restores the cwd in `finally`.
+    process.chdir(root)
+    mkdirSync(join(root, 'C:\\Users'))
+    writeFileSync(join(root, 'C:\\Users', 'shot.png'), 'x')
+    mkdirSync(join(root, '\\\\server\\\\share'))
+    writeFileSync(join(root, '\\\\server\\\\share', 'foo.png'), 'x')
+    const drive = suggestPathArgument('C:\\Users\\sh', root)
+    assert.ok(drive !== null, `a drive token must complete:\\n${JSON.stringify(drive)}`)
+    assert.ok(drive.some(item => item.value === 'C:\\Users\\shot.png'), `drive value keeps the backslash dialect:\\n${JSON.stringify(drive)}`)
+    const unc = suggestPathArgument('\\\\server\\\\share\\\\fo', root)
+    assert.ok(unc !== null, `a UNC token must complete:\\n${JSON.stringify(unc)}`)
+    assert.ok(unc.some(item => item.value === '\\\\server\\share\\foo.png'), `UNC value keeps the share form:\\n${JSON.stringify(unc)}`)
+  } finally {
+    process.chdir(savedCwd)
+  }
+})
+
 test('suggestPathArgument quotes values with spaces and stays quiet otherwise', () => {
   const root = fixtureWorkspace()
   const spaced = suggestPathArgument('my', root)

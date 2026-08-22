@@ -64,11 +64,6 @@ export class ImageThumbnail implements Component {
     this.unsubscribe = loader.subscribe(ref.attachmentId, () => this.invalidate())
   }
 
-  /** The durable attachment id (the fullscreen click hit-testing key). */
-  get attachmentId(): string {
-    return this.ref.attachmentId
-  }
-
   /** Whether this thumbnail participates in the fullscreen collapse
    * toggle: only instances the host wired a `collapsedRef` for (user and
    * assistant message attachments). Tool-card images stay inside their

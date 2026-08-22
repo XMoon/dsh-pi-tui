@@ -33,7 +33,11 @@ nothing. Tab had two more gaps:
   mid-edit stays correct.
 - **`suggestPathArgument(argumentText, cwd)`** is shell-style and
   directory-local (the fd whole-tree fuzzy search stays `@`'s job). It
-  resolves `~`, absolute and relative forms, and mirrors the fork's
+  resolves `~`, absolute and relative forms — including Windows drive
+  (`C:\x`) and UNC (`\\server\share`) tokens, detected via
+  `isAbsolute` + `win32.isAbsolute` and completed in the user's own path
+  dialect (win32 dirname/join math, so `C:\Users\…` values stay
+  backslash-separated) — and mirrors the fork's
   `getFileSuggestions` display rules so a completed value always reads like
   what the user typed (`./`, `~/` and `dir/` forms preserved, spaces quoted,
   directories first with a trailing `/`). LEADING separator whitespace is

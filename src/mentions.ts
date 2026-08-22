@@ -13,7 +13,7 @@
 
 import { accessSync, constants as fsConstants, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, win32 } from 'node:path'
 import {
   CombinedAutocompleteProvider,
   type AutocompleteItem,
@@ -178,7 +178,17 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
   // word would clobber the earlier ones, so stay quiet.
   if (parsed === '' || parsed.includes(' ') || parsed.includes('\t')) return null
   const expanded = expandHomeToken(parsed)
-  const absolute = parsed.startsWith('~') || parsed.startsWith('/')
+  // Absolute detection covers every platform form: POSIX `/x`, Windows
+  // drive (`C:\x`, `C:/x`) and UNC (`\\server\share`) paths. The win32
+  // check engages ONLY for genuinely Windows-dialect tokens — win32 alone
+  // would also accept a bare POSIX `/x` token, which must keep the POSIX
+  // dialect (its dirname/join use backslashes). The win32 form drives the
+  // path MATH below, so a completed value stays in the user's own dialect.
+  const posixAbsolute = isAbsolute(expanded)
+  const winAbsolute = !posixAbsolute && win32.isAbsolute(expanded)
+  const absolute = parsed.startsWith('~') || posixAbsolute || winAbsolute
+  const pathDirname = winAbsolute ? win32.dirname : dirname
+  const pathBasename = winAbsolute ? win32.basename : basename
   let searchDir: string
   let searchPrefix: string
   if (
@@ -187,14 +197,17 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
     // Complete the whole root directory (the fork's isRootPrefix cases).
     searchDir = absolute ? expanded : join(cwd, expanded)
     searchPrefix = ''
-  } else if (parsed.endsWith('/')) {
-    // Show the directory's contents.
+  } else if (parsed.endsWith('/') || parsed.endsWith('\\')) {
+    // Show the directory's contents (a Windows path ends with `\`).
     searchDir = absolute ? expanded : join(cwd, expanded)
     searchPrefix = ''
   } else {
-    // Split into directory + basename prefix.
-    searchDir = absolute ? dirname(expanded) : join(cwd, dirname(expanded))
-    searchPrefix = basename(expanded)
+    // Split into directory + basename prefix. win32.dirname returns UNC
+    // roots WITH a trailing separator (`\\server\share\`) — a trailing
+    // separator is redundant in a readdir target (identical on Windows),
+    // and stripping keeps the target stable across dialects.
+    searchDir = absolute ? pathDirname(expanded).replace(/[\\/]$/, '') : join(cwd, dirname(expanded))
+    searchPrefix = pathBasename(expanded)
   }
   let entries
   try {
@@ -208,18 +221,22 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
     let isDirectory = entry.isDirectory()
     if (!isDirectory && entry.isSymbolicLink()) {
       try {
-        isDirectory = statSync(join(searchDir, entry.name)).isDirectory()
+        isDirectory = statSync(winAbsolute ? win32.join(searchDir, entry.name) : join(searchDir, entry.name)).isDirectory()
       } catch {
         // Broken symlink or permission error — treat as a file candidate.
       }
     }
     // Mirror the fork's display construction: `dir/` appends the entry, a
     // `~/`/absolute/relative directory prefix is preserved, a bare token
-    // completes within the cwd.
+    // completes within the cwd. Windows drive/UNC tokens keep their own
+    // `\` dialect (win32 math), so the completed value reads like what the
+    // user typed on Windows.
     const name = entry.name
     let relativePath: string
-    if (parsed.endsWith('/')) {
+    if (parsed.endsWith('/') || parsed.endsWith('\\')) {
       relativePath = parsed + name
+    } else if (winAbsolute) {
+      relativePath = win32.join(win32.dirname(parsed), name)
     } else if (parsed.includes('/') || parsed.includes('\\')) {
       if (parsed.startsWith('~/')) {
         const dir = dirname(parsed.slice(2))
@@ -244,7 +261,7 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
     items.push({
       value,
       label: `${name}${isDirectory ? '/' : ''}`,
-      description: join(searchDir, entry.name),
+      description: winAbsolute ? win32.join(searchDir, entry.name) : join(searchDir, entry.name),
     })
   }
   if (items.length === 0) return null

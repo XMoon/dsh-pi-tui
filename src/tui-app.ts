@@ -1362,19 +1362,24 @@ export class TuiApp {
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
   /**
-   * Per-attachment image-display collapse overrides from fullscreen clicks:
-   * a collapsed attachment renders its constant info bar (`🖼️ name · W×H ·
-   * bytes`) only — the image rows collapse, the identity never does.
-   * Absent = expanded. Cleared on session switch with the other click
-   * overrides.
+   * Per-OCCURRENCE image-display collapse overrides from fullscreen clicks:
+   * a collapsed attachment occurrence renders its constant info bar
+   * (`🖼️ name · W×H · bytes`) only — the image rows collapse, the identity
+   * never does. Keyed by message object + the image block's index within
+   * `message.content` (the folder's entry objects are stable within one
+   * folder lifetime — the same identity the per-message render cache and
+   * `expandedOverride` use), so the SAME durable attachment displayed twice
+   * collapses independently: clicking "this position's picture" never
+   * touches the other occurrence. Absent = expanded. Cleared on session
+   * switch with the other click overrides.
    */
-  private readonly collapsedImages = new Set<string>()
+  private readonly collapsedOccurrences = new Map<TranscriptMessage, Set<number>>()
   /** Rendered row heights per transcript message, for mouse hit-testing. */
   private messageRows: ReadonlyArray<{
     message: TranscriptMessage
     height: number
     /** The row span (message-relative) of every attachment's click region. */
-    attachments: ReadonlyArray<{ attachmentId: string; start: number; end: number }>
+    attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
   }> = []
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
@@ -2708,7 +2713,7 @@ export class TuiApp {
     const rows: Array<{
       message: TranscriptMessage
       height: number
-      attachments: ReadonlyArray<{ attachmentId: string; start: number; end: number }>
+      attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
     }> = []
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
     // a session never reads as one undifferentiated wall of text. The spacer
@@ -2775,18 +2780,26 @@ export class TuiApp {
    * enter a collapse range, so a click there still folds/unfolds the card
    * instead of being swallowed by an inert attachment toggle. Every other
    * child's height still advances the row counter, so the spans line up
-   * with the rendered layout. */
+   * with the rendered layout.
+   *
+   * The ordinal among COLLAPSIBLE thumbnails IS the occurrence's image
+   * index: renderUserBlocks / renderBlockSequence create a collapsible
+   * thumbnail for EVERY image block of the message in content order, so
+   * the nth thumbnail ↔ the nth image block — the same index the host's
+   * collapsedRef getter reads. */
   private attachmentRangesOf(
     component: Component,
     width: number,
-  ): ReadonlyArray<{ attachmentId: string; start: number; end: number }> {
+  ): ReadonlyArray<{ imageIndex: number; start: number; end: number }> {
     if (!(component instanceof Container)) return []
-    const ranges: Array<{ attachmentId: string; start: number; end: number }> = []
+    const ranges: Array<{ imageIndex: number; start: number; end: number }> = []
     let row = 0
+    let imageIndex = 0
     for (const child of component.children) {
       const height = child.render(width).length
       if (child instanceof ImageThumbnail && child.collapsible) {
-        ranges.push({ attachmentId: child.attachmentId, start: row, end: row + height })
+        ranges.push({ imageIndex, start: row, end: row + height })
+        imageIndex += 1
       }
       row += height
     }
@@ -2807,7 +2820,7 @@ export class TuiApp {
     const rows: Array<{
       message: TranscriptMessage
       height: number
-      attachments: ReadonlyArray<{ attachmentId: string; start: number; end: number }>
+      attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
     }> = []
     blocks.forEach((message, index) => {
       const component = this.componentForMessage(message, boundary)
@@ -2817,11 +2830,24 @@ export class TuiApp {
     this.messageRows = rows
   }
 
-  /** Toggle one attachment's image display (fullscreen click). The info
-   * bar stays constant — only the image rows collapse/expand. */
-  private toggleAttachmentCollapsed(attachmentId: string): void {
-    if (this.collapsedImages.has(attachmentId)) this.collapsedImages.delete(attachmentId)
-    else this.collapsedImages.add(attachmentId)
+  /** The live collapse flag for ONE image-block occurrence (message object
+   * + image index within its content). Read at render time — a fullscreen
+   * click only repaints. */
+  private occurrenceCollapsedRef(message: TranscriptMessage, imageIndex: number): () => boolean {
+    return () => this.collapsedOccurrences.get(message)?.has(imageIndex) ?? false
+  }
+
+  /** Toggle ONE image occurrence's display (fullscreen click). The info
+   * bar stays constant — only that image's rows collapse/expand; a
+   * repeated attachment elsewhere in the transcript is untouched. */
+  private toggleAttachmentCollapsed(message: TranscriptMessage, imageIndex: number): void {
+    let indices = this.collapsedOccurrences.get(message)
+    if (indices === undefined) {
+      indices = new Set()
+      this.collapsedOccurrences.set(message, indices)
+    }
+    if (indices.has(imageIndex)) indices.delete(imageIndex)
+    else indices.add(imageIndex)
     // Rebuild so the row map reflects the new heights immediately (the
     // thumbnail's render cache key carries the collapse bit, so the cached
     // message component re-renders in place).
@@ -2976,12 +3002,13 @@ export class TuiApp {
       if (messageRow < row + entry.height) {
         const inMessage = messageRow - row
         // Attachment rows win: a click on an image's info bar or its image
-        // rows toggles THAT attachment's display — the identity stays, the
-        // picture collapses/expands. Rows outside every attachment span
-        // fall through to the message-level toggle (cards/thinking).
+        // rows toggles THAT OCCURRENCE's display — the identity stays, the
+        // picture collapses/expands, and a repeated attachment elsewhere
+        // stays untouched. Rows outside every attachment span fall through
+        // to the message-level toggle (cards/thinking).
         for (const attachment of entry.attachments) {
           if (inMessage >= attachment.start && inMessage < attachment.end) {
-            this.toggleAttachmentCollapsed(attachment.attachmentId)
+            this.toggleAttachmentCollapsed(entry.message, attachment.imageIndex)
             return
           }
         }
@@ -3009,7 +3036,7 @@ export class TuiApp {
     this.expandedOverride.clear()
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
-    this.collapsedImages.clear()
+    this.collapsedOccurrences.clear()
     // The per-message render cache is session-scoped too: old messages are
     // unreachable after a switch, so drop their cached components — with
     // disposal so thumbnail loader subscriptions never leak (round-2
@@ -4361,6 +4388,7 @@ export class TuiApp {
   private renderBlockSequence(
     content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
     makeText: (text: string) => Component,
+    message: TranscriptMessage,
   ): Component {
     if (this.imageLoader === undefined || this.imageTheme === undefined) {
       // Loader-less hosts keep the image POSITION as an inline marker — a
@@ -4376,6 +4404,7 @@ export class TuiApp {
         buffer = ''
       }
     }
+    let imageIndex = 0
     for (const block of content) {
       if (block.type === 'text') {
         buffer += block.text
@@ -4385,8 +4414,9 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader,
           this.imageTheme,
-          () => this.collapsedImages.has((block.attachment as import('./image/admission.ts').ImageAttachmentRefLike).attachmentId),
+          this.occurrenceCollapsedRef(message, imageIndex),
         ))
+        imageIndex += 1
       }
     }
     flush()
@@ -4403,6 +4433,7 @@ export class TuiApp {
    */
   private renderUserBlocks(
     content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
+    message: TranscriptMessage,
   ): Component {
     const container = new Container()
     container.addChild(new UserBubbleComponent(
@@ -4410,14 +4441,16 @@ export class TuiApp {
       `${color.roleUser('❯')} `,
       color.roleUserBg,
     ))
+    let imageIndex = 0
     for (const block of content) {
       if (block.type === 'image') {
         container.addChild(new ImageThumbnail(
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader!,
           this.imageTheme!,
-          () => this.collapsedImages.has((block.attachment as import('./image/admission.ts').ImageAttachmentRefLike).attachmentId),
+          this.occurrenceCollapsedRef(message, imageIndex),
         ))
+        imageIndex += 1
       }
     }
     return container
@@ -4432,7 +4465,7 @@ export class TuiApp {
       // the background and indent under the marker, so multi-line input
       // stays aligned inside one block.
       if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
-        return this.renderUserBlocks(message.content)
+        return this.renderUserBlocks(message.content, message)
       }
       return new UserBubbleComponent(
         new Text(message.text, 0, 0),
@@ -4448,7 +4481,7 @@ export class TuiApp {
       // instead of re-wrapping a frozen render (the 5a76526 regression).
       if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
         return this.renderBlockSequence(message.content, (text) =>
-          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme), `${color.primary('🐋')}  `))
+          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme), `${color.primary('🐋')}  `), message)
       }
       return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), `${color.primary('🐋')}  `)
     }

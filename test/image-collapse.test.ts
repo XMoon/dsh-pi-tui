@@ -70,9 +70,21 @@ async function viewport(vt: VirtualTerminal): Promise<string> {
  * failure), so assertions compare RELATIVE positions — the exact image row
  * count never enters the math. */
 async function rowOf(vt: VirtualTerminal, needle: string, label: string): Promise<number> {
+  return rowOfNth(vt, needle, 0, label)
+}
+
+/** The 1-based row of the NTH line containing the needle (0-based n) —
+ * needed when two identical attachment info bars sit in one transcript. */
+async function rowOfNth(vt: VirtualTerminal, needle: string, n: number, label: string): Promise<number> {
   const view = await viewport(vt)
-  const index = view.split('\n').findIndex(line => line.includes(needle))
-  assert.ok(index !== -1, `${label}: row ${JSON.stringify(needle)} missing:\n${view}`)
+  let seen = 0
+  const index = view.split('\n').findIndex(line => {
+    if (!line.includes(needle)) return false
+    if (seen === n) return true
+    seen += 1
+    return false
+  })
+  assert.ok(index !== -1, `${label}: occurrence #${n + 1} of ${JSON.stringify(needle)} missing:\n${view}`)
   return index + 1
 }
 
@@ -245,6 +257,94 @@ test('a tool-card image row still toggles the CARD — never swallowed by an att
   // signal is the IMAGE row disappearing: the click folded the card
   // instead of being swallowed by an attachment toggle.
   assert.ok(!foldedView.includes('🖼️ shot.png · 800×100'), `the image-row click folds the tool card (image body gone):\n${foldedView}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+
+test('the SAME attachment in two messages collapses per occurrence, never together', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  // The SAME durable ref (att-1) is displayed twice — message A and
+  // message B. Clicking A's picture must fold A's image rows only; the
+  // old attachmentId-keyed state collapsed both.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 1, time: 1, data: { content: [
+      { type: 'text', text: 'first' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], source: { kind: 'user' } } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [
+      { type: 'text', text: 'second' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], source: { kind: 'user' } } },
+    { type: 'user/message', seq: 3, time: 3, data: { content: [
+      { type: 'text', text: 'NEXT' },
+    ], source: { kind: 'user' } } },
+  ] as never)
+  app.setTranscript(folder.messages())
+  const before = await rowOf(vt, 'NEXT', 'both occurrences expanded')
+  // The FIRST info bar — both messages' info bars are byte-identical.
+  const firstInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'first info bar')
+  click(vt, 4, firstInfo)
+  await settleClick(vt)
+  const afterFirst = await rowOf(vt, 'NEXT', 'after the first occurrence collapsed')
+  assert.ok(afterFirst < before, 'the clicked occurrence collapsed')
+  // Re-expanding the first occurrence restores the FULL layout — had the
+  // second occurrence collapsed along, NEXT would stay short of `before`.
+  const firstInfoAgain = await rowOf(vt, '🖼️ shot.png · 800×100', 'first info bar again')
+  click(vt, 4, firstInfoAgain)
+  await settleClick(vt)
+  const reExpanded = await rowOf(vt, 'NEXT', 'after re-expand')
+  assert.equal(reExpanded, before, 'only the clicked occurrence toggled; the repeated attachment stayed expanded')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the same attachment twice in ONE message collapses per block index', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 1, time: 1, data: { content: [
+      { type: 'text', text: 'both' },
+      { type: 'image', attachment: IMAGE_REF },
+      { type: 'text', text: 'and' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], source: { kind: 'user' } } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [
+      { type: 'text', text: 'NEXT' },
+    ], source: { kind: 'user' } } },
+  ] as never)
+  app.setTranscript(folder.messages())
+  const before = await rowOf(vt, 'NEXT', 'both blocks expanded')
+  // Two identical attachment occurrences inside ONE message: each block
+  // index is its own occurrence.
+  const firstInfo = await rowOfNth(vt, '🖼️ shot.png · 800×100', 0, 'first info bar')
+  click(vt, 4, firstInfo)
+  await settleClick(vt)
+  const afterFirst = await rowOf(vt, 'NEXT', 'after the first block collapsed')
+  assert.ok(afterFirst < before, 'the first block collapsed')
+  // The SECOND block is still expanded — clicking its info bar collapses
+  // it too (NEXT moves up again). Under the old attachmentId-keyed state
+  // the first click had folded BOTH blocks, and this click would EXPAND
+  // the second instead (NEXT would move back DOWN).
+  const secondInfo = await rowOfNth(vt, '🖼️ shot.png · 800×100', 1, 'second info bar')
+  click(vt, 4, secondInfo)
+  await settleClick(vt)
+  const afterSecond = await rowOf(vt, 'NEXT', 'after the second block collapsed')
+  assert.ok(afterSecond < afterFirst, 'the second block collapsed independently (its own rows left)')
+  // Re-expand the FIRST block: NEXT returns by exactly the first block's
+  // rows — the second stays collapsed (delta math only).
+  const firstInfoAgain = await rowOfNth(vt, '🖼️ shot.png · 800×100', 0, 'first info bar again')
+  click(vt, 4, firstInfoAgain)
+  await settleClick(vt)
+  const reExpanded = await rowOf(vt, 'NEXT', 'after re-expanding the first block')
+  assert.equal(reExpanded, afterSecond + (before - afterFirst), 'only the first block re-expanded')
   app.setFullscreen(false)
   app.stop()
 })

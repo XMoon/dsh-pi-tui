@@ -42,10 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`🖼️ shot.png · 1490×1284 · 392.2 KiB`) — you always know which image
   it is — and the picture itself renders below it. A click on the
   attachment (info bar or image) collapses just that image's rows; a
-  second click expands them again. Multiple attachments collapse
-  independently, the toggle is session-scoped (a session switch
-  re-expands), and collapsing a kitty image erases its tile through the
-  fork's existing diff machinery — no vendored code changed. Regular
+  second click expands them again. Every attachment OCCURRENCE collapses
+  independently — the same image attached twice in one transcript folds
+  per position, never together — the toggle is session-scoped (a session
+  switch re-expands), and collapsing a kitty image erases its tile through
+  the fork's existing diff machinery — no vendored code changed. Regular
   (non-fullscreen) mode stays mouse-free by design.
 
 ### Fixed
