@@ -2290,6 +2290,11 @@ export function registerTuiCommands(
               app.notify('the session changed while reading the image — try again', 'error')
               return undefined
             }
+            // Re-prune AFTER the async read: the user may have deleted the
+            // placeholder or Ctrl+C-cleared the editor while the file was
+            // in flight — those drafts must not linger past the attach
+            // (review finding 2 follow-up).
+            pruneUnreferencedDrafts(app.getDraft(), runner.imageStore)
             const draft = runner.imageStore.add({
               bytes: resolved.bytes,
               mediaType: resolved.mediaType,
