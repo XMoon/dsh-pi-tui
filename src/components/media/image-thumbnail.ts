@@ -67,9 +67,14 @@ export class ImageThumbnail implements Component {
     this.invalidate()
   }
 
-  /** The one-line text fallback (plan §17.1). */
+  /** The one-line text fallback (plan §17.1). The marker is `🖼️` WITH the
+   * U+FE0F variation selector: U+1F5BC alone has no default emoji
+   * presentation, so the width math measures it as ONE cell while fonts
+   * with an emoji face render it TWO cells wide — the glyph overhang then
+   * eats the space and overlaps the name (font-dependent). VS16 forces the
+   * wide 2-cell rendering the measurement expects. */
   private fallbackText(): string {
-    return `🖼 ${this.label()} · ${this.ref.width}×${this.ref.height} · ${formatBytes(this.ref.bytes)}`
+    return `🖼️ ${this.label()} · ${this.ref.width}×${this.ref.height} · ${formatBytes(this.ref.bytes)}`
   }
 
   invalidate(): void {

@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
+import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
 import { ImageThumbnail, NARROW_WIDTH_THRESHOLD } from '../src/components/media/image-thumbnail.ts'
 import { ImageLoader } from '../src/image/loader.ts'
 import type { ImageAttachmentRefLike } from '../src/image/admission.ts'
@@ -42,7 +42,12 @@ test('an unsupported terminal renders the text fallback (tmux/unknown)', () => {
   const component = new ImageThumbnail(REF, loader, THEME)
   const lines = component.render(80)
   assert.equal(lines.length, 1)
-  assert.ok(lines[0]!.includes('shot.png'), `fallback names the file: ${lines[0]}`)
+  // The marker is `🖼️ ` (U+1F5BC + U+FE0F + a space): U+1F5BC alone has no
+  // default emoji presentation, so the width math measures it 1 cell while
+  // emoji fonts render it 2 — the overhang eats the space and overlaps the
+  // name. VS16 forces the 2-cell render the math expects.
+  assert.ok(lines[0]!.includes('🖼️ shot.png'), `fallback names the file: ${lines[0]}`)
+  assert.equal(visibleWidth('🖼️ '), 3, 'the VS16 marker measures 2 cells + the space')
   assert.ok(lines[0]!.includes('800×600'), `fallback carries dimensions: ${lines[0]}`)
 })
 
@@ -53,7 +58,7 @@ test('a narrow terminal falls back to text even with kitty support', () => {
   loader.load(REF)
   const component = new ImageThumbnail(REF, loader, THEME)
   const lines = component.render(NARROW_WIDTH_THRESHOLD - 1)
-  assert.ok(lines[0]!.includes('🖼'), `narrow fallback line: ${lines[0]}`)
+  assert.ok(lines[0]!.includes('🖼️ '), `narrow fallback line: ${lines[0]}`)
 })
 
 test('an idle ref triggers the load and renders the fallback meanwhile', () => {

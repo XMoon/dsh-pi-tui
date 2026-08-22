@@ -34,7 +34,7 @@ import { consumeDraftImages, pruneUnreferencedDrafts } from './image/submit.ts'
 import { readImageFile } from './image/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
-import { resolveFdPath } from './mentions.ts'
+import { resolveFdPath, suggestPathArgument } from './mentions.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
@@ -879,6 +879,10 @@ export function registerTuiCommands(
   // lacks must be consumed with an explicit error, never sent to the model.
   /** The advertised names of the currently installed completion list. */
   let claims = new Set<string>()
+  /** Slash commands whose single argument is a path: the fork's
+   * `getArgumentCompletions` extension point completes it against the LIVE
+   * session cwd (natural typing shows candidates, Tab accepts them). */
+  const PATH_ARGUMENT_COMMANDS = new Set(['image'])
   /**
    * Install one completion list (sorted, claims refreshed). The single
    * synchronous seam every catalog commit funnels through.
@@ -894,6 +898,9 @@ export function registerTuiCommands(
         name: command.name,
         description: command.description,
         argumentHint: command.input?.hint,
+        ...(PATH_ARGUMENT_COMMANDS.has(command.name)
+          ? { getArgumentCompletions: (argument: string) => suggestPathArgument(argument, runner.sessionCwd()) }
+          : {}),
       })),
       runner.sessionCwd(),
       fdPath,
@@ -2257,7 +2264,7 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'image',
-    description: 'Attach an image file to the draft ([image #N (W×H)] placeholder)',
+    description: 'Attach an image file to the draft (tab completes the path; [image #N (W×H)] placeholder)',
     input: { hint: '<path>' },
     handler: (invocation) => {
       // The /image command is a TUI-LOCAL UI action (plan M2): it stages

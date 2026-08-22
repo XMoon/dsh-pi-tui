@@ -239,7 +239,7 @@ test('renderTranscriptMarkdown projects image blocks (review finding 4)', () => 
     ],
   }
   const md = renderTranscriptMarkdown(session as never)
-  assert.ok(md.includes('> 🖼 shot.png · 1920×1080 · attachment `att-9`'), 'image line rendered')
-  assert.ok(md.includes('> 🖼 image · 640×480 · attachment `att-10`'), 'image-only message renders')
+  assert.ok(md.includes('> 🖼️ shot.png · 1920×1080 · attachment `att-9`'), 'image line rendered')
+  assert.ok(md.includes('> 🖼️ image · 640×480 · attachment `att-10`'), 'image-only message renders')
   assert.ok(md.includes('分析这张图:'), 'text rides along')
 })

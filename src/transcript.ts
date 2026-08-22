@@ -125,6 +125,23 @@ export function textOf(blocks: readonly ContentBlock[]): string {
     .join('')
 }
 
+/** Flat text with image positions preserved: text blocks verbatim, image
+ * blocks as an inline `🖼️ name` marker AT their position (the queue-preview
+ * format; U+FE0F keeps the marker 2 cells wide in emoji fonts). The
+ * structured `content` blocks stay the canonical form for thumbnail
+ * rendering; this projection feeds the flat-text consumers (transcript
+ * search, loader-less fallback rendering) so a mixed message never reads
+ * as if the image was not there, and an image-only message is not empty.
+ * Identical to {@link textOf} for text-only content. */
+export function textWithImageMarkers(blocks: readonly ContentBlock[]): string {
+  let text = ''
+  for (const block of blocks) {
+    if (block.type === 'text') text += block.text
+    else if (block.type === 'image') text += `🖼️ ${block.attachment.name ?? 'image'}`
+  }
+  return text
+}
+
 /** Key identifying one step's model output (turn + step). */
 function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
@@ -603,7 +620,12 @@ export class TranscriptFolder {
       }
       case 'user/message': {
         const blocks = event.data.content
-        const text = textOf(blocks)
+        // User messages keep an inline `🖼️ name` marker at every image's
+        // position in the FLAT text too (textWithImageMarkers): the search
+        // and loader-less rendering paths consume `text`, and a mixed
+        // message must never read as if the image was not there. The
+        // ordered `content` blocks stay the canonical form for thumbnails.
+        const text = textWithImageMarkers(blocks)
         if (text === '' && !blocks.some(block => block.type === 'image')) break
         // Only direct human prompts are user messages; plugin-injected
         // context (system reminders, skill content) folds into a collapsible
@@ -881,7 +903,8 @@ export function childOwnEvents(events: readonly SessionEvent[]): readonly Sessio
 
 /** Render one session's log as a readable markdown transcript for `/export md`. */
 /** The markdown projection of content blocks (review finding 4): text
- * blocks verbatim, image blocks as a compact `🖼` line with the durable
+ * blocks verbatim, image blocks as a compact `🖼️` line (U+FE0F marker,
+ * same convention as the transcript and queue summaries) with the durable
  * attachment id — the binary is NEVER embedded, and an image-only message
  * still renders a User/Assistant section. */
 function markdownContent(blocks: readonly ContentBlock[]): string {
@@ -899,7 +922,7 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
     } else if (block.type === 'image') {
       flush()
       const attachment = block.attachment
-      parts.push(`> 🖼 ${attachment.name ?? 'image'} · ${attachment.width}×${attachment.height} · attachment \`${attachment.attachmentId}\``)
+      parts.push(`> 🖼️ ${attachment.name ?? 'image'} · ${attachment.width}×${attachment.height} · attachment \`${attachment.attachmentId}\``)
     }
   }
   flush()

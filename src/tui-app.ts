@@ -91,7 +91,7 @@ import {
 import { TranscriptSearchComponent } from './search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
-import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
+import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
@@ -4259,16 +4259,18 @@ export class TuiApp {
    * fold into one text component per run, image blocks render as inline
    * thumbnails between them — `[text, image, text]` stays `text → image →
    * text` on screen. Other block kinds (reasoning/tool-call) are skipped
-   * exactly like the flat `textOf` path. Only reached when the loader and
-   * theme are wired.
+   * exactly like the flat `textWithImageMarkers` path. Only reached when
+   * the loader and theme are wired.
    */
   private renderBlockSequence(
     content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
     makeText: (text: string) => Component,
   ): Component {
     if (this.imageLoader === undefined || this.imageTheme === undefined) {
-      const text = content.filter(block => block.type === 'text').map(block => block.text).join('')
-      return makeText(text)
+      // Loader-less hosts keep the image POSITION as an inline marker — a
+      // mixed message must never silently lose its images (the fold's flat
+      // text uses the same projection).
+      return makeText(textWithImageMarkers(content))
     }
     const container = new Container()
     let buffer = ''

@@ -221,6 +221,11 @@ test('orchestration: a real submit flow restores BEFORE unpin and survives a con
         app.setEditorText([app.getDraft(), t].filter(part => part.trim() !== '').join('\n\n') || t)
       },
     }, submitted)
+    // Attach the rejection assertion IMMEDIATELY: the async run settles on a
+    // 10ms timer, and under full-suite load a later handler leaves an
+    // unhandled-rejection window (the observed flake) — assert.rejects is
+    // awaited at the end, but its handler is live from here on.
+    const rejection = assert.rejects(failing, /admission failed/)
     // The editor was cleared before dispatch (submit semantics); while the
     // async run is blocked, the user attaches a second image — its prunes
     // see the empty editor but must keep the PINNED draft #1.
@@ -231,7 +236,7 @@ test('orchestration: a real submit flow restores BEFORE unpin and survives a con
     assert.equal(imageStore.get(draft1.id), draft1, 'the in-flight draft survives the concurrent attach')
     // The submission fails: the flow restores the editor BEFORE releasing
     // the reservation (the ordering contract under test).
-    await assert.rejects(failing, /admission failed/)
+    await rejection
     assert.equal(imageStore.isPinned(draft1.id), false, 'the reservation released after the restore')
     assert.ok(app.getDraft().includes(draft1.placeholder), 'the restored editor references draft #1')
     // The concurrent attach settles (its post-read prune sees the restored

@@ -9,7 +9,7 @@ import test from 'node:test'
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { extractAtPrefix, MentionProvider, resolveFdPath } from '../src/mentions.ts'
+import { extractAtPrefix, MentionProvider, resolveFdPath, suggestPathArgument } from '../src/mentions.ts'
 
 /** A throwaway workspace with known files. */
 function fixtureWorkspace(): string {
@@ -98,4 +98,81 @@ test('the provider delegates slash-command completion to the inner provider', as
   const result = await provider.getSuggestions(['/ex'], 0, 3, { signal: abort })
   assert.ok(result !== null, `/ex must suggest:\n${JSON.stringify(result)}`)
   assert.ok(result.items.some(item => item.value === 'exit'), `the exit command missing:\n${JSON.stringify(result.items)}`)
+})
+
+// ── slash-command path-argument completion (`/image <path>`) ──────────────
+
+test('suggestPathArgument completes a bare prefix in the cwd', () => {
+  const root = fixtureWorkspace()
+  const items = suggestPathArgument('fi', root)
+  assert.ok(items !== null, `'fi' must suggest:\n${JSON.stringify(items)}`)
+  assert.ok(items.some(item => item.value === 'file-one.txt'), `file-one missing:\n${JSON.stringify(items)}`)
+  assert.ok(items.some(item => item.value === 'file-two.ts'), `file-two missing:\n${JSON.stringify(items)}`)
+  // Directories sort FIRST and keep the trailing slash so Tab continues.
+  const dirs = suggestPathArgument('s', root)
+  assert.ok(dirs !== null, `'s' must suggest:\n${JSON.stringify(dirs)}`)
+  assert.equal(dirs[0]!.value, 'src/', 'directories lead the list')
+  assert.equal(dirs[0]!.label, 'src/')
+})
+
+test('suggestPathArgument completes directory continuations', () => {
+  const root = fixtureWorkspace()
+  const contents = suggestPathArgument('src/', root)
+  assert.ok(contents !== null, `'src/' must suggest:\n${JSON.stringify(contents)}`)
+  assert.ok(contents.some(item => item.value === 'src/deep-nested.ts'), `nested file missing:\n${JSON.stringify(contents)}`)
+  // A partial basename inside a directory keeps the directory prefix.
+  const partial = suggestPathArgument('src/deep', root)
+  assert.ok(partial !== null, `'src/deep' must suggest:\n${JSON.stringify(partial)}`)
+  assert.ok(partial.some(item => item.value === 'src/deep-nested.ts'), `prefixed value missing:\n${JSON.stringify(partial)}`)
+})
+
+test('suggestPathArgument handles absolute and ~ forms', () => {
+  const root = fixtureWorkspace()
+  const absolute = suggestPathArgument(`${root}/file`, root)
+  assert.ok(absolute !== null, `absolute must suggest:\n${JSON.stringify(absolute)}`)
+  assert.ok(absolute.some(item => item.value === `${root}/file-one.txt`), `absolute value missing:\n${JSON.stringify(absolute)}`)
+  const home = mkdtempSync(join(tmpdir(), 'dsh-mentions-home-'))
+  const savedHome = process.env.HOME
+  try {
+    process.env.HOME = home
+    mkdirSync(join(home, 'pics'))
+    writeFileSync(join(home, 'pics', 'a.png'), 'x')
+    const tilde = suggestPathArgument('~/p', root)
+    assert.ok(tilde !== null, `'~/p' must suggest:\n${JSON.stringify(tilde)}`)
+    assert.ok(tilde.some(item => item.value === '~/pics/'), `tilde value missing:\n${JSON.stringify(tilde)}`)
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME
+    else process.env.HOME = savedHome
+  }
+})
+
+test('suggestPathArgument quotes values with spaces and stays quiet otherwise', () => {
+  const root = fixtureWorkspace()
+  const spaced = suggestPathArgument('my', root)
+  assert.ok(spaced !== null, `'my' must suggest:\n${JSON.stringify(spaced)}`)
+  assert.ok(spaced.some(item => item.value === '"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(spaced)}`)
+  assert.equal(suggestPathArgument('', root), null, 'an empty argument completes nothing')
+  assert.equal(suggestPathArgument('a b', root), null, 'embedded spaces cannot complete (single-token only)')
+  assert.equal(suggestPathArgument('no/such/dir', root), null, 'an unreadable directory stays quiet')
+})
+
+test('the provider completes /image arguments through the fork command branch', async () => {
+  const root = fixtureWorkspace()
+  const provider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: (arg) => suggestPathArgument(arg, root) }],
+    root,
+    null,
+  )
+  const result = await provider.getSuggestions(['/image fi'], 0, 9, { signal: abort })
+  assert.ok(result !== null, `/image fi must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, 'fi', 'the argument prefix is the completion prefix')
+  assert.ok(result.items.some(item => item.value === 'file-one.txt'), `file missing:\n${JSON.stringify(result.items)}`)
+})
+
+test('MentionProvider lets Tab file-complete a trailing-space slash argument', () => {
+  const root = fixtureWorkspace()
+  const provider = new MentionProvider([{ name: 'image', description: 'Attach' }], root, null)
+  assert.equal(provider.shouldTriggerFileCompletion(['/image'], 0, 6), false, 'a bare command name stays command completion')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image '], 0, 7), true, 'a trailing-space argument is a file-completion site (the fork trims it away)')
+  assert.equal(provider.shouldTriggerFileCompletion(['see /tmp/'], 0, 9), true, 'plain path lines keep the fork behavior')
 })

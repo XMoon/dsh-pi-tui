@@ -585,15 +585,17 @@ export interface QueueFoldResult {
  */
 /**
  * The queue-pane display text of one message's content (review finding 5):
- * text blocks verbatim, image blocks as a compact `🖼 name` summary — an
- * image-only queued message shows `🖼 shot.png` instead of an empty row,
+ * text blocks verbatim, image blocks as a compact `🖼️ name` summary (the
+ * marker carries U+FE0F so fonts with an emoji face render it 2 cells wide
+ * — the width math's expectation — and never overlap the name) — an
+ * image-only queued message shows `🖼️ shot.png` instead of an empty row,
  * and a mixed message advertises its image. The queue row stays one line.
  */
 function queueTextOf(content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[]): string {
   const parts: string[] = []
   for (const block of content) {
     if (block.type === 'text') parts.push(block.text)
-    else if (block.type === 'image') parts.push(`🖼 ${block.attachment.name ?? 'image'}`)
+    else if (block.type === 'image') parts.push(`🖼️ ${block.attachment.name ?? 'image'}`)
   }
   return parts.join(' ')
 }

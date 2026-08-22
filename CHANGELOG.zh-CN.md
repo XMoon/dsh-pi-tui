@@ -17,6 +17,15 @@
   思考行混淆。队列窗格与编辑器 prompt 使用同一品牌蓝 `❯`:用户自己的
   输入在界面各处都是同一个标记。气泡背景是可选的调色板 token
   (`roleUserBg`),自定义主题可覆盖。
+- **`/image <path>` 支持路径补全。** 在 `/image` 后输入参数时会随击键
+  提示会话工作区内的文件与目录,Tab 可完成(包括空参数——此前 Tab
+  毫无反应),Tab 接受目录后立即列出其子项——与 `@` mention、`!` shell
+  行已有的目录补全体验一致。支持 `~`、绝对与相对路径形式;补全挂载在
+  fork 自带的 `getArgumentCompletions` 扩展点上,vendored 代码零改动。
+- **图文混合消息的平文本保留内联 `🖼️` 占位符。** 形如
+  `check [image] done` 的用户消息不再在任何地方读作 `check  done`:
+  transcript 搜索可按图片名命中,不具备图片渲染能力的宿主也能看到图片
+  原本所在的位置。
 
 ### 修复
 
@@ -24,11 +33,16 @@
   host 的 dsh-tool-skill 监听器)会把模型面 `<skill_content>` 正文作为
   上下文行注入,skill 目录与工作区指令也各自携带 `<system-reminder>`
   框架;此前展开这类行(Ctrl+O)会把原始信封直接倾倒进 transcript。
-  现在展开的上下文行渲染解析后的内容——skill 指令正文、剥离包装与
+  现在展开后的上下文行渲染结构化内容——skill 指令正文、剥离包装与
   `<available_skills>` 标记行后的目录/工作区文本——模型面字节保持
   不变,畸形 skill 信封不渲染任何正文。折叠的 skill 行新增
   `— N lines of instructions` 后缀(与工具卡片一致),折叠状态下也能
   看出模型收到了什么。
+- **图片摘要标记改为 `🖼️`(带 U+FE0F),emoji 字体下不再与文件名重叠。**
+  标记在宽度计算中只占 1 格,而带 emoji 字形的字体实际渲染 2 格——
+  字形右缘悬垂吃掉了空格并压住文件名(视字体而定)。变体选择符强制
+  2 格渲染,与宽度计算一致;emoji 后的空格保留,transcript 缩略图
+  降级行、队列预览与 markdown 导出三处统一。
 - **write 卡片折叠时只显示动词,不再泄漏原始 XML 信封。** write 工具的
   result 是 XML 确认信封(`<path>…</path> <type>…</type> <content>Updated
   file</content>`);折叠行现在像 read 卡片显示行数摘要那样显示

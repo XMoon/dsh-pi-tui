@@ -54,7 +54,10 @@ test('a user message with images folds with ordered content blocks', () => {
   const message = messages[0]!
   assert.equal(message.kind, 'user')
   if (message.kind !== 'user') return
-  assert.equal(message.text, '分析  的差异')
+  // The FLAT text keeps an inline marker at the image's position (search
+  // and loader-less rendering consume `text`); the ordered `content` blocks
+  // stay the canonical form for thumbnail rendering.
+  assert.equal(message.text, '分析 🖼️ shot.png 的差异')
   assert.deepEqual(message.content?.map(block => block.type), ['text', 'image', 'text'])
   assert.equal(message.content?.[1]?.type === 'image' && message.content[1].attachment.attachmentId, 'att-img-1')
 })
@@ -124,14 +127,14 @@ test('the TUI renders a user message with an image (fallback line, then inline-r
   let view = vt.getViewport().join('\n')
   // The image renders as the fallback summary line (loader resolves async;
   // the first frame shows the pending text).
-  assert.ok(view.includes('🖼'), `thumbnail fallback visible:\n${view}`)
+  assert.ok(view.includes('🖼️ '), `thumbnail fallback visible:\n${view}`)
   assert.ok(view.includes('800×600'), `dimensions in fallback:\n${view}`)
   // After the loader settles, a notified repaint keeps the fallback for
   // non-inline terminals (headless caps default to no images).
   await new Promise(resolve => setTimeout(resolve, 30))
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🖼'), 'settled state still shows the text fallback headless')
+  assert.ok(view.includes('🖼️ '), 'settled state still shows the text fallback headless')
   app.stop()
 })
 
@@ -149,7 +152,7 @@ test('a tool-result image renders inside the tool card (generic tool)', async ()
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🖼'), `tool-card image fallback visible:\n${view}`)
+  assert.ok(view.includes('🖼️ '), `tool-card image fallback visible:\n${view}`)
   assert.ok(view.includes('caption'), 'the text block still renders')
   app.stop()
 })
@@ -167,6 +170,6 @@ test('a read_image tool card renders its image blocks as thumbnails', async () =
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🖼'), `read_image card shows the thumbnail:\n${view}`)
+  assert.ok(view.includes('🖼️ '), `read_image card shows the thumbnail:\n${view}`)
   app.stop()
 })

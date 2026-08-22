@@ -12,7 +12,8 @@
  */
 
 import { accessSync, constants as fsConstants, readdirSync, statSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { homedir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 import {
   CombinedAutocompleteProvider,
   type AutocompleteItem,
@@ -139,6 +140,114 @@ function toMentionItem(candidate: FsMentionCandidate): AutocompleteItem {
   }
 }
 
+/** Expand a leading `~` in one argument token (other tokens unchanged). */
+function expandHomeToken(token: string): string {
+  if (token === '~') return homedir()
+  if (token.startsWith('~/')) return join(homedir(), token.slice(2))
+  return token
+}
+
+/**
+ * Slash-command PATH-argument completion (`/image <path>`): complete the
+ * single argument token against the session cwd — shell-style and
+ * directory-local (the fd whole-tree fuzzy search stays `@`'s job). Handles
+ * `~`, absolute and relative forms and mirrors the fork's getFileSuggestions
+ * display rules so a completed value always reads like what the user typed
+ * (`./`, `~/` and `dir/` forms preserved); directories keep their trailing
+ * `/` so Tab-accepting one continues completion. Returns null when the
+ * argument is not a single completable token (embedded spaces) or the
+ * directory cannot be read — the editor then shows no suggestions.
+ * @param argumentText - the text after the command name (the fork passes
+ *   everything up to the cursor; its argument apply replaces that whole
+ *   range, so only single-token arguments can complete).
+ * @param cwd - the session workspace (resolve relative forms against it).
+ */
+export function suggestPathArgument(argumentText: string, cwd: string): AutocompleteItem[] | null {
+  const token = argumentText
+  // Embedded spaces are a quoted-token case (deferred); completing a later
+  // word would clobber the earlier ones, so stay quiet.
+  if (token === '' || token.includes(' ') || token.includes('\t')) return null
+  const expanded = expandHomeToken(token)
+  const absolute = token.startsWith('~') || token.startsWith('/')
+  let searchDir: string
+  let searchPrefix: string
+  if (
+    token === './' || token === '../' || token === '~' || token === '~/' || token === '/' || token === ''
+  ) {
+    // Complete the whole root directory (the fork's isRootPrefix cases).
+    searchDir = absolute ? expanded : join(cwd, expanded)
+    searchPrefix = ''
+  } else if (token.endsWith('/')) {
+    // Show the directory's contents.
+    searchDir = absolute ? expanded : join(cwd, expanded)
+    searchPrefix = ''
+  } else {
+    // Split into directory + basename prefix.
+    searchDir = absolute ? dirname(expanded) : join(cwd, dirname(expanded))
+    searchPrefix = basename(expanded)
+  }
+  let entries
+  try {
+    entries = readdirSync(searchDir, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  const items: AutocompleteItem[] = []
+  for (const entry of entries) {
+    if (!entry.name.toLowerCase().startsWith(searchPrefix.toLowerCase())) continue
+    let isDirectory = entry.isDirectory()
+    if (!isDirectory && entry.isSymbolicLink()) {
+      try {
+        isDirectory = statSync(join(searchDir, entry.name)).isDirectory()
+      } catch {
+        // Broken symlink or permission error — treat as a file candidate.
+      }
+    }
+    // Mirror the fork's display construction: `dir/` appends the entry, a
+    // `~/`/absolute/relative directory prefix is preserved, a bare token
+    // completes within the cwd.
+    const name = entry.name
+    let relativePath: string
+    if (token.endsWith('/')) {
+      relativePath = token + name
+    } else if (token.includes('/') || token.includes('\\')) {
+      if (token.startsWith('~/')) {
+        const dir = dirname(token.slice(2))
+        relativePath = `~/${dir === '.' ? name : join(dir, name)}`
+      } else if (token.startsWith('/')) {
+        const dir = dirname(token)
+        relativePath = dir === '/' ? `/${name}` : `${dir}/${name}`
+      } else {
+        relativePath = join(dirname(token), name)
+        if (token.startsWith('./') && !relativePath.startsWith('./')) {
+          relativePath = `./${relativePath}`
+        }
+      }
+    } else {
+      relativePath = token.startsWith('~') ? `~/${name}` : name
+    }
+    const pathValue = isDirectory ? `${relativePath}/` : relativePath
+    // Same quoting rule as the fork's buildCompletionValue: spaces need
+    // quotes so the value stays one shell word for the /image handler.
+    const value = pathValue.includes(' ') ? `"${pathValue}"` : pathValue
+    items.push({
+      value,
+      label: `${name}${isDirectory ? '/' : ''}`,
+      description: join(searchDir, entry.name),
+    })
+  }
+  if (items.length === 0) return null
+  // Directories first, then alphabetically (the fork's sort order).
+  items.sort((left, right) => {
+    const leftIsDir = left.label.endsWith('/')
+    const rightIsDir = right.label.endsWith('/')
+    if (leftIsDir && !rightIsDir) return -1
+    if (!leftIsDir && rightIsDir) return 1
+    return left.label.localeCompare(right.label)
+  })
+  return items
+}
+
 /** The recursive fallback suggestion set for one `@` prefix. */
 function fsMentionSuggestions(workDir: string, atPrefix: string, signal: AbortSignal): AutocompleteSuggestions | null {
   if (signal.aborted) return null
@@ -247,6 +356,16 @@ export class MentionProvider implements AutocompleteProvider {
   }
 
   shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
-    return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? false
+    const currentLine = lines[cursorLine] ?? ''
+    const textBeforeCursor = currentLine.slice(0, cursorCol)
+    // A slash-command line WITH an argument position — even a trailing-space
+    // empty one (`/image `) — is a file-completion site: Tab must list the
+    // cwd. The fork's check trims BOTH ends, so `/image ` reads as a bare
+    // command name and Tab is silently blocked; trimStart keeps the trailing
+    // space visible. A pure command name (`/image`, no space) stays blocked —
+    // Tab there completes the command name, never files.
+    const trimmedStart = textBeforeCursor.trimStart()
+    if (trimmedStart.startsWith('/') && trimmedStart.includes(' ')) return true
+    return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true
   }
 }
