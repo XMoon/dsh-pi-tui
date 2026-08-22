@@ -254,13 +254,17 @@ function main() {
       // legitimately inlines the TuiApp implementation (src/tui-app.d.ts)
       // for the Loader row — it is NOT a third-party SDK entry. Its region
       // is exempted; everything else (chunks, extensions, builtins) must
-      // name only the public modules below.
+      // name only the public modules below. The image modules
+      // (src/image/admission.d.ts, src/image/types.d.ts) are also
+      // legitimately inlined into the root entry: the public
+      // `commandRejectsImages` signature references `DraftImageStoreLike`,
+      // which pulls in the draft vocabulary (and the recalled-ref shape).
       const isRoot = name === 'dist/index.d.mts'
       for (const line of lines) {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(builtins|commands|diag|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(builtins|commands|diag|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|image\/admission|image\/types|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }

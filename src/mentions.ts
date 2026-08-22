@@ -152,9 +152,9 @@ function expandHomeToken(token: string): string {
  * directory a completion token reads and what basename prefix it filters.
  * Exported so the POSIX and Windows ROOT semantics are pinned without
  * touching the fs — `dirname` leaves a trailing separator ONLY on roots,
- * and a root must stay a root (`/` stripped would read `''`; `C:\` is the
- * drive root while `C:` is the drive-relative path; `\\server\share\` is
- * the legal UNC share form).
+ * and a root must stay a root (`/` stripped would read `''`; a drive root
+ * keeps its trailing separator while the drive-relative form drops it; a
+ * UNC share keeps its legal trailing form).
  * @param token - the parsed argument token (no leading separator
  *   whitespace).
  * @param cwd - the session workspace (relative forms resolve against it).
