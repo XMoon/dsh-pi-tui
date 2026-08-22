@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -132,7 +132,10 @@ test('incompatibleHarnessMessage is actionable and names both versions', () => {
   const entry = harnessCompatEntryFor('0.1.0-rc.8')
   assert.ok(entry !== undefined, 'rc.8 must match an incompatible entry')
   const message = incompatibleHarnessMessage('0.1.0-rc.8', entry!)
-  assert.ok(message.includes('dsh-pi-tui v0.3.1'), `must name the bundle version: ${message}`)
+  // The bundle version is read from package.json at runtime (never
+  // hardcoded), so the assertion reads it the same way.
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
+  assert.ok(message.includes(`dsh-pi-tui v${pkg.version}`), `must name the bundle version: ${message}`)
   assert.ok(message.includes('DeepSeek Harness 0.1.1-rc.1 or later'), 'must name the requirement')
   assert.ok(message.includes('0.1.0-rc.8'), 'must name the installed version')
   assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.1-rc.1'), 'must give the upgrade command')
