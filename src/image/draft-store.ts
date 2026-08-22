@@ -105,13 +105,29 @@ export class DraftImageStore {
   }
 
   /** Drop every staged draft (submit, /clear, session switch, dispose). */
+  /** Drop every staged draft (TUI dispose / full teardown). */
   clear(): void {
     this.images.clear()
     this.bytesHeld = 0
-    // Session switch / dispose: in-flight pins are meaningless for drafts
-    // that no longer exist — drop them so stale entries never linger
-    // (review finding 3 follow-up).
+    // Full teardown: in-flight pins are meaningless for drafts that no
+    // longer exist — drop them so stale entries never linger.
     this.pins.clear()
+  }
+
+  /**
+   * Drop every staged draft EXCEPT those reserved by an in-flight
+   * submission (session switch, /new, /fork — review finding): a stale
+   * submission that detects the switch still restores its editor text
+   * (mergeDraft), and that text's placeholders must keep their backing
+   * drafts until the submission's pin releases. Unpinned drafts go; the
+   * pin map survives (released pins become prunable normally).
+   */
+  clearUnpinned(): void {
+    for (const [id, image] of this.images) {
+      if (this.isPinned(id)) continue
+      this.bytesHeld -= image.bytes.byteLength
+      this.images.delete(id)
+    }
   }
 
   /** All staged drafts in insertion order. */

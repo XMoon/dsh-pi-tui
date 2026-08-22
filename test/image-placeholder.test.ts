@@ -266,3 +266,40 @@ test('clear() drops in-flight pins too (review finding 3 follow-up)', () => {
   assert.equal(store.isPinned(draft.id), false, 'no stale pins after a clear')
   release() // the late release is a harmless no-op
 })
+
+test('clearUnpinned keeps in-flight pinned drafts; clear drops everything (review finding)', () => {
+  const store = new DraftImageStore()
+  const pinned = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const staged = store.add({ bytes: new Uint8Array([2]), mediaType: 'image/png', width: 1, height: 1 })
+  const release = store.pinReferenced(pinned.placeholder)
+  // Session switch: the in-flight submission's draft survives so a stale
+  // submission can still restore its text with a live backing draft.
+  store.clearUnpinned()
+  assert.equal(store.get(pinned.id), pinned, 'the pinned draft survives a session switch')
+  assert.equal(store.get(staged.id), undefined, 'unpinned drafts are dropped')
+  // After the submission settles (pin released), the restored text still
+  // references the draft — pruning later collects it only if unreferenced.
+  release()
+  assert.equal(store.isPinned(pinned.id), false)
+  // Full teardown still drops everything, pins included.
+  store.clear()
+  assert.equal(store.get(pinned.id), undefined)
+})
+
+test('a submission pinned BEFORE its async phase survives concurrent pruning (deferred-start window)', () => {
+  const store = new DraftImageStore()
+  const draft = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  // The editor is cleared before dispatch; the submission pins SYNCHRONOUSLY
+  // (same call stack) before ensureSession/prepare ever awaits.
+  const release = store.pinReferenced(draft.placeholder)
+  // During the async session-creation window the user attaches a new image:
+  // the attach-time prune sees an EMPTY editor — the pinned in-flight
+  // draft must survive, or the submission's placeholders degrade to text.
+  pruneUnreferencedDrafts('', store)
+  assert.equal(store.get(draft.id), draft, 'the in-flight draft survives the deferred-start window')
+  // The submission's prepare then resolves (draft still present), commits,
+  // consumes, and finally releases the pin.
+  store.remove(draft.id) // consumeDraftImages equivalent
+  release()
+  assert.equal(store.isPinned(draft.id), false)
+})

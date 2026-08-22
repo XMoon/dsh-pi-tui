@@ -1590,9 +1590,11 @@ export function apply(ctx: Context, config: Config): void {
         })
         const error = await swapTo(next)
         // The switch COMMITTED: staged drafts are per-session UI state —
-        // drop them now (never durable attachments, plan §14; review
-        // finding 2). A failure keeps the current drafts.
-        if (error === undefined) draftImages.clear()
+        // drop the UNPINNED ones now (never durable attachments, plan
+        // §14). In-flight submissions keep their pinned drafts so a stale
+        // submission can still restore its text with a live backing draft
+        // (review finding: clear() would orphan the restored placeholders).
+        if (error === undefined) draftImages.clearUnpinned()
         return error
       } catch (error) {
         const message = safeErrorMessage(error)
@@ -2230,13 +2232,16 @@ export function apply(ctx: Context, config: Config): void {
       const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
-      runOwned('submit', () => ensureSession().then(async () => {
-        // Reserve the referenced drafts for the WHOLE submission (review
-        // finding 1): the editor was cleared before dispatch, so an
-        // attach-time prune (a concurrent /image) must not delete the very
-        // images this submission is about to admit. Released in finally.
-        const pin = draftImages.pinReferenced(text)
+      // Reserve the referenced drafts SYNCHRONOUSLY, in the SAME call stack
+      // that left the editor (review finding): ensureSession() on a
+      // deferred start is async (create/compose/resume), and the editor is
+      // already cleared — an attach-time prune during session creation must
+      // not delete the images this submission is about to admit. No await
+      // may precede the reservation.
+      const releasePin = draftImages.pinReferenced(text)
+      runOwned('submit', async () => {
         try {
+        await ensureSession()
         const agent = liveAgent
         if (agent === undefined) return
         // The guard checks THIS agent's session; capture the identity so
@@ -2398,9 +2403,9 @@ export function apply(ctx: Context, config: Config): void {
         // image survives (round-5 finding 1).
         consumeDraftImages(text, draftImages)
         } finally {
-          pin()
+          releasePin()
         }
-      }), {
+      }, {
         diag,
         sessionId: () => liveAgent?.session.id,
         onError: failSubmission(text),
@@ -2506,14 +2511,14 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       // An owned workflow: the send's outcome drives the draft restore and
-      // the notices — runOwned (AGENTS.md), never a bare void.
-      runOwned('steer', () => ensureSession().then(async () => {
-        // Reserve the referenced drafts for the whole send (review finding
-        // 1): the editor was cleared before dispatch, so a concurrent
-        // /image prune must not delete the images this steer is about to
-        // admit. Released in finally.
-        const pin = draftImages.pinReferenced(text)
+      // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
+      // referenced drafts SYNCHRONOUSLY (same call stack that left the
+      // editor — review finding): ensureSession() is async on a deferred
+      // start, and no await may precede the reservation.
+      const releasePin = draftImages.pinReferenced(text)
+      runOwned('steer', async () => {
         try {
+        await ensureSession()
         if (liveAgent === undefined) return
         // The draft message is prepared BEFORE the guard: admission is
         // async I/O, and the guard's identity is the draft text (which
@@ -2560,9 +2565,9 @@ export function apply(ctx: Context, config: Config): void {
         // (round-5 finding 1).
         if (outcome === 'ok') consumeDraftImages(text, draftImages)
         } finally {
-          pin()
+          releasePin()
         }
-      }), {
+      }, {
         diag,
         sessionId: () => liveAgent?.session.id,
         onError: failSubmission(text),

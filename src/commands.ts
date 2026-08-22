@@ -1926,9 +1926,10 @@ export function registerTuiCommands(
         return { kind: 'error', text: error }
       }
       // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
-      // them now, never before (a failed create/swap keeps the current
-      // session and its drafts intact; review finding 2).
-      runner.imageStore.clear()
+      // the UNPINNED ones now, never before (a failed create/swap keeps
+      // the current session and its drafts intact; in-flight submissions
+      // keep their pinned drafts — review finding 2).
+      runner.imageStore.clearUnpinned()
       return { kind: 'success', text: 'started a fresh session' }
     },
   })
@@ -2389,8 +2390,10 @@ export function registerTuiCommands(
         return { kind: 'error', text: error }
       }
       // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
-      // them now (durable attachments are untouched, plan §14).
-      runner.imageStore.clear()
+      // the UNPINNED ones now (durable attachments are untouched, plan
+      // §14; in-flight submissions keep their pinned drafts — review
+      // finding 2).
+      runner.imageStore.clearUnpinned()
       return { kind: 'success', text: `forked as ${next.agent.session.id}` }
     },
   })

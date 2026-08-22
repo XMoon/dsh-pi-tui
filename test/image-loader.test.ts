@@ -228,3 +228,25 @@ test('invalidating one attachment never discards an unrelated in-flight settle (
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(loader.get(refOf('a')).state, 'ready')
 })
+
+test('clear() invalidates even attachments that were locally invalidated before (review finding)', async () => {
+  let releaseA!: () => void
+  const gateA = new Promise<void>(resolve => { releaseA = resolve })
+  const loader = new ImageLoader(async (ref) => {
+    if (ref.attachmentId === 'a') await gateA
+    return { ref: {}, data: new Uint8Array([9]) }
+  })
+  const ref = refOf('a')
+  loader.invalidate('a') // local generation for a
+  loader.load(ref)       // captures the binary epoch {global:0, local:1}
+  await new Promise(resolve => setTimeout(resolve, 5))
+  loader.clear()         // global bump + per-id reset
+  releaseA()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  // The pre-clear read must NOT repopulate the cache after a clear.
+  assert.equal(loader.get(ref).state, 'idle', 'a clear wins over a stale local epoch')
+  // A fresh load works.
+  loader.load(ref)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(loader.get(ref).state, 'ready')
+})

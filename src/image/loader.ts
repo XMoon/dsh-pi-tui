@@ -46,18 +46,29 @@ export class ImageLoader {
   private readonly read: (ref: ImageAttachmentRefLike) => Promise<{ ref: unknown; data: Uint8Array }>
   /**
    * Invalidation generations (review finding 3): `invalidate(id)` bumps
-   * ONLY that attachment's generation, so a settle of an unrelated in-flight
-   * read is never discarded (a global epoch made one invalidate drop every
-   * concurrent load, re-reading unrelated images on long transcripts).
-   * `clear()` still bumps the GLOBAL generation (every in-flight settle is
-   * stale after a session switch).
+   * ONLY that attachment's local generation, so a settle of an unrelated
+   * in-flight read is never discarded. `clear()` bumps the GLOBAL
+   * generation AND resets the per-id map — every in-flight settle is stale
+   * after a session switch, including ones that had been locally
+   * invalidated before (a per-id override must never let a pre-clear read
+   * pass the global check; review finding: composite-single-number epochs
+   * were unsound).
    */
   private globalEpoch = 0
   private readonly perIdEpoch = new Map<string, number>()
 
-  /** The current epoch one read must match at settle time. */
-  private epochOf(id: string): number {
-    return this.perIdEpoch.get(id) ?? this.globalEpoch
+  /** The epoch one read must match at settle time (a binary snapshot). */
+  private epochOf(id: string): { global: number; local: number } {
+    return {
+      global: this.globalEpoch,
+      local: this.perIdEpoch.get(id) ?? 0,
+    }
+  }
+
+  /** Whether a settle with the captured epoch is still current. */
+  private epochCurrent(id: string, captured: { global: number; local: number }): boolean {
+    return this.globalEpoch === captured.global
+      && (this.perIdEpoch.get(id) ?? 0) === captured.local
   }
 
   constructor(
@@ -107,7 +118,7 @@ export class ImageLoader {
       // A stale settlement (the attachment was invalidated, or the whole
       // cache cleared) is dropped — it must not repopulate the cache
       // (round-4 finding 4; per-id generations, review finding 3).
-      if (this.epochOf(id) !== epoch) return stored
+      if (!this.epochCurrent(id, epoch)) return stored
       const data = stored.data
       this.cache.set(id, {
         state: 'ready',
@@ -118,7 +129,7 @@ export class ImageLoader {
       this.errors.delete(id)
       return stored
     }).catch((error: unknown) => {
-      if (this.epochOf(id) !== epoch) return { data: new Uint8Array(0) }
+      if (!this.epochCurrent(id, epoch)) return { data: new Uint8Array(0) }
       this.recordError(id, error instanceof Error ? error : new ImageLoadError(String(error)))
       return { data: new Uint8Array(0) }
     }).finally(() => {
@@ -165,16 +176,19 @@ export class ImageLoader {
    * unrelated in-flight reads keep their generations and settle normally
    * (review finding 3). */
   invalidate(attachmentId: string): void {
-    this.perIdEpoch.set(attachmentId, this.epochOf(attachmentId) + 1)
+    this.perIdEpoch.set(attachmentId, this.epochOf(attachmentId).local + 1)
     this.cache.delete(attachmentId)
     this.errors.delete(attachmentId)
   }
 
-  /** Drop everything (session switch / dispose); the GLOBAL generation
-   * bumps (every in-flight settle is stale), every subscriber hears the
-   * global invalidation and repaints once. */
+  /** Drop everything (session switch / dispose): the GLOBAL generation
+   * bumps AND the per-id map resets — a pre-clear local invalidation can
+   * never mask the global invalidation for a later settle (review
+   * finding), and the map cannot grow unboundedly. Every subscriber hears
+   * the global invalidation and repaints once. */
   clear(): void {
     this.globalEpoch += 1
+    this.perIdEpoch.clear()
     this.cache.clear()
     this.errors.clear()
     this.notifyAll()
