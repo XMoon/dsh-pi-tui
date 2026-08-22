@@ -2288,6 +2288,13 @@ export function apply(ctx: Context, config: Config): void {
             : text
           // The command execution is itself an owned workflow: its outcome
           // decides between the fallback follow-up and a draft restore.
+          // HANDSHAKE PIN (review finding): the outer task's pin releases
+          // when this task returns (right after launching the command), but
+          // the nested fallback pin is only established inside onResult —
+          // without a synchronous handoff the referenced drafts would be
+          // prunable for the whole command run. Acquire it HERE, transfer
+          // it to the nested fallback, and release it on every other exit.
+          const fallbackPin = draftImages.pinReferenced(text)
           runOwned('command execution', () => commands.execute(agent as Agent, toggled, [], signal), {
             diag,
             sessionId: () => agent.session.id,
@@ -2303,6 +2310,7 @@ export function apply(ctx: Context, config: Config): void {
               // retry could ride the unadvertised fallback).
               if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
                 app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
+                fallbackPin()
                 return
               }
               // The fallback follow-up still targets the CAPTURED agent; if
@@ -2314,12 +2322,11 @@ export function apply(ctx: Context, config: Config): void {
                   // images when present) and follow up — an owned workflow
                   // so a failed image admission restores the draft instead
                   // of silently dropping the images. This nested workflow
-                  // outlives the outer task (fire-and-forget), so it holds
-                  // its OWN pin across the async admission — the outer
-                  // finally must not release a draft this task still needs
-                  // (review finding 1 follow-up).
+                  // outlives the outer task (fire-and-forget), so it
+                  // consumes the handoff pin across the async admission
+                  // and releases it in its own finally (review finding 1
+                  // follow-up).
                   runOwned('image submit', async () => {
-                    const nestedPin = draftImages.pinReferenced(text)
                     try {
                       const message = await prepareUserMessage(text, draftImages, submitDeps)
                       // Re-check the captured session identity AFTER the
@@ -2337,7 +2344,7 @@ export function apply(ctx: Context, config: Config): void {
                       // intake's newer image survives (round-5 finding 1).
                       consumeDraftImages(text, draftImages)
                     } finally {
-                      nestedPin()
+                      fallbackPin()
                     }
                   }, {
                     diag,
@@ -2345,15 +2352,21 @@ export function apply(ctx: Context, config: Config): void {
                     onError: failSubmission(text),
                   })
                 } else {
+                  fallbackPin()
                   const merged = mergeDraft(app.getDraft(), text)
                   app.setEditorText(merged)
                   app.notify(merged === text
                     ? 'the session changed while sending — try again'
                     : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
                 }
+              } else {
+                // The command COMMITTED (no image fallback): release the
+                // handoff pin.
+                fallbackPin()
               }
             },
             onError: (error) => {
+              fallbackPin()
               if (extensionCommandId !== undefined) extensionService?._recordRegistryError('command', extensionCommandId, error)
               const message = safeErrorMessage(error)
               try {
