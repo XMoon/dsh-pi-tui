@@ -299,8 +299,10 @@ SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属
   生成标题——这会覆盖当前标题,包括你之前固定的标题**(`/rename` 是
   别名)。
 - `/tasks` — 合并任务浏览器:后台 job 与子代理在同一个可搜索列表中
-  (直接输入过滤行——`subagent`、`bash`、`failed`…)。`Enter` 打开详情
-  (子代理为子转录,job 为状态查看器),`i` 中断选中的子代理。
+  (直接输入过滤行——`subagent`、`bash`、`failed`…)。子代理行把 mode
+  写进主标签(`subagent · <label> · continuable` / `… · one-shot`),
+  按下 `Enter` 之前就能知道查看器是否可交互。`Enter` 打开详情
+  (子代理为子查看器,job 为状态查看器),`i` 中断选中的子代理。
   `/subagents` 是别名。
 - `/yolo` — 切换到 `danger-full-access`(`/permission danger-full-access`
   的别名)。
@@ -327,8 +329,13 @@ SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属
   (`fd` 在 PATH 上时以其为后端,否则使用内置的递归回退)。字面
   `@path` 会被提交,由模型自行读取文件。有后台工作时,空编辑器的 `↓`
   会打开与 `/tasks` 相同的合并任务浏览器:
-  - **子代理行**(可继续的实时子任务)——`Enter` 以只读方式打开子代理
-    的转录(`Esc` 返回);`i` 中断选中的子代理。它们从不注册 job 记录,
+  - **子代理行**(实时子任务,标签携带目录 mode:`continuable` 或
+    `one-shot`)——`Enter` 打开子代理查看器:**continuable** 子代理的
+    查看器是**可交互的**——输入后续消息并回车,它会作为子代理的
+    **下一回合**通过 `ctx.subagents.followup` 投递(FIFO——运行中的
+    子代理不会被中断或 steer;非活跃的子代理会自动冷恢复),`Esc` 返回
+    主会话。**one-shot** 子代理的查看器保持**只读**(`Esc` 返回,编辑器
+    显示只读占位符)。`i` 中断选中的子代理。它们从不注册 job 记录,
     所以此浏览器是它们唯一可一览的归宿。
   - **job 行**(bash 与一次性子代理 job)——`Enter` 只显示状态查看器:
     bash job 的输出读取游标属于模型的 `job_output`,而一次性子代理 job

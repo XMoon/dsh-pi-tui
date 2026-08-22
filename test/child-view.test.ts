@@ -101,7 +101,7 @@ test('entering the viewer clears the main session local cards', async () => {
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('!ls'), `the local card must render before the viewer:\n${view}`)
 
-  app.setViewerMode({ id: 'session-child', label: 'child' })
+  app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'session-child', label: 'child', mode: 'one-shot', activity: 'inactive' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(!view.includes('!ls'), `the main session local card must not leak into the viewer:\n${view}`)

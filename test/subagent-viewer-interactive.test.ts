@@ -1,0 +1,280 @@
+/**
+ * Interactive (continuable) subagent viewer acceptance tests (plan M1–M3):
+ * the editor is LIVE in a continuable viewer, Enter submits through
+ * onSubagentSubmit (never the parent's onSubmit/steer/queue), the child
+ * draft is isolated from the main draft and retained across visits, and
+ * failed sends restore the text into the child's own slot without
+ * polluting a switched/closed viewer.
+ * @module @xmoon76/dsh-pi-tui/subagent-viewer-interactive.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
+
+const continuable = (overrides: Partial<SubagentViewerTarget> = {}): SubagentViewerTarget => ({
+  parentSessionId: 'session-main',
+  childSessionId: 'child-1',
+  label: 'research',
+  mode: 'continuable',
+  activity: 'inactive',
+  ...overrides,
+})
+
+const oneShot = (overrides: Partial<SubagentViewerTarget> = {}): SubagentViewerTarget => ({
+  parentSessionId: 'session-main',
+  childSessionId: 'child-1',
+  label: 'research',
+  mode: 'one-shot',
+  activity: 'running',
+  ...overrides,
+})
+
+/** A bare app whose events are the CALLER's (a fresh object per test —
+ * the harness never mutates the app's private state). */
+async function startApp(
+  events: {
+    onSubmit?: (text: string) => void
+    onExit?: () => void
+    onSingleEscape?: () => boolean | void
+    onSteer?: (text: string) => void
+    onQueueSubmit?: (text: string) => void
+    onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string }) => void
+  } = {},
+): Promise<{ vt: VirtualTerminal; app: TuiApp }> {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: events.onSubmit ?? (() => {}),
+    onExit: events.onExit ?? (() => {}),
+    onSingleEscape: events.onSingleEscape,
+    onSteer: events.onSteer,
+    onQueueSubmit: events.onQueueSubmit,
+    onSubagentSubmit: events.onSubagentSubmit,
+  })
+  app.start()
+  await vt.waitForRender()
+  return { vt, app }
+}
+
+test('a continuable viewer opens an EDITABLE editor with the child placeholder hint', async () => {
+  const { vt, app } = await startApp()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[viewing subagent · continuable]'), `badge missing:\n${view}`)
+  assert.ok(view.includes('Message research'), `empty-draft placeholder missing:\n${view}`)
+  // Typing edits the CHILD draft (and hides the placeholder).
+  vt.sendInput('hello child')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'hello child')
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Message research'), `placeholder must vanish once the draft is non-empty:\n${view}`)
+  app.stop()
+})
+
+test('the child draft never mixes with the main draft: enter/exit round-trips both', async () => {
+  const { vt, app } = await startApp()
+  app.setDraft('main draft abc')
+  await vt.waitForRender()
+  // Enter the continuable viewer: the editor shows the (empty) child draft.
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'the main draft must NOT appear in the child editor')
+  vt.sendInput('child draft xyz')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'child draft xyz')
+  // Exit: the main draft returns; the child draft is parked.
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'main draft abc', 'the main draft must be restored exactly')
+  // Re-enter the SAME child: the unsent child draft is back.
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'child draft xyz', 'the child draft must be retained on re-entry')
+  app.setViewerMode(undefined)
+  app.stop()
+})
+
+test('Enter in a continuable viewer submits to onSubagentSubmit — never the parent', async () => {
+  const parentSubmits: string[] = []
+  const childSubmits: Array<{ parentSessionId: string; childSessionId: string; text: string }> = []
+  const { vt, app } = await startApp({
+    onSubmit: (text) => parentSubmits.push(text),
+    onSubagentSubmit: (request) => childSubmits.push(request),
+  })
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  vt.sendInput('focus on cancellation')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(childSubmits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: 'focus on cancellation',
+  }], 'Enter must deliver exactly one subagent follow-up')
+  assert.deepEqual(parentSubmits, [], 'the parent onSubmit must never fire from the viewer')
+  assert.equal(app.getDraft(), '', 'the child draft clears after a submit (the runner restores on rejection)')
+  // An EMPTY draft does not submit.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(childSubmits.length, 1, 'an empty draft must not submit')
+  app.stop()
+})
+
+test('the main session chords are inert inside the interactive viewer', async () => {
+  const steered: string[] = []
+  const queued: string[] = []
+  const singleEscapes: number[] = []
+  const { vt, app } = await startApp({
+    onSteer: (text) => steered.push(text),
+    onQueueSubmit: (text) => queued.push(text),
+    onSingleEscape: () => { singleEscapes.push(1); return true },
+  })
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  vt.sendInput('draft text')
+  await vt.waitForRender()
+  // Ctrl+S (steer) and Ctrl+Enter (queue) must be consumed, never parent.
+  vt.sendInput('\x13') // ctrl+s
+  await vt.waitForRender()
+  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
+  await vt.waitForRender()
+  // Alt+↑ (dequeue), Shift+Tab (permission) and Ctrl+C (exit chord) too.
+  vt.sendInput('\x1b[1;3A') // alt+up
+  await vt.waitForRender()
+  vt.sendInput('\x1b[Z') // shift+tab
+  await vt.waitForRender()
+  vt.sendInput('\x03') // ctrl+c
+  await vt.waitForRender()
+  assert.deepEqual(steered, [], 'Ctrl+S must never steer the parent from the viewer')
+  assert.deepEqual(queued, [], 'Ctrl+Enter must never queue the parent from the viewer')
+  assert.equal(singleEscapes.length, 0, 'Ctrl+C must not exit (and no accidental Esc)')
+  // The child draft is untouched by the blocked chords.
+  assert.equal(app.getDraft(), 'draft text')
+  // Esc still exits through onSingleEscape.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(singleEscapes.length, 1, 'Esc must exit the viewer')
+  app.stop()
+})
+
+test('a one-shot viewer cannot submit through the host path either (hard reject)', async () => {
+  const parentSubmits: string[] = []
+  const childSubmits: unknown[] = []
+  const { vt, app } = await startApp({
+    onSubmit: (text) => parentSubmits.push(text),
+    onSubagentSubmit: (request) => childSubmits.push(request),
+  })
+  app.setViewerMode(oneShot())
+  await vt.waitForRender()
+  // Enter is consumed by the read-only guard; submitDraft (the plugin
+  // path) is a defensive hard reject.
+  vt.sendInput('x')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(parentSubmits, [])
+  assert.deepEqual(childSubmits, [])
+  app.stop()
+})
+
+test('a failed send restores into the child draft slot, merged with newer typing', async () => {
+  const { vt, app } = await startApp({ onSubagentSubmit: () => {} })
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  vt.sendInput('foo')
+  await vt.waitForRender()
+  // Submit (clears the draft), then the delivery REJECTS while the user
+  // already typed 'bar' again.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('bar')
+  await vt.waitForRender()
+  app.restoreSubagentDraft('child-1', 'foo')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'bar\n\nfoo', 'the failed submission must merge below the newer typing')
+  app.setViewerMode(undefined)
+  app.stop()
+})
+
+test('a send that outlives a viewer switch restores into the OLD child slot only', async () => {
+  const { vt, app } = await startApp()
+  app.setViewerMode(continuable({ childSessionId: 'child-1' }))
+  await vt.waitForRender()
+  app.setViewerMode(continuable({ childSessionId: 'child-2', label: 'audit' }))
+  await vt.waitForRender()
+  vt.sendInput('new child draft')
+  await vt.waitForRender()
+  // The child-1 send failed AFTER the viewer switched: the text must land
+  // in child-1's slot, never in the current surface.
+  app.restoreSubagentDraft('child-1', 'old submission')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'new child draft', 'the current viewer must stay unpolluted')
+  // Re-enter child-1: the restored text is there (merged with whatever
+  // child-1 held — the cleared submit draft).
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  app.setViewerMode(continuable({ childSessionId: 'child-1' }))
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'old submission')
+  app.stop()
+})
+
+test('the viewer generation bumps on open/close/switch (the stale-guard anchor)', async () => {
+  const { vt, app } = await startApp()
+  const g0 = app.getViewerGeneration()
+  app.setViewerMode(continuable())
+  const g1 = app.getViewerGeneration()
+  assert.ok(g1 > g0, 'opening the viewer must bump the generation')
+  app.setViewerMode(continuable({ childSessionId: 'child-2' }))
+  const g2 = app.getViewerGeneration()
+  assert.ok(g2 > g1, 'switching the viewed child must bump the generation')
+  app.setViewerMode(undefined)
+  const g3 = app.getViewerGeneration()
+  assert.ok(g3 > g2, 'closing the viewer must bump the generation')
+  app.stop()
+})
+
+test('a replacement (plugin) editor receives the child draft and the follow-up target', async () => {
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const registry = new EditorRegistry()
+  const submits: unknown[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSubagentSubmit: (request) => submits.push(request),
+  }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  registry.register({ id: 'vim', priority: 0, create: () => ({
+    component: { kind: 'text', spans: [{ text: 'vim' }] },
+    getText: () => 'vim draft',
+    setText: () => {},
+    getCursor: () => 0,
+    setCursor: () => {},
+    focused: true,
+    dispose: () => {},
+  }) }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // The child draft writes target the CURRENT seat occupant.
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  app.setEditorText('child draft via runner')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'child draft via runner', 'the child draft must not leak to the main draft')
+  // The host-owned submit routes to the subagent even with a plugin editor.
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: 'child draft via runner',
+  }])
+  app.setViewerMode(undefined)
+  app.stop()
+})

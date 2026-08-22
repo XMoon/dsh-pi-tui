@@ -319,7 +319,19 @@ export interface TuiCommandRunner {
    * `/tasks` (and its `subagents` alias) — identical to the ↓ trigger.
    */
   openTasksBrowser(): void
-  enterView(childId: SessionId, label?: string): Promise<void>
+  /**
+   * Enter the subagent viewer for one child session: the target carries
+   * the catalog MODE (continuable = interactive editor, one-shot =
+   * read-only) and the exact direct-parent session id the follow-up write
+   * path is pinned to.
+   */
+  enterView(
+    childId: SessionId,
+    label: string | undefined,
+    mode: 'one-shot' | 'continuable',
+    parentSessionId: SessionId,
+    activity: 'running' | 'inactive',
+  ): Promise<void>
   exit(code: number): void
   /**
    * The M5 extension registries (commands/themes/settings/autocomplete/

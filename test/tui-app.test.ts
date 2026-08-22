@@ -1038,7 +1038,7 @@ test('a big diff card caps in the default view with an expand hint', async () =>
   app.stop()
 })
 
-test('the subagent viewer covers the editor, consumes input, and restores the draft on exit', async () => {
+test('the one-shot subagent viewer covers the editor, consumes input, and restores the draft on exit', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
   let singleEscapes = 0
@@ -1051,11 +1051,11 @@ test('the subagent viewer covers the editor, consumes input, and restores the dr
   const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
   app.setDraft('my precious draft')
   await vt.waitForRender()
-  app.setViewerMode({ id: 'child-1', label: 'research' })
+  app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'child-1', label: 'research', mode: 'one-shot', activity: 'running' })
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('viewing subagent: research — read-only · Esc returns'), `placeholder missing:\n${view}`)
-  assert.ok(view.includes('[viewing subagent]'), `header badge missing:\n${view}`)
+  assert.ok(view.includes('viewing subagent: research — one-shot · read-only · Esc returns'), `placeholder missing:\n${view}`)
+  assert.ok(view.includes('[viewing subagent · one-shot · read-only]'), `header badge missing:\n${view}`)
   // Typing goes nowhere, Enter does not submit, ↓ does not open anything.
   vt.sendInput('hello')
   vt.sendInput('\r')
@@ -1076,7 +1076,7 @@ test('the subagent viewer covers the editor, consumes input, and restores the dr
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('my precious draft'), `draft not restored:\n${view}`)
-  assert.ok(!view.includes('[viewing subagent]'), `badge survived leaving:\n${view}`)
+  assert.ok(!view.includes('[viewing subagent'), `badge survived leaving:\n${view}`)
   app.stop()
 })
 
@@ -1087,7 +1087,7 @@ test('ctrl+o still folds the viewed transcript while the viewer is up', async ()
     onExit: () => {},
   })
   app.start()
-  app.setViewerMode({ id: 'child-1', label: 'research' })
+  app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'child-1', label: 'research', mode: 'one-shot', activity: 'running' })
   await vt.waitForRender()
   app.setToolOutputExpanded(false)
   vt.sendInput('\x0f') // ctrl+o

@@ -68,8 +68,11 @@ export interface InputRouterContext {
   readonly questionActive: boolean
   /** Whether an approval prompt is currently shown (capturing). */
   readonly approvalActive: boolean
-  /** Whether the read-only subagent viewer is up and no overlay is open. */
-  readonly viewerLocked: boolean
+  /** The subagent viewer's input mode: `readonly` locks every key except
+   * Esc/Ctrl+O; `continuable` keeps the editor LIVE (the HOST consumes
+   * Enter and the parent-owned chords before the router is consulted);
+   * `none` = no viewer. */
+  readonly viewerInputMode: 'none' | 'readonly' | 'continuable'
   /** Whether any overlay (picker/settings/search/...) is mounted. */
   readonly hasOverlay: boolean
   /** Whether the transcript-search overlay is open (owns its keys). */
@@ -95,6 +98,11 @@ export type InputRouteResult =
   | { kind: 'consumed' }
   /** The input is a normal editor keystroke (or paste burst). */
   | { kind: 'editor' }
+  /** The input is an editor keystroke inside the INTERACTIVE (continuable)
+   * subagent viewer: the same editor dispatch as `editor`, but the
+   * semantic submission target is the viewed SUBAGENT (Enter and the
+   * parent-owned chords are consumed by the HOST before the router). */
+  | { kind: 'viewer-editor' }
   /** The input maps to a plugin keybinding: the SEMANTIC action to
    * execute (never raw input). */
   | { kind: 'plugin-action'; action: TuiAction; key: NormalizedKey }
@@ -153,9 +161,12 @@ export class InputRouter {
     // Capturing flows own everything.
     if (ctx.questionActive) return { kind: 'consumed' }
     if (ctx.approvalActive) return { kind: 'consumed' }
-    // Read-only viewer: only Esc + Ctrl+O pass through (host paths); the
-    // router treats everything else as consumed while locked.
-    if (ctx.viewerLocked && !matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
+    // Read-only (one-shot) viewer: only Esc + Ctrl+O pass through (host
+    // paths); the router treats everything else as consumed while locked.
+    // An INTERACTIVE (continuable) viewer keeps the editor live — the
+    // router's editor routes below become `viewer-editor` (the host has
+    // already consumed Enter and the parent-owned chords).
+    if (ctx.viewerInputMode === 'readonly' && !matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
       return { kind: 'consumed' }
     }
     // The transcript-search overlay owns its keys.
@@ -183,7 +194,7 @@ export class InputRouter {
     // A replacement editor is probed by TuiApp before this final plugin
     // stage. The router reports the editor route so that TuiApp can deliver
     // the key, then retry plugin resolution only when the editor declined.
-    if (ctx.editorReplacement) return { kind: 'editor' }
+    if (ctx.editorReplacement) return this.viewerEditor(ctx)
     // Non-capturing plugin keybindings are consulted last for the host
     // editor. Printable keys always stay with normal text entry, and an
     // editor-owned binding (navigation, deletion, completion) keeps priority
@@ -191,11 +202,19 @@ export class InputRouter {
     if (normalized !== undefined && !isPrintableKey(normalized)) {
       const action = pluginActionFor(normalized)
       if (action !== undefined) {
-        if (ctx.editorAccepts?.(data) === true) return { kind: 'editor' }
+        if (ctx.editorAccepts?.(data) === true) return this.viewerEditor(ctx)
         return { kind: 'plugin-action', action, key: normalized }
       }
     }
-    return { kind: 'editor' }
+    return this.viewerEditor(ctx)
+  }
+
+  /** The editor route, named for its submission target: inside the
+   * interactive subagent viewer the visible editor belongs to the CHILD
+   * (the semantic submit target differs, though the dispatch is the
+   * same). */
+  private viewerEditor(ctx: InputRouterContext): InputRouteResult {
+    return ctx.viewerInputMode === 'continuable' ? { kind: 'viewer-editor' } : { kind: 'editor' }
   }
 
   /** Whether a normalized key is reserved by the host lifecycle. */

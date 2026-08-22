@@ -101,6 +101,14 @@ import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
+import {
+  submitSubagentFollowup,
+  type SubagentFollowupOutcome,
+  type SubagentFollowupReject,
+  type SubagentFollowupService,
+  type SubagentParentLike,
+  type SubagentViewerSubmitRequest,
+} from './subagent-viewer-submit.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -2133,8 +2141,20 @@ export function apply(ctx: Context, config: Config): void {
     // and immediately on turn/end.
     let repaintTimer: NodeJS.Timeout | undefined
     // P7d: subagent viewer — while set, the transcript shows another live
-    // session's log read-only and Esc returns to the parent session.
-    let viewing: { id: SessionId; folder: TranscriptFolder } | undefined
+    // session's log and Esc returns to the parent session. The target is
+    // MODE-AWARE: a continuable child's viewer is INTERACTIVE (the editor
+    // submits follow-ups through ctx.subagents.followup), a one-shot
+    // child's viewer stays read-only. The parent session id is pinned at
+    // open time — follow-ups require the exact live direct parent, and
+    // the viewer never guesses it from the current live agent.
+    let viewing: {
+      id: SessionId
+      folder: TranscriptFolder
+      parentSessionId: SessionId
+      label: string
+      mode: 'one-shot' | 'continuable'
+      activity: 'running' | 'inactive'
+    } | undefined
     // Unsettled subagent delegations in the live session, in tool/call order.
     // The viewer matches one of these by description when the user opens a
     // child transcript, so the child's tool/result can pop the viewer back.
@@ -2199,8 +2219,18 @@ export function apply(ctx: Context, config: Config): void {
       }))
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
-    /** Enter the read-only subagent viewer for one session (live or persisted). */
-    const enterView = async (childId: SessionId, label?: string): Promise<void> => {
+    /** Enter the subagent viewer for one session (live or persisted). The
+     * target carries the catalog MODE (continuable = interactive editor,
+     * one-shot = read-only — never guessed from running/inactive) and the
+     * exact direct-parent session id the follow-up write path is pinned
+     * to. */
+    const enterView = async (
+      childId: SessionId,
+      label: string | undefined,
+      mode: 'one-shot' | 'continuable',
+      parentSessionId: SessionId,
+      activity: 'running' | 'inactive',
+    ): Promise<void> => {
       const childFolder = new TranscriptFolder()
       // Only the child's OWN events enter the viewer: a fork provider seeds
       // the child with the parent's completed-turn history (session/end-seed
@@ -2229,12 +2259,13 @@ export function apply(ctx: Context, config: Config): void {
       // user exits with Esc as before).
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
       if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
-      viewing = { id: childId, folder: childFolder }
+      viewing = { id: childId, folder: childFolder, parentSessionId, label: label ?? childId, mode, activity }
       repaint(app, childFolder)
-      // The viewer bar covers the editor (read-only placeholder, accent
-      // border) and the header badges the mode — the transient notify is
-      // no longer the only "you are elsewhere" signal.
-      app.setViewerMode({ id: childId, label: label ?? childId })
+      // The viewer bar covers the editor (a read-only placeholder for
+      // one-shot, the child's own draft for continuable) and the header
+      // badges the mode — the transient notify is no longer the only "you
+      // are elsewhere" signal.
+      app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity })
     }
     /** Leave the subagent viewer (single Esc). Returns whether it exited. */
     const exitView = (): boolean => {
@@ -3228,6 +3259,35 @@ export function apply(ctx: Context, config: Config): void {
       // row-level `i` = interrupt on subagent rows (kimi's stop-on-row
       // pattern; the old /subagents SettingsList-submenu panel is gone).
       onOpenTasks: () => openTasksBrowser(),
+      // Enter in an INTERACTIVE (continuable) subagent viewer: deliver the
+      // follow-up through ctx.subagents.followup — the continuation
+      // manager's child inbox (enqueue while running, wake while waiting,
+      // cold resume when absent). NEVER the parent's submit/steer/queue
+      // path. The app already cleared the child draft; a rejection
+      // restores it (merged) into the child's own draft slot.
+      onSubagentSubmit: (request) => {
+        const viewerGeneration = app.getViewerGeneration()
+        runOwned('subagent followup', () => submitSubagentFollowup(request, {
+          // The exact live direct parent: read at SEND time so a session
+          // switch / /new / /resume that landed while the user typed is a
+          // hard reject (never route the text to a different main Agent).
+          currentParent: () => liveAgent as SubagentParentLike | undefined,
+          subagents: () => ctx.get('subagents') as SubagentFollowupService | undefined,
+          makeSignal: () => new AbortController().signal,
+          // Durable attribution: a plain user-sourced message (the same
+          // source the main editor's messages carry).
+          makeSource: () => ({ kind: 'user' }),
+        }), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onResult: (outcome) => settleSubagentSubmit(request, outcome, viewerGeneration),
+          onError: (error) => settleSubagentSubmit(
+            request,
+            { kind: 'rejected', reason: { kind: 'error', message: safeErrorMessage(error) } },
+            viewerGeneration,
+          ),
+        })
+      },
     }, {
       // The transcript image surface (plan M8/M9): the durable loader plus
       // the dim fallback coloring.
@@ -3279,6 +3339,68 @@ export function apply(ctx: Context, config: Config): void {
       unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
       unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
     })
+    /**
+     * One follow-up send settled (plan §10/§11/§12):
+     * - ACCEPTED: the child inbox owns the message — never restore the
+     *   draft, never insert a fake transcript row; the child's OWN session
+     *   events update the viewer transcript through the normal folding.
+     *   Only a transient `sent` notice is shown, and only while the SAME
+     *   child is still being viewed.
+     * - REJECTED: the user's text must NEVER be lost. It is restored into
+     *   the CHILD's own draft slot, merged with whatever the user typed
+     *   while the request was in flight. The current surface is touched
+     *   ONLY while the same child is still being viewed — a viewer
+     *   closed/switched during the send restores into the OLD child's
+     *   slot and never pollutes the new surface (the generation guard).
+     */
+    const settleSubagentSubmit = (
+      request: SubagentViewerSubmitRequest,
+      outcome: SubagentFollowupOutcome,
+      viewerGeneration: number,
+    ): void => {
+      // The viewer target is CURRENT only while the SAME child is still
+      // being viewed AND the parent session is still the one the viewer
+      // was opened from AND the app's viewer generation is unchanged (a
+      // viewer open/close/switch bumps it).
+      const currentViewing = viewing !== undefined
+        && viewing.id === request.childSessionId
+        && liveAgent?.session.id === request.parentSessionId
+        && app.getViewerGeneration() === viewerGeneration
+        ? viewing
+        : undefined
+      if (outcome.kind === 'ok') {
+        if (currentViewing !== undefined) {
+          app.notify(`sent to ${currentViewing.label} — queued for the next turn`, 'info')
+        }
+        return
+      }
+      const reason = outcome.reason
+      if (reason.kind === 'cancelled') {
+        // Aborted before inbox acceptance: the message never entered the
+        // child's inbox — restore silently.
+        app.restoreSubagentDraft(request.childSessionId, request.text)
+        return
+      }
+      if (currentViewing === undefined) {
+        app.restoreSubagentDraft(request.childSessionId, request.text)
+        return
+      }
+      app.setEditorText(mergeDraft(app.getDraft(), request.text))
+      app.notify(subagentFollowupNotice(reason, currentViewing.label), 'error')
+    }
+
+    /** The user-facing reason for a rejected follow-up (plan §18). */
+    const subagentFollowupNotice = (reason: SubagentFollowupReject, label: string): string => {
+      switch (reason.kind) {
+        case 'parent-unavailable': return 'Cannot send: parent session is no longer active'
+        case 'stale-child': return 'Cannot continue this subagent'
+        case 'unauthorized': return 'Cannot send: subagent ownership changed'
+        case 'unavailable': return 'Subagent continuation is temporarily unavailable'
+        case 'error': return `could not send to ${label}: ${reason.message}`
+        case 'cancelled': return 'send cancelled — draft restored'
+      }
+    }
+
     // ↓ with an empty editor: the task browser over BOTH background
     // surfaces. Job rows (bash + background one-shot subagent jobs) are
     // status-only: the bash output read cursor belongs to the model's
@@ -3318,7 +3440,14 @@ export function apply(ctx: Context, config: Config): void {
         const row = rows.find(candidate => candidate.value === value)
         if (row === undefined) return
         if (row.kind === 'subagent') {
-          runOwned('subagent view from tasks', () => enterView(row.childId as SessionId, row.label), {
+          const parentSessionId = liveAgent?.session.id
+          if (parentSessionId === undefined) return
+          // The row carries the catalog MODE + activity: the viewer target
+          // is pinned to them (continuable → interactive editor, one-shot →
+          // read-only), and the follow-up write path to the exact parent.
+          runOwned('subagent view from tasks', () => enterView(
+            row.childId as SessionId, row.label, row.mode, parentSessionId, row.activity,
+          ), {
             diag,
             sessionId: () => liveAgent?.session.id,
             onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
@@ -3342,7 +3471,11 @@ export function apply(ctx: Context, config: Config): void {
         target.map(row => row.kind === 'job'
           ? {
               value: row.value,
-              label: taskRowLabel(row),
+              // A `subagent`-kind job is the registry's reliable contract
+              // for a background one-shot delegation: its `one-shot` mode
+              // rides as the non-truncatable suffix, like the child rows.
+              label: row.jobKind === 'subagent' ? `subagent job · ${row.label}` : taskRowLabel(row),
+              suffix: row.jobKind === 'subagent' ? 'one-shot' : undefined,
               status: row.status,
               detail: row.detail,
               startedAt: row.startedAt,
@@ -3352,7 +3485,11 @@ export function apply(ctx: Context, config: Config): void {
             }
           : {
               value: row.value,
-              label: taskRowLabel(row),
+              // The mode rides as the panel's non-truncatable SUFFIX
+              // (`subagent · <label> · continuable`): the label itself may
+              // truncate on a narrow screen, the mode never silently does.
+              label: `subagent · ${row.label}`,
+              suffix: row.mode,
               status: row.activity,
               detail: row.hasChildren ? 'has children' : undefined,
               group: rowGroup(row),
@@ -3705,7 +3842,13 @@ export function apply(ctx: Context, config: Config): void {
       if (snapshot.kind === 'subagent') {
         const childSessionId = subagentJobTranscriptId(snapshot)
         if (childSessionId !== undefined) {
-          runOwned('subagent view from tasks', () => enterView(childSessionId as SessionId, snapshot.label), {
+          // The jobs registry's `subagent` kind IS the reliable contract
+          // for a background ONE-SHOT delegation (the registry never
+          // records continuable children): the transcript viewer opens
+          // read-only. The parent is the job owner.
+          runOwned('subagent view from tasks', () => enterView(
+            childSessionId as SessionId, snapshot.label, 'one-shot', owner.session.id, 'inactive',
+          ), {
             diag,
             sessionId: () => owner.session.id,
             onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),

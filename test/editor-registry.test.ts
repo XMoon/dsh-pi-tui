@@ -1226,16 +1226,16 @@ test('TuiApp: the subagent viewer covers a PLUGIN editor and restores its draft 
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'plugin viewer draft')
   // Enter the viewer: the SEAT shows the placeholder; the preserved
-  // draft stays in draftBeforeViewer (getDraft returns it — the real
+  // draft stays in mainDraftBeforeViewer (getDraft returns it — the real
   // draft must never be lost while viewing).
-  app.setViewerMode({ id: 'child-1', label: 'child' })
+  app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'child-1', label: 'child', mode: 'one-shot', activity: 'running' })
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'plugin viewer draft',
     'getDraft preserves the real draft while viewing (never the placeholder)')
   // The seat text is the placeholder (the plugin editor's component was
   // covered). Probe via the holder's current editor:
   const seatText = app.seatTextForTest()
-  assert.equal(seatText, 'viewing subagent: child — read-only · Esc returns',
+  assert.equal(seatText, 'viewing subagent: child — one-shot · read-only · Esc returns',
     'the placeholder covers the CURRENT seat occupant')
   // Exit: the draft returns to the PLUGIN editor (the current occupant).
   app.setViewerMode(undefined)

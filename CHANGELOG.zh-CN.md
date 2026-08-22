@@ -9,6 +9,18 @@
 
 ### 新增
 
+- **continuable 子代理查看器现在可交互。** 从 `/tasks` 进入 `continuable`
+  子代理时,打开的是一个实时对话界面:编辑器持有子代理自己的草稿(与主
+  会话草稿隔离,再次进入时保留),回车把文本作为子代理的**下一回合**
+  通过 `ctx.subagents.followup` 投递——FIFO,运行中的子代理不会被中断
+  或 steer,非活跃的子代理会自动冷恢复。查看器内的编辑器绝不触达父会话
+  (其中的 Ctrl+S/Ctrl+Enter/Alt+↑ 均失效),投递失败时文本会合并回子
+  代理草稿(不丢失、不错发),发送期间切换查看器时,结果只恢复到原子
+  代理的草稿槽。one-shot 子代理保持严格只读。
+- **任务浏览器显示子代理 mode。** 每个子代理行都标注为
+  `subagent · <label> · continuable` / `· one-shot`,按下 Enter 之前就
+  能知道查看器是否可交互;mode 是不可截断的后缀(长标签会被截断,mode
+  不会),且绝不由 running/inactive 状态推断。
 - **`/settings` 新增 `Home/End keys` 可配置项。** fullscreen 下 Home/End
   存在两种用户习惯:有人期望它们控制输入框,有人期望它们滚动对话。新的
   `Home/End keys` 行选择行为——`Input`(Home/End 在输入框内移动,

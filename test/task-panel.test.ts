@@ -609,3 +609,51 @@ test('Kitty CSI-u Esc cancels and CSI-u Enter confirms', () => {
   panel4.handleInput('\x1b')
   assert.equal(cancelled, 3, `legacy Esc must still cancel: got ${cancelled}`)
 })
+
+test('the subagent mode suffix renders after the label and survives truncation', () => {
+  // The mode (continuable / one-shot) is the panel's non-truncatable
+  // SUFFIX: a narrow screen or a long label may clip the label, never the
+  // mode — the viewer's interactivity must be readable before Enter.
+  const { panel, rendered } = makePanel([
+    { value: 'agent:child-1', label: 'subagent · research', suffix: 'continuable', status: 'inactive', group: 'subagents' },
+    { value: 'agent:child-2', label: 'subagent · a-very-long-reviewer-label-that-keeps-growing', suffix: 'one-shot', status: 'running', group: 'subagents' },
+  ])
+  const wide = rendered().map(strip).join('\n')
+  assert.ok(wide.includes('subagent · research · continuable'), `mode suffix missing on the wide frame:\n${wide}`)
+  assert.ok(wide.includes('subagent · a-very-long-reviewer-label-that-keeps-growing · one-shot'), `full label + suffix missing:\n${wide}`)
+
+  // Narrow frame: the label truncates from its own end, the mode stays.
+  const narrowPanel = new TaskBrowserPanel(
+    [subagent({ label: 'subagent · a-very-long-reviewer-label-that-keeps-growing', suffix: 'one-shot' })],
+    10,
+    { header: 'tasks', enableSearch: false, noMatchText: 'no active tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const narrow = narrowPanel.render(40).map(strip).join('\n')
+  assert.ok(narrow.includes('· one-shot'), `the mode must survive the narrow frame:\n${narrow}`)
+  assert.ok(narrow.includes('…'), `the clipped label must show the ellipsis:\n${narrow}`)
+  assert.ok(!narrow.includes('keeps-growing'), `the label tail should be clipped on the narrow frame:\n${narrow}`)
+})
+
+test('search matches the mode suffix too', () => {
+  const { panel, rendered } = makePanel([
+    subagent({ label: 'subagent · research', suffix: 'continuable', status: 'inactive' }),
+    subagent({ label: 'subagent · audit', suffix: 'one-shot', status: 'inactive', value: 'agent:child-2' }),
+  ], { enableSearch: true })
+  // Type "one-shot" — only the audit row matches (the suffix is part of
+  // the searchable text, so the mode is reachable by filter).
+  panel.handleInput('o')
+  panel.handleInput('n')
+  panel.handleInput('e')
+  panel.handleInput('-')
+  panel.handleInput('s')
+  panel.handleInput('h')
+  panel.handleInput('o')
+  panel.handleInput('t')
+  const lines = rendered().map(strip)
+  const joined = lines.join('\n')
+  assert.ok(joined.includes('subagent · audit · one-shot'), `the one-shot row must match:\n${joined}`)
+  assert.ok(!joined.includes('subagent · research · continuable'), `the continuable row must not match:\n${joined}`)
+})

@@ -336,9 +336,11 @@ the Advanced/Unstable roadmap).
   pinned earlier** (`/rename` is an alias).
 - `/tasks` — the merged task browser: background jobs AND subagents in one
   searchable list (type to filter rows by kind/label/status — `subagent`,
-  `bash`, `failed`…). `Enter` opens the detail (child transcript for a
-  subagent, status viewer for a job), `i` interrupts the selected subagent.
-  `/subagents` is an alias.
+  `bash`, `failed`…). Subagent rows show their mode as part of the label
+  (`subagent · <label> · continuable` / `… · one-shot`) — you know before
+  Enter whether the viewer will be interactive. `Enter` opens the detail
+  (child viewer for a subagent, status viewer for a job), `i` interrupts
+  the selected subagent. `/subagents` is an alias.
 - `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
 - `/status` — show the current session's stats and identity (turn counts,
   token usage, workspace, installed dsh version).
@@ -366,9 +368,16 @@ the Advanced/Unstable roadmap).
   fallback otherwise). The literal `@path` is submitted and the model reads
   the file itself. With background work running, an empty editor's `↓` opens
   the same merged task browser as `/tasks`:
-  - **subagent rows** (live continuable children) — `Enter` opens the child's
-    transcript read-only (`Esc` returns); `i` interrupts the selected child.
-    They never register jobs records, so this browser is their only glanceable
+  - **subagent rows** (live children, labeled with their catalog mode:
+    `continuable` or `one-shot`) — `Enter` opens the child's viewer:
+    a **continuable** child's viewer is **interactive** — type a
+    follow-up and press Enter, and it is delivered as the child's NEXT
+    turn through `ctx.subagents.followup` (FIFO — a running child is
+    never interrupted or steered; an inactive child cold-resumes
+    automatically), while `Esc` returns to your session. A **one-shot**
+    child's viewer stays **read-only** (`Esc` returns; the editor shows
+    the read-only placeholder). `i` interrupts the selected child. They
+    never register job records, so this browser is their only glanceable
     home.
   - **job rows** (bash and one-shot subagent jobs) — `Enter` shows the status
     viewer only: a bash job's output read cursor belongs to the model's

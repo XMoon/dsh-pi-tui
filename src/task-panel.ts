@@ -21,6 +21,11 @@ export interface TaskPanelItem {
   value: string
   /** Primary label (`bash · pnpm build` / `subagent · research`). */
   label: string
+  /** An always-visible TAIL appended after the label (`continuable` /
+   * `one-shot`): truncation applies to the label only, so a narrow screen
+   * or a long label can never silently cut the mode off (the viewer's
+   * interactivity must be readable before Enter). */
+  suffix?: string
   /** Status word (running / completed / …). */
   status: string
   /** Optional detail line (job detail / has-children note). */
@@ -341,7 +346,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       const needle = query.toLowerCase()
       this.filtered = this.items.filter(item =>
         (!typeActive || item.type === this.activeType)
-        && (query === '' || `${item.value}\n${item.label}\n${item.status}\n${item.detail ?? ''}\n${item.group ?? ''}`.toLowerCase().includes(needle)))
+        && (query === '' || `${item.value}\n${item.label}\n${item.suffix ?? ''}\n${item.status}\n${item.detail ?? ''}\n${item.group ?? ''}`.toLowerCase().includes(needle)))
     }
     this.selected = 0
     this.scroll = 0
@@ -424,7 +429,6 @@ export class TaskBrowserPanel implements Component, Focusable {
     // Left column: pointer + dot + label.
     const leftPrefix = `${pointer} ${dot} `
     const leftWidth = visibleWidth(leftPrefix)
-    const label = selected ? color.textStrong(item.label) : color.text(item.label)
 
     // Right column: status + elapsed, right-aligned. The tail reserves its
     // width on the right; the label wraps to the rest (2-cell gap minimum).
@@ -435,7 +439,16 @@ export class TaskBrowserPanel implements Component, Focusable {
     const tailWidth = visibleWidth(tail)
     const available = width - leftWidth
     const labelBudget = Math.max(1, available - tailWidth - 2)
-    const leftFinal = leftPrefix + truncateToWidth(label, labelBudget, '…')
+    // The mode suffix is a non-truncatable tail: the label takes the
+    // remaining budget AFTER the suffix is reserved, so a long label
+    // truncates from its own end and `· continuable` / `· one-shot`
+    // always survives (the viewer's interactivity is a pre-Enter fact).
+    const suffix = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
+    const suffixWidth = visibleWidth(suffix)
+    const truncated = truncateToWidth(item.label, Math.max(1, labelBudget - suffixWidth), '…')
+    const leftFinal = leftPrefix
+      + (selected ? color.textStrong(truncated) : color.text(truncated))
+      + (suffix === '' ? '' : selected ? color.textStrong(suffix) : color.text(suffix))
     const pad = Math.max(1, available - visibleWidth(leftFinal) - tailWidth)
     const line = leftFinal + ' '.repeat(pad) + tail
     const out = [truncateToWidth(line, width, '…')]
