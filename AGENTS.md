@@ -299,9 +299,15 @@ gitignored):
   (prepack build/typecheck/tests + every postpack smoke, including the
   declaration-leak gate). Measured ≈2 min. Some failures are ONLY visible
   in the packed artifact (the settleCompactionSurface declaration leak was
-  exactly this class) — do not skip this for a CI round-trip.
+  exactly this class) — do not skip this for a CI round-trip. When the
+  pushed range does NOT touch `packages/pi-tui/`, the fork's own
+  typecheck/tests are skipped (`verify:prepush:nofork`, ≈1:45; the fork
+  suite only guards fork changes and CI runs it regardless).
 - **any other branch** → `pnpm typecheck` only (≈15 s), so WIP pushes stay
-  cheap.
+  cheap; fork untouched → `pnpm typecheck:bundle` (≈10 s).
+- Output is quiet by design: success prints ONE summary line (full logs
+  are discarded); failure prints the last 60 log lines and retains the
+  log path. Run `pnpm run verify:prepush` manually for unabridged output.
 - Escape hatch: `git push --no-verify` (then rely on CI).
 
 ## Reusable flow (worth repeating for the next capability)

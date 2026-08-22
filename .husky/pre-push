@@ -6,17 +6,55 @@
 #     tarball smokes) — the settleCompactionSurface leak was exactly this
 #     class, see AGENTS.md "Traps hit".
 #   - any other branch: fast typecheck only, so WIP pushes stay cheap.
+# When the pushed range does NOT touch packages/pi-tui/ (the vendored
+# fork), the fork's own typecheck/tests are skipped (~15 s saved) — the
+# fork suite only guards fork changes, and CI still runs it regardless.
+# Output: on success a single summary line (logs are discarded); on
+# failure the last 60 log lines plus the retained log path. Run
+# `pnpm run verify:prepush` manually for the unabridged output.
 # Escape hatch: git push --no-verify.
 
 FULL=0
+FORK_CHANGED=1
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
     refs/heads/main | refs/tags/v*) FULL=1 ;;
   esac
+  # The remote base may be unknown (new branch: zero sha, or a shallow
+  # clone): fall back to the safe "fork changed" default.
+  if git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    if git diff --quiet "$remote_sha" "$local_sha" -- packages/pi-tui/; then
+      FORK_CHANGED=0
+    else
+      FORK_CHANGED=1
+    fi
+  fi
 done
 
 if [ "$FULL" -eq 1 ]; then
-  pnpm run verify:prepush
+  if [ "$FORK_CHANGED" -eq 1 ]; then
+    VERIFY="pnpm run verify:prepush"
+  else
+    VERIFY="pnpm run verify:prepush:nofork"
+  fi
 else
-  pnpm typecheck
+  if [ "$FORK_CHANGED" -eq 1 ]; then
+    VERIFY="pnpm typecheck"
+  else
+    VERIFY="pnpm typecheck:bundle"
+  fi
+fi
+
+LOG=$(mktemp "${TMPDIR:-/tmp}/dsh-pi-tui-push.XXXXXX.log")
+START=$(date +%s)
+if $VERIFY >"$LOG" 2>&1; then
+  END=$(date +%s)
+  echo "✓ pre-push verification passed ($VERIFY, $((END - START))s)"
+  rm -f "$LOG"
+else
+  END=$(date +%s)
+  echo "✗ pre-push verification FAILED ($VERIFY, $((END - START))s)"
+  tail -n 60 "$LOG"
+  echo "full log: $LOG"
+  exit 1
 fi
