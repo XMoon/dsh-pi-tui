@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { extractAtPrefix, MentionProvider, resolveFdPath, suggestPathArgument } from '../src/mentions.ts'
 
 /** A throwaway workspace with known files. */
@@ -175,14 +175,38 @@ test('suggestPathArgument treats Windows drive and UNC tokens as absolute', () =
     process.chdir(root)
     mkdirSync(join(root, 'C:\\Users'))
     writeFileSync(join(root, 'C:\\Users', 'shot.png'), 'x')
-    mkdirSync(join(root, '\\\\server\\\\share'))
-    writeFileSync(join(root, '\\\\server\\\\share', 'foo.png'), 'x')
+    // The UNC share ROOT keeps its trailing separator (win32 root form):
+    // readdirSync('\\server\share\') is legal on Windows, and the root
+    // must not be stripped into a different path.
+    mkdirSync(join(root, '\\\\server\\share\\'))
+    writeFileSync(join(root, '\\\\server\\share\\', 'foo.png'), 'x')
     const drive = suggestPathArgument('C:\\Users\\sh', root)
     assert.ok(drive !== null, `a drive token must complete:\\n${JSON.stringify(drive)}`)
     assert.ok(drive.some(item => item.value === 'C:\\Users\\shot.png'), `drive value keeps the backslash dialect:\\n${JSON.stringify(drive)}`)
-    const unc = suggestPathArgument('\\\\server\\\\share\\\\fo', root)
+    const unc = suggestPathArgument('\\\\server\\share\\fo', root)
     assert.ok(unc !== null, `a UNC token must complete:\\n${JSON.stringify(unc)}`)
     assert.ok(unc.some(item => item.value === '\\\\server\\share\\foo.png'), `UNC value keeps the share form:\\n${JSON.stringify(unc)}`)
+  } finally {
+    process.chdir(savedCwd)
+  }
+})
+
+test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', () => {
+  // `C:\` is the drive root; `C:` is the drive-relative current directory
+  // — different directories on Windows. win32.dirname('C:\\Wi') returns
+  // `C:\\`, and the search target must stay `C:\\` (the earlier
+  // unconditional strip turned it into `C:` and read the wrong place).
+  assert.equal(win32.dirname('C:\\Wi'), 'C:\\', 'the win32 dirname root form')
+  const root = fixtureWorkspace()
+  const savedCwd = process.cwd()
+  try {
+    process.chdir(root)
+    // A POSIX dir literally named `C:\` stands in for the drive root.
+    mkdirSync(join(root, 'C:\\'))
+    writeFileSync(join(root, 'C:\\', 'Win.exe'), 'x')
+    const items = suggestPathArgument('C:\\Wi', root)
+    assert.ok(items !== null, `the drive root must complete:\\n${JSON.stringify(items)}`)
+    assert.ok(items.some(item => item.value === 'C:\\Win.exe'), `drive-root value stays rooted:\\n${JSON.stringify(items)}`)
   } finally {
     process.chdir(savedCwd)
   }

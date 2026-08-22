@@ -202,11 +202,18 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
     searchDir = absolute ? expanded : join(cwd, expanded)
     searchPrefix = ''
   } else {
-    // Split into directory + basename prefix. win32.dirname returns UNC
-    // roots WITH a trailing separator (`\\server\share\`) — a trailing
-    // separator is redundant in a readdir target (identical on Windows),
-    // and stripping keeps the target stable across dialects.
-    searchDir = absolute ? pathDirname(expanded).replace(/[\\/]$/, '') : join(cwd, dirname(expanded))
+    // Split into directory + basename prefix. win32.dirname returns
+    // drive/UNC ROOTS with their trailing separator (`C:\`,
+    // `\\server\share\`) — the root MUST keep it: `C:\` is the drive
+    // root while `C:` is the drive-relative current directory, a real
+    // Windows semantic difference. Non-root dirs strip the redundant
+    // separator for a stable readdir target.
+    const dir = pathDirname(expanded)
+    searchDir = absolute
+      ? winAbsolute && dir === win32.parse(dir).root
+        ? dir
+        : dir.replace(/[\\/]$/, '')
+      : join(cwd, dirname(expanded))
     searchPrefix = pathBasename(expanded)
   }
   let entries
