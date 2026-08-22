@@ -88,6 +88,15 @@ import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import { execFile } from 'node:child_process'
+import { DraftImageStore } from './image/draft-store.ts'
+import { ImageInputError } from './image/errors.ts'
+import { clipboardBackendOf, commandOnPath, readClipboardImage, type ClipboardEnvironment, type RunCommand } from './image/clipboard.ts'
+import { checkImageLimits } from './image/intake.ts'
+import { ImageLoadError } from './image/errors.ts'
+import { ImageLoader } from './image/loader.ts'
+import { consumeDraftImages, draftHasImages, prepareUserMessage, pruneUnreferencedDrafts, type PrepareInputDeps } from './image/submit.ts'
+import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
@@ -180,7 +189,7 @@ const REPAINT_FLUSH_MS = 50
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'exit', 'settings', 'help', 'login', 'logout', 'model', 'reload',
+  'exit', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'preset',
 ])
 
@@ -197,11 +206,34 @@ export const SESSIONLESS_COMMANDS = new Set([
  * body — there is no command-execution wire for skills.
  */
 export const LOCAL_COMMANDS = new Set([
-  'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
+  'copy', 'exit', 'export', 'fork', 'help', 'image', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
 ])
+
+/**
+ * Command semantics matrix (plan §19.3/M12): a LOCAL command line carrying a
+ * staged image placeholder is REJECTED — local commands are pure UI
+ * controls, never LLM prompts. AGENT-FACING input (plain prompts AND
+ * per-skill slash invocations like `/grilling`) SUPPORTS images: the skill
+ * wrapper builds its message through the same prepared-input path, so an
+ * image-bearing skill line is a real multimodal prompt (review finding 4).
+ * There is never a silent drop.
+ * @param parsed - the parsed slash command, undefined for a plain prompt.
+ * @param text - the submission text.
+ * @param store - the live draft store.
+ * @param isLocal - whether the command name is a LOCAL (TUI-owned/UI)
+ *   command; skill names answer false.
+ */
+export function commandRejectsImages(
+  parsed: { name: string } | undefined,
+  text: string,
+  store: import('./image/types.ts').DraftImageStoreLike,
+  isLocal: (name: string) => boolean,
+): boolean {
+  return parsed !== undefined && isLocal(parsed.name) && draftHasImages(text, store)
+}
 
 /**
  * The AUTHORITATIVE host-owned command catalog (P1-04): every command name
@@ -234,7 +266,7 @@ export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
  *   plugin-declared local commands (absent = static set only).
  */
 export function shouldSteerOnEnter(
-  parsed: { name: string } | undefined,
+  parsed: { name: string; rawInput?: string } | undefined,
   running: boolean,
   busyEnter: string | undefined,
   forceQueue: boolean,
@@ -242,10 +274,41 @@ export function shouldSteerOnEnter(
 ): boolean {
   if (forceQueue) return false
   if (parsed !== undefined) {
+    // `/skill <name> [args...]` is an AGENT-facing invocation (loadSkill),
+    // NOT the local picker: it steers like any other prompt. Only the bare
+    // `/skill` picker counts as local (review finding — same classification
+    // as the image-rejection gate).
+    if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return running && busyEnter === 'steer'
     if (LOCAL_COMMANDS.has(parsed.name)) return false
     if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return false
   }
   return running && busyEnter === 'steer'
+}
+
+/**
+ * Normalize an explicit `/skill <name> <args>` invocation to the skill's
+ * own slash line `/<name> <args>` (review finding 2). The harness's
+ * explicit skill gesture scans for `/<skill-name>` — it would extract
+ * `skill` from a raw `/skill grilling ...` line and never inject the
+ * grilling body. The command handler already performs this conversion
+ * (`loadSkill` builds `'/' + skill.name + ' ' + args`); the busy-Enter
+ * steer path must use the SAME normalized line so the body injects and
+ * any image placeholders ride along.
+ * @param text - the submitted line.
+ * @returns the normalized `/<name> <args>` line, or undefined when the
+ *   line is not an explicit skill invocation (plain prompt, other
+ *   commands, or the bare `/skill` picker).
+ */
+export function normalizeSkillInvocation(text: string): string | undefined {
+  const parsed = parseCommand(text)
+  if (parsed?.name !== 'skill') return undefined
+  const raw = parsed.rawInput.trim()
+  if (raw === '') return undefined
+  const match = /^([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+([\s\S]*))?$/.exec(raw)
+  if (match === null) return undefined
+  const name = match[1]!
+  const args = match[2]
+  return args === undefined || args.trim() === '' ? `/${name}` : `/${name} ${args.trimStart()}`
 }
 
 /**
@@ -520,6 +583,23 @@ export interface QueueFoldResult {
  *   skipped, and a newly-reported id is ADDED here so a re-render can never
  *   double-notify.
  */
+/**
+ * The queue-pane display text of one message's content (review finding 5):
+ * text blocks verbatim, image blocks as a compact `🖼️ name` summary (the
+ * marker carries U+FE0F so fonts with an emoji face render it 2 cells wide
+ * — the width math's expectation — and never overlap the name) — an
+ * image-only queued message shows `🖼️ shot.png` instead of an empty row,
+ * and a mixed message advertises its image. The queue row stays one line.
+ */
+function queueTextOf(content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[]): string {
+  const parts: string[] = []
+  for (const block of content) {
+    if (block.type === 'text') parts.push(block.text)
+    else if (block.type === 'image') parts.push(`🖼️ ${block.attachment.name ?? 'image'}`)
+  }
+  return parts.join(' ')
+}
+
 export function foldQueueRows(
   messages: readonly QueueInboxMessage[],
   mode: 'followup' | 'steer',
@@ -538,7 +618,7 @@ export function foldQueueRows(
     }
     rows.push({
       id: message.id,
-      text: textOf(message.content),
+      text: queueTextOf(message.content),
       mode,
       // Only user-origin (or sourceless plain) rows are steerable user
       // input. Everything else — plugin notices, subagent-report relays,
@@ -1467,6 +1547,11 @@ export function apply(ctx: Context, config: Config): void {
      * failure (unknown session, broken log, preset mount) returns an error
      * string so callers' `.then(error => ...)` need no rejection path. */
     const switchSession = async (sessionId: string): Promise<string | undefined> => {
+      // Draft cleanup happens ONLY after the switch committed (swapTo
+      // returned success): a refused/failed switch keeps the CURRENT
+      // session and its staged drafts intact — clearing up front would
+      // orphan the editor's placeholders on every failed switch (review
+      // finding 2).
       try {
         // The tracker is a single slot: acquiring the target first would
         // overwrite it, leaving the current session's lock leaked for the
@@ -1506,7 +1591,14 @@ export function apply(ctx: Context, config: Config): void {
           },
           setup: composition.setup,
         })
-        return swapTo(next)
+        const error = await swapTo(next)
+        // The switch COMMITTED: staged drafts are per-session UI state —
+        // drop the UNPINNED ones now (never durable attachments, plan
+        // §14). In-flight submissions keep their pinned drafts so a stale
+        // submission can still restore its text with a live backing draft
+        // (review finding: clear() would orphan the restored placeholders).
+        if (error === undefined) draftImages.clearUnpinned()
+        return error
       } catch (error) {
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
@@ -2091,12 +2183,75 @@ export function apply(ctx: Context, config: Config): void {
       // back. (The classification diagnostics are owned by runOwned.)
       app.setEditorText(mergeDraft(app.getDraft(), draft))
       const message = safeErrorMessage(error)
+      // Image intake/admission/capability failures are THEIR OWN actionable
+      // errors ("Current model ... does not support image input") — wrapping
+      // them in "could not start a session" misleads when a session already
+      // exists (review finding).
+      if (error instanceof ImageInputError) {
+        app.notify(message, 'error')
+        return
+      }
       try {
         ctx.logger.error(`tui-runner: session creation failed: ${message}`)
       } catch {
         // The cordis logger must not block the notice.
       }
       app.notify(`could not start a session: ${message}`, 'error')
+    }
+    /**
+     * Restore the submitted text into the editor after a failed submission
+     * (review finding: the restore MUST run BEFORE the reservation pin
+     * releases — the restored placeholders must keep their backing drafts
+     * against concurrent attach-time prunes). Correctness side effect
+     * first; never throws.
+     */
+    const restoreSubmissionDraft = (draft: string): void => {
+      app.setEditorText(mergeDraft(app.getDraft(), draft))
+    }
+    /**
+     * Notify one submission failure WITHOUT restoring (the task's catch
+     * already restored; restoring twice would re-merge the draft). Image
+     * intake/admission/capability failures are THEIR OWN actionable errors
+     * ("Current model ... does not support image input") — wrapping them in
+     * "could not start a session" misleads when a session already exists.
+     * Diagnostics are owned by runOwned.
+     */
+    const notifySubmissionFailure = (error: unknown): void => {
+      const message = safeErrorMessage(error)
+      if (error instanceof ImageInputError) {
+        app.notify(message, 'error')
+        return
+      }
+      try {
+        ctx.logger.error(`tui-runner: submission failed: ${message}`)
+      } catch {
+        // The cordis logger must not block the notice.
+      }
+      // A followup/steer against an EXISTING session is not a session
+      // creation failure — "could not start a session" would mislead
+      // (review finding).
+      const prefix = liveAgent === undefined ? 'could not start a session' : 'submission failed'
+      app.notify(`${prefix}: ${message}`, 'error')
+    }
+    /** The image submission surface (plan §13): the live attachment/llm
+     * services + the CURRENT provider/model, re-read at submit time (the
+     * TUI supports runtime model switching — never a startup snapshot). */
+    const submitDeps: PrepareInputDeps = {
+      attachments: ctx.get('attachments') as PrepareInputDeps['attachments'],
+      llm: ctx.get('llm') as PrepareInputDeps['llm'],
+      currentModel: () => {
+        // The AUTHORITATIVE model for the next step is the mutable
+        // selection's `current` (/model writes it; prompt assembly reads
+        // it) — never `liveAgent.options`, which holds the agent's launch
+        // configuration and does not move on /model (review finding 1).
+        const current = selected.current
+        if (current !== undefined) return { provider: current.provider, model: current.model }
+        // No selection assembled yet (pre-/model or a sessionless start):
+        // fall back to the agent's launch options as the best known pair.
+        if (liveAgent === undefined) return undefined
+        const { provider, model } = liveAgent.options
+        return provider === undefined || model === undefined ? undefined : { provider, model }
+      },
     }
     /** The session-backed dispatch: create the session lazily (the first
      * user input is the deferred trigger), guard against cross-process
@@ -2115,7 +2270,19 @@ export function apply(ctx: Context, config: Config): void {
       const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
-      runOwned('submit', () => ensureSession().then(async () => {
+      // Reserve the referenced drafts SYNCHRONOUSLY, in the SAME call stack
+      // that left the editor (review finding): ensureSession() on a
+      // deferred start is async (create/compose/resume), and the editor is
+      // already cleared — an attach-time prune during session creation must
+      // not delete the images this submission is about to admit. No await
+      // may precede the reservation.
+      // The submit-flow core owns the ordering contract (reserve →
+      // run → failure-restore-before-release → release), shared with the
+      // integration tests — never hand-rolled per path.
+      runOwned('submit', () => runReservedSubmit({
+        reserve: (t) => draftImages.pinReferenced(t),
+        run: async () => {
+        await ensureSession()
         const agent = liveAgent
         if (agent === undefined) return
         // The guard checks THIS agent's session; capture the identity so
@@ -2167,6 +2334,13 @@ export function apply(ctx: Context, config: Config): void {
             : text
           // The command execution is itself an owned workflow: its outcome
           // decides between the fallback follow-up and a draft restore.
+          // HANDSHAKE PIN (review finding): the outer task's pin releases
+          // when this task returns (right after launching the command), but
+          // the nested fallback pin is only established inside onResult —
+          // without a synchronous handoff the referenced drafts would be
+          // prunable for the whole command run. Acquire it HERE, transfer
+          // it to the nested fallback, and release it on every other exit.
+          const fallbackPin = draftImages.pinReferenced(text)
           runOwned('command execution', () => commands.execute(agent as Agent, toggled, [], signal), {
             diag,
             sessionId: () => agent.session.id,
@@ -2182,6 +2356,7 @@ export function apply(ctx: Context, config: Config): void {
               // retry could ride the unadvertised fallback).
               if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
                 app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
+                fallbackPin()
                 return
               }
               // The fallback follow-up still targets the CAPTURED agent; if
@@ -2189,20 +2364,63 @@ export function apply(ctx: Context, config: Config): void {
               // draft instead of posting into a session the user has left.
               if (execution === undefined) {
                 if (sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
-                  agent.followup(createUserMessage({
-                    content: [{ type: 'text', text }],
-                    source: { kind: 'user' },
-                  }))
+                  // The fallback is a REAL submission: prepare (admit
+                  // images when present) and follow up — an owned workflow
+                  // so a failed image admission restores the draft instead
+                  // of silently dropping the images. This nested workflow
+                  // outlives the outer task (fire-and-forget), so it
+                  // consumes the handoff pin across the async admission
+                  // and releases it in its own finally (review finding 1
+                  // follow-up).
+                  runOwned('image submit', () => runReservedSubmit({
+                    // TRANSFER the handoff reservation, never a second
+                    // pin: fallbackPin was acquired synchronously before
+                    // commands.execute() launched (covering the outer
+                    // release window); the nested flow releases it in its
+                    // finally (review finding — double pinning leaked the
+                    // handoff pin forever).
+                    reserve: () => fallbackPin,
+                    run: async () => {
+                      const message = await prepareUserMessage(text, draftImages, submitDeps)
+                      // Re-check the captured session identity AFTER the
+                      // async admission (the guard-window rule, AGENTS.md).
+                      if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+                        const merged = mergeDraft(app.getDraft(), text)
+                        app.setEditorText(merged)
+                        app.notify(merged === text
+                          ? 'the session changed while sending — try again'
+                          : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+                        return
+                      }
+                      agent.followup(message)
+                      // Consume ONLY the referenced drafts — a concurrent
+                      // intake's newer image survives (round-5 finding 1).
+                      consumeDraftImages(text, draftImages)
+                    },
+                    restore: (t) => restoreSubmissionDraft(t),
+                  }, text), {
+                    diag,
+                    sessionId: () => agent.session.id,
+                    // The flow restored the editor; this sink only
+                    // notifies.
+                    onError: notifySubmissionFailure,
+                  })
                 } else {
+                  fallbackPin()
                   const merged = mergeDraft(app.getDraft(), text)
                   app.setEditorText(merged)
                   app.notify(merged === text
                     ? 'the session changed while sending — try again'
                     : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
                 }
+              } else {
+                // The command COMMITTED (no image fallback): release the
+                // handoff pin.
+                fallbackPin()
               }
             },
             onError: (error) => {
+              fallbackPin()
               if (extensionCommandId !== undefined) extensionService?._recordRegistryError('command', extensionCommandId, error)
               const message = safeErrorMessage(error)
               try {
@@ -2216,15 +2434,30 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         // No commands service: plain follow-up on the CAPTURED agent (see
-        // the note above — never a re-read closure variable).
-        agent.followup(createUserMessage({
-          content: [{ type: 'text', text }],
-          source: { kind: 'user' },
-        }))
-      }), {
+        // the note above — never a re-read closure variable). Images ride
+        // the same prepared message as every other path (§13).
+        const message = await prepareUserMessage(text, draftImages, submitDeps)
+        // Re-check the captured session identity AFTER the async admission
+        // (the guard-window rule, AGENTS.md).
+        if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+          const merged = mergeDraft(app.getDraft(), text)
+          app.setEditorText(merged)
+          app.notify(merged === text
+            ? 'the session changed while sending — try again'
+            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+          return
+        }
+        agent.followup(message)
+        // Consume ONLY the referenced drafts — a concurrent intake's newer
+        // image survives (round-5 finding 1).
+        consumeDraftImages(text, draftImages)
+        },
+        restore: (t) => restoreSubmissionDraft(t),
+      }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,
-        onError: failSubmission(text),
+        // The flow restored the editor; this sink only notifies.
+        onError: notifySubmissionFailure,
       })
     }
     /**
@@ -2319,23 +2552,36 @@ export function apply(ctx: Context, config: Config): void {
       // next step boundary claims all next-step input together, so the
       // batch arrives in one shot (an idle driver starts a turn with it).
       if (onlyDraft) {
-        if (text.trim() === '') return
+        if (text.trim() === '' && !draftHasImages(text, draftImages)) return
       } else if (liveAgent !== undefined) {
         const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
-        if (queued.length === 0 && text.trim() === '') return
-      } else if (text.trim() === '') {
+        if (queued.length === 0 && text.trim() === '' && !draftHasImages(text, draftImages)) return
+      } else if (text.trim() === '' && !draftHasImages(text, draftImages)) {
         return
       }
       // An owned workflow: the send's outcome drives the draft restore and
-      // the notices — runOwned (AGENTS.md), never a bare void.
-      runOwned('steer', () => ensureSession().then(async () => {
+      // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
+      // referenced drafts SYNCHRONOUSLY (same call stack that left the
+      // editor — review finding): ensureSession() is async on a deferred
+      // start, and no await may precede the reservation.
+      // The submit-flow core owns the ordering contract (shared with the
+      // integration tests).
+      runOwned('steer', () => runReservedSubmit({
+        reserve: (t) => draftImages.pinReferenced(t),
+        run: async () => {
+        await ensureSession()
         if (liveAgent === undefined) return
+        // The draft message is prepared BEFORE the guard: admission is
+        // async I/O, and the guard's identity is the draft text (which
+        // carries the placeholders), so a guard run after admission
+        // covers everything the send will write (§13).
+        const prepared = await prepareUserMessage(text, draftImages, submitDeps)
         // The whole send (snapshot → guard → re-validate → confirm-and-
         // send) lives in steer.ts so the races are testable: a queue
         // splice or session switch while the guard reads the file aborts
         // with a retry notice instead of losing messages or writing to a
         // session the guard never checked.
-        await steerAll({
+        const outcome = await steerAll({
           currentAgent: () => liveAgent as unknown as SteerAgentLike,
           currentGeneration: () => sessionGeneration,
           guard: {
@@ -2353,10 +2599,7 @@ export function apply(ctx: Context, config: Config): void {
             app.setEditorText(merged)
             return merged === draft
           },
-          createDraft: (draft) => createUserMessage({
-            content: [{ type: 'text', text: draft }],
-            source: { kind: 'user' },
-          }),
+          createDraft: () => prepared,
           blockedNotice: (reason) => reason === 'removed'
             ? GUARD_REMOVED_NOTIFY('save')
             : reason === 'tail-mismatch'
@@ -2366,10 +2609,19 @@ export function apply(ctx: Context, config: Config): void {
           staleNotice: () => 'the queue or session changed while sending — try again',
           mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
         }, text, onlyDraft ? { onlyDraft: true } : undefined)
-      }), {
+        // Only a successful send consumes the drafts: on block/stale the
+        // draft was restored and the images are still referenced — removing
+        // would orphan the placeholders (§14). The consumption is
+        // per-reference, so a concurrent intake's newer draft survives
+        // (round-5 finding 1).
+        if (outcome === 'ok') consumeDraftImages(text, draftImages)
+        },
+        restore: (t) => restoreSubmissionDraft(t),
+      }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,
-        onError: failSubmission(text),
+        // The flow restored the editor; this sink only notifies.
+        onError: notifySubmissionFailure,
       })
     }
     /**
@@ -2415,7 +2667,13 @@ export function apply(ctx: Context, config: Config): void {
       // dropping it. `!` shell lines persist verbatim so ↑ recall re-runs
       // the shell branch.
       const trimmed = text.trim()
-      if (trimmed !== '' && trimmed !== lastHistoryContent) {
+      // A MULTIMODAL submission (draft text referencing staged images) is
+      // NOT persisted to the plain-text history: the placeholder dies with
+      // its draft on consumeDraftImages, so an ↑ recall would re-send the
+      // placeholder as ORDINARY TEXT — the images would silently vanish
+      // from the model input (review finding 3). Structured attachment
+      // history (text + refs, recalled on recall) is a post-v1 extension.
+      if (trimmed !== '' && trimmed !== lastHistoryContent && !draftHasImages(text, draftImages)) {
         const file = historyFilePath(dshHome(process.env), sessionCwd())
         runDetached('input history write', () => {
           appendHistoryLine(file, trimmed, lastHistoryContent)
@@ -2452,6 +2710,23 @@ export function apply(ctx: Context, config: Config): void {
       // like /plan, and plain prompts — creates the session lazily. M5: a
       // plugin-declared sessionless command (CommandBridge) joins the set.
       const parsed = parseCommand(text)
+      // Command semantics matrix (plan §19.3): slash commands are not LLM
+      // prompts — an image-bearing command line is REJECTED explicitly
+      // (never a silent drop, never a stray placeholder sent to the model).
+      // The draft comes back so the user can re-attach after choosing a
+      // plain prompt. LOCAL commands only: agent-facing invocations —
+      // plain prompts AND per-skill slash lines, including `/skill <name>
+      // [image #N ...]` (`skill` is local only as the bare picker; with
+      // arguments it is a loadSkill agent prompt — review finding).
+      if (commandRejectsImages(parsed, text, draftImages, name => {
+        if (name === 'skill' && (parsed?.rawInput.trim() ?? '') !== '') return false
+        return LOCAL_COMMANDS.has(name)
+          || (extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)
+      })) {
+        app.setEditorText(mergeDraft(app.getDraft(), text))
+        app.notify('Images cannot be attached to a command.', 'error')
+        return
+      }
       const isSessionless = parsed !== undefined && (
         SESSIONLESS_COMMANDS.has(parsed.name)
         || (extensionService?.commands.isSessionless(parsed.name, SESSIONLESS_COMMANDS) ?? false)
@@ -2474,7 +2749,12 @@ export function apply(ctx: Context, config: Config): void {
         // M5: the CommandBridge's effective-local check (dynamic plugin
         // local commands are local while registered).
         name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)) {
-        steerNow(text, true)
+        // An explicit `/skill <name>` invocation steers its NORMALIZED
+        // `/<name> <args>` line — the harness gesture recognizes the
+        // skill's own slash name and injects its body; the raw `/skill
+        // <name>` form would never match (review finding 2). Image
+        // placeholders ride the normalized line untouched.
+        steerNow(normalizeSkillInvocation(text) ?? text, true)
         return
       }
       dispatchViaSession(text)
@@ -2487,11 +2767,99 @@ export function apply(ctx: Context, config: Config): void {
     if (extensionService !== undefined) {
       extensionHost = new SurfaceHost(extensionService._ledger(), () => app.requestRender())
     }
+    // The durable-image loader (plan M8/M10): history images resolve through
+    // `ctx.attachments.readImage` only — never the draft store. The read
+    // callback is a late-bound service access (AGENTS.md: never a bare
+    // property read of a non-injected service).
+    const imageLoader = new ImageLoader((ref) => {
+      const attachments = ctx.get('attachments')
+      if (attachments === undefined) {
+        throw new ImageLoadError('Image attachments are unavailable in this deployment.')
+      }
+      return attachments.readImage(ref as never) as Promise<{ ref: unknown; data: Uint8Array }>
+    })
+    /** The clipboard bridge (plan M3): a bounded execFile runner with a
+     * generous buffer (clipboard payloads can be multi-MB). */
+    const runClipboardCommand: RunCommand = (command, args, options) => new Promise((resolve) => {
+      execFile(command, args as string[], {
+        timeout: options?.timeoutMs ?? 2000,
+        maxBuffer: 64 * 1024 * 1024,
+      }, (error, stdout, stderr) => {
+        const code = error === null
+          ? 0
+          : typeof (error as { code?: unknown }).code === 'number'
+            ? (error as { code: number }).code
+            : 1
+        resolve({
+          stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout),
+          stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ''),
+          code,
+        })
+      })
+    })
+    const clipboardEnv: ClipboardEnvironment = {
+      platform: process.platform,
+      env: process.env as Record<string, string | undefined>,
+      // PATH-aware helper detection — a bare existsSync only checks the
+      // CWD and would declare installed wl-paste/xclip "missing" (review
+      // finding).
+      exists: (command) => commandOnPath(command, process.env.PATH, process.platform),
+    }
     app = startProcessTui({
       onSubmit: (text) => dispatchUserInput(text),
+      // The image-only submit gate (plan §11.1): an empty-text draft with
+      // staged images is a real submission.
+      isImageDraft: () => draftHasImages(app.getDraft(), draftImages),
+      // The in-process EDITOR history must never recall a multimodal line
+      // after its drafts were consumed — the placeholders would re-send as
+      // plain text (the persisted JSONL history has the same guard; review
+      // finding: the memory side was missing it).
+      shouldRememberInput: (text) => !draftHasImages(text, draftImages),
+      // Ctrl+V (plan M3): probe the clipboard ONCE per paste — an image
+      // lands as a draft placeholder, plain text as an editor insert,
+      // unsupported/empty silently (a text paste must never error).
+      onClipboardPaste: () => {
+        // The clipboard probe is ASYNC: capture the session identity and
+        // discard the result if the user switched sessions meanwhile — a
+        // late paste must never stage into the NEW session's draft
+        // (round-5 finding 2).
+        const pasteGeneration = sessionGeneration
+        runOwned('clipboard paste', () => readClipboardImage(runClipboardCommand, clipboardEnv).then((result) => {
+          if (sessionGeneration !== pasteGeneration) return
+          if (result.kind === 'image') {
+            // Attach-time prune (review finding 2): placeholders deleted or
+            // Ctrl+C-cleared since the last attach must not hold their
+            // bytes until the store fills up.
+            pruneUnreferencedDrafts(app.getDraft(), draftImages)
+            const limits = ctx.get('attachments')?.imageLimits
+            if (limits !== undefined) {
+              checkImageLimits(
+                { mediaType: result.mediaType, width: result.width, height: result.height },
+                result.bytes.byteLength,
+                limits as Parameters<typeof checkImageLimits>[2],
+              )
+            }
+            const draft = draftImages.add({
+              bytes: result.bytes,
+              mediaType: result.mediaType,
+              width: result.width,
+              height: result.height,
+              source: { type: 'clipboard' },
+            })
+            app.insertIntoEditor(`${draft.placeholder} `)
+            app.notify(`attached ${draft.placeholder} — Enter to send`)
+          } else if (result.kind === 'text' && result.text !== '') {
+            app.insertIntoEditor(result.text)
+          }
+        }), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onError: (error) => app.notify(safeErrorMessage(error), 'error'),
+        })
+      },
       // The Ctrl+Enter opposite chord (web busyEnter parity): force the
       // QUEUE delivery mode regardless of the busyEnter preference.
-      onQueueSubmit: (text) => dispatchUserInput(text, true),
+      onQueueSubmit: (input) => dispatchUserInput(input, true),
       // The owned-task entry for UI-layer one-shot flows (the external
       // editor): runOwned with the runner's diag pre-attached.
       runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
@@ -2708,12 +3076,50 @@ export function apply(ctx: Context, config: Config): void {
         const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
           .filter(message => isUserQueueInput(message.source as QueueNoticeSource | undefined))
         if (queued.length === 0) return
+        // Multimodal queued messages (durable ImageBlocks) ARE pullable:
+        // each image block becomes a RECALLED draft — a placeholder that
+        // reuses the already-durable ImageAttachmentRef, so re-submitting
+        // never re-uploads the bytes. The queue is spliced ONLY after the
+        // drafts are staged (a failure keeps the queue intact).
+        let recalledText = ''
+        const staged: number[] = []
+        try {
+          const lines: string[] = []
+          for (const message of queued) {
+            const parts: string[] = []
+            for (const block of message.content) {
+              if (block.type === 'text') {
+                parts.push(block.text)
+              } else if (block.type === 'image') {
+                const attachment = block.attachment as import('./image/admission.ts').ImageAttachmentRefLike
+                const draft = draftImages.add({
+                  mediaType: attachment.mediaType,
+                  width: attachment.width,
+                  height: attachment.height,
+                  ...(attachment.name !== undefined ? { name: attachment.name } : {}),
+                  source: { type: 'recalled' },
+                  recalledRef: attachment,
+                })
+                staged.push(draft.id)
+                parts.push(draft.placeholder)
+              }
+            }
+            lines.push(parts.join(''))
+          }
+          recalledText = lines.join('\n\n')
+        } catch (error) {
+          // The recalled drafts could not be staged (capacity): roll back
+          // the drafts staged so far and keep the queue fully intact —
+          // nothing removed, no capacity leaked (follow-up finding).
+          for (const id of staged) draftImages.remove(id)
+          app.notify(safeErrorMessage(error), 'error')
+          return
+        }
         // Remove exactly the pulled-back messages (durable splice), keeping
         // any notices queued behind them.
         for (const message of queued) liveAgent.inbox.remove(message.id)
-        const queuedText = queued.map(message => textOf(message.content)).join('\n\n')
         const current = app.getDraft()
-        app.setDraft([queuedText, current].filter(part => part.trim() !== '').join('\n\n'))
+        app.setDraft([recalledText, current].filter(part => part.trim() !== '').join('\n\n'))
         refreshQueue()
       },
       // ↓ / Ctrl+J with an empty editor: the task browser over BOTH
@@ -2738,7 +3144,10 @@ export function apply(ctx: Context, config: Config): void {
       // pattern; the old /subagents SettingsList-submenu panel is gone).
       onOpenTasks: () => openTasksBrowser(),
     }, {
-
+      // The transcript image surface (plan M8/M9): the durable loader plus
+      // the dim fallback coloring.
+      imageLoader,
+      imageTheme: { fallbackColor: color.textDim },
       present,
       workspaceRoot: cwd,
       extensionHost,
@@ -3475,6 +3884,10 @@ export function apply(ctx: Context, config: Config): void {
         diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
       }
     }
+    // The per-TUI draft image registry (plan §5.2): staged clipboard/file
+    // bytes for the current run. Cleared on submit/session-switch/dispose —
+    // never touches durable attachments the harness already accepted.
+    const draftImages = new DraftImageStore()
     const runner: TuiCommandRunner = {
       ctx,
       app,
@@ -3486,6 +3899,14 @@ export function apply(ctx: Context, config: Config): void {
       agents: agents as unknown as TuiCommandRunner['agents'],
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       cwd,
+      imageStore: draftImages,
+      // The deployment image policy, re-read dynamically so a runtime
+      // reconfiguration is picked up (plan §10.1: never a cached copy).
+      imageLimits: () => ctx.get('attachments')?.imageLimits as import('./image/intake.ts').ImageLimitsLike | undefined,
+      insertIntoEditor: (text) => app.insertIntoEditor(text),
+      // The shared prepared-input pipeline (skills build their message
+      // through this — review finding 4).
+      prepareDraftMessage: (text) => prepareUserMessage(text, draftImages, submitDeps),
       // M5: the extension registries (commands/themes/settings/autocomplete/
       // keybindings), when the extension service is mounted. The /settings
       // and /theme pickers read them; undefined degrades to the host-only

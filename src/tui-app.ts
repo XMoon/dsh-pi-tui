@@ -43,6 +43,7 @@ import {
   type Terminal,
   type TuiInputListenerResult,
 } from '@xmoon76/pi-tui'
+import { ImageThumbnail } from './components/media/image-thumbnail.ts'
 import {
   detectThemeFromBackground,
   detectThemeFromColorFgBg,
@@ -90,7 +91,7 @@ import {
 import { TranscriptSearchComponent } from './search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
-import { recentTurnThreshold, type TranscriptMessage } from './transcript.ts'
+import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
@@ -575,6 +576,28 @@ export type OwnedRunner = <T>(
 export interface TuiAppEventsBase {
   /** The user submitted a line in the editor. */
   onSubmit: (text: string) => void
+  /**
+   * Ctrl+V with image intake (plan M3): the host consumed the key and asks
+   * the runner to probe the clipboard — an image lands as a draft
+   * placeholder, plain text as an editor insert. Optional; absent keeps
+   * the pre-pipeline behavior (the key falls through to the editor).
+   */
+  onClipboardPaste?: () => void
+  /**
+   * Whether a submitted line may enter the EDITOR history (both the
+   * in-memory recall and the editor's own stack; the runner's persisted
+   * JSONL history has its own guard). A multimodal line whose image
+   * placeholders die with their drafts must NOT be recalled as text —
+   * re-sending it would silently drop the images (review finding).
+   * Optional; absent keeps the unconditional behavior.
+   */
+  shouldRememberInput?: (text: string) => boolean
+  /**
+   * Whether the current draft references a staged image (the image-only
+   * submit gate: an empty-text draft with images is NOT empty). Optional —
+   * absent means the draft text is the only emptiness authority.
+   */
+  isImageDraft?: () => boolean
   /** The user asked to quit (Ctrl+C in the TUI's own raw mode). */
   onExit: () => void
   /** Double-Esc: stop the current activity (turn, tool run). Optional. */
@@ -908,6 +931,14 @@ export interface TuiAppOptions {
   workspaceRoot?: string
   /** Tool presentation bridge (web-parity cards via the live tool registry). */
   present?: ToolPresenter
+  /**
+   * The durable-image loader + thumbnail theme (plan M8/M9). When wired,
+   * user/assistant/tool-result image blocks render as inline thumbnails
+   * (Kitty/iTerm2) with text fallbacks; absent, image blocks render as
+   * their flat text only (the surface still works without the pipeline).
+   */
+  imageLoader?: import('./image/loader.ts').ImageLoader
+  imageTheme?: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme
   /** Working-indicator frame interval in ms; injectable so tests stay fast. */
   workingIntervalMs?: number
   /**
@@ -1030,6 +1061,14 @@ interface MessageComponentEntry {
    * message keeps the same string instance, so the check is O(1) and
    * streaming chunks (which create a new string) reliably miss. */
   text?: string
+  /** The full content blocks (user/assistant) the component was built
+   * from — an immutable array identity, so a settled image block landing
+   * on a text-only component marks it stale (round-1 finding 2). */
+  content?: unknown
+  /** The tool card's result content blocks identity (review finding 7): a
+   * resultBlocks transition to image-bearing content must rebuild the
+   * card even when the flattened result text barely changed. */
+  resultBlocks?: unknown
   running?: boolean
   label?: string
   summary?: string
@@ -1307,6 +1346,10 @@ export class TuiApp {
   private lastRendererRevision = -1
   /** M9: the editor seat holder (the atomic handoff + current occupant). */
   private readonly editorSeatHolder: EditorSeatHolder
+  /** The durable-image loader (plan M8): optional, wired by the runner. */
+  private readonly imageLoader: import('./image/loader.ts').ImageLoader | undefined
+  /** The thumbnail fallback theme (plan M9): optional, wired by the runner. */
+  private readonly imageTheme: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
   /** The busy indicator row directly above the editor border; idle renders nothing. */
   private readonly working: WorkingIndicator
   /** The fullscreen transcript ScrollView, for click hit-testing offsets. */
@@ -1318,8 +1361,26 @@ export class TuiApp {
    * keyboard behavior is unaffected by mouse toggles.
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
+  /**
+   * Per-OCCURRENCE image-display collapse overrides from fullscreen clicks:
+   * a collapsed attachment occurrence renders its constant info bar
+   * (`🖼️ name · W×H · bytes`) only — the image rows collapse, the identity
+   * never does. Keyed by message object + the image block's index within
+   * `message.content` (the folder's entry objects are stable within one
+   * folder lifetime — the same identity the per-message render cache and
+   * `expandedOverride` use), so the SAME durable attachment displayed twice
+   * collapses independently: clicking "this position's picture" never
+   * touches the other occurrence. Absent = expanded. Cleared on session
+   * switch with the other click overrides.
+   */
+  private readonly collapsedOccurrences = new Map<TranscriptMessage, Set<number>>()
   /** Rendered row heights per transcript message, for mouse hit-testing. */
-  private messageRows: ReadonlyArray<{ message: TranscriptMessage; height: number }> = []
+  private messageRows: ReadonlyArray<{
+    message: TranscriptMessage
+    height: number
+    /** The row span (message-relative) of every attachment's click region. */
+    attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+  }> = []
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
@@ -1422,6 +1483,8 @@ export class TuiApp {
     // M9: the editor seat holder — the atomic handoff + current occupant.
     // The host default editor is the adapter source; a plugin editor
     // (single-winner from the editor registry) can replace it.
+    this.imageLoader = options.imageLoader
+    this.imageTheme = options.imageTheme
     this.editorSeatHolder = new EditorSeatHolder({
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
@@ -1609,7 +1672,7 @@ export class TuiApp {
     }
     this.terminalSchemeListeners.clear()
     this.expandedOverride.clear()
-    this.messageComponents.clear()
+    this.disposeMessageComponents()
     this.localMessages.length = 0
     for (const lease of this.extensionOverlayLeases) lease.close()
     this.extensionOverlayLeases.clear()
@@ -1984,6 +2047,16 @@ export class TuiApp {
       this.rebuildMessages()
       return { consume: true }
     }
+    if (matchesKey(data, 'ctrl+v')) {
+      // Clipboard paste with image intake (plan M3): with a host handler
+      // the key is consumed and the runner probes the clipboard once — an
+      // image becomes a draft placeholder and plain text falls back to an
+      // editor insert. WITHOUT a handler the key falls through to the
+      // editor exactly like the pre-pipeline behavior (round-1 finding 6).
+      if (this.events.onClipboardPaste === undefined) return { consume: false }
+      this.events.onClipboardPaste()
+      return { consume: true }
+    }
     if (matchesKey(data, 'ctrl+t')) {
       // Todo panel toggle (kimi semantics; Ctrl+T never reaches the editor).
       this.toggleTodoPanel()
@@ -2296,10 +2369,14 @@ export class TuiApp {
     }
   }
 
-  /** Record a submitted line into the editor history and the persistence mirror. */
+  /** Record a submitted line into the editor history and the persistence
+   * mirror. The host may REFUSE via `shouldRememberInput` (e.g. a
+   * multimodal draft whose placeholders die with their drafts — recalling
+   * it would re-send dead placeholders as plain text; review finding). */
   private rememberInput(text: string): void {
     const trimmed = text.trim()
     if (trimmed === '') return
+    if (this.events.shouldRememberInput?.(text) === false) return
     this.editor.addToHistory(trimmed)
     if (this.inputHistory[0] === trimmed) return
     this.inputHistory.unshift(trimmed)
@@ -2633,7 +2710,11 @@ export class TuiApp {
     // Row heights for mouse hit-testing: components render (and cache) at
     // the same width the frame pass uses, so the heights match the screen.
     const width = this.terminal.columns
-    const rows: Array<{ message: TranscriptMessage; height: number }> = []
+    const rows: Array<{
+      message: TranscriptMessage
+      height: number
+      attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+    }> = []
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
     // a session never reads as one undifferentiated wall of text. The spacer
     // row is charged to the preceding message's height, keeping the fullscreen
@@ -2651,7 +2732,7 @@ export class TuiApp {
       const component = this.componentForMessage(message, boundary)
       this.messagesView.addChild(component)
       const height = component.render(width).length + (index < blocks.length - 1 ? 1 : 0)
-      rows.push({ message, height })
+      rows.push({ message, height, attachments: this.attachmentRangesOf(component, width) })
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
     })
     if (this.notifyText !== '') {
@@ -2689,6 +2770,88 @@ export class TuiApp {
     this.compacting = active
     this.reconcileWorkingRow()
     this.requestRender()
+  }
+
+  /** The per-attachment click regions inside one message component: the row
+   * span (message-relative) of every COLLAPSIBLE `ImageThumbnail` child —
+   * the host wires a `collapsedRef` only for user/assistant message
+   * attachments. Tool-card images (no collapsedRef) stay inside their
+   * card's own click surface: their rows advance the counter but never
+   * enter a collapse range, so a click there still folds/unfolds the card
+   * instead of being swallowed by an inert attachment toggle. Every other
+   * child's height still advances the row counter, so the spans line up
+   * with the rendered layout.
+   *
+   * The ordinal among COLLAPSIBLE thumbnails IS the occurrence's image
+   * index: renderUserBlocks / renderBlockSequence create a collapsible
+   * thumbnail for EVERY image block of the message in content order, so
+   * the nth thumbnail ↔ the nth image block — the same index the host's
+   * collapsedRef getter reads. */
+  private attachmentRangesOf(
+    component: Component,
+    width: number,
+  ): ReadonlyArray<{ imageIndex: number; start: number; end: number }> {
+    if (!(component instanceof Container)) return []
+    const ranges: Array<{ imageIndex: number; start: number; end: number }> = []
+    let row = 0
+    let imageIndex = 0
+    for (const child of component.children) {
+      const height = child.render(width).length
+      if (child instanceof ImageThumbnail && child.collapsible) {
+        ranges.push({ imageIndex, start: row, end: row + height })
+        imageIndex += 1
+      }
+      row += height
+    }
+    return ranges
+  }
+
+  /** Re-measure the message row map (heights + attachment spans) from the
+   * cached components — called before a fullscreen click hit-test so a
+   * thumbnail that just finished loading (1 row → image rows) never shifts
+   * the hit map. Cached renders make this cheap (reference-stable lines). */
+  private refreshMessageRows(): void {
+    const width = this.terminal.columns
+    const boundary = this.expandBoundary()
+    const blocks: TranscriptMessage[] = [
+      ...this.messages.filter(message => !(message.kind === 'thinking' && this.hideThinking)),
+      ...this.localMessages,
+    ]
+    const rows: Array<{
+      message: TranscriptMessage
+      height: number
+      attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+    }> = []
+    blocks.forEach((message, index) => {
+      const component = this.componentForMessage(message, boundary)
+      const height = component.render(width).length + (index < blocks.length - 1 ? 1 : 0)
+      rows.push({ message, height, attachments: this.attachmentRangesOf(component, width) })
+    })
+    this.messageRows = rows
+  }
+
+  /** The live collapse flag for ONE image-block occurrence (message object
+   * + image index within its content). Read at render time — a fullscreen
+   * click only repaints. */
+  private occurrenceCollapsedRef(message: TranscriptMessage, imageIndex: number): () => boolean {
+    return () => this.collapsedOccurrences.get(message)?.has(imageIndex) ?? false
+  }
+
+  /** Toggle ONE image occurrence's display (fullscreen click). The info
+   * bar stays constant — only that image's rows collapse/expand; a
+   * repeated attachment elsewhere in the transcript is untouched. */
+  private toggleAttachmentCollapsed(message: TranscriptMessage, imageIndex: number): void {
+    let indices = this.collapsedOccurrences.get(message)
+    if (indices === undefined) {
+      indices = new Set()
+      this.collapsedOccurrences.set(message, indices)
+    }
+    if (indices.has(imageIndex)) indices.delete(imageIndex)
+    else indices.add(imageIndex)
+    // Rebuild so the row map reflects the new heights immediately (the
+    // thumbnail's render cache key carries the collapse bit, so the cached
+    // message component re-renders in place).
+    this.rebuildMessages()
   }
 
   /**
@@ -2830,9 +2993,25 @@ export class TuiApp {
     const welcomeHeight = this.welcomeCard.render(width).length
     const messageRow = rowInScroll + scrollTop - welcomeHeight
     if (messageRow < 0) return
+    // Re-measure first: a thumbnail that just finished loading grew from
+    // its 1-row info bar to info + image rows — a stale map would misplace
+    // the click (cached renders make this cheap).
+    this.refreshMessageRows()
     let row = 0
     for (const entry of this.messageRows) {
       if (messageRow < row + entry.height) {
+        const inMessage = messageRow - row
+        // Attachment rows win: a click on an image's info bar or its image
+        // rows toggles THAT OCCURRENCE's display — the identity stays, the
+        // picture collapses/expands, and a repeated attachment elsewhere
+        // stays untouched. Rows outside every attachment span fall through
+        // to the message-level toggle (cards/thinking).
+        for (const attachment of entry.attachments) {
+          if (inMessage >= attachment.start && inMessage < attachment.end) {
+            this.toggleAttachmentCollapsed(entry.message, attachment.imageIndex)
+            return
+          }
+        }
         this.toggleMessageExpanded(entry.message)
         return
       }
@@ -2855,8 +3034,30 @@ export class TuiApp {
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
     this.expandedOverride.clear()
+    // The attachment collapse toggles are session-scoped too: a switched-in
+    // session's attachments start expanded (the click state must never leak).
+    this.collapsedOccurrences.clear()
     // The per-message render cache is session-scoped too: old messages are
-    // unreachable after a switch, so drop their cached components.
+    // unreachable after a switch, so drop their cached components — with
+    // disposal so thumbnail loader subscriptions never leak (round-2
+    // finding 2).
+    this.disposeMessageComponents()
+  }
+
+  /** Dispose every cached message component, then clear the cache. The
+   * component dispose is idempotent (thumbnails release their loader
+   * subscription once). */
+  private disposeMessageComponents(): void {
+    for (const entry of this.messageComponents.values()) {
+      const component = entry.component as { dispose?: () => void } | undefined
+      if (component?.dispose !== undefined) {
+        try {
+          component.dispose()
+        } catch {
+          // Best effort: a cached component's dispose must not break teardown.
+        }
+      }
+    }
     this.messageComponents.clear()
   }
 
@@ -2921,6 +3122,27 @@ export class TuiApp {
     // M9: every public draft mutation targets the visible seat occupant, not
     // the hidden host editor left behind by an editor handoff.
     this.seatEditor().setText(text)
+    this.editorSeatHolder.notifyChanged()
+    this.requestRender()
+  }
+
+  /**
+   * Insert text at the editor cursor — the image-placeholder insertion
+   * path (`/image`, Ctrl+V). A replacement editor without cursor insertion
+   * falls back to appending at the end of the draft; the host editor
+   * inserts at the cursor (fork `Editor.insertTextAtCursor`).
+   */
+  insertIntoEditor(text: string): void {
+    if (this.viewerMode !== undefined) {
+      this.draftBeforeViewer = (this.draftBeforeViewer ?? this.seatEditor().getText()) + text
+      return
+    }
+    const editor = this.seatEditor()
+    if (editor.insertTextAtCursor !== undefined) {
+      editor.insertTextAtCursor(text)
+    } else {
+      editor.setText(editor.getText() + text)
+    }
     this.editorSeatHolder.notifyChanged()
     this.requestRender()
   }
@@ -3861,6 +4083,7 @@ export class TuiApp {
         const targetLine = Math.min(line, Math.max(0, lines.length - 1))
         editor.setTextAndCursor(normalized, { line: targetLine, col: remaining })
       },
+      insertTextAtCursor: (text) => editor.insertTextAtCursor(text),
       handleInput: (data) => editor.handleInput(data),
       runWithoutChange: <T>(task: () => T): T => {
         const onChange = editor.onChange
@@ -4042,6 +4265,16 @@ export class TuiApp {
     if (entry.boundary !== boundary || entry.themeRev !== this.themeRevision
       || entry.expanded !== expanded || rendererRevisionChanged
       || this.componentStale(entry, message)) {
+      // Dispose the OLD component (a thumbnail's loader subscription) so a
+      // rebuild never leaks listeners (round-1 finding 7).
+      const previous = entry.component as { dispose?: () => void } | undefined
+      if (previous?.dispose !== undefined) {
+        try {
+          previous.dispose()
+        } catch {
+          // Best effort: a cached component's dispose must not break a paint.
+        }
+      }
       const rebuilt = this.buildMessage(message, boundary, expanded)
       entry.component = rebuilt.component
       entry.boundary = rebuilt.boundary
@@ -4088,6 +4321,7 @@ export class TuiApp {
       case 'thinking':
       case 'system':
         entry.text = message.text
+        entry.content = message.kind === 'user' || message.kind === 'assistant' ? message.content : undefined
         entry.running = message.kind === 'thinking' ? message.running : undefined
         entry.label = message.kind === 'system' ? message.label : undefined
         entry.summary = message.kind === 'system' ? message.summary : undefined
@@ -4099,6 +4333,7 @@ export class TuiApp {
         entry.meta = message.meta
         entry.members = message.members
         entry.error = message.error
+        entry.resultBlocks = message.resultBlocks
         break
       case 'summary':
         break
@@ -4117,7 +4352,7 @@ export class TuiApp {
     switch (message.kind) {
       case 'user':
       case 'assistant':
-        return entry.text !== message.text
+        return entry.text !== message.text || entry.content !== message.content
       case 'thinking':
         return entry.text !== message.text || entry.running !== message.running
       case 'system':
@@ -4125,7 +4360,7 @@ export class TuiApp {
       case 'tool':
         return entry.status !== message.status || entry.args !== message.args
           || entry.result !== message.result || entry.meta !== message.meta || entry.members !== message.members
-          || entry.error !== message.error
+          || entry.error !== message.error || entry.resultBlocks !== message.resultBlocks
       case 'summary':
         return false
       case 'compaction':
@@ -4142,6 +4377,85 @@ export class TuiApp {
    * renderer, so a throwing renderer is invoked exactly once per build
    * and the host fallback is single-path).
    */
+  /**
+   * Render a message's content blocks IN ORDER (plan §15.2): text blocks
+   * fold into one text component per run, image blocks render as inline
+   * thumbnails between them — `[text, image, text]` stays `text → image →
+   * text` on screen. Other block kinds (reasoning/tool-call) are skipped
+   * exactly like the flat `textWithImageMarkers` path. Only reached when
+   * the loader and theme are wired.
+   */
+  private renderBlockSequence(
+    content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
+    makeText: (text: string) => Component,
+    message: TranscriptMessage,
+  ): Component {
+    if (this.imageLoader === undefined || this.imageTheme === undefined) {
+      // Loader-less hosts keep the image POSITION as an inline marker — a
+      // mixed message must never silently lose its images (the fold's flat
+      // text uses the same projection).
+      return makeText(textWithImageMarkers(content))
+    }
+    const container = new Container()
+    let buffer = ''
+    const flush = (): void => {
+      if (buffer !== '') {
+        container.addChild(makeText(buffer))
+        buffer = ''
+      }
+    }
+    let imageIndex = 0
+    for (const block of content) {
+      if (block.type === 'text') {
+        buffer += block.text
+      } else if (block.type === 'image') {
+        flush()
+        container.addChild(new ImageThumbnail(
+          block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+          this.imageLoader,
+          this.imageTheme,
+          this.occurrenceCollapsedRef(message, imageIndex),
+        ))
+        imageIndex += 1
+      }
+    }
+    flush()
+    return container
+  }
+
+  /**
+   * A user message with images: ONE bubble whose text keeps an inline
+   * `🖼️ name` placeholder at every image's ORIGINAL position — the user's
+   * own words then read like the draft they submitted (`这张图是啥 🖼️
+   * shot.png`), instead of a bubble with the image silently moved to its
+   * own row. The thumbnails follow as attachment rows in block order; the
+   * bubble marker carries the position, the thumbnail carries the picture.
+   */
+  private renderUserBlocks(
+    content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
+    message: TranscriptMessage,
+  ): Component {
+    const container = new Container()
+    container.addChild(new UserBubbleComponent(
+      new Text(textWithImageMarkers(content), 0, 0),
+      `${color.roleUser('❯')} `,
+      color.roleUserBg,
+    ))
+    let imageIndex = 0
+    for (const block of content) {
+      if (block.type === 'image') {
+        container.addChild(new ImageThumbnail(
+          block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+          this.imageLoader!,
+          this.imageTheme!,
+          this.occurrenceCollapsedRef(message, imageIndex),
+        ))
+        imageIndex += 1
+      }
+    }
+    return container
+  }
+
   private renderMessage(message: TranscriptMessage, boundary: number): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
@@ -4150,6 +4464,9 @@ export class TuiApp {
       // blue. The ❯ leads the FIRST line; wrapped continuation lines keep
       // the background and indent under the marker, so multi-line input
       // stays aligned inside one block.
+      if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
+        return this.renderUserBlocks(message.content, message)
+      }
       return new UserBubbleComponent(
         new Text(message.text, 0, 0),
         `${color.roleUser('❯')} `,
@@ -4162,6 +4479,10 @@ export class TuiApp {
       // never floats alone on its own row. The markdown stays a LIVE child:
       // a terminal resize re-renders it at the new width, so tables reflow
       // instead of re-wrapping a frozen render (the 5a76526 regression).
+      if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
+        return this.renderBlockSequence(message.content, (text) =>
+          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme), `${color.primary('🐋')}  `), message)
+      }
       return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), `${color.primary('🐋')}  `)
     }
     if (message.kind === 'thinking') {
@@ -4596,7 +4917,7 @@ export class TuiApp {
           // body here): text blocks render verbatim, others as pretty JSON.
           for (const block of callView.content ?? []) {
             if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
-            else card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+            else card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
           }
           return
         }
@@ -4727,12 +5048,45 @@ export class TuiApp {
         }
         case 'generic': {
           // A generic result view with UI-facing content (plan review) shows
-          // that content instead of the raw model-facing result text.
+          // that content instead of the raw model-facing result text. Image
+          // blocks render as thumbnails in order (round-4 finding 1) — the
+          // same ordered renderer the no-presenter fallback uses; a
+          // text-only generic view keeps the EXACT legacy per-block loop
+          // (round-5 finding 3).
           const content = resultView.content ?? []
           if (content.length > 0) {
-            for (const block of content) {
-              if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
-              else card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+            const hasImages = content.some(block => block.type === 'image')
+            if (hasImages && this.imageLoader !== undefined && this.imageTheme !== undefined) {
+              let buffer = ''
+              const flush = (): void => {
+                if (buffer !== '') {
+                  card.addChild(new Text(color.textDim(buffer), 0, 0))
+                  buffer = ''
+                }
+              }
+              for (const block of content) {
+                if (block.type === 'text') {
+                  buffer += block.text
+                } else if (block.type === 'image') {
+                  flush()
+                  card.addChild(new ImageThumbnail(
+                    block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+                    this.imageLoader,
+                    this.imageTheme,
+                  ))
+                } else {
+                  // Non-text/non-image blocks keep the legacy JSON form,
+                  // interleaved in order (round-5 finding 4).
+                  flush()
+                  card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+                }
+              }
+              flush()
+            } else {
+              for (const block of content) {
+                if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
+                else card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
+              }
             }
             return
           }
@@ -4803,14 +5157,20 @@ export class TuiApp {
     if (message.name === 'read_image') {
       // Without a presenter, the image envelope renders its summary + path,
       // never the raw XML; the image payload block is never dumped as JSON
-      // (resultTextLines projects image blocks to a placeholder).
+      // (resultTextLines projects image blocks to a placeholder). With the
+      // image pipeline wired, the RESULT image blocks render as thumbnails
+      // below the summary (the envelope summary + the actual pixels).
       const envelope = parseImageEnvelope(message.result)
       if (envelope !== undefined) {
         card.addChild(new Text(color.textDim(`  ${envelope.summary}`), 0, 0))
         card.addChild(new Text(color.textMuted(`  path: ${relativizeToCwd(envelope.path, this.workspaceRoot)}`), 0, 0))
+        this.renderResultImageBlocks(card, message.resultBlocks)
         return
       }
-      if (message.status === 'ok') return
+      if (message.status === 'ok') {
+        this.renderResultImageBlocks(card, message.resultBlocks)
+        return
+      }
     }
     if (message.name === 'write') {
       // Without a presenter (replay edge), the write confirmation envelope
@@ -4834,13 +5194,75 @@ export class TuiApp {
       this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
       // With result blocks available, render with the Web's resultText
       // semantics (text verbatim, non-text as pretty JSON); otherwise the
-      // joined text is the only material.
+      // joined text is the only material. Result IMAGE blocks render as
+      // inline thumbnails in order when the image pipeline is wired (plan
+      // M11: covers read-image, MCP image results, screenshot tools).
       const blocks = message.resultBlocks ?? []
-      const lines = blocks.length > 0
-        ? resultTextLines(blocks, message.status === 'error' ? { name: 'error', code: 'tool' } : undefined)
-        : [message.result]
-      for (const line of lines) {
-        card.addChild(new Text(color.textDim(line), 0, 0))
+      const hasResultImages = blocks.some(block => block.type === 'image')
+      if (hasResultImages && this.imageLoader !== undefined && this.imageTheme !== undefined) {
+        let buffer = ''
+        const flush = (): void => {
+          if (buffer !== '') {
+            card.addChild(new Text(color.textDim(buffer), 0, 0))
+            buffer = ''
+          }
+        }
+        for (const block of blocks) {
+          if (block.type === 'text') {
+            buffer += block.text
+          } else if (block.type === 'image') {
+            flush()
+            card.addChild(new ImageThumbnail(
+              block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+              this.imageLoader,
+              this.imageTheme,
+            ))
+          } else {
+            // Non-text/non-image blocks keep the legacy JSON form, in order
+            // (round-5 finding 4).
+            flush()
+            card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+          }
+        }
+        flush()
+      } else {
+        const lines = blocks.length > 0
+          ? resultTextLines(blocks, message.status === 'error' ? { name: 'error', code: 'tool' } : undefined)
+          : [message.result]
+        for (const line of lines) {
+          card.addChild(new Text(color.textDim(line), 0, 0))
+        }
+      }
+    }
+  }
+
+  /**
+   * Display form for a non-text block WITHOUT the image pipeline: image
+   * blocks project to a compact placeholder — never a JSON dump (the
+   * read_image envelope rule, review finding); everything else keeps the
+   * legacy pretty-JSON form.
+   */
+  private blockDisplayText(block: import('@deepseek-ai/dsh-llm').ContentBlock): string {
+    if (block.type === 'image') return '[image]'
+    return JSON.stringify(block, null, 2)
+  }
+
+  /** Append the result's IMAGE blocks as thumbnails (any tool card that
+   * returns images but has its own summary path — read_image today, MCP
+   * image results and screenshot tools next). No-op without the pipeline
+   * or without image blocks. */
+  private renderResultImageBlocks(
+    card: Container,
+    blocks: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] | undefined,
+  ): void {
+    if (blocks === undefined || this.imageLoader === undefined || this.imageTheme === undefined) return
+    for (const block of blocks) {
+      if (block.type === 'image') {
+        card.addChild(new ImageThumbnail(
+          block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+          this.imageLoader,
+          this.imageTheme,
+        ))
       }
     }
   }
@@ -5348,7 +5770,9 @@ export class TuiApp {
     // session-side effect after teardown.
     if (this.disposed) return
     const text = this.getDraft()
-    if (text.trim() === '') return
+    // An image-only draft is NOT empty: the placeholder expansion resolves
+    // it to real content blocks at submission (plan §11.1).
+    if (text.trim() === '' && this.events.isImageDraft?.() !== true) return
     this.rememberInput(text)
     this.clearNotify()
     // Clear the draft like a normal Enter submit (the runner's dispatch

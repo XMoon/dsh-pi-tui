@@ -51,6 +51,12 @@ export interface SeatEditor {
   setText(text: string): void
   getCursor(): number
   setCursor(offset: number): void
+  /**
+   * Insert text at the cursor (the image-placeholder insertion path). A
+   * plugin editor without cursor insertion leaves this absent and the
+   * caller falls back to append-at-end.
+   */
+  insertTextAtCursor?(text: string): void
   readonly focused: boolean
   borderColor: (text: string) => string
   invalidate(): void
@@ -81,6 +87,8 @@ export interface HostEditorAdapter {
   getCursor?(): number
   /** Best-effort cursor setter for the host editor. */
   setCursor?(offset: number): void
+  /** Insert text at the host editor's cursor (image placeholder path). */
+  insertTextAtCursor?(text: string): void
   /** Stage replacement text/cursor without resetting host transient state. */
   setTextAndCursor(text: string, cursor: number): void
   /** Forward one declined replacement-editor key through the host editor. */
@@ -224,6 +232,7 @@ export class EditorSeatHolder {
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getCursor: () => editor.getCursor?.() ?? 0,
       setCursor: (offset) => editor.setCursor?.(offset),
+      insertTextAtCursor: (text) => editor.insertTextAtCursor?.(text),
       get focused() { return editor.focused },
       borderColor: (text) => editor.borderColor(text),
       invalidate: () => editor.invalidate(),

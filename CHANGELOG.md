@@ -19,6 +19,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queue pane and the editor prompt use the same brand-blue `❯`: one marker
   for the user's own input everywhere. The bubble background is an
   optional palette token (`roleUserBg`) custom themes can override.
+- **`/image <path>` completes paths.** Typing an argument after `/image`
+  now suggests files and directories of the session workspace as you type,
+  Tab completes them (including an empty argument, which previously did
+  nothing), and Tab-accepting a directory immediately lists its children —
+  the same directory-walk UX the `@` mention and `!` shell lines already
+  had. `~`, absolute and relative forms are all supported; the completion
+  rides the fork's own `getArgumentCompletions` extension point, so no
+  vendored code changed.
+- **Mixed image messages keep an inline `🖼️` placeholder in their text —
+  the transcript bubble included.** A user message like `check [image] done`
+  now reads `check 🖼️ shot.png done` in the bubble itself (with the
+  thumbnails following as attachment rows), never as text-only with the
+  picture silently moved to its own row: the transcript search can find it
+  by image name, and hosts without image rendering still show where the
+  image was. A marker boundary always carries one separating space, so a
+  draft without a space before the placeholder never glues the marker to
+  the text.
+- **Fullscreen: click an attachment to collapse the picture back to its
+  info bar, click again to expand.** On image-capable terminals every
+  thumbnail now leads with a CONSTANT identity line
+  (`🖼️ shot.png · 1490×1284 · 392.2 KiB`) — you always know which image
+  it is — and the picture itself renders below it. A click on the
+  attachment (info bar or image) collapses just that image's rows; a
+  second click expands them again. Every attachment OCCURRENCE collapses
+  independently — the same image attached twice in one transcript folds
+  per position, never together — the toggle is session-scoped (a session
+  switch re-expands), and collapsing a kitty image erases its tile through
+  the fork's existing diff machinery — no vendored code changed. Regular
+  (non-fullscreen) mode stays mouse-free by design.
 
 ### Fixed
 
@@ -34,6 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all. Folded skill rows gain the `— N lines of instructions` suffix (the
   same one tool cards show), so the fold still says what the model
   received.
+- **The image summary marker is `🖼️` (with U+FE0F), so emoji fonts no
+  longer overlap the filename.** The marker measures ONE cell in the
+  width math while emoji fonts render it TWO wide — the glyph overhang ate
+  the space and collided with the name (font-dependent). The variation
+  selector forces the 2-cell rendering the measurement expects; the space
+  after the emoji stays, in the transcript thumbnail fallback, the queue
+  preview and the markdown export alike.
 - **Write cards fold their verb, never the raw XML envelope.** The write
   tool's result is an XML confirmation envelope (`<path>…</path> <type>
   …</type> <content>Updated file</content>`); the folded row now shows

@@ -30,8 +30,11 @@ import type { Diag } from './diag.ts'
 import { dshHome } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import { consumeDraftImages, pruneUnreferencedDrafts } from './image/submit.ts'
+import { readImageFile } from './image/intake.ts'
+import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
-import { resolveFdPath } from './mentions.ts'
+import { resolveFdPath, suggestPathArgument } from './mentions.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
@@ -205,6 +208,24 @@ export interface TuiCommandRunner {
    * Command handlers must NEVER stop the app, flush or exit themselves. */
   requestExit(): void
   cwd: string
+  /** The per-TUI draft image registry (image pipeline, plan M1). Shared by
+   * the /image command, the clipboard intake and the submission path; the
+   * runner clears it on submit/session-switch/dispose, never on durable
+   * attachments. */
+  imageStore: import('./image/draft-store.ts').DraftImageStore
+  /** The deployment image policy (`ctx.attachments.imageLimits`), re-read
+   * dynamically; undefined when the attachment service is unavailable. */
+  imageLimits(): import('./image/intake.ts').ImageLimitsLike | undefined
+  /** Insert text at the editor cursor (the image placeholder path). */
+  insertIntoEditor(text: string): void
+  /**
+   * Prepare one draft text as an immutable UserMessage — the SAME pipeline
+   * the submit/steer paths use (placeholder expansion, capability gate,
+   * batched admission). Skill invocations build their message through this
+   * so an image-bearing `/skill ...` line is a real multimodal prompt
+   * (review finding 4).
+   */
+  prepareDraftMessage(text: string): Promise<import('@deepseek-ai/dsh-llm').UserMessage>
   /**
    * The live session's workspace (its header cwd), falling back to the
    * process cwd before any session exists. The editor autocomplete, the
@@ -858,6 +879,10 @@ export function registerTuiCommands(
   // lacks must be consumed with an explicit error, never sent to the model.
   /** The advertised names of the currently installed completion list. */
   let claims = new Set<string>()
+  /** Slash commands whose single argument is a path: the fork's
+   * `getArgumentCompletions` extension point completes it against the LIVE
+   * session cwd (natural typing shows candidates, Tab accepts them). */
+  const PATH_ARGUMENT_COMMANDS = new Set(['image'])
   /**
    * Install one completion list (sorted, claims refreshed). The single
    * synchronous seam every catalog commit funnels through.
@@ -873,6 +898,9 @@ export function registerTuiCommands(
         name: command.name,
         description: command.description,
         argumentHint: command.input?.hint,
+        ...(PATH_ARGUMENT_COMMANDS.has(command.name)
+          ? { getArgumentCompletions: (argument: string) => suggestPathArgument(argument, runner.sessionCwd()) }
+          : {}),
       })),
       runner.sessionCwd(),
       fdPath,
@@ -1483,10 +1511,28 @@ export function registerTuiCommands(
     // was the wrapper discarding `rawInput` and injecting a hand-rolled body
     // card that swallowed the user's request.
     const line = args.trim() === '' ? '/' + skill.name : '/' + skill.name + ' ' + args.trimStart()
-    const userMessage = createUserMessage({
-      content: [{ type: 'text', text: line }],
-      source: { kind: 'user' },
-    })
+    // The skill invocation is an AGENT-FACING prompt: build its message
+    // through the shared prepared-input pipeline so an image-bearing
+    // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
+    // like a plain prompt (review finding 4). The referenced drafts are
+    // PINNED across the WHOLE invocation — the async prepare, the steer
+    // and the draft consumption — so a concurrent /image prune can never
+    // delete images this invocation is still admitting (review finding 1).
+    const releasePin = runner.imageStore.pinReferenced(line)
+    let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
+    try {
+      userMessage = await runner.prepareDraftMessage(line)
+      // The invocation COMMITTED: consume the image drafts it referenced
+      // (the prepared message holds the durable refs now; a concurrent
+      // intake's newer draft survives — review finding).
+      agent.steer(userMessage)
+      consumeDraftImages(line, runner.imageStore)
+    } finally {
+      // The pin releases on EVERY exit — including a synchronous steer
+      // throw (review finding: a leaked pin would block pruning and eat
+      // draft capacity forever).
+      releasePin()
+    }
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
     // body only when ITS tool registration is visible to this agent — the
     // same visibility test the listener itself uses. A composition without
@@ -1523,7 +1569,6 @@ export function registerTuiCommands(
     // the user's words, inverting the web's message order. (A second
     // follow-up would not help either: a turn boundary claims ONE next-turn
     // message, so the pair would split across two turns.)
-    agent.steer(userMessage)
     if (!hostLoadsSkillBody) {
       const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
       // Forward the resource base too, so the fallback rendering matches
@@ -1883,7 +1928,15 @@ export function registerTuiCommands(
         setup: composition.setup,
       })
       const error = await runner.swapTo(next)
-      if (error !== undefined) app.notify(error, 'error')
+      if (error !== undefined) {
+        app.notify(error, 'error')
+        return { kind: 'error', text: error }
+      }
+      // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
+      // the UNPINNED ones now, never before (a failed create/swap keeps
+      // the current session and its drafts intact; in-flight submissions
+      // keep their pinned drafts — review finding 2).
+      runner.imageStore.clearUnpinned()
       return { kind: 'success', text: 'started a fresh session' }
     },
   })
@@ -2210,6 +2263,83 @@ export function registerTuiCommands(
   })
 
   commands.register({
+    name: 'image',
+    description: 'Attach an image file to the draft (tab completes the path; [image #N (W×H)] placeholder)',
+    input: { hint: '<path>' },
+    handler: (invocation) => {
+      // The /image command is a TUI-LOCAL UI action (plan M2): it stages
+      // the file into the draft store and inserts its placeholder into the
+      // editor — it NEVER submits, so no session is created (deferred
+      // start preserved) and no model call happens here.
+      const words = parseShellWords(invocation.rawInput)
+      if (words.length !== 1 || words[0] === '') {
+        return { kind: 'error', text: 'Usage: /image <path>' }
+      }
+      const raw = words[0]!
+      // The intake is ASYNC: capture the session identity at launch and
+      // discard the result if the user switched sessions meanwhile — a late
+      // intake must never stage an image into the NEW session's draft
+      // (round-5 finding 2).
+      const intakeGeneration = runner.sessionGeneration
+      const detach = (label: string, task: () => unknown): void => {
+        runDetached(label, task, {
+          diag: runner.diag,
+          sessionId: () => runner.liveAgent?.session.id,
+          notify: (message) => app.notify(message, 'error'),
+          recoverable: () => true,
+        })
+      }
+      detach('image intake', () => {
+        // An owned workflow: the intake outcome decides the notice and the
+        // draft insertion — runOwned (AGENTS.md), never a bare void. The
+        // limits are read INSIDE the task so a mid-run policy change is
+        // honored (round-2 finding 5); the intake itself is ASYNC
+        // (fs/promises) so a slow disk or NFS never blocks the TUI event
+        // loop (review finding 1).
+        runOwned('image intake', () => {
+          // Attach-time prune: a placeholder deleted (or Ctrl+C-cleared)
+          // since the last attach must not hold its bytes hostage until the
+          // store fills up (review finding 2).
+          pruneUnreferencedDrafts(app.getDraft(), runner.imageStore)
+          // The intake's pre-read cap is the SMALLEST of the attachment
+          // limit and the draft store's remaining RESIDENT budget — a file
+          // that could never be staged is refused before any read.
+          const intake = readImageFile(raw, runner.sessionCwd(), runner.imageLimits(), runner.imageStore.remainingBytes())
+          return intake.then((resolved) => {
+            if (runner.sessionGeneration !== intakeGeneration) {
+              app.notify('the session changed while reading the image — try again', 'error')
+              return undefined
+            }
+            // Re-prune AFTER the async read: the user may have deleted the
+            // placeholder or Ctrl+C-cleared the editor while the file was
+            // in flight — those drafts must not linger past the attach
+            // (review finding 2 follow-up).
+            pruneUnreferencedDrafts(app.getDraft(), runner.imageStore)
+            const draft = runner.imageStore.add({
+              bytes: resolved.bytes,
+              mediaType: resolved.mediaType,
+              width: resolved.width,
+              height: resolved.height,
+              source: { type: 'path', path: resolved.path },
+              name: resolved.name,
+            })
+            runner.insertIntoEditor(`${draft.placeholder} `)
+            app.notify(`attached ${draft.placeholder} — Enter to send`)
+            return undefined
+          })
+        }, {
+          diag: runner.diag,
+          sessionId: () => runner.liveAgent?.session.id,
+          onError: (error) => {
+            app.notify(safeErrorMessage(error), 'error')
+          },
+        })
+      })
+      return { kind: 'success' }
+    },
+  })
+
+  commands.register({
     name: 'export',
     description: 'Export this session log (JSONL by default, `md` for a readable transcript)',
     input: { hint: '[md|<path>]' },
@@ -2259,7 +2389,18 @@ export function registerTuiCommands(
         seed,
       })
       const error = await runner.swapTo(next)
-      if (error !== undefined) app.notify(error, 'error')
+      if (error !== undefined) {
+        // A failed swap keeps the CURRENT session: report the failure and
+        // never claim success (review finding 6 — same lifecycle rule as
+        // /new).
+        app.notify(error, 'error')
+        return { kind: 'error', text: error }
+      }
+      // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
+      // the UNPINNED ones now (durable attachments are untouched, plan
+      // §14; in-flight submissions keep their pinned drafts — review
+      // finding 2).
+      runner.imageStore.clearUnpinned()
       return { kind: 'success', text: `forked as ${next.agent.session.id}` }
     },
   })

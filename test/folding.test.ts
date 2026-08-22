@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { setKittyProtocolActive, visibleWidth } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
+import { renderTranscriptMarkdown } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -212,4 +213,33 @@ test('folded thinking keeps its three-row height even with little content', asyn
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `short block must stay 3 rows:\n${block.join('\n')}`)
   assert.ok(block[2]!.includes('ctrl+o'), `hint row missing:\n${block[2]}`)
+})
+
+test('renderTranscriptMarkdown projects image blocks (review finding 4)', () => {
+  const session = {
+    header: { id: 'session-1' as never, cwd: '/ws', version: 1, createdAt: 0 },
+    events: [
+      {
+        type: 'user/message',
+        data: {
+          content: [
+            { type: 'text', text: '分析这张图:' },
+            { type: 'image', attachment: { attachmentId: 'att-9', mediaType: 'image/png', bytes: 100, width: 1920, height: 1080, name: 'shot.png' } },
+          ],
+          source: { kind: 'user' },
+        },
+      },
+      {
+        type: 'user/message',
+        data: {
+          content: [{ type: 'image', attachment: { attachmentId: 'att-10', mediaType: 'image/jpeg', bytes: 50, width: 640, height: 480 } }],
+          source: { kind: 'user' },
+        },
+      },
+    ],
+  }
+  const md = renderTranscriptMarkdown(session as never)
+  assert.ok(md.includes('> 🖼️ shot.png · 1920×1080 · attachment `att-9`'), 'image line rendered')
+  assert.ok(md.includes('> 🖼️ image · 640×480 · attachment `att-10`'), 'image-only message renders')
+  assert.ok(md.includes('分析这张图:'), 'text rides along')
 })

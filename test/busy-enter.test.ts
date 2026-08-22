@@ -18,6 +18,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { LOCAL_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** The TUI-owned command names registered by registerTuiCommands (commands.ts). */
@@ -129,6 +130,10 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     sessions: { flush: async () => {} },
     cwd: '/ws',
     sessionCwd: () => '/ws',
+    imageStore: new DraftImageStore(),
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),
@@ -246,4 +251,13 @@ test('the local-shell-sandbox row Enter toggle persists the other behavior', asy
   const last = t.settings.writes[t.settings.writes.length - 1]
   assert.equal(last?.localShellSandbox, 'sandbox', `the toggle must flip bypass -> sandbox, wrote: ${JSON.stringify(last)}`)
   t.app.stop()
+})
+
+test('shouldSteerOnEnter: /skill <name> with args steers; the bare picker does not (review finding)', () => {
+  const withArgs = shouldSteerOnEnter({ name: 'skill', rawInput: 'grilling [image #1 (800×600)]' }, true, 'steer', false)
+  assert.equal(withArgs, true, '/skill <name> [image ...] is agent input while running')
+  const bare = shouldSteerOnEnter({ name: 'skill', rawInput: '' }, true, 'steer', false)
+  assert.equal(bare, false, 'the bare /skill picker stays local')
+  const idle = shouldSteerOnEnter({ name: 'skill', rawInput: 'grilling x' }, false, 'steer', false)
+  assert.equal(idle, false, 'idle never steers')
 })

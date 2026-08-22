@@ -21,6 +21,7 @@ import { SESSIONLESS_COMMANDS } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { customThemesDir, darkColors } from '../src/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
@@ -119,6 +120,10 @@ function stubRunner(options: {
     sessions: { flush: async () => {} },
     cwd: '/ws',
     sessionCwd: () => '/ws',
+    imageStore: new DraftImageStore(),
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),

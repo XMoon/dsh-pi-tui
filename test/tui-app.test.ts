@@ -1202,3 +1202,111 @@ test('openSettings revert() restores a rejected row display (M5 gate)', async ()
   assert.ok(stripped.includes('old'), `rejected row must show the previous value:\n${stripped}`)
   app.stop()
 })
+
+test('submitDraft with an empty draft and a staged image submits (image-only gate)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    isImageDraft: () => true,
+  })
+  app.start()
+  await vt.waitForRender()
+  // The runner resolves the placeholders to image blocks (plan §11.1): an
+  // empty-text draft with images is NOT empty.
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [''])
+  app.stop()
+})
+
+test('submitDraft with an empty draft and no image stays a no-op even with the gate wired', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    isImageDraft: () => false,
+  })
+  app.start()
+  await vt.waitForRender()
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [])
+  app.stop()
+})
+
+test('ctrl+v routes to onClipboardPaste and consumes the key', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let pasted = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onClipboardPaste: () => { pasted += 1 },
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x16') // legacy Ctrl+V byte
+  await vt.waitForRender()
+  assert.equal(pasted, 1, 'ctrl+v fires the clipboard paste event')
+  assert.ok(!vt.getViewport().join('\n').includes('^V'), 'the key is consumed, never inserted')
+  // Kitty-protocol Ctrl+V press routes the same way.
+  const { setKittyProtocolActive } = await import('@xmoon76/pi-tui')
+  setKittyProtocolActive(true)
+  try {
+    vt.sendInput('\x1b[118;5u') // ctrl+v press
+    await vt.waitForRender()
+    assert.equal(pasted, 2)
+  } finally {
+    setKittyProtocolActive(false)
+  }
+  app.stop()
+})
+
+test('a multimodal submission refused by shouldRememberInput never recalls (review finding)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    // The runner refuses lines carrying image placeholders: their drafts
+    // die on consume, so ↑ must never resurrect them as plain text.
+    shouldRememberInput: (text) => !text.includes('[image #'),
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('分析 [image #1 (800×600)]')
+  await vt.waitForRender()
+  vt.sendInput('\r') // submit
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['分析 [image #1 (800×600)]'])
+  // ↑ (history previous): the multimodal line must NOT come back.
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('[image #1'), `dead placeholder recalled:\n${view}`)
+  app.stop()
+})
+
+test('a plain-text submission still recalls through the editor history', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    shouldRememberInput: (text) => !text.includes('[image #'),
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('plain prompt')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['plain prompt'])
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('plain prompt'), `plain text recalls:\n${view}`)
+  app.stop()
+})

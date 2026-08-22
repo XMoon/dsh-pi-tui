@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TuiApp } from '../src/tui-app.ts'
+import { suggestPathArgument } from '../src/mentions.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A throwaway workspace with one directory + a file inside it. */
@@ -19,6 +20,16 @@ function fixtureWorkspace(): string {
   const root = mkdtempSync(join(tmpdir(), 'dsh-tui-editor-'))
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'deep-nested.ts'), 'deep')
+  return root
+}
+
+/** A workspace with image-named fixtures for the /image argument tests. */
+function imageWorkspace(): string {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-tui-editor-img-'))
+  writeFileSync(join(root, 'shot.png'), 'x')
+  writeFileSync(join(root, 'notes.txt'), 'x')
+  mkdirSync(join(root, 'subdir'))
+  writeFileSync(join(root, 'subdir', 'deep.png'), 'x')
   return root
 }
 
@@ -33,6 +44,24 @@ function startApp(cwd: string): { vt: VirtualTerminal; app: TuiApp; cancels: num
   app.setCommandCompletions([], cwd, null)
   app.start()
   return { vt, app, get cancels() { return cancels } }
+}
+
+/** Start the app with the /image command carrying its path-argument
+ * completion (the same shape commands.ts installs). */
+function startImageApp(cwd: string): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => {},
+  })
+  app.setCommandCompletions(
+    [{ name: 'image', description: 'Attach an image file', getArgumentCompletions: (arg) => suggestPathArgument(arg, cwd) }],
+    cwd,
+    null,
+  )
+  app.start()
+  return { vt, app }
 }
 
 /** Poll the viewport until the dropdown row appears (asserts on failure). */
@@ -108,5 +137,67 @@ test('a non-mention trailing slash does not reopen the dropdown', async () => {
   await new Promise(resolve => setTimeout(resolve, 80))
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('deep-nested.ts'), `plain path must not open the dropdown:\n${view}`)
+  app.stop()
+})
+
+// ── /image path-argument completion (tab + natural typing) ────────────────
+
+test('/image natural typing completes the path argument', async () => {
+  const root = imageWorkspace()
+  const { vt, app } = startImageApp(root)
+  await vt.waitForRender()
+  // The fork's command-argument branch (getArgumentCompletions) answers the
+  // editor's per-letter natural trigger: the dropdown appears while typing.
+  vt.sendInput('/image sh')
+  await waitForDropdownRow(vt, 'shot.png', 'dropdown after typing /image sh')
+  assert.ok(!app.seatTextForTest().includes('shot.png'), 'typing alone must not apply anything')
+  app.stop()
+})
+
+test('Tab on an empty /image argument lists the cwd', async () => {
+  const root = imageWorkspace()
+  const { vt, app } = startImageApp(root)
+  await vt.waitForRender()
+  vt.sendInput('/image ')
+  await vt.waitForRender()
+  // The fork's shouldTriggerFileCompletion trims the line, so `/image `
+  // reads as a bare command name and would block Tab; the host provider
+  // overrides that for argument positions.
+  vt.sendInput('\t')
+  await waitForDropdownRow(vt, 'subdir/', 'Tab on /image  lists the cwd')
+  app.stop()
+})
+
+test('Tab-accepting a /image directory reopens the dropdown at its children', async () => {
+  const root = imageWorkspace()
+  const { vt, app } = startImageApp(root)
+  await vt.waitForRender()
+  vt.sendInput('/image sub')
+  await waitForDropdownRow(vt, 'subdir/', 'dropdown after typing /image sub')
+  // Tab accepts the directory item: the text becomes `/image subdir/` and
+  // the dropdown reopens at the children (slash-argument reopen parity
+  // with the @dir/ mention).
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '/image subdir/', 'Tab must accept the directory argument')
+  await waitForDropdownRow(vt, 'deep.png', 'children after Tab accept')
+  app.stop()
+})
+
+test('a multi-space (tab-expanded) /image directory also reopens the dropdown at its children', async () => {
+  const root = imageWorkspace()
+  const { vt, app } = startImageApp(root)
+  await vt.waitForRender()
+  // Tabs never reach the editor document (the fork normalizes them to four
+  // spaces), so the REAL separator-whitespace case is multi-space — a
+  // pasted-tab draft reads exactly like '/image    subdir/'. The argument
+  // branch passes everything after the FIRST space, so the argument
+  // carries leading whitespace; the reopen gate and the path completion
+  // must both tolerate it.
+  app.setEditorText('/image    subdir/')
+  // Any handled key triggers reopenAutocompleteAfterInput; the right arrow
+  // moves nothing but is itself handled.
+  vt.sendInput('\x1b[C')
+  await waitForDropdownRow(vt, 'deep.png', 'children after a multi-space directory accept')
   app.stop()
 })

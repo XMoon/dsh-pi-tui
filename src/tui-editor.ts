@@ -32,6 +32,20 @@ interface AutocompleteInternals {
  * so content and wrapped continuations start right after the prompt. */
 const PROMPT_WIDTH = 2
 
+/** Whether the text before the cursor is a slash-command line WITH an
+ * argument position (`/cmd <arg>`): the command name is the first
+ * whitespace-delimited (space OR tab — the fork's path delimiters) token
+ * after the leading `/`; anything after it is the argument the completion
+ * re-trigger targets. */
+function isSlashCommandArgument(textBeforeCursor: string): boolean {
+  const trimmed = textBeforeCursor.trimStart()
+  if (!trimmed.startsWith('/')) return false
+  const separatorIndex = trimmed.search(/[ \t]/)
+  if (separatorIndex <= 0) return false
+  const commandName = trimmed.slice(1, separatorIndex)
+  return commandName !== '' && !commandName.includes('/')
+}
+
 /**
  * Paint the terminal-prompt `❯ ` over the first content row of the fork's
  * editor render. The fork renders every content row with `paddingX` spaces
@@ -88,13 +102,17 @@ export class TuiEditor extends Editor {
   }
 
   /** Reopen `@dir/` mention completion right after a key closed it (e.g.
-   * Tab accepted a directory). Mirrors kimi's reopenAutocompleteAfterInput
-   * for the @-mention case only. */
+   * Tab accepted a directory), and the same for a slash-command path
+   * argument (`/image subdir/`): the editor's natural trigger only fires on
+   * letters, so a freshly accepted trailing `/` would otherwise leave the
+   * children hidden until the next keystroke. Mirrors kimi's
+   * reopenAutocompleteAfterInput for the @-mention case, extended to
+   * path-argument commands. */
   private reopenAutocompleteAfterInput(): void {
     if (this.isShowingAutocomplete()) return
     const { line, col } = this.getCursor()
     const textBeforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
-    if (textBeforeCursor.endsWith('/') && extractAtPrefix(textBeforeCursor) !== null) {
+    if (textBeforeCursor.endsWith('/') && (extractAtPrefix(textBeforeCursor) !== null || isSlashCommandArgument(textBeforeCursor))) {
       ;(this as unknown as AutocompleteInternals)
         .requestAutocomplete({ force: false, explicitTab: false })
     }
