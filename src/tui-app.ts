@@ -612,7 +612,9 @@ export interface TuiAppEventsBase {
   isImageDraft?: () => boolean
   /** The user asked to quit (Ctrl+C in the TUI's own raw mode). */
   onExit: () => void
-  /** Double-Esc: stop the current activity (turn, tool run). Optional. */
+  /** Stop the current activity (busy: a SINGLE Esc fires this; idle: a
+   * double-Esc within the window). The runner's handler interrupts the
+   * agent while preserving its queue (web Stop parity). Optional. */
   onCancel?: () => void
   /**
    * Ctrl+S: steer with the current draft (possibly empty). The runner sends
@@ -1314,9 +1316,10 @@ export class TuiApp {
   private static readonly NOTIFY_DURATION_MS = 8000
   /** The notify auto-clear window; injectable so tests stay fast. */
   private readonly notifyDurationMs: number
-  /** Timestamp of the last Esc press, for double-Esc cancellation. */
+  /** Timestamp of the last Esc press, for the IDLE double-Esc cancel (a
+   * busy agent cancels on a single Esc — pi parity). */
   private lastEscapeAt: number | undefined
-  /** Double-Esc window in ms. */
+  /** Idle double-Esc window in ms. */
   private static readonly ESCAPE_CANCEL_WINDOW_MS = 400
   /** Footer wrap cap (plan §14): host line-1 wraps to at most 3 physical
    * rows, the stats line to 1, total never above 4 — a long extension
@@ -5190,6 +5193,13 @@ export class TuiApp {
           // same ordered renderer the no-presenter fallback uses; a
           // text-only generic view keeps the EXACT legacy per-block loop
           // (round-5 finding 3).
+          //
+          // Call presentation stays: a BACKGROUND bash/pwsh settles into a
+          // generic "started background job …" result, so the expanded card
+          // must keep the `$ command` row above it (call and result are two
+          // stages, never substitutes — the 2026-08-22 plan). No-op for
+          // every non-terminal tool (terminalCommand returns '').
+          this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
           const content = resultView.content ?? []
           if (content.length > 0) {
             const hasImages = content.some(block => block.type === 'image')

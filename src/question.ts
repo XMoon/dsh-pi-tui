@@ -203,8 +203,9 @@ interface Row {
 /**
  * The interactive question flow. Renders one question at a time with a tab
  * strip (answered marks), a navigable option list (↑↓/digits/Enter), a real
- * Input for free text, and a final review page (Submit/Cancel). Esc cancels
- * the whole flow; the app layer resolves the batch on done().
+ * Input for free text, and a final REVIEW page with NO two-choice control:
+ * Enter submits, Esc cancels, ← edits the last answer (plan item 4). Esc
+ * cancels the whole flow; the app layer resolves the batch on done().
  */
 export class QuestionFlow implements Component, Focusable {
   private readonly questions: readonly QuestionFlowQuestion[]
@@ -218,8 +219,6 @@ export class QuestionFlow implements Component, Focusable {
   /** Free-text editing mode (the "Type something." row or an optionless question). */
   private editingOther = false
   private readonly otherInput = new Input()
-  /** Review-page action highlight (0 = Submit, 1 = Cancel). */
-  private submitIdx = 0
   /**
    * Current content-row budget (8..38). The editor-seat QuestionFrame in
    * tui-app.ts re-derives it from the terminal height on every render and
@@ -555,7 +554,6 @@ export class QuestionFlow implements Component, Focusable {
   private advance(): void {
     this.tab += 1
     this.cursor = 0
-    this.submitIdx = 0
     this.syncEditMode()
   }
 
@@ -665,7 +663,6 @@ export class QuestionFlow implements Component, Focusable {
         if (this.tab > 0) {
           this.tab -= 1
           this.cursor = 0
-          this.submitIdx = 0
           this.syncEditMode()
         }
       } else if (matchesKey(data, 'right')) {
@@ -680,28 +677,21 @@ export class QuestionFlow implements Component, Focusable {
     }
     const rows = this.rows()
     if (this.tab >= this.questions.length) {
-      // Review page: ↑↓ choose Submit/Cancel, Enter executes, ← goes back
-      // to the last question (drafts survive), Esc cancels. The action
-      // highlight uses ↑↓ (kimi's question dialog); ← is the back verb
-      // (it replaced the old 'b' key — the arrows own back/skip now).
-      // `h` stays as the vim alias for ← (as in list mode); `l` has no
-      // mapping because the review page binds no action to → (the arrows
-      // no longer select Submit/Cancel — ↑↓ do).
+      // Review page (the 2026-08-22 plan, item 4): a pure review — NO
+      // Submit/Cancel two-choice control, no focus, no ↑↓. Enter submits
+      // the whole batch, Esc cancels the flow, ← returns to the last
+      // question (drafts survive). The keys match user intuition and the
+      // page carries one less state machine. `h` stays the vim alias for
+      // ← (as in list mode).
       if (matchesKey(data, 'enter')) {
-        if (this.submitIdx === 0) this.submit()
-        else this.onCancel()
+        this.submit()
       } else if (matchesKey(data, 'escape')) {
         this.onCancel()
       } else if (matchesKey(data, 'left') || data === 'h') {
         // ← back to the last question (drafts survive).
         this.tab = Math.max(0, this.questions.length - 1)
         this.cursor = 0
-        this.submitIdx = 0
         this.syncEditMode()
-      } else if (matchesKey(data, 'up') || data === 'k') {
-        this.submitIdx = 0
-      } else if (matchesKey(data, 'down') || data === 'j') {
-        this.submitIdx = 1
       }
       return
     }
@@ -762,7 +752,6 @@ export class QuestionFlow implements Component, Focusable {
       if (this.tab > 0) {
         this.tab -= 1
         this.cursor = 0
-        this.submitIdx = 0
         this.syncEditMode()
       }
       return
@@ -781,12 +770,10 @@ export class QuestionFlow implements Component, Focusable {
       if (this.tab < this.questions.length - 1) {
         this.tab += 1
         this.cursor = 0
-        this.submitIdx = 0
         this.syncEditMode()
       } else {
         this.tab = this.questions.length
         this.cursor = 0
-        this.submitIdx = 0
         this.syncEditMode()
       }
       return
@@ -826,13 +813,15 @@ export class QuestionFlow implements Component, Focusable {
     lines.push(tabs.join('  '))
     lines.push('')
     if (this.tab >= this.questions.length) {
-      // Review page: every answer, then Submit/Cancel actions. The page
-      // shares the SAME physical-row budget as the rest of the dialog: no
-      // matter how long the answers are, the Submit/Cancel row and the hint
-      // must stay visible — they are the REQUIRED tail (2 rows), and title,
-      // separators, questions and answers share everything else,
-      // row-budgeted with the usual `... N more lines` cut marker.
-      let reviewBudget = this.budget - lines.length - 2
+      // Review page (plan item 4): every answer, then the fixed hint — NO
+      // Submit/Cancel action row (Enter submits, Esc cancels, ← edits).
+      // The page shares the SAME physical-row budget as the rest of the
+      // dialog: no matter how long the answers are, the hint must stay
+      // visible — it is the ONLY required tail row now (the blank
+      // separator before it yields when space is tight, round-3 finding),
+      // and title, separators, questions and answers share everything
+      // else, row-budgeted with the usual `... N more lines` cut marker.
+      let reviewBudget = this.budget - lines.length - 1
       reviewBudget = appendWrappedBudgeted(
         lines,
         '',
@@ -881,10 +870,7 @@ export class QuestionFlow implements Component, Focusable {
         lines.push('')
         reviewBudget -= 1
       }
-      const submit = this.submitIdx === 0 ? color.textStrong('Submit') : color.textDim('Submit')
-      const cancel = this.submitIdx === 1 ? color.textStrong('Cancel') : color.textDim('Cancel')
-      lines.push(`${this.submitIdx === 0 ? color.primary('→ ') : '  '}${submit}   ${cancel}`)
-      lines.push(color.textDim('↑↓ choose · ← back · ↵ confirm · esc cancel'))
+      lines.push(color.textDim('← back · ↵ submit · esc cancel'))
       return lines
     }
     const question = this.questions[this.tab]

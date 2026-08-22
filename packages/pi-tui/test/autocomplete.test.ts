@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it, test } from "node:test";
-import { CombinedAutocompleteProvider } from "../src/autocomplete.ts";
+import { CombinedAutocompleteProvider, typeDirectoryOutputLines } from "../src/autocomplete.ts";
 
 const resolveFdPath = (): string | null => {
 	const command = process.platform === "win32" ? "where" : "which";
@@ -111,6 +111,71 @@ describe("CombinedAutocompleteProvider", () => {
 			if (result) {
 				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
 			}
+		});
+	});
+
+	describe("typeDirectoryOutputLines", () => {
+		let rootDir = "";
+		let baseDir = "";
+
+		beforeEach(() => {
+			rootDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-type-"));
+			baseDir = join(rootDir, "cwd");
+			mkdirSync(baseDir, { recursive: true });
+		});
+
+		afterEach(() => {
+			rmSync(rootDir, { recursive: true, force: true });
+		});
+
+		test("classifies BARE directory lines (no trailing slash) as directories", () => {
+			// The regression: fd's plain output does not guarantee a
+			// trailing `/` on directories. A bare `src` line must still be
+			// typed as a directory so `@src<Tab>` completes to `@src/` and
+			// the next Tab can descend into it.
+			setupFolder(baseDir, {
+				dirs: ["src", "other"],
+				files: { "src/index.ts": "export {};", "file.txt": "content" },
+			});
+
+			const typed = typeDirectoryOutputLines(baseDir, ["src", "other", "file.txt", "src/index.ts"]);
+
+			const byPath = new Map(typed.map((entry) => [entry.path, entry.isDirectory]));
+			assert.strictEqual(byPath.get("src"), true, "bare src must type as a directory");
+			assert.strictEqual(byPath.get("other"), true, "bare other must type as a directory");
+			assert.strictEqual(byPath.get("file.txt"), false, "a file stays a file");
+			assert.strictEqual(byPath.get("src/index.ts"), false, "a nested file stays a file");
+		});
+
+		test("normalizes trailing separators away and keeps the .git exclusion", () => {
+			setupFolder(baseDir, {
+				dirs: [".git", "src"],
+			});
+
+			// Duplicate lines (a slash-form and a bare form of the same
+			// path) both normalize to the same entry — the consumer
+			// (bestByAbs) dedups by absolute path.
+			const typed = typeDirectoryOutputLines(baseDir, ["src/", ".git/", "src"]);
+			assert.deepStrictEqual(typed, [
+				{ path: "src", isDirectory: true },
+				{ path: "src", isDirectory: true },
+			]);
+		});
+
+		test("follows a symlink to a directory (keeps the / completion)", () => {
+			setupFolder(baseDir, {
+				dirs: ["real-dir"],
+				files: { "real-dir/file.txt": "content" },
+			});
+			symlinkSync("real-dir", join(baseDir, "linked-dir"));
+
+			const typed = typeDirectoryOutputLines(baseDir, ["linked-dir"]);
+			assert.deepStrictEqual(typed, [{ path: "linked-dir", isDirectory: true }]);
+		});
+
+		test("tolerates a missing path (racing removal) without throwing", () => {
+			const typed = typeDirectoryOutputLines(baseDir, ["gone-dir"]);
+			assert.deepStrictEqual(typed, [{ path: "gone-dir", isDirectory: false }]);
 		});
 	});
 

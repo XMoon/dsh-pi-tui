@@ -176,6 +176,161 @@ test('search matches the GROUP name too (the merged /tasks surface)', () => {
   assert.ok(!filtered.includes('pnpm build'), `job rows must be filtered by the group query:\n${filtered}`)
 })
 
+// ── the async-merge focus race (plan item 2) ──────────────────────────────
+
+const typed = (item: TaskPanelItem, type: string): TaskPanelItem => ({ ...item, type })
+
+test('an UNTOUCHED selection follows the enriched list head (the /tasks race)', () => {
+  // The browser opens on the jobs half only…
+  const { panel, rendered } = makePanel([runningJob(), doneJob()], { enableSearch: true })
+  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'),
+    `precondition — first job selected before enrichment`)
+  // …then the subagent catalog lands: the running subagent heads the
+  // enriched list, and an untouched selection must MOVE onto it (the old
+  // value-preserving setItems left the cursor stuck on the first job).
+  panel.setItems([
+    typed(subagent(), 'subagent'),
+    runningJob({ type: 'bash' }),
+    doneJob({ type: 'bash' }),
+  ])
+  const enriched = rendered().map(strip).join('\n')
+  assert.ok(enriched.includes('→ ● subagent · research'),
+    `untouched selection must follow the preferred head (first running subagent):\n${enriched}`)
+})
+
+test('a USER-touched selection survives a later enrichment (no focus stealing)', () => {
+  const { panel, rendered } = makePanel(
+    [typed(runningJob(), 'bash'), typed(doneJob(), 'bash')],
+    { enableSearch: true },
+  )
+  // The user moves down to the second row…
+  panel.handleInput('\x1b[B')
+  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · lint'), `precondition — user on the lint row:\n${rendered().map(strip).join('\n')}`)
+  // …then a refresh inserts a running subagent at the head.
+  panel.setItems([
+    typed(subagent(), 'subagent'),
+    typed(runningJob(), 'bash'),
+    typed(doneJob(), 'bash'),
+  ])
+  const after = rendered().map(strip).join('\n')
+  assert.ok(after.includes('→ ● bash · lint'),
+    `a touched selection must stay on the user's row, not jump to the new head:\n${after}`)
+  assert.ok(!after.includes('→ ● subagent · research'), `the head must not steal the focus:\n${after}`)
+})
+
+test('a user-touched selection whose row vanished resets to the head (not a stale value)', () => {
+  const { panel, rendered } = makePanel(
+    [typed(runningJob(), 'bash'), typed(subagent(), 'subagent')],
+    { enableSearch: true },
+  )
+  panel.handleInput('\x1b[B') // user moves onto the subagent row
+  // The subagent settles and disappears; the refresh must not resurrect it.
+  panel.setItems([typed(runningJob(), 'bash')])
+  const after = rendered().map(strip).join('\n')
+  assert.ok(after.includes('→ ● bash · pnpm build'), `a vanished row must fall back to the head:\n${after}`)
+})
+
+// ── the Tab type filter (initial item 2) ──────────────────────────────────
+
+test('Tab cycles All → subagent → bash → All and filters rows by type', () => {
+  const { panel, rendered } = makePanel(
+    [typed(subagent(), 'subagent'), typed(runningJob(), 'bash'), typed(doneJob(), 'bash')],
+    { enableSearch: true, header: 'tasks · subagents' },
+  )
+  const all = rendered().map(strip).join('\n')
+  assert.ok(all.includes('subagent · research') && all.includes('pnpm build'), `precondition — All shows everything:\n${all}`)
+
+  panel.handleInput('\t')
+  const agents = rendered().map(strip).join('\n')
+  assert.ok(agents.includes('subagent · research'), `subagent filter keeps the agent row:\n${agents}`)
+  assert.ok(!agents.includes('pnpm build'), `subagent filter drops job rows:\n${agents}`)
+  assert.ok(agents.includes('[subagent]'), `the header must show the active type chip:\n${agents}`)
+
+  panel.handleInput('\t')
+  const bash = rendered().map(strip).join('\n')
+  assert.ok(bash.includes('pnpm build'), `bash filter keeps job rows:\n${bash}`)
+  assert.ok(!bash.includes('subagent · research'), `bash filter drops the agent row:\n${bash}`)
+  assert.ok(bash.includes('[bash]'), `the chip follows the cycle:\n${bash}`)
+
+  panel.handleInput('\t') // bash → All (the cycle wraps)
+  const allAgain = rendered().map(strip).join('\n')
+  assert.ok(allAgain.includes('subagent · research') && allAgain.includes('pnpm build'), `cycle wraps to All:\n${allAgain}`)
+  assert.ok(!allAgain.includes('[bash]'), `All shows no chip:\n${allAgain}`)
+})
+
+test('type filter composes with the search query', () => {
+  const { panel, rendered } = makePanel(
+    [typed(subagent(), 'subagent'), typed(runningJob(), 'bash'), typed(doneJob(), 'bash')],
+    { enableSearch: true },
+  )
+  panel.handleInput('\t') // subagent
+  panel.handleInput('r') // query 'r'
+  const both = rendered().map(strip).join('\n')
+  assert.ok(both.includes('subagent · research'), `type+query keeps the matching agent row:\n${both}`)
+  assert.ok(!both.includes('pnpm build'), `type+query keeps job rows out:\n${both}`)
+})
+
+test('rows without a type never match a type filter (they only appear under All)', () => {
+  const { panel, rendered } = makePanel(
+    [runningJob(), typed(doneJob(), 'bash')],
+    { enableSearch: true },
+  )
+  panel.handleInput('\t') // bash
+  const filtered = rendered().map(strip).join('\n')
+  assert.ok(filtered.includes('bash · lint'), `typed row stays:\n${filtered}`)
+  assert.ok(!filtered.includes('bash · pnpm build'), `typeless row hides under a type filter:\n${filtered}`)
+})
+
+test('the type hint advertises Tab only when the cycle has two or more entries', () => {
+  const single = makePanel([typed(runningJob(), 'bash')], { enableSearch: true })
+  assert.ok(!single.rendered().map(strip).join('\n').includes('tab type'),
+    `a single-kind list must not advertise the toggle:\n${single.rendered().map(strip).join('\n')}`)
+  const multi = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true })
+  assert.ok(multi.rendered().map(strip).join('\n').includes('tab type'),
+    `mixed list advertises the Tab cycle:\n${multi.rendered().map(strip).join('\n')}`)
+})
+
+test('a vanished active type snaps the filter back to All on setItems', () => {
+  const { panel, rendered } = makePanel(
+    [typed(subagent(), 'subagent'), typed(runningJob(), 'bash')],
+    { enableSearch: true },
+  )
+  panel.handleInput('\t') // subagent
+  assert.ok(rendered().map(strip).join('\n').includes('[subagent]'), `precondition — subagent filter active:\n${rendered().map(strip).join('\n')}`)
+  // The subagent settles and disappears from the refresh.
+  panel.setItems([typed(runningJob(), 'bash')])
+  const after = rendered().map(strip).join('\n')
+  assert.ok(after.includes('pnpm build'), `snapped to All shows the remaining row:\n${after}`)
+  assert.ok(!after.includes('[subagent]'), `the vanished type must not stay active:\n${after}`)
+})
+
+test('a Tab type filter counts as a user interaction (no head-stealing on refresh)', () => {
+  // Round-1 review finding: Tab cycles the type filter, so a later async
+  // setItems enrichment must preserve the selection within the user's
+  // chosen scope — never re-focus the unfiltered head.
+  const { panel, rendered } = makePanel(
+    [typed(subagent(), 'subagent'), typed(runningJob(), 'bash'), typed(doneJob(), 'bash')],
+    { enableSearch: true },
+  )
+  // The user picks the bash scope and moves onto the lint row.
+  panel.handleInput('\t') // subagent
+  panel.handleInput('\t') // bash (marks the selection touched)
+  panel.handleInput('\x1b[B') // onto the lint row
+  const before = rendered().map(strip).join('\n')
+  assert.ok(before.includes('→ ● bash · lint'), `precondition — a row selected within the type scope:\n${before}`)
+  // An enrichment arrives with a NEW bash job at the head of the filtered
+  // scope; the touched selection must not jump.
+  panel.setItems([
+    typed(runningJob({ value: 'job:bash-new', label: 'bash · fresh' }), 'bash'),
+    typed(runningJob(), 'bash'),
+    typed(doneJob(), 'bash'),
+    typed(subagent(), 'subagent'),
+  ])
+  const after = rendered().map(strip).join('\n')
+  assert.ok(after.includes('→ ● bash · lint'),
+    `the touched selection must survive the refresh inside the typed scope:\n${after}`)
+})
+
 test('i on a selected subagent row fires the interrupt action while search is closed', () => {
   let acted: { value: string; action: string } | undefined
   const panel = new TaskBrowserPanel(
@@ -301,6 +456,23 @@ test('empty state renders the no-match text and hint', () => {
   const joined = rendered().map(strip).join('\n')
   assert.ok(joined.includes('no active tasks'), `empty text missing:\n${joined}`)
   assert.ok(joined.includes('↑↓ navigate'), `hint missing:\n${joined}`)
+})
+
+test('the type chip narrows the header counts to the visible scope', () => {
+  // Round-1 review finding: with a type filter active, the counts must
+  // describe the visible rows only — a running row outside the scope must
+  // not inflate the numbers.
+  const { panel, rendered } = makePanel(
+    [typed(subagent(), 'subagent'), typed(runningJob(), 'bash')],
+    { enableSearch: true, header: 'tasks · subagents' },
+  )
+  const all = rendered().map(strip).join('\n')
+  assert.ok(all.includes('2 running'), `precondition — full surface counts both rows:\n${all}`)
+  panel.handleInput('\t') // subagent
+  const agents = rendered().map(strip).join('\n')
+  assert.ok(agents.includes('[subagent]'), `precondition — type chip:\n${agents}`)
+  assert.ok(agents.includes('1 running'), `the subagent scope counts its own row only:\n${agents}`)
+  assert.ok(!agents.includes('2 running'), `the hidden bash row must not inflate the count:\n${agents}`)
 })
 
 test('the hint advertises i interrupt only while a subagent row is selectable', () => {

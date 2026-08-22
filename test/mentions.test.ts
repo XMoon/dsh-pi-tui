@@ -6,10 +6,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
-import { extractAtPrefix, MentionProvider, resolveFdPath, resolvePathSearch, suggestPathArgument } from '../src/mentions.ts'
+import { expandFileMentionsForSubmit, extractAtPrefix, findFileMentions, MentionProvider, resolveFdPath, resolvePathSearch, suggestPathArgument } from '../src/mentions.ts'
 
 /** A throwaway workspace with known files. */
 function fixtureWorkspace(): string {
@@ -279,4 +279,155 @@ test('MentionProvider lets Tab file-complete a trailing-space PATH argument only
   assert.equal(provider.shouldTriggerFileCompletion(['/help\t'], 0, 6), false, 'a NON-path command keeps the fork judgment for a trailing TAB too')
   assert.equal(provider.shouldTriggerFileCompletion(['/help foo'], 0, 9), true, 'non-path commands keep the fork behavior for real arguments')
   assert.equal(provider.shouldTriggerFileCompletion(['see /tmp/'], 0, 9), true, 'plain path lines keep the fork behavior')
+})
+
+// ── send-time mention canonicalization (the 2026-08-22 plan, item 7) ─────
+
+test('findFileMentions finds boundary @ tokens in both bare and quoted forms', () => {
+  const text = 'see @src/foo.ts and @"my file.txt" plus user@example.com'
+  const mentions = findFileMentions(text)
+  assert.equal(mentions.length, 2, `email @ must not parse:\n${JSON.stringify(mentions)}`)
+  assert.deepEqual(mentions[0], { start: 4, end: 15, path: 'src/foo.ts', quoted: false })
+  assert.deepEqual(mentions[1], { start: 20, end: 34, path: 'my file.txt', quoted: true })
+})
+
+test('a quoted mention immediately followed by another mention is not swallowed', () => {
+  // Round-2 review finding: `@"a.txt"@b.txt` — the scanner advanced past
+  // the char right after the closing quote, silently dropping the second
+  // mention.
+  const mentions = findFileMentions('@"a.txt"@b.txt')
+  assert.equal(mentions.length, 2, `the second mention must parse:\n${JSON.stringify(mentions)}`)
+  assert.deepEqual(mentions[0], { start: 0, end: 8, path: 'a.txt', quoted: true })
+  assert.deepEqual(mentions[1], { start: 8, end: 14, path: 'b.txt', quoted: false })
+})
+
+test('findFileMentions stops at CJK sentence punctuation and strips ASCII trailing punctuation', () => {
+  // No space before the mention: the CJK boundary rule accepts it.
+  const mentions = findFileMentions('看看@src/deep-nested.ts，然后…')
+  assert.equal(mentions.length, 1)
+  assert.equal(mentions[0]!.path, 'src/deep-nested.ts', 'a CJK comma must end the token, not join the path')
+  // The token range excludes the comma (the rewrite keeps it as text).
+  assert.equal('看看@src/deep-nested.ts，然后…'.slice(mentions[0]!.start, mentions[0]!.end), '@src/deep-nested.ts')
+  // ASCII trailing punctuation is stripped from the PATH; the span ends
+  // BEFORE the punctuation so the rewrite never swallows it.
+  const ascii = findFileMentions('see @file-one.txt, ok')
+  assert.equal(ascii.length, 1)
+  assert.equal(ascii[0]!.path, 'file-one.txt')
+  assert.equal('see @file-one.txt, ok'.slice(ascii[0]!.start, ascii[0]!.end), '@file-one.txt',
+    'the punctuation must stay OUTSIDE the replaced span')
+})
+
+test('expandFileMentionsForSubmit keeps stripped ASCII punctuation as text', () => {
+  // Round-1 review finding: `@file.ts,` must become `@/abs/file.ts,` — the
+  // trailing comma is sentence punctuation, never part of the path, and the
+  // rewrite must not eat it.
+  const root = fixtureWorkspace()
+  assert.equal(
+    expandFileMentionsForSubmit('see @file-one.txt, then do X', root),
+    `see @${join(root, 'file-one.txt')}, then do X`,
+  )
+  assert.equal(
+    expandFileMentionsForSubmit('see @file-one.txt.', root),
+    `see @${join(root, 'file-one.txt')}.`,
+  )
+})
+
+test('expandFileMentionsForSubmit canonicalizes a mention inside a CJK sentence', () => {
+  const root = fixtureWorkspace()
+  assert.equal(
+    expandFileMentionsForSubmit('看看@src/deep-nested.ts，然后继续', root),
+    `看看@${join(root, 'src', 'deep-nested.ts')}，然后继续`,
+    'the CJK punctuation stays as text after the absolute path',
+  )
+})
+
+test('expandFileMentionsForSubmit canonicalizes relative, ./ and ../ mentions', () => {
+  const root = fixtureWorkspace()
+  assert.equal(
+    expandFileMentionsForSubmit(`please look at @file-one.txt`, root),
+    `please look at @${join(root, 'file-one.txt')}`,
+  )
+  assert.equal(
+    expandFileMentionsForSubmit('see @./file-one.txt', root),
+    `see @${join(root, 'file-one.txt')}`,
+  )
+  // A ../ mention resolves OUTSIDE the workspace root: build a dedicated
+  // parent/child pair so the parent file really exists.
+  const parent = mkdtempSync(join(tmpdir(), 'dsh-mentions-parent-'))
+  const child = join(parent, 'child')
+  mkdirSync(child)
+  writeFileSync(join(parent, 'sibling.txt'), 'sib')
+  assert.equal(
+    expandFileMentionsForSubmit('up @../sibling.txt', child),
+    `up @${join(parent, 'sibling.txt')}`,
+  )
+})
+
+test('expandFileMentionsForSubmit keeps absolute forms and expands ~ to the homedir', () => {
+  const root = fixtureWorkspace()
+  const absolute = join(root, 'file-one.txt')
+  // Absolute: unchanged (already canonical).
+  assert.equal(expandFileMentionsForSubmit(`abs @${absolute}`, root), `abs @${absolute}`)
+  // `@~/` resolves to the homedir itself (always exists — no fixture
+  // needed under $HOME).
+  assert.equal(expandFileMentionsForSubmit('home @~/', root), `home @${homedir()}`)
+  // A home-relative path under a real home entry: use the homedir itself
+  // as the mention target through the `~` prefix only when the home has a
+  // stable entry; otherwise the bare `~/` case above already pins the
+  // grammar.
+  const candidates = ['.bashrc', '.gitconfig', '.zshrc', '.profile', '.dsh']
+  const homeTarget = candidates.find(name => existsSync(join(homedir(), name)))
+  if (homeTarget !== undefined) {
+    assert.equal(
+      expandFileMentionsForSubmit(`home @~/${homeTarget}`, root),
+      `home @${join(homedir(), homeTarget)}`,
+      'a real home-relative mention must expand through the homedir',
+    )
+  }
+})
+
+test('expandFileMentionsForSubmit leaves nonexistent paths verbatim', () => {
+  const root = fixtureWorkspace()
+  assert.equal(
+    expandFileMentionsForSubmit('see @missing-file.ts and @src/missing.ts', root),
+    'see @missing-file.ts and @src/missing.ts',
+    'nonexistent mentions must never be rewritten',
+  )
+  // A typo with punctuation stays untouched too.
+  assert.equal(expandFileMentionsForSubmit('see @missin.ts, ok', root), 'see @missin.ts, ok')
+})
+
+test('expandFileMentionsForSubmit absolutizes a symlink without realpath-ing it', () => {
+  const root = fixtureWorkspace()
+  const link = join(root, 'link.ts')
+  symlinkSync('file-one.txt', link)
+  const out = expandFileMentionsForSubmit('see @link.ts', root)
+  assert.equal(out, `see @${link}`, 'the link path itself is the canonical form (never the target)')
+})
+
+test('expandFileMentionsForSubmit keeps quotes for spaced paths and never touches emails', () => {
+  const root = fixtureWorkspace()
+  assert.equal(
+    expandFileMentionsForSubmit(`see @"my file.txt"`, root),
+    `see @"${join(root, 'my file.txt')}"`,
+    'quoted mentions keep their quotes around the absolute path',
+  )
+  assert.equal(
+    expandFileMentionsForSubmit('mail user@example.com and pkg@1.0.0 stay', root),
+    'mail user@example.com and pkg@1.0.0 stay',
+    'non-boundary @ tokens are never mentions',
+  )
+})
+
+test('expandFileMentionsForSubmit rewrites MULTIPLE mentions in one line', () => {
+  const root = fixtureWorkspace()
+  const out = expandFileMentionsForSubmit('a @file-one.txt b @src/deep-nested.ts c', root)
+  assert.equal(out, `a @${join(root, 'file-one.txt')} b @${join(root, 'src', 'deep-nested.ts')} c`)
+})
+
+test('findFileMentions stops at an unterminated quote and keeps later text safe', () => {
+  const text = 'see @"unclosed and then @file-one.txt'
+  assert.deepEqual(findFileMentions(text), [], 'an unterminated quote must not fabricate mentions')
+  // The expander therefore leaves the line untouched (safe for the submit).
+  assert.equal(expandFileMentionsForSubmit(text, '/ws'), text)
 })

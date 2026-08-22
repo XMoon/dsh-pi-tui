@@ -25,6 +25,37 @@ import { shellCompletionContext, suggestShellCompletion } from './shell-completi
 
 /** Token separators: `@` must sit at the start of the current token. */
 const PATH_DELIMITERS = new Set([' ', '\t', '"', "'", '='])
+/** Trailing punctuation allowed AFTER an unquoted mention token: stripped
+ * for the existence probe but KEPT in the rewritten text, so a sentence
+ * like "see @src/foo.ts, then…" still canonicalizes. The set covers ASCII
+ * sentence punctuation plus the CJK full-width forms. */
+const MENTION_TRAILING_PUNCTUATION = new Set([
+  '.', ',', ';', ':', '!', '?', ')', ']', '}',
+  '。', '，', '；', '：', '！', '？', '）', '】', '》',
+])
+/** CJK punctuation that ENDS an unquoted mention token: CJK sentences
+ * rarely put a space after a mention ("see @src/foo.ts,then..."), and paths
+ * virtually never contain these characters — stopping the token there
+ * keeps the mention canonical while the CJK punctuation stays as text. */
+const CJK_MENTION_ENDERS = new Set([
+  '，', '。', '；', '：', '！', '？', '、', '）', '】', '》', '」', '』', '…',
+])
+
+/** Whether the char is CJK (ideographs, kana, hangul, CJK punctuation,
+ * full-width forms): a mention may sit DIRECTLY against CJK text without
+ * a delimiter — CJK sentences glue the mention to the previous character
+ * — while ASCII words keep the strict boundary rule (emails,
+ * `pkg@1.0.0`). */
+function isCjkChar(char: string): boolean {
+  const code = char.codePointAt(0) ?? 0
+  return (code >= 0x3000 && code <= 0x303f) // CJK punctuation
+    || (code >= 0x3040 && code <= 0x30ff) // hiragana + katakana
+    || (code >= 0x3400 && code <= 0x4dbf) // CJK extension A
+    || (code >= 0x4e00 && code <= 0x9fff) // CJK unified ideographs
+    || (code >= 0xac00 && code <= 0xd7af) // hangul
+    || (code >= 0xf900 && code <= 0xfaff) // compatibility ideographs
+    || (code >= 0xff00 && code <= 0xffef) // full-width forms
+}
 /** Bounded recursive scan (kimi MAX_FALLBACK_SCAN). */
 const MAX_FALLBACK_SCAN = 2000
 /** Suggestion cap for the fallback (kimi MAX_FALLBACK_SUGGESTIONS). */
@@ -47,10 +78,137 @@ export function extractAtPrefix(text: string): string | null {
   return text.slice(tokenStart)
 }
 
+/** One `@`-mention token found in a draft. */
+export interface FileMentionOccurrence {
+  /** Token start (the `@` itself). */
+  readonly start: number
+  /** Token end (exclusive; the closing quote for quoted mentions). */
+  readonly end: number
+  /** The mention path WITHOUT the `@` (quotes stripped). */
+  readonly path: string
+  /** Whether the path was quoted (`@"…"`). */
+  readonly quoted: boolean
+}
+
+/**
+ * Find every `@`-file mention token in a draft. The token grammar mirrors
+ * the editor's mention completion (PATH_DELIMITERS): `@` must sit at a
+ * token boundary — start-of-text or after a delimiter — so emails
+ * (`a@b.com`) and `pkg@1.0.0` are never treated as mentions. Two forms:
+ * the bare token (`@src/foo.ts`, runs to the next delimiter) and the
+ * quoted token (`@"dir with spaces/foo.ts"`, closed by a `"`). Trailing
+ * sentence punctuation is stripped from the PATH (kept in the source text
+ * by the caller's range replacement).
+ * @param text - the draft text.
+ */
+export function findFileMentions(text: string): FileMentionOccurrence[] {
+  const mentions: FileMentionOccurrence[] = []
+  let index = 0
+  while (index < text.length) {
+    const at = text.indexOf('@', index)
+    if (at === -1) break
+    const before = at === 0 ? '' : text[at - 1] ?? ''
+    // The token-start rule: `@` must follow start-of-text, a delimiter,
+    // or CJK text (CJK sentences glue the mention to the previous
+    // character). Emails (`a@b.com`) and `pkg@1.0.0` never qualify.
+    if (!(at === 0 || PATH_DELIMITERS.has(before) || isCjkChar(before))) {
+      index = at + 1
+      continue
+    }
+    let cursor = at + 1
+    let quoted = false
+    let pathStart = cursor
+    let pathEnd = cursor
+    if (text[cursor] === '"') {
+      quoted = true
+      cursor += 1
+      pathStart = cursor
+      const close = text.indexOf('"', cursor)
+      if (close === -1) break // unterminated quote: nothing after it can parse
+      pathEnd = close
+      // The token range INCLUDES the closing quote (the rewriter replaces
+      // [start, end) and supplies its own quotes).
+      cursor = close + 1
+    } else {
+      while (cursor < text.length
+        && !PATH_DELIMITERS.has(text[cursor] ?? '')
+        && !CJK_MENTION_ENDERS.has(text[cursor] ?? '')) cursor += 1
+      pathEnd = cursor
+    }
+    let path = text.slice(pathStart, pathEnd)
+    while (path.length > 0 && MENTION_TRAILING_PUNCTUATION.has(path[path.length - 1] ?? '')) {
+      path = path.slice(0, -1)
+    }
+    if (path !== '') {
+      mentions.push({
+        start: at,
+        // Unquoted: the span ends where the STRIPPED path ends, so the
+        // stripped punctuation stays in the source text (`@file.ts,` →
+        // `@/abs/file.ts` + `,`); the rewriter supplies its own quotes for
+        // the quoted form, so there the full span (closing quote included)
+        // is replaced.
+        end: quoted ? cursor : pathStart + path.length,
+        path,
+        quoted,
+      })
+    }
+    // After a QUOTED token the cursor sits on the char right after the
+    // closing quote — it may be another `@` (`@"a.txt"@b.txt`), so resume
+    // AT the cursor; an unquoted token ends ON a delimiter, which can be
+    // skipped (round-2 review finding).
+    index = quoted ? cursor : cursor + 1
+  }
+  return mentions
+}
+
+/**
+ * Send-time canonicalization of `@`-file mentions (the 2026-08-22 plan,
+ * item 7): the EDITOR keeps showing the concise relative form the user
+ * typed, but the MODEL-facing message carries the unambiguous absolute
+ * path, so a weaker model does not have to guess which workspace
+ * `@src/foo.ts` lives in. Rules: a relative path resolves against
+ * `sessionCwd`; `~` expands through the homedir; an absolute path stays
+ * as-is; a path that does NOT exist is left VERBATIM (typos and non-path
+ * `@` words are never mangled); symlinks are absolutized, never
+ * realpath'd — the user's link path is the intent. Quoted mentions keep
+ * their quotes in the rewritten text.
+ * @param text - the draft text.
+ * @param sessionCwd - the session's working directory (the resolution
+ *   base for relative mentions).
+ * @returns the canonicalized text (unchanged when no mention resolves).
+ */
+export function expandFileMentionsForSubmit(text: string, sessionCwd: string): string {
+  const mentions = findFileMentions(text)
+  if (mentions.length === 0) return text
+  const exists = (candidate: string): boolean => {
+    try {
+      statSync(candidate)
+      return true
+    } catch {
+      return false
+    }
+  }
+  let out = ''
+  let cursor = 0
+  for (const mention of mentions) {
+    const raw = mention.path
+    let candidate: string
+    if (raw.startsWith('~/')) candidate = join(homedir(), raw.slice(2))
+    else if (isAbsolute(raw)) candidate = raw
+    else candidate = join(sessionCwd, raw)
+    const rewritten = exists(candidate)
+      ? (mention.quoted ? `@"${candidate}"` : `@${candidate}`)
+      : text.slice(mention.start, mention.end)
+    out += text.slice(cursor, mention.start) + rewritten
+    cursor = mention.end
+  }
+  out += text.slice(cursor)
+  return out
+}
+
 /** Locate an executable `fd` on PATH (bare command names resolve through
  * PATH at spawn time; absolute/relative entries must exist and be X_OK). */
-export function resolveFdPath(): string | null {
-  const pathEntries = process.env.PATH?.split(':').filter(entry => entry !== '') ?? []
+export function resolveFdPath(): string | null {  const pathEntries = process.env.PATH?.split(':').filter(entry => entry !== '') ?? []
   for (const dir of pathEntries) {
     const candidate = join(dir, 'fd')
     try {

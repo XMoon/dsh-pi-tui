@@ -330,6 +330,37 @@ export function shouldConsumeAdvertisedMiss(
   return execution === undefined && wasAdvertised
 }
 
+/** The live-agent surface {@link interruptAgent} needs (structural — the
+ * TUI never imports the agent runtime for this call). */
+export interface InterruptAgentLike {
+  readonly status: string
+  cancel(cause: { kind: 'user' }, options?: { keepInbox?: boolean }): void
+}
+
+/**
+ * Interrupt the live agent (web Stop parity): abort the current
+ * turn/tool run while PRESERVING the pending queue. dsh's DEFAULT
+ * `cancel()` clears queued AND steering input, so a bare cancel would
+ * destroy everything the user queued with Ctrl+S / queue-mode Enter —
+ * the Esc-interrupt semantic is "stop the current thinking", never
+ * "drop the queue". `keepInbox: true` parks the preserved work; dsh's
+ * cancel is a documented no-op when nothing is active, so an idle
+ * interrupt (double-Esc while idle) is harmless and still aborts a
+ * local shell / maintenance task through the caller.
+ *
+ * NOTE (upstream dependency): dsh currently PARKS the preserved queue
+ * after an abort — the "Esc with a queue continues immediately" UX
+ * needs an upstream `wakePending`/`continueInbox` capability (not yet
+ * in dsh). A TUI-side emulation (remove + re-send a queue message)
+ * would fabricate durable discarded/inserted events in the session
+ * log, which the design explicitly rejects — the parked queue is the
+ * agreed web-parity behavior until upstream lands the capability.
+ */
+export function interruptAgent(agent: InterruptAgentLike | undefined): void {
+  if (agent === undefined) return
+  agent.cancel({ kind: 'user' }, { keepInbox: true })
+}
+
 /** One unsettled subagent delegation, in tool/call order. */
 export interface PendingSubagentCall {
   readonly callId: string
@@ -2277,6 +2308,7 @@ export function apply(ctx: Context, config: Config): void {
     const submitDeps: PrepareInputDeps = {
       attachments: ctx.get('attachments') as PrepareInputDeps['attachments'],
       llm: ctx.get('llm') as PrepareInputDeps['llm'],
+      sessionCwd: () => sessionCwd(),
       currentModel: () => {
         // The AUTHORITATIVE model for the next step is the mutable
         // selection's `current` (/model writes it; prompt assembly reads
@@ -2911,12 +2943,15 @@ export function apply(ctx: Context, config: Config): void {
         requestExit()
       },
       onCancel: () => {
-        // Double-Esc: abort a running `!` shell command, then the live turn.
-        // The cancel also invalidates any pending force token (the guard
-        // state may change while the turn is being torn down).
+        // Esc cancel: abort a running `!` shell command, then interrupt the
+        // live agent (busy: one Esc fires this directly; idle: double-Esc).
+        // interruptAgent PRESERVES the pending queue (web Stop parity) — an
+        // interrupt stops the current thinking, never the queued input. The
+        // cancel also invalidates any pending force token (the guard state
+        // may change while the turn is being torn down).
         guardToken = undefined
         localShellController?.abort()
-        liveAgent?.cancel({ kind: 'user' })
+        interruptAgent(liveAgent)
       },
       // M6: execute a plugin keybinding's SEMANTIC action through the
       // host's own paths (plan §2.2 — the host never lets a plugin bypass
@@ -2942,7 +2977,7 @@ export function apply(ctx: Context, config: Config): void {
           case 'cancel-activity': {
             guardToken = undefined
             localShellController?.abort()
-            liveAgent?.cancel({ kind: 'user' })
+            interruptAgent(liveAgent)
             break
           }
           case 'open-search': {
@@ -3301,6 +3336,8 @@ export function apply(ctx: Context, config: Config): void {
               detail: row.detail,
               startedAt: row.startedAt,
               group: rowGroup(row),
+              // The Tab type filter: job rows filter by their job kind.
+              type: row.jobKind,
             }
           : {
               value: row.value,
@@ -3308,6 +3345,7 @@ export function apply(ctx: Context, config: Config): void {
               status: row.activity,
               detail: row.hasChildren ? 'has children' : undefined,
               group: rowGroup(row),
+              type: 'subagent',
             })
       const handle = app.openTaskBrowser(
         taskPanelItems(rows),

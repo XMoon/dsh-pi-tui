@@ -17,6 +17,7 @@ import {
   sessionPickerItem,
   type SessionPickerRow,
 } from '../src/sessions.ts'
+import { sessionPickerCategories } from '../src/commands.ts'
 import type { PickerCategory } from '../src/tui-app.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -47,6 +48,47 @@ test('buildSessionTree hangs subagents under their parent chain', () => {
   // sibling subtree only if it came first in the input.
   assert.equal(tree[0]!.row.id, 'session-root-1')
   assert.equal(tree[1]!.row.id, 'session-child-1', 'children follow their root immediately')
+})
+
+// ── the Current directory / All directories scopes (plan item 3) ──────────
+
+const pickerRows: SessionPickerRow[] = [
+  { id: 'session-current-1', createdAt: 5, cwd: '/ws/project-a', live: false },
+  { id: 'session-current-2', createdAt: 4, cwd: '/ws/project-a/', live: false },
+  { id: 'session-other', createdAt: 3, cwd: '/ws/project-b', live: false },
+  { id: 'session-child', createdAt: 2, cwd: '/ws/project-a', origin: 'subagent', parentSession: 'session-current-1', live: false },
+  { id: 'session-unrooted', createdAt: 1, live: false },
+]
+
+/** The picker's plain item mapper (no titles, no current marker). */
+const plainItem = (row: SessionPickerRow): { value: string; label: string; description: string; group: string } =>
+  sessionPickerItem(row, '')
+
+test('sessionPickerCategories scopes Current to the workspace and never shows subagents', () => {
+  const categories = sessionPickerCategories(pickerRows, '/ws/project-a', 'sessions', plainItem)
+  assert.deepEqual(categories.map(category => category.label), ['Current directory', 'All directories'],
+    'the old Main/Subagents/All triad is gone')
+  assert.equal(categories[0]!.header, 'sessions · Current directory')
+  assert.equal(categories[1]!.header, 'sessions · All directories')
+
+  const current = categories[0]!.items()
+  const currentIds = current.map(item => item.value).sort()
+  assert.deepEqual(currentIds, ['session-current-1', 'session-current-2'],
+    `Current keeps only main sessions in the current workspace:\n${JSON.stringify(currentIds)}`)
+  assert.ok(!current.some(item => item.value === 'session-child'), 'subagent children never appear in Current')
+
+  const all = categories[1]!.items()
+  const allIds = all.map(item => item.value).sort()
+  assert.deepEqual(allIds, ['session-current-1', 'session-current-2', 'session-other', 'session-unrooted'],
+    `All lists every main session:\n${JSON.stringify(allIds)}`)
+  assert.ok(!all.some(item => item.value === 'session-child'), 'subagent children never appear in All either')
+})
+
+test('sessionPickerCategories treats a trailing-slash cwd as the same workspace', () => {
+  const categories = sessionPickerCategories(pickerRows, '/ws/project-a/', 'sessions', plainItem)
+  const currentIds = categories[0]!.items().map(row => row.value).sort()
+  assert.deepEqual(currentIds, ['session-current-1', 'session-current-2'],
+    `/ws/project-a/ scopes the same sessions as /ws/project-a:\n${JSON.stringify(currentIds)}`)
 })
 
 test('sessionPickerItem indents subagent rows in the All category', () => {

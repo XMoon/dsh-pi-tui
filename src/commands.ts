@@ -43,10 +43,10 @@ import {
   MAX_PICKER_SESSIONS,
   TITLE_BATCH_SIZE,
   TITLE_FIRST_BATCH,
-  buildSessionTree,
   findSessionMatch,
   headerToPickerRow,
   loadSessionTitleBatch,
+  sameWorkspace,
   sessionPickerItem,
   type SessionPickerItem,
   type SessionPickerRow,
@@ -110,6 +110,44 @@ function displaySessionId(id: string): string {
 /** Session meta for a fresh/forked session: the cwd plus the preset id when composed. */
 function metaOf(cwd: string, presetId: string | undefined): Record<string, unknown> {
   return presetId === undefined ? { cwd } : { cwd, agentPreset: presetId }
+}
+
+/**
+ * The `/sessions` category tabs (the 2026-08-22 plan, item 3): the session
+ * picker is a HUMAN surface, so subagent children never appear in either
+ * scope — /tasks and the subagent viewer own that surface now (kimi's
+ * directory-scope direction). `current` scopes to the live session's
+ * workspace (the sessionCwd the whole surface follows); `all` lists every
+ * main session, grouped by its workspace. Exported so the scope contract
+ * is unit-testable without a runner.
+ * @param shown - the picker rows, newest first (already capped).
+ * @param currentCwd - the live session's workspace.
+ * @param header - the picker header prefix (`sessions` / `resume`).
+ * @param itemFor - the row → picker item mapper (titles + current marker).
+ */
+export function sessionPickerCategories(
+  shown: readonly SessionPickerRow[],
+  currentCwd: string,
+  header: string,
+  itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem,
+): PickerCategory[] {
+  const mainRows = shown.filter(row => row.origin !== 'subagent')
+  return [
+    {
+      id: 'current',
+      label: 'Current directory',
+      header: `${header} · Current directory`,
+      items: () => mainRows
+        .filter(row => sameWorkspace(row.cwd, currentCwd))
+        .map(row => itemFor(row)),
+    },
+    {
+      id: 'all',
+      label: 'All directories',
+      header: `${header} · All directories`,
+      items: () => mainRows.map(row => itemFor(row)),
+    },
+  ]
 }
 
 /**
@@ -1324,8 +1362,7 @@ export function registerTuiCommands(
   // Shared /sessions + /resume body: list persisted sessions newest-first,
   // open the picker, and enrich rows with titles in the background. The
   // header parameter lets the resume alias present itself under its own name.
-  const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
-    // The current marker is the live session's id; before the first session
+  const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {    // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
     const currentId = runner.liveAgent?.session.id
@@ -1346,36 +1383,24 @@ export function registerTuiCommands(
     rows.sort((a, b) => b.createdAt - a.createdAt)
     if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
     // The picker opens instantly on the headers; titles land in the
-    // background below. The cap keeps the title read bounded.
+    // background below. The cap keeps the TITLE read bounded — the category
+    // scopes below still see the FULL row set, so "All directories" really
+    // lists every main session (round-1 review finding: the old code capped
+    // the rows themselves at MAX_PICKER_SESSIONS).
     const shown = rows.slice(0, MAX_PICKER_SESSIONS)
     // Live title map: the background loader fills it, and the category
     // factories re-read it on every activation (Tab cycle, refresh).
     const titlesById = new Map<string, string>()
     const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
       sessionPickerItem({ ...row, title: titlesById.get(row.id) }, runner.liveAgent?.session.id ?? '', indent)
-    // Category tabs (Tab cycles while the picker is open): Main sessions by
-    // default (subagent children hidden — the resume surface is for humans),
-    // All (tree indent: subagents hang under their parent), Subagents only.
-    const categories: PickerCategory[] = [
-      {
-        id: 'main',
-        label: 'Main',
-        header: `${header} · Main`,
-        items: () => shown.filter(row => row.origin !== 'subagent').map(row => itemFor(row)),
-      },
-      {
-        id: 'all',
-        label: 'All',
-        header: `${header} · All`,
-        items: () => buildSessionTree(shown).map(({ row, depth }) => itemFor(row, depth)),
-      },
-      {
-        id: 'sub',
-        label: 'Subagents',
-        header: `${header} · Subagents`,
-        items: () => shown.filter(row => row.origin === 'subagent').map(row => itemFor(row)),
-      },
-    ]
+    // Category tabs (Tab cycles while the picker is open): the session
+    // picker is a HUMAN surface, so subagent children never appear in
+    // either scope — /tasks and the subagent viewer own that surface now
+    // (the 2026-08-22 plan, item 3; kimi's directory-scope direction).
+    // Current directory scopes to the live session's workspace (the
+    // sessionCwd the whole surface follows); All directories lists every
+    // main session, grouped by its workspace.
+    const categories = sessionPickerCategories(rows, runner.sessionCwd(), header, itemFor)
     const picker = app.openPicker(
       categories[0]!.items(),
       (id) => {
@@ -2662,7 +2687,7 @@ export function registerTuiCommands(
       const rows: SettingItem[] = [        { id: 'k-enter', label: 'Enter', description: 'Submit (steers the running turn while busy when Enter while busy is Steer; skill commands steer too, UI commands run locally)', currentValue: '' },
         { id: 'k-queue', label: 'Ctrl+Enter', description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
         { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
-        { id: 'k-cancel', label: 'Double-Esc', description: 'Cancel the active turn / tool / shell command', currentValue: '' },
+        { id: 'k-cancel', label: 'Esc', description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle)', currentValue: '' },
         { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool output and thinking', currentValue: '' },
         { id: 'k-todo', label: 'Ctrl+T', description: 'Toggle the todo panel', currentValue: '' },
         { id: 'k-think', label: 'Alt+T', description: 'Hide/show thinking blocks', currentValue: '' },

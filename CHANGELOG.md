@@ -17,6 +17,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (default; Home/End scroll the conversation, Ctrl+Home/End move within
   the input). The choice applies immediately and persists across
   restarts; existing behavior is unchanged by default.
+- **`@`-file mentions reach the model as absolute paths.** The editor
+  keeps the concise relative form you typed (`@src/foo.ts`), but at
+  submit time every mention that resolves to a real file is canonicalized
+  to the full path (`@/home/…/src/foo.ts`), so the model never has to
+  guess which workspace the file lives in. Relative, `./`, `../`, `~`
+  and quoted (`@"dir with spaces/f.ts"`) forms are supported; a mention
+  that does not resolve (a typo, or a non-path `@` word) is sent verbatim.
+  Email addresses and `pkg@1.0.0`-style text are never touched.
+- **The task browser filters by row type.** Pressing Tab in `/tasks` (or
+  the ↓/Ctrl+J trigger) cycles `All → subagent → bash → pwsh → …`; the
+  header shows the active scope (`[bash]`) and the counts follow it. The
+  cursor also lands on the first *running* subagent when the browser
+  opens, instead of staying stuck on the first job while the subagent
+  catalog loads in the background.
+
+### Changed
+
+- **Esc never destroys your queue again.** Interrupting the agent (one
+  Esc while busy, double-Esc while idle) now preserves queued input — the
+  same `keepInbox` semantics as the web Stop button. The pending queue is
+  parked while the current turn aborts instead of being cleared outright;
+  dsh currently parks the queue after an interrupt (auto-continuing it
+  needs an upstream dsh capability, tracked in the code).
+- **`/sessions` scopes by directory.** The Main/Subagents/All tabs are
+  gone: the picker opens on `Current directory` (sessions in the
+  workspace you are in) and Tab switches to `All directories` (every main
+  session, grouped by its workspace — no cap). Subagent sessions are no
+  longer a picker category; `/tasks` and the subagent viewers own that
+  surface.
+- **The question review page is a pure review.** The final Submit/Cancel
+  two-choice row is gone: Enter submits the whole batch, Esc cancels, `←`
+  returns to the last question to edit. No focus, no arrows — just the
+  keys you would expect.
 
 ### Fixed
 
@@ -37,6 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exit window — it appears on the first Ctrl+C (even with text in the
   editor, and in the compact footer preset) and disappears the moment
   the window expires or the app exits.
+- **A settled background job card keeps its command.** The expanded tool
+  card for a finished background bash/pwsh now shows `$ command` above
+  `started background job …` — the call and its result are two stages,
+  never substitutes.
+- **`@dir` completion no longer depends on a trailing slash.** fd's plain
+  output does not guarantee a trailing `/` on directories, so `@src<Tab>`
+  could complete to a file-style value with a trailing space and the next
+  Tab could never descend into `src/`. Directory type is now resolved
+  from the filesystem (symlinks included), so `@src<Tab>` → `@src/` and
+  Tab keeps descending.
 
 ## [0.3.2] - 2026-08-22
 

@@ -13,6 +13,7 @@
  */
 
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { expandFileMentionsForSubmit } from '../mentions.ts'
 import { admitDraftImages, type AttachmentsLike } from './admission.ts'
 import { assertModelSupportsImages, type LlmLike } from './capability.ts'
 import { ImageAdmissionError } from './errors.ts'
@@ -35,6 +36,9 @@ export interface PrepareInputDeps {
   /** The CURRENT provider/model (re-read at submit time — the TUI supports
    * runtime model switching, plan §12). */
   currentModel(): CurrentModelLike | undefined
+  /** The session's working directory — the resolution base for send-time
+   * `@`-file mention canonicalization (the 2026-08-22 plan, item 7). */
+  sessionCwd(): string
 }
 
 /** Whether the draft text references any staged image (the image-only
@@ -90,11 +94,17 @@ export async function prepareUserMessage(
   store: DraftImageStoreLike,
   deps: PrepareInputDeps,
 ): Promise<UserMessage> {
-  const segments = expandImagePlaceholders(text, store)
+  // Send-time `@`-file mention canonicalization (the 2026-08-22 plan,
+  // item 7): the editor keeps the concise relative form, the model
+  // receives the absolute path. Runs BEFORE image-placeholder expansion —
+  // a canonical placeholder contains no `@`, so strict placeholder
+  // matching is unaffected.
+  const canonical = expandFileMentionsForSubmit(text, deps.sessionCwd())
+  const segments = expandImagePlaceholders(canonical, store)
   const hasImage = segments.some(segment => segment.type === 'image')
   if (!hasImage) {
     return createUserMessage({
-      content: [{ type: 'text', text }],
+      content: [{ type: 'text', text: canonical }],
       source: { kind: 'user' },
     })
   }

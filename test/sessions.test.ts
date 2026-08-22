@@ -19,6 +19,7 @@ import {
   formatSessionAge,
   headerToPickerRow,
   loadSessionTitles,
+  sameWorkspace,
   sessionPickerItem,
   shortSessionId,
   workspaceKey,
@@ -46,6 +47,26 @@ test('workspaceKey takes the last two path segments', () => {
   assert.equal(workspaceKey('/tmp'), '/tmp')
   assert.equal(workspaceKey(undefined), '(no workspace)')
   assert.equal(workspaceKey(''), '(no workspace)')
+})
+
+test('sameWorkspace ignores trailing separators and rejects unrooted cwds', () => {
+  assert.equal(sameWorkspace('/a/b', '/a/b'), true)
+  assert.equal(sameWorkspace('/a/b', '/a/b/'), true, 'a trailing slash is the same workspace')
+  assert.equal(sameWorkspace('/a/b', '/a/b//'), true)
+  assert.equal(sameWorkspace('/a/b', '/a/c'), false)
+  assert.equal(sameWorkspace('/a', '/'), false)
+  assert.equal(sameWorkspace(undefined, '/a'), false, 'an unrooted session never scopes in')
+  assert.equal(sameWorkspace('/a', undefined), false)
+  assert.equal(sameWorkspace('', '/a'), false)
+  assert.equal(sameWorkspace(undefined, undefined), false)
+})
+
+test('sameWorkspace normalizes dot segments (round-2 review finding)', () => {
+  assert.equal(sameWorkspace('/ws/project/./', '/ws/project'), true, 'a ./ segment is the same workspace')
+  assert.equal(sameWorkspace('/ws/project-a/../project-a', '/ws/project-a'), true, 'a .. round-trip is the same workspace')
+  assert.equal(sameWorkspace('/ws/project-a/../project-b', '/ws/project-b'), true)
+  assert.equal(sameWorkspace('/ws/project/../other', '/ws/project'), false)
+  assert.equal(sameWorkspace('/a/b/..', '/a'), true)
 })
 
 test('formatSessionAge is compact and bounded', () => {

@@ -10,7 +10,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, normalize } from 'node:path'
 
 /** How many most-recent sessions the picker shows at once (older rows still
  * appear, but only this many get background title reads). */
@@ -59,6 +59,22 @@ export function shortSessionId(id: string): string {
 export function workspaceKey(cwd: string | undefined): string {
   if (cwd === undefined || cwd === '') return '(no workspace)'
   return cwd.split('/').slice(-2).join('/')
+}
+
+/** Whether two cwd values denote the same workspace: lexical path
+ * normalization (`/a/b/` ≡ `/a/b` — node's normalize KEEPS one trailing
+ * separator, so it is stripped first — and `.`/`..` segments collapse);
+ * never a symlink/realpath resolution. An absent/empty cwd matches
+ * NOTHING (an unrooted session never scopes into the Current directory
+ * category). */
+export function sameWorkspace(a: string | undefined, b: string | undefined): boolean {
+  if (a === undefined || b === undefined || a === '' || b === '') return false
+  const strip = (path: string): string => {
+    let end = path.length
+    while (end > 1 && (path[end - 1] === '/' || path[end - 1] === '\\')) end -= 1
+    return path.slice(0, end)
+  }
+  return normalize(strip(a)) === normalize(strip(b))
 }
 
 /** Compact relative age of a session ("now", "2m", "3h", "5d", "3mo", "1y"). */

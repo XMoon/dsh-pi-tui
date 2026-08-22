@@ -314,12 +314,13 @@ test('the highlighted question option stays visible at narrow terminal widths', 
   }
 })
 
-test('review page stays inside the dialog: Submit and the hint survive long answers', async () => {
+test('review page stays inside the dialog: the hint survives long answers', async () => {
   const { vt, app } = startApp()
   // Review repro: 3 questions, each ~900 chars, answered — the old review
   // page wrapped every question/answer unbudgeted (54+ rows) and the overlay
-  // clipped Submit/Cancel at row 53. The budgeted review page must keep the
-  // action row and the hint visible no matter how long the answers are.
+  // clipped the action row at row 53. The budgeted review page must keep the
+  // hint visible no matter how long the answers are; the Submit/Cancel
+  // two-choice row is gone (plan item 4 — Enter submits, Esc cancels).
   const longQuestion = 'q'.repeat(900)
   const promise = app.askQuestions([
     { id: 'q1', question: longQuestion, options: [{ label: 'A' }] },
@@ -339,8 +340,8 @@ test('review page stays inside the dialog: Submit and the hint survive long answ
   await viewport(vt)
   vt.sendInput('\x1b[C') // → review page
   const view = await viewport(vt)
-  assert.ok(view.includes('Submit'), `Submit action missing:\n${view}`)
-  assert.ok(view.includes('Cancel'), `Cancel action missing:\n${view}`)
+  assert.ok(view.includes('Submit'), `Submit tab missing:\n${view}`)
+  assert.ok(!view.includes('Cancel'), `the two-choice Cancel action is gone:\n${view}`)
   assert.ok(view.includes('esc cancel'), `hint missing:\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)
@@ -1682,6 +1683,64 @@ test('generic presenter cards keep the command row above the raw input', async (
   // The presenter rawInput renders pretty-printed (JSON.stringify(…, null, 2)).
   const rawAt = view.indexOf('"command": "sleep 5"')
   assert.ok(rawAt > commandAt, `command must render above the raw input:\n${view}`)
+  app.stop()
+})
+
+test('a SETTLED background bash keeps the $ command above the generic result', async () => {
+  // The 2026-08-22 plan item 1 repro: a background bash returns fast, the
+  // tool call settles, and the expanded body used to render ONLY the
+  // generic "started background job …" result — the call presentation
+  // ($ command) vanished. Call and result are two stages, never
+  // substitutes: the expanded card must lead with the command row and
+  // append the result below it.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'generic',
+        content: [{ type: 'text', text: 'started background job abc123' }],
+      }),
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"npm run build"}',
+    result: 'started background job abc123', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  const commandAt = view.indexOf('$ npm run build')
+  assert.ok(commandAt >= 0, `settled background card lost the command:\n${view}`)
+  const resultAt = view.indexOf('started background job abc123')
+  assert.ok(resultAt > commandAt, `the job result must render BELOW the command:\n${view}`)
+  app.stop()
+})
+
+test('a settled generic result on a NON-terminal tool adds no command row', async () => {
+  // The generic command row is a no-op for tools that are not bash/pwsh:
+  // a plan-review card must not gain a stray `$ ` line.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'generic',
+        content: [{ type: 'text', text: 'the plan body' }],
+      }),
+    },
+  })
+  app.start()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: '{"plan":"do things"}',
+    result: 'the plan body', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('the plan body'), `generic content missing:\n${view}`)
+  assert.ok(!view.includes('$ '), `non-terminal generic card must not gain a command row:\n${view}`)
   app.stop()
 })
 

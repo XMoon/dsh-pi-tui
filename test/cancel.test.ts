@@ -1,12 +1,17 @@
 /**
- * Headless tests for double-Esc cancellation: a fast second Esc fires
- * onCancel, a single Esc does not, and overlays keep their own Esc.
+ * Headless tests for Esc cancellation: a SINGLE Esc while the agent is
+ * busy fires onCancel at once (pi parity); while idle a fast second Esc
+ * fires it; overlays keep their own Esc. The runner-side handler
+ * (`interruptAgent`) is covered below — its `keepInbox: true` preserves
+ * the pending queue (web Stop parity), so an interrupt never destroys
+ * queued input.
  * @module @xmoon76/dsh-pi-tui/cancel.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SettingItem } from '@xmoon76/pi-tui'
+import { interruptAgent } from '../src/index.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -324,4 +329,36 @@ test('a single Esc while IDLE only arms the double-Esc window', async () => {
   surface.vt.sendInput('\x1b')
   await surface.vt.waitForRender()
   assert.equal(surface.cancels, 0, 'idle: one Esc must not cancel')
+})
+
+// ── interruptAgent: the runner-side cancel preserves the queue ────────────
+
+test('interruptAgent cancels with keepInbox: true (web Stop parity)', () => {
+  const calls: Array<{ cause: unknown; options: unknown }> = []
+  interruptAgent({
+    status: 'running',
+    cancel: (cause, options) => { calls.push({ cause, options }) },
+  })
+  assert.equal(calls.length, 1, 'a running agent is interrupted exactly once')
+  assert.deepEqual(calls[0]!.cause, { kind: 'user' })
+  // THE regression: the default dsh cancel clears queued + steering
+  // input; the interrupt must pass keepInbox so Esc never destroys the
+  // queue (the P0 of the 2026-08-22 plan).
+  assert.deepEqual(calls[0]!.options, { keepInbox: true })
+})
+
+test('interruptAgent tolerates an idle agent (no status gate, no throw)', () => {
+  const calls: Array<{ cause: unknown; options: unknown }> = []
+  interruptAgent({
+    // 'idle' — a maintenance task (compaction) may still be aborted by
+    // dsh's cancel, so the helper must NOT gate on the running status.
+    status: 'idle',
+    cancel: (cause, options) => { calls.push({ cause, options }) },
+  })
+  assert.equal(calls.length, 1, 'the cancel call itself is still made (dsh no-ops when idle)')
+  assert.deepEqual(calls[0]!.options, { keepInbox: true })
+})
+
+test('interruptAgent with no live agent is a silent no-op', () => {
+  interruptAgent(undefined)
 })

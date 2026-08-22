@@ -62,7 +62,11 @@ function assertPage(
     }
   }
   if (expect.review === true) {
-    assert.ok(joined.includes('Submit') && joined.includes('Cancel'), `review actions missing (${width}x${budget}):\n${joined}`)
+    // The review page (plan item 4) has NO Submit/Cancel action row: the
+    // 'Submit' TAB stays in the strip, but a Cancel ACTION must never
+    // render (Enter submits, Esc cancels — no two-choice control).
+    assert.ok(joined.includes('Submit'), `review tab missing (${width}x${budget}):\n${joined}`)
+    assert.ok(!joined.includes('Cancel'), `the Submit/Cancel two-choice row is gone (${width}x${budget}):\n${joined}`)
   }
 }
 
@@ -258,14 +262,16 @@ test('text-mode → with an empty input never wipes an existing selection', () =
   assert.deepEqual(done2, [{ id: 'q1', selected: ['X'] }])
 })
 
-test('review page: ↑↓ choose the action, ← goes back to the last question', () => {
-  // The review highlight moved from ←/→ to ↑↓ (kimi's question dialog);
-  // ← is now the back verb (replacing the old 'b' key).
+test('review page: Enter submits, ↓ never cancels, ← goes back to the last question', () => {
+  // Plan item 4: the review page is a PURE review — no Submit/Cancel
+  // two-choice control, no focus, no ↑↓. Enter submits the whole batch,
+  // Esc cancels the flow, ← returns to the last question (drafts survive).
   let cancelled = 0
+  let done: unknown
   const f = new QuestionFlow([
     { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
     { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
-  ], () => {}, () => { cancelled += 1 })
+  ], (answers) => { done = answers }, () => { cancelled += 1 })
   f.setMaxRows(24)
   render(f, 100)
   f.handleInput('1') // answer q1 → q2
@@ -273,12 +279,18 @@ test('review page: ↑↓ choose the action, ← goes back to the last question'
   f.handleInput('1') // answer q2 → review
   let review = render(f, 100).join('\n')
   assert.ok(review.includes('Submit'), `review page missing:\n${review}`)
-  // ↓ moves the highlight to Cancel; Enter then cancels the flow.
+  assert.ok(!review.includes('Cancel'), `no Cancel action row on the pure review page:\n${review}`)
+  assert.ok(review.includes('← back · ↵ submit · esc cancel'), `fixed review hint missing:\n${review}`)
+  // ↑↓ are INERT on the review page: ↓ must not arm a Cancel action.
   f.handleInput('\x1b[B')
-  review = render(f, 100).join('\n')
-  assert.ok(review.includes('Cancel'), `Cancel must be reachable:\n${review}`)
+  f.handleInput('\x1b[B')
+  render(f, 100)
   f.handleInput('\r')
-  assert.equal(cancelled, 1, `↓ + Enter must cancel`)
+  assert.equal(cancelled, 0, `↓ + Enter must SUBMIT, never cancel`)
+  assert.deepEqual(done, [
+    { id: 'q1', selected: ['A'] },
+    { id: 'q2', selected: ['B'] },
+  ])
   // ← back to the last question (drafts survive) — the old 'b' verb.
   const g = new QuestionFlow([
     { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
@@ -332,11 +344,12 @@ test('the hint advertises ← back · → skip instead of the old letters', () =
   render(f, 100)
   f.handleInput('1') // → review
   const review = render(f, 100).join('\n')
-  assert.ok(review.includes('↑↓ choose · ← back'), `review hint must advertise ↑↓ choose · ← back:\n${review}`)
+  assert.ok(review.includes('← back · ↵ submit · esc cancel'), `review hint must advertise the fixed verbs:\n${review}`)
+  assert.ok(!review.includes('↑↓ choose'), `the Submit/Cancel two-choice verb must be gone:\n${review}`)
   assert.ok(!review.includes('b back'), `the old 'b back' verb must be gone:\n${review}`)
 })
 
-test('budget matrix: review page keeps Submit/Cancel and the hint', () => {
+test('budget matrix: review page keeps the hint and never a Cancel row', () => {
   for (const budget of BUDGETS) {
     for (const width of WIDTHS) {
       const f = makeFlow([
@@ -350,6 +363,29 @@ test('budget matrix: review page keeps Submit/Cancel and the hint', () => {
         review: true,
       })
     }
+  }
+})
+
+test('the review page fills the FULL budget (round-3 finding: one row was reserved for the removed Cancel row)', () => {
+  // The old page reserved TWO tail rows (the Submit/Cancel action row +
+  // the hint); with the action row gone, the hint is the ONLY required
+  // tail — the page must show one more answer/content row, i.e. use the
+  // whole budget when the answers are long enough. Five long answers
+  // far exceed every budget, so the budget is exactly filled.
+  const questions = Array.from({ length: 5 }, (_, i) => ({
+    id: `q${i + 1}`,
+    question: RICH_QUESTION.question,
+    options: RICH_QUESTION.options,
+  }))
+  for (const budget of BUDGETS) {
+    const f = makeFlow(questions, budget)
+    for (let qi = 0; qi < questions.length; qi++) {
+      f.handleInput('1') // answer → advance (review page on the last)
+    }
+    const lines = render(f, 100)
+    assert.equal(lines.length, budget, `the review page must fill the whole budget at ${budget}:\n${lines.join('\n')}`)
+    assert.ok(lines[lines.length - 1]!.includes('↵ submit'),
+      `the hint must still be the last row at ${budget}:\n${lines.join('\n')}`)
   }
 })
 

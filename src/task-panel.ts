@@ -29,6 +29,10 @@ export interface TaskPanelItem {
   startedAt?: number
   /** Group header label (subagents / jobs), rendered as a dim divider. */
   group?: string
+  /** The row's type for the Tab filter: `subagent` or the job kind
+   * (bash / pwsh / …). Absent rows never match a type filter and only
+   * appear under All. */
+  type?: string
 }
 
 /** Options for {@link TaskBrowserPanel}. */
@@ -72,11 +76,19 @@ const DOT = '●'
  */
 export class TaskBrowserPanel implements Component, Focusable {
   private items: TaskPanelItem[] = []
-  /** The filtered view (search query applied). */
+  /** The filtered view (search query + type filter applied). */
   private filtered: TaskPanelItem[] = []
   private selected = 0
   /** Scroll offset into the filtered list. */
   private scroll = 0
+  /** The active type filter (null = All). */
+  private activeType: string | null = null
+  /** Distinct row types in first-appearance order (the Tab cycle). */
+  private typeOrder: string[] = []
+  /** Whether the user moved the selection since the panel opened (nav
+   * keys or search typing). Until then, an async setItems enrichment may
+   * re-focus the list head — the plan's "preferred initial selection". */
+  private selectionTouched = false
   private readonly maxVisible: number
   private readonly options: TaskPanelOptions
   private readonly searchInput = new Input()
@@ -102,6 +114,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   ) {
     this.items = [...items]
     this.filtered = [...items]
+    this.rebuildTypeCycle()
     this.maxVisible = Math.max(1, maxVisible)
     this.options = options
     this.onSelect = onSelect
@@ -122,16 +135,61 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.startTick()
   }
 
-  /** Replace the row list; the active search query re-applies and the
-   * selection survives when its value is still present. */
+  /** Replace the row list; the active search query + type filter re-apply.
+   * A selection the USER moved survives when its value is still present.
+   * An untouched selection follows the fresh list's head on the FIRST
+   * enrichment — the /tasks async-merge race: the browser opens on the
+   * jobs half, the subagent catalog lands later, and the cursor must land
+   * on the preferred row (the enriched list is already sorted running
+   * subagents first, so its head IS first-running-subagent ?? first
+   * running job), not stay stuck on the first pre-enrichment job. */
   setItems(items: readonly TaskPanelItem[]): void {
     const previousValue = this.filtered[this.selected]?.value
     this.items = [...items]
-    this.applyFilter(this.searchInput.getValue() ?? '')
-    if (previousValue !== undefined) {
-      const index = this.filtered.findIndex(item => item.value === previousValue)
-      if (index !== -1) this.selected = index
+    this.rebuildTypeCycle()
+    if (this.activeType !== null && !this.typeOrder.includes(this.activeType)) {
+      // The filtered type vanished from the row set: fall back to All
+      // instead of showing a permanently empty list.
+      this.activeType = null
     }
+    this.applyFilter(this.searchInput.getValue() ?? '')
+    if (this.selectionTouched) {
+      if (previousValue !== undefined) {
+        const index = this.filtered.findIndex(item => item.value === previousValue)
+        if (index !== -1) this.selected = index
+      }
+    }
+  }
+
+  /** Rebuild the Tab type cycle from the current rows (first-appearance
+   * order, never derived from label strings). */
+  private rebuildTypeCycle(): void {
+    const seen: string[] = []
+    for (const item of this.items) {
+      if (item.type !== undefined && !seen.includes(item.type)) seen.push(item.type)
+    }
+    this.typeOrder = seen
+  }
+
+  /** Tab: cycle the type filter All → subagent → bash → pwsh → … → All. */
+  private cycleType(): void {
+    const order = this.typeOrder
+    if (order.length === 0) return
+    const index = this.activeType === null ? -1 : order.indexOf(this.activeType)
+    if (index === -1) {
+      // All → the first type.
+      this.activeType = order[0]!
+    } else if (index + 1 >= order.length) {
+      // Last type → back to All.
+      this.activeType = null
+    } else {
+      this.activeType = order[index + 1]!
+    }
+    // Cycling the type filter is a USER interaction with the list: a later
+    // async enrichment must not re-focus the head over the user's scope
+    // (round-1 review finding).
+    this.selectionTouched = true
+    this.applyFilter(this.searchInput.getValue() ?? '')
   }
 
   /** The current search query. */
@@ -223,25 +281,37 @@ export class TaskBrowserPanel implements Component, Focusable {
         return
       }
     }
+    // Tab cycles the type filter (All → subagent → bash → pwsh → …).
+    // Consumed before the search input so a query can never contain a tab.
+    if (matchesKey(data, 'tab')) {
+      this.cycleType()
+      return
+    }
     if (!isNavUp && !isNavDown && !isPage && !matchesKey(data, 'enter') && !matchesKey(data, 'escape') && this.searchEnabled) {
+      // Typing a search query is a user interaction with the list: a later
+      // enrichment must not re-focus the head over the user's filter.
+      this.selectionTouched = true
       this.searchInput.handleInput(data)
       this.applyFilter(this.searchInput.getValue() ?? '')
       return
     }
     if (isNavUp) {
       if (this.filtered.length === 0) return
+      this.selectionTouched = true
       this.selected = Math.max(0, this.selected - 1)
       this.ensureVisible()
       return
     }
     if (isNavDown) {
       if (this.filtered.length === 0) return
+      this.selectionTouched = true
       this.selected = Math.min(this.filtered.length - 1, this.selected + 1)
       this.ensureVisible()
       return
     }
     if (isPage) {
       if (this.filtered.length === 0) return
+      this.selectionTouched = true
       if (matchesKey(data, 'pageUp')) this.selected = Math.max(0, this.selected - this.maxVisible)
       else this.selected = Math.min(this.filtered.length - 1, this.selected + this.maxVisible)
       this.ensureVisible()
@@ -264,12 +334,14 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   private applyFilter(query: string): void {
-    if (query === '') {
+    const typeActive = this.activeType !== null
+    if (query === '' && !typeActive) {
       this.filtered = this.items
     } else {
       const needle = query.toLowerCase()
       this.filtered = this.items.filter(item =>
-        `${item.value}\n${item.label}\n${item.status}\n${item.detail ?? ''}\n${item.group ?? ''}`.toLowerCase().includes(needle))
+        (!typeActive || item.type === this.activeType)
+        && (query === '' || `${item.value}\n${item.label}\n${item.status}\n${item.detail ?? ''}\n${item.group ?? ''}`.toLowerCase().includes(needle)))
     }
     this.selected = 0
     this.scroll = 0
@@ -281,7 +353,10 @@ export class TaskBrowserPanel implements Component, Focusable {
 
     if (this.options.header !== undefined) {
       const counts = this.counts()
-      const headerText = counts === '' ? this.options.header : `${this.options.header}  ${counts}`
+      // The active type filter shows as a chip so a type-filtered list
+      // never looks like a broken search ("where did the jobs go?").
+      const chip = this.activeType === null ? '' : `  [${this.activeType}]`
+      const headerText = counts === '' ? `${this.options.header}${chip}` : `${this.options.header}${chip}  ${counts}`
       lines.push(color.textStrong(truncateToWidth(headerText, safeWidth, '…')))
       lines.push('')
     }
@@ -327,14 +402,19 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   private counts(): string {
-    const running = this.items.filter(item => item.status === 'running' || item.status === 'stopping').length
-    const done = this.items.filter(item => item.status === 'completed').length
-    const failed = this.items.filter(item => item.status === 'failed' || item.status === 'killed' || item.status === 'timed_out' || item.status === 'lost').length
+    // Under a TYPE filter the counts describe the VISIBLE scope (the
+    // header chip already names it — counting the hidden rows would
+    // mislead); without one the full surface totals stay (search alone
+    // keeps the pre-existing behavior, round-1 review finding).
+    const scope = this.activeType === null ? this.items : this.filtered
+    const running = scope.filter(item => item.status === 'running' || item.status === 'stopping').length
+    const done = scope.filter(item => item.status === 'completed').length
+    const failed = scope.filter(item => item.status === 'failed' || item.status === 'killed' || item.status === 'timed_out' || item.status === 'lost').length
     const parts: string[] = []
     if (running > 0) parts.push(color.primary(`${running} running`))
     if (done > 0) parts.push(color.textDim(`${done} done`))
     if (failed > 0) parts.push(color.error(`${failed} failed`))
-    if (parts.length === 0) parts.push(color.textDim(`${this.items.length} total`))
+    if (parts.length === 0) parts.push(color.textDim(`${scope.length} total`))
     return parts.join(' · ')
   }
 
@@ -372,6 +452,10 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private hint(): string {
     const search = this.searchEnabled ? 'type to filter · ' : ''
+    // Tab cycles the type filter; advertise the verb only when the cycle
+    // has at least two entries (All + one type — a single-kind list would
+    // advertise a no-op toggle).
+    const typeHint = this.typeOrder.length > 1 ? 'tab type · ' : ''
     // The interrupt verbatim shows only while a subagent row is selectable
     // (search off, or an empty query on a subagent row): `i` on a job row
     // is a search letter, so advertising it unconditionally would lie.
@@ -380,6 +464,6 @@ export class TaskBrowserPanel implements Component, Focusable {
     const interrupt = this.filtered.some(item => item.value.startsWith('agent:'))
       ? 'i interrupt · '
       : ''
-    return `${search}${interrupt}↑↓ navigate · enter open · esc close`
+    return `${search}${typeHint}${interrupt}↑↓ navigate · enter open · esc close`
   }
 }
