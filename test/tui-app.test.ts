@@ -1341,3 +1341,34 @@ test('fullscreen drag selection copies through the host copySelection policy (is
   assert.ok(view.includes('Copied!'), `the success flash must render:\n${view}`)
   app.stop()
 })
+
+test('a reasoning-only assistant message (no text) adds no blank row between cards', async () => {
+  const vt = new VirtualTerminal(60, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    // Thinking streams, then the step settles with a reasoning-only message
+    // (NO text block): the image pipeline's non-text-block retention keeps
+    // the empty assistant entry — it must not occupy a spacer row, or the
+    // thinking card and the next card read two blank rows apart.
+    { type: 'assistant/chunk', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', text: 'think one\nthink two\n' } } } as SessionEvent,
+    { type: 'assistant/message', seq: 2, time: 1_700_000_000_002, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
+    { type: 'tool/call', seq: 3, time: 1_700_000_000_003, data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } } as SessionEvent,
+    { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const thinkingRow = view.findIndex(line => line.includes('think one'))
+  const bashRow = view.findIndex(line => line.includes('Bash ls'))
+  assert.ok(thinkingRow >= 0, `thinking card must render:\n${view.join('\n')}`)
+  assert.ok(bashRow >= 0, `bash card must render:\n${view.join('\n')}`)
+  // Exactly ONE blank row between the cards (the spacer) — the invisible
+  // reasoning-only entry must not add a second one.
+  const between = view.slice(thinkingRow + 1, bashRow)
+  const blankCount = between.filter(line => line.trim() === '').length
+  assert.equal(blankCount, 1, `exactly one blank row between cards:\n${view.join('\n')}`)
+  app.stop()
+})

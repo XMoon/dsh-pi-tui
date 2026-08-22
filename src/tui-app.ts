@@ -2748,8 +2748,20 @@ export class TuiApp {
       // recomputed for content that did not change. Only streaming/changed
       // messages rebuild.
       const component = this.componentForMessage(message, boundary)
+      const rendered = component.render(width)
+      if (rendered.length === 0) {
+        // A zero-row block must not occupy a spacer row: the image
+        // pipeline's non-text-block retention keeps reasoning-only
+        // assistant messages (no text, no image) as empty entries, and an
+        // invisible block's Spacer would read as an extra blank line
+        // between the surrounding cards. Skip the component, the spacer
+        // and the row height — the click map stays aligned (height 0
+        // never hits, see handleFullscreenClick).
+        rows.push({ message, height: 0, attachments: [] })
+        return
+      }
       this.messagesView.addChild(component)
-      const height = component.render(width).length + (index < blocks.length - 1 ? 1 : 0)
+      const height = rendered.length + (index < blocks.length - 1 ? 1 : 0)
       rows.push({ message, height, attachments: this.attachmentRangesOf(component, width) })
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
     })
@@ -2842,7 +2854,14 @@ export class TuiApp {
     }> = []
     blocks.forEach((message, index) => {
       const component = this.componentForMessage(message, boundary)
-      const height = component.render(width).length + (index < blocks.length - 1 ? 1 : 0)
+      const rendered = component.render(width)
+      if (rendered.length === 0) {
+        // Same zero-row rule as rebuildMessages: no spacer row, no height —
+        // the click map must mirror the rendered layout exactly.
+        rows.push({ message, height: 0, attachments: [] })
+        return
+      }
+      const height = rendered.length + (index < blocks.length - 1 ? 1 : 0)
       rows.push({ message, height, attachments: this.attachmentRangesOf(component, width) })
     })
     this.messageRows = rows
