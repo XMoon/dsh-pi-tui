@@ -2999,6 +2999,11 @@ export function apply(ctx: Context, config: Config): void {
         localShellController?.abort()
         interruptAgent(liveAgent)
       },
+      // Conversation rewind: the TuiApp fires this only when IDLE with an
+      // EMPTY editor and a fast second Esc (busy stays a cancel; overlays,
+      // autocomplete and replacement editors keep their own Esc). The SAME
+      // surface as `/rewind` — one implementation, two entries.
+      onRewind: () => openRewindPicker(),
       // M6: execute a plugin keybinding's SEMANTIC action through the
       // host's own paths (plan §2.2 — the host never lets a plugin bypass
       // submission/session safety).

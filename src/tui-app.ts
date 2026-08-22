@@ -612,10 +612,21 @@ export interface TuiAppEventsBase {
   isImageDraft?: () => boolean
   /** The user asked to quit (Ctrl+C in the TUI's own raw mode). */
   onExit: () => void
-  /** Stop the current activity (busy: a SINGLE Esc fires this; idle: a
-   * double-Esc within the window). The runner's handler interrupts the
-   * agent while preserving its queue (web Stop parity). Optional. */
+  /** Stop the current activity (busy: a SINGLE Esc fires this directly;
+   * idle: a double-Esc within the window fires it when the editor is
+   * non-empty — an empty editor opens the rewind picker instead, see
+   * {@link onRewind}). The runner's handler interrupts the agent while
+   * preserving its queue (web Stop parity). Optional. */
   onCancel?: () => void
+  /**
+   * Conversation rewind (pi parity): an idle double-Esc within the window
+   * with an EMPTY editor asks the host to open the rewind picker (fork the
+   * conversation from an earlier user turn). Busy Esc, overlays,
+   * autocomplete, replacement editors and a NON-empty draft never reach
+   * this (they keep their existing semantics). Optional; absent keeps the
+   * historical double-Esc cancel.
+   */
+  onRewind?: () => void
   /**
    * Ctrl+S: steer with the current draft (possibly empty). The runner sends
    * the whole queue when it has messages, with the draft riding along, and
@@ -2087,7 +2098,15 @@ export class TuiApp {
       const now = Date.now()
       if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
         this.lastEscapeAt = undefined
-        this.events.onCancel?.()
+        // Conversation rewind (pi parity): an EMPTY editor opens the rewind
+        // picker; a non-empty draft keeps the historical cancel semantics —
+        // a half-written draft is never dragged into a rewind (plan Case C).
+        // A host without rewind keeps the cancel for both cases.
+        if (this.seatEditor().getText().trim() === '' && this.events.onRewind !== undefined) {
+          this.events.onRewind()
+        } else {
+          this.events.onCancel?.()
+        }
       } else {
         this.lastEscapeAt = now
       }
