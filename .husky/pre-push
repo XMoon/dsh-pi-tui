@@ -1,0 +1,22 @@
+# Pre-push gate:
+#   - main and release tags (refs/tags/v*): run the FULL CI-equivalent
+#     verification (source checks + audit + pack with every postpack
+#     smoke). A failed CI round-trip costs ~5 minutes, and some failures
+#     are only visible in the PACKED artifact (the declaration-leak gate,
+#     tarball smokes) — the settleCompactionSurface leak was exactly this
+#     class, see AGENTS.md "Traps hit".
+#   - any other branch: fast typecheck only, so WIP pushes stay cheap.
+# Escape hatch: git push --no-verify.
+
+FULL=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main | refs/tags/v*) FULL=1 ;;
+  esac
+done
+
+if [ "$FULL" -eq 1 ]; then
+  pnpm run verify:prepush
+else
+  pnpm typecheck
+fi

@@ -142,6 +142,7 @@
     "@types/node": "^22.0.0",
     "@xmoon76/pi-tui": "workspace:^0.84.3",
     "@xterm/headless": "5.5.0",
+    "husky": "^9.1.7",
     "tsdown": "0.22.0",
     "tsx": "^4.23.12",
     "typescript": "^5.9.0"
@@ -173,6 +174,8 @@
     "prepack": "pnpm clean && pnpm clean:fork && pnpm build && pnpm typecheck:bundle && pnpm test:bundle",
     "postpack": "node scripts/tarball-smoke.mjs && node scripts/extension-fixture-smoke.mjs && node scripts/advanced-plugin-smoke.mjs && node scripts/phase4-plugin-smoke.mjs && node scripts/unstable-plugin-smoke.mjs && node scripts/vim-plugin-smoke.mjs && node scripts/examples-plugin-smoke.mjs",
     "pack:release": "rm -f xmoon76-dsh-pi-tui-*.tgz && pnpm pack --pack-destination .",
-    "smoke:pack": "node scripts/tarball-smoke.mjs"
+    "smoke:pack": "node scripts/tarball-smoke.mjs",
+    "verify:prepush": "pnpm typecheck:fork && pnpm test:fork && pnpm test:docs && node scripts/naming-gate.mjs && pnpm audit --prod --audit-level high && pnpm pack:release",
+    "prepare": "husky"
   }
 }

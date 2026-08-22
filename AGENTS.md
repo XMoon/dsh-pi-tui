@@ -287,6 +287,23 @@ Headless UI tests drive `@xterm/headless` through `test/virtual-terminal.ts`
 (copied from the fork's `test/virtual-terminal.ts`, import path changed) — rendering
 and input routing are verified without a TTY or a model connection.
 
+### Pre-push verification gate (husky)
+
+`git push` runs a local gate (husky, `.husky/pre-push`; installed by the
+`prepare` script on `pnpm install`; runtime shims in `.husky/_` are
+gitignored):
+
+- **`main` and `v*` release tags** → `pnpm run verify:prepush`, the
+  CI-equivalent full chain: fork typecheck + fork tests + docs tests +
+  naming gate + `pnpm audit --prod --audit-level high` + `pnpm pack:release`
+  (prepack build/typecheck/tests + every postpack smoke, including the
+  declaration-leak gate). Measured ≈2 min. Some failures are ONLY visible
+  in the packed artifact (the settleCompactionSurface declaration leak was
+  exactly this class) — do not skip this for a CI round-trip.
+- **any other branch** → `pnpm typecheck` only (≈15 s), so WIP pushes stay
+  cheap.
+- Escape hatch: `git push --no-verify` (then rely on CI).
+
 ## Reusable flow (worth repeating for the next capability)
 
 1. **Read both sides before designing**: the dsh bundle shape (`packages/bundle/web-app`: startup.ts commander row + index.ts glue + `cordis.patch.yml` with `dsh.bundle.patch`), and the library's real API (check `src/index.ts` exports, not the README).
