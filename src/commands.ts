@@ -1508,14 +1508,16 @@ export function registerTuiCommands(
     // through the shared prepared-input pipeline so an image-bearing
     // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
     // like a plain prompt (review finding 4). The referenced drafts are
-    // PINNED across the async prepare — a concurrent /image prune must not
-    // delete images this invocation is about to admit (review finding 1).
+    // PINNED across the WHOLE invocation — the async prepare, the steer
+    // and the draft consumption — so a concurrent /image prune can never
+    // delete images this invocation is still admitting (review finding 1).
     const releasePin = runner.imageStore.pinReferenced(line)
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
-    } finally {
+    } catch (error) {
       releasePin()
+      throw error
     }
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
     // body only when ITS tool registration is visible to this agent — the
@@ -1558,6 +1560,9 @@ export function registerTuiCommands(
     // (the prepared message holds the durable refs now; a concurrent
     // intake's newer draft survives — review finding).
     consumeDraftImages(line, runner.imageStore)
+    // The invocation settled: the pin releases and the drafts become
+    // prunable again (review finding 1 follow-up).
+    releasePin()
     if (!hostLoadsSkillBody) {
       const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
       // Forward the resource base too, so the fallback rendering matches

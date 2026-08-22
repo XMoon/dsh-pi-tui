@@ -256,3 +256,13 @@ test('pins are refcounted across concurrent submissions', () => {
   first() // idempotent release
   assert.equal(store.isPinned(draft.id), false)
 })
+
+test('clear() drops in-flight pins too (review finding 3 follow-up)', () => {
+  const store = new DraftImageStore()
+  const draft = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const release = store.pinReferenced(draft.placeholder)
+  assert.equal(store.isPinned(draft.id), true)
+  store.clear()
+  assert.equal(store.isPinned(draft.id), false, 'no stale pins after a clear')
+  release() // the late release is a harmless no-op
+})

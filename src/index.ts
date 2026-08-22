@@ -2313,23 +2313,33 @@ export function apply(ctx: Context, config: Config): void {
                   // The fallback is a REAL submission: prepare (admit
                   // images when present) and follow up — an owned workflow
                   // so a failed image admission restores the draft instead
-                  // of silently dropping the images.
-                  runOwned('image submit', () => prepareUserMessage(text, draftImages, submitDeps).then((message) => {
-                    // Re-check the captured session identity AFTER the
-                    // async admission (the guard-window rule, AGENTS.md).
-                    if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
-                      const merged = mergeDraft(app.getDraft(), text)
-                      app.setEditorText(merged)
-                      app.notify(merged === text
-                        ? 'the session changed while sending — try again'
-                        : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-                      return
+                  // of silently dropping the images. This nested workflow
+                  // outlives the outer task (fire-and-forget), so it holds
+                  // its OWN pin across the async admission — the outer
+                  // finally must not release a draft this task still needs
+                  // (review finding 1 follow-up).
+                  runOwned('image submit', async () => {
+                    const nestedPin = draftImages.pinReferenced(text)
+                    try {
+                      const message = await prepareUserMessage(text, draftImages, submitDeps)
+                      // Re-check the captured session identity AFTER the
+                      // async admission (the guard-window rule, AGENTS.md).
+                      if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+                        const merged = mergeDraft(app.getDraft(), text)
+                        app.setEditorText(merged)
+                        app.notify(merged === text
+                          ? 'the session changed while sending — try again'
+                          : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+                        return
+                      }
+                      agent.followup(message)
+                      // Consume ONLY the referenced drafts — a concurrent
+                      // intake's newer image survives (round-5 finding 1).
+                      consumeDraftImages(text, draftImages)
+                    } finally {
+                      nestedPin()
                     }
-                    agent.followup(message)
-                    // Consume ONLY the referenced drafts — a concurrent
-                    // intake's newer image survives (round-5 finding 1).
-                    consumeDraftImages(text, draftImages)
-                  }), {
+                  }, {
                     diag,
                     sessionId: () => agent.session.id,
                     onError: failSubmission(text),

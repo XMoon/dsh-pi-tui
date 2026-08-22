@@ -108,6 +108,10 @@ export class DraftImageStore {
   clear(): void {
     this.images.clear()
     this.bytesHeld = 0
+    // Session switch / dispose: in-flight pins are meaningless for drafts
+    // that no longer exist — drop them so stale entries never linger
+    // (review finding 3 follow-up).
+    this.pins.clear()
   }
 
   /** All staged drafts in insertion order. */
