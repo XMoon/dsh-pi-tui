@@ -306,11 +306,19 @@ SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属
   的别名)。
 - `/status` — 显示当前会话的统计与身份信息(回合数、token 用量、
   工作区、已安装的 dsh 版本)。
+- `/rewind` — 从更早的用户回合 fork 当前对话:选择器列出每个已完成
+  的用户提示(最新在上),选中一个会创建一个新的子会话,其历史恰好
+  止于该回合之前,并把选中的提示回填到编辑器供修改。原会话从不被
+  修改,仍可通过 `/sessions` 回到;**工作区与外部副作用(文件、shell、
+  API)不会回滚。** 空编辑器下按 `Esc Esc` 也会打开同一个选择器。
 - `/preset`、`/model`、`/settings`、`/export`、`/fork` —
   见 `dsh --profile pi-tui` 的命令自动补全(`/` + Tab)。
 
 ## 快捷键(节选)
 
+- `Esc Esc` — 对话 rewind(空闲且编辑器为空时):打开 rewind 选择器,
+  从更早的用户回合 fork。agent 忙碌时按一次 `Esc` 仍只取消当前
+  回合/工具/shell 命令;草稿非空时双击 Esc 保持原有的取消语义。
 - `Ctrl+F` — 切换转录搜索(`/search <query>` 覆盖层;再按一次关闭)。
 - `Shift+Tab` — 循环切换权限预设(read-only → workspace-write →
   danger-full-access);页脚的模式槽位会为每个预设显示徽章

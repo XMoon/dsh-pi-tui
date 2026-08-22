@@ -31,6 +31,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cursor also lands on the first *running* subagent when the browser
   opens, instead of staying stuck on the first job while the subagent
   catalog loads in the background.
+- **Pi-style conversation rewind: `Esc Esc` (or `/rewind`) forks the
+  conversation from an earlier user turn.** With an empty editor and the
+  agent idle, a fast second Esc opens a picker of the session's completed
+  user prompts (newest first, one row per turn, searchable). Choosing one
+  creates a new child session whose history ends right before that turn
+  (`parentSession` + `seedLength` recorded), swaps to it, and restores the
+  selected prompt into the editor for editing — nothing is sent
+  automatically. The original session is never modified, truncated or
+  deleted and stays reachable through `/sessions`, whose "All directories"
+  view now renders the full lineage tree (fork children, rewind branches
+  and subagents hang under their parent). Rewind is a conversation
+  operation only: workspace and external side effects are never reverted,
+  historic image attachments are not re-staged (the picker marks
+  multimodal prompts and the restore warns), and a busy single Esc still
+  cancels — only an idle empty-editor double-Esc opens the picker.
+- **`/fork` and `/rewind` share one fork chain.** Both create their child
+  session through the same code path (recorded-preset resolution →
+  composition → agent creation with `parentSession`/`seedLength`), so
+  preset, provider/model and cwd inheritance can never drift between the
+  two surfaces; `/fork` now uses the live session's cwd instead of the
+  launch-time value.
 
 ### Changed
 

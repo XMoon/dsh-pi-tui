@@ -25,6 +25,23 @@
   Tab 循环 `All → subagent → bash → pwsh → …`;header 显示当前作用域
   (`[bash]`)且计数随之变化。浏览器打开时,光标也会落在第一个 *运行中*
   的 subagent 上,而不是在 subagent 目录异步加载期间一直停在第一个 job。
+- **Pi 风格对话 rewind:`Esc Esc`(或 `/rewind`)从更早的用户回合 fork
+  当前对话。** 编辑器为空且 agent 空闲时,快速按两次 Esc 会打开一个
+  选择器,列出会话中所有已完成的用户提示(最新在上,每回合一行,可搜索)。
+  选中一个会创建新的子会话,其历史恰好止于该回合之前(记录
+  `parentSession` 与 `seedLength`),切换到它,并把选中的提示回填到编辑器
+  供修改——不会自动发送任何内容。原会话从不被修改、截断或删除,仍可
+  通过 `/sessions` 回到;`/sessions` 的 "All directories" 视图现在渲染
+  完整的 lineage 树(fork 子会话、rewind 分支与 subagent 都挂在各自的
+  parent 之下)。Rewind 只回退对话:工作区与外部副作用从不回滚,历史
+  图片附件不会被重新暂存(选择器会标记多模态提示,恢复时给出警告),
+  忙碌时按一次 Esc 仍只取消——只有空闲 + 空编辑器 + 双击 Esc 才会打开
+  选择器。
+- **`/fork` 与 `/rewind` 共用同一条 fork 链路。** 两者都通过同一段代码
+  创建子会话(解析记录 preset → composition → 带
+  `parentSession`/`seedLength` 的 agent 创建),因此 preset、provider/model
+  与 cwd 的继承在两个表面之间永远不会漂移;`/fork` 现在使用当前会话的
+  cwd,而不是启动时捕获的值。
 
 ### 变更
 

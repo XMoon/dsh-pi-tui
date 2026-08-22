@@ -342,11 +342,22 @@ the Advanced/Unstable roadmap).
 - `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
 - `/status` — show the current session's stats and identity (turn counts,
   token usage, workspace, installed dsh version).
+- `/rewind` — fork this conversation from an earlier user turn: the picker
+  lists every completed user prompt (newest first), and choosing one creates
+  a new child session whose history ends right before that turn, then
+  restores the selected prompt into the editor for editing. The original
+  session is never modified and stays reachable through `/sessions`;
+  **workspace and external side effects (files, shell, APIs) are not
+  reverted.** The same picker opens with `Esc Esc` on an empty editor.
 - `/preset`, `/model`, `/settings`, `/export`, `/fork` — see
   `dsh --profile pi-tui`'s command autocomplete (`/` + Tab).
 
 ## Keybindings (selection)
 
+- `Esc Esc` — conversation rewind (on an empty editor while idle): open the
+  rewind picker and fork from an earlier user turn. One `Esc` while the
+  agent is busy still cancels the active turn/tool/shell command; with a
+  non-empty draft the double-Esc keeps its historical cancel behavior.
 - `Ctrl+F` — toggle transcript search (the `/search <query>` overlay; a
   second press closes it).
 - `Shift+Tab` — cycle the permission preset (read-only → workspace-write →
