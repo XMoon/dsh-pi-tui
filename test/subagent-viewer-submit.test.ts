@@ -10,9 +10,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   classifySubagentFollowupError,
+  resolveSubagentSettleTarget,
   submitSubagentFollowup,
   type SubagentFollowupService,
   type SubagentParentLike,
+  type SubagentSettleViewerState,
   type SubagentViewerSubmitDeps,
 } from '../src/subagent-viewer-submit.ts'
 
@@ -137,3 +139,55 @@ test('an unexpected throw surfaces as a safe error reason with a message', async
 function makeError(code: string): Error {
   return Object.assign(new Error(`subagent error: ${code}`), { code })
 }
+
+// ── settle target resolution (plan §12: the current/stale split) ──────────
+
+const settleView = (overrides: Partial<SubagentSettleViewerState> = {}): SubagentSettleViewerState => ({
+  viewingChildId: 'session-child',
+  viewingLabel: 'research',
+  viewingParentSessionId: 'session-parent',
+  viewerGenerationAtSend: 3,
+  viewerGenerationNow: 3,
+  liveParentSessionId: 'session-parent',
+  ...overrides,
+})
+
+test('a settle is CURRENT only while the SAME viewer session is unchanged', () => {
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView()),
+    { kind: 'current', label: 'research' })
+})
+
+test('a close → REOPEN of the SAME child is STALE (the generation moved)', () => {
+  // The exact round-2 scenario: the viewer was closed and reopened for the
+  // same child id while the send was in flight — the new viewer session
+  // must not be touched by the old send's settle.
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    viewerGenerationNow: 5,
+  })), { kind: 'stale' })
+})
+
+test('a child switch is STALE even when the new child is the same id via another parent', () => {
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    viewingChildId: 'session-other',
+  })), { kind: 'stale' })
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    viewingParentSessionId: 'session-other-parent',
+  })), { kind: 'stale' })
+})
+
+test('a parent session switch at settle time is STALE', () => {
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    liveParentSessionId: 'session-other',
+  })), { kind: 'stale' })
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    liveParentSessionId: undefined,
+  })), { kind: 'stale' })
+})
+
+test('a closed viewer (no viewing child) is STALE', () => {
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    viewingChildId: undefined,
+    viewingLabel: undefined,
+    viewingParentSessionId: undefined,
+  })), { kind: 'stale' })
+})

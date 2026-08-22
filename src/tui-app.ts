@@ -3422,10 +3422,16 @@ export class TuiApp {
       const leaving = this.viewerMode
       this.viewerMode = undefined
       this.viewerGeneration += 1
-      // Save the outgoing child's unsent draft (the visible editor IS the
-      // child draft while a continuable viewer is up).
+      // Save the outgoing child's unsent draft. The MAP is the child
+      // slot's source of truth (onChange mirrors every edit; a map-only
+      // stale restore may hold MORE than the visible text), so the
+      // visible text is folded in ONLY when it carries something the map
+      // does not already know (a replacement editor whose text never
+      // mirrors through onChange). A visible text the map already
+      // contains (equal or a substring of the merge) never duplicates —
+      // a stale restore's merged text survives an exit exactly once.
       if (leaving.mode === 'continuable') {
-        this.subagentDrafts.set(leaving.childSessionId, this.seatEditor().getText())
+        this.parkSubagentDraft(leaving.childSessionId)
       }
       // M9 (round-2 finding 1): the viewer restore writes the preserved
       // main draft to the CURRENT seat occupant (a plugin editor's draft
@@ -3452,7 +3458,7 @@ export class TuiApp {
       this.rebuildMessages()
     } else if (this.viewerMode.mode === 'continuable') {
       // Switching child: park the outgoing child's draft first.
-      this.subagentDrafts.set(this.viewerMode.childSessionId, this.seatEditor().getText())
+      this.parkSubagentDraft(this.viewerMode.childSessionId)
     }
     this.viewerMode = mode
     this.viewerGeneration += 1
@@ -3484,25 +3490,53 @@ export class TuiApp {
     return this.viewerGeneration
   }
 
+  /** Park one child's unsent draft when its viewer session ends (exit or
+   * child switch). The MAP is the child slot's source of truth, so the
+   * visible text is folded in ONLY when it carries something the map does
+   * not already know:
+   * - the map is EMPTY/unset → the visible text becomes the slot;
+   * - the visible text is the map's merge PREFIX (`visible` followed by
+   *   `\n\n` — the exact shape a map-only restore produces: the older
+   *   visible text on top, the restored submission beneath) → the map
+   *   already contains the visible text, keep it (a stale restore's
+   *   merged text survives an exit exactly once, never duplicated);
+   * - otherwise (a replacement editor whose text never mirrors through
+   *   onChange edited beyond the map — including DELETIONS, which a
+   *   substring check would wrongly classify as "already known") → the
+   *   visible text is appended beneath the map, nothing is lost.
+   * Exact equality short-circuits as "already parked". */
+  private parkSubagentDraft(childSessionId: string): void {
+    const visible = this.seatEditor().getText()
+    const slotted = this.subagentDrafts.get(childSessionId)
+    if (visible === slotted) return
+    if (slotted === undefined || slotted === '') {
+      if (visible !== '') this.subagentDrafts.set(childSessionId, visible)
+      return
+    }
+    if (visible === '') return
+    this.subagentDrafts.set(childSessionId,
+      slotted.startsWith(`${visible}\n\n`)
+        ? slotted
+        : `${slotted}\n\n${visible}`)
+  }
+
   /** The unsent draft of one child (the viewer's per-child slot), merged
    * with `text` so a FAILED follow-up never loses input: whatever the
    * child draft currently holds (possibly newer user input typed while
    * the request was in flight) stays on top, the failed submission is
-   * preserved visibly beneath it. Applies to the child's OWN slot
-   * regardless of the current viewer state — a send that outlived a
-   * viewer switch restores into the OLD child's draft, never the current
-   * surface. */
+   * preserved visibly beneath it. MAP-ONLY: a stale send (the viewer was
+   * closed/switched/reopened since the send started — its generation
+   * moved on) must NEVER touch the current surface, even when the user
+   * re-opened the SAME child: the visible editor belongs to the NEW
+   * viewer session, and the restored text surfaces through the map on
+   * the next entry instead. The runner's CURRENT-session restore (the
+   * viewer never moved) goes through setEditorText(mergeDraft(...)),
+   * which updates the visible editor; this API is only for stale
+   * restores. */
   restoreSubagentDraft(childSessionId: string, text: string): void {
     if (text === '') return
     const current = this.subagentDrafts.get(childSessionId) ?? ''
-    const merged = current === '' ? text : `${current}\n\n${text}`
-    this.subagentDrafts.set(childSessionId, merged)
-    const target = this.viewerMode
-    if (target !== undefined && target.mode === 'continuable' && target.childSessionId === childSessionId) {
-      this.seatEditor().setText(merged)
-      this.editorSeatHolder.notifyChanged()
-      this.requestRender()
-    }
+    this.subagentDrafts.set(childSessionId, current === '' ? text : `${current}\n\n${text}`)
   }
 
   /** Enter in a continuable viewer: snapshot the child draft, clear the
@@ -3522,9 +3556,12 @@ export class TuiApp {
     // exit chord (and its footer hint) must not survive into the next
     // interaction.
     this.clearCtrlCExit()
-    // Snapshot + clear the visible child draft (the per-child slot syncs
-    // through onChange). Consumed at the app level: request the frame
-    // ourselves (the stale-clear trap — see the Ctrl+C branch).
+    // Snapshot + clear the visible child draft. The per-child SLOT is
+    // cleared EXPLICITLY — not via the onChange mirror — because a
+    // replacement editor in the seat does not guarantee onChange: an
+    // accepted submission must never resurrect in the child's slot (a
+    // reopened viewer would otherwise show already-delivered text).
+    this.subagentDrafts.set(target.childSessionId, '')
     this.seatEditor().setText('')
     this.editorSeatHolder.notifyChanged()
     this.requestRender()
@@ -6141,15 +6178,20 @@ export class TuiApp {
     this.requestRender()
   }
 
-  /** The editor's current draft text (the Alt+↑ dequeue merge reads it);
-   * in a continuable viewer the CHILD's draft is returned (the per-child
-   * slot is synced from the visible editor on every change); a one-shot
-   * viewer returns the preserved main draft. */
+  /** The editor's current draft text (the Alt+↑ dequeue merge reads it).
+   * In a continuable viewer the VISIBLE editor is the authority — it is
+   * exactly what the user sees and submits: a replacement editor's edits
+   * (through its own handleInput) never mirror through the host's
+   * onChange, so the per-child slot may lag and must never be submitted
+   * in the visible text's place. The slot remains the CROSS-SESSION
+   * store (park on exit/switch, map-only stale restores, re-entry seed);
+   * the visible text is the CURRENT-session truth. A one-shot viewer
+   * returns the preserved main draft. */
   getDraft(): string {
     const target = this.viewerMode
     if (target === undefined) return this.seatEditor().getText()
     if (target.mode === 'continuable') {
-      return this.subagentDrafts.get(target.childSessionId) ?? this.seatEditor().getText()
+      return this.seatEditor().getText()
     }
     return this.mainDraftBeforeViewer ?? ''
   }
@@ -6186,7 +6228,9 @@ export class TuiApp {
       // runner's job (onSubagentSubmit), exactly like the Enter path.
       // Viewer submissions never enter the shared editor history (an ↑
       // recall in the MAIN editor must not resend child-scoped text to
-      // the parent).
+      // the parent). The per-child slot clears EXPLICITLY (a replacement
+      // editor does not guarantee the onChange mirror).
+      this.subagentDrafts.set(target.childSessionId, '')
       this.seatEditor().setText('')
       this.editorSeatHolder.notifyChanged()
       this.requestRender()

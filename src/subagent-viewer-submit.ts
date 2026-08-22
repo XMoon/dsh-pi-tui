@@ -85,6 +85,44 @@ export type SubagentFollowupOutcome =
   | { readonly kind: 'ok'; readonly messageId: unknown }
   | { readonly kind: 'rejected'; readonly reason: SubagentFollowupReject }
 
+/** Whether a settled follow-up may still touch the CURRENT surface: the
+ * viewer session that started the send must be unchanged — the SAME
+ * child is still being viewed, the viewer generation has not moved (a
+ * viewer open/close/switch bumps it, so a close → reopen of the SAME
+ * child is stale), and the live parent session is still the one the
+ * viewer was opened from. Anything else is a STALE settle: the result
+ * may only touch the child's OWN draft slot (map-only), never the
+ * visible surface (plan §12). */
+export type SubagentSettleTarget =
+  | { readonly kind: 'current'; readonly label: string }
+  | { readonly kind: 'stale' }
+
+export interface SubagentSettleViewerState {
+  /** The child currently being viewed (undefined = viewer closed). */
+  readonly viewingChildId: string | undefined
+  /** The viewed child's display label. */
+  readonly viewingLabel: string | undefined
+  /** The exact parent the current viewer was opened from. */
+  readonly viewingParentSessionId: string | undefined
+  /** The viewer generation captured when the send started. */
+  readonly viewerGenerationAtSend: number
+  /** The viewer generation NOW (open/close/switch bump it). */
+  readonly viewerGenerationNow: number
+  /** The live parent session id at settle time. */
+  readonly liveParentSessionId: string | undefined
+}
+
+export function resolveSubagentSettleTarget(
+  request: SubagentViewerSubmitRequest,
+  view: SubagentSettleViewerState,
+): SubagentSettleTarget {
+  if (view.viewingChildId !== request.childSessionId) return { kind: 'stale' }
+  if (view.viewingParentSessionId !== request.parentSessionId) return { kind: 'stale' }
+  if (view.viewerGenerationNow !== view.viewerGenerationAtSend) return { kind: 'stale' }
+  if (view.liveParentSessionId !== request.parentSessionId) return { kind: 'stale' }
+  return { kind: 'current', label: view.viewingLabel ?? request.childSessionId }
+}
+
 /**
  * Deliver one viewer follow-up to a continuable child, or classify why it
  * could not be delivered. Never throws for a classified rejection; an

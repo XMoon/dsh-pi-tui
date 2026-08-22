@@ -637,6 +637,36 @@ test('the subagent mode suffix renders after the label and survives truncation',
   assert.ok(!narrow.includes('keeps-growing'), `the label tail should be clipped on the narrow frame:\n${narrow}`)
 })
 
+test('the mode suffix is a HARD layout right: extreme widths compress label and tail, never the mode', () => {
+  const item: TaskPanelItem = {
+    value: 'agent:child-1',
+    label: 'subagent · a-very-long-reviewer-label',
+    suffix: 'one-shot',
+    status: 'inactive',
+    group: 'subagents',
+  }
+  const render = (width: number): string =>
+    new TaskBrowserPanel([item], 10, { header: 'tasks', enableSearch: false, noMatchText: '' }, () => {}, () => {}, () => {})
+      .render(width).map(strip).join('\n')
+  // 60 cols: the mode and the tail survive with the label nearly complete
+  // (one cell yields to the pad between the mode and the status).
+  const wide = render(60)
+  assert.ok(wide.includes('subagent · a-very-long-reviewer'), `label clipped too far:\n${wide}`)
+  assert.ok(wide.includes('· one-shot'), `mode missing:\n${wide}`)
+  assert.ok(wide.includes('inactive'), `tail missing:\n${wide}`)
+  // 30 cols: the label clips, the mode and the tail survive.
+  const medium = render(30)
+  assert.ok(medium.includes('· one-shot'), `mode must survive 30 cols:\n${medium}`)
+  assert.ok(medium.includes('…'), `clipped label must show the ellipsis:\n${medium}`)
+  assert.ok(medium.includes('inactive'), `tail must survive 30 cols:\n${medium}`)
+  // 16 cols (physically fits `→ ● one-shot`): the label and tail yield
+  // entirely, the MODE stays — the viewer's interactivity is a pre-Enter
+  // fact and the final whole-line truncation may never cut it.
+  const narrow = render(16)
+  assert.ok(narrow.includes('one-shot'), `the mode must survive an extreme width:\n${narrow}`)
+  assert.ok(!narrow.includes('long-reviewer'), `the label must yield first:\n${narrow}`)
+})
+
 test('search matches the mode suffix too', () => {
   const { panel, rendered } = makePanel([
     subagent({ label: 'subagent · research', suffix: 'continuable', status: 'inactive' }),

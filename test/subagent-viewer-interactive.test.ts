@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
+import { mergeDraft } from '../src/steer.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const continuable = (overrides: Partial<SubagentViewerTarget> = {}): SubagentViewerTarget => ({
@@ -181,21 +182,58 @@ test('a one-shot viewer cannot submit through the host path either (hard reject)
   app.stop()
 })
 
-test('a failed send restores into the child draft slot, merged with newer typing', async () => {
+test('a failed send while the viewer is CURRENT restores into the visible editor, merged with newer typing', async () => {
   const { vt, app } = await startApp({ onSubagentSubmit: () => {} })
   app.setViewerMode(continuable())
   await vt.waitForRender()
   vt.sendInput('foo')
   await vt.waitForRender()
   // Submit (clears the draft), then the delivery REJECTS while the user
-  // already typed 'bar' again.
+  // already typed 'bar' again. The viewer never moved, so the runner's
+  // settleSubagentSubmit CURRENT branch runs the EXACT restore call:
+  //   app.setEditorText(mergeDraft(app.getDraft(), request.text))
+  // (the current/stale decision itself is unit-tested in
+  // subagent-viewer-submit.test.ts via resolveSubagentSettleTarget).
   vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('bar')
+  await vt.waitForRender()
+  app.setEditorText(mergeDraft(app.getDraft(), 'foo'))
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'bar\n\nfoo', 'the failed submission must merge below the newer typing')
+  assert.equal(app.seatTextForTest(), 'bar\n\nfoo', 'the visible editor must show the merge')
+  app.setViewerMode(undefined)
+  app.stop()
+})
+
+test('a stale send (close → reopen the SAME child) restores MAP-ONLY, never the visible editor', async () => {
+  const { vt, app } = await startApp({ onSubagentSubmit: () => {} })
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  vt.sendInput('foo')
+  await vt.waitForRender()
+  // Submit, then close and REOPEN the same child while the send is in
+  // flight: the reopened viewer is a NEW viewer session (its generation
+  // moved on), so the late rejection must not touch its visible editor —
+  // even though the child id is identical.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
   await vt.waitForRender()
   vt.sendInput('bar')
   await vt.waitForRender()
   app.restoreSubagentDraft('child-1', 'foo')
   await vt.waitForRender()
-  assert.equal(app.getDraft(), 'bar\n\nfoo', 'the failed submission must merge below the newer typing')
+  assert.equal(app.seatTextForTest(), 'bar', 'the reopened viewer\u2019s visible editor must stay unpolluted')
+  assert.equal(app.getDraft(), 'bar', 'getDraft reads the VISIBLE editor (the current session\u2019s truth)')
+  // The stale merge lives in the child's slot: re-entering later shows it.
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'bar\n\nfoo')
   app.setViewerMode(undefined)
   app.stop()
 })
@@ -242,6 +280,7 @@ test('a replacement (plugin) editor receives the child draft and the follow-up t
   const { EditorRegistry } = await import('../src/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
+  let pluginText = ''
   const submits: unknown[] = []
   const app = new TuiApp(vt, {
     onSubmit: () => {},
@@ -252,8 +291,8 @@ test('a replacement (plugin) editor receives the child draft and the follow-up t
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
-    getText: () => 'vim draft',
-    setText: () => {},
+    getText: () => pluginText,
+    setText: (text) => { pluginText = text },
     getCursor: () => 0,
     setCursor: () => {},
     focused: true,
@@ -276,5 +315,149 @@ test('a replacement (plugin) editor receives the child draft and the follow-up t
     text: 'child draft via runner',
   }])
   app.setViewerMode(undefined)
+  app.stop()
+})
+
+test('a replacement editor submit clears the child slot EXPLICITLY (no resurrection on re-entry)', async () => {
+  // The host editor's onChange mirror cannot be relied on when a
+  // replacement editor occupies the seat: an accepted submission must
+  // clear the child's SLOT directly, or a reopened viewer would show
+  // already-delivered text.
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const registry = new EditorRegistry()
+  let pluginText = ''
+  const submits: Array<{ text: string }> = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSubagentSubmit: (request) => submits.push(request),
+  }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  registry.register({ id: 'vim', priority: 0, create: () => ({
+    component: { kind: 'text', spans: [{ text: 'vim' }] },
+    getText: () => pluginText,
+    setText: (text) => { pluginText = text },
+    getCursor: () => 0,
+    setCursor: () => {},
+    focused: true,
+    dispose: () => {},
+  }) }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  app.setEditorText('delivered text')
+  await vt.waitForRender()
+  // Submit through the host path (the plugin editor never fires the host
+  // onChange): the slot must clear even though the plugin's setText is
+  // what cleared the visible buffer.
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: 'delivered text',
+  }])
+  assert.equal(app.getDraft(), '', 'the child slot must clear without relying on onChange')
+  // Re-enter: the delivered text must NOT resurrect.
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'already-delivered text must never resurrect in a reopened viewer')
+  app.stop()
+})
+
+test('a replacement editor that edits through its OWN handleInput submits the LATEST visible text', async () => {
+  // The plugin editor mutates its buffer through its public handleInput
+  // (semantic events) — the host onChange mirror never fires, so the
+  // per-child slot lags. getDraft() must read the VISIBLE editor as the
+  // authority, or a submit would send the stale slot text and lose the
+  // user's latest input (round-3 finding 1).
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const registry = new EditorRegistry()
+  let pluginText = ''
+  const submits: Array<{ text: string }> = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSubagentSubmit: (request) => submits.push({ text: request.text }),
+  }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  registry.register({ id: 'vim', priority: 0, create: () => ({
+    component: { kind: 'text', spans: [{ text: 'vim' }] },
+    getText: () => pluginText,
+    setText: (text) => { pluginText = text },
+    handleInput: (event) => {
+      if (event.kind === 'key' && event.key.key === 'x') {
+        pluginText += 'x'
+        return true
+      }
+      return false
+    },
+    getCursor: () => 0,
+    setCursor: () => {},
+    focused: true,
+    dispose: () => {},
+  }) }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  app.setEditorText('old')
+  await vt.waitForRender()
+  // The plugin edits through its OWN handleInput ('x' key) — the host
+  // onChange never fires, so the per-child slot still holds 'old'.
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'oldx', 'getDraft must read the VISIBLE editor in a continuable viewer')
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(submits, [{ text: 'oldx' }], 'the submission must carry the LATEST visible text, never the stale slot')
+  app.setViewerMode(undefined)
+  app.stop()
+})
+
+test('parking keeps NEW replacement-editor text even when it is a SUBSTRING of the slotted map', async () => {
+  // The plugin edited the draft down (abcdef → cdef) without the host
+  // onChange mirror: parking must keep the CURRENT text, not classify it
+  // as "already known" because it is a substring of the slotted value.
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const registry = new EditorRegistry()
+  let pluginText = ''
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  await vt.waitForRender()
+  registry.register({ id: 'vim', priority: 0, create: () => ({
+    component: { kind: 'text', spans: [{ text: 'vim' }] },
+    getText: () => pluginText,
+    setText: (text) => { pluginText = text },
+    getCursor: () => 0,
+    setCursor: () => {},
+    focused: true,
+    dispose: () => {},
+  }) }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  app.setEditorText('abcdef')
+  await vt.waitForRender()
+  // The plugin buffer shrinks (deletions) — host onChange never fires.
+  pluginText = 'cdef'
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  // Re-enter: BOTH texts must be present (the map kept the older, the
+  // visible parked the newer — nothing lost).
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  const draft = app.getDraft()
+  assert.ok(draft.includes('cdef'), `the newer visible text must survive parking:\n${draft}`)
+  assert.ok(draft.includes('abcdef'), `the older slotted text must survive parking:\n${draft}`)
   app.stop()
 })

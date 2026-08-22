@@ -439,20 +439,55 @@ export class TaskBrowserPanel implements Component, Focusable {
     const tailWidth = visibleWidth(tail)
     const available = width - leftWidth
     const labelBudget = Math.max(1, available - tailWidth - 2)
-    // The mode suffix is a non-truncatable tail: the label takes the
-    // remaining budget AFTER the suffix is reserved, so a long label
-    // truncates from its own end and `· continuable` / `· one-shot`
-    // always survives (the viewer's interactivity is a pre-Enter fact).
     const suffix = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
     const suffixWidth = visibleWidth(suffix)
-    const truncated = truncateToWidth(item.label, Math.max(1, labelBudget - suffixWidth), '…')
+    if (suffix === '') {
+      // No mode suffix: the classic single-column layout (the tail reserves
+      // its width; the label truncates to the rest; the whole line is
+      // truncated as the final backstop).
+      const truncated = truncateToWidth(item.label, labelBudget, '…')
+      const leftFinal = leftPrefix + (selected ? color.textStrong(truncated) : color.text(truncated))
+      const pad = Math.max(1, available - visibleWidth(leftFinal) - tailWidth)
+      const line = leftFinal + ' '.repeat(pad) + tail
+      const out = [truncateToWidth(line, width, '…')]
+      if (item.detail !== undefined && item.detail !== '') {
+        const indent = ' '.repeat(leftWidth)
+        const detailLines = wrapTextWithAnsi(color.textDim(item.detail), Math.max(1, width - leftWidth))
+        for (const wrapped of detailLines.slice(0, 2)) {
+          out.push(truncateToWidth(indent + wrapped, width, '…'))
+        }
+      }
+      return out
+    }
+    // The mode suffix is a HARD layout contract (plan §4.0): the mode must
+    // stay readable on ANY width that physically fits it. The suffix is
+    // reserved FIRST; the status tail (the activity dimension — mode and
+    // activity are independent, never traded) keeps its full width next;
+    // only the LABEL compresses (its truncation budget is whatever the
+    // suffix and tail leave). The tail is dropped entirely only when the
+    // label is already at zero and the mode would otherwise be cut.
+    // The mode suffix is a HARD layout contract (plan §4.0): the mode must
+    // stay readable on ANY width that physically fits it. The suffix is
+    // reserved FIRST; the status tail (the activity dimension — mode and
+    // activity are independent, never traded) keeps its full width next;
+    // only the LABEL compresses (its truncation budget is whatever the
+    // suffix and tail leave, minus one cell for the pad). The tail is
+    // dropped entirely only when the label is already at zero and the
+    // mode would otherwise be cut.
+    const labelLimit = Math.max(0, available - suffixWidth - tailWidth - 1)
+    const truncated = truncateToWidth(item.label, labelLimit, '…')
     const leftFinal = leftPrefix
       + (selected ? color.textStrong(truncated) : color.text(truncated))
-      + (suffix === '' ? '' : selected ? color.textStrong(suffix) : color.text(suffix))
-    const pad = Math.max(1, available - visibleWidth(leftFinal) - tailWidth)
-    const line = leftFinal + ' '.repeat(pad) + tail
+      + (selected ? color.textStrong(suffix) : color.text(suffix))
+    const leftFinalWidth = visibleWidth(leftFinal)
+    const tailPart = tailWidth <= width - leftFinalWidth
+      ? tail
+      : (labelLimit === 0 && width - leftFinalWidth > 0
+          ? truncateToWidth(tail, width - leftFinalWidth, '…')
+          : '')
+    const pad = Math.max(0, width - leftFinalWidth - visibleWidth(tailPart))
+    const line = leftFinal + ' '.repeat(pad) + tailPart
     const out = [truncateToWidth(line, width, '…')]
-
     if (item.detail !== undefined && item.detail !== '') {
       const indent = ' '.repeat(leftWidth)
       const detailLines = wrapTextWithAnsi(color.textDim(item.detail), Math.max(1, width - leftWidth))

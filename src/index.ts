@@ -102,6 +102,7 @@ import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import {
+  resolveSubagentSettleTarget,
   submitSubagentFollowup,
   type SubagentFollowupOutcome,
   type SubagentFollowupReject,
@@ -373,6 +374,65 @@ export function interruptAgent(agent: InterruptAgentLike | undefined): void {
 export interface PendingSubagentCall {
   readonly callId: string
   readonly description: string
+}
+
+/**
+ * The async viewer-OPEN invalidation token (pure, exported for the headless
+ * suite — the runner closure itself is not drivable in the headless tests,
+ * so the lifecycle rule is tested through these token semantics). An open
+ * request captures a token; EVERY viewer session change — opening another
+ * child, leaving the viewer (Esc), or a session swap (which routes through
+ * exitView) — invalidates the token, so a slow transcript inspection can
+ * never commit an obsolete child over the current surface. Invalidation is
+ * unconditional: an exit that finds NO mounted viewer still invalidates,
+ * because the open is exactly then still in flight (round-5 finding).
+ */
+export interface ViewerOpenToken {
+  /** The current token value (bumped by every open and every invalidate). */
+  readonly current: number
+  /** Start one async open; returns the request's token. */
+  open(): number
+  /** Invalidate every in-flight open (a viewer session change). */
+  invalidate(): void
+  /** Whether a request may still commit. */
+  isCurrent(request: number): boolean
+}
+
+export function createViewerOpenToken(): ViewerOpenToken {
+  let value = 0
+  return {
+    get current(): number {
+      return value
+    },
+    open: () => ++value,
+    invalidate: () => {
+      value += 1
+    },
+    isCurrent: (request) => request === value,
+  }
+}
+
+/**
+ * Session-swap viewer teardown (pure, exported for the headless suite —
+ * the runner closure is not headless-drivable, so the rule is pinned
+ * through this seam). A session swap must do BOTH: invalidate any
+ * in-flight viewer OPEN — UNCONDITIONALLY, because the open may still be
+ * loading when nothing is mounted yet, and the swap must still cancel it
+ * (round-6 finding) — and close a MOUNTED viewer when there is one.
+ * @param token - the shared viewer-open token.
+ * @param mounted - whether a viewer is currently mounted.
+ * @param closeMounted - closes the mounted viewer (a no-op when unmounted).
+ * @returns whether a mounted viewer was closed.
+ */
+export function teardownViewerForSessionSwap(
+  token: ViewerOpenToken,
+  mounted: boolean,
+  closeMounted: () => void,
+): boolean {
+  token.invalidate()
+  if (!mounted) return false
+  closeMounted()
+  return true
 }
 
 /**
@@ -2207,6 +2267,24 @@ export function apply(ctx: Context, config: Config): void {
       searchCurrent = -1
       app.setSearchResult(0, 0)
       app.clearSessionOverrides()
+      // A new session owns the surface: tear down the subagent viewer. The
+      // old viewer's parent session is gone (the continuation contract
+      // requires the EXACT live parent), so the child transcript, the
+      // viewer editor and the per-child drafts must not leak into the new
+      // session. The teardown is UNCONDITIONAL — an open may still be
+      // loading when nothing is mounted, and the swap must still cancel
+      // it — and closes the mounted viewer when there is one. The MAIN
+      // draft (the user's unsent text) restores into the new session's
+      // editor — cross-session draft retention is the existing behavior.
+      teardownViewerForSessionSwap(viewerOpen, viewing !== undefined, () => {
+        viewing = undefined
+        app.clearLocalMessages()
+        app.clearNotify()
+        app.setViewerMode(undefined)
+        repaint(app, folder)
+        app.scrollToBottom()
+        refreshStatus()
+      })
       return sessionGeneration
     }
     const jumpToSearchMatch = (): void => {
@@ -2223,7 +2301,12 @@ export function apply(ctx: Context, config: Config): void {
      * target carries the catalog MODE (continuable = interactive editor,
      * one-shot = read-only — never guessed from running/inactive) and the
      * exact direct-parent session id the follow-up write path is pinned
-     * to. */
+     * to. The open is ASYNC (a cold child's log is read from persistence);
+     * a viewer open/close/child switch — or a session swap — that lands
+     * while the inspection is in flight invalidates this request (the
+     * viewerOpen token), so a slow open can never commit an obsolete child
+     * over the current surface (round-4/5 findings). */
+    const viewerOpen = createViewerOpenToken()
     const enterView = async (
       childId: SessionId,
       label: string | undefined,
@@ -2231,6 +2314,7 @@ export function apply(ctx: Context, config: Config): void {
       parentSessionId: SessionId,
       activity: 'running' | 'inactive',
     ): Promise<void> => {
+      const request = viewerOpen.open()
       const childFolder = new TranscriptFolder()
       // Only the child's OWN events enter the viewer: a fork provider seeds
       // the child with the parent's completed-turn history (session/end-seed
@@ -2257,6 +2341,13 @@ export function apply(ctx: Context, config: Config): void {
       // user is most likely watching); an empty/absent label falls back to a
       // lone pending call, and no match simply disables the auto-pop (the
       // user exits with Esc as before).
+      //
+      // STALE-OPEN GUARD: while the inspection above was in flight the user
+      // may have exited, switched children, or swapped sessions — every one
+      // of those invalidates the viewerOpen token. A stale request must not
+      // commit its child over the current surface (no viewing write, no
+      // repaint, no viewer mount, no auto-pop match).
+      if (!viewerOpen.isCurrent(request)) return
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
       if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
       viewing = { id: childId, folder: childFolder, parentSessionId, label: label ?? childId, mode, activity }
@@ -2267,8 +2358,13 @@ export function apply(ctx: Context, config: Config): void {
       // are elsewhere" signal.
       app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity })
     }
-    /** Leave the subagent viewer (single Esc). Returns whether it exited. */
+    /** Leave the subagent viewer (single Esc). Returns whether it exited.
+     * Invalidates any in-flight viewer OPEN UNCONDITIONALLY — an Esc (or a
+     * session swap, which routes through this) must prevent a slow
+     * transcript inspection from reopening the viewer afterwards, even when
+     * no viewer is currently mounted (the open is still in flight). */
     const exitView = (): boolean => {
+      viewerOpen.invalidate()
       if (viewing === undefined) return false
       viewing = undefined
       app.clearLocalMessages()
@@ -3359,34 +3455,44 @@ export function apply(ctx: Context, config: Config): void {
       viewerGeneration: number,
     ): void => {
       // The viewer target is CURRENT only while the SAME child is still
-      // being viewed AND the parent session is still the one the viewer
-      // was opened from AND the app's viewer generation is unchanged (a
-      // viewer open/close/switch bumps it).
-      const currentViewing = viewing !== undefined
-        && viewing.id === request.childSessionId
-        && liveAgent?.session.id === request.parentSessionId
-        && app.getViewerGeneration() === viewerGeneration
-        ? viewing
-        : undefined
+      // being viewed AND the viewer generation is unchanged (a viewer
+      // open/close/switch bumps it — a close → reopen of the SAME child
+      // is therefore STALE) AND the parent session is still the one the
+      // viewer was opened from. The shared pure decision keeps the
+      // current/stale split unit-testable (test/subagent-viewer-submit).
+      const settleTarget = resolveSubagentSettleTarget(request, {
+        viewingChildId: viewing?.id,
+        viewingLabel: viewing?.label,
+        viewingParentSessionId: viewing?.parentSessionId,
+        viewerGenerationAtSend: viewerGeneration,
+        viewerGenerationNow: app.getViewerGeneration(),
+        liveParentSessionId: liveAgent?.session.id,
+      })
       if (outcome.kind === 'ok') {
-        if (currentViewing !== undefined) {
-          app.notify(`sent to ${currentViewing.label} — queued for the next turn`, 'info')
+        if (settleTarget.kind === 'current') {
+          app.notify(`sent to ${settleTarget.label} — queued for the next turn`, 'info')
         }
         return
       }
       const reason = outcome.reason
       if (reason.kind === 'cancelled') {
         // Aborted before inbox acceptance: the message never entered the
-        // child's inbox — restore silently.
-        app.restoreSubagentDraft(request.childSessionId, request.text)
+        // child's inbox — restore. Current viewer session: visible merge;
+        // stale viewer (closed/switched/reopened): map-only (never the
+        // current surface).
+        if (settleTarget.kind === 'current') {
+          app.setEditorText(mergeDraft(app.getDraft(), request.text))
+        } else {
+          app.restoreSubagentDraft(request.childSessionId, request.text)
+        }
         return
       }
-      if (currentViewing === undefined) {
+      if (settleTarget.kind === 'stale') {
         app.restoreSubagentDraft(request.childSessionId, request.text)
         return
       }
       app.setEditorText(mergeDraft(app.getDraft(), request.text))
-      app.notify(subagentFollowupNotice(reason, currentViewing.label), 'error')
+      app.notify(subagentFollowupNotice(reason, settleTarget.label), 'error')
     }
 
     /** The user-facing reason for a rejected follow-up (plan §18). */
