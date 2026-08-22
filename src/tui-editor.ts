@@ -34,14 +34,15 @@ const PROMPT_WIDTH = 2
 
 /** Whether the text before the cursor is a slash-command line WITH an
  * argument position (`/cmd <arg>`): the command name is the first
- * whitespace-delimited token after the leading `/`; anything after it is
- * the argument the completion re-trigger targets. */
+ * whitespace-delimited (space OR tab — the fork's path delimiters) token
+ * after the leading `/`; anything after it is the argument the completion
+ * re-trigger targets. */
 function isSlashCommandArgument(textBeforeCursor: string): boolean {
   const trimmed = textBeforeCursor.trimStart()
   if (!trimmed.startsWith('/')) return false
-  const spaceIndex = trimmed.indexOf(' ')
-  if (spaceIndex <= 0) return false
-  const commandName = trimmed.slice(1, spaceIndex)
+  const separatorIndex = trimmed.search(/[ \t]/)
+  if (separatorIndex <= 0) return false
+  const commandName = trimmed.slice(1, separatorIndex)
   return commandName !== '' && !commandName.includes('/')
 }
 

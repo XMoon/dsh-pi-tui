@@ -36,12 +36,20 @@ nothing. Tab had two more gaps:
   resolves `~`, absolute and relative forms, and mirrors the fork's
   `getFileSuggestions` display rules so a completed value always reads like
   what the user typed (`./`, `~/` and `dir/` forms preserved, spaces quoted,
-  directories first with a trailing `/`).
+  directories first with a trailing `/`). LEADING separator whitespace is
+  tolerated and kept in the completed value: the fork's argument branch
+  passes everything after the FIRST space, so a multi-space separator —
+  and a pasted tab, which the fork normalizes to four spaces — must not
+  break completion, and the padding must survive the whole-range apply so
+  the path never glues to the command.
 - **Tab on an empty argument**: `MentionProvider.shouldTriggerFileCompletion`
   overrides the fork's trim quirk — a slash-command line WITH an argument
-  position (space present after `trimStart`, even trailing) is a
-  file-completion site. A pure command name (`/image`, no space) stays
-  command-name completion.
+  position (any whitespace separator after `trimStart`, even trailing) is a
+  file-completion site. The override is SCOPED to commands that declare
+  path-argument completion (`pathArgumentCommands` — the
+  `getArgumentCompletions` carriers); a trailing-space `/help ` keeps the
+  fork's judgment (command completion, never a file list). A pure command
+  name (`/image`, no separator) stays command-name completion.
 - **Directory continuation**: `TuiEditor.reopenAutocompleteAfterInput` now
   re-triggers for `/cmd <dir>/` path arguments too (same shape as the
   `@dir/` reopen), so Tab-accepting a directory immediately shows its
@@ -150,11 +158,15 @@ a fork change AND would suppress terminal-native text selection.
   screen's `prepareKittyScreen` eviction path).
 - **Hit-testing.** `rebuildMessages` records each attachment's row span
   (message-relative) inside `messageRows` (walking the direct
-  `ImageThumbnail` children of the message container). `handleFullscreenClick`
-  re-measures the map first (`refreshMessageRows` — a thumbnail that just
-  finished loading grew from 1 row to image rows), then attachment rows
-  WIN over the message-level card toggle. `toggleAttachmentCollapsed` flips
-  the set and rebuilds (fresh heights immediately).
+  `ImageThumbnail` children of the message container). Only COLLAPSIBLE
+  thumbnails (the host wired a `collapsedRef` — user/assistant message
+  attachments) enter a range: tool-card images stay inside their card's
+  own click surface, so clicking one still folds/unfolds the card.
+  `handleFullscreenClick` re-measures the map first (`refreshMessageRows`
+  — a thumbnail that just finished loading grew from 1 row to image rows),
+  then attachment rows WIN over the message-level card toggle.
+  `toggleAttachmentCollapsed` flips the set and rebuilds (fresh heights
+  immediately).
 - **Lifecycle.** `collapsedImages` is cleared by `clearSessionOverrides`
   like the card expansion overrides — a session switch never leaks click
   state.

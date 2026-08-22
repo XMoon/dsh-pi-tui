@@ -209,3 +209,42 @@ test('collapsed state is session-scoped: clearSessionOverrides re-expands', asyn
   app.setFullscreen(false)
   app.stop()
 })
+
+test('a tool-card image row still toggles the CARD — never swallowed by an attachment collapse', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  // Tool-card images are NOT collapse targets (the host wires a
+  // collapsedRef only for message attachments): their rows must keep the
+  // card's own click surface, so a click on the image folds the card.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
+    { type: 'tool/result', seq: 2, time: 2, data: { callId: 'call-1', message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: [
+      { type: 'text', text: 'caption' },
+      { type: 'image', attachment: IMAGE_REF },
+    ] }] } } } as never,
+  ])
+  app.setTranscript(folder.messages())
+  // Folded: only the header. Click it to expand the card (per-message
+  // override on).
+  const headerRow = await rowOf(vt, 'screenshot_tool', 'tool header')
+  click(vt, 4, headerRow)
+  await settleClick(vt)
+  const expandedView = await viewport(vt)
+  assert.ok(expandedView.includes('caption'), 'expanded card shows its body')
+  assert.ok(expandedView.includes('🖼️ shot.png · 800×100 · 33 B'), 'expanded card shows the image info bar')
+  // Click the IMAGE ROW: the card folds (the click belongs to the card's
+  // own surface — an attachment toggle must never intercept it).
+  const imageRow = await rowOf(vt, '🖼️ shot.png · 800×100', 'tool image info bar')
+  click(vt, 4, imageRow)
+  await settleClick(vt)
+  const foldedView = await viewport(vt)
+  // The folded header keeps its summary line ('— caption'), so the body
+  // signal is the IMAGE row disappearing: the click folded the card
+  // instead of being swallowed by an attachment toggle.
+  assert.ok(!foldedView.includes('🖼️ shot.png · 800×100'), `the image-row click folds the tool card (image body gone):\n${foldedView}`)
+  app.setFullscreen(false)
+  app.stop()
+})

@@ -2768,11 +2768,14 @@ export class TuiApp {
   }
 
   /** The per-attachment click regions inside one message component: the row
-   * span (message-relative) of every ImageThumbnail child. User messages
-   * (renderUserBlocks) and assistant messages (renderBlockSequence) render
-   * their attachment rows as DIRECT container children, so the walk is
-   * exact; every other child's height still advances the row counter, so
-   * the spans line up with the rendered layout. */
+   * span (message-relative) of every COLLAPSIBLE `ImageThumbnail` child —
+   * the host wires a `collapsedRef` only for user/assistant message
+   * attachments. Tool-card images (no collapsedRef) stay inside their
+   * card's own click surface: their rows advance the counter but never
+   * enter a collapse range, so a click there still folds/unfolds the card
+   * instead of being swallowed by an inert attachment toggle. Every other
+   * child's height still advances the row counter, so the spans line up
+   * with the rendered layout. */
   private attachmentRangesOf(
     component: Component,
     width: number,
@@ -2782,7 +2785,7 @@ export class TuiApp {
     let row = 0
     for (const child of component.children) {
       const height = child.render(width).length
-      if (child instanceof ImageThumbnail) {
+      if (child instanceof ImageThumbnail && child.collapsible) {
         ranges.push({ attachmentId: child.attachmentId, start: row, end: row + height })
       }
       row += height

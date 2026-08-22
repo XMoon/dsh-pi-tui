@@ -164,20 +164,30 @@ function expandHomeToken(token: string): string {
  */
 export function suggestPathArgument(argumentText: string, cwd: string): AutocompleteItem[] | null {
   const token = argumentText
+  // Leading whitespace belongs to the SEPARATOR, not the token: the fork's
+  // argument branch passes everything after the FIRST space, so a
+  // multi-space separator (`/image    t.png` — the fork also normalizes
+  // tabs to four spaces, so a pasted-tab draft reads exactly like this)
+  // yields an argument with leading spaces. The completed VALUE keeps that
+  // leading whitespace, because the fork's apply replaces the WHOLE
+  // argument range — without the padding the path would glue to the
+  // command (`/image` + `subdir/` → `/imagesubdir/`).
+  const leading = token.match(/^[ \t]+/)?.[0] ?? ''
+  const parsed = token.slice(leading.length)
   // Embedded spaces are a quoted-token case (deferred); completing a later
   // word would clobber the earlier ones, so stay quiet.
-  if (token === '' || token.includes(' ') || token.includes('\t')) return null
-  const expanded = expandHomeToken(token)
-  const absolute = token.startsWith('~') || token.startsWith('/')
+  if (parsed === '' || parsed.includes(' ') || parsed.includes('\t')) return null
+  const expanded = expandHomeToken(parsed)
+  const absolute = parsed.startsWith('~') || parsed.startsWith('/')
   let searchDir: string
   let searchPrefix: string
   if (
-    token === './' || token === '../' || token === '~' || token === '~/' || token === '/' || token === ''
+    parsed === './' || parsed === '../' || parsed === '~' || parsed === '~/' || parsed === '/' || parsed === ''
   ) {
     // Complete the whole root directory (the fork's isRootPrefix cases).
     searchDir = absolute ? expanded : join(cwd, expanded)
     searchPrefix = ''
-  } else if (token.endsWith('/')) {
+  } else if (parsed.endsWith('/')) {
     // Show the directory's contents.
     searchDir = absolute ? expanded : join(cwd, expanded)
     searchPrefix = ''
@@ -208,28 +218,29 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
     // completes within the cwd.
     const name = entry.name
     let relativePath: string
-    if (token.endsWith('/')) {
-      relativePath = token + name
-    } else if (token.includes('/') || token.includes('\\')) {
-      if (token.startsWith('~/')) {
-        const dir = dirname(token.slice(2))
+    if (parsed.endsWith('/')) {
+      relativePath = parsed + name
+    } else if (parsed.includes('/') || parsed.includes('\\')) {
+      if (parsed.startsWith('~/')) {
+        const dir = dirname(parsed.slice(2))
         relativePath = `~/${dir === '.' ? name : join(dir, name)}`
-      } else if (token.startsWith('/')) {
-        const dir = dirname(token)
+      } else if (parsed.startsWith('/')) {
+        const dir = dirname(parsed)
         relativePath = dir === '/' ? `/${name}` : `${dir}/${name}`
       } else {
-        relativePath = join(dirname(token), name)
-        if (token.startsWith('./') && !relativePath.startsWith('./')) {
+        relativePath = join(dirname(parsed), name)
+        if (parsed.startsWith('./') && !relativePath.startsWith('./')) {
           relativePath = `./${relativePath}`
         }
       }
     } else {
-      relativePath = token.startsWith('~') ? `~/${name}` : name
+      relativePath = parsed.startsWith('~') ? `~/${name}` : name
     }
     const pathValue = isDirectory ? `${relativePath}/` : relativePath
     // Same quoting rule as the fork's buildCompletionValue: spaces need
-    // quotes so the value stays one shell word for the /image handler.
-    const value = pathValue.includes(' ') ? `"${pathValue}"` : pathValue
+    // quotes so the value stays one shell word for the /image handler. The
+    // separator's leading whitespace rides in front of the quoted value.
+    const value = leading + (pathValue.includes(' ') ? `"${pathValue}"` : pathValue)
     items.push({
       value,
       label: `${name}${isDirectory ? '/' : ''}`,
@@ -281,6 +292,11 @@ export class MentionProvider implements AutocompleteProvider {
   private readonly inner: CombinedAutocompleteProvider
   private readonly workDir: string
   private readonly fdPath: string | null
+  /** The slash commands whose argument completion is a PATH (the host
+   * attaches `getArgumentCompletions`, e.g. `/image`): ONLY these tolerate
+   * a trailing-space argument as a Tab file-completion site — every other
+   * command keeps the fork's judgment. */
+  private readonly pathArgumentCommands: ReadonlySet<string>
 
   constructor(
     slashCommands: readonly SlashCommand[],
@@ -290,6 +306,11 @@ export class MentionProvider implements AutocompleteProvider {
     this.workDir = workDir
     this.fdPath = fdPath
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, fdPath)
+    this.pathArgumentCommands = new Set(
+      slashCommands
+        .filter(command => command.getArgumentCompletions !== undefined)
+        .map(command => command.name),
+    )
   }
 
   async getSuggestions(
@@ -358,14 +379,25 @@ export class MentionProvider implements AutocompleteProvider {
   shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
     const currentLine = lines[cursorLine] ?? ''
     const textBeforeCursor = currentLine.slice(0, cursorCol)
-    // A slash-command line WITH an argument position — even a trailing-space
-    // empty one (`/image `) — is a file-completion site: Tab must list the
-    // cwd. The fork's check trims BOTH ends, so `/image ` reads as a bare
-    // command name and Tab is silently blocked; trimStart keeps the trailing
-    // space visible. A pure command name (`/image`, no space) stays blocked —
-    // Tab there completes the command name, never files.
+    // A PATH-ARGUMENT command's argument position — even a trailing-space
+    // or trailing-TAB empty one (`/image `, `/image<TAB>`) — is a
+    // file-completion site: Tab must list the cwd. The fork's check trims
+    // BOTH ends, so a trailing separator reads as a bare command name and
+    // Tab is silently blocked; trimStart keeps the separator visible and
+    // the argument position is detected on ANY whitespace (space or tab —
+    // the fork's own path delimiters). ONLY commands that declare
+    // path-argument completion get this override — a trailing `/help ` or
+    // `/help<TAB>` keeps the fork's judgment (command completion, never a
+    // file list). A pure command name (`/image`, no separator) stays
+    // blocked — Tab there completes the command name, never files.
     const trimmedStart = textBeforeCursor.trimStart()
-    if (trimmedStart.startsWith('/') && trimmedStart.includes(' ')) return true
+    if (trimmedStart.startsWith('/')) {
+      const separatorIndex = trimmedStart.search(/[ \t]/)
+      if (separatorIndex > 0) {
+        const commandName = trimmedStart.slice(1, separatorIndex)
+        if (this.pathArgumentCommands.has(commandName)) return true
+      }
+    }
     return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true
   }
 }

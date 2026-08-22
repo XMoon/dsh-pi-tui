@@ -183,3 +183,21 @@ test('Tab-accepting a /image directory reopens the dropdown at its children', as
   await waitForDropdownRow(vt, 'deep.png', 'children after Tab accept')
   app.stop()
 })
+
+test('a multi-space (tab-expanded) /image directory also reopens the dropdown at its children', async () => {
+  const root = imageWorkspace()
+  const { vt, app } = startImageApp(root)
+  await vt.waitForRender()
+  // Tabs never reach the editor document (the fork normalizes them to four
+  // spaces), so the REAL separator-whitespace case is multi-space — a
+  // pasted-tab draft reads exactly like '/image    subdir/'. The argument
+  // branch passes everything after the FIRST space, so the argument
+  // carries leading whitespace; the reopen gate and the path completion
+  // must both tolerate it.
+  app.setEditorText('/image    subdir/')
+  // Any handled key triggers reopenAutocompleteAfterInput; the right arrow
+  // moves nothing but is itself handled.
+  vt.sendInput('\x1b[C')
+  await waitForDropdownRow(vt, 'deep.png', 'children after a multi-space directory accept')
+  app.stop()
+})

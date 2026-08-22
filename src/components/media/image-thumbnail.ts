@@ -69,6 +69,15 @@ export class ImageThumbnail implements Component {
     return this.ref.attachmentId
   }
 
+  /** Whether this thumbnail participates in the fullscreen collapse
+   * toggle: only instances the host wired a `collapsedRef` for (user and
+   * assistant message attachments). Tool-card images stay inside their
+   * card's own click surface — their rows must never swallow a click that
+   * would otherwise fold/unfold the card. */
+  get collapsible(): boolean {
+    return this.collapsedRef !== undefined
+  }
+
   /** Whether the image rows are collapsed (the info line stays constant). */
   private collapsed(): boolean {
     return this.collapsedRef?.() === true

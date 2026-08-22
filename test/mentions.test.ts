@@ -146,6 +146,23 @@ test('suggestPathArgument handles absolute and ~ forms', () => {
   }
 })
 
+test('suggestPathArgument tolerates leading separator whitespace (multi-space / tab-expanded)', () => {
+  const root = fixtureWorkspace()
+  // The fork's argument branch passes everything after the FIRST space, so
+  // a multi-space separator yields leading whitespace in the argument; the
+  // completed VALUE keeps it so the fork's apply never glues the path to
+  // the command.
+  const multi = suggestPathArgument('  fi', root)
+  assert.ok(multi !== null, `'  fi' must suggest:\n${JSON.stringify(multi)}`)
+  assert.ok(multi.some(item => item.value === '  file-one.txt'), `leading whitespace must survive in the value:\n${JSON.stringify(multi)}`)
+  // A tab-expanded directory continuation (tabs normalize to four spaces).
+  const dir = suggestPathArgument('    src/', root)
+  assert.ok(dir !== null, `'    src/' must suggest:\n${JSON.stringify(dir)}`)
+  assert.ok(dir.some(item => item.value === '    src/deep-nested.ts'), `padded continuation missing:\n${JSON.stringify(dir)}`)
+  // Pure separator (no token) stays quiet.
+  assert.equal(suggestPathArgument('   ', root), null, 'separator-only arguments complete nothing')
+})
+
 test('suggestPathArgument quotes values with spaces and stays quiet otherwise', () => {
   const root = fixtureWorkspace()
   const spaced = suggestPathArgument('my', root)
@@ -169,10 +186,22 @@ test('the provider completes /image arguments through the fork command branch', 
   assert.ok(result.items.some(item => item.value === 'file-one.txt'), `file missing:\n${JSON.stringify(result.items)}`)
 })
 
-test('MentionProvider lets Tab file-complete a trailing-space slash argument', () => {
+test('MentionProvider lets Tab file-complete a trailing-space PATH argument only', () => {
   const root = fixtureWorkspace()
-  const provider = new MentionProvider([{ name: 'image', description: 'Attach' }], root, null)
+  const provider = new MentionProvider(
+    [
+      { name: 'image', description: 'Attach', getArgumentCompletions: () => null },
+      { name: 'help', description: 'Help' },
+    ],
+    root,
+    null,
+  )
   assert.equal(provider.shouldTriggerFileCompletion(['/image'], 0, 6), false, 'a bare command name stays command completion')
-  assert.equal(provider.shouldTriggerFileCompletion(['/image '], 0, 7), true, 'a trailing-space argument is a file-completion site (the fork trims it away)')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image '], 0, 7), true, 'a trailing-space PATH argument is a file-completion site (the fork trims it away)')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image\t'], 0, 7), true, 'a trailing-TAB PATH argument is a file-completion site too (tab is a fork path delimiter)')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image\tfo'], 0, 9), true, 'a TAB-separated PATH argument completes files')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help '], 0, 6), false, 'a NON-path command keeps the fork judgment (a trailing space never lists files)')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help\t'], 0, 6), false, 'a NON-path command keeps the fork judgment for a trailing TAB too')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help foo'], 0, 9), true, 'non-path commands keep the fork behavior for real arguments')
   assert.equal(provider.shouldTriggerFileCompletion(['see /tmp/'], 0, 9), true, 'plain path lines keep the fork behavior')
 })
