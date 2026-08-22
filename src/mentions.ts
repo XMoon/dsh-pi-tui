@@ -148,6 +148,57 @@ function expandHomeToken(token: string): string {
 }
 
 /**
+ * Pure token → search-dir/prefix resolution (no filesystem access): which
+ * directory a completion token reads and what basename prefix it filters.
+ * Exported so the POSIX and Windows ROOT semantics are pinned without
+ * touching the fs — `dirname` leaves a trailing separator ONLY on roots,
+ * and a root must stay a root (`/` stripped would read `''`; `C:\` is the
+ * drive root while `C:` is the drive-relative path; `\\server\share\` is
+ * the legal UNC share form).
+ * @param token - the parsed argument token (no leading separator
+ *   whitespace).
+ * @param cwd - the session workspace (relative forms resolve against it).
+ * @param expanded - `expandHomeToken(token)` (the caller already computed
+ *   it; kept as a param so the fs-free contract stays pure).
+ * @returns the readdir target, the basename prefix, and whether the token
+ *   is genuinely Windows-dialect (the caller's display math needs it).
+ */
+export function resolvePathSearch(
+  token: string,
+  cwd: string,
+  expanded: string,
+): { searchDir: string; searchPrefix: string; winAbsolute: boolean } {
+  // Absolute detection covers every platform form: POSIX `/x`, Windows
+  // drive (`C:\x`, `C:/x`) and UNC (`\\server\share`) paths. The win32
+  // check engages ONLY for genuinely Windows-dialect tokens — win32 alone
+  // would also accept a bare POSIX `/x` token, which must keep the POSIX
+  // dialect (its dirname/join use backslashes).
+  const posixAbsolute = isAbsolute(expanded)
+  const winAbsolute = !posixAbsolute && win32.isAbsolute(expanded)
+  const absolute = token.startsWith('~') || posixAbsolute || winAbsolute
+  const pathDirname = winAbsolute ? win32.dirname : dirname
+  const pathBasename = winAbsolute ? win32.basename : basename
+  if (
+    token === './' || token === '../' || token === '~' || token === '~/' || token === '/' || token === ''
+  ) {
+    // Complete the whole root directory (the fork's isRootPrefix cases).
+    return { searchDir: absolute ? expanded : join(cwd, expanded), searchPrefix: '', winAbsolute }
+  }
+  if (token.endsWith('/') || token.endsWith('\\')) {
+    // Show the directory's contents (a Windows path ends with `\`).
+    return { searchDir: absolute ? expanded : join(cwd, expanded), searchPrefix: '', winAbsolute }
+  }
+  // Split into directory + basename prefix. dirname leaves a trailing
+  // separator ONLY on roots — which must keep it (see the doc comment) —
+  // so the dirname result is used verbatim, never stripped.
+  return {
+    searchDir: absolute ? pathDirname(expanded) : join(cwd, dirname(expanded)),
+    searchPrefix: pathBasename(expanded),
+    winAbsolute,
+  }
+}
+
+/**
  * Slash-command PATH-argument completion (`/image <path>`): complete the
  * single argument token against the session cwd — shell-style and
  * directory-local (the fd whole-tree fuzzy search stays `@`'s job). Handles
@@ -178,44 +229,7 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
   // word would clobber the earlier ones, so stay quiet.
   if (parsed === '' || parsed.includes(' ') || parsed.includes('\t')) return null
   const expanded = expandHomeToken(parsed)
-  // Absolute detection covers every platform form: POSIX `/x`, Windows
-  // drive (`C:\x`, `C:/x`) and UNC (`\\server\share`) paths. The win32
-  // check engages ONLY for genuinely Windows-dialect tokens — win32 alone
-  // would also accept a bare POSIX `/x` token, which must keep the POSIX
-  // dialect (its dirname/join use backslashes). The win32 form drives the
-  // path MATH below, so a completed value stays in the user's own dialect.
-  const posixAbsolute = isAbsolute(expanded)
-  const winAbsolute = !posixAbsolute && win32.isAbsolute(expanded)
-  const absolute = parsed.startsWith('~') || posixAbsolute || winAbsolute
-  const pathDirname = winAbsolute ? win32.dirname : dirname
-  const pathBasename = winAbsolute ? win32.basename : basename
-  let searchDir: string
-  let searchPrefix: string
-  if (
-    parsed === './' || parsed === '../' || parsed === '~' || parsed === '~/' || parsed === '/' || parsed === ''
-  ) {
-    // Complete the whole root directory (the fork's isRootPrefix cases).
-    searchDir = absolute ? expanded : join(cwd, expanded)
-    searchPrefix = ''
-  } else if (parsed.endsWith('/') || parsed.endsWith('\\')) {
-    // Show the directory's contents (a Windows path ends with `\`).
-    searchDir = absolute ? expanded : join(cwd, expanded)
-    searchPrefix = ''
-  } else {
-    // Split into directory + basename prefix. win32.dirname returns
-    // drive/UNC ROOTS with their trailing separator (`C:\`,
-    // `\\server\share\`) — the root MUST keep it: `C:\` is the drive
-    // root while `C:` is the drive-relative current directory, a real
-    // Windows semantic difference. Non-root dirs strip the redundant
-    // separator for a stable readdir target.
-    const dir = pathDirname(expanded)
-    searchDir = absolute
-      ? winAbsolute && dir === win32.parse(dir).root
-        ? dir
-        : dir.replace(/[\\/]$/, '')
-      : join(cwd, dirname(expanded))
-    searchPrefix = pathBasename(expanded)
-  }
+  const { searchDir, searchPrefix, winAbsolute } = resolvePathSearch(parsed, cwd, expanded)
   let entries
   try {
     entries = readdirSync(searchDir, { withFileTypes: true })

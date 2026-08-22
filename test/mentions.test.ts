@@ -6,10 +6,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
-import { extractAtPrefix, MentionProvider, resolveFdPath, suggestPathArgument } from '../src/mentions.ts'
+import { extractAtPrefix, MentionProvider, resolveFdPath, resolvePathSearch, suggestPathArgument } from '../src/mentions.ts'
 
 /** A throwaway workspace with known files. */
 function fixtureWorkspace(): string {
@@ -161,6 +161,32 @@ test('suggestPathArgument tolerates leading separator whitespace (multi-space / 
   assert.ok(dir.some(item => item.value === '    src/deep-nested.ts'), `padded continuation missing:\n${JSON.stringify(dir)}`)
   // Pure separator (no token) stays quiet.
   assert.equal(suggestPathArgument('   ', root), null, 'separator-only arguments complete nothing')
+})
+
+test('POSIX and Windows ROOT partials keep their separator as the search dir', () => {
+  // dirname leaves a trailing separator ONLY on roots, and a root must
+  // stay a root: `/et` reads `/` (a stripped `/` would read `''`),
+  // `C:\Wi` reads `C:\` (not the drive-relative `C:`), and the UNC share
+  // root keeps its trailing separator. Pure — no filesystem involved.
+  assert.deepEqual(resolvePathSearch('/et', '/ws', '/et'), { searchDir: '/', searchPrefix: 'et', winAbsolute: false })
+  assert.deepEqual(resolvePathSearch('C:\\Wi', '/ws', 'C:\\Wi'), { searchDir: 'C:\\', searchPrefix: 'Wi', winAbsolute: true })
+  assert.deepEqual(resolvePathSearch('\\\\server\\share\\fo', '/ws', '\\\\server\\share\\fo'), {
+    searchDir: '\\\\server\\share\\',
+    searchPrefix: 'fo',
+    winAbsolute: true,
+  })
+  // Ordinary dirs carry no trailing separator anyway.
+  assert.deepEqual(resolvePathSearch('C:\\Users\\sh', '/ws', 'C:\\Users\\sh'), { searchDir: 'C:\\Users', searchPrefix: 'sh', winAbsolute: true })
+  assert.deepEqual(resolvePathSearch('/tmp/fi', '/ws', '/tmp/fi'), { searchDir: '/tmp', searchPrefix: 'fi', winAbsolute: false })
+  assert.deepEqual(resolvePathSearch('sub/fi', '/ws', 'sub/fi'), { searchDir: join('/ws', 'sub'), searchPrefix: 'fi', winAbsolute: false })
+})
+
+test('a POSIX root partial completes from `/` (fs level, when /tmp exists)', () => {
+  if (!existsSync('/tmp')) return // the machine has no /tmp to complete
+  const root = fixtureWorkspace()
+  const items = suggestPathArgument('/tm', root)
+  assert.ok(items !== null && items.length > 0, `'/tm' must list root entries:\n${JSON.stringify(items)}`)
+  assert.ok(items.some(item => item.value.startsWith('/tmp')), `the root completion stays absolute:\n${JSON.stringify(items)}`)
 })
 
 test('suggestPathArgument treats Windows drive and UNC tokens as absolute', () => {
