@@ -958,14 +958,25 @@ export function foldCompactionEvent(
   return { id: state.id, active: false, clear: false, notify: undefined }
 }
 
+/** The minimal compaction-settle surface the runner passes in — STRUCTURAL
+ * on purpose: referencing the full {@link TuiApp} class from a public
+ * export would inline the whole surface (and its internal registry/
+ * presentation dependencies) into the published declaration bundle. The
+ * settle contract only needs the three phase/busy/working setters. */
+export interface CompactionSettleSurface {
+  setCompactionPhase(phase: 'idle'): void
+  setBusy(busy: boolean): void
+  setWorking(busy: boolean): void
+}
+
 /** The UI side effects of a MATCHED compaction settle: clear the phase,
  * hand the working row back to the turn state, and re-measure the session
  * surface so the footer context reflects the compacted log IMMEDIATELY —
  * the next step/start or turn/end would otherwise delay the refresh.
  * Exported as a seam so the settle contract is testable without a full
- * runner fixture (the firehose closure is not). */
+ * runner driver (the firehose closure is not). */
 export function settleCompactionSurface(
-  app: TuiApp,
+  app: CompactionSettleSurface,
   refreshStatus: () => void,
   busyNow: boolean,
 ): void {

@@ -80,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tab could never descend into `src/`. Directory type is now resolved
   from the filesystem (symlinks included), so `@src<Tab>` → `@src/` and
   Tab keeps descending.
+- **The packed SDK declarations no longer leak internals.** The
+  compaction-settle test seam (`settleCompactionSurface`) took the full
+  `TuiApp` class, which dragged the whole surface implementation — the
+  renderer/editor registries, presentation and transcript internals,
+  image modules and vendored pi-tui types — into the published `.d.mts`
+  files, tripping the tarball declaration-leak gate. The seam now takes a
+  minimal structural surface (the three phase/busy/working setters), so
+  `dist/` declarations stay limited to the public runner surface.
 
 ## [0.3.2] - 2026-08-22
 

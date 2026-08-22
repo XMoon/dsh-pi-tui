@@ -63,6 +63,12 @@
   `/`,因此 `@src<Tab>` 可能补全成带空格的类文件值,下一次 Tab 也无法
   进入 `src/`。目录类型现在从文件系统解析(含 symlink),于是
   `@src<Tab>` → `@src/`,Tab 可以继续下钻。
+- **打包产物的 SDK 声明不再泄漏内部实现。** compaction 收尾的测试缝
+  (`settleCompactionSurface`)原先接收完整的 `TuiApp` 类,导致整个界面
+  实现——renderer/editor 注册表、呈现与 transcript 内部模块、图片模块
+  以及 vendored pi-tui 类型——被内联进发布的 `.d.mts`,触发 tarball
+  声明泄漏门禁失败。该函数现在只接收一个最小结构化表面(phase/busy/
+  working 三个 setter),`dist/` 声明仅保留公开 runner 表面。
 
 ## [0.3.2] - 2026-08-22
 
