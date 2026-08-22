@@ -93,6 +93,7 @@ import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
 import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage } from './transcript.ts'
 import { WorkingIndicator } from './working.ts'
+import { indeterminateProgressFrames } from './progress.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
@@ -111,6 +112,17 @@ import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapsh
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
+
+/** The compaction lifecycle phase the working row advertises: idle (no
+ * compaction), summarizing (compaction/start seen, the summary is being
+ * generated), or applying (the summary landed, the compacted surface is
+ * being committed). Derived by the runner from compaction/start →
+ * compaction/summary → compaction/end (foldCompactionEvent). */
+export type CompactionPhase = 'idle' | 'summarizing' | 'applying'
+
+/** The indeterminate progress-bar frames shown while a compaction runs:
+ * width 12 / block 3, the same visual weight as the footer context bar. */
+const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export const RESULT_PREVIEW_LINES = 3
 /** Diff-body cap for default-view tool cards; mirrors kimi COMMAND_PREVIEW_LINES. */
@@ -1317,8 +1329,9 @@ export class TuiApp {
    */
   private busy = false
   /** Context compaction in flight: the working row shows "Compacting
-   * context…" in place of the Working label until compaction/end. */
-  private compacting = false
+   * context…" (summarizing) or "Applying compacted context…" (applying)
+   * in place of the Working label until the matched compaction/end. */
+  private compactionPhase: CompactionPhase = 'idle'
   /** The working row's turn-derived activity (setWorking input). */
   private workingActive = false
   /** Phase 4: the plugin working-message override (advanced host state). */
@@ -2812,18 +2825,28 @@ export class TuiApp {
   }
 
   /**
-   * Advertise an in-flight context compaction: the working row (above the
-   * editor border) shows "Compacting context…" in place of the Working
-   * label while the compaction runs — pi's status-indicator parity. The
-   * runner pairs start/end by compactionId; on end it re-derives the row
-   * from the turn state (a turn-enclosed compaction hands back to the
-   * turn animation, a standalone one clears the row).
+   * Advertise the compaction lifecycle phase: the working row (above the
+   * editor border) shows "Compacting context…" while summarizing and
+   * "Applying compacted context…" while the replacement commits, each
+   * with an indeterminate progress bar driven by the indicator's own
+   * frame tick — pi's status-indicator parity. The runner derives the
+   * phase from compaction/start → compaction/summary → compaction/end
+   * (foldCompactionEvent); on end it re-derives the row from the turn
+   * state (a turn-enclosed compaction hands back to the turn animation,
+   * a standalone one clears the row).
    */
-  setCompacting(active: boolean): void {
-    if (this.compacting === active) return
-    this.compacting = active
+  setCompactionPhase(phase: CompactionPhase): void {
+    if (this.compactionPhase === phase) return
+    this.compactionPhase = phase
     this.reconcileWorkingRow()
     this.requestRender()
+  }
+
+  /** Compatibility wrapper for the pre-phase boolean API: active maps to
+   * the summarizing phase (the runner now uses {@link setCompactionPhase}
+   * so the applying stage is expressible). */
+  setCompacting(active: boolean): void {
+    this.setCompactionPhase(active ? 'summarizing' : 'idle')
   }
 
   /** The per-attachment click regions inside one message component: the row
@@ -2919,7 +2942,7 @@ export class TuiApp {
    * Show or hide the busy indicator on the row directly above the editor
    * border: while a turn is streaming or a tool is running (the runner
    * derives it from turn/start and turn/end). A compaction in flight keeps
-   * the row live under its own label (see {@link setCompacting}).
+   * the row live under its own label (see {@link setCompactionPhase}).
    */
   setWorking(active: boolean): void {
     this.workingActive = active
@@ -2930,19 +2953,32 @@ export class TuiApp {
 
   /** The working row's effective label: the base Working label (or the
    * Phase-4 plugin override) ALWAYS leads, and a running compaction
-   * appends its state — one unified row whether the turn is busy, the
+   * appends its stage — one unified row whether the turn is busy, the
    * compaction is standalone, or both. */
   private effectiveWorkingMessage(): string {
     const base = this.workingMessageOverride ?? 'Working...'
-    return this.compacting ? `${base} · Compacting context…` : base
+    switch (this.compactionPhase) {
+      case 'summarizing':
+        return `${base} · Compacting context…`
+      case 'applying':
+        return `${base} · Applying compacted context…`
+      case 'idle':
+        return base
+    }
   }
 
   /** Reconcile the working row against its two drivers (turn activity,
    * compaction): the row animates while either is live, with the label
-   * chosen by {@link effectiveWorkingMessage}. */
+   * chosen by {@link effectiveWorkingMessage} and an indeterminate
+   * progress-bar suffix while a compaction runs. */
   private reconcileWorkingRow(): void {
     this.working.setMessage(this.effectiveWorkingMessage())
-    if (this.workingActive || this.compacting) {
+    if (this.compactionPhase === 'idle') {
+      this.working.setSuffixAnimation(undefined)
+    } else {
+      this.working.setSuffixAnimation({ frames: COMPACTION_PROGRESS_FRAMES })
+    }
+    if (this.workingActive || this.compactionPhase !== 'idle') {
       this.working.start()
     } else {
       this.working.stop()

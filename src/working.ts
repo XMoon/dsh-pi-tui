@@ -24,6 +24,14 @@ export interface WorkingIndicatorOptions {
   message?: string
 }
 
+/** An animated suffix attached to the working row (e.g. an indeterminate
+ * progress bar): its frames cycle on the indicator's OWN frame tick —
+ * never a second timer. */
+export interface WorkingIndicatorAnimation {
+  /** The suffix frames, cycled in order on every indicator tick. */
+  frames: readonly string[]
+}
+
 /**
  * A single-row busy indicator. start() shows the first frame and animates;
  * stop() halts the timer (the text stays until the caller clears it); an
@@ -35,6 +43,8 @@ export class WorkingIndicator extends Text {
   private readonly intervalMs: number
   private message: string
   private currentFrame = 0
+  private suffixFrames: readonly string[] = []
+  private suffixFrame = 0
   private intervalId: NodeJS.Timeout | undefined
   private active = false
 
@@ -57,6 +67,17 @@ export class WorkingIndicator extends Text {
   /** The current label (Phase 4 test hook — probes the override). */
   messageText(): string {
     return this.message
+  }
+
+  /** Attach an animated suffix (e.g. an indeterminate progress bar) that
+   * advances on the indicator's OWN frame tick — never a second timer.
+   * undefined clears the suffix. An active indicator repaints with the
+   * new suffix immediately; the suffix frame position is kept so a
+   * phase change (summarizing → applying) continues the motion smoothly. */
+  setSuffixAnimation(animation?: WorkingIndicatorAnimation): void {
+    this.suffixFrames = animation?.frames ?? []
+    if (this.suffixFrames.length === 0) this.suffixFrame = 0
+    if (this.active) this.updateDisplay()
   }
 
   /** Show the indicator and start alternating frames. Idempotent: a second
@@ -103,6 +124,9 @@ export class WorkingIndicator extends Text {
     if (this.frames.length <= 1) return
     this.intervalId = setInterval(() => {
       this.currentFrame = (this.currentFrame + 1) % this.frames.length
+      if (this.suffixFrames.length > 0) {
+        this.suffixFrame = (this.suffixFrame + 1) % this.suffixFrames.length
+      }
       this.updateDisplay()
     }, this.intervalMs)
   }
@@ -110,7 +134,8 @@ export class WorkingIndicator extends Text {
   private updateDisplay(): void {
     const frame = this.frames[this.currentFrame] ?? ''
     const indicator = frame === '' ? '' : frame + '  '
-    this.setText(indicator + color.textDim(this.message))
+    const suffix = this.suffixFrames.length > 0 ? `  ${this.suffixFrames[this.suffixFrame] ?? ''}` : ''
+    this.setText(indicator + color.textDim(this.message) + suffix)
     this.requestRender()
   }
 }

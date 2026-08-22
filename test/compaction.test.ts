@@ -8,9 +8,17 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { busyAfterTurnBoundary, compactingFromLog, foldCompactionEvent, settleCompactionSurface, type CompactionFold } from '../src/index.ts'
+import {
+  busyAfterTurnBoundary,
+  compactingFromLog,
+  foldCompactionEvent,
+  settleCompactionSurface,
+  type CompactionFold,
+} from '../src/index.ts'
+import { indeterminateProgressFrames } from '../src/progress.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { WorkingIndicator } from '../src/working.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A structural compaction event (dsh-compaction is not a peer). */
@@ -149,8 +157,11 @@ test('a standalone compaction lights the working row and hides it on end', async
 test('foldCompactionEvent pairs start/end by id and notifies the settle', () => {
   const state = { id: undefined as string | undefined }
   const start = foldCompactionEvent(state, { type: 'compaction/start', data: { compactionId: 'c1' } })
-  assert.deepEqual(start, { id: 'c1', active: true, clear: false, notify: undefined })
+  assert.deepEqual(start, { id: 'c1', active: true, clear: false, phase: 'summarizing', notify: undefined })
   state.id = start.id
+
+  const summary = foldCompactionEvent(state, { type: 'compaction/summary', data: { compactionId: 'c1' } })
+  assert.deepEqual(summary, { id: 'c1', active: false, clear: false, phase: 'applying', notify: undefined })
 
   const matched = foldCompactionEvent(state, { type: 'compaction/end', data: { compactionId: 'c1' } })
   assert.deepEqual(matched, {
@@ -163,6 +174,21 @@ test('foldCompactionEvent pairs start/end by id and notifies the settle', () => 
   const errEnd = foldCompactionEvent({ id: 'c2' }, { type: 'compaction/end', data: { compactionId: 'c2', error: 'boom' } })
   assert.equal(errEnd.clear, true)
   assert.deepEqual(errEnd.notify, { text: 'Compaction failed: boom', kind: 'error' })
+})
+
+test('a STALE compaction/summary does not advance the phase', () => {
+  const state = { id: 'c2' as string | undefined }
+  const stale = foldCompactionEvent(state, { type: 'compaction/summary', data: { compactionId: 'c1' } })
+  assert.equal(stale.phase, undefined, 'a stale summary must not flip the phase')
+  assert.equal(stale.id, 'c2', 'the newer compaction id survives')
+  assert.equal(stale.clear, false)
+  // The current compaction's own summary advances to applying.
+  const fresh = foldCompactionEvent(state, { type: 'compaction/summary', data: { compactionId: 'c2' } })
+  assert.equal(fresh.phase, 'applying')
+  // An id-less summary is a foreign event: no phase change.
+  const orphan = foldCompactionEvent(state, { type: 'compaction/summary', data: {} })
+  assert.equal(orphan.phase, undefined)
+  assert.equal(orphan.id, 'c2')
 })
 
 test('a STALE compaction/end neither clears nor notifies', () => {
@@ -271,25 +297,175 @@ test('a turn end while compacting keeps the working row and label live', async (
   app.stop()
 })
 
+test('indeterminateProgressFrames ping-pongs a block across the track', () => {
+  const frames = indeterminateProgressFrames(12, 3)
+  assert.equal(frames.length, 19, '0..9 then 8..0 (no tail-to-head jump)')
+  assert.equal(frames[0], '[███░░░░░░░░░]')
+  assert.equal(frames[1], '[░███░░░░░░░░]')
+  assert.equal(frames[9], '[░░░░░░░░░███]')
+  assert.equal(frames[10], '[░░░░░░░░███░]')
+  assert.equal(frames[18], '[███░░░░░░░░░]')
+  for (const frame of frames) {
+    assert.equal(frame.length, 14, 'every frame is the bracketed track width')
+    assert.ok(frame.startsWith('[') && frame.endsWith(']'), `frame must be bracketed: ${frame}`)
+  }
+  // Degenerate sizes stay valid (never an empty or negative track).
+  assert.deepEqual(indeterminateProgressFrames(1, 1), ['[█]'])
+  assert.deepEqual(indeterminateProgressFrames(4, 9), ['[████]'])
+})
+
+test('WorkingIndicator advances the suffix on its own tick (no second timer)', async () => {
+  const renders: string[] = []
+  const indicator = new WorkingIndicator(
+    () => { renders.push(indicator.render(80).join('')) },
+    { intervalMs: 20 },
+  )
+  indicator.setSuffixAnimation({ frames: ['[A]', '[B]'] })
+  indicator.start()
+  const seen = new Set<string>()
+  for (let i = 0; i < 30 && seen.size < 2; i += 1) {
+    const text = indicator.render(80).join('')
+    if (text.includes('[A]')) seen.add('A')
+    if (text.includes('[B]')) seen.add('B')
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(seen.has('A') && seen.has('B'), `both suffix frames must appear, saw: ${[...seen].join(', ')}`)
+  // Clearing the suffix stops the suffix motion (the leading frame keeps
+  // animating on the same timer). Match the bracketed bar pattern, not a
+  // bare '[' — the ANSI dim escape contains a literal '['.
+  indicator.setSuffixAnimation(undefined)
+  const cleared = indicator.render(80).join('')
+  assert.ok(cleared.match(/\[[█░]+\]/) === null, `the suffix must clear:\n${cleared}`)
+  indicator.dispose()
+})
+
+test('a compaction start shows the indeterminate progress bar', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setCompactionPhase('summarizing')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Working... · Compacting context…'), `unified label missing:\n${view}`)
+  const workingLine = vt.getViewport().find(line => line.includes('Working'))
+  assert.ok(workingLine !== undefined && workingLine.includes('[') && workingLine.includes(']'),
+    `progress bar brackets missing on the working row:\n${view}`)
+  assert.ok(workingLine.includes('█') && workingLine.includes('░'),
+    `progress bar cells missing on the working row:\n${view}`)
+  app.stop()
+})
+
+test('the progress bar advances on the working indicator tick', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
+  app.start()
+  await vt.waitForRender()
+  app.setCompactionPhase('summarizing')
+  await vt.waitForRender()
+  const barOf = (): string | undefined =>
+    vt.getViewport().find(line => line.includes('Working'))?.match(/\[[█░]+\]/)?.[0]
+  const first = barOf()
+  assert.ok(first !== undefined, `progress bar missing:\n${vt.getViewport().join('\n')}`)
+  // Sample several ticks until the bar frame changes: the bar rides the
+  // indicator's own 20ms timer — never a second repaint timer.
+  let changed: string | undefined
+  for (let i = 0; i < 30 && changed === undefined; i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const current = barOf()
+    if (current !== undefined && current !== first) changed = current
+  }
+  assert.ok(changed !== undefined, 'the bar must advance on the indicator tick')
+  app.stop()
+})
+
+test('a matched summary switches the phase to applying', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setCompactionPhase('summarizing')
+  await vt.waitForRender()
+  app.setCompactionPhase('applying')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Working... · Applying compacted context…'), `applying label missing:\n${view}`)
+  const workingLine = vt.getViewport().find(line => line.includes('Working'))
+  assert.ok(workingLine !== undefined && workingLine.includes('█'),
+    `the bar must survive the phase switch:\n${view}`)
+  app.stop()
+})
+
+test('a matched end clears the phase, the label and the bar', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setCompactionPhase('applying')
+  await vt.waitForRender()
+  app.setCompactionPhase('idle')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Compacting'), `compaction label must clear:\n${view}`)
+  assert.ok(!view.includes('Applying compacted'), `applying label must clear:\n${view}`)
+  const workingLine = vt.getViewport().find(line => line.includes('Working'))
+  assert.ok(workingLine === undefined || !workingLine.includes('['),
+    `the bar must clear with the phase:\n${view}`)
+  app.stop()
+})
+
+test('a turn-enclosed compaction restores the plain Working row on end', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setWorking(true)
+  app.setCompactionPhase('summarizing')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Working... · Compacting context…'), `unified label missing:\n${view}`)
+  app.setCompactionPhase('idle')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Working...'), `the turn animation must survive the settle:\n${view}`)
+  assert.ok(!view.includes('Compacting'), `compaction label must clear:\n${view}`)
+  assert.ok(!view.includes('Applying compacted'), `applying label must clear:\n${view}`)
+  app.setWorking(false)
+  app.stop()
+})
+
+test('the plugin working-message override survives the compaction phase', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.advancedHostState().setWorkingMessage('Reviewing...')
+  app.setCompactionPhase('summarizing')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Reviewing... · Compacting context…'), `override + summarizing missing:\n${view}`)
+  const workingLine = vt.getViewport().find(line => line.includes('Reviewing'))
+  assert.ok(workingLine !== undefined && workingLine.includes('█'),
+    `the bar must ride the override:\n${view}`)
+  app.setCompactionPhase('applying')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Reviewing... · Applying compacted context…'), `override + applying missing:\n${view}`)
+  app.setCompactionPhase('idle')
+  app.advancedHostState().setWorkingMessage(undefined)
+  app.stop()
+})
+
 test('a matched compaction settle clears the phase and refreshes the status once', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   app.setWorking(true)
-  app.setCompacting(true)
+  app.setCompactionPhase('applying')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Compacting context…'), `compaction label missing:\n${view}`)
+  assert.ok(view.includes('Applying compacted context…'), `applying label missing:\n${view}`)
   // The runner's matched compaction/end path (work package A): clear the
-  // compacting flag, hand the row back to the turn state, and re-measure
-  // the session surface IMMEDIATELY — the next step/start or turn/end
-  // must not be required for the footer to reflect the compacted log.
+  // phase, hand the row back to the turn state, and re-measure the
+  // session surface IMMEDIATELY — the next step/start or turn/end must
+  // not be required for the footer to reflect the compacted log.
   let refreshes = 0
   settleCompactionSurface(app, () => { refreshes += 1 }, true)
   await vt.waitForRender()
   assert.equal(refreshes, 1, 'a matched settle must refresh the status exactly once')
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('Working...'), `the turn animation must survive the settle:\n${view}`)
-  assert.ok(!view.includes('Compacting'), `the compaction surface must clear:\n${view}`)
+  assert.ok(!view.includes('Compacting') && !view.includes('Applying compacted'),
+    `the compaction surface must clear:\n${view}`)
   app.stop()
 })
 

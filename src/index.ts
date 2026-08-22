@@ -76,7 +76,7 @@ import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
-import { startProcessTui, type QueueItem, type TuiApp } from './tui-app.ts'
+import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
@@ -869,6 +869,11 @@ export interface CompactionFold {
    * re-derived from the turn log (a stale end never clears a newer
    * compaction's state). */
   clear: boolean
+  /** The compaction phase the event implies: compaction/start →
+   * 'summarizing', a MATCHED compaction/summary → 'applying'. Undefined
+   * when the event does not advance the phase (a stale summary, any
+   * compaction/end — the settle clears via {@link clear}). */
+  phase?: Exclude<CompactionPhase, 'idle'>
   /** The settle notification for compaction/end, when one fires. */
   notify: { text: string; kind: 'info' | 'error' } | undefined
 }
@@ -883,6 +888,21 @@ export function foldCompactionEvent(
       id: typeof event.data.compactionId === 'string' ? event.data.compactionId : undefined,
       active: true,
       clear: false,
+      phase: 'summarizing',
+      notify: undefined,
+    }
+  }
+  if (event.type === 'compaction/summary') {
+    // ONLY a summary matching the in-flight compaction advances the phase
+    // to 'applying': a stale summary (another compaction's, or an id-less
+    // orphan) must not flip the label while the current compaction is
+    // still summarizing.
+    const matched = typeof event.data.compactionId === 'string' && event.data.compactionId === state.id
+    return {
+      id: state.id,
+      active: false,
+      clear: false,
+      phase: matched ? 'applying' : undefined,
       notify: undefined,
     }
   }
@@ -907,19 +927,18 @@ export function foldCompactionEvent(
   return { id: state.id, active: false, clear: false, notify: undefined }
 }
 
-/** The UI side effects of a MATCHED compaction settle: clear the
- * compacting flag, hand the working row back to the turn state, and
- * re-measure the session surface so the footer context reflects the
- * compacted log IMMEDIATELY — the next step/start or turn/end would
- * otherwise delay the refresh. Exported as a seam so the settle contract
- * is testable without a full runner fixture (the firehose closure is
- * not). */
+/** The UI side effects of a MATCHED compaction settle: clear the phase,
+ * hand the working row back to the turn state, and re-measure the session
+ * surface so the footer context reflects the compacted log IMMEDIATELY —
+ * the next step/start or turn/end would otherwise delay the refresh.
+ * Exported as a seam so the settle contract is testable without a full
+ * runner fixture (the firehose closure is not). */
 export function settleCompactionSurface(
   app: TuiApp,
   refreshStatus: () => void,
   busyNow: boolean,
 ): void {
-  app.setCompacting(false)
+  app.setCompactionPhase('idle')
   app.setBusy(busyNow)
   app.setWorking(busyNow)
   refreshStatus()
@@ -4176,18 +4195,21 @@ export function apply(ctx: Context, config: Config): void {
         queueMicrotask(refreshQueue)
       }
       // Compaction lifecycle (dsh-compaction is not a peer — the event
-      // data is read structurally): the working row advertises an
-      // in-flight compaction, the busy flag covers the single-Esc cancel
-      // (pi parity), and the settle notifies. The compactionId pairs
-      // start/end so a stale end can never clear a NEWER compaction's
-      // state (foldCompactionEvent).
+      // data is read structurally): the working row advertises the
+      // compaction phase (summarizing → applying), the busy flag covers
+      // the single-Esc cancel (pi parity), and the settle notifies. The
+      // compactionId pairs start/end so a stale end can never clear a
+      // NEWER compaction's state (foldCompactionEvent).
       const compacted = foldCompactionEvent({ id: compactingId }, event as never)
       compactingId = compacted.id
-      if (compacted.active) {
-        app.setCompacting(true)
+      if (compacted.phase === 'summarizing') {
+        app.setCompactionPhase('summarizing')
         // Busy while compacting: a single Esc cancels the compaction (pi
         // parity — compaction rides the turn signal).
         app.setBusy(true)
+      }
+      if (compacted.phase === 'applying') {
+        app.setCompactionPhase('applying')
       }
       if (compacted.clear) {
         // The compacted replacement has committed to the live session
@@ -4276,11 +4298,13 @@ export function apply(ctx: Context, config: Config): void {
       // working row shows the unified label and the busy flag keeps the
       // single-Esc cancel armed. A session/end-seed boundary makes any
       // EARLIER unmatched start stale (upstream invariant), so only a
-      // bracket in the LIVE part of the log re-arms the surface.
+      // bracket in the LIVE part of the log re-arms the surface. The log
+      // holds no summary/end yet, so the safest phase inference is
+      // 'summarizing' (in progress).
       const resumedCompaction = compactingFromLog(liveAgent.session.events)
       if (resumedCompaction.active) {
         compactingId = resumedCompaction.id
-        app.setCompacting(true)
+        app.setCompactionPhase('summarizing')
         app.setBusy(true)
         app.setWorking(true)
       }
