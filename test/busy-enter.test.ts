@@ -133,6 +133,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     imageStore: new DraftImageStore(),
     imageLimits: () => undefined,
     insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),

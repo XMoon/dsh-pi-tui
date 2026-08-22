@@ -116,7 +116,16 @@ async function x11Probe(run: RunCommand): Promise<ClipboardReadResult> {
     const text = await runWithTimeout(run, 'xclip', ['-selection', 'clipboard', '-o'], 1500)
     return { kind: 'text', text: text.stdout.toString('utf8') }
   }
-  const data = await runWithTimeout(run, 'xclip', ['-selection', 'clipboard', '-t', 'image/png', '-o'], 2000)
+  // Try the supported raster types in order, exactly like the Wayland
+  // probe — a clipboard advertising only image/jpeg or image/webp must
+  // still work (review finding 6).
+  for (const mediaType of ['image/png', 'image/jpeg', 'image/webp', 'image/gif']) {
+    if (!list.includes(mediaType)) continue
+    const data = await runWithTimeout(run, 'xclip', ['-selection', 'clipboard', '-t', mediaType, '-o'], 2000)
+    if (data.stdout.length === 0) continue
+    return imageFromBytes(data.stdout)
+  }
+  const data = await runWithTimeout(run, 'xclip', ['-selection', 'clipboard', '-o'], 2000)
   if (data.stdout.length === 0) return { kind: 'text', text: '' }
   return imageFromBytes(data.stdout)
 }
@@ -150,10 +159,20 @@ async function macosProbe(run: RunCommand): Promise<ClipboardReadResult> {
   }
 }
 
-/** Windows / WSL: PowerShell clipboard → temp PNG. */
-async function powershellProbe(run: RunCommand): Promise<ClipboardReadResult> {
+/** Windows / WSL: PowerShell clipboard → temp PNG. Under WSL the Linux
+ * temp path is converted with `wslpath -w` first — PowerShell cannot
+ * address `/tmp/...` directly (review finding 5). */
+async function powershellProbe(run: RunCommand, wsl: boolean): Promise<ClipboardReadResult> {
   const file = join(tmpdir(), `dsh-clipboard-${randomUUID()}.png`)
-  const escaped = file.replaceAll("'", "''")
+  let target = file
+  if (wsl) {
+    const converted = await run('wslpath', ['-w', file], { timeoutMs: 2000 })
+    if (converted.code !== 0) {
+      throw new ClipboardImageError(`wslpath failed (exit ${converted.code})`)
+    }
+    target = converted.stdout.toString('utf8').trim()
+  }
+  const escaped = target.replaceAll("'", "''")
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
     '$img = [System.Windows.Forms.Clipboard]::GetImage()',
@@ -186,8 +205,8 @@ async function powershellProbe(run: RunCommand): Promise<ClipboardReadResult> {
 export async function readClipboardImage(run: RunCommand, env: ClipboardEnvironment): Promise<ClipboardReadResult> {
   if (isTermux(env)) return { kind: 'unsupported' }
   if (env.platform === 'darwin') return macosProbe(run)
-  if (env.platform === 'win32') return powershellProbe(run)
-  if (isWsl(env)) return powershellProbe(run)
+  if (env.platform === 'win32') return powershellProbe(run, false)
+  if (isWsl(env)) return powershellProbe(run, true)
   if (env.env.WAYLAND_DISPLAY !== undefined) return waylandProbe(run)
   if (env.env.DISPLAY !== undefined) return x11Probe(run)
   return { kind: 'unsupported' }

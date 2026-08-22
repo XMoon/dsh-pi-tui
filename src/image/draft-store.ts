@@ -26,7 +26,13 @@ export class DraftImageStore {
   private readonly maxImages: number
   private readonly maxBytes: number
 
-  /** @param maxImages - entry cap (default 16, plan §21).
+  /**
+   * TUI-OWNED memory protection, NOT an attachment limit: the caps bound
+   * what the TUI stages in RAM before submission (review finding). The
+   * harness's `imageLimits` (20 images / 200 MiB per message by default)
+   * is a SEPARATE policy enforced at admission; a draft rejected here can
+   * still be valid for the backend once submitted in smaller batches.
+   * @param maxImages - entry cap (default 16).
    * @param maxBytes - aggregate encoded-byte cap (default 64 MiB). */
   constructor(maxImages = 16, maxBytes = 64 * 1024 * 1024) {
     // Explicit fields (Node strip-only mode rejects parameter properties).

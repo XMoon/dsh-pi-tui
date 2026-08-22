@@ -53,7 +53,7 @@ test('ImageLoader lazily resolves, dedupes concurrent loads and notifies once', 
   const ref = refOf('a')
   assert.equal(loader.get(ref).state, 'idle')
   let notified = 0
-  loader.subscribe(() => { notified += 1 })
+  loader.subscribe(ref.attachmentId, () => { notified += 1 })
   // Two components load the SAME ref concurrently: one underlying read.
   loader.load(ref)
   loader.load(ref)
@@ -90,7 +90,7 @@ test('a failed read lands in the error state and notifies subscribers', async ()
   })
   const ref = refOf('c')
   let notified = 0
-  loader.subscribe(() => { notified += 1 })
+  loader.subscribe(ref.attachmentId, () => { notified += 1 })
   loader.load(ref)
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(notified, 1)
@@ -172,4 +172,35 @@ test('an invalidate during an in-flight read drops the stale settle (round-4 fin
   loader.load(ref)
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(loader.get(ref).state, 'ready')
+})
+
+test('settle fan-out is per-attachment (review finding 8)', async () => {
+  const loader = new ImageLoader(async (ref) => {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    return { ref: {}, data: new Uint8Array([ref.attachmentId.charCodeAt(0)]) }
+  })
+  let aNotified = 0
+  let bNotified = 0
+  loader.subscribe('a', () => { aNotified += 1 })
+  loader.subscribe('b', () => { bNotified += 1 })
+  loader.load(refOf('a'))
+  loader.load(refOf('b'))
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(aNotified, 1, 'a settles exactly once')
+  assert.equal(bNotified, 1, 'b settles exactly once')
+  assert.equal(loader.listenerCount(), 2)
+  // clear() broadcasts globally.
+  loader.clear()
+  assert.equal(loader.listenerCount(), 2, 'listeners survive a clear')
+})
+
+test('unsubscribing removes only that attachment listener', () => {
+  const loader = new ImageLoader(async () => ({ ref: {}, data: new Uint8Array([1]) }))
+  const offA = loader.subscribe('a', () => {})
+  const offB = loader.subscribe('b', () => {})
+  assert.equal(loader.listenerCount(), 2)
+  offA()
+  assert.equal(loader.listenerCount(), 1, 'a removed, b stays')
+  offB()
+  assert.equal(loader.listenerCount(), 0, 'the empty per-id set is pruned')
 })

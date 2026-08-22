@@ -218,6 +218,14 @@ export interface TuiCommandRunner {
   /** Insert text at the editor cursor (the image placeholder path). */
   insertIntoEditor(text: string): void
   /**
+   * Prepare one draft text as an immutable UserMessage — the SAME pipeline
+   * the submit/steer paths use (placeholder expansion, capability gate,
+   * batched admission). Skill invocations build their message through this
+   * so an image-bearing `/skill ...` line is a real multimodal prompt
+   * (review finding 4).
+   */
+  prepareDraftMessage(text: string): Promise<import('@deepseek-ai/dsh-llm').UserMessage>
+  /**
    * The live session's workspace (its header cwd), falling back to the
    * process cwd before any session exists. The editor autocomplete, the
    * footer/welcome cwd, and the per-directory input history follow THIS,
@@ -1495,10 +1503,11 @@ export function registerTuiCommands(
     // was the wrapper discarding `rawInput` and injecting a hand-rolled body
     // card that swallowed the user's request.
     const line = args.trim() === '' ? '/' + skill.name : '/' + skill.name + ' ' + args.trimStart()
-    const userMessage = createUserMessage({
-      content: [{ type: 'text', text: line }],
-      source: { kind: 'user' },
-    })
+    // The skill invocation is an AGENT-FACING prompt: build its message
+    // through the shared prepared-input pipeline so an image-bearing
+    // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
+    // like a plain prompt (review finding 4).
+    const userMessage = await runner.prepareDraftMessage(line)
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
     // body only when ITS tool registration is visible to this agent — the
     // same visibility test the listener itself uses. A composition without
@@ -1881,9 +1890,6 @@ export function registerTuiCommands(
     name: 'new',
     description: 'Start a fresh session in this workspace',
     handler: async () => {
-      // Staged drafts are per-TUI-run UI state: a fresh session never
-      // carries them over (durable attachments are untouched — plan §14).
-      runner.imageStore.clear()
       const liveAgent = runner.liveAgent
       const composition = await runner.compose(runner.pendingPreset)
       const presetId = composition.agentPreset
@@ -1898,7 +1904,14 @@ export function registerTuiCommands(
         setup: composition.setup,
       })
       const error = await runner.swapTo(next)
-      if (error !== undefined) app.notify(error, 'error')
+      if (error !== undefined) {
+        app.notify(error, 'error')
+        return { kind: 'error', text: error }
+      }
+      // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
+      // them now, never before (a failed create/swap keeps the current
+      // session and its drafts intact; review finding 2).
+      runner.imageStore.clear()
       return { kind: 'success', text: 'started a fresh session' }
     },
   })

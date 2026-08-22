@@ -1056,6 +1056,10 @@ interface MessageComponentEntry {
    * from — an immutable array identity, so a settled image block landing
    * on a text-only component marks it stale (round-1 finding 2). */
   content?: unknown
+  /** The tool card's result content blocks identity (review finding 7): a
+   * resultBlocks transition to image-bearing content must rebuild the
+   * card even when the flattened result text barely changed. */
+  resultBlocks?: unknown
   running?: boolean
   label?: string
   summary?: string
@@ -4193,6 +4197,7 @@ export class TuiApp {
         entry.meta = message.meta
         entry.members = message.members
         entry.error = message.error
+        entry.resultBlocks = message.resultBlocks
         break
       case 'summary':
         break
@@ -4219,7 +4224,7 @@ export class TuiApp {
       case 'tool':
         return entry.status !== message.status || entry.args !== message.args
           || entry.result !== message.result || entry.meta !== message.meta || entry.members !== message.members
-          || entry.error !== message.error
+          || entry.error !== message.error || entry.resultBlocks !== message.resultBlocks
       case 'summary':
         return false
       case 'compaction':
@@ -4982,14 +4987,20 @@ export class TuiApp {
     if (message.name === 'read_image') {
       // Without a presenter, the image envelope renders its summary + path,
       // never the raw XML; the image payload block is never dumped as JSON
-      // (resultTextLines projects image blocks to a placeholder).
+      // (resultTextLines projects image blocks to a placeholder). With the
+      // image pipeline wired, the RESULT image blocks render as thumbnails
+      // below the summary (the envelope summary + the actual pixels).
       const envelope = parseImageEnvelope(message.result)
       if (envelope !== undefined) {
         card.addChild(new Text(color.textDim(`  ${envelope.summary}`), 0, 0))
         card.addChild(new Text(color.textMuted(`  path: ${relativizeToCwd(envelope.path, this.workspaceRoot)}`), 0, 0))
+        this.renderResultImageBlocks(card, message.resultBlocks)
         return
       }
-      if (message.status === 'ok') return
+      if (message.status === 'ok') {
+        this.renderResultImageBlocks(card, message.resultBlocks)
+        return
+      }
     }
     if (message.name === 'write') {
       // Without a presenter (replay edge), the write confirmation envelope
@@ -5051,6 +5062,26 @@ export class TuiApp {
         for (const line of lines) {
           card.addChild(new Text(color.textDim(line), 0, 0))
         }
+      }
+    }
+  }
+
+  /** Append the result's IMAGE blocks as thumbnails (any tool card that
+   * returns images but has its own summary path — read_image today, MCP
+   * image results and screenshot tools next). No-op without the pipeline
+   * or without image blocks. */
+  private renderResultImageBlocks(
+    card: Container,
+    blocks: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] | undefined,
+  ): void {
+    if (blocks === undefined || this.imageLoader === undefined || this.imageTheme === undefined) return
+    for (const block of blocks) {
+      if (block.type === 'image') {
+        card.addChild(new ImageThumbnail(
+          block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+          this.imageLoader,
+          this.imageTheme,
+        ))
       }
     }
   }

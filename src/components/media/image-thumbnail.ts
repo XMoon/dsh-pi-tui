@@ -45,9 +45,10 @@ export class ImageThumbnail implements Component {
     this.ref = ref
     this.loader = loader
     this.theme = theme
-    // Subscribe once: every settle (any attachment) repaints this component
-    // — cheap, and the fork's steady-frame reuse keeps repaints cheap.
-    this.unsubscribe = loader.subscribe(() => this.invalidate())
+    // Subscribe to THIS attachment's settles only: N thumbnails loading in
+    // parallel never invalidate each other (review finding 8 — no O(N²)
+    // repaint churn, no kitty image-id churn).
+    this.unsubscribe = loader.subscribe(ref.attachmentId, () => this.invalidate())
   }
 
   /** Fallback display name (never a path). */

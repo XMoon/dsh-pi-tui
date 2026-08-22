@@ -96,13 +96,31 @@ test('Termux resolves to unsupported without probing', async () => {
   assert.equal(ran, false)
 })
 
-test('WSL prefers the PowerShell bridge over wayland/x11', async () => {
-  const run = (async (command: string) => {
+test('WSL converts the temp path with wslpath before PowerShell (review finding 5)', async () => {
+  const calls: string[] = []
+  const run = (async (command: string, args: readonly string[]) => {
+    calls.push(command)
+    if (command === 'wslpath') {
+      assert.ok(args.includes('-w'), 'wslpath receives -w')
+      assert.ok(args.some(arg => arg.startsWith('/')), 'the LINUX temp path is converted')
+      return { stdout: Buffer.from('\\\\wsl$\\Ubuntu\\tmp\\dsh-clipboard-x.png'), stderr: Buffer.alloc(0), code: 0 }
+    }
     assert.equal(command, 'powershell.exe')
     return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
   }) as unknown as RunCommand
   const result = await readClipboardImage(run, envOf({ env: { WSL_DISTRO_NAME: 'Ubuntu', WAYLAND_DISPLAY: 'wayland-0' } }))
+  assert.deepEqual(calls.slice(0, 2), ['wslpath', 'powershell.exe'], 'wslpath runs FIRST')
   assert.equal(result.kind, 'text', 'no PNG written by the bridge → text fallback')
+})
+
+test('native Windows skips wslpath entirely', async () => {
+  const calls: string[] = []
+  const run = (async (command: string) => {
+    calls.push(command)
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await readClipboardImage(run, envOf({ platform: 'win32' }))
+  assert.ok(calls.every(command => command === 'powershell.exe'), 'only powershell, no wslpath on native Windows')
 })
 
 test('macOS probes through osascript', async () => {

@@ -135,12 +135,12 @@ test('the TUI renders a user message with an image (fallback line, then inline-r
   app.stop()
 })
 
-test('a tool-result image renders inside the tool card', async () => {
+test('a tool-result image renders inside the tool card (generic tool)', async () => {
   const { vt, app } = startAppWithLoader()
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'call-1', name: 'read_image', arguments: [] } } as never,
+    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
     toolResultEvent([
       { type: 'text', text: 'caption' },
       { type: 'image', attachment: IMAGE_REF },
@@ -151,5 +151,22 @@ test('a tool-result image renders inside the tool card', async () => {
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('🖼'), `tool-card image fallback visible:\n${view}`)
   assert.ok(view.includes('caption'), 'the text block still renders')
+  app.stop()
+})
+
+test('a read_image tool card renders its image blocks as thumbnails', async () => {
+  const { vt, app } = startAppWithLoader()
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'call-1', name: 'read_image', arguments: [] } } as never,
+    toolResultEvent([
+      { type: 'image', attachment: IMAGE_REF },
+    ]),
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼'), `read_image card shows the thumbnail:\n${view}`)
   app.stop()
 })

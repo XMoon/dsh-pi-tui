@@ -39,7 +39,10 @@ export class ImageLoader {
   private readonly cache: ImageCache
   private readonly inflight = new Map<string, Promise<{ data: Uint8Array }>>()
   private readonly errors = new Map<string, Error>()
-  private readonly listeners = new Set<() => void>()
+  /** Per-attachment listeners: a settle notifies ONLY the attachments that
+   * care, so N thumbnails loading in parallel never invalidate each other
+   * (review finding 8 — no O(N²) repaint churn). */
+  private readonly listeners = new Map<string, Set<() => void>>()
   private readonly read: (ref: ImageAttachmentRefLike) => Promise<{ ref: unknown; data: Uint8Array }>
   /**
    * Invalidation epoch (round-4 finding 4): every invalidate/clear bumps it;
@@ -110,7 +113,9 @@ export class ImageLoader {
       return { data: new Uint8Array(0) }
     }).finally(() => {
       this.inflight.delete(id)
-      this.notify()
+      // Settle fan-out is per-attachment: only the components watching
+      // THIS id repaint (review finding 8).
+      this.notify(id)
     })
     this.inflight.set(id, pending)
   }
@@ -124,10 +129,25 @@ export class ImageLoader {
     }
   }
 
-  /** Subscribe to settles; returns the unsubscribe function. */
-  subscribe(listener: () => void): () => void {
-    this.listeners.add(listener)
-    return () => this.listeners.delete(listener)
+  /**
+   * Subscribe to one attachment's settles; returns the unsubscribe
+   * function. A settle notifies ONLY its attachment's listeners — N
+   * thumbnails loading in parallel never invalidate each other (review
+   * finding 8). `clear()` still broadcasts to every subscriber.
+   */
+  subscribe(attachmentId: string, listener: () => void): () => void {
+    let set = this.listeners.get(attachmentId)
+    if (set === undefined) {
+      set = new Set()
+      this.listeners.set(attachmentId, set)
+    }
+    set.add(listener)
+    return () => {
+      const owned = this.listeners.get(attachmentId)
+      if (owned === undefined) return
+      owned.delete(listener)
+      if (owned.size === 0) this.listeners.delete(attachmentId)
+    }
   }
 
   /** Drop one attachment's cached state (transcript trim). In-flight reads
@@ -138,11 +158,13 @@ export class ImageLoader {
     this.errors.delete(attachmentId)
   }
 
-  /** Drop everything (session switch / dispose). */
+  /** Drop everything (session switch / dispose); every subscriber hears
+   * the global invalidation and repaints once. */
   clear(): void {
     this.epoch += 1
     this.cache.clear()
     this.errors.clear()
+    this.notifyAll()
   }
 
   /** Current cache size (observability/tests). */
@@ -150,12 +172,35 @@ export class ImageLoader {
     return this.cache.size()
   }
 
-  private notify(): void {
-    for (const listener of this.listeners) {
+  /** Current subscriber count (observability/tests). */
+  listenerCount(): number {
+    let total = 0
+    for (const set of this.listeners.values()) total += set.size
+    return total
+  }
+
+  /** Notify the listeners of ONE attachment (settle fan-out). */
+  private notify(attachmentId: string): void {
+    const set = this.listeners.get(attachmentId)
+    if (set === undefined) return
+    for (const listener of set) {
       try {
         listener()
       } catch {
         // A throwing subscriber must not break the settle fan-out.
+      }
+    }
+  }
+
+  /** Notify every subscriber (global invalidation). */
+  private notifyAll(): void {
+    for (const set of this.listeners.values()) {
+      for (const listener of set) {
+        try {
+          listener()
+        } catch {
+          // A throwing subscriber must not break the fan-out.
+        }
       }
     }
   }

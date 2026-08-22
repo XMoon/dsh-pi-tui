@@ -90,6 +90,7 @@ import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.t
 import { safeErrorMessage } from './error-boundary.ts'
 import { execFile } from 'node:child_process'
 import { DraftImageStore } from './image/draft-store.ts'
+import { ImageInputError } from './image/errors.ts'
 import { clipboardBackendOf, readClipboardImage, type ClipboardEnvironment, type RunCommand } from './image/clipboard.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
@@ -211,21 +212,26 @@ export const LOCAL_COMMANDS = new Set([
 ])
 
 /**
- * Command semantics matrix (plan §19.3/M12): a slash command line carrying
- * a staged image placeholder is REJECTED — commands are not LLM prompts, so
- * images are either supported (plain prompts, skill prompts) or explicitly
- * refused (everything with a leading `/name`); there is never a silent
- * drop. Pure, so the matrix is testable headless.
+ * Command semantics matrix (plan §19.3/M12): a LOCAL command line carrying a
+ * staged image placeholder is REJECTED — local commands are pure UI
+ * controls, never LLM prompts. AGENT-FACING input (plain prompts AND
+ * per-skill slash invocations like `/grilling`) SUPPORTS images: the skill
+ * wrapper builds its message through the same prepared-input path, so an
+ * image-bearing skill line is a real multimodal prompt (review finding 4).
+ * There is never a silent drop.
  * @param parsed - the parsed slash command, undefined for a plain prompt.
  * @param text - the submission text.
  * @param store - the live draft store.
+ * @param isLocal - whether the command name is a LOCAL (TUI-owned/UI)
+ *   command; skill names answer false.
  */
 export function commandRejectsImages(
   parsed: { name: string } | undefined,
   text: string,
   store: import('./image/types.ts').DraftImageStoreLike,
+  isLocal: (name: string) => boolean,
 ): boolean {
-  return parsed !== undefined && draftHasImages(text, store)
+  return parsed !== undefined && isLocal(parsed.name) && draftHasImages(text, store)
 }
 
 /**
@@ -1492,9 +1498,11 @@ export function apply(ctx: Context, config: Config): void {
      * failure (unknown session, broken log, preset mount) returns an error
      * string so callers' `.then(error => ...)` need no rejection path. */
     const switchSession = async (sessionId: string): Promise<string | undefined> => {
-      // Session switch: staged drafts are per-session UI state — drop them
-      // (never durable attachments, plan §14).
-      draftImages.clear()
+      // Draft cleanup happens ONLY after the switch committed (swapTo
+      // returned success): a refused/failed switch keeps the CURRENT
+      // session and its staged drafts intact — clearing up front would
+      // orphan the editor's placeholders on every failed switch (review
+      // finding 2).
       try {
         // The tracker is a single slot: acquiring the target first would
         // overwrite it, leaving the current session's lock leaked for the
@@ -1534,7 +1542,12 @@ export function apply(ctx: Context, config: Config): void {
           },
           setup: composition.setup,
         })
-        return swapTo(next)
+        const error = await swapTo(next)
+        // The switch COMMITTED: staged drafts are per-session UI state —
+        // drop them now (never durable attachments, plan §14; review
+        // finding 2). A failure keeps the current drafts.
+        if (error === undefined) draftImages.clear()
+        return error
       } catch (error) {
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
@@ -2119,6 +2132,14 @@ export function apply(ctx: Context, config: Config): void {
       // back. (The classification diagnostics are owned by runOwned.)
       app.setEditorText(mergeDraft(app.getDraft(), draft))
       const message = safeErrorMessage(error)
+      // Image intake/admission/capability failures are THEIR OWN actionable
+      // errors ("Current model ... does not support image input") — wrapping
+      // them in "could not start a session" misleads when a session already
+      // exists (review finding).
+      if (error instanceof ImageInputError) {
+        app.notify(message, 'error')
+        return
+      }
       try {
         ctx.logger.error(`tui-runner: session creation failed: ${message}`)
       } catch {
@@ -2133,6 +2154,14 @@ export function apply(ctx: Context, config: Config): void {
       attachments: ctx.get('attachments') as PrepareInputDeps['attachments'],
       llm: ctx.get('llm') as PrepareInputDeps['llm'],
       currentModel: () => {
+        // The AUTHORITATIVE model for the next step is the mutable
+        // selection's `current` (/model writes it; prompt assembly reads
+        // it) — never `liveAgent.options`, which holds the agent's launch
+        // configuration and does not move on /model (review finding 1).
+        const current = selected.current
+        if (current !== undefined) return { provider: current.provider, model: current.model }
+        // No selection assembled yet (pre-/model or a sessionless start):
+        // fall back to the agent's launch options as the best known pair.
         if (liveAgent === undefined) return undefined
         const { provider, model } = liveAgent.options
         return provider === undefined || model === undefined ? undefined : { provider, model }
@@ -2537,7 +2566,9 @@ export function apply(ctx: Context, config: Config): void {
       // (never a silent drop, never a stray placeholder sent to the model).
       // The draft comes back so the user can re-attach after choosing a
       // plain prompt.
-      if (commandRejectsImages(parsed, text, draftImages)) {
+      if (commandRejectsImages(parsed, text, draftImages,
+        name => LOCAL_COMMANDS.has(name)
+          || (extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false))) {
         app.setEditorText(mergeDraft(app.getDraft(), text))
         app.notify('Images cannot be attached to a command.', 'error')
         return
@@ -2874,6 +2905,15 @@ export function apply(ctx: Context, config: Config): void {
         const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
           .filter(message => isUserQueueInput(message.source as QueueNoticeSource | undefined))
         if (queued.length === 0) return
+        // Multimodal queued messages (durable ImageBlocks) cannot be pulled
+        // back into the text editor without losing the images: refuse the
+        // dequeue and keep the queue intact (review finding 3). The durable
+        // refs stay with the harness; a recalled-durable-image draft is a
+        // post-v1 enhancement.
+        if (queued.some(message => message.content.some(block => block.type === 'image'))) {
+          app.notify('A queued message with an image cannot be pulled back yet — keep it queued or cancel it (Ctrl+Enter / Alt+↑ is disabled for it)', 'info')
+          return
+        }
         // Remove exactly the pulled-back messages (durable splice), keeping
         // any notices queued behind them.
         for (const message of queued) liveAgent.inbox.remove(message.id)
@@ -3664,6 +3704,9 @@ export function apply(ctx: Context, config: Config): void {
       // reconfiguration is picked up (plan §10.1: never a cached copy).
       imageLimits: () => ctx.get('attachments')?.imageLimits as import('./image/intake.ts').ImageLimitsLike | undefined,
       insertIntoEditor: (text) => app.insertIntoEditor(text),
+      // The shared prepared-input pipeline (skills build their message
+      // through this — review finding 4).
+      prepareDraftMessage: (text) => prepareUserMessage(text, draftImages, submitDeps),
       // M5: the extension registries (commands/themes/settings/autocomplete/
       // keybindings), when the extension service is mounted. The /settings
       // and /theme pickers read them; undefined degrades to the host-only
