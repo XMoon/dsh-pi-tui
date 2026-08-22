@@ -102,6 +102,7 @@ function stubRunner(
         { header: 'tasks', enableSearch: true },
       )
     },
+    openRewindPicker: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

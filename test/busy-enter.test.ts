@@ -150,6 +150,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
+    openRewindPicker: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

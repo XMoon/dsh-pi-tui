@@ -258,6 +258,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
+    openRewindPicker: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

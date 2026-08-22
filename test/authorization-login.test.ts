@@ -167,6 +167,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
+    openRewindPicker: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

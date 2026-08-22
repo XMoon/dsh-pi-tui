@@ -86,6 +86,7 @@ function setup(): {
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
+    openRewindPicker: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

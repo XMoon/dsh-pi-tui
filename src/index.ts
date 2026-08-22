@@ -136,6 +136,14 @@ import {
   type SessionLockPersistence,
 } from './session-lock.ts'
 import { createProcProbe, parseProcStat } from './session-lock-proc.ts'
+import { collectRewindCandidates, rewindPickerItem } from './rewind.ts'
+import {
+  SWAP_STALE_MESSAGE,
+  commitRewind,
+  isRewindIdentityCurrent,
+  type RewindCommitHost,
+  type RewindLiveIdentity,
+} from './session-fork.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -191,7 +199,7 @@ const REPAINT_FLUSH_MS = 50
  */
 export const SESSIONLESS_COMMANDS = new Set([
   'exit', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
-  'sessions', 'resume', 'search', 'new', 'fork', 'preset',
+  'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset',
 ])
 
 /**
@@ -208,7 +216,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  */
 export const LOCAL_COMMANDS = new Set([
   'copy', 'exit', 'export', 'fork', 'help', 'image', 'kill', 'login', 'logout',
-  'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume',
+  'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
 ])
@@ -1555,8 +1563,18 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
 
-    /** Swap the live agent to a new handle, repainting for its session. */
-    const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>): Promise<string | undefined> => {
+    /** Swap the live agent to a new handle, repainting for its session.
+     * `expected` is OPTIONAL (conversation rewind only): the surface
+     * identity the caller captured. When it is given, the swap refuses —
+     * returning {@link SWAP_STALE_MESSAGE} — if the surface changed while
+     * the swap was being prepared, so a rewind ordered against a stale
+     * picker can never commit into (or tear down) a session another path
+     * switched to. The refusal happens INSIDE the commit boundary: after
+     * the flush but BEFORE the current handle is disposed or the new one
+     * assigned, so the current session stays live and the caller can
+     * dispose the never-live child. Other callers (no `expected`) keep the
+     * historical unconditional behavior. */
+    const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>, expected?: RewindLiveIdentity): Promise<string | undefined> => {
       const from = liveAgent?.session.id
       // The from-session's header, captured BEFORE the swap: the repair path
       // must re-acquire from's lock with FROM's cwd even when the failure
@@ -1573,6 +1591,23 @@ export function apply(ctx: Context, config: Config): void {
           // the shared log and collide with our flush — the exact corruption
           // the lock exists to prevent).
           await sessions.flush(liveAgent.session)
+        }
+        // The rewind stale gate INSIDE the swap's commit boundary — run
+        // UNCONDITIONALLY for expected-bearing swaps (never nested inside
+        // the liveAgent conditional): a surface that became sessionless
+        // during the flush (`sessionId: undefined`) is refused exactly like
+        // a switched one. The refusal happens before the current handle is
+        // disposed or the new one assigned, so the current session stays
+        // live and the caller disposes the never-live ghost child (plan
+        // §12 gate 2; the picker-side gate is a cheap pre-check, this one
+        // is authoritative).
+        if (expected !== undefined && !isRewindIdentityCurrent(
+          { sessionId: liveAgent?.session.id, generation: sessionGeneration },
+          expected,
+        )) {
+          return SWAP_STALE_MESSAGE
+        }
+        if (liveAgent !== undefined) {
           await liveHandle?.dispose()
         }
         liveHandle = next
@@ -3990,6 +4025,105 @@ export function apply(ctx: Context, config: Config): void {
     // bytes for the current run. Cleared on submit/session-switch/dispose —
     // never touches durable attachments the harness already accepted.
     const draftImages = new DraftImageStore()
+    /**
+     * The conversation rewind picker (the ONE entry shared by the idle
+     * empty-editor double-Esc and `/rewind` — plan §22). Lists the completed
+     * user turns of the live session; a selection commits through
+     * `commitRewind` (create → swap → prompt restore) as an OWNED task with
+     * the stale-generation gates. Sessionless (deferred start) it notifies
+     * and never creates a session.
+     */
+    function openRewindPicker(): void {
+      const source = liveAgent
+      if (source === undefined) {
+        app.notify('no conversation to rewind', 'info')
+        return
+      }
+      // Rewind only from an EMPTY editor: the restored prompt must be a
+      // deliberate, clean draft — never merged into (or over) the user's
+      // current draft. The `/rewind` command gets the same guard, so both
+      // entries can never drop staged input (plan §30).
+      if (app.getDraft().trim() !== '') {
+        app.notify('clear the current draft before rewinding', 'info')
+        return
+      }
+      const candidates = collectRewindCandidates(source.session.events)
+      if (candidates.length === 0) {
+        app.notify('no completed user turn to rewind', 'info')
+        return
+      }
+      // The source identity captured at OPEN time: the selection commits
+      // only while the same session still owns the surface (stale gates
+      // inside commitRewind).
+      const sourceId = source.session.id
+      const sourceGeneration = sessionGeneration
+      const commitHost: RewindCommitHost = {
+        sessionCwd: () => sessionCwd(),
+        compose,
+        agents: agents as unknown as RewindCommitHost['agents'],
+        liveIdentity: () => ({ sessionId: liveAgent?.session.id, generation: sessionGeneration }),
+        swapTo: (next, expected) => swapTo(next as Parameters<typeof swapTo>[0], expected),
+        disposeAgent: async (handle) => {
+          try {
+            await handle.dispose()
+          } catch (error) {
+            diag.warn('rewind child disposal failed', { error: safeErrorMessage(error) })
+          }
+        },
+        replaceDraft: (text) => app.setDraft(text),
+      }
+      app.openPicker(
+        candidates.map(rewindPickerItem),
+        (value) => {
+          const candidate = candidates.find(item => String(item.turnStartSeq) === value)
+          if (candidate === undefined) return
+          runOwned('conversation rewind', () => commitRewind(commitHost, source, candidate, {
+            sessionId: sourceId,
+            generation: sourceGeneration,
+          }), {
+            diag,
+            sessionId: () => sourceId,
+            onResult: (outcome) => {
+              if (outcome.kind === 'stale') {
+                // Gate 1 or 2: another path switched the surface while the
+                // picker was open — never commit into it (a gate-2 child was
+                // already disposed inside commitRewind).
+                app.notify('session changed — rewind cancelled', 'info')
+                return
+              }
+              if (outcome.kind === 'failed') {
+                app.notify(outcome.message, 'error')
+                return
+              }
+              // The swap COMMITTED: staged drafts are per-session UI state —
+              // drop the UNPINNED ones now, exactly like /new and /fork (a
+              // historic attachment is never silently re-staged).
+              draftImages.clearUnpinned()
+              if (outcome.hasNonTextContent) {
+                app.notify(`rewound to turn ${outcome.turn}; original attachments were not re-staged — reattach them before sending`, 'error')
+              } else {
+                app.notify(`rewound to turn ${outcome.turn}`, 'info')
+              }
+            },
+            onError: (error) => {
+              // Failed compose/create keeps the CURRENT session, the picker
+              // is closed, the editor draft is untouched (commitRewind never
+              // writes it before the swap commits).
+              app.notify(safeErrorMessage(error), 'error')
+            },
+          })
+        },
+        () => {},
+        {
+          header: 'Rewind conversation · workspace unchanged',
+          enableSearch: true,
+          noMatchText: 'No matching turn',
+          width: 72,
+          maxHeight: 24,
+          showHint: true,
+        },
+      )
+    }
     const runner: TuiCommandRunner = {
       ctx,
       app,
@@ -4061,6 +4195,7 @@ export function apply(ctx: Context, config: Config): void {
       updateWelcomeCard,
       openJobView,
       openTasksBrowser,
+      openRewindPicker,
       enterView,
       requestExit,
       exit,

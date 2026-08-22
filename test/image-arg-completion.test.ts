@@ -83,6 +83,7 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
+    openRewindPicker: () => {},
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

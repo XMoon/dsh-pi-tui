@@ -320,6 +320,15 @@ export interface TuiCommandRunner {
    * `/tasks` (and its `subagents` alias) — identical to the ↓ trigger.
    */
   openTasksBrowser(): void
+  /**
+   * Open the conversation rewind picker (plan: the ONE entry shared by the
+   * idle empty-editor double-Esc and `/rewind`). The runner decides what
+   * rewind means: it lists the completed user turns, and a selection forks
+   * a child session before the chosen turn and restores its prompt into
+   * the editor. Sessionless it degrades to a notify — it never creates a
+   * session just to be rewound.
+   */
+  openRewindPicker(): void
   enterView(childId: SessionId, label?: string): Promise<void>
   exit(code: number): void
   /**
@@ -2451,6 +2460,18 @@ export function registerTuiCommands(
       // finding 2).
       runner.imageStore.clearUnpinned()
       return { kind: 'success', text: `forked as ${next.agent.session.id}` }
+    },
+  })
+
+  commands.register({
+    name: 'rewind',
+    description: 'Fork this conversation from an earlier user turn (the workspace is not reverted)',
+    handler: () => {
+      // The SAME surface as the idle empty-editor double-Esc — one
+      // implementation, two entries (plan §22). Sessionless it notifies
+      // "no conversation to rewind" and never creates a session.
+      runner.openRewindPicker()
+      return { kind: 'success' }
     },
   })
 
