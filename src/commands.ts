@@ -139,9 +139,13 @@ export function sessionPickerCategories(
       id: 'current',
       label: 'Current directory',
       header: `${header} · Current directory`,
-      items: () => mainRows
-        .filter(row => sameWorkspace(row.cwd, currentCwd))
-        .map(row => itemFor(row)),
+      // The same lineage tree as "All directories", built over the CURRENT
+      // workspace's subset: a fork/rewind branch whose parent lives in
+      // another workspace (or outside the window) is an orphan at depth 1 —
+      // never lost, never mis-nested under an unrelated root.
+      items: () => buildSessionTree(
+        mainRows.filter(row => sameWorkspace(row.cwd, currentCwd)),
+      ).map(entry => itemFor(entry.row, entry.depth)),
     },
     {
       id: 'all',

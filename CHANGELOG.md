@@ -39,9 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`parentSession` + `seedLength` recorded), swaps to it, and restores the
   selected prompt into the editor for editing — nothing is sent
   automatically. The original session is never modified, truncated or
-  deleted and stays reachable through `/sessions`, whose "All directories"
-  view now renders the full lineage tree (fork children, rewind branches
-  and subagents hang under their parent). Rewind is a conversation
+  deleted and stays reachable through `/sessions`, whose picker now renders
+  the full lineage tree in BOTH scopes — fork children, rewind branches and
+  subagents hang under their parent with a `└─` prefix (in the
+  Current-directory scope, a branch whose parent lives in another workspace
+  is shown as a depth-1 orphan, never lost). Rewind is a conversation
   operation only: workspace and external side effects are never reverted,
   historic image attachments are not re-staged (the picker marks
   multimodal prompts and the restore warns), and a busy single Esc still

@@ -31,9 +31,11 @@
   选中一个会创建新的子会话,其历史恰好止于该回合之前(记录
   `parentSession` 与 `seedLength`),切换到它,并把选中的提示回填到编辑器
   供修改——不会自动发送任何内容。原会话从不被修改、截断或删除,仍可
-  通过 `/sessions` 回到;`/sessions` 的 "All directories" 视图现在渲染
-  完整的 lineage 树(fork 子会话、rewind 分支与 subagent 都挂在各自的
-  parent 之下)。Rewind 只回退对话:工作区与外部副作用从不回滚,历史
+  通过 `/sessions` 回到;`/sessions` 的两个视图(Current directory 与
+  All directories)现在都渲染完整的 lineage 树(fork 子会话、rewind 分支
+  与 subagent 都挂在各自的 parent 之下,带 `└─` 前缀;Current 范围内,
+  父在别的工作区/窗口外的分支以深度 1 孤儿显示,不会丢失)。Rewind 只回退
+  对话:工作区与外部副作用从不回滚,历史
   图片附件不会被重新暂存(选择器会标记多模态提示,恢复时给出警告),
   忙碌时按一次 Esc 仍只取消——只有空闲 + 空编辑器 + 双击 Esc 才会打开
   选择器。

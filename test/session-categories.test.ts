@@ -15,6 +15,7 @@ import {
   buildSessionTree,
   headerToPickerRow,
   sessionPickerItem,
+  type SessionPickerItem,
   type SessionPickerRow,
 } from '../src/sessions.ts'
 import { sessionPickerCategories } from '../src/commands.ts'
@@ -196,6 +197,30 @@ test('sessionPickerCategories treats a trailing-slash cwd as the same workspace'
   const currentIds = categories[0]!.items().map(row => row.value).sort()
   assert.deepEqual(currentIds, ['session-current-1', 'session-current-2'],
     `/ws/project-a/ scopes the same sessions as /ws/project-a:\n${JSON.stringify(currentIds)}`)
+})
+
+test('the Current category indents fork children in the current workspace', () => {
+  const treeItem = (row: SessionPickerRow, indent = 0): SessionPickerItem => sessionPickerItem(row, '', indent)
+  const categories = sessionPickerCategories(
+    [
+      { id: 'session-parent', createdAt: 4, cwd: '/ws', live: false },
+      { id: 'session-fork', createdAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
+      { id: 'session-other-cwd', createdAt: 2, cwd: '/other', parentSession: 'session-parent', live: false },
+      { id: 'session-orphan', createdAt: 1, cwd: '/ws', parentSession: 'session-missing', live: false },
+    ],
+    '/ws',
+    'sessions',
+    treeItem,
+  )
+  const current = categories[0]!.items()
+  const parent = current.find(item => item.value === 'session-parent')
+  const fork = current.find(item => item.value === 'session-fork')
+  const otherCwd = current.find(item => item.value === 'session-other-cwd')
+  const orphan = current.find(item => item.value === 'session-orphan')
+  assert.ok(parent !== undefined && !parent.label.includes('└─'), 'the workspace root stays flat')
+  assert.ok(fork !== undefined && fork.label.startsWith('  └─ '), `a fork child in the current workspace must be indented:\n${fork!.label}`)
+  assert.equal(otherCwd, undefined, 'a child in ANOTHER workspace is out of the Current scope')
+  assert.ok(orphan !== undefined && orphan!.label.startsWith('  └─ '), 'an orphan (parent outside the workspace/window) sits at depth 1, never lost')
 })
 
 test('sessionPickerItem indents subagent rows in the All category', () => {
