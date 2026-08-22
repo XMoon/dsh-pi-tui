@@ -65,6 +65,7 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     cwd: root,
     sessionCwd: () => root,
     imageStore: store,
+    copyToClipboard: async () => true,
     imageLimits: () => undefined,
     insertIntoEditor: (text) => app.insertIntoEditor(text),
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,

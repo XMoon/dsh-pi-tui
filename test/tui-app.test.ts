@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
-import { CallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { CallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -1308,5 +1308,36 @@ test('a plain-text submission still recalls through the editor history', async (
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('plain prompt'), `plain text recalls:\n${view}`)
+  app.stop()
+})
+
+test('fullscreen drag selection copies through the host copySelection policy (issue #7)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const copied: string[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    copySelection: async (text) => { copied.push(text); return true },
+  })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/message', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The fullscreen layout pins the header at row 0, so the transcript
+  // starts at row 1: drag from (1,1) across the user + assistant rows
+  // (rows 0..4: header, ❯ hello, spacer, 🐋 alpha, beta continuation).
+  vt.sendInput('\x1b[<0;1;1M')
+  vt.sendInput('\x1b[<32;10;5M')
+  vt.sendInput('\x1b[<0;10;5m')
+  await vt.waitForRender()
+  assert.equal(copied.length, 1, `the drag selection must reach the host policy:\n${vt.getViewport().join('\n')}`)
+  const text = copied[0] ?? ''
+  assert.ok(text.includes('alpha'), `selected text must carry the transcript content: ${JSON.stringify(text)}`)
+  assert.ok(text.includes('beta'), `selected text must carry the wrapped line: ${JSON.stringify(text)}`)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Copied!'), `the success flash must render:\n${view}`)
   app.stop()
 })

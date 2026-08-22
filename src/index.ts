@@ -88,10 +88,10 @@ import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
 import { safeErrorMessage } from './error-boundary.ts'
-import { execFile } from 'node:child_process'
 import { DraftImageStore } from './image/draft-store.ts'
 import { ImageInputError } from './image/errors.ts'
-import { clipboardBackendOf, commandOnPath, readClipboardImage, type ClipboardEnvironment, type RunCommand } from './image/clipboard.ts'
+import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, type ClipboardEnvironment } from './image/clipboard.ts'
+import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from './clipboard.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
 import { ImageLoader } from './image/loader.ts'
@@ -2779,24 +2779,10 @@ export function apply(ctx: Context, config: Config): void {
       return attachments.readImage(ref as never) as Promise<{ ref: unknown; data: Uint8Array }>
     })
     /** The clipboard bridge (plan M3): a bounded execFile runner with a
-     * generous buffer (clipboard payloads can be multi-MB). */
-    const runClipboardCommand: RunCommand = (command, args, options) => new Promise((resolve) => {
-      execFile(command, args as string[], {
-        timeout: options?.timeoutMs ?? 2000,
-        maxBuffer: 64 * 1024 * 1024,
-      }, (error, stdout, stderr) => {
-        const code = error === null
-          ? 0
-          : typeof (error as { code?: unknown }).code === 'number'
-            ? (error as { code: number }).code
-            : 1
-        resolve({
-          stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout),
-          stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ''),
-          code,
-        })
-      })
-    })
+     * generous buffer (clipboard payloads can be multi-MB); `input` is
+     * piped to the child's stdin (issue #7 — the copy helpers read their
+     * payload from stdin). */
+    const runClipboardCommand = createClipboardRunner()
     const clipboardEnv: ClipboardEnvironment = {
       platform: process.platform,
       env: process.env as Record<string, string | undefined>,
@@ -2804,6 +2790,21 @@ export function apply(ctx: Context, config: Config): void {
       // CWD and would declare installed wl-paste/xclip "missing" (review
       // finding).
       exists: (command) => commandOnPath(command, process.env.PATH, process.platform),
+    }
+    /** Issue #7: the copy policy's executor — the same bounded execFile
+     * runner as the paste probe, with the text payload piped to stdin. */
+    const runCopyCommand: CopyExecutor = (command, args, input) =>
+      runClipboardCommand(command, args, { timeoutMs: 2000, input }).then(result => ({ code: result.code }))
+    /** Issue #7: the copy policy's platform facts — the paste probe's
+     * environment plus the OSC 52 best-effort sink (a TTY-gated write;
+     * inside tmux the sequence rides a DCS passthrough so the terminal
+     * behind tmux receives it — kimi-code convention). */
+    const copyEnv: CopyEnvironment = {
+      platform: clipboardEnv.platform,
+      env: clipboardEnv.env,
+      exists: clipboardEnv.exists,
+      isTTY: () => process.stdout.isTTY === true,
+      writeOsc52: (text) => process.stdout.write(buildOsc52Sequence(text, (process.env.TMUX ?? '').length > 0)),
     }
     app = startProcessTui({
       onSubmit: (text) => dispatchUserInput(text),
@@ -3151,6 +3152,10 @@ export function apply(ctx: Context, config: Config): void {
       present,
       workspaceRoot: cwd,
       extensionHost,
+      // Issue #7: the fullscreen drag selection copies through the SAME
+      // shared policy as /copy (tmux → platform helper → OSC 52) — a bare
+      // OSC 52 write is a silent lie under tmux `set-clipboard external`.
+      copySelection: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
       // M7: the transcript/tool renderer registry. Renderer failures are
       // isolated per contribution (the registry catches throws and the
       // host falls back); the health sink records them for /status.
@@ -3900,6 +3905,8 @@ export function apply(ctx: Context, config: Config): void {
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       cwd,
       imageStore: draftImages,
+      // Issue #7: /copy shares the fullscreen selection's clipboard policy.
+      copyToClipboard: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
       // The deployment image policy, re-read dynamically so a runtime
       // reconfiguration is picked up (plan §10.1: never a cached copy).
       imageLimits: () => ctx.get('attachments')?.imageLimits as import('./image/intake.ts').ImageLimitsLike | undefined,

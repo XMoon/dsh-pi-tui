@@ -213,6 +213,10 @@ export interface TuiCommandRunner {
    * runner clears it on submit/session-switch/dispose, never on durable
    * attachments. */
   imageStore: import('./image/draft-store.ts').DraftImageStore
+  /** The shared clipboard WRITE policy (issue #7): tmux → platform helper
+   * → OSC 52 best-effort. Used by /copy; the fullscreen drag selection
+   * routes through the same policy via the app's copySelection option. */
+  copyToClipboard(text: string): Promise<boolean>
   /** The deployment image policy (`ctx.attachments.imageLimits`), re-read
    * dynamically; undefined when the attachment service is unavailable. */
   imageLimits(): import('./image/intake.ts').ImageLimitsLike | undefined
@@ -2245,7 +2249,7 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'copy',
-    description: 'Copy the last assistant message (OSC 52 clipboard)',
+    description: 'Copy the last assistant message to the system clipboard (tmux-aware)',
     handler: async () => {
       const liveAgent = await requireAgent()
       const last = liveAgent.session.events.findLast((event): event is SessionEvent<'assistant/message'> =>
@@ -2256,9 +2260,14 @@ export function registerTuiCommands(
         .map(block => block.text)
         .join('')
       if (text === '') return { kind: 'error', text: 'last assistant message has no text' }
-      if (process.stdout.isTTY !== true) return { kind: 'error', text: 'clipboard needs a TTY (OSC 52)' }
-      process.stdout.write(`\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`)
-      return { kind: 'success', text: 'copied last assistant message' }
+      // Issue #7: the SAME policy as the fullscreen drag selection (tmux →
+      // platform helper → OSC 52 best-effort) — a bare OSC 52 write is a
+      // silent lie under tmux `set-clipboard external` / restricted
+      // terminals.
+      const ok = await runner.copyToClipboard(text)
+      return ok
+        ? { kind: 'success', text: 'copied last assistant message' }
+        : { kind: 'error', text: 'failed to copy last assistant message' }
     },
   })
 

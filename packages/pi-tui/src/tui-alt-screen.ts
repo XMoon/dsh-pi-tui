@@ -160,6 +160,15 @@ export interface TuiAltScreenOptions {
 	 * transcript card) without reimplementing selection.
 	 */
 	onCellClick?: (x: number, y: number) => void;
+	/**
+	 * Host-owned clipboard strategy for a completed drag selection
+	 * (dsh-pi-tui extension, backported from upstream earendil-works/pi#8110
+	 * structure). When provided, the selection text is handed to this
+	 * callback instead of writing a raw OSC 52 sequence; the returned
+	 * boolean drives the `Copied!` / `Copy failed` flash. Absent, the
+	 * original OSC 52 write stays the behavior (other pi-tui consumers).
+	 */
+	copySelection?: (text: string) => Promise<boolean>;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -200,6 +209,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
 	private readonly onCellClick?: (x: number, y: number) => void;
+	private readonly copySelection?: (text: string) => Promise<boolean>;
 
 	constructor(
 		terminal: Terminal,
@@ -223,6 +233,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.onCellClick = options.onCellClick;
+		this.copySelection = options.copySelection;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -1103,6 +1114,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		const text = lines.join("\n");
 		if (text.length === 0) return;
+		if (this.copySelection) {
+			// Host-owned clipboard strategy: the callback decides success
+			// and feedback. The input path stays synchronous — the flash
+			// lands when the (async) copy settles, and a throwing callback
+			// must never crash the mouse handler.
+			Promise.resolve()
+				.then(() => this.copySelection!(text))
+				.then((ok) => this.flash(ok ? "Copied!" : "Copy failed"))
+				.catch(() => this.flash("Copy failed"));
+			return;
+		}
 		this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
 		this.flash("Copied!");
 	}

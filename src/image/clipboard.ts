@@ -17,6 +17,7 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { existsSync, rmSync, readFileSync } from 'node:fs'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { ClipboardImageError } from './errors.ts'
 import { parseImageMetadata } from './intake.ts'
@@ -35,8 +36,47 @@ export interface RunCommand {
   (
     command: string,
     args: readonly string[],
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; input?: string },
   ): Promise<{ stdout: Buffer; stderr: Buffer; code: number }>
+}
+
+/**
+ * The real execFile-backed runner (plan M3): a bounded execFile with a
+ * generous buffer (clipboard payloads can be multi-MB). `input` is piped
+ * to the child's stdin and closed before awaiting — the copy policy's
+ * `tmux load-buffer -w -` / `pbcopy` / `wl-copy` / `xclip` all read their
+ * payload from stdin, so a runner that drops the payload would "succeed"
+ * while copying nothing (issue #7 review finding). Note: async execFile
+ * has NO `input` option (that is spawnSync/execFileSync-only), so the
+ * payload is written to `child.stdin` explicitly.
+ */
+export function createClipboardRunner(): RunCommand {
+  return (command, args, options) => new Promise((resolve) => {
+    const child = execFile(command, args as string[], {
+      timeout: options?.timeoutMs ?? 2000,
+      maxBuffer: 64 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      const code = error === null
+        ? 0
+        : typeof (error as { code?: unknown }).code === 'number'
+          ? (error as { code: number }).code
+          : 1
+      resolve({
+        stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout),
+        stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ''),
+        code,
+      })
+    })
+    if (options?.input !== undefined) {
+      // A helper that exits early (missing command, immediate failure)
+      // while a large payload is being piped emits EPIPE on stdin — an
+      // unhandled 'error' event would crash the process (round-3 finding).
+      // Swallow it: the child is gone, and its non-zero exit (or the
+      // timeout) already reports the failure through the result code.
+      child.stdin?.on('error', () => {})
+      child.stdin?.end(options.input)
+    }
+  })
 }
 
 /** Platform facts the probe decision tree reads. */

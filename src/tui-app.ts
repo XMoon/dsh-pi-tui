@@ -974,6 +974,15 @@ export interface TuiAppOptions {
    */
   editorRegistry?: EditorRegistry
   /**
+   * Host-owned clipboard strategy for fullscreen drag-selection copy
+   * (issue #7). When wired, the alt screen's selection copy routes
+   * through this callback (the shared tmux → platform helper → OSC 52
+   * policy in src/clipboard.ts) instead of the vendor's raw OSC 52
+   * write; the returned boolean drives the `Copied!` / `Copy failed`
+   * flash. Optional — absent keeps the vendor's OSC 52 fallback.
+   */
+  copySelection?: (text: string) => Promise<boolean>
+  /**
    * Phase 2: the ADVANCED normalized input capture route (wired by the
    * runner from the service's advanced registry). Consulted by the host
    * input path AFTER its own capturing flows (questions, approvals,
@@ -1334,6 +1343,10 @@ export class TuiApp {
   private readonly renderers: RendererRegistry | undefined
   /** M9: the editor registry (optional). */
   private readonly editorRegistry: EditorRegistry | undefined
+  /** Issue #7: the host-owned clipboard strategy for fullscreen drag
+   * selection (tmux → platform helper → OSC 52); undefined keeps the
+   * vendor's raw OSC 52 write. */
+  private readonly copySelection: ((text: string) => Promise<boolean>) | undefined
   /**
    * P1-1: the renderer registry revision observed by the LAST render pass.
    * When the registry revision moves (a renderer registered/unloaded —
@@ -1451,6 +1464,7 @@ export class TuiApp {
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
+    this.copySelection = options.copySelection
     this.overlayBroker = new OverlayBroker({
       question: () => this.activeQuestions,
       setFocusSeat: (seat) => this.setFocusSeat(seat),
@@ -2530,6 +2544,10 @@ export class TuiApp {
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
         onCellClick: (x, y) => this.handleFullscreenClick(x, y),
+        // Issue #7: the host clipboard policy (tmux-aware, platform
+        // helpers, OSC 52 last) replaces the vendor's raw OSC 52 write —
+        // the alt screen never needs to understand tmux/SSH/Wayland/X11.
+        copySelection: this.copySelection,
       })
       // Fullscreen layout: header and todo pinned, the transcript scrolls in
       // the middle (grow), and the editor + footer stay pinned to the bottom

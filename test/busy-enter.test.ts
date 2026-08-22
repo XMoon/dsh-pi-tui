@@ -131,6 +131,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: new DraftImageStore(),
+    copyToClipboard: async () => true,
     imageLimits: () => undefined,
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,

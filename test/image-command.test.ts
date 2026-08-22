@@ -68,6 +68,7 @@ function setup(): {
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: store,
+    copyToClipboard: async () => true,
     imageLimits: () => undefined,
     insertIntoEditor: (text) => app.insertIntoEditor(text),
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
