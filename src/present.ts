@@ -512,14 +512,59 @@ export function writeFoldedPreview(result: string): string {
  * escaped by the producer (escapeAttr: `&amp;`/`&quot;`/`&lt;`) and is
  * decoded here; the instructions body is embedded VERBATIM by the producer
  * (skills are trusted local content), so it is returned unmodified.
+ *
+ * The boundaries are OUTER-envelope-aware: the opener is the first
+ * `<skill_content name="…">`, the instructions opener the first
+ * `<skill_instructions>` after it, and the closers the last
+ * `</skill_instructions>` / `</skill_content>` — so a body that itself
+ * documents envelope-shaped XML (a complete nested block, or an unclosed
+ * tag) never truncates the outer body. A MALFORMED first envelope never
+ * borrows a later envelope's boundaries: a second `<skill_content name="…">`
+ * opener between the first opener and its instructions opener means the
+ * first envelope is incomplete, and the selected instructions body must
+ * close every `<skill_content name="…">` opener it contains (unmatched
+ * closing tags are tolerated) — without those guards, a first envelope
+ * whose own boundaries are unclosed would cross-pair with a later
+ * envelope's. An unclosed `<skill_content name="…">` example inside a body
+ * is indistinguishable from such a malformed concatenation and degrades to
+ * a header-only card, never raw tags.
  * @param result - the tool result text.
  * @returns the envelope's name and instruction body, or undefined when the
  * result is not a well-formed skill envelope (a blank name is malformed).
  */
 export function parseSkillEnvelope(result: string): { name: string; instructions: string } | undefined {
-  const match = /<skill_content name="([^"]*)">[\s\S]*?<skill_instructions>\n?([\s\S]*?)\n?<\/skill_instructions>[\s\S]*?<\/skill_content>/.exec(result)
-  if (match === null) return undefined
-  const rawName = (match[1] ?? '').trim()
+  const open = result.indexOf('<skill_content name="')
+  if (open < 0) return undefined
+  const nameStart = open + '<skill_content name="'.length
+  const nameEnd = result.indexOf('"', nameStart)
+  if (nameEnd < 0) return undefined
+  const instrOpen = result.indexOf('<skill_instructions>', nameEnd)
+  if (instrOpen < 0) return undefined
+  // A content opener BEFORE the instructions opener belongs to a later
+  // envelope: the first envelope is malformed and must be rejected, never
+  // cross-paired with the later envelope's boundaries.
+  const nestedOpen = result.indexOf('<skill_content name="', nameEnd)
+  if (nestedOpen >= 0 && nestedOpen < instrOpen) return undefined
+  const outerClose = result.lastIndexOf('</skill_content>')
+  if (outerClose < instrOpen) return undefined
+  const instrClose = result.lastIndexOf('</skill_instructions>', outerClose)
+  if (instrClose <= instrOpen) return undefined
+  // The selected body must have no UNMATCHED content opener: every
+  // `<skill_content name="…">` opener inside it must be closed inside it.
+  // An opener without a matching close means the first envelope's
+  // instructions are not independently closed and the selected boundaries
+  // would cross into a later envelope (the same shape as an unclosed nested
+  // example — the malformed envelope wins and the result degrades, never
+  // leaks). Unmatched closing tags are ignored: they cannot cross-pair and
+  // a body documenting `</skill_content>` stays verbatim.
+  const bodyRegion = result.slice(instrOpen, instrClose)
+  let contentDepth = 0
+  for (const token of bodyRegion.matchAll(/<skill_content name="|<\/skill_content>/g)) {
+    if (token[0] === '<skill_content name="') contentDepth += 1
+    else contentDepth = Math.max(0, contentDepth - 1)
+  }
+  if (contentDepth > 0) return undefined
+  const rawName = result.slice(nameStart, nameEnd).trim()
   if (rawName === '') return undefined
   // Decode the producer's attribute escaping (&quot; → ", &lt; → <, &amp;
   // → & — in that order, so an originally-escaped literal like &amp;quot;
@@ -529,7 +574,10 @@ export function parseSkillEnvelope(result: string): { name: string; instructions
     .replaceAll('&lt;', '<')
     .replaceAll('&gt;', '>')
     .replaceAll('&amp;', '&')
-  return { name, instructions: match[2] ?? '' }
+  let body = result.slice(instrOpen + '<skill_instructions>'.length, instrClose)
+  if (body.startsWith('\n')) body = body.slice(1)
+  if (body.endsWith('\n')) body = body.slice(0, -1)
+  return { name, instructions: body }
 }
 
 /**
@@ -545,6 +593,44 @@ export function skillFoldedPreview(result: string): string {
   if (envelope === undefined) return ''
   const lines = envelope.instructions.split('\n').filter(line => line !== '').length
   return lines === 0 ? '' : ` — ${lines} lines of instructions`
+}
+
+/**
+ * The human-facing body lines of one injected context row, derived from the
+ * model-facing text so the expanded row never leaks the envelope's raw XML
+ * (the same no-XML rule as the read/write/skill tool cards):
+ *
+ * - a well-formed skill envelope (`<skill_content …>` — the skill loader
+ *   tool result and the user-explicit invocation injection share this
+ *   shape) renders its instructions body;
+ * - a `<system-reminder>`-wrapped producer (the skill catalog, workspace
+ *   instructions — both bake their complete frame into the content,
+ *   harness caller-owned framing) renders its content with the wrapper tag
+ *   lines stripped; `<available_skills>` markers are stripped only when the
+ *   pair is present, so a lone marker inside real content survives;
+ * - any OTHER text returns undefined and the caller keeps its raw-body
+ *   behavior (plain context rows are unchanged).
+ *
+ * A malformed skill envelope yields an EMPTY body, never the raw tags: the
+ * header still names the producer, and the model-facing bytes are untouched
+ * (presentation only).
+ * @param text - the injected context message text, exactly as logged.
+ * @returns the body lines to render, or undefined when no envelope shape
+ * applies.
+ */
+export function systemContextBody(text: string): string[] | undefined {
+  const skill = parseSkillEnvelope(text)
+  if (skill !== undefined) return skill.instructions.split('\n')
+  if (text.trimStart().startsWith('<skill_content')) return []
+  const lines = text.split('\n')
+  const first = lines[0]?.trim()
+  const last = lines[lines.length - 1]?.trim()
+  if (first !== '<system-reminder>' || last !== '</system-reminder>') return undefined
+  const body = lines.slice(1, -1)
+  const hasSkillsPair = body.some(line => line.trim() === '<available_skills>')
+    && body.some(line => line.trim() === '</available_skills>')
+  if (!hasSkillsPair) return body
+  return body.filter(line => line.trim() !== '<available_skills>' && line.trim() !== '</available_skills>')
 }
 
 /**

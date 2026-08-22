@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import {
-  foldedCallPreview, genericRawInputLines, parseReadEnvelopes, resultTextLines, subagentModelDisplay, toolPresenterFrom, webCardLines,
+  foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/present.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { TuiApp, BulletedComponent } from '../src/tui-app.ts'
@@ -2007,6 +2007,313 @@ test('expanded skill and read_image cards render their content, never the envelo
   assert.ok(view.includes('path: /ws/img.png'), `image path row missing:\n${view}`)
   assert.ok(!view.includes('AQIDBA=='), `image payload base64 dumped into the card:\n${view}`)
   assert.ok(!view.includes('<path>'), `expanded image envelope leaked:\n${view}`)
+})
+
+test('systemContextBody parses context envelopes and leaves plain text alone', () => {
+  const envelope = [
+    '<skill_content name="review-fix-loop">',
+    '<skill_resources>',
+    'Base directory for this skill: /home/x/.dsh/skills/review-fix-loop',
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    'Follow these instructions.',
+    '',
+    'Step one. Step two.',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  assert.deepEqual(systemContextBody(envelope), ['Follow these instructions.', '', 'Step one. Step two.'])
+  // A malformed skill envelope yields an empty body, never the raw tags.
+  assert.deepEqual(systemContextBody('<skill_content name="">broken'), [])
+  // The skill catalog: wrapper and available_skills markers stripped, prose kept.
+  const catalog = [
+    '<system-reminder>',
+    'A skill is a reusable set of task-specific instructions.',
+    '',
+    '<available_skills>',
+    '- `glab`: GitLab helper',
+    '- `find-skills`: Discover skills',
+    '</available_skills>',
+    '',
+    'If the user names a skill, call the `skill` tool.',
+    '</system-reminder>',
+  ].join('\n')
+  assert.deepEqual(systemContextBody(catalog), [
+    'A skill is a reusable set of task-specific instructions.',
+    '',
+    '- `glab`: GitLab helper',
+    '- `find-skills`: Discover skills',
+    '',
+    'If the user names a skill, call the `skill` tool.',
+  ])
+  // Workspace instructions: only the wrapper lines go.
+  const instructions = [
+    '<system-reminder>',
+    'The following workspace instructions may be relevant to your work.',
+    '',
+    '# AGENTS.md',
+    'Do the thing carefully.',
+    '</system-reminder>',
+  ].join('\n')
+  assert.deepEqual(systemContextBody(instructions), [
+    'The following workspace instructions may be relevant to your work.',
+    '',
+    '# AGENTS.md',
+    'Do the thing carefully.',
+  ])
+  // A lone marker inside real content survives (the pair decides).
+  const lone = ['<system-reminder>', 'uses <available_skills> inside', '</system-reminder>'].join('\n')
+  assert.deepEqual(systemContextBody(lone), ['uses <available_skills> inside'])
+  // Plain text: undefined — the caller keeps its raw-body behavior.
+  assert.equal(systemContextBody('plain context text'), undefined)
+  assert.equal(systemContextBody(''), undefined)
+})
+
+test('parseSkillEnvelope keeps a body with nested envelope-shaped XML verbatim', () => {
+  // A skill documenting its own envelope embeds a COMPLETE nested
+  // `<skill_content>` block inside the outer instructions. The outer-
+  // envelope-aware boundaries must return the whole outer body, never the
+  // first inner closer.
+  const envelope = [
+    '<skill_content name="outer">',
+    '<skill_resources>',
+    'Base directory for this skill: /home/x/.dsh/skills/outer',
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    'The skill documents its own envelope:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'End of the outer body.',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsed = parseSkillEnvelope(envelope)
+  assert.ok(parsed !== undefined, 'the nested envelope must parse')
+  assert.equal(parsed.name, 'outer')
+  assert.equal(parsed.instructions, [
+    'The skill documents its own envelope:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'End of the outer body.',
+  ].join('\n'))
+  // The system row body derives through the same parser.
+  const body = systemContextBody(envelope)
+  assert.ok(body !== undefined)
+  assert.ok(body.includes('End of the outer body.'), `outer body truncated:\n${body?.join('\n')}`)
+  assert.ok(body!.includes('<skill_content name="inner">'), `nested block dropped:\n${body?.join('\n')}`)
+  // An unclosed nested opener in the body must not eat the outer close either.
+  const unclosed = [
+    '<skill_content name="u">',
+    '<skill_instructions>',
+    'body with <skill_instructions> but no inner close',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsedUnclosed = parseSkillEnvelope(unclosed)
+  assert.ok(parsedUnclosed !== undefined)
+  assert.equal(parsedUnclosed.instructions, 'body with <skill_instructions> but no inner close')
+})
+
+test('parseSkillEnvelope rejects a malformed first envelope instead of borrowing a later one', () => {
+  // A first envelope with no instructions of its own, followed by a
+  // COMPLETE second envelope: the parser must reject the malformed first
+  // envelope, never cross-pair its name with the later envelope's body.
+  const text = [
+    '<skill_content name="bad">',
+    'no instructions of its own',
+    '<skill_content name="good">',
+    '<skill_resources>',
+    'Base directory for this skill: /home/x/.dsh/skills/good',
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    'the good body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  assert.equal(parseSkillEnvelope(text), undefined)
+  // The context row derives an EMPTY body for the malformed envelope (it
+  // starts with `<skill_content` but does not parse): header only, never
+  // the raw tags.
+  assert.deepEqual(systemContextBody(text), [])
+  // An UNCLOSED `<skill_content name="…">` mention inside the body is
+  // structurally indistinguishable from the malformed concatenation above,
+  // so it degrades the same way (header only, never raw tags) — documented
+  // in parseSkillEnvelope. A CLOSED mention stays balanced and parses.
+  const unclosedMention = [
+    '<skill_content name="outer">',
+    '<skill_instructions>',
+    'mentions <skill_content name="inner"> inside the body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  assert.equal(parseSkillEnvelope(unclosedMention), undefined)
+  const closedMention = [
+    '<skill_content name="outer">',
+    '<skill_instructions>',
+    'a complete example:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'end of the outer body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsed = parseSkillEnvelope(closedMention)
+  assert.ok(parsed !== undefined, 'a balanced nested example inside the body must still parse')
+  assert.equal(parsed.instructions, [
+    'a complete example:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'end of the outer body',
+  ].join('\n'))
+})
+
+test('parseSkillEnvelope rejects a malformed first envelope with unclosed instructions', () => {
+  // The first envelope's `<skill_instructions>` opener is never closed; the
+  // selected instructions boundaries would cross into the later envelope.
+  // The body balance guard rejects it instead of pairing across envelopes.
+  const text = [
+    '<skill_content name="bad">',
+    '<skill_instructions>',
+    'unclosed instructions body',
+    '<skill_content name="good">',
+    '<skill_instructions>',
+    'the good body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  assert.equal(parseSkillEnvelope(text), undefined)
+  assert.deepEqual(systemContextBody(text), [])
+  // The complete-nested-example body stays balanced and keeps parsing:
+  // both the inner opener and its close live inside the outer body.
+  const nested = [
+    '<skill_content name="outer">',
+    '<skill_instructions>',
+    'a complete example:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'end of the outer body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsed = parseSkillEnvelope(nested)
+  assert.ok(parsed !== undefined)
+  assert.equal(parsed.instructions, [
+    'a complete example:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'end of the outer body',
+  ].join('\n'))
+  // A stray UNMATCHED closing tag in the body is documentation, not a
+  // second envelope: it cannot cross-pair, so the body stays verbatim.
+  const strayCloser = [
+    '<skill_content name="outer">',
+    '<skill_instructions>',
+    'the envelope ends with </skill_content>',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsedStray = parseSkillEnvelope(strayCloser)
+  assert.ok(parsedStray !== undefined, 'a stray closing tag must not reject the envelope')
+  assert.equal(parsedStray.instructions, 'the envelope ends with </skill_content>')
+})
+
+test('injected skill rows fold with the instruction count and expand to the parsed body, never the envelope', async () => {
+  const { vt, app } = startApp()
+  const skillBody = 'Follow these instructions.\n\nStep one. Step two.'
+  const envelope = [
+    '<skill_content name="review-fix-loop">',
+    '<skill_resources>',
+    'Base directory for this skill: /home/x/.dsh/skills/review-fix-loop',
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    skillBody,
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  // Folded (old turn): the row names the skill and the instruction count,
+  // never a single envelope tag.
+  app.setTranscript([{ kind: 'system', turn: 99, text: envelope, label: 'review-fix-loop', emoji: '📚' }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Context injection review-fix-loop — 2 lines of instructions'), `skill count missing:\n${view}`)
+  assert.ok(!view.includes('<skill_content'), `raw skill envelope leaked into the folded row:\n${view}`)
+  assert.ok(!view.includes('Base directory'), `resource chrome leaked into the folded row:\n${view}`)
+  // Expanded (Ctrl+O, recent turn): the instructions body renders, the
+  // envelope stays out — the same no-XML rule as the skill tool card.
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{ kind: 'system', turn: 0, text: envelope, label: 'review-fix-loop', emoji: '📚' }])
+  view = await viewport(vt)
+  assert.ok(view.includes('Context injection review-fix-loop'), `labeled header missing:\n${view}`)
+  assert.ok(view.includes('Follow these instructions.'), `instructions body missing:\n${view}`)
+  assert.ok(view.includes('Step one. Step two.'), `instructions body missing:\n${view}`)
+  assert.ok(!view.includes('<skill_content'), `raw skill envelope leaked into the expanded row:\n${view}`)
+  assert.ok(!view.includes('<skill_instructions'), `raw skill envelope leaked into the expanded row:\n${view}`)
+  assert.ok(!view.includes('<skill_resources'), `raw skill envelope leaked into the expanded row:\n${view}`)
+  assert.ok(!view.includes('Base directory'), `resource chrome leaked into the expanded row:\n${view}`)
+  // A malformed skill envelope in a system row renders the header only.
+  app.setTranscript([{ kind: 'system', turn: 0, text: '<skill_content name="">broken', label: 'x', emoji: '📚' }])
+  view = await viewport(vt)
+  assert.ok(view.includes('Context injection x'), `malformed header missing:\n${view}`)
+  assert.ok(!view.includes('<skill'), `malformed skill envelope leaked:\n${view}`)
+})
+
+test('injected catalog and instruction rows strip their reminder framing when expanded', async () => {
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  const catalog = [
+    '<system-reminder>',
+    'A skill is a reusable set of task-specific instructions.',
+    '',
+    '<available_skills>',
+    '- `glab`: GitLab helper',
+    '- `find-skills`: Discover skills',
+    '</available_skills>',
+    '',
+    'If the user names a skill, call the `skill` tool.',
+    '</system-reminder>',
+  ].join('\n')
+  app.setTranscript([{ kind: 'system', turn: 0, text: catalog, label: 'skill-catalog', emoji: '📚' }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Context injection skill-catalog'), `catalog header missing:\n${view}`)
+  assert.ok(view.includes('- `glab`: GitLab helper'), `catalog entry missing:\n${view}`)
+  assert.ok(view.includes('If the user names a skill'), `catalog prose missing:\n${view}`)
+  assert.ok(!view.includes('<system-reminder'), `catalog wrapper leaked:\n${view}`)
+  assert.ok(!view.includes('<available_skills'), `catalog markers leaked:\n${view}`)
+
+  const instructions = [
+    '<system-reminder>',
+    'The following workspace instructions may be relevant to your work.',
+    '',
+    '# AGENTS.md',
+    'Do the thing carefully.',
+    '</system-reminder>',
+  ].join('\n')
+  app.setTranscript([{ kind: 'system', turn: 0, text: instructions, label: 'AGENTS.md', emoji: '📄' }])
+  view = await viewport(vt)
+  assert.ok(view.includes('Context injection AGENTS.md'), `instruction header missing:\n${view}`)
+  assert.ok(view.includes('Do the thing carefully.'), `instruction body missing:\n${view}`)
+  assert.ok(!view.includes('<system-reminder'), `instruction wrapper leaked:\n${view}`)
 })
 
 test('malformed read/write results render nothing expanded, never the raw envelope', async () => {

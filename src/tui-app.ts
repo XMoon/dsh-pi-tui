@@ -81,6 +81,7 @@ import {
   GOAL_TOOL_NAMES,
   foldedResultSummaryFor,
   FOLDED_JSON_RESULT_TOOLS,
+  systemContextBody,
   toolCardHeader,
   toolEmoji,
   webCardLines,
@@ -4206,10 +4207,30 @@ export class TuiApp {
         if (expanded) {
           row.addChild(new Text(color.textMuted(`${emoji}  Context injection ${message.label}`), 0, 0))
           // Injected content stays dimmed like tool-card bodies: context is
-          // never mistaken for the assistant's actual output.
-          row.addChild(new Text(color.textDim(message.text), 0, 0))
+          // never mistaken for the assistant's actual output. XML-framed
+          // envelopes (the skill loader's `<skill_content>` body, the skill
+          // catalog and workspace instructions' `<system-reminder>` frame)
+          // render their parsed content line by line — never the raw tags
+          // (the same no-XML rule as the read/write/skill tool cards); a
+          // malformed skill envelope renders no body at all. Plain context
+          // text keeps the raw-body behavior.
+          const body = systemContextBody(message.text)
+          if (body === undefined) {
+            row.addChild(new Text(color.textDim(message.text), 0, 0))
+          } else {
+            for (const line of body) {
+              row.addChild(new Text(color.textDim(line), 0, 0))
+            }
+          }
         } else {
-          const summary = message.summary === undefined ? '' : ` — ${message.summary}`
+          // The folded row shows the producer's one-line account, falling
+          // back to the skill envelope's instruction count (the tool-card
+          // `— N lines of instructions` suffix) when the row is a skill
+          // injection without a summary, so the fold still says something
+          // about what the model received.
+          const summary = message.summary === undefined
+            ? skillFoldedPreview(message.text)
+            : ` — ${message.summary}`
           // Folded rows truncate to one line: a long label/summary must not
           // wrap the context row (same rule as folded thinking).
           row.addChild(new Text(truncateToWidth(
@@ -4220,9 +4241,10 @@ export class TuiApp {
         }
         return row
       }
+      const unwrapped = systemContextBody(message.text)?.join('\n') ?? message.text
       const text = expanded
-        ? `${color.textMuted('§')} ${color.textDim(message.text)}`
-        : color.textMuted(`§ ${truncateToWidth(preview(message.text, 2), Math.max(1, this.terminal.columns - 22), '…')} (ctrl+o to expand)`)
+        ? `${color.textMuted('§')} ${color.textDim(unwrapped)}`
+        : color.textMuted(`§ ${truncateToWidth(preview(unwrapped, 2), Math.max(1, this.terminal.columns - 22), '…')} (ctrl+o to expand)`)
       return new Text(text, 0, 0)
     }
     if (message.kind === 'summary') {

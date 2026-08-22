@@ -20,6 +20,15 @@
 
 ### 修复
 
+- **注入上下文行展开时不再泄漏原始 XML 信封。** 加载 skill(TUI 回退或
+  host 的 dsh-tool-skill 监听器)会把模型面 `<skill_content>` 正文作为
+  上下文行注入,skill 目录与工作区指令也各自携带 `<system-reminder>`
+  框架;此前展开这类行(Ctrl+O)会把原始信封直接倾倒进 transcript。
+  现在展开的上下文行渲染解析后的内容——skill 指令正文、剥离包装与
+  `<available_skills>` 标记行后的目录/工作区文本——模型面字节保持
+  不变,畸形 skill 信封不渲染任何正文。折叠的 skill 行新增
+  `— N lines of instructions` 后缀(与工具卡片一致),折叠状态下也能
+  看出模型收到了什么。
 - **write 卡片折叠时只显示动词,不再泄漏原始 XML 信封。** write 工具的
   result 是 XML 确认信封(`<path>…</path> <type>…</type> <content>Updated
   file</content>`);折叠行现在像 read 卡片显示行数摘要那样显示

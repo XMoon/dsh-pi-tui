@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Injected context rows never leak their XML envelopes when expanded.**
+  Loading a skill (the TUI fallback or the host's dsh-tool-skill listener)
+  injects the model-facing `<skill_content>` body as a context row, and the
+  skill catalog and workspace instructions carry `<system-reminder>` frames
+  of their own; expanding such a row (Ctrl+O) used to dump the raw envelope
+  into the transcript. Expanded context rows now render the parsed content —
+  the skill instructions body, and catalog/workspace text with the wrapper
+  and `<available_skills>` marker lines stripped — while the model-facing
+  bytes stay untouched, and a malformed skill envelope renders no body at
+  all. Folded skill rows gain the `— N lines of instructions` suffix (the
+  same one tool cards show), so the fold still says what the model
+  received.
 - **Write cards fold their verb, never the raw XML envelope.** The write
   tool's result is an XML confirmation envelope (`<path>…</path> <type>
   …</type> <content>Updated file</content>`); the folded row now shows
