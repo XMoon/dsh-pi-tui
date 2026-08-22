@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { busyAfterTurnBoundary, compactingFromLog, foldCompactionEvent, type CompactionFold } from '../src/index.ts'
+import { busyAfterTurnBoundary, compactingFromLog, foldCompactionEvent, settleCompactionSurface, type CompactionFold } from '../src/index.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -269,4 +269,41 @@ test('a turn end while compacting keeps the working row and label live', async (
   const after = vt.getViewport().join('\n')
   assert.ok(!after.includes('Compacting'), `the row must clear once the compaction settles:\n${after}`)
   app.stop()
+})
+
+test('a matched compaction settle clears the phase and refreshes the status once', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setWorking(true)
+  app.setCompacting(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Compacting context…'), `compaction label missing:\n${view}`)
+  // The runner's matched compaction/end path (work package A): clear the
+  // compacting flag, hand the row back to the turn state, and re-measure
+  // the session surface IMMEDIATELY — the next step/start or turn/end
+  // must not be required for the footer to reflect the compacted log.
+  let refreshes = 0
+  settleCompactionSurface(app, () => { refreshes += 1 }, true)
+  await vt.waitForRender()
+  assert.equal(refreshes, 1, 'a matched settle must refresh the status exactly once')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Working...'), `the turn animation must survive the settle:\n${view}`)
+  assert.ok(!view.includes('Compacting'), `the compaction surface must clear:\n${view}`)
+  app.stop()
+})
+
+test('a stale compaction/end never reaches the settle refresh', () => {
+  // The runner invokes settleCompactionSurface ONLY on compacted.clear;
+  // a stale end folds to clear=false, so the status refresh cannot fire
+  // for a foreign compaction's settle.
+  const state = { id: 'c2' as string | undefined }
+  const stale = foldCompactionEvent(state, { type: 'compaction/end', data: { compactionId: 'c1' } })
+  assert.equal(stale.clear, false, 'a stale end must not reach the settle path')
+  // The current compaction's own end (success OR error) is the only
+  // clear=true fold — the refresh fires exactly for that settle.
+  const fresh = foldCompactionEvent(state, { type: 'compaction/end', data: { compactionId: 'c2' } })
+  assert.equal(fresh.clear, true)
+  const errEnd = foldCompactionEvent({ id: 'c3' }, { type: 'compaction/end', data: { compactionId: 'c3', error: 'MAX_TOKENS' } })
+  assert.equal(errEnd.clear, true, 'an error settle is still a matched settle: it must refresh too')
 })

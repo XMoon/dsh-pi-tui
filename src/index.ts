@@ -907,6 +907,24 @@ export function foldCompactionEvent(
   return { id: state.id, active: false, clear: false, notify: undefined }
 }
 
+/** The UI side effects of a MATCHED compaction settle: clear the
+ * compacting flag, hand the working row back to the turn state, and
+ * re-measure the session surface so the footer context reflects the
+ * compacted log IMMEDIATELY — the next step/start or turn/end would
+ * otherwise delay the refresh. Exported as a seam so the settle contract
+ * is testable without a full runner fixture (the firehose closure is
+ * not). */
+export function settleCompactionSurface(
+  app: TuiApp,
+  refreshStatus: () => void,
+  busyNow: boolean,
+): void {
+  app.setCompacting(false)
+  app.setBusy(busyNow)
+  app.setWorking(busyNow)
+  refreshStatus()
+}
+
 /** The busy flag after a turn-boundary event: a turn end must NOT clear
  * the busy state while a compaction is still in flight — an interrupted
  * turn can close (turn/end) before its compaction settles, and the
@@ -4172,12 +4190,13 @@ export function apply(ctx: Context, config: Config): void {
         app.setBusy(true)
       }
       if (compacted.clear) {
-        app.setCompacting(false)
-        // The working row hands back to the turn state: a turn-enclosed
-        // compaction keeps the turn animation, a standalone one clears.
-        const busyNow = workingFromLog(liveAgent.session.events)
-        app.setBusy(busyNow)
-        app.setWorking(busyNow)
+        // The compacted replacement has committed to the live session
+        // surface: re-measure context immediately so the footer reflects
+        // the new surface without waiting for the next step/start or
+        // turn/end. The working row hands back to the turn state: a
+        // turn-enclosed compaction keeps the turn animation, a standalone
+        // one clears.
+        settleCompactionSurface(app, refreshStatus, workingFromLog(liveAgent.session.events))
       }
       if (compacted.notify !== undefined) app.notify(compacted.notify.text, compacted.notify.kind)
       // Persist each completed turn so a crash loses at most the live turn.
