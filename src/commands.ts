@@ -2353,7 +2353,16 @@ export function registerTuiCommands(
         seed,
       })
       const error = await runner.swapTo(next)
-      if (error !== undefined) app.notify(error, 'error')
+      if (error !== undefined) {
+        // A failed swap keeps the CURRENT session: report the failure and
+        // never claim success (review finding 6 — same lifecycle rule as
+        // /new).
+        app.notify(error, 'error')
+        return { kind: 'error', text: error }
+      }
+      // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
+      // them now (durable attachments are untouched, plan §14).
+      runner.imageStore.clear()
       return { kind: 'success', text: `forked as ${next.agent.session.id}` }
     },
   })

@@ -207,7 +207,15 @@ export async function readClipboardImage(run: RunCommand, env: ClipboardEnvironm
   if (env.platform === 'darwin') return macosProbe(run)
   if (env.platform === 'win32') return powershellProbe(run, false)
   if (isWsl(env)) return powershellProbe(run, true)
-  if (env.env.WAYLAND_DISPLAY !== undefined) return waylandProbe(run)
-  if (env.env.DISPLAY !== undefined) return x11Probe(run)
+  if (env.env.WAYLAND_DISPLAY !== undefined) {
+    // A session with WAYLAND_DISPLAY but no wl-paste installed must not
+    // fall into a raw exec error: probe existence first (review finding 7).
+    if (!env.exists('wl-paste')) return { kind: 'unsupported' }
+    return waylandProbe(run)
+  }
+  if (env.env.DISPLAY !== undefined) {
+    if (!env.exists('xclip')) return { kind: 'unsupported' }
+    return x11Probe(run)
+  }
   return { kind: 'unsupported' }
 }

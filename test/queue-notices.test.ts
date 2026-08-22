@@ -191,3 +191,27 @@ test('isPlainExitPrompt matches only the exact trimmed lowercase word', () => {
   assert.ok(!isPlainExitPrompt('/exit'), 'the command form is separate')
   assert.ok(!isPlainExitPrompt(''), 'empty must not match')
 })
+
+test('foldQueueRows shows image blocks in the queue row (review finding 5)', () => {
+  const imageBlock = {
+    type: 'image',
+    attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 10, width: 800, height: 600, name: 'shot.png' },
+  }
+  const mixed = {
+    id: 'm1',
+    source: { kind: 'user' },
+    content: [
+      { type: 'text', text: 'analyze this' },
+      imageBlock,
+    ],
+  }
+  const imageOnly = {
+    id: 'm2',
+    source: { kind: 'user' },
+    content: [imageBlock],
+  }
+  const result = foldQueueRows([mixed as never, imageOnly as never], 'steer', new Set())
+  assert.equal(result.rows.length, 2)
+  assert.equal(result.rows[0]!.text, 'analyze this 🖼 shot.png', 'mixed row advertises its image')
+  assert.equal(result.rows[1]!.text, '🖼 shot.png', 'image-only row is never empty')
+})

@@ -25,7 +25,9 @@ function envOf(overrides: Partial<ClipboardEnvironment> = {}): ClipboardEnvironm
   return {
     platform: 'linux',
     env: {},
-    exists: () => false,
+    // The default assumes the platform helpers are installed; the
+    // missing-helper tests pass `exists: () => false` explicitly.
+    exists: () => true,
     ...overrides,
   }
 }
@@ -142,4 +144,19 @@ test('clipboardBackendOf names the platform backend', () => {
   assert.equal(clipboardBackendOf(envOf({ env: { WAYLAND_DISPLAY: 'wayland-0' } })), 'wayland-wl-paste')
   assert.equal(clipboardBackendOf(envOf({ env: { DISPLAY: ':0' } })), 'x11-xclip')
   assert.equal(clipboardBackendOf(envOf({})), 'unsupported')
+})
+
+test('missing wl-paste/xclip resolves to unsupported instead of a raw exec error (review finding 7)', async () => {
+  let ran = false
+  const run = (async () => { ran = true; return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 } }) as unknown as RunCommand
+  const wayland = await readClipboardImage(run, envOf({ env: { WAYLAND_DISPLAY: 'wayland-0' }, exists: () => false }))
+  assert.deepEqual(wayland, { kind: 'unsupported' })
+  const x11 = await readClipboardImage(run, envOf({ env: { DISPLAY: ':0' }, exists: () => false }))
+  assert.deepEqual(x11, { kind: 'unsupported' })
+  assert.equal(ran, false, 'no command ran without the helper present')
+})
+
+test('Wayland probes when wl-paste exists', async () => {
+  const result = await readClipboardImage(waylandMock(pngBytes()), envOf({ env: { WAYLAND_DISPLAY: 'wayland-0' }, exists: () => true }))
+  assert.equal(result.kind, 'image')
 })

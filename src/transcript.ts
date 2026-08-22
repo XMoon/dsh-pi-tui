@@ -880,6 +880,32 @@ export function childOwnEvents(events: readonly SessionEvent[]): readonly Sessio
 }
 
 /** Render one session's log as a readable markdown transcript for `/export md`. */
+/** The markdown projection of content blocks (review finding 4): text
+ * blocks verbatim, image blocks as a compact `🖼` line with the durable
+ * attachment id — the binary is NEVER embedded, and an image-only message
+ * still renders a User/Assistant section. */
+function markdownContent(blocks: readonly ContentBlock[]): string {
+  const parts: string[] = []
+  let buffer = ''
+  const flush = (): void => {
+    if (buffer !== '') {
+      parts.push(buffer)
+      buffer = ''
+    }
+  }
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      buffer += block.text
+    } else if (block.type === 'image') {
+      flush()
+      const attachment = block.attachment
+      parts.push(`> 🖼 ${attachment.name ?? 'image'} · ${attachment.width}×${attachment.height} · attachment \`${attachment.attachmentId}\``)
+    }
+  }
+  flush()
+  return parts.join('\n\n')
+}
+
 export function renderTranscriptMarkdown(session: {
   header: SessionHeader
   events: readonly SessionEvent[]
@@ -893,12 +919,12 @@ export function renderTranscriptMarkdown(session: {
   for (const event of session.events) {
     switch (event.type) {
       case 'user/message': {
-        const text = textOf(event.data.content)
+        const text = markdownContent(event.data.content)
         if (text !== '') lines.push(`## User\n\n${text}\n`)
         break
       }
       case 'assistant/message': {
-        const text = textOf(event.data.message.content)
+        const text = markdownContent(event.data.message.content)
         if (text !== '') lines.push(`## Assistant\n\n${text}\n`)
         break
       }
@@ -909,7 +935,7 @@ export function renderTranscriptMarkdown(session: {
       }
       case 'tool/result': {
         const block = event.data.message.content[0]
-        const text = textOf(block?.content ?? [])
+        const text = markdownContent(block?.content ?? [])
         if (text !== '') lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`)
         break
       }

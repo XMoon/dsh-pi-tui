@@ -188,7 +188,7 @@ const REPAINT_FLUSH_MS = 50
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'exit', 'settings', 'help', 'login', 'logout', 'model', 'reload',
+  'exit', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'preset',
 ])
 
@@ -282,6 +282,32 @@ export function shouldSteerOnEnter(
     if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return false
   }
   return running && busyEnter === 'steer'
+}
+
+/**
+ * Normalize an explicit `/skill <name> <args>` invocation to the skill's
+ * own slash line `/<name> <args>` (review finding 2). The harness's
+ * explicit skill gesture scans for `/<skill-name>` — it would extract
+ * `skill` from a raw `/skill grilling ...` line and never inject the
+ * grilling body. The command handler already performs this conversion
+ * (`loadSkill` builds `'/' + skill.name + ' ' + args`); the busy-Enter
+ * steer path must use the SAME normalized line so the body injects and
+ * any image placeholders ride along.
+ * @param text - the submitted line.
+ * @returns the normalized `/<name> <args>` line, or undefined when the
+ *   line is not an explicit skill invocation (plain prompt, other
+ *   commands, or the bare `/skill` picker).
+ */
+export function normalizeSkillInvocation(text: string): string | undefined {
+  const parsed = parseCommand(text)
+  if (parsed?.name !== 'skill') return undefined
+  const raw = parsed.rawInput.trim()
+  if (raw === '') return undefined
+  const match = /^([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+([\s\S]*))?$/.exec(raw)
+  if (match === null) return undefined
+  const name = match[1]!
+  const args = match[2]
+  return args === undefined || args.trim() === '' ? `/${name}` : `/${name} ${args.trimStart()}`
 }
 
 /**
@@ -556,6 +582,21 @@ export interface QueueFoldResult {
  *   skipped, and a newly-reported id is ADDED here so a re-render can never
  *   double-notify.
  */
+/**
+ * The queue-pane display text of one message's content (review finding 5):
+ * text blocks verbatim, image blocks as a compact `🖼 name` summary — an
+ * image-only queued message shows `🖼 shot.png` instead of an empty row,
+ * and a mixed message advertises its image. The queue row stays one line.
+ */
+function queueTextOf(content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[]): string {
+  const parts: string[] = []
+  for (const block of content) {
+    if (block.type === 'text') parts.push(block.text)
+    else if (block.type === 'image') parts.push(`🖼 ${block.attachment.name ?? 'image'}`)
+  }
+  return parts.join(' ')
+}
+
 export function foldQueueRows(
   messages: readonly QueueInboxMessage[],
   mode: 'followup' | 'steer',
@@ -574,7 +615,7 @@ export function foldQueueRows(
     }
     rows.push({
       id: message.id,
-      text: textOf(message.content),
+      text: queueTextOf(message.content),
       mode,
       // Only user-origin (or sourceless plain) rows are steerable user
       // input. Everything else — plugin notices, subagent-report relays,
@@ -2529,7 +2570,13 @@ export function apply(ctx: Context, config: Config): void {
       // dropping it. `!` shell lines persist verbatim so ↑ recall re-runs
       // the shell branch.
       const trimmed = text.trim()
-      if (trimmed !== '' && trimmed !== lastHistoryContent) {
+      // A MULTIMODAL submission (draft text referencing staged images) is
+      // NOT persisted to the plain-text history: the placeholder dies with
+      // its draft on consumeDraftImages, so an ↑ recall would re-send the
+      // placeholder as ORDINARY TEXT — the images would silently vanish
+      // from the model input (review finding 3). Structured attachment
+      // history (text + refs, recalled on recall) is a post-v1 extension.
+      if (trimmed !== '' && trimmed !== lastHistoryContent && !draftHasImages(text, draftImages)) {
         const file = historyFilePath(dshHome(process.env), sessionCwd())
         runDetached('input history write', () => {
           appendHistoryLine(file, trimmed, lastHistoryContent)
@@ -2605,7 +2652,12 @@ export function apply(ctx: Context, config: Config): void {
         // M5: the CommandBridge's effective-local check (dynamic plugin
         // local commands are local while registered).
         name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)) {
-        steerNow(text, true)
+        // An explicit `/skill <name>` invocation steers its NORMALIZED
+        // `/<name> <args>` line — the harness gesture recognizes the
+        // skill's own slash name and injects its body; the raw `/skill
+        // <name>` form would never match (review finding 2). Image
+        // placeholders ride the normalized line untouched.
+        steerNow(normalizeSkillInvocation(text) ?? text, true)
         return
       }
       dispatchViaSession(text)

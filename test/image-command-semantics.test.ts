@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DraftImageStore } from '../src/image/draft-store.ts'
-import { commandRejectsImages, LOCAL_COMMANDS } from '../src/index.ts'
+import { commandRejectsImages, LOCAL_COMMANDS, normalizeSkillInvocation, SESSIONLESS_COMMANDS } from '../src/index.ts'
 
 function storeWithImage(): DraftImageStore {
   const store = new DraftImageStore()
@@ -65,4 +65,16 @@ test('a /skill <name> invocation with an image is agent input (bare /skill stays
   const bare = commandRejectsImages({ name: 'skill', rawInput: '' } as never,
     '/skill', store, name => name === 'skill')
   assert.equal(bare, false, 'no image attached → nothing to reject')
+})
+
+test('SESSIONLESS_COMMANDS includes image: /image never creates a session (review finding 1)', () => {
+  assert.ok(SESSIONLESS_COMMANDS.has('image'), '/image is sessionless')
+})
+
+test('normalizeSkillInvocation rewrites /skill <name> <args> to /<name> <args> (review finding 2)', () => {
+  assert.equal(normalizeSkillInvocation('/skill grilling foo bar'), '/grilling foo bar')
+  assert.equal(normalizeSkillInvocation('/skill matrix-cli'), '/matrix-cli')
+  assert.equal(normalizeSkillInvocation('/skill'), undefined, 'bare picker stays unnormalized')
+  assert.equal(normalizeSkillInvocation('/help me'), undefined, 'non-skill commands untouched')
+  assert.equal(normalizeSkillInvocation('plain prompt'), undefined)
 })
