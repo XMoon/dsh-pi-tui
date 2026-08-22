@@ -204,3 +204,27 @@ test('unsubscribing removes only that attachment listener', () => {
   offB()
   assert.equal(loader.listenerCount(), 0, 'the empty per-id set is pruned')
 })
+
+test('invalidating one attachment never discards an unrelated in-flight settle (review finding 3)', async () => {
+  let releaseA!: () => void
+  const gateA = new Promise<void>(resolve => { releaseA = resolve })
+  const reads: string[] = []
+  const loader = new ImageLoader(async (ref) => {
+    reads.push(ref.attachmentId)
+    if (ref.attachmentId === 'a') await gateA
+    return { ref: {}, data: new Uint8Array([1]) }
+  })
+  loader.load(refOf('a'))
+  loader.load(refOf('b'))
+  await new Promise(resolve => setTimeout(resolve, 5))
+  loader.invalidate('a') // bumps ONLY a's generation
+  releaseA()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  // b's settle survived the per-id invalidation; a's was discarded.
+  assert.equal(loader.get(refOf('b')).state, 'ready', 'b settles despite invalidate(a)')
+  assert.equal(loader.get(refOf('a')).state, 'idle', 'a is invalidated')
+  // A fresh read of a works.
+  loader.load(refOf('a'))
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(loader.get(refOf('a')).state, 'ready')
+})

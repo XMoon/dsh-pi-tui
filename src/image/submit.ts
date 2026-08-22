@@ -61,7 +61,10 @@ export function consumeDraftImages(text: string, store: DraftImageStore): void {
  * the staged bytes in the store until capacity runs out — 16 stale
  * attachments then block the next /image with "Too many staged images".
  * Called BEFORE a new attach (the editor text at that moment is the truth
- * of what is still wanted).
+ * of what is still wanted). DRAFTS PINNED BY AN IN-FLIGHT SUBMISSION are
+ * kept — the editor is cleared before dispatch, so an attach must never
+ * delete the images a pending prepareUserMessage is about to admit
+ * (review finding 1).
  */
 export function pruneUnreferencedDrafts(text: string, store: DraftImageStore): void {
   const referenced = new Set<number>()
@@ -69,7 +72,7 @@ export function pruneUnreferencedDrafts(text: string, store: DraftImageStore): v
     if (segment.type === 'image') referenced.add(segment.image.id)
   }
   for (const image of store.values()) {
-    if (!referenced.has(image.id)) store.remove(image.id)
+    if (!referenced.has(image.id) && !store.isPinned(image.id)) store.remove(image.id)
   }
 }
 

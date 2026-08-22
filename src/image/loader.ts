@@ -45,11 +45,20 @@ export class ImageLoader {
   private readonly listeners = new Map<string, Set<() => void>>()
   private readonly read: (ref: ImageAttachmentRefLike) => Promise<{ ref: unknown; data: Uint8Array }>
   /**
-   * Invalidation epoch (round-4 finding 4): every invalidate/clear bumps it;
-   * settlements belonging to an older epoch are dropped, so a read started
-   * before an invalidation can never repopulate the cache afterwards.
+   * Invalidation generations (review finding 3): `invalidate(id)` bumps
+   * ONLY that attachment's generation, so a settle of an unrelated in-flight
+   * read is never discarded (a global epoch made one invalidate drop every
+   * concurrent load, re-reading unrelated images on long transcripts).
+   * `clear()` still bumps the GLOBAL generation (every in-flight settle is
+   * stale after a session switch).
    */
-  private epoch = 0
+  private globalEpoch = 0
+  private readonly perIdEpoch = new Map<string, number>()
+
+  /** The current epoch one read must match at settle time. */
+  private epochOf(id: string): number {
+    return this.perIdEpoch.get(id) ?? this.globalEpoch
+  }
 
   constructor(
     read: (ref: ImageAttachmentRefLike) => Promise<{ ref: unknown; data: Uint8Array }>,
@@ -90,14 +99,15 @@ export class ImageLoader {
   load(ref: ImageAttachmentRefLike): void {
     const id = ref.attachmentId
     if (this.cache.has(id) || this.inflight.has(id)) return
-    const epoch = this.epoch
+    const epoch = this.epochOf(id)
     // `Promise.resolve().then(...)` defers the read call: a SYNCHRONOUS
     // throw from `read` becomes a rejection instead of escaping into a
     // render() call stack (round-2 finding 1).
     const pending = Promise.resolve().then(() => this.read(ref)).then((stored) => {
-      // A stale settlement (an invalidate/clear happened meanwhile) is
-      // dropped — it must not repopulate the cache (round-4 finding 4).
-      if (this.epoch !== epoch) return stored
+      // A stale settlement (the attachment was invalidated, or the whole
+      // cache cleared) is dropped — it must not repopulate the cache
+      // (round-4 finding 4; per-id generations, review finding 3).
+      if (this.epochOf(id) !== epoch) return stored
       const data = stored.data
       this.cache.set(id, {
         state: 'ready',
@@ -108,7 +118,7 @@ export class ImageLoader {
       this.errors.delete(id)
       return stored
     }).catch((error: unknown) => {
-      if (this.epoch !== epoch) return { data: new Uint8Array(0) }
+      if (this.epochOf(id) !== epoch) return { data: new Uint8Array(0) }
       this.recordError(id, error instanceof Error ? error : new ImageLoadError(String(error)))
       return { data: new Uint8Array(0) }
     }).finally(() => {
@@ -151,17 +161,20 @@ export class ImageLoader {
   }
 
   /** Drop one attachment's cached state (transcript trim). In-flight reads
-   * for it settle into the void (the epoch bumps, round-4 finding 4). */
+   * for THIS attachment settle into the void (its per-id generation bumps);
+   * unrelated in-flight reads keep their generations and settle normally
+   * (review finding 3). */
   invalidate(attachmentId: string): void {
-    this.epoch += 1
+    this.perIdEpoch.set(attachmentId, this.epochOf(attachmentId) + 1)
     this.cache.delete(attachmentId)
     this.errors.delete(attachmentId)
   }
 
-  /** Drop everything (session switch / dispose); every subscriber hears
-   * the global invalidation and repaints once. */
+  /** Drop everything (session switch / dispose); the GLOBAL generation
+   * bumps (every in-flight settle is stale), every subscriber hears the
+   * global invalidation and repaints once. */
   clear(): void {
-    this.epoch += 1
+    this.globalEpoch += 1
     this.cache.clear()
     this.errors.clear()
     this.notifyAll()

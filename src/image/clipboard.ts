@@ -217,8 +217,10 @@ async function powershellProbe(run: RunCommand, wsl: boolean): Promise<Clipboard
     try {
       bytes = new Uint8Array(readFileSync(file))
     } catch {
-      // No image on the clipboard: read the plain-text payload.
-      const text = await run('powershell.exe', ['-NoProfile', '-Command', '[System.Windows.Forms.Clipboard]::GetText()'], { timeoutMs: 3000 })
+      // No image on the clipboard: read the plain-text payload. The
+      // SECOND PowerShell invocation must load System.Windows.Forms itself
+      // (each -Command process starts fresh — review finding 2).
+      const text = await run('powershell.exe', ['-NoProfile', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetText()'], { timeoutMs: 3000 })
       return { kind: 'text', text: text.stdout.toString('utf8') }
     }
     return imageFromBytes(bytes)

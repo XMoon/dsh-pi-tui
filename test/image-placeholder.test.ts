@@ -227,3 +227,32 @@ test('pruneUnreferencedDrafts drops drafts whose placeholder left the editor (re
   assert.equal(store.size(), 0)
   void another
 })
+
+test('pinned drafts survive pruning; release unpins (review finding 1)', () => {
+  const store = new DraftImageStore()
+  const staged = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const other = store.add({ bytes: new Uint8Array([2]), mediaType: 'image/png', width: 1, height: 1 })
+  // A submission in flight pins the staged draft (the editor is already
+  // cleared): prune must keep it even though the editor text is empty.
+  const release = store.pinReferenced(staged.placeholder)
+  pruneUnreferencedDrafts('', store)
+  assert.equal(store.get(staged.id), staged, 'the in-flight draft survives the prune')
+  assert.equal(store.get(other.id), undefined, 'an unpinned unreferenced draft is pruned')
+  // After the submission settles, the pin releases and prune can collect.
+  release()
+  pruneUnreferencedDrafts('', store)
+  assert.equal(store.get(staged.id), undefined, 'released drafts are prunable again')
+})
+
+test('pins are refcounted across concurrent submissions', () => {
+  const store = new DraftImageStore()
+  const draft = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const first = store.pinReferenced(draft.placeholder)
+  const second = store.pinReferenced(draft.placeholder)
+  first()
+  assert.equal(store.isPinned(draft.id), true, 'the second pin still holds')
+  second()
+  assert.equal(store.isPinned(draft.id), false)
+  first() // idempotent release
+  assert.equal(store.isPinned(draft.id), false)
+})

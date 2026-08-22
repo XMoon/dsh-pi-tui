@@ -2231,6 +2231,12 @@ export function apply(ctx: Context, config: Config): void {
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
       runOwned('submit', () => ensureSession().then(async () => {
+        // Reserve the referenced drafts for the WHOLE submission (review
+        // finding 1): the editor was cleared before dispatch, so an
+        // attach-time prune (a concurrent /image) must not delete the very
+        // images this submission is about to admit. Released in finally.
+        const pin = draftImages.pinReferenced(text)
+        try {
         const agent = liveAgent
         if (agent === undefined) return
         // The guard checks THIS agent's session; capture the identity so
@@ -2368,6 +2374,9 @@ export function apply(ctx: Context, config: Config): void {
         // Consume ONLY the referenced drafts — a concurrent intake's newer
         // image survives (round-5 finding 1).
         consumeDraftImages(text, draftImages)
+        } finally {
+          pin()
+        }
       }), {
         diag,
         sessionId: () => liveAgent?.session.id,
@@ -2476,6 +2485,12 @@ export function apply(ctx: Context, config: Config): void {
       // An owned workflow: the send's outcome drives the draft restore and
       // the notices — runOwned (AGENTS.md), never a bare void.
       runOwned('steer', () => ensureSession().then(async () => {
+        // Reserve the referenced drafts for the whole send (review finding
+        // 1): the editor was cleared before dispatch, so a concurrent
+        // /image prune must not delete the images this steer is about to
+        // admit. Released in finally.
+        const pin = draftImages.pinReferenced(text)
+        try {
         if (liveAgent === undefined) return
         // The draft message is prepared BEFORE the guard: admission is
         // async I/O, and the guard's identity is the draft text (which
@@ -2521,6 +2536,9 @@ export function apply(ctx: Context, config: Config): void {
         // per-reference, so a concurrent intake's newer draft survives
         // (round-5 finding 1).
         if (outcome === 'ok') consumeDraftImages(text, draftImages)
+        } finally {
+          pin()
+        }
       }), {
         diag,
         sessionId: () => liveAgent?.session.id,

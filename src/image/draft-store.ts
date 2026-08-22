@@ -15,7 +15,7 @@
  */
 
 import { ImageAdmissionError, ImageTooLargeError } from './errors.ts'
-import { formatImagePlaceholder } from './placeholder.ts'
+import { expandImagePlaceholders, formatImagePlaceholder } from './placeholder.ts'
 import type { DraftImage, DraftImageId, DraftImageInput } from './types.ts'
 
 /** In-memory draft registry. */
@@ -25,6 +25,14 @@ export class DraftImageStore {
   private bytesHeld = 0
   private readonly maxImages: number
   private readonly maxBytes: number
+  /**
+   * In-flight submission reservations (review finding 1): ids referenced by
+   * a submission that STARTED but has not committed yet. The editor is
+   * cleared before dispatch, so an attach-time prune would otherwise delete
+   * the very drafts the in-flight prepareUserMessage still needs. A pinned
+   * draft survives pruning until its submission settles.
+   */
+  private readonly pins = new Map<DraftImageId, number>()
 
   /**
    * TUI-OWNED memory protection, NOT an attachment limit: the caps bound
@@ -123,5 +131,41 @@ export class DraftImageStore {
    * draft store is refused before any read). */
   remainingBytes(): number {
     return Math.max(0, this.maxBytes - this.bytesHeld)
+  }
+
+  /**
+   * Reserve every draft referenced by `text` for the duration of one
+   * in-flight submission (review finding 1): the editor is cleared before
+   * dispatch, so without a reservation an attach-time prune could delete
+   * the drafts the submission is about to admit. The returned release
+   * function MUST be called (idempotent; safe in finally).
+   * @param text - the submitted text (placeholders already expanded).
+   * @returns the release function.
+   */
+  pinReferenced(text: string): () => void {
+    const ids: DraftImageId[] = []
+    for (const segment of expandImagePlaceholders(text, this)) {
+      if (segment.type !== 'image') continue
+      const id = segment.image.id
+      if (!this.images.has(id)) continue
+      this.pins.set(id, (this.pins.get(id) ?? 0) + 1)
+      ids.push(id)
+    }
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      for (const id of ids) {
+        const count = this.pins.get(id)
+        if (count === undefined) continue
+        if (count <= 1) this.pins.delete(id)
+        else this.pins.set(id, count - 1)
+      }
+    }
+  }
+
+  /** Whether a draft is reserved by an in-flight submission. */
+  isPinned(id: DraftImageId): boolean {
+    return (this.pins.get(id) ?? 0) > 0
   }
 }

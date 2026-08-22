@@ -202,3 +202,17 @@ test('Wayland without wl-paste falls through to X11 xclip (review finding 4)', a
   assert.deepEqual(result, { kind: 'text', text: 'x11 text' })
   assert.ok(calls.length >= 1 && calls.every(command => command === 'xclip'), 'only xclip ran after wl-paste was missing')
 })
+
+test('the PowerShell text fallback loads System.Windows.Forms itself (review finding 2)', async () => {
+  const commands: string[] = []
+  const run = (async (command: string, args: readonly string[]) => {
+    commands.push(args.join(' '))
+    if (args.some(arg => arg.includes('GetImage'))) return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+    return { stdout: Buffer.from('clipboard text'), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  const result = await readClipboardImage(run, envOf({ platform: 'win32' }))
+  assert.deepEqual(result, { kind: 'text', text: 'clipboard text' })
+  const fallback = commands.find(command => command.includes('GetText'))
+  assert.ok(fallback !== undefined, 'the text fallback ran')
+  assert.ok(fallback!.includes('Add-Type -AssemblyName System.Windows.Forms'), 'the fallback loads the assembly itself')
+})

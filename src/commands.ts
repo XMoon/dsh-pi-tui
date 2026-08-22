@@ -1507,8 +1507,16 @@ export function registerTuiCommands(
     // The skill invocation is an AGENT-FACING prompt: build its message
     // through the shared prepared-input pipeline so an image-bearing
     // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
-    // like a plain prompt (review finding 4).
-    const userMessage = await runner.prepareDraftMessage(line)
+    // like a plain prompt (review finding 4). The referenced drafts are
+    // PINNED across the async prepare — a concurrent /image prune must not
+    // delete images this invocation is about to admit (review finding 1).
+    const releasePin = runner.imageStore.pinReferenced(line)
+    let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
+    try {
+      userMessage = await runner.prepareDraftMessage(line)
+    } finally {
+      releasePin()
+    }
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
     // body only when ITS tool registration is visible to this agent — the
     // same visibility test the listener itself uses. A composition without
