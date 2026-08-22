@@ -19,7 +19,7 @@
  * @module @xmoon76/dsh-pi-tui/image/intake
  */
 
-import { realpathSync, statSync, readFileSync } from 'node:fs'
+import { realpath, stat, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, resolve } from 'node:path'
 import { ImageDimensionError, ImageInputError, ImageTooLargeError, UnsupportedImageTypeError } from './errors.ts'
@@ -250,21 +250,22 @@ export function expandHome(raw: string): string {
  * @throws ImageInputError when the target is missing, unreadable, or not a
  *   regular file (directory/FIFO/socket/device are rejected, §7.1). Error
  *   messages name the BASENAME only — full private paths are never logged
- *   (§21).
+ *   (§21). ASYNC throughout (fs/promises) — the intake must never block the
+ *   TUI event loop on slow disks or NFS (review finding).
  */
-export function resolveImagePath(raw: string, cwd: string): string {
+export async function resolveImagePath(raw: string, cwd: string): Promise<string> {
   const expanded = expandHome(raw)
   const absolute = isAbsolute(expanded) ? expanded : resolve(cwd, expanded)
   const label = basename(absolute)
   let real: string
   try {
-    real = realpathSync(absolute)
+    real = await realpath(absolute)
   } catch (error) {
     throw new ImageInputError(`Image file not found: ${label}`)
   }
   let stats
   try {
-    stats = statSync(real)
+    stats = await stat(real)
   } catch (error) {
     throw new ImageInputError(`Image file cannot be read: ${label}`)
   }
@@ -275,20 +276,43 @@ export function resolveImagePath(raw: string, cwd: string): string {
 }
 
 /**
+ * The TUI's OWN pre-read safety cap (review finding): when the attachment
+ * service is absent (limits === undefined) a raw stat+read could pull an
+ * arbitrarily large file into memory before the draft store rejects it.
+ * The cap mirrors the draft store's default resident budget — a file above
+ * it is refused BEFORE any read, with an actionable message.
+ */
+export const INTAKE_SAFETY_MAX_BYTES = 64 * 1024 * 1024
+
+/**
  * Read one image file end to end: resolve → stat → size preflight → read →
  * sniff → parse → dimension preflight. Throws the actionable errors from
- * errors.ts; the caller stages the result into the draft store.
+ * errors.ts; the caller stages the result into the draft store. Fully
+ * async — never blocks the TUI event loop (review finding).
  * @param rawPath - the command argument (shell-word parsed already).
  * @param cwd - the working directory for relative paths.
- * @param limits - the deployment image policy (undefined = skip preflight).
+ * @param limits - the deployment image policy (undefined = the TUI safety
+ *   cap applies instead of the attachment limit).
+ * @param extraSafetyCap - an additional caller-side byte cap (e.g. the
+ *   draft store's remaining resident budget); the smallest of all caps
+ *   wins. Undefined = no extra cap.
  */
-export function readImageFile(rawPath: string, cwd: string, limits: ImageLimitsLike | undefined): ImageFileIntake {
-  const path = resolveImagePath(rawPath, cwd)
-  const stats = statSync(path)
-  if (limits !== undefined && stats.size > limits.maxImageBytes) {
-    throw new ImageTooLargeError(stats.size, limits.maxImageBytes)
+export async function readImageFile(
+  rawPath: string,
+  cwd: string,
+  limits: ImageLimitsLike | undefined,
+  extraSafetyCap?: number,
+): Promise<ImageFileIntake> {
+  const path = await resolveImagePath(rawPath, cwd)
+  const stats = await stat(path)
+  const sizeCap = Math.min(
+    limits?.maxImageBytes ?? INTAKE_SAFETY_MAX_BYTES,
+    extraSafetyCap ?? INTAKE_SAFETY_MAX_BYTES,
+  )
+  if (stats.size > sizeCap) {
+    throw new ImageTooLargeError(stats.size, sizeCap)
   }
-  const bytes = new Uint8Array(readFileSync(path))
+  const bytes = new Uint8Array(await readFile(path))
   const meta = parseImageMetadata(bytes)
   if (meta === undefined) {
     throw new UnsupportedImageTypeError()

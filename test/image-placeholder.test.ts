@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DraftImageStore } from '../src/image/draft-store.ts'
+import { pruneUnreferencedDrafts } from '../src/image/submit.ts'
 import { ImageTooLargeError } from '../src/image/errors.ts'
 import { expandImagePlaceholders, formatImagePlaceholder, type DraftSegment } from '../src/image/placeholder.ts'
 import type { DraftImage, DraftImageInput } from '../src/image/types.ts'
@@ -185,4 +186,44 @@ test('a recalled draft stages without local bytes and reuses its durable ref', (
   // Removing frees the (conservative) byte budget.
   store.remove(draft.id)
   assert.equal(store.size(), 0)
+})
+
+test('recalled drafts never count toward the resident byte budget (review finding 3)', () => {
+  const store = new DraftImageStore(4, 100)
+  // A local draft consumes its bytes.
+  const local = store.add({ bytes: new Uint8Array(40), mediaType: 'image/png', width: 1, height: 1 })
+  assert.equal(store.bytes(), 40)
+  // Recalled images (20 MiB logical each) hold NO resident bytes: four of
+  // them must fit a 100-byte budget easily — the RAM cap is untouched.
+  for (let index = 0; index < 3; index += 1) {
+    store.add({
+      mediaType: 'image/png',
+      width: 1000,
+      height: 1000,
+      source: { type: 'recalled' },
+      recalledRef: { attachmentId: `att-r${index}`, mediaType: 'image/png', bytes: 20 * 1024 * 1024, width: 1000, height: 1000 },
+    })
+  }
+  assert.equal(store.size(), 4)
+  assert.equal(store.bytes(), 40, 'only the local draft holds resident bytes')
+  assert.ok(store.remainingBytes() > 40, 'the budget reflects resident only')
+  // The LOGICAL size still surfaces on the draft (message aggregate).
+  const recalledDraft = store.values()[1]!
+  assert.equal(recalledDraft.byteLength, 20 * 1024 * 1024)
+})
+
+test('pruneUnreferencedDrafts drops drafts whose placeholder left the editor (review finding 2)', () => {
+  const store = new DraftImageStore()
+  const kept = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const deleted = store.add({ bytes: new Uint8Array([2]), mediaType: 'image/png', width: 1, height: 1 })
+  // The editor text references `kept` ONLY (the other placeholder was
+  // deleted or Ctrl+C cleared it).
+  pruneUnreferencedDrafts(`keep ${kept.placeholder}`, store)
+  assert.equal(store.get(deleted.id), undefined, 'the unreferenced draft is pruned')
+  assert.equal(store.get(kept.id), kept, 'the referenced draft survives')
+  // Pruning with a fully-cleared editor drops EVERYTHING.
+  const another = store.add({ bytes: new Uint8Array([3]), mediaType: 'image/png', width: 1, height: 1 })
+  pruneUnreferencedDrafts('', store)
+  assert.equal(store.size(), 0)
+  void another
 })

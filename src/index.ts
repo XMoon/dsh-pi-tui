@@ -95,7 +95,7 @@ import { clipboardBackendOf, commandOnPath, readClipboardImage, type ClipboardEn
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
 import { ImageLoader } from './image/loader.ts'
-import { consumeDraftImages, draftHasImages, prepareUserMessage, type PrepareInputDeps } from './image/submit.ts'
+import { consumeDraftImages, draftHasImages, prepareUserMessage, pruneUnreferencedDrafts, type PrepareInputDeps } from './image/submit.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
@@ -2730,6 +2730,10 @@ export function apply(ctx: Context, config: Config): void {
         runOwned('clipboard paste', () => readClipboardImage(runClipboardCommand, clipboardEnv).then((result) => {
           if (sessionGeneration !== pasteGeneration) return
           if (result.kind === 'image') {
+            // Attach-time prune (review finding 2): placeholders deleted or
+            // Ctrl+C-cleared since the last attach must not hold their
+            // bytes until the store fills up.
+            pruneUnreferencedDrafts(app.getDraft(), draftImages)
             const limits = ctx.get('attachments')?.imageLimits
             if (limits !== undefined) {
               checkImageLimits(

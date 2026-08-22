@@ -14,7 +14,7 @@ import test from 'node:test'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { ImageDimensionError, ImageTooLargeError, UnsupportedImageTypeError } from '../src/image/errors.ts'
 import {
-  checkImageLimits, expandHome, parseImageMetadata, readImageFile, resolveImagePath, sniffMediaType,
+  INTAKE_SAFETY_MAX_BYTES, checkImageLimits, expandHome, parseImageMetadata, readImageFile, resolveImagePath, sniffMediaType,
 } from '../src/image/intake.ts'
 import type { ImageLimitsLike } from '../src/image/intake.ts'
 import type { ImageMediaType } from '../src/image/types.ts'
@@ -149,22 +149,22 @@ test('expandHome expands ~ and ~/ forms only', () => {
   assert.equal(expandHome('/abs/a.png'), '/abs/a.png')
 })
 
-test('resolveImagePath rejects missing paths, directories and non-regular files', () => {
+test('resolveImagePath rejects missing paths, directories and non-regular files', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-image-intake-'))
   try {
-    assert.throws(() => resolveImagePath(join(dir, 'missing.png'), dir), /not found/)
-    assert.throws(() => resolveImagePath(dir, dir), /Not a regular file/)
+    await assert.rejects(resolveImagePath(join(dir, 'missing.png'), dir), /not found/)
+    await assert.rejects(resolveImagePath(dir, dir), /Not a regular file/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('readImageFile resolves, reads, sniffs, parses and preflights in one pipeline', () => {
+test('readImageFile resolves, reads, sniffs, parses and preflights in one pipeline', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-image-intake-'))
   try {
     const file = join(dir, 'shot.png')
     writeFileSync(file, pngBytes(800, 600))
-    const intake = readImageFile('./shot.png', dir, LIMITS)
+    const intake = await readImageFile('./shot.png', dir, LIMITS)
     assert.equal(intake.width, 800)
     assert.equal(intake.height, 600)
     assert.equal(intake.mediaType, 'image/png')
@@ -175,7 +175,7 @@ test('readImageFile resolves, reads, sniffs, parses and preflights in one pipeli
     writeFileSync(join(dir, 'target.png'), pngBytes(1, 1))
     try {
       symlinkSync(join(dir, 'target.png'), link)
-      assert.equal(readImageFile(link, dir, LIMITS).name, 'target.png')
+      assert.equal((await readImageFile(link, dir, LIMITS)).name, 'target.png')
     } catch {
       // symlink may be unavailable; the pipeline itself is covered above
     }
@@ -184,35 +184,35 @@ test('readImageFile resolves, reads, sniffs, parses and preflights in one pipeli
   }
 })
 
-test('readImageFile rejects over-limit files BEFORE reading them into memory', () => {
+test('readImageFile rejects over-limit files BEFORE reading them into memory', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-image-intake-'))
   try {
     const file = join(dir, 'big.png')
     writeFileSync(file, pngBytes(10, 10))
     const tight = { ...LIMITS, maxImageBytes: 4 }
-    assert.throws(() => readImageFile(file, dir, tight), ImageTooLargeError)
+    await assert.rejects(readImageFile(file, dir, tight), ImageTooLargeError)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('readImageFile rejects files whose bytes are not a supported image', () => {
+test('readImageFile rejects files whose bytes are not a supported image', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-image-intake-'))
   try {
     const file = join(dir, 'fake.png')
     writeFileSync(file, 'this is not an image')
-    assert.throws(() => readImageFile(file, dir, LIMITS), UnsupportedImageTypeError)
+    await assert.rejects(readImageFile(file, dir, LIMITS), UnsupportedImageTypeError)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('a staged draft carries the intake metadata end to end', () => {
+test('a staged draft carries the intake metadata end to end', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-image-intake-'))
   try {
     const file = join(dir, 'shot.png')
     writeFileSync(file, pngBytes(800, 600))
-    const intake = readImageFile(file, dir, LIMITS)
+    const intake = await readImageFile(file, dir, LIMITS)
     const store = new DraftImageStore()
     const draft = store.add({
       bytes: intake.bytes,
@@ -246,4 +246,20 @@ test('malformed SOF segments are rejected (round-4 finding 3)', () => {
   bytes.set([0xff, 0xe0, 0x00, 0x04], 2) // tiny APP0
   bytes.set([0xff, 0xc0, 0x00, 0x02, 0x08, 0x01, 0xe0, 0x02, 0x80], 8) // SOF0 len 2
   assert.equal(parseImageMetadata(bytes), undefined)
+})
+
+test('readImageFile without limits still applies the TUI safety cap (review finding 1)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-image-intake-'))
+  try {
+    const file = join(dir, 'big.png')
+    writeFileSync(file, pngBytes(10, 10))
+    const safety = INTAKE_SAFETY_MAX_BYTES
+    // A tiny file passes with no attachment limits at all.
+    const intake = await readImageFile(file, dir, undefined, safety - 10)
+    assert.equal(intake.width, 10)
+    // An over-cap file is refused BEFORE the read.
+    await assert.rejects(readImageFile(file, dir, undefined, 4), ImageTooLargeError)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

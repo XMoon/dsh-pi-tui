@@ -30,7 +30,7 @@ import type { Diag } from './diag.ts'
 import { dshHome } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
-import { consumeDraftImages } from './image/submit.ts'
+import { consumeDraftImages, pruneUnreferencedDrafts } from './image/submit.ts'
 import { readImageFile } from './image/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
@@ -2273,24 +2273,35 @@ export function registerTuiCommands(
         // An owned workflow: the intake outcome decides the notice and the
         // draft insertion — runOwned (AGENTS.md), never a bare void. The
         // limits are read INSIDE the task so a mid-run policy change is
-        // honored (round-2 finding 5).
+        // honored (round-2 finding 5); the intake itself is ASYNC
+        // (fs/promises) so a slow disk or NFS never blocks the TUI event
+        // loop (review finding 1).
         runOwned('image intake', () => {
-          const intake = readImageFile(raw, runner.sessionCwd(), runner.imageLimits())
-          if (runner.sessionGeneration !== intakeGeneration) {
-            app.notify('the session changed while reading the image — try again', 'error')
+          // Attach-time prune: a placeholder deleted (or Ctrl+C-cleared)
+          // since the last attach must not hold its bytes hostage until the
+          // store fills up (review finding 2).
+          pruneUnreferencedDrafts(app.getDraft(), runner.imageStore)
+          // The intake's pre-read cap is the SMALLEST of the attachment
+          // limit and the draft store's remaining RESIDENT budget — a file
+          // that could never be staged is refused before any read.
+          const intake = readImageFile(raw, runner.sessionCwd(), runner.imageLimits(), runner.imageStore.remainingBytes())
+          return intake.then((resolved) => {
+            if (runner.sessionGeneration !== intakeGeneration) {
+              app.notify('the session changed while reading the image — try again', 'error')
+              return undefined
+            }
+            const draft = runner.imageStore.add({
+              bytes: resolved.bytes,
+              mediaType: resolved.mediaType,
+              width: resolved.width,
+              height: resolved.height,
+              source: { type: 'path', path: resolved.path },
+              name: resolved.name,
+            })
+            runner.insertIntoEditor(`${draft.placeholder} `)
+            app.notify(`attached ${draft.placeholder} — Enter to send`)
             return undefined
-          }
-          const draft = runner.imageStore.add({
-            bytes: intake.bytes,
-            mediaType: intake.mediaType,
-            width: intake.width,
-            height: intake.height,
-            source: { type: 'path', path: intake.path },
-            name: intake.name,
           })
-          runner.insertIntoEditor(`${draft.placeholder} `)
-          app.notify(`attached ${draft.placeholder} — Enter to send`)
-          return undefined
         }, {
           diag: runner.diag,
           sessionId: () => runner.liveAgent?.session.id,

@@ -41,10 +41,13 @@ export class DraftImageStore {
   }
 
   /** Stage one image and return its draft (ids increment from 1).
-   * @throws ImageTooLargeError when the aggregate cap would be exceeded;
-   *   ImageAdmissionError when the entry cap is reached. A RECALLED input
-   *   (`recalledRef` present) carries no local bytes — its byte budget is
-   *   the durable ref's recorded size (conservative; no copy is held). */
+   * @throws ImageTooLargeError when the aggregate RESIDENT cap would be
+   *   exceeded; ImageAdmissionError when the entry cap is reached. A
+   *   RECALLED input (`recalledRef` present) carries no local bytes: its
+   *   LOGICAL size (the durable ref's recorded bytes) counts toward the
+   *   message aggregate, but its RESIDENT size is 0 — the bytes live in
+   *   harness storage, so the TUI RAM budget never counts them (review
+   *   finding 3). */
   add(input: DraftImageInput): DraftImage {
     if (this.images.size >= this.maxImages) {
       throw new ImageAdmissionError(
@@ -53,9 +56,11 @@ export class DraftImageStore {
     }
     const recalled = input.recalledRef
     const bytes = input.bytes ?? new Uint8Array(0)
-    const byteLength = recalled !== undefined ? recalled.bytes : bytes.byteLength
-    if (this.bytesHeld + byteLength > this.maxBytes) {
-      throw new ImageTooLargeError(byteLength, this.maxBytes - this.bytesHeld)
+    const logicalByteLength = recalled !== undefined ? recalled.bytes : bytes.byteLength
+    // Resident = local bytes only; recalled images hold none.
+    const residentBytes = bytes.byteLength
+    if (this.bytesHeld + residentBytes > this.maxBytes) {
+      throw new ImageTooLargeError(residentBytes, this.maxBytes - this.bytesHeld)
     }
     const id = this.nextId++
     const image: DraftImage = {
@@ -68,13 +73,13 @@ export class DraftImageStore {
       mediaType: input.mediaType,
       width: input.width,
       height: input.height,
-      byteLength,
+      byteLength: logicalByteLength,
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(recalled !== undefined ? { recalledRef: recalled } : {}),
       placeholder: formatImagePlaceholder(id, input.width, input.height),
     }
     this.images.set(id, image)
-    this.bytesHeld += image.byteLength
+    this.bytesHeld += residentBytes
     return image
   }
 
@@ -87,7 +92,7 @@ export class DraftImageStore {
   remove(id: DraftImageId): boolean {
     const image = this.images.get(id)
     if (image === undefined) return false
-    this.bytesHeld -= image.byteLength
+    this.bytesHeld -= image.bytes.byteLength
     return this.images.delete(id)
   }
 
@@ -107,8 +112,16 @@ export class DraftImageStore {
     return this.images.size
   }
 
-  /** Aggregate staged bytes (observability/tests). */
+  /** Aggregate RESIDENT staged bytes (observability/tests; recalled
+   * images hold no local bytes and count 0). */
   bytes(): number {
     return this.bytesHeld
+  }
+
+  /** The remaining RESIDENT byte budget (review finding: used as the
+   * intake's extra pre-read safety cap, so a file that could never fit the
+   * draft store is refused before any read). */
+  remainingBytes(): number {
+    return Math.max(0, this.maxBytes - this.bytesHeld)
   }
 }

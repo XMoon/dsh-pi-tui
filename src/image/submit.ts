@@ -56,6 +56,24 @@ export function consumeDraftImages(text: string, store: DraftImageStore): void {
 }
 
 /**
+ * Drop every draft the CURRENT editor text no longer references (review
+ * finding 2): deleting a placeholder (or Ctrl+C clearing the editor) leaves
+ * the staged bytes in the store until capacity runs out — 16 stale
+ * attachments then block the next /image with "Too many staged images".
+ * Called BEFORE a new attach (the editor text at that moment is the truth
+ * of what is still wanted).
+ */
+export function pruneUnreferencedDrafts(text: string, store: DraftImageStore): void {
+  const referenced = new Set<number>()
+  for (const segment of expandImagePlaceholders(text, store)) {
+    if (segment.type === 'image') referenced.add(segment.image.id)
+  }
+  for (const image of store.values()) {
+    if (!referenced.has(image.id)) store.remove(image.id)
+  }
+}
+
+/**
  * Prepare the immutable `UserMessage` for one submission.
  * @param text - the editor draft text.
  * @param store - the live draft store.

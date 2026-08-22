@@ -186,3 +186,19 @@ test('commandOnPath resolves separator-bearing commands directly (shell lookup s
   assert.equal(commandOnPath('./node', process.env.PATH, 'linux'), false, 'a CWD-relative name is checked directly, not under PATH dirs')
   assert.equal(commandOnPath('/bin/sh', undefined, 'linux'), true, 'an absolute path resolves directly')
 })
+
+test('Wayland without wl-paste falls through to X11 xclip (review finding 4)', async () => {
+  const calls: string[] = []
+  const run = (async (command: string, args: readonly string[]) => {
+    calls.push(command)
+    if (args.includes('TARGETS')) return { stdout: Buffer.from('UTF8_STRING'), stderr: Buffer.alloc(0), code: 0 }
+    return { stdout: Buffer.from('x11 text'), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  const env = envOf({
+    env: { WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' },
+    exists: (command) => command === 'xclip',
+  })
+  const result = await readClipboardImage(run, env)
+  assert.deepEqual(result, { kind: 'text', text: 'x11 text' })
+  assert.ok(calls.length >= 1 && calls.every(command => command === 'xclip'), 'only xclip ran after wl-paste was missing')
+})
