@@ -755,3 +755,34 @@ test('a tool merely NAMED skill without a loader shape is treated as no host loa
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the body is injected by the TUI fallback')
   app.stop()
 })
+
+test('a throwing skill steer releases the image pin (review finding)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  // A hostile/sync-throwing steer: the invocation must still release its
+  // pin so pruning and draft capacity are never blocked forever.
+  const throwing = agent as unknown as { steer: () => void }
+  throwing.steer = () => { throw new Error('steer failed') }
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => name === 'glab'
+      ? { name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
+      : undefined,
+  } as never)
+  const runner = stubRunner(ctx, app, { agent })
+  const draft = runner.imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  registerTuiCommands(runner)
+  const skillDef = services.defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await assert.rejects(
+    () => (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'glab' }),
+    /steer failed/,
+  )
+  assert.equal(runner.imageStore.isPinned(draft.id), false, 'the pin releases even when steer throws')
+  app.stop()
+})

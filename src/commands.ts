@@ -1515,9 +1515,16 @@ export function registerTuiCommands(
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
-    } catch (error) {
+      // The invocation COMMITTED: consume the image drafts it referenced
+      // (the prepared message holds the durable refs now; a concurrent
+      // intake's newer draft survives — review finding).
+      agent.steer(userMessage)
+      consumeDraftImages(line, runner.imageStore)
+    } finally {
+      // The pin releases on EVERY exit — including a synchronous steer
+      // throw (review finding: a leaked pin would block pruning and eat
+      // draft capacity forever).
       releasePin()
-      throw error
     }
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
     // body only when ITS tool registration is visible to this agent — the
@@ -1555,14 +1562,6 @@ export function registerTuiCommands(
     // the user's words, inverting the web's message order. (A second
     // follow-up would not help either: a turn boundary claims ONE next-turn
     // message, so the pair would split across two turns.)
-    agent.steer(userMessage)
-    // The invocation COMMITTED: consume the image drafts it referenced
-    // (the prepared message holds the durable refs now; a concurrent
-    // intake's newer draft survives — review finding).
-    consumeDraftImages(line, runner.imageStore)
-    // The invocation settled: the pin releases and the drafts become
-    // prunable again (review finding 1 follow-up).
-    releasePin()
     if (!hostLoadsSkillBody) {
       const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
       // Forward the resource base too, so the fallback rendering matches
