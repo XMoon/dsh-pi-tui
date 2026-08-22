@@ -169,3 +169,20 @@ test('the draft store enforces its entry and byte caps (plan §21)', () => {
   tight.add({ bytes: new Uint8Array(10), mediaType: 'image/png', width: 1, height: 1 })
   assert.equal(tight.size(), 1)
 })
+
+test('a recalled draft stages without local bytes and reuses its durable ref', () => {
+  const store = new DraftImageStore()
+  const ref = { attachmentId: 'att-9', mediaType: 'image/png' as const, bytes: 1234, width: 800, height: 600, name: 'old.png' }
+  const draft = store.add({ mediaType: ref.mediaType, width: ref.width, height: ref.height, source: { type: 'recalled' }, recalledRef: ref })
+  assert.equal(draft.source.type, 'recalled')
+  assert.equal(draft.recalledRef?.attachmentId, 'att-9')
+  assert.equal(draft.byteLength, 1234)
+  assert.equal(draft.bytes.byteLength, 0, 'no local copy')
+  assert.equal(draft.placeholder, '[image #1 (800×600)]')
+  // The placeholder resolves against the store like any draft.
+  const segments = expandImagePlaceholders(draft.placeholder, store)
+  assert.equal(segments[0]!.type, 'image')
+  // Removing frees the (conservative) byte budget.
+  store.remove(draft.id)
+  assert.equal(store.size(), 0)
+})

@@ -53,3 +53,16 @@ test('every LOCAL_COMMANDS entry is covered by the rejection matrix', () => {
     assert.equal(commandRejectsImages({ name }, `/${name} ${image.placeholder}`, store, () => true), true, `/${name} rejects images`)
   }
 })
+
+test('a /skill <name> invocation with an image is agent input (bare /skill stays local)', () => {
+  const store = storeWithImage()
+  const image = store.values()[0]!
+  // The dispatch callback treats `skill` as non-local when it carries args.
+  const withArgs = commandRejectsImages({ name: 'skill', rawInput: 'grilling [image #1 (800×600)]' } as never,
+    `/skill grilling ${image.placeholder}`, store, name => name === 'skill' && false)
+  assert.equal(withArgs, false, '/skill <name> + image is not rejected')
+  // The bare picker stays local: rejected when the callback says local.
+  const bare = commandRejectsImages({ name: 'skill', rawInput: '' } as never,
+    '/skill', store, name => name === 'skill')
+  assert.equal(bare, false, 'no image attached → nothing to reject')
+})

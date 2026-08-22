@@ -2565,10 +2565,15 @@ export function apply(ctx: Context, config: Config): void {
       // prompts — an image-bearing command line is REJECTED explicitly
       // (never a silent drop, never a stray placeholder sent to the model).
       // The draft comes back so the user can re-attach after choosing a
-      // plain prompt.
-      if (commandRejectsImages(parsed, text, draftImages,
-        name => LOCAL_COMMANDS.has(name)
-          || (extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false))) {
+      // plain prompt. LOCAL commands only: agent-facing invocations —
+      // plain prompts AND per-skill slash lines, including `/skill <name>
+      // [image #N ...]` (`skill` is local only as the bare picker; with
+      // arguments it is a loadSkill agent prompt — review finding).
+      if (commandRejectsImages(parsed, text, draftImages, name => {
+        if (name === 'skill' && (parsed?.rawInput.trim() ?? '') !== '') return false
+        return LOCAL_COMMANDS.has(name)
+          || (extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)
+      })) {
         app.setEditorText(mergeDraft(app.getDraft(), text))
         app.notify('Images cannot be attached to a command.', 'error')
         return
@@ -2905,21 +2910,46 @@ export function apply(ctx: Context, config: Config): void {
         const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
           .filter(message => isUserQueueInput(message.source as QueueNoticeSource | undefined))
         if (queued.length === 0) return
-        // Multimodal queued messages (durable ImageBlocks) cannot be pulled
-        // back into the text editor without losing the images: refuse the
-        // dequeue and keep the queue intact (review finding 3). The durable
-        // refs stay with the harness; a recalled-durable-image draft is a
-        // post-v1 enhancement.
-        if (queued.some(message => message.content.some(block => block.type === 'image'))) {
-          app.notify('A queued message with an image cannot be pulled back yet — keep it queued or cancel it (Ctrl+Enter / Alt+↑ is disabled for it)', 'info')
+        // Multimodal queued messages (durable ImageBlocks) ARE pullable:
+        // each image block becomes a RECALLED draft — a placeholder that
+        // reuses the already-durable ImageAttachmentRef, so re-submitting
+        // never re-uploads the bytes. The queue is spliced ONLY after the
+        // drafts are staged (a failure keeps the queue intact).
+        let recalledText = ''
+        try {
+          const lines: string[] = []
+          for (const message of queued) {
+            const parts: string[] = []
+            for (const block of message.content) {
+              if (block.type === 'text') {
+                parts.push(block.text)
+              } else if (block.type === 'image') {
+                const attachment = block.attachment as import('./image/admission.ts').ImageAttachmentRefLike
+                const draft = draftImages.add({
+                  mediaType: attachment.mediaType,
+                  width: attachment.width,
+                  height: attachment.height,
+                  ...(attachment.name !== undefined ? { name: attachment.name } : {}),
+                  source: { type: 'recalled' },
+                  recalledRef: attachment,
+                })
+                parts.push(draft.placeholder)
+              }
+            }
+            lines.push(parts.join(''))
+          }
+          recalledText = lines.join('\n\n')
+        } catch (error) {
+          // The recalled drafts could not be staged (capacity): keep the
+          // queue fully intact — nothing was removed, nothing is lost.
+          app.notify(safeErrorMessage(error), 'error')
           return
         }
         // Remove exactly the pulled-back messages (durable splice), keeping
         // any notices queued behind them.
         for (const message of queued) liveAgent.inbox.remove(message.id)
-        const queuedText = queued.map(message => textOf(message.content)).join('\n\n')
         const current = app.getDraft()
-        app.setDraft([queuedText, current].filter(part => part.trim() !== '').join('\n\n'))
+        app.setDraft([recalledText, current].filter(part => part.trim() !== '').join('\n\n'))
         refreshQueue()
       },
       // ↓ / Ctrl+J with an empty editor: the task browser over BOTH

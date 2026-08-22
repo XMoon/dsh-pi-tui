@@ -23,40 +23,56 @@ export type DraftImageId = number
 export type DraftImageSource =
   | { readonly type: 'clipboard' }
   | { readonly type: 'path'; readonly path: string }
+  /** The image was pulled back from a queued message: its bytes are ALREADY
+   * durable with the harness (the recalled ref) — the draft holds no local
+   * copy and re-submitting reuses the ref instead of re-uploading. */
+  | { readonly type: 'recalled' }
 
 /**
  * One image staged in the editor draft. The draft holds the raw bytes so
  * clipboard and path entries share one shape and a submit never depends on
- * the source file still existing (plan §5.1).
+ * the source file still existing (plan §5.1). A RECALLED draft (pulled
+ * back from the queue) instead carries the durable `ImageAttachmentRef`
+ * and NO local bytes — the bytes stay in harness storage and re-submitting
+ * reuses the ref.
  */
 export interface DraftImage {
   /** Per-TUI draft identity (the `#N` of the placeholder). */
   readonly id: DraftImageId
   readonly kind: 'image'
   readonly source: DraftImageSource
-  /** Exact encoded bytes, held only for the draft lifetime. */
+  /** Exact encoded bytes, held only for the draft lifetime. Empty for a
+   * recalled draft (its bytes live in harness storage). */
   readonly bytes: Uint8Array
   readonly mediaType: ImageMediaType
   /** Intrinsic encoded width in pixels. */
   readonly width: number
   /** Intrinsic encoded height in pixels. */
   readonly height: number
-  /** Exact encoded byte length (`bytes.byteLength`, snapshot for free). */
+  /** Exact encoded byte length (`bytes.byteLength` for local drafts; the
+   * durable ref's recorded `bytes` for recalled drafts). */
   readonly byteLength: number
   /** Optional display name (basename for path sources), never a path. */
   readonly name?: string
   /** The canonical editor placeholder text for this draft. */
   readonly placeholder: string
+  /** The durable ref this draft reuses on submit; present ONLY for
+   * recalled drafts (already-durable images are never re-uploaded). */
+  readonly recalledRef?: import('./admission.ts').ImageAttachmentRefLike
 }
 
 /** Input accepted by {@link DraftImageStore.add}. */
 export interface DraftImageInput {
-  readonly bytes: Uint8Array
+  /** Local bytes; REQUIRED unless `recalledRef` is present (a recalled
+   * draft carries no local copy). */
+  readonly bytes?: Uint8Array
   readonly mediaType: ImageMediaType
   readonly width: number
   readonly height: number
   readonly source?: DraftImageSource
   readonly name?: string
+  /** The durable ref of a recalled (queue-pulled-back) image. */
+  readonly recalledRef?: import('./admission.ts').ImageAttachmentRefLike
 }
 
 /** The store surface the placeholder expansion needs (structural). */

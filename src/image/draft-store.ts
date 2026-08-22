@@ -42,27 +42,35 @@ export class DraftImageStore {
 
   /** Stage one image and return its draft (ids increment from 1).
    * @throws ImageTooLargeError when the aggregate cap would be exceeded;
-   *   ImageAdmissionError when the entry cap is reached. */
+   *   ImageAdmissionError when the entry cap is reached. A RECALLED input
+   *   (`recalledRef` present) carries no local bytes — its byte budget is
+   *   the durable ref's recorded size (conservative; no copy is held). */
   add(input: DraftImageInput): DraftImage {
     if (this.images.size >= this.maxImages) {
       throw new ImageAdmissionError(
         `Too many staged images: the draft holds ${this.images.size} (limit ${this.maxImages}). Send or remove one first.`,
       )
     }
-    if (this.bytesHeld + input.bytes.byteLength > this.maxBytes) {
-      throw new ImageTooLargeError(input.bytes.byteLength, this.maxBytes - this.bytesHeld)
+    const recalled = input.recalledRef
+    const bytes = input.bytes ?? new Uint8Array(0)
+    const byteLength = recalled !== undefined ? recalled.bytes : bytes.byteLength
+    if (this.bytesHeld + byteLength > this.maxBytes) {
+      throw new ImageTooLargeError(byteLength, this.maxBytes - this.bytesHeld)
     }
     const id = this.nextId++
     const image: DraftImage = {
       id,
       kind: 'image',
-      source: input.source ?? { type: 'clipboard' },
-      bytes: input.bytes,
+      source: recalled !== undefined
+        ? { type: 'recalled' }
+        : (input.source ?? { type: 'clipboard' }),
+      bytes,
       mediaType: input.mediaType,
       width: input.width,
       height: input.height,
-      byteLength: input.bytes.byteLength,
+      byteLength,
       ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(recalled !== undefined ? { recalledRef: recalled } : {}),
       placeholder: formatImagePlaceholder(id, input.width, input.height),
     }
     this.images.set(id, image)

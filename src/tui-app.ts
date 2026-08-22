@@ -4747,7 +4747,7 @@ export class TuiApp {
           // body here): text blocks render verbatim, others as pretty JSON.
           for (const block of callView.content ?? []) {
             if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
-            else card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+            else card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
           }
           return
         }
@@ -4915,7 +4915,7 @@ export class TuiApp {
             } else {
               for (const block of content) {
                 if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
-                else card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+                else card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
               }
             }
             return
@@ -5064,6 +5064,17 @@ export class TuiApp {
         }
       }
     }
+  }
+
+  /**
+   * Display form for a non-text block WITHOUT the image pipeline: image
+   * blocks project to a compact placeholder — never a JSON dump (the
+   * read_image envelope rule, review finding); everything else keeps the
+   * legacy pretty-JSON form.
+   */
+  private blockDisplayText(block: import('@deepseek-ai/dsh-llm').ContentBlock): string {
+    if (block.type === 'image') return '[image]'
+    return JSON.stringify(block, null, 2)
   }
 
   /** Append the result's IMAGE blocks as thumbnails (any tool card that

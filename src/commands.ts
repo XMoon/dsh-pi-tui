@@ -30,6 +30,7 @@ import type { Diag } from './diag.ts'
 import { dshHome } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import { consumeDraftImages } from './image/submit.ts'
 import { readImageFile } from './image/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
@@ -1545,6 +1546,10 @@ export function registerTuiCommands(
     // follow-up would not help either: a turn boundary claims ONE next-turn
     // message, so the pair would split across two turns.)
     agent.steer(userMessage)
+    // The invocation COMMITTED: consume the image drafts it referenced
+    // (the prepared message holds the durable refs now; a concurrent
+    // intake's newer draft survives — review finding).
+    consumeDraftImages(line, runner.imageStore)
     if (!hostLoadsSkillBody) {
       const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
       // Forward the resource base too, so the fallback rendering matches

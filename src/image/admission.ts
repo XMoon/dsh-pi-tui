@@ -97,6 +97,10 @@ export function buildContentBlocks(
  * `saveImages()` keeps input/ref ordering and avoids half-success semantics.
  * Count/aggregate preflights come from the LIVE `imageLimits`; the harness
  * re-validates bytes at admission — the TUI never duplicates normalization.
+ * RECALLED images (pulled back from the queue) are ALREADY durable: their
+ * ref is reused as-is and they are excluded from the save batch — the
+ * harness object is content-addressed, so re-submitting the same ref never
+ * duplicates storage (dequeue recall, review finding 3).
  * @param segments - the expanded draft segments.
  * @param attachments - the live `ctx.attachments` service.
  * @returns the admitted blocks and refs.
@@ -122,17 +126,38 @@ export async function admitDraftImages(
       `Images total ${aggregate} bytes; the current aggregate limit is ${limits.maxMessageImageBytes} bytes.`,
     )
   }
-  const refs = await attachments.saveImages(images.map(image => ({
-    data: image.image.bytes,
-    mediaType: image.image.mediaType,
-    ...(image.image.name !== undefined ? { name: image.image.name } : {}),
-  })))
-  if (refs.length !== images.length) {
-    // The service's contract is input-order-aligned refs; a mismatch means
-    // the blocks would silently diverge from the images (round-2 finding 6).
-    throw new ImageAdmissionError(
-      `The attachment service returned ${refs.length} references for ${images.length} images.`,
-    )
+  // Split recalled (already-durable) from fresh images: only fresh bytes
+  // enter the save batch; recalled refs slot back into their positions.
+  const refs: ImageAttachmentRefLike[] = new Array(images.length)
+  const toSave: { input: SaveImageAttachmentLike; index: number }[] = []
+  images.forEach((segment, index) => {
+    const recalled = segment.image.recalledRef
+    if (recalled !== undefined) {
+      refs[index] = recalled
+    } else {
+      toSave.push({
+        input: {
+          data: segment.image.bytes,
+          mediaType: segment.image.mediaType,
+          ...(segment.image.name !== undefined ? { name: segment.image.name } : {}),
+        },
+        index,
+      })
+    }
+  })
+  if (toSave.length > 0) {
+    const saved = await attachments.saveImages(toSave.map(entry => entry.input))
+    if (saved.length !== toSave.length) {
+      // The service's contract is input-order-aligned refs; a mismatch
+      // means the blocks would silently diverge from the images
+      // (round-2 finding 6).
+      throw new ImageAdmissionError(
+        `The attachment service returned ${saved.length} references for ${toSave.length} images.`,
+      )
+    }
+    toSave.forEach((entry, savedIndex) => {
+      refs[entry.index] = saved[savedIndex]!
+    })
   }
   return { blocks: buildContentBlocks(segments, refs), refs }
 }

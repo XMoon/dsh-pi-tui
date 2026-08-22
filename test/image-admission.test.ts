@@ -161,3 +161,25 @@ test('a ref-count mismatch from the service is rejected loudly', async () => {
   }) as never
   await assert.rejects(() => admitDraftImages(segments, attachments), ImageAdmissionError)
 })
+
+test('recalled images reuse their durable ref without re-uploading (dequeue recall)', async () => {
+  const store = new DraftImageStore()
+  const fresh = store.add({ bytes: new Uint8Array([9]), mediaType: 'image/png', width: 10, height: 10, name: 'fresh.png' })
+  const recalled = store.add({
+    mediaType: 'image/jpeg',
+    width: 640,
+    height: 480,
+    source: { type: 'recalled' },
+    recalledRef: { attachmentId: 'att-durable', mediaType: 'image/jpeg', bytes: 500, width: 640, height: 480, name: 'old.jpg' },
+  })
+  const segments = expandImagePlaceholders(`${fresh.placeholder} and ${recalled.placeholder}`, store)
+  const attachments = attachmentsService()
+  const admitted = await admitDraftImages(segments, attachments)
+  // Only ONE save call for the fresh image; the recalled ref is reused.
+  assert.equal(attachments.saved.length, 1)
+  assert.equal(attachments.saved[0]!.length, 1)
+  assert.equal(attachments.saved[0]![0]!.name, 'fresh.png')
+  const blocks = admitted.blocks.filter(block => block.type === 'image')
+  assert.equal((blocks[0] as { attachment: { attachmentId: string } }).attachment.attachmentId, 'att-1')
+  assert.equal((blocks[1] as { attachment: { attachmentId: string } }).attachment.attachmentId, 'att-durable')
+})
