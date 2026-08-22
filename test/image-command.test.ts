@@ -149,3 +149,47 @@ test('/image prunes drafts whose placeholder left the editor while the intake wa
   }
 })
 
+
+test('failed submission restores BEFORE unpinning: placeholders keep their backing draft through concurrent attaches (review finding)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-image-race-'))
+  try {
+    const file2 = join(dir, 'second.png')
+    writeFileSync(file2, pngBytes())
+    const { app, imageStore, imageHandler } = setup()
+    // Stage image #1 and submit a multimodal draft (the editor text).
+    const draft1 = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+    const submitted = `look at ${draft1.placeholder}`
+    app.setEditorText(submitted)
+    // The submission pins SYNCHRONOUSLY (same call stack that left the
+    // editor) and the editor clears.
+    const release = imageStore.pinReferenced(submitted)
+    app.setEditorText('')
+    // While the async prepare is blocked, the user attaches a SECOND
+    // image: its attach-time prunes (pre/post-read) see the empty editor
+    // but must keep the PINNED in-flight draft #1.
+    const result = await imageHandler({ rawInput: file2 })
+    assert.deepEqual(result, { kind: 'success' })
+    await waitFor(() => imageStore.size() >= 2)
+    assert.equal(imageStore.get(draft1.id), draft1, 'the in-flight draft survives the concurrent attach')
+    // The submission FAILS: the task catch restores the editor BEFORE the
+    // pin releases (the exact ordering this fix enforces).
+    restoreIntoEditor(app, submitted)
+    assert.ok(app.getDraft().includes(draft1.placeholder), 'the restored editor references draft #1')
+    release()
+    assert.equal(imageStore.isPinned(draft1.id), false, 'the pin released after the restore')
+    // A later /image runs a post-read prune against the RESTORED editor:
+    // draft #1 is referenced by the text, so it survives the prune even
+    // though its pin is gone.
+    await imageHandler({ rawInput: file2 })
+    await waitFor(() => imageStore.size() >= 3)
+    assert.equal(imageStore.get(draft1.id), draft1, 'the restored placeholder keeps its backing draft')
+    assert.ok(app.getDraft().includes(draft1.placeholder), 'the placeholder stays in the editor')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/** The restore half of the failure path (restoreSubmissionDraft semantics). */
+function restoreIntoEditor(app: TuiApp, draft: string): void {
+  app.setEditorText([app.getDraft(), draft].filter(part => part.trim() !== '').join('\n\n') || draft)
+}

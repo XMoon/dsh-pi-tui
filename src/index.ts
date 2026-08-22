@@ -2195,6 +2195,37 @@ export function apply(ctx: Context, config: Config): void {
       }
       app.notify(`could not start a session: ${message}`, 'error')
     }
+    /**
+     * Restore the submitted text into the editor after a failed submission
+     * (review finding: the restore MUST run BEFORE the reservation pin
+     * releases — the restored placeholders must keep their backing drafts
+     * against concurrent attach-time prunes). Correctness side effect
+     * first; never throws.
+     */
+    const restoreSubmissionDraft = (draft: string): void => {
+      app.setEditorText(mergeDraft(app.getDraft(), draft))
+    }
+    /**
+     * Notify one submission failure WITHOUT restoring (the task's catch
+     * already restored; restoring twice would re-merge the draft). Image
+     * intake/admission/capability failures are THEIR OWN actionable errors
+     * ("Current model ... does not support image input") — wrapping them in
+     * "could not start a session" misleads when a session already exists.
+     * Diagnostics are owned by runOwned.
+     */
+    const notifySubmissionFailure = (error: unknown): void => {
+      const message = safeErrorMessage(error)
+      if (error instanceof ImageInputError) {
+        app.notify(message, 'error')
+        return
+      }
+      try {
+        ctx.logger.error(`tui-runner: submission failed: ${message}`)
+      } catch {
+        // The cordis logger must not block the notice.
+      }
+      app.notify(`could not start a session: ${message}`, 'error')
+    }
     /** The image submission surface (plan §13): the live attachment/llm
      * services + the CURRENT provider/model, re-read at submit time (the
      * TUI supports runtime model switching — never a startup snapshot). */
@@ -2244,6 +2275,8 @@ export function apply(ctx: Context, config: Config): void {
         await ensureSession()
         const agent = liveAgent
         if (agent === undefined) return
+        // (the whole body below; the catch restores BEFORE the pin
+        // releases — review finding)
         // The guard checks THIS agent's session; capture the identity so
         // the write below can never target a session the guard did not see
         // (a session switch while the file read is in flight).
@@ -2348,13 +2381,20 @@ export function apply(ctx: Context, config: Config): void {
                       // Consume ONLY the referenced drafts — a concurrent
                       // intake's newer image survives (round-5 finding 1).
                       consumeDraftImages(text, draftImages)
+                    } catch (error: unknown) {
+                      // Failure: restore the editor draft BEFORE the
+                      // handoff pin releases (review finding).
+                      restoreSubmissionDraft(text)
+                      throw error
                     } finally {
                       fallbackPin()
                     }
                   }, {
                     diag,
                     sessionId: () => agent.session.id,
-                    onError: failSubmission(text),
+                    // The task's catch already restored; this sink only
+                    // notifies.
+                    onError: notifySubmissionFailure,
                   })
                 } else {
                   fallbackPin()
@@ -2402,13 +2442,20 @@ export function apply(ctx: Context, config: Config): void {
         // Consume ONLY the referenced drafts — a concurrent intake's newer
         // image survives (round-5 finding 1).
         consumeDraftImages(text, draftImages)
+        } catch (error: unknown) {
+          // Failure: restore the editor draft BEFORE the reservation
+          // releases — the restored placeholders must keep their backing
+          // drafts against concurrent attach-time prunes (review finding).
+          restoreSubmissionDraft(text)
+          throw error
         } finally {
           releasePin()
         }
       }, {
         diag,
         sessionId: () => liveAgent?.session.id,
-        onError: failSubmission(text),
+        // The task's catch already restored; this sink only notifies.
+        onError: notifySubmissionFailure,
       })
     }
     /**
@@ -2564,13 +2611,20 @@ export function apply(ctx: Context, config: Config): void {
         // per-reference, so a concurrent intake's newer draft survives
         // (round-5 finding 1).
         if (outcome === 'ok') consumeDraftImages(text, draftImages)
+        } catch (error: unknown) {
+          // Failure: restore the editor draft BEFORE the reservation
+          // releases (review finding — the restored placeholders must keep
+          // their backing drafts against concurrent prunes).
+          restoreSubmissionDraft(text)
+          throw error
         } finally {
           releasePin()
         }
       }, {
         diag,
         sessionId: () => liveAgent?.session.id,
-        onError: failSubmission(text),
+        // The task's catch already restored; this sink only notifies.
+        onError: notifySubmissionFailure,
       })
     }
     /**
