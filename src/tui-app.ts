@@ -983,6 +983,12 @@ export interface TuiAppOptions {
    */
   copySelection?: (text: string) => Promise<boolean>
   /**
+   * The empty-editor double-Ctrl+C exit window in ms (issue #8);
+   * injectable so headless tests never wait the real 1.5s. The footer
+   * hint's lifetime is EXACTLY this window — the two share one timer.
+   */
+  ctrlCExitWindowMs?: number
+  /**
    * Phase 2: the ADVANCED normalized input capture route (wired by the
    * runner from the service's advanced registry). Consulted by the host
    * input path AFTER its own capturing flows (questions, approvals,
@@ -1324,6 +1330,14 @@ export class TuiApp {
    * read as "the chord doesn't work"; 1.5s covers a natural double
    * press, and the armed state is announced by the hint. */
   private static readonly CTRL_C_EXIT_WINDOW_MS = 1500
+  /** Issue #8: the effective exit window (injectable for tests). */
+  private readonly ctrlCExitWindowMs: number
+  /** Issue #8: whether the exit chord is armed — the footer's second line
+   * shows `Press Ctrl+C again to exit` while armed, and the hint's
+   * lifetime is EXACTLY the exit window (one shared timer, never a
+   * lingering notify). */
+  private ctrlCExitArmed = false
+  private ctrlCExitTimer: NodeJS.Timeout | undefined
   /** Session workspace root for path relativization (Web relativizeToCwd). */
   private readonly workspaceRoot: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
@@ -1452,6 +1466,7 @@ export class TuiApp {
     // re-merges its chrome rows so the new content reaches the screen.
     this.extensionHost?.setChromeRefresher(() => this.refreshChrome())
     this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS
+    this.ctrlCExitWindowMs = options.ctrlCExitWindowMs ?? TuiApp.CTRL_C_EXIT_WINDOW_MS
     this.workspaceRoot = options.workspaceRoot
     this.present = options.present
     this.pluginActionFor = options.pluginActionFor
@@ -1481,6 +1496,9 @@ export class TuiApp {
       // Fresh user input supersedes any transient notice (a stale error
       // from the previous submission must not outlive the next one).
       this.clearNotify()
+      // Issue #8: a successful submit is a fresh explicit action — the
+      // armed exit chord (and its footer hint) must not survive.
+      this.clearCtrlCExit()
       this.events.onSubmit(text)
     }
     this.editor.onChange = () => {
@@ -1644,6 +1662,9 @@ export class TuiApp {
   /** Leave raw mode and stop rendering. */
   stop(): void {
     this.clearNotify()
+    // Issue #8: the exit-chord timer dies with the surface — a stopped
+    // TUI must never fire a stale disarm into a dead footer.
+    this.clearCtrlCExit()
     this.working.dispose()
     // Every pending question flow settles rejected: a stopped TUI must not
     // leave askQuestions promises hanging forever.
@@ -2132,12 +2153,14 @@ export class TuiApp {
       // pi parity (handleCtrlC): a first press CLEARS a non-empty editor
       // (recording the time); a second press within the window on the now
       // EMPTY editor exits. Overlays own the key (the global overlay guard
-      // above already passed them through).
+      // above already passed them through). Issue #8: every arm shows the
+      // footer hint for EXACTLY the exit window (armCtrlCExit), and the
+      // exit path disarms it — the hint never outlives the window.
       const text = this.seatEditor().getText()
       if (text !== '') {
         this.seatEditor().setText('')
         this.editorSeatHolder.notifyChanged()
-        this.lastCtrlCAt = Date.now()
+        this.armCtrlCExit()
         // The key is CONSUMED at the app level, so the fork's input path
         // never reaches the focused editor and never requests its own
         // frame — without an explicit render the cleared draft stays on
@@ -2148,23 +2171,24 @@ export class TuiApp {
         return { consume: true }
       }
       const now = Date.now()
-      if (this.lastCtrlCAt !== undefined && now - this.lastCtrlCAt < TuiApp.CTRL_C_EXIT_WINDOW_MS) {
-        this.lastCtrlCAt = undefined
+      if (this.lastCtrlCAt !== undefined && now - this.lastCtrlCAt < this.ctrlCExitWindowMs) {
+        this.clearCtrlCExit()
         this.events.onExit()
       } else {
-        this.lastCtrlCAt = now
         // First press on an EMPTY editor changes nothing visible, and the
         // exit window is easy to miss — announce the armed state so a
         // slow second press is not a silent no-op (the next Enter would
         // otherwise send an empty draft). The second press within the
         // window exits.
-        this.notify('Press Ctrl+C again to exit', 'info')
+        this.armCtrlCExit()
       }
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+d')) {
       // Ctrl+D quits like /exit (and Ctrl+C). The editor's delete-char-
-      // forward remains on the Delete key.
+      // forward remains on the Delete key. Issue #8: an armed exit chord
+      // must not leave its hint behind on a Ctrl+D exit.
+      this.clearCtrlCExit()
       this.events.onExit()
       return { consume: true }
     }
@@ -3142,6 +3166,46 @@ export class TuiApp {
       this.notifyTimer = undefined
     }
     this.rebuildMessages()
+  }
+
+  /**
+   * Issue #8: arm the empty-editor double-Ctrl+C exit window. The footer's
+   * second line switches to `Press Ctrl+C again to exit` for EXACTLY
+   * {@link ctrlCExitWindowMs} — the hint and the exit window share ONE
+   * timer, so a stale hint can never outlive a dead window (the old
+   * notify-based hint lingered ~8s while the window was already gone).
+   */
+  private armCtrlCExit(): void {
+    this.clearCtrlCExit()
+    this.lastCtrlCAt = Date.now()
+    this.ctrlCExitArmed = true
+    this.renderFooter()
+    this.ctrlCExitTimer = setTimeout(() => {
+      this.ctrlCExitTimer = undefined
+      this.lastCtrlCAt = undefined
+      this.ctrlCExitArmed = false
+      this.renderFooter()
+      this.requestRender()
+    }, this.ctrlCExitWindowMs)
+    this.ctrlCExitTimer.unref?.()
+  }
+
+  /**
+   * Issue #8: disarm the exit chord and restore the footer. Public so the
+   * runner clears it on session switches (a stale armed window must not
+   * exit the NEW session). Idempotent; safe after dispose (renderFooter
+   * requests are benign no-ops then).
+   */
+  clearCtrlCExit(): void {
+    if (this.ctrlCExitTimer !== undefined) {
+      clearTimeout(this.ctrlCExitTimer)
+      this.ctrlCExitTimer = undefined
+    }
+    if (this.ctrlCExitArmed || this.lastCtrlCAt !== undefined) {
+      this.ctrlCExitArmed = false
+      this.lastCtrlCAt = undefined
+      this.renderFooter()
+    }
   }
 
   /**
@@ -5812,6 +5876,10 @@ export class TuiApp {
     if (text.trim() === '' && this.events.isImageDraft?.() !== true) return
     this.rememberInput(text)
     this.clearNotify()
+    // Issue #8: a successful submit is a fresh explicit action — the armed
+    // exit chord (and its footer hint) must not survive into the next
+    // interaction.
+    this.clearCtrlCExit()
     // Clear the draft like a normal Enter submit (the runner's dispatch
     // owns the session/guard path). M9: clear the CURRENT seat occupant.
     if (this.viewerMode === undefined) {
@@ -5985,7 +6053,14 @@ export class TuiApp {
       this.extensionHost?.footerText() ?? '',
     ].filter(part => part !== '')
     // Line 2: the stats line only; context pressure is the bar on line 1.
-    const line2 = this.footerPreset === 'compact' ? '' : this.status.statsLine
+    // Issue #8: while the Ctrl+C exit chord is armed, the second line is
+    // the exit hint for EXACTLY the exit window (one shared timer) — it
+    // temporarily covers the stats, and even the compact preset shows it
+    // (the user just triggered an explicit interaction and needs the
+    // feedback).
+    const line2 = this.ctrlCExitArmed
+      ? 'Press Ctrl+C again to exit'
+      : this.footerPreset === 'compact' ? '' : this.status.statsLine
     // Narrow-screen footer (plan §14): the host line-1 WRAPS instead of
     // being hard-truncated (v0.1.x behavior — the multi-row footer returns,
     // and the layout already budgets footer rows via

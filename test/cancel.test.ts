@@ -66,7 +66,7 @@ test('a slow second Esc does not cancel', async () => {
 
 // ── requirement 7: Ctrl+C pi parity + busy single-Esc ─────────────────────
 
-function startAppWithExits(): { vt: VirtualTerminal; app: TuiApp; cancels: number; exits: number } {
+function startAppWithExits(options: { ctrlCExitWindowMs?: number } = {}): { vt: VirtualTerminal; app: TuiApp; cancels: number; exits: number } {
   const vt = new VirtualTerminal(100, 24)
   let cancels = 0
   let exits = 0
@@ -74,9 +74,30 @@ function startAppWithExits(): { vt: VirtualTerminal; app: TuiApp; cancels: numbe
     onSubmit: () => {},
     onExit: () => { exits += 1 },
     onCancel: () => { cancels += 1 },
-  })
+  }, options)
   app.start()
   return { vt, app, get cancels() { return cancels }, get exits() { return exits } }
+}
+
+/** The footer's second line (the last non-empty viewport row). */
+function footerLine(vt: VirtualTerminal): string {
+  const lines = vt.getViewport()
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i]!.trim() !== '') return lines[i]!
+  }
+  return ''
+}
+
+/** Poll until the predicate holds (bounded) — never a fixed sleep, which
+ * would make the timer tests timing-sensitive (AGENTS.md trap). Flushes a
+ * render between polls so the predicate sees settled frames. */
+async function waitFor(predicate: () => boolean, vt: VirtualTerminal, timeoutMs = 1000): Promise<void> {
+  const start = Date.now()
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for the condition')
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await vt.waitForRender()
+  }
 }
 
 test('Ctrl+C with text clears the editor and does NOT exit', async () => {
@@ -117,12 +138,141 @@ test('the first empty-editor Ctrl+C shows the exit-chord hint', async () => {
   assert.equal(surface.exits, 0, 'the first press must not exit')
 })
 
-test('Ctrl+C presses spaced beyond the window do not exit', async () => {
-  const surface = startAppWithExits()
+// ── issue #8: the exit hint lives in the footer for EXACTLY the window ───
+
+test('the exit hint renders in the FOOTER, never the transcript notify', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03')
-  // The exit window is 1500ms; a press beyond it must only re-arm.
-  await new Promise(resolve => setTimeout(resolve, 1750))
+  await surface.vt.waitForRender()
+  const lines = surface.vt.getViewport()
+  // The 100x24 layout: header (0), editor (1-3), footer line1 (4), footer
+  // line2 (5). The hint must be the footer's second line — the transcript
+  // area (rows 0-3) must NOT carry it.
+  assert.ok(lines[5]!.includes('Press Ctrl+C again to exit'),
+    `the hint must sit in the footer line 2:\n${lines.join('\n')}`)
+  assert.ok(!lines.slice(0, 4).join('\n').includes('Press Ctrl+C again to exit'),
+    `the hint must never enter the transcript notify area:\n${lines.join('\n')}`)
+})
+
+test('the exit hint disappears when the window expires (one shared timer)', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 80 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'), 'armed: hint visible')
+  // Past the window: the hint and the exit window die TOGETHER. Poll for
+  // the expiry instead of sleeping a fixed delay.
+  await waitFor(() => !footerLine(surface.vt).includes('Press Ctrl+C again to exit'), surface.vt)
+})
+
+test('a second Ctrl+C after the window expired only re-arms, never exits', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 80 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'), 'armed: hint visible')
+  // Wait for the window to expire (poll, never a fixed sleep).
+  await waitFor(() => !footerLine(surface.vt).includes('Press Ctrl+C again to exit'), surface.vt)
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'a slow second press must not exit')
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'), 'the slow press re-arms the hint')
+  // A fast third press now exits.
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'a fast press after re-arming exits')
+})
+
+test('a successful exit clears the hint', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+  assert.ok(!footerLine(surface.vt).includes('Press Ctrl+C again to exit'),
+    `the hint must clear on exit:\n${surface.vt.getViewport().join('\n')}`)
+})
+
+test('Ctrl+D while armed clears the hint too (round-1 finding)', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // arm
+  await surface.vt.waitForRender()
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'), 'armed before Ctrl+D')
+  surface.vt.sendInput('\x04') // ctrl+d
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'Ctrl+D exits')
+  assert.ok(!footerLine(surface.vt).includes('Press Ctrl+C again to exit'),
+    `the armed hint must not survive a Ctrl+D exit:\n${surface.vt.getViewport().join('\n')}`)
+})
+
+test('Ctrl+C with text clears the editor AND shows the exit hint', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('abc')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.app.seatTextForTest(), '', 'the editor must be cleared')
+  assert.equal(surface.exits, 0, 'a first Ctrl+C on text must not exit')
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'),
+    `clear-then-arm must show the hint:\n${surface.vt.getViewport().join('\n')}`)
+})
+
+test('a submit clears the armed exit chord', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // arm
+  await surface.vt.waitForRender()
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'), 'armed before submit')
+  surface.vt.sendInput('hello')
+  surface.vt.sendInput('\r') // submit
+  await surface.vt.waitForRender()
+  assert.ok(!footerLine(surface.vt).includes('Press Ctrl+C again to exit'),
+    `a fresh explicit action must disarm the chord:\n${surface.vt.getViewport().join('\n')}`)
+})
+
+test('dispose clears the exit timer (no stale timer fires into a dead surface)', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 50 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // arm
+  await surface.vt.waitForRender()
+  surface.app.dispose()
+  // Past the window: the timer was cleared by dispose — nothing fires, no
+  // crash, no exit. There is no rendered state to poll after dispose, so
+  // the bounded wait only gives a stale timer a chance to fire (an
+  // unhandled error would fail the test); the assertion itself is not
+  // timing-sensitive.
+  const deadline = Date.now() + 100
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await surface.vt.waitForRender()
+  }
+  assert.equal(surface.exits, 0)
+})
+
+test('the compact footer preset still shows the armed hint', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.app.setFooterPreset('compact')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'),
+    `compact must not hide the armed hint (the user just triggered it):\n${surface.vt.getViewport().join('\n')}`)
+})
+
+test('Ctrl+C presses spaced beyond the window do not exit', async () => {
+  const surface = startAppWithExits({ ctrlCExitWindowMs: 80 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'), 'armed: hint visible')
+  // A press beyond the window must only re-arm. Poll for the expiry
+  // instead of sleeping a fixed delay (round-2 finding).
+  await waitFor(() => !footerLine(surface.vt).includes('Press Ctrl+C again to exit'), surface.vt)
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 0, 'a slow second Ctrl+C must not exit')

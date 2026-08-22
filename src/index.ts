@@ -3723,6 +3723,8 @@ export function apply(ctx: Context, config: Config): void {
       app.setSessionTitle(foldSessionTitle(agent.session.events)?.title)
       app.clearLocalMessages()
       app.clearNotify() // a notice from the previous session is stale here
+      // Issue #8: a stale armed exit chord must not exit the NEW session.
+      app.clearCtrlCExit()
       // The subagent-notice notify guard is per-session: a new session's
       // settlements must notify again.
       notifiedSubagentNotices.clear()
