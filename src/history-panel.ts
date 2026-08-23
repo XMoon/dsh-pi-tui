@@ -215,7 +215,7 @@ export class HistoryPanel implements Component, Focusable {
 
   /** Open-time init: run the initial (empty-query) search immediately. */
   start(): void {
-    void this.refresh()
+    void this.refresh() // allowlist: refresh() never rejects (errors land in the panel state)
   }
 
   /** Cancel and forget (called by the host on close). */
@@ -259,7 +259,7 @@ export class HistoryPanel implements Component, Focusable {
     if (this.timer !== undefined) clearTimeout(this.timer)
     this.timer = setTimeout(() => {
       this.timer = undefined
-      void this.refresh()
+      void this.refresh() // allowlist: refresh() never rejects (errors land in the panel state)
     }, this.debounceMs)
     // The first keystroke shows loading immediately (the debounce only
     // delays the file reads, not the state flip).
