@@ -28,6 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before Enter whether the viewer will be interactive; the mode is a
   non-truncatable suffix (a long label clips, the mode never does) and is
   never inferred from running/inactive state.
+- **Focus Mode folds a running turn's intermediate activity into one live
+  Thought block.** `/focus` (or the `Focus mode` row in `/settings`)
+  switches the transcript to a projection: while the agent works, each
+  turn's thinking, tool calls and intermediate replies collapse into a
+  compact `◐ Thought 16s · 8 tools · read ×4 …` card with a reasoning
+  preview and the latest operation. Clicking the card — even while the
+  turn is still running — expands the full live process; new reasoning
+  and tool calls stream into the open region, and the choice survives the
+  turn's end. Focus ON also injects a system-prompt instruction: the user
+  only sees the final text message, so everything they need must land
+  there. The working indicator, session log, search/export, subagent
+  viewer and every other interaction are unchanged, and Focus OFF is
+  exactly the previous behavior.
 - **`Home/End keys` are now configurable in `/settings`.** Two habits
   exist for Home/End in fullscreen: some expect them to move within the
   input, others expect them to scroll the conversation. The new

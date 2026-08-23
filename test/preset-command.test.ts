@@ -140,6 +140,8 @@ function stubRunner(options: {
     },
     recomposeBlank: options.recomposeBlank ?? (async () => ({ kind: 'switched', preset: 'standard' })),
     refreshStatus: () => {},
+    focusEnabled: () => false,
+    setFocusMode: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -428,7 +430,7 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
     get: () => {
       reads += 1
       onGet?.(reads)
-      return { theme: currentTheme, footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport' }
+      return { theme: currentTheme, footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }
     },
     replace: doc => { currentTheme = doc.theme },
   }
