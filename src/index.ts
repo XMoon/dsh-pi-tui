@@ -142,7 +142,7 @@ import {
   type RewindLiveIdentity,
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
-import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
+import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, PublicationStateUnknownError, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 import { OpenLockHolder } from './open-locks.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
@@ -1322,13 +1322,16 @@ export function apply(ctx: Context, config: Config): void {
      * never deletes the durable artifact — review round 8), so a rejected
      * create on a durable id must be RECOVERED, never treated as "never
      * published". Never throws (an unreadable backend degrades to false). */
-    const durablePublished = async (sessionId: string): Promise<boolean> => {
+    const durablePublished = async (sessionId: string): Promise<'durable' | 'not-durable' | 'unknown'> => {
       const persistence = ctx.get('sessionPersistence') as { list?: () => Promise<{ id: string }[]> } | undefined
       try {
         const rows = await persistence?.list?.()
-        return rows?.some(row => row.id === sessionId) ?? false
+        return rows?.some(row => row.id === sessionId) ?? false ? 'durable' : 'not-durable'
       } catch {
-        return false
+        // An unreadable backend cannot confirm: the child MAY be published —
+        // the caller must keep its lock and never fall back (review
+        // round 25).
+        return 'unknown'
       }
     }
 
@@ -1420,6 +1423,9 @@ export function apply(ctx: Context, config: Config): void {
         // fallback case either: it exists and stays locked (review round
         // 17/19) — never silently replace it with a fresh session.
         if (error instanceof DurablePublishedUnrecoverableError) {
+          throw error
+        }
+        if (error instanceof PublicationStateUnknownError) {
           throw error
         }
         const message = safeErrorMessage(error)
@@ -1694,21 +1700,7 @@ export function apply(ctx: Context, config: Config): void {
         },
         acquireTargetLock: (target) => acquireOpenLock(target.id, target.header),
         releaseLock: (sessionId) => releaseOpenLock(sessionId),
-        isDurablePublished: async (sessionId) => {
-          // The persistence backend's LIST only contains materialized
-          // sessions: presence means the child crossed the durable boundary
-          // (a `create` rejection after `session/created` — review round 8).
-          const persistence = ctx.get('sessionPersistence') as { list?: () => Promise<{ id: string }[]> } | undefined
-          try {
-            const rows = await persistence?.list?.()
-            return rows?.some(row => row.id === sessionId) ?? false
-          } catch {
-            // An unreadable backend degrades to "not published": the
-            // recovery path is not entered and the pre-publication abort
-            // runs (the divergence guard remains the write-path backstop).
-            return false
-          }
-        },
+        isDurablePublished: async (sessionId) => durablePublished(sessionId),
         handoverLocks: (next) => {
           // The TARGET lock was REQUIRED and acquired BEFORE the create
           // (phase 2 — target is mandatory and the pre-acquire is verified
@@ -4087,6 +4079,7 @@ export function apply(ctx: Context, config: Config): void {
           // preset-mount fault: the child exists and stays locked — never
           // fall back to a second fresh session (review round 17).
           if (error instanceof DurablePublishedUnrecoverableError) throw error
+          if (error instanceof PublicationStateUnknownError) throw error
           // A preset that resolves but fails to MOUNT (e.g. a row waiting for
           // a host service) rejects inside the agent-factory setup. Surface it
           // and fall back to the default rather than killing the TUI. The

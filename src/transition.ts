@@ -95,6 +95,19 @@ export class DurablePublishedUnrecoverableError extends Error {
   }
 }
 
+/** A child whose publication state could NOT be verified (the persistence
+ * backend was unreadable while deciding whether a rejected create
+ * published): it MAY exist on disk, so it stays locked and no fallback
+ * may run (review round 25 — the old boolean degraded an unreadable
+ * backend to 'not published', which could release the lock of a child
+ * that actually exists). */
+export class PublicationStateUnknownError extends Error {
+  constructor(sessionId: string, detail: string) {
+    super(`cannot confirm whether session ${sessionId} was published (${detail}); it stays locked`)
+    this.name = 'PublicationStateUnknownError'
+  }
+}
+
 /** One open-lock acquisition's state (the host's acquire surface).
  * `unavailable` and `refused` are DISTINCT: an EXISTING target may proceed
  * without a lock (the divergence guard is the write-path backstop), but a
@@ -138,8 +151,10 @@ export interface TransitionHost<T> {
    * `session/created` fired (a later synchronous listener threw; the
    * rollback disposes the agent but never deletes the durable artifact —
    * review round 8), so a rejection does NOT imply the child was never
-   * published. Never throws. */
-  isDurablePublished(sessionId: string): Promise<boolean>
+   * published. The result is THREE-STATE (review round 25): an unreadable
+   * backend settles `unknown` — the child MAY exist, so the caller must
+   * keep its lock and never fall back. Never throws. */
+  isDurablePublished(sessionId: string): Promise<'durable' | 'not-durable' | 'unknown'>
   /** Record one phase failure (the host owns the diagnostics sink). */
   recordFailure(phase: string, error: unknown): void
 }
@@ -160,21 +175,30 @@ export async function createWithPublicationRecovery<T>(deps: {
   create(): Promise<T>
   /** Resume the child after a post-publication rejection (lock held). */
   resume(): Promise<T>
-  /** Whether the child is already durable (persistence list). */
-  isDurablePublished(): Promise<boolean>
+  /** The child's durable state (three-state: an unreadable backend is
+   * 'unknown' — the child MAY be published, so the lock stays and no
+   * fallback may run). */
+  isDurablePublished(): Promise<'durable' | 'not-durable' | 'unknown'>
   /** Release the target lock on a PRE-publication failure only. */
   releaseTargetLock(): void
 }): Promise<T> {
   try {
     return await deps.create()
   } catch (error) {
-    if (await deps.isDurablePublished()) {
+    const published = await deps.isDurablePublished()
+    if (published === 'durable') {
       try {
         return await deps.resume()
       } catch (recoverError) {
         // The child exists and stays locked: never a fallback trigger.
         throw new DurablePublishedUnrecoverableError(deps.targetId, safeErrorMessage(recoverError))
       }
+    }
+    if (published === 'unknown') {
+      // The child MAY exist (the backend could not be read): keep the lock
+      // and abort — never release a possibly-published child (review
+      // round 25).
+      throw new PublicationStateUnknownError(deps.targetId, 'persistence backend unreadable')
     }
     deps.releaseTargetLock()
     throw error
@@ -234,19 +258,27 @@ export async function runTransitionTo<T>(
   try {
     next = await steps.create()
   } catch (error) {
-    if (steps.recover !== undefined && await host.isDurablePublished(steps.target.id)) {
+    const published = await host.isDurablePublished(steps.target.id)
+    if (published === 'durable' && steps.recover !== undefined) {
       try {
         next = await steps.recover()
       } catch (recoverError) {
         // Published but unrecoverable: keep the target lock (the session
         // exists on disk and must not silently become openable as a ghost
         // without its owner knowing) and report the explicit state.
-        host.recordFailure('create', new Error(`${safeErrorMessage(error)}; the child was durable-published but could not be recovered (${safeErrorMessage(recoverError)})`))
+        host.recordFailure('create', new Error(`create failed (${safeErrorMessage(error)}); the child was durable-published but could not be recovered (${safeErrorMessage(recoverError)})`))
         return {
           ok: false,
           message: `transition failed: the child session ${steps.target.id} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); it exists and stays locked`,
         }
       }
+    } else if (published === 'unknown') {
+      // The backend could not confirm the child's state: it MAY exist on
+      // disk — keep the lock and abort rather than release a possibly-
+      // published child (review round 25).
+      const reason = `cannot confirm whether session ${steps.target.id} was published (${safeErrorMessage(error)}); it stays locked`
+      host.recordFailure('create', new Error(reason))
+      return { ok: false, message: `transition failed: ${reason}` }
     } else {
       host.releaseLock(steps.target.id)
       host.recordFailure('create', error)

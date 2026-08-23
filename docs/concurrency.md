@@ -231,9 +231,13 @@ releases the target lock and aborts cleanly; a POST-publication failure
 resumes the published child WITH THE TARGET LOCK STILL HELD and commits
 it as the transition result — the third state (UI says failed, disk has
 a child) is never allowed. A durable child that cannot be recovered
-keeps its lock and reports the explicit state. The same detection
-guards ensureSession's createWithLock and the --session resume
-fallback.
+keeps its lock and reports the explicit state. The publication check is
+THREE-STATE (review round 25): an unreadable persistence backend
+settles `unknown` — the child MAY exist, so the lock stays and no
+fallback may run (the old boolean degraded an unreadable backend to
+"not published", which could release the lock of a child that actually
+exists). The same detection guards ensureSession's createWithLock and
+the --session resume fallback.
 
 `whenIdle()` is an INSTANT check, not a freeze: the old agent can be
 woken again by a followup/steer while the transition still awaits

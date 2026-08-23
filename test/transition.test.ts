@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, runTransitionTo, type TransitionHost, type TransitionSteps } from '../src/transition.ts'
+import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, PublicationStateUnknownError, runTransitionTo, type TransitionHost, type TransitionSteps } from '../src/transition.ts'
 
 /** The handle shape the host drives (structurally the AgentHandle). */
 interface Handle {
@@ -45,6 +45,8 @@ interface FakeHostOptions {
   targetLockUnavailable?: boolean
   /** Whether the child is durable-published when create rejects. */
   durablePublished?: boolean
+  /** Whether the child's publication state cannot be verified. */
+  durablePublishedUnknown?: boolean
   prepareError?: string
   createError?: string
   retireError?: string
@@ -72,7 +74,11 @@ function fakeHost(options: FakeHostOptions = {}): {
       return { kind: 'acquired' }
     },
     releaseLock: (sessionId) => { events.push(`target.lock.release:${sessionId}`) },
-    isDurablePublished: async () => options.durablePublished === true,
+    isDurablePublished: async () => options.durablePublished === true
+      ? 'durable'
+      : options.durablePublishedUnknown === true
+        ? 'unknown'
+        : 'not-durable',
     handoverLocks: () => {
       // The child lock was pre-acquired in phase 2; the COMMIT only
       // releases the old lock (review round 12: no redundant re-acquire).
@@ -248,7 +254,7 @@ test('a durable-published child that CANNOT be recovered keeps its lock and repo
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
     'child.recover',
   ], 'the target lock is NEVER released — the published child must not silently become an openable ghost')
-  assert.deepEqual(failures, ['create:post-publication listener threw; the child was durable-published but could not be recovered (resume repair failed)'])
+  assert.deepEqual(failures, ['create:create failed (post-publication listener threw); the child was durable-published but could not be recovered (resume repair failed)'])
 })
 
 test('review round 17: the unrecoverable-published error is a distinct class, never a fallback trigger', () => {
@@ -282,7 +288,7 @@ test('review round 17/18: an unrecoverable published child — no second create,
         resumes += 1
         throw new Error('resume repair failed')
       },
-      isDurablePublished: async () => true,
+      isDurablePublished: async () => 'durable',
       releaseTargetLock: () => { releases += 1 },
     }),
     (error: unknown) => {
@@ -303,7 +309,7 @@ test('review round 8: a PRE-publication failure releases the lock and rethrows t
       targetId: 'session-c',
       create: async () => { throw new Error('pre-publication') },
       resume: async () => { throw new Error('must not resume') },
-      isDurablePublished: async () => false,
+      isDurablePublished: async () => 'not-durable',
       releaseTargetLock: () => { releases += 1 },
     }),
     /pre-publication/,
@@ -327,7 +333,7 @@ test('review round 19: a resume failure on a durable session recovers the SAME s
       resumes += 1
       return { id: 'session-existing' }
     },
-    isDurablePublished: async () => true,
+    isDurablePublished: async () => 'durable',
     releaseTargetLock: () => { releases += 1 },
   })
   assert.equal(resumes, 2, 'the recovery resumes the same session once')
@@ -342,7 +348,7 @@ test('review round 19: an unrecoverable durable RESUME failure escapes with the 
       targetId: 'session-existing',
       create: async () => { throw new Error('resume publication listener threw') },
       resume: async () => { throw new Error('resume repair failed') },
-      isDurablePublished: async () => true,
+      isDurablePublished: async () => 'durable',
       releaseTargetLock: () => { releases += 1 },
     }),
     (error: unknown) => {
@@ -365,11 +371,42 @@ test('review round 19/20: a stale (never-durable) --session id releases the lock
       targetId: 'session-stale',
       create: async () => { throw new Error('session not found') },
       resume: async () => { resumes += 1; throw new Error('must not resume') },
-      isDurablePublished: async () => false,
+      isDurablePublished: async () => 'not-durable',
       releaseTargetLock: () => { releases += 1 },
     }),
     /session not found/,
   )
   assert.equal(releases, 1, 'the never-durable id releases the lock (the caller falls back to a fresh session)')
   assert.equal(resumes, 0, 'no recovery resume for a session that never existed')
+})
+
+test('review round 25: an UNVERIFIABLE publication state keeps the lock and aborts (never releases a maybe-published child)', async () => {
+  const { host, events, failures } = fakeHost({ durablePublishedUnknown: true })
+  const outcome = await runTransitionTo(host, steps(events, { createError: 'post-publication listener threw' }))
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.ok === false ? outcome.message : '', /cannot confirm whether session/)
+  assert.match(outcome.ok === false ? outcome.message : '', /stays locked/)
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+  ], 'the target lock is NEVER released when the publication state is unverifiable')
+  assert.equal(failures.length, 1)
+})
+
+test('review round 25: the standalone helper treats an unreadable backend as unknown — lock kept, no fallback', async () => {
+  let releases = 0
+  await assert.rejects(
+    createWithPublicationRecovery({
+      targetId: 'session-c',
+      create: async () => { throw new Error('post-publication listener threw') },
+      resume: async () => { throw new Error('must not resume') },
+      isDurablePublished: async () => 'unknown',
+      releaseTargetLock: () => { releases += 1 },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof PublicationStateUnknownError, 'the unknown state escapes as its own class')
+      assert.match((error as Error).message, /stays locked/)
+      return true
+    },
+  )
+  assert.equal(releases, 0, 'a maybe-published child is never released')
 })

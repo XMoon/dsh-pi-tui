@@ -139,7 +139,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps its lock and reports the explicit state (a distinct
   DurablePublishedUnrecoverableError that ensureSession rethrows — never
   a fallback trigger, so an unrecoverable published child can never be
-  silently replaced by a second fresh session).
+  silently replaced by a second fresh session). The publication check is
+  THREE-STATE: an unreadable persistence backend settles `unknown` and
+  the target keeps its lock with an explicit "cannot confirm whether the
+  session was published" error — never a release of a maybe-published
+  child (review round 25).
 - **The double-Esc rewind chord is now truly consecutive.** Any real key
   press between the two Esc presses disarms the window — `Esc → Left →
   Esc` no longer opens the rewind picker (Kitty release/repeat events

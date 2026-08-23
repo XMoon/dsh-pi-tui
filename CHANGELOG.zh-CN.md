@@ -108,7 +108,10 @@
   child 会保持锁并报告明确状态(专用
   `DurablePublishedUnrecoverableError` 会被 ensureSession 直接重抛——
   绝不会触发 fallback,不可恢复的已发布 child 不可能被第二个新会话
-  静默顶替)。
+  静默顶替)。发布状态检测是**三态**的(review round 25):持久化后端
+  不可读时 settle 为 `unknown`——child 可能已存在,因此 target 锁保持、
+  绝不允许 fallback(旧版把"后端不可读"降级为"未发布",可能释放一个
+  实际已发布 child 的锁)。
 - **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
   都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
   release/repeat 事件仍然不计为按键)。
