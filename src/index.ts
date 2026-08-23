@@ -2391,9 +2391,12 @@ export function apply(ctx: Context, config: Config): void {
         app.clearNotify()
         app.setViewerMode(undefined)
         app.setViewerFooter(undefined)
-        // Symmetric with exitView: restore the parent's Focus disclosures
-        // (plan §26) so the focus stack cannot leak across a session swap.
-        app.exitFocusViewerScope()
+        // Session swap: the OLD parent session is gone — its parked Focus
+        // disclosures must be DISCARDED, never restored into the new
+        // session (clearSessionOverrides already dropped the stack; this
+        // keeps the teardown's intent explicit and ordering-safe). The
+        // Esc path uses exitFocusViewerScope instead (restore).
+        app.discardFocusViewerScope()
         repaint(app, folder)
         app.scrollToBottom()
         refreshStatus()

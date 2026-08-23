@@ -2959,6 +2959,17 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
+  /** Leave the subagent-viewer scope WITHOUT restoring: the parent session
+   * is gone (a session swap), so its parked disclosure snapshot must be
+   * DISCARDED — restoring it would leak the old session's turn expansions
+   * into the new one (plan §16.3). Usually a no-op: the swap's
+   * clearSessionOverrides already dropped the stack; this method makes the
+   * teardown's intent explicit and stays correct even if that ordering
+   * ever changes. */
+  discardFocusViewerScope(): void {
+    this.focusExpansionsStack.pop()
+  }
+
   /**
    * Drop cached message components that left the live transcript (window
    * slides forward forever in a long session, so the cache must never grow
@@ -3480,8 +3491,14 @@ export class TuiApp {
     this.expandedOverride.clear()
     // The Focus disclosures are session-scoped transient state too: a
     // switched-in session must never inherit the old session's turn
-    // numbers (plan §16.3). The persisted Focus preference survives.
+    // numbers (plan §16.3). The persisted Focus preference survives. The
+    // VIEWER-SCOPE STACK is equally session-scoped: it holds the old
+    // parent's disclosure snapshot while a subagent viewer is open, and a
+    // session swap must DISCARD it (never restore the old session's turns
+    // into the new one — the swap teardown's discardFocusViewerScope is
+    // then a no-op; see that method).
     this.focusExpandedTurns.clear()
+    this.focusExpansionsStack.length = 0
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
     this.collapsedOccurrences.clear()
