@@ -20,9 +20,9 @@
  * and its physical lock is released only by the cooling verifier after
  * durable parity (or stays pinned on any uncertainty). A clean exit does
  * NOT release touched locks either — they stay as stale records that the
- * next opener's stale-takeover owns. `releaseAll` is a low-level helper
- * (tests / teardown utilities) and is NOT part of the production exit
- * path.
+ * next opener's stale-takeover owns. `releaseAllForTests` is a
+ * TEST/UTILITY helper ONLY (test isolation) and must never be called by
+ * production cleanup.
  * @module @xmoon76/dsh-pi-tui/open-locks
  */
 
@@ -62,8 +62,11 @@ export class OpenLockHolder {
     release()
   }
 
-  /** Release EVERY lock this process holds (clean exit / teardown). */
-  releaseAll(): void {
+  /** TEST/UTILITY helper ONLY: release EVERY lock this process holds.
+   *  MUST NOT be called by production cleanup — a clean exit does NOT
+   *  release touched/pinned locks (they stay as stale records that the
+   *  next opener's stale-takeover owns; see the module doc). */
+  releaseAllForTests(): void {
     for (const release of this.locks.values()) release()
     this.locks.clear()
   }

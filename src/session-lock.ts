@@ -22,8 +22,12 @@
  * - acquire (`O_CREAT|O_EXCL`): the first opener wins. The lock file records
  *   the owner's pid, its `/proc/<pid>/stat` starttime (the pid-reuse guard),
  *   the profile, and a human-readable start time.
- * - release: the owner deletes the file on a clean exit or session switch.
- *   Idempotent — a missing file is not an error.
+ * - release: the physical lock file is unlinked ONLY by the lease layer —
+ *   an UNTOUCHED pre-DSH reservation may be released, and a touched session
+ *   is released only by the VERIFIED COOLING release. A clean exit does NOT
+ *   release touched/PINNED locks: they stay as stale records for the next
+ *   opener's stale takeover (idempotent release — a missing file is not an
+ *   error).
  * - stale takeover: a crashed/killed owner leaves the file behind. The next
  *   opener reads it and probes the recorded pid against /proc: a missing
  *   process, a zombie, a reused pid (starttime mismatch) or a different
@@ -32,6 +36,11 @@
  *   process is currently writing". A live, matching owner is a valid lock
  *   even while idle (SIGSTOP, long GC, laptop sleep) — expiring it early
  *   would create the exact double-writer window the lock exists to prevent.
+ *
+ * `unavailable` means this deployment could not establish the low-level lock
+ * (no persistence / no artifact / no lock dir / write error). Writable TUI
+ * callers MUST FAIL CLOSED on it — the divergence guard is a backstop, never
+ * permission to proceed without an owner lock.
  *
  * The lock only guards TUI-vs-TUI opens. A web surface or an older TUI that
  * knows nothing about the lock can still write concurrently; the divergence
@@ -185,8 +194,9 @@ function tryCreate(
  * Returns `acquired` (with an idempotent `release`), `held` (another live dsh
  * process owns it), `taken-over-stale` (a dead owner's lock was replaced),
  * `unverifiable` (the owner could not be probed — refuse), or `unavailable`
- * (this deployment cannot lock; callers should proceed as before, the guard
- * still protects the write path). Never throws.
+ * (this deployment could not establish the lock — writable TUI callers MUST
+ * fail closed on it; the divergence guard is a backstop, never permission to
+ * proceed). Never throws.
  */
 export function acquireSessionLock(
   deps: { persistence: SessionLockPersistence | undefined; fs: SessionLockFs; proc: SessionLockProc },
@@ -226,7 +236,9 @@ export function acquireSessionLock(
       // is pre-created BEFORE the session exists (review round 7: the
       // target-lock-before-create rule is only real when the lock can
       // physically exist ahead of the session). Without it, no lock is
-      // possible — do not block (the guard still protects the write path).
+      // possible — the acquire settles `unavailable` and the writable
+      // TUI caller fails closed on it (the divergence guard is a
+      // backstop, never permission to proceed).
       if (created.error?.code === 'ENOENT' && fs.mkdirSync !== undefined && !dirPrecreated) {
         try {
           fs.mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 })

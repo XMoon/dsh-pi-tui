@@ -48,17 +48,17 @@ test('releasing an unknown session is a no-op', () => {
   assert.equal(holder.size, 0)
 })
 
-test('releaseAll covers the clean-exit path (a transition may hold two)', () => {
+test('releaseAllForTests drops every recorded lock (test-only helper; a transition may hold two)', () => {
   const holder = new OpenLockHolder()
   const released: string[] = []
   holder.add('session-a', () => { released.push('session-a') })
   holder.add('session-b', () => { released.push('session-b') })
-  holder.releaseAll()
+  holder.releaseAllForTests()
   assert.deepEqual(released.sort(), ['session-a', 'session-b'])
   assert.equal(holder.size, 0)
   assert.equal(holder.has('session-a'), false)
-  // releaseAll is idempotent.
-  holder.releaseAll()
+  // releaseAllForTests is idempotent.
+  holder.releaseAllForTests()
   assert.deepEqual(released.sort(), ['session-a', 'session-b'])
 })
 

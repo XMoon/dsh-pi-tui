@@ -430,6 +430,25 @@ test('reserve() on a LOCKLESS PINNED record is REFUSED (never re-acquired)', () 
   assert.deepEqual(released, [])
 })
 
+test('canReuseLocally on a PINNED lease is FALSE (held AND lockless — the sticky quarantine is not bypassable)', () => {
+  const { manager } = deps()
+  // Held PINNED: the physical lock is present, but the quarantine still
+  // forbids local reuse (a reuse would skip the reserveForActivation
+  // refusal and re-enter the lifecycle).
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.pin('session-a', 'unsettled cooling')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, true)
+  assert.equal(manager.canReuseLocally('session-a'), false, 'a held PINNED lease is never reusable')
+  // Lockless PINNED: no physical lock, and likewise not reusable.
+  manager.pin('session-b', 'resume failed before the lock could be held')
+  assert.equal(manager.state('session-b')?.physicalLockHeld, false)
+  assert.equal(manager.canReuseLocally('session-b'), false, 'a lockless PINNED record is never reusable')
+  // The normal held lifecycle still reports reusable (regression guard).
+  manager.reserve({ id: 'session-c' })
+  assert.equal(manager.canReuseLocally('session-c'), true)
+})
+
 test('PINNED survives an HMR remount (the process-global registry keeps the quarantine)', () => {
   const first = acquireProcessLeaseManager({
     acquire: () => ({ result: { kind: 'acquired' }, release: () => {} }),

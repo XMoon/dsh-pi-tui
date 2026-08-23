@@ -8,11 +8,12 @@
  * for rewind), so the metadata, preset/provider/model inheritance and cwd
  * rules can never drift between the two surfaces.
  *
- * `commitRewind` is the rewind selection workflow (create → swap COMMIT →
- * restore the prompt), with the two stale-selection gates from plan §12:
- * the source must still own the surface before creation (gate 1) and before
- * the swap (gate 2 — a child created into a stale surface is disposed, never
- * left behind as a ghost).
+ * `commitRewind` is the rewind selection workflow (stale check → create →
+ * swap COMMIT → restore the prompt), with ONE authoritative pre-create
+ * stale gate: it MUST run inside the caller's session-transition gate, so
+ * no other transition can interleave and a stale selection never creates a
+ * child at all — once the create succeeds, the child is committed (no
+ * post-create disposal of a "ghost" child exists).
  * @module @xmoon76/dsh-pi-tui/session-fork
  */
 

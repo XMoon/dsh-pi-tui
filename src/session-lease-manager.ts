@@ -434,9 +434,16 @@ export class ProcessSessionLeaseManager {
   }
 
   /** Whether this process may reuse a session locally without re-acquiring
-   *  (it still holds the physical lock). */
+   *  (it still holds the physical lock). A PINNED lease — held OR lockless
+   *  — is NEVER reusable locally: the sticky quarantine must not be
+   *  bypassed through the physical-lock shortcut (the PINNED refusal is
+   *  the only activation outcome for a quarantined session). */
   canReuseLocally(sessionId: string): boolean {
-    return this.leases.get(sessionId)?.physicalLockHeld === true
+    const lease = this.leases.get(sessionId)
+    return (
+      lease?.physicalLockHeld === true &&
+      lease.state !== 'pinned'
+    )
   }
 
   /** Whether reusing a session requires a fresh physical acquire (a
