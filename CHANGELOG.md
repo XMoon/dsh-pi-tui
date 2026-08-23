@@ -78,23 +78,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Session transitions are now a single-writer transaction.** `/new`,
   `/fork`, `/rewind` and `/sessions` switches all run through one unified
-  transaction (`transitionTo`): the OLD session is flushed first, the
-  child is created/resumed next, the commit (lock handover + live
-  replacement + generation bump) is a synchronous critical section, and
-  the old-handle teardown after it is best-effort. Two consequences close
-  the review blockers: (1) two transitions can never interleave — a
-  stale-identity check can no longer pass and then yield across an await
-  while a concurrent switch lands and later gets overwritten; (2) once
-  the child is created it is never "rolled back" — `dispose()` stops an
-  agent but never deletes a persisted session, so the old create-then-
-  flush order could leave a durable ghost branch in `/sessions` when the
-  flush failed after the child was published. Failures now only happen
-  BEFORE the create: a stale rewind selection never creates a child at
-  all, and a failed flush/create leaves the current session untouched.
-  `/new` and `/fork` also dispose nothing "on failure" anymore — there is
-  nothing to dispose, because nothing was published. The fork cwd is
-  captured from the source session before the first await (parent=A
-  cwd=B mixes are impossible).
+  transaction (`transitionTo`, ordered in `src/transition.ts`): the OLD
+  agent is QUIESCED first (`whenIdle` — a transition while the agent is
+  busy now waits for the current activity instead of aborting it), its
+  final flush runs with the old lock still held, the child is
+  created/resumed next, the commit (old-lock release, new-lock acquire,
+  live replacement, generation bump) is a synchronous critical section,
+  and the old-handle teardown after it is best-effort. Three consequences
+  close the review blockers: (1) two transitions can never interleave —
+  a stale-identity check can no longer pass and then yield across an
+  await while a concurrent transition lands and later gets overwritten;
+  (2) once the child is created it is never "rolled back" — `dispose()`
+  stops an agent but never deletes a persisted session, so a failed
+  flush after the create could no longer leave a durable ghost branch;
+  (3) the old session's open lock is only released after the old agent
+  has quiesced — a cancelled RUNNING turn appends its closure events in
+  finally blocks, and releasing the lock earlier would let another dsh
+  process resume the session while those closures are still being
+  written (the two-writers seq collision the lock exists to prevent).
+  Failures only happen BEFORE the create: a stale rewind selection never
+  creates a child at all, and a failed quiesce/flush/create leaves the
+  current session untouched. `/new` and `/fork` dispose nothing "on
+  failure" anymore — there is nothing to dispose, because nothing was
+  published. The fork cwd is captured from the source session before the
+  first await (parent=A cwd=B mixes are impossible).
 - **The double-Esc rewind chord is now truly consecutive.** Any real key
   press between the two Esc presses disarms the window — `Esc → Left →
   Esc` no longer opens the rewind picker (Kitty release/repeat events

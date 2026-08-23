@@ -63,17 +63,23 @@
 ### 修复
 
 - **Session transition 现在是单写事务。** `/new`、`/fork`、`/rewind` 与
-  `/sessions` 切换统一走同一个事务(`transitionTo`):先 flush **旧**会话,
-  再创建/恢复子会话,提交(锁交接 + live 替换 + generation 递增)是同步
-  临界区,之后的旧 handle 收尾是 best-effort。这关闭了两类 review
-  blocker:(1)两个 transition 永远不会交错——身份检查不可能通过后又在
-  await 间隙被并发切换覆盖;(2)子会话一旦创建就**绝不回滚**——
-  `dispose()` 只能停止 agent,不会删除已持久化的会话,旧的"先创建后
-  flush"顺序在 flush 失败时会留下用户从未进入的持久幽灵分支。现在失败
-  只可能发生在 create **之前**:stale 的 rewind 选择根本不会创建子会话,
-  失败的 flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再在
-  "失败"时 dispose 任何东西——因为什么都没发布,自然无可处置。fork 的
-  cwd 在第一个 await 之前从源会话捕获(不可能出现父=A、cwd=B 的混合)。
+  `/sessions` 切换统一走同一个事务(顺序由 `src/transition.ts` 固定并
+  单元测试):先让**旧** agent 安静(`whenIdle`——busy 时的切换现在会
+  等待当前活动结束,而不是打断它),在旧锁仍持有下做最终 flush,再创建/
+  恢复子会话,提交(旧锁释放 + 新锁 + live 替换 + generation 递增)是
+  同步临界区,之后的旧 handle 收尾是 best-effort。这关闭了三个 review
+  blocker:(1)两个 transition 永远不会交错——身份检查不可能在 await
+  间隙被并发切换覆盖;(2)子会话一旦创建就**绝不回滚**——`dispose()`
+  只能停止 agent,不会删除已持久化的会话,旧的"先创建后 flush"顺序在
+  flush 失败时会留下用户从未进入的持久分支;(3)**旧会话的 owner.lock
+  只在旧 agent 安静之后才释放**——被中止的正在运行的回合会在 finally
+  中追加 closure 事件,过早释放锁会让另一个 dsh 进程在 closure 仍在
+  写入时 resume 同一会话(正是该锁要防止的双写 seq 冲突)。现在失败只
+  发生在 create **之前**:stale 的 rewind 选择根本不会创建子会话,失败
+  的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
+  在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。
+  fork 的 cwd 在第一个 await 之前从父会话捕获——避免出现父/child 的
+  cwd 混合。
 - **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
   都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
   release/repeat 事件仍然不计为按键)。

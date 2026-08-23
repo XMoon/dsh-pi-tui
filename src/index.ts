@@ -142,6 +142,7 @@ import {
   type RewindLiveIdentity,
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
+import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -1579,150 +1580,117 @@ export function apply(ctx: Context, config: Config): void {
 
     /**
      * The ONE session-transition transaction, shared by /new, /fork,
-     * conversation rewind and `/sessions` switch/resume. Phase ordering is
-     * the whole point (review round 2):
+     * conversation rewind and `/sessions` switch/resume. The canonical
+     * ordering lives in `runTransitionTo` (src/transition.ts — unit-tested
+     * against the exact phase order); this is the runner's host adapter.
      *
-     *   1. flush the OLD session            — may fail → abort, ZERO child side
-     *                                         effects (the old session stays
-     *                                         live, nothing was published)
-     *   2. caller `prepare` (its own gates  — may fail → abort (the caller is
-     *      / lock pre-checks)                responsible for its own rollback)
-     *   3. create/resume the CHILD          — may fail → abort; once it
-     *                                         SUCCEEDS the child is published
-     *                                         (session/created → persistence
-     *                                         may already write its seed), so
-     *                                         there is NO failure path after
-     *                                         this point that may be
-     *                                         interpreted as "the child never
-     *                                         happened"
-     *   4. COMMIT (a synchronous critical    — lock handover, guard reset,
-     *      section, no awaits)                generation bump, live handle /
-     *                                         agent replacement
-     *   5. RETIRE (async teardown, failures  — old-handle dispose, whenIdle,
-     *      WARN ONLY, never a rollback)       surface rebuild, catalog refresh
+     * The ordering is the whole point (review rounds 2–3):
      *
-     * `AgentHandle.dispose()` stops an agent but never deletes a persisted
-     * session, and dsh has no durable rollback API — so a child is never
-     * "undone" after phase 3. The old code created the child and THEN ran
-     * the fallible old-session flush inside the swap: a flush failure after
-     * the create left a durable ghost branch (`parentSession` set,
-     * `seedLength > 0`) the user never entered, and /new + /fork did not
-     * even dispose their never-live agents. Moving the flush BEFORE the
-     * create closes that: everything that can fail now happens before
-     * anything is published, and everything after the create is
-     * success-oriented teardown.
+     *   1. QUIESCE OLD — `whenIdle()` then the FINAL flush, with the old
+     *      session's open lock still held. `dispose()` is an async
+     *      quiescence and a cancelled RUNNING turn appends its closure
+     *      events (interrupted assistant/message, step/end, turn/end) in
+     *      finally blocks — releasing the old lock before the old agent is
+     *      idle would let another dsh process resume the session while
+     *      those closures are still appended (two-writers/seq-collision).
+     *      Old-idle-then-flush closes that window; may fail → abort with
+     *      ZERO child side effects.
+     *   2. caller `prepare` (rewind's stale gate, switch lock pre-checks)
+     *      — may fail → abort;
+     *   3. create/resume the CHILD — may fail → abort; once it SUCCEEDS the
+     *      child is published (session/created → persistence may already
+     *      write its seed) and there is NO failure path afterwards that may
+     *      be interpreted as "the child never happened" (`dispose()` stops
+     *      an agent but never deletes a persisted session; dsh has no
+     *      durable rollback);
+     *   4. COMMIT — a synchronous critical section (old-lock release,
+     *      new-lock acquire, guard reset, generation bump, live handle /
+     *      agent replacement) with no awaits between its steps;
+     *   5. RETIRE — old-handle dispose (now idle: no abort closures), child
+     *      whenIdle, surface rebuild, catalog refresh — failures WARN ONLY,
+     *      the committed child always stands.
      *
      * Must be called inside {@link transitionGate} (via
      * `withSessionTransition` or the rewind commit's own gate wrapper).
      */
-    const transitionTo = async <T extends AgentHandle>(steps: {
-      /** Runs after the old-session flush, before the create: caller-owned
-       * gates (rewind's identity check) and lock pre-checks. A throw aborts
-       * the transaction; the caller is responsible for undoing anything it
-       * did here (e.g. switchSession re-takes the released from-lock). */
-      prepare?: () => Promise<void> | void
-      /** Create or resume the child. A throw aborts the transaction with no
-       * child published. */
-      create: () => Promise<T>
-    }): Promise<{ ok: true; next: T } | { ok: false; message: string }> => {
+    const transitionTo = async <T extends AgentHandle>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
       const from = liveAgent?.session.id
-      // Phase 1 — flush the old session. Failing here aborts with ZERO
-      // child side effects: the old session stays live and locked.
-      if (liveAgent !== undefined) {
-        try {
-          // Flush BEFORE releasing the old session's open lock: the lock must
-          // cover the old session's last durable write, so a racing opener
-          // cannot resume the session while our flush is still appending from
-          // our in-memory seq (dsh's prepare would synthesize closers into
-          // the shared log and collide with our flush — the exact corruption
-          // the lock exists to prevent).
-          await sessions.flush(liveAgent.session)
-        } catch (error) {
-          const message = safeErrorMessage(error)
-          diag.error('transition prepare failed (flush)', { from, error: message })
-          return { ok: false, message: `transition failed: ${message}` }
-        }
-      }
-      // Phase 2 — caller-owned preparation (rewind's stale gate, the switch
-      // lock pre-check). Failures abort before anything is published.
-      if (steps.prepare !== undefined) {
-        try {
-          await steps.prepare()
-        } catch (error) {
-          const message = safeErrorMessage(error)
-          diag.error('transition prepare failed', { from, error: message })
-          return { ok: false, message: `transition failed: ${message}` }
-        }
-      }
-      // Phase 3 — create the child. From here on there is NO rollback:
-      // the child is published and may already be persisted.
-      let next: T
-      try {
-        next = await steps.create()
-      } catch (error) {
-        const message = safeErrorMessage(error)
-        diag.error('transition create failed', { from, error: message })
-        return { ok: false, message: `transition failed: ${message}` }
-      }
-      // Phase 4 — COMMIT. A synchronous critical section: the old handle is
-      // captured first (retire needs it), then the lock handover, guard
-      // reset, generation bump and live replacement happen with no awaits
-      // between them, so nothing can interleave even without the gate.
       const oldHandle = liveHandle
-      if (from !== undefined) releaseOpenLock(from)
-      // The new session is now ours: take its open lock (a switchSession
-      // that pre-acquired it hits the same-process shortcut and is a no-op;
-      // a refusal is defensive-only — a fresh UUID or a pre-checked switch
-      // cannot be held — and the write-path guard still protects the
-      // session).
-      const transitionLockRefusal = acquireOpenLock(next.agent.session.id, next.agent.session.header)
-      if (transitionLockRefusal !== undefined) {
-        ctx.logger.warn(`tui-runner: lock refused on transition to ${next.agent.session.id}: ${transitionLockRefusal}`)
-        diag.warn('session lock refused on transition', { session: next.agent.session.id })
-      }
-      guardState = freshGuardState()
-      guardToken = undefined
-      // A new session owns the surface: bump the generation so late async
-      // work from the old session cannot commit, and clear old-session state.
-      bumpSessionGeneration()
-      liveHandle = next
-      liveAgent = next.agent
-      // Phase 5 — RETIRE. Async teardown; every failure is recorded and
-      // NEVER rolls the committed child back (there is no durable rollback
-      // primitive — the child is live and may be persisted).
-      const retired: string[] = []
-      if (oldHandle !== undefined) {
-        try {
-          await oldHandle.dispose()
-        } catch (error) {
-          retired.push(`old handle dispose: ${safeErrorMessage(error)}`)
-        }
-      }
-      try {
-        await next.agent.whenIdle()
-      } catch (error) {
-        retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
-      }
-      try {
-        await initLiveSession(next.agent)
-      } catch (error) {
-        retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
-      }
-      // The new owner's catalog refresh is AWAITED before the switch is
-      // reported: the old wrappers became revalidating transitions at the
-      // target change, and the report must not precede the new catalog (a
-      // failed attempt still returns a successful switch — the coordinator
-      // warns and the transition commands keep re-validating).
-      try {
-        await refreshLiveCatalog(next.agent)
-      } catch (error) {
-        retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
-      }
-      if (retired.length > 0) {
-        diag.error('transition retire failed (child committed)', { to: next.agent.session.id, failures: retired })
-      }
-      diag.info('switch ok', { from: from ?? '(none)', to: next.agent.session.id, seq: next.agent.session.events.length })
-      return { ok: true, next }
+      return runTransitionTo<T>({
+        quiesceOld: async () => {
+          if (liveAgent === undefined) return
+          // QUIESCE first: after whenIdle the old agent can no longer
+          // produce turn events, so the final flush below is truly final —
+          // releasing its open lock afterwards cannot race our own
+          // teardown appends. (A /new or /fork while the agent is busy now
+          // WAITS for the current activity instead of aborting it — the
+          // deliberate product semantics, see docs/concurrency.md.)
+          await liveAgent.whenIdle()
+          // Final flush, with the old session's lock still held.
+          await sessions.flush(liveAgent.session)
+        },
+        handoverLocks: (next) => {
+          if (from !== undefined) releaseOpenLock(from)
+          // The new session is now ours: take its open lock (a switchSession
+          // that pre-acquired it hits the same-process shortcut and is a
+          // no-op; a refusal is defensive-only — a fresh UUID or a
+          // pre-checked switch cannot be held — and the write-path guard
+          // still protects the session).
+          const transitionLockRefusal = acquireOpenLock(next.agent.session.id, next.agent.session.header)
+          if (transitionLockRefusal !== undefined) {
+            ctx.logger.warn(`tui-runner: lock refused on transition to ${next.agent.session.id}: ${transitionLockRefusal}`)
+            diag.warn('session lock refused on transition', { session: next.agent.session.id })
+          }
+        },
+        commit: (next) => {
+          guardState = freshGuardState()
+          guardToken = undefined
+          // A new session owns the surface: bump the generation so late
+          // async work from the old session cannot commit, and clear
+          // old-session state.
+          bumpSessionGeneration()
+          liveHandle = next
+          liveAgent = next.agent
+        },
+        retire: async (next) => {
+          const retired: string[] = []
+          if (oldHandle !== undefined) {
+            try {
+              await oldHandle.dispose()
+            } catch (error) {
+              retired.push(`old handle dispose: ${safeErrorMessage(error)}`)
+            }
+          }
+          try {
+            await next.agent.whenIdle()
+          } catch (error) {
+            retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
+          }
+          try {
+            await initLiveSession(next.agent)
+          } catch (error) {
+            retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
+          }
+          // The new owner's catalog refresh is AWAITED before the switch is
+          // reported: the old wrappers became revalidating transitions at
+          // the target change, and the report must not precede the new
+          // catalog (a failed attempt still returns a successful switch —
+          // the coordinator warns and the transition commands keep
+          // re-validating).
+          try {
+            await refreshLiveCatalog(next.agent)
+          } catch (error) {
+            retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
+          }
+          if (retired.length > 0) {
+            diag.error('transition retire failed (child committed)', { to: next.agent.session.id, failures: retired })
+          }
+          diag.info('switch ok', { from: from ?? '(none)', to: next.agent.session.id, seq: next.agent.session.events.length })
+        },
+        recordFailure: (phase, error) => {
+          diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
+        },
+      }, steps)
     }
 
     /** Hand the TUI over to another persisted session. Never throws: every

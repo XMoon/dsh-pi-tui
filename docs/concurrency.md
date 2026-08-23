@@ -167,28 +167,38 @@ runner exposes the gate as `runner.withSessionTransition(task)`.
 
 On top of the gate, all paths share ONE transaction shape
 (`runner.transitionTo` / `RewindCommitHost.transitionTo`), whose phase
-order is the durable-ghost fix:
+order — fixed in `src/transition.ts` (`runTransitionTo`, unit-tested) —
+is the whole point:
 
-1. flush the OLD session — may fail → abort with ZERO child side effects;
-2. caller-owned `prepare` (rewind's stale-identity gate, switch lock
-   pre-checks) — may fail → abort;
+1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush, with the old
+   session's open lock still held. `AgentHandle.dispose()` is an async
+   quiescence (`machine.cancel → whenIdle → scope.dispose`), and a
+   cancelled RUNNING turn appends its closure events (interrupted
+   assistant/message, step/end, turn/end) in `finally` blocks — releasing
+   the old lock before the old agent is idle would let another dsh
+   process resume the session while those closures are still appended
+   (the two-writers/seq-collision this lock exists to prevent).
+   May fail → abort, ZERO child side effects. PRODUCT SEMANTICS: a
+   transition while the agent is busy (/new, /fork, /sessions switch)
+   WAITS for the current activity instead of aborting it;
+2. caller-owned `prepare` (rewind's stale gate, switch lock pre-checks) —
+   may fail → abort;
 3. create/resume the CHILD — may fail → abort; once it SUCCEEDS the child
    is published (`session/created` → persistence may already write its
    seed) and there is NO failure path after this point that may be
-   interpreted as "the child never happened": `AgentHandle.dispose()`
-   stops an agent but never deletes a persisted session, and dsh has no
-   durable rollback API;
-4. COMMIT — a synchronous critical section (lock handover, guard reset,
-   generation bump, live handle/agent replacement) with no awaits between
-   its steps;
-5. RETIRE — old-handle dispose, whenIdle, surface rebuild, catalog
-   refresh; every failure is recorded as diagnostics and NEVER rolls the
-   committed child back.
+   interpreted as "the child never happened": `dispose()` stops an agent
+   but never deletes a persisted session, and dsh has no durable
+   rollback API;
+4. COMMIT — a synchronous critical section (old-lock release, new-lock
+   acquire, guard reset, generation bump, live handle/agent replacement)
+   with no awaits between its steps;
+5. RETIRE — old-handle dispose (now idle: no abort closures), child
+   whenIdle, surface rebuild, catalog refresh; every failure is recorded
+   as diagnostics and NEVER rolls the committed child back.
 
-The old code created the child first and THEN flushed the old session
-inside the swap: a flush failure after the create left a durable ghost
-branch in `/sessions` (`parentSession` set, `seedLength > 0`) the user
-never entered, and /new + /fork did not even dispose their never-live
-agents. Failures now only happen before the create: a stale rewind never
-creates a child at all, and a failed flush/create leaves the current
-session untouched.
+The old code created the child first and THEN flushed the old session:
+a flush failure after the create left a durable ghost branch, and the
+old lock was released before the old agent had quiesced. Failures now
+only happen before the create: a stale rewind never creates a child at
+all, and a failed quiesce/flush/create leaves the current session
+untouched.
