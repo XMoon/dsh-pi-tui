@@ -99,7 +99,7 @@ export interface GlobalLeaseRegistry {
 }
 
 const LEASE_MANAGER_SYMBOL: symbol = Symbol.for(
-  '@xmoon-dsh-pi-tui/process-session-lease-manager',
+  '@xmoon76/dsh-pi-tui/process-session-lease-manager',
 )
 
 /** The per-process session lease manager (one instance per OS process). */
