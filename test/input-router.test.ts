@@ -118,6 +118,15 @@ test('InputRouter: Ctrl+F transcript search is reserved from plugin bindings', (
   assert.equal(r.route('\x06', context(), () => 'open-search').kind, 'consumed')
 })
 
+test('InputRouter: Ctrl+R input-history search is reserved from plugin bindings', () => {
+  const r = router()
+  // Legacy Ctrl+R is \x12; kitty/modifyOtherKeys reports ctrl+r too.
+  assert.equal(r.route('\x12', context(), () => 'open-search').kind, 'consumed')
+  // The key stays consumed under an overlay (the overlay owns it) and in
+  // the read-only viewer (the viewer locks everything except Esc/Ctrl+O).
+  assert.equal(r.route('\x12', context({ hasOverlay: true }), () => 'open-search').kind, 'consumed')
+})
+
 test('InputRouter: reserved host lifecycle keys never reach a plugin binding', () => {
   const r = router()
   // Ctrl+C is reserved: the host ladder handles it; the router reports the
