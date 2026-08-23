@@ -111,7 +111,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   processes holding one session). A same-session switch is refused up
   front, and the failure branches release the target lock only when this
   switch actually acquired it — a failed switch can never drop the
-  current session's lock through a target id.
+  current session's lock through a target id. The target-lock-before-
+  create rule now covers EVERY transition: /new, /fork and rewind
+  pre-generate the child's session id and acquire its open lock BEFORE
+  the create publishes it (a refusal aborts with zero child side
+  effects; a create failure releases the target lock) — no transition
+  can publish a child whose lock it does not already hold.
   Failures happen only BEFORE the create: a stale rewind selection
   never creates a child at all, and a failed quiesce/flush/create leaves
   the current session untouched. `/new` and `/fork` dispose nothing "on

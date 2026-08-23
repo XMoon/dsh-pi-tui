@@ -76,7 +76,7 @@ function stubRunner(
     get sessionGeneration() { return 1 },
     compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
-    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
       return { ok: true, next: await steps.create() }
     },

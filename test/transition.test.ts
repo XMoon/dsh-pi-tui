@@ -39,6 +39,8 @@ interface FakeHostOptions {
   /** whenIdle of the old agent hangs until released (the agent is RUNNING). */
   quiesceHang?: Promise<void>
   quiesceError?: string
+  /** The target lock is refused (another process holds it). */
+  targetLockRefused?: string
   prepareError?: string
   createError?: string
   retireError?: string
@@ -59,6 +61,11 @@ function fakeHost(options: FakeHostOptions = {}): {
       events.push('old.flush')
       if (options.quiesceError !== undefined) throw new Error(options.quiesceError)
     },
+    acquireTargetLock: (target) => {
+      events.push(`target.lock.acquire:${target.id}`)
+      return options.targetLockRefused
+    },
+    releaseLock: (sessionId) => { events.push(`target.lock.release:${sessionId}`) },
     handoverLocks: () => {
       events.push('old.lock.release')
       events.push('child.lock.acquire')
@@ -77,6 +84,7 @@ function fakeHost(options: FakeHostOptions = {}): {
 
 function steps(events: string[], options: { prepareError?: string; createError?: string } = {}): TransitionSteps<Handle> {
   return {
+    target: { id: 'session-c', header: { cwd: '/ws' } },
     prepare: options.prepareError === undefined
       ? async () => { events.push('prepare') }
       : async () => { events.push('prepare'); throw new Error(options.prepareError) },
@@ -91,14 +99,15 @@ test('the canonical order is quiesce → flush → prepare → create → lock h
   const outcome = await runTransitionTo(host, steps(events))
   assert.equal(outcome.ok, true)
   assert.deepEqual(events, [
-    'old.whenIdle',        // 1. the old agent quiesces FIRST (no abort closures later)
-    'old.flush',           // 2. final flush, old lock still held
-    'prepare',             // 3. caller gates
-    'child.create',        // 4. create — published from here on
-    'old.lock.release',    // 5. old lock released only AFTER old is idle+flushed
+    'old.whenIdle',            // 1. the old agent quiesces FIRST (no abort closures later)
+    'old.flush',               // 2. final flush, old lock still held
+    'target.lock.acquire:session-c', // 3. the TARGET lock BEFORE the create (review round 6)
+    'prepare',                 // 4. caller gates
+    'child.create',            // 5. create — published from here on
+    'old.lock.release',        // 6. old lock released only AFTER old is idle+flushed
     'child.lock.acquire',
-    'child.commit',        // 6. synchronous commit
-    'old.dispose',         // 7. dispose of the now-idle old agent
+    'child.commit',            // 7. synchronous commit
+    'old.dispose',             // 8. dispose of the now-idle old agent
   ])
 })
 
@@ -116,7 +125,7 @@ test('review: a RUNNING old agent blocks the transition — no create, no lock r
   const outcome = await pending
   assert.equal(outcome.ok, true)
   assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'prepare', 'child.create',
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
     'old.lock.release', 'child.lock.acquire', 'child.commit', 'old.dispose',
   ])
 })
@@ -129,22 +138,36 @@ test('a quiesce/flush failure aborts with zero child side effects', async () => 
   assert.deepEqual(failures, ['quiesce:flush disk full'])
 })
 
-test('a prepare failure aborts before anything is published', async () => {
+test('a prepare failure aborts before anything is published and releases the target lock', async () => {
   const { host, events, failures } = fakeHost()
   const outcome = await runTransitionTo(host, steps(events, { prepareError: 'lock refused' }))
   assert.equal(outcome.ok, false)
-  assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'prepare'],
-    'the create and the lock handover must not run')
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare',
+    'target.lock.release:session-c',
+  ], 'the create and the lock handover must not run; the target lock is released')
   assert.deepEqual(failures, ['prepare:lock refused'])
 })
 
-test('a create failure aborts without releasing the old lock or committing', async () => {
+test('a create failure aborts, releases the target lock and never touches the old lock', async () => {
   const { host, events, failures } = fakeHost()
   const outcome = await runTransitionTo(host, steps(events, { createError: 'roster unavailable' }))
   assert.equal(outcome.ok, false)
-  assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'prepare', 'child.create'],
-    'the old lock stays held and nothing is committed')
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'target.lock.release:session-c',
+  ], 'the old lock stays held, the target lock is released, nothing is committed')
   assert.deepEqual(failures, ['create:roster unavailable'])
+})
+
+test('review round 6: a REFUSED target lock aborts BEFORE the create (zero child side effects)', async () => {
+  const { host, events, failures } = fakeHost({ targetLockRefused: 'held by another process' })
+  const outcome = await runTransitionTo(host, steps(events))
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.ok === false ? outcome.message : '', /held by another process/)
+  assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'target.lock.acquire:session-c'],
+    'the child must never be created when its lock is refused')
+  assert.deepEqual(failures, ['target-lock:held by another process'])
 })
 
 test('a retire failure NEVER rolls the committed child back', async () => {
@@ -153,7 +176,7 @@ test('a retire failure NEVER rolls the committed child back', async () => {
   assert.equal(outcome.ok, true, 'the child is committed and stands despite the retire failure')
   if (outcome.ok) assert.equal(outcome.next.agent.session.id, 'session-c')
   assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'prepare', 'child.create',
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
     'old.lock.release', 'child.lock.acquire', 'child.commit', 'old.dispose',
   ])
   assert.deepEqual(failures, ['retire:old dispose exploded'])

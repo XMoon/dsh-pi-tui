@@ -177,7 +177,16 @@ order — fixed in `src/transition.ts` (`runTransitionTo`, unit-tested) —
 is the whole point:
 
 1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush, with the old
-   session's open lock still held. `AgentHandle.dispose()` is an async
+   session's open lock still held;
+1b. TARGET LOCK — the child's PRE-GENERATED session id's open lock is
+   acquired BEFORE the create (the old lock is still held — the
+   multi-slot holder). Every fallible ownership operation happens before
+   the durable child is published: a refusal aborts with zero child side
+   effects, and a later prepare/create failure releases the target lock
+   while the old session stays live with its own lock (review round 6:
+   /new, /fork and rewind used to create the child first and acquire its
+   lock only in the COMMIT, leaving a window where another process could
+   grab the published child's lock). `AgentHandle.dispose()` is an async
    quiescence (`machine.cancel → whenIdle → scope.dispose`), and a
    cancelled RUNNING turn appends its closure events (interrupted
    assistant/message, step/end, turn/end) in `finally` blocks — releasing

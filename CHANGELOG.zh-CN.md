@@ -86,7 +86,11 @@
   真空窗口:另一个进程可能在切换未决时拿走旧会话,re-acquire 失败后
   两个进程同时持有同一会话)。同会话切换在入口被拒绝,失败分支也只
   在本次切换确实新获取了目标锁时才释放它——失败的切换永远不会通过
-  目标 id 误伤当前会话的锁。现在失败只
+  目标 id 误伤当前会话的锁。target-lock-before-create 规则现在覆盖
+  所有 transition:`/new`、`/fork` 与 rewind 预生成 child 的 session id,
+  并在 create 发布它**之前**获取其 open lock(拒绝 → 零 child 副作用
+  中止;create 失败 → 释放 target 锁)——任何 transition 都不可能发布
+  一个自己尚未持锁的 child。现在失败只
   发生在 create **之前**:stale 的 rewind 选择根本不会创建子会话,失败
   的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
   在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。

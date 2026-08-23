@@ -17,6 +17,7 @@ import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import {
@@ -293,7 +294,7 @@ function makeRig(options: {
   composePreset?: string
   createError?: string
   /** Full transitionTo override (wins over the default implementation). */
-  transitionTo?: <T extends AgentHandle>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  transitionTo?: <T extends AgentHandle>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
   createHook?: (call: CreatedCall) => void
 } = {}): ForkRig {
   const created: CreatedCall[] = []
@@ -361,7 +362,7 @@ test('C04: createForkedAgent records preset, source cwd, parent, seedLength, pro
   // The source's recorded preset (header) resolves to 'minimal'; its header
   // cwd is '/ws' — the child's cwd is the SOURCE's workspace (the live
   // surface cwd '/other-cwd' only matters for a header without one).
-  const next = await createForkedAgent(rig.host, sourceAgent('session-parent', [], 'minimal'), seed)
+  const next = await createForkedAgent(rig.host, sourceAgent('session-parent', [], 'minimal'), seed, SessionId('session-child'))
   assert.deepEqual(rig.resolved, ['minimal'])
   assert.equal(rig.created.length, 1)
   const call = rig.created[0]!
@@ -398,20 +399,20 @@ test('review P2: the cwd is captured BEFORE the compose await (no parent=A cwd=B
   // The source header has NO cwd: the fallback is the live cwd captured at
   // entry — '/ws-a', never the post-switch '/ws-b'.
   const source = sourceAgent('session-parent', [], undefined, '')
-  await createForkedAgent(host, source, [])
+  await createForkedAgent(host, source, [], SessionId('session-child'))
   assert.equal(created[0]!.meta.cwd, '/ws-a', 'the cwd is the pre-await capture, never the post-switch value')
 })
 
 test('review P2: a source header WITHOUT a cwd falls back to the live surface cwd', async () => {
   const rig = makeRig({ sessionCwd: '/live-fallback' })
   const source = sourceAgent('session-parent', [], undefined, '')
-  await createForkedAgent(rig.host, source, [])
+  await createForkedAgent(rig.host, source, [], SessionId('session-child'))
   assert.equal(rig.created[0]!.meta.cwd, '/live-fallback')
 })
 
 test('createForkedAgent without a preset omits agentPreset from the meta', async () => {
   const rig = makeRig()
-  await createForkedAgent(rig.host, sourceAgent(), [])
+  await createForkedAgent(rig.host, sourceAgent(), [], SessionId('session-child'))
   assert.equal('agentPreset' in rig.created[0]!.meta, false)
 })
 
@@ -621,7 +622,7 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
-    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
       return { ok: true, next: await steps.create() }
     },

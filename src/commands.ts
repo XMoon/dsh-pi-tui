@@ -306,6 +306,11 @@ export interface TuiCommandRunner {
    * this transaction and must run it inside {@link withSessionTransition}.
    */
   transitionTo<T extends AgentHandle>(steps: {
+    /** The child's PRE-GENERATED session identity: the transaction
+     * acquires its open lock BEFORE the create (while the old lock is
+     * still held), so a refusal aborts with zero child side effects and a
+     * later create failure releases the target lock (review round 6). */
+    target?: { id: string; header?: { cwd?: string } }
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
@@ -2029,16 +2034,19 @@ export function registerTuiCommands(
     description: 'Start a fresh session in this workspace',
     handler: () => runner.withSessionTransition(async () => {
       // The unified transaction: the old session is flushed BEFORE the
-      // fresh session is created, the commit is synchronous, and a failure
-      // anywhere before the create leaves the current session untouched
-      // (no published child to roll back — there is no durable rollback).
+      // fresh session is created, the child's lock is acquired BEFORE the
+      // create publishes it (pre-generated id — review round 6), the commit
+      // is synchronous, and a failure anywhere before the create leaves
+      // the current session untouched (no published child to roll back).
+      const sessionId = SessionId(`session-${randomUUID()}`)
       const result = await runner.transitionTo({
+        target: { id: String(sessionId), header: { cwd } },
         create: async () => {
           const liveAgent = runner.liveAgent
           const composition = await runner.compose(runner.pendingPreset)
           const presetId = composition.agentPreset
           return runner.agents.create({
-            sessionId: SessionId(`session-${randomUUID()}`),
+            sessionId,
             meta: metaOf(cwd, presetId),
             // Before the first session the process-wide selection stands in.
             agentOptions: {
@@ -2503,11 +2511,16 @@ export function registerTuiCommands(
       // Shared child creation with rewind (plan §6.2): preset inheritance,
       // live session cwd, provider/model inheritance, parentSession +
       // seedLength metadata — one chain, no drift between the two surfaces.
-      // The create runs inside the unified transaction: the old session is
-      // flushed first, and a failure before the create leaves nothing
-      // behind (no published child, no ghost, no rollback attempt).
+      // The child's id is PRE-GENERATED so the transaction acquires its
+      // open lock BEFORE the create publishes it (review round 6); the
+      // create runs inside the unified transaction, and a failure before
+      // the create leaves nothing behind (no published child, no ghost,
+      // no rollback attempt).
+      const sessionId = SessionId(`session-${randomUUID()}`)
+      const childCwd = source.session.header.cwd || runner.sessionCwd()
       const result = await runner.transitionTo({
-        create: () => createForkedAgent(runner, source, seed),
+        target: { id: String(sessionId), header: { cwd: childCwd } },
+        create: () => createForkedAgent(runner, source, seed, sessionId),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —

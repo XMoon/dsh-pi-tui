@@ -40,12 +40,26 @@ import { safeErrorMessage } from './error-boundary.ts'
 
 /** The caller-owned transition steps (the runner supplies the shared host). */
 export interface TransitionSteps<T> {
-  /** Runs after the old-session quiesce+flush, before the create. A throw
-   * aborts the transaction; the caller is responsible for undoing anything
-   * it did here (e.g. switchSession re-takes the released from-lock). */
+  /**
+   * The child's PRE-GENERATED session identity. When provided, the
+   * transition acquires its open lock BEFORE the create — while the old
+   * lock is still held — so every fallible ownership operation happens
+   * before the durable child is published (review round 6: /new, /fork and
+   * rewind used to create the child first and acquire its lock only in the
+   * COMMIT, leaving a window where another process could grab the
+   * published child's lock and both processes would hold one session).
+   * A refusal aborts with ZERO child side effects; a later prepare/create
+   * failure releases the target lock and the old session stays live with
+   * its own lock.
+   */
+  target?: { id: string; header?: { cwd?: string } }
+  /** Runs after the old-session quiesce+flush and the target-lock acquire,
+   * before the create. A throw aborts the transaction (the target lock is
+   * released); the caller is responsible for undoing anything else it did
+   * here (e.g. switchSession's own pre-checks). */
   prepare?: () => Promise<void> | void
-  /** Create or resume the child. A throw aborts the transaction with no
-   * child published. */
+  /** Create or resume the child. A throw aborts the transaction (the
+   * target lock is released) with no child published. */
   create: () => Promise<T>
 }
 
@@ -58,8 +72,16 @@ export interface TransitionHost<T> {
    * old session's open lock still held. A throw aborts with zero child
    * side effects. A no-op when there is no live agent. */
   quiesceOld(): Promise<void>
+  /** Acquire the TARGET's open lock BEFORE the child is created (the old
+   * lock is still held — the multi-slot holder). Returns the refusal text
+   * or undefined. Never throws. */
+  acquireTargetLock(target: { id: string; header?: { cwd?: string } }): string | undefined
+  /** Release one open lock (idempotent) — the failure paths release the
+   * target lock here; the COMMIT releases the old lock. */
+  releaseLock(sessionId: string): void
   /** Synchronous lock handover: release the old session's lock, acquire
-   * the new one (a refusal is defensive-only and recorded, never fatal). */
+   * the new one (an idempotent no-op when the target was pre-acquired; a
+   * refusal is defensive-only and recorded, never fatal). */
   handoverLocks(next: T): void
   /** Synchronous commit: guard reset, generation bump, live replacement. */
   commit(next: T): void
@@ -85,28 +107,41 @@ export async function runTransitionTo<T>(
     host.recordFailure('quiesce', error)
     return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
   }
-  // Phase 2 — caller-owned preparation. Failures abort before anything is
-  // published (the caller is responsible for its own rollback).
+  // Phase 2 — the TARGET lock, BEFORE the create (the old lock is still
+  // held). Every fallible ownership operation happens before the durable
+  // child is published: a refusal aborts with zero child side effects.
+  if (steps.target !== undefined) {
+    const refusal = host.acquireTargetLock(steps.target)
+    if (refusal !== undefined) {
+      host.recordFailure('target-lock', new Error(refusal))
+      return { ok: false, message: `transition failed: ${refusal}` }
+    }
+  }
+  // Phase 3 — caller-owned preparation. Failures abort before anything is
+  // published; the target lock (if acquired) is released.
   if (steps.prepare !== undefined) {
     try {
       await steps.prepare()
     } catch (error) {
+      if (steps.target !== undefined) host.releaseLock(steps.target.id)
       host.recordFailure('prepare', error)
       return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
     }
   }
-  // Phase 3 — create the child. From here on there is NO rollback.
+  // Phase 4 — create the child. From here on there is NO rollback. A create
+  // failure releases the target lock and leaves the old session untouched.
   let next: T
   try {
     next = await steps.create()
   } catch (error) {
+    if (steps.target !== undefined) host.releaseLock(steps.target.id)
     host.recordFailure('create', error)
     return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
   }
-  // Phase 4 — COMMIT: a synchronous critical section, no awaits.
+  // Phase 5 — COMMIT: a synchronous critical section, no awaits.
   host.handoverLocks(next)
   host.commit(next)
-  // Phase 5 — RETIRE: best-effort teardown; failures are recorded and the
+  // Phase 6 — RETIRE: best-effort teardown; failures are recorded and the
   // committed child always stands.
   try {
     await host.retire(next)
