@@ -74,6 +74,7 @@ import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
 import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
+import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
@@ -190,7 +191,7 @@ const REPAINT_FLUSH_MS = 50
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'exit', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
+  'exit', 'focus', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'preset',
 ])
 
@@ -207,7 +208,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  * body — there is no command-execution wire for skills.
  */
 export const LOCAL_COMMANDS = new Set([
-  'copy', 'exit', 'export', 'fork', 'help', 'image', 'kill', 'login', 'logout',
+  'copy', 'exit', 'export', 'focus', 'fork', 'help', 'image', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
@@ -686,7 +687,10 @@ function packageVersion(): string {
  * @param folder - the incremental fold state for the live session.
  */
 function repaint(app: TuiApp, folder: TranscriptFolder): void {
-  app.setTranscript(folder.messages({ maxTurns: WINDOW_TURNS }))
+  // Messages AND the turn activities come from the SAME fold state: a
+  // repaint must never show a stale Thought header against fresh rows
+  // (plan §19).
+  app.setTranscript(folder.messages({ maxTurns: WINDOW_TURNS }), folder.turnActivities())
 }
 
 /** Current git branch from the nearest .git/HEAD, or empty outside a checkout. */
@@ -1041,6 +1045,14 @@ export interface AgentComposition {
  * @param ctx - the runner context (services read through `ctx.get`).
  * @param selected - the mutable model selection every setup installs.
  * @param presetId - the requested preset, or `undefined` for the default.
+ * @param focusState - the shared Focus runtime state (STRUCTURAL on
+ *   purpose: the public declaration bundle must not inline src/focus.ts —
+ *   the parameter only ever carries the runner's FocusState object, so a
+ *   bare `{ enabled: boolean }` keeps the shipped .d.mts clean); when
+ *   provided, the setup ALSO installs the dynamic Focus system-prompt
+ *   section exactly once per composed agent (plan §9 — every composed
+ *   root TUI agent gets it; /focus toggles never re-register).
+ * @param diag - the diagnostics channel, when the caller has one.
  * @returns the id to record on the header (absent without a roster) and the setup callback.
  * @throws when the roster supplies no such preset.
  */
@@ -1048,12 +1060,18 @@ export async function composeAgent(
   ctx: Context,
   selected: ModelSelectionRef,
   presetId?: string,
+  focusState?: { enabled: boolean },
+  diag?: Diag,
 ): Promise<AgentComposition> {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
     return {
       setup: (agentCtx: Context): void => {
         installModelSelection(agentCtx, selected)
+        // Focus is a TUI surface policy: install it only when the runner
+        // supplied the shared state (other callers — the headless tests —
+        // keep the plain composition).
+        if (focusState !== undefined) installFocusPrompt(agentCtx, focusState, diag)
       },
     }
   }
@@ -1063,6 +1081,14 @@ export async function composeAgent(
     setup: async (agentCtx: Context): Promise<void> => {
       installModelSelection(agentCtx, selected)
       await presets.mount(agentCtx, resolvedId)
+      // Focus is a TUI surface policy, installed AFTER the preset mount so
+      // it exists consistently across every preset (standard/code/minimal/
+      // cordis) without depending on what the preset itself installs
+      // (plan §9.1). A preset recompose that only swaps preset-owned rows
+      // keeps this outer scoped section; a full agent rebuild re-runs this
+      // setup, so the section still lands exactly once. Only the runner
+      // (which owns the shared state) requests the install.
+      if (focusState !== undefined) installFocusPrompt(agentCtx, focusState, diag)
     },
   }
 }
@@ -1176,13 +1202,55 @@ export function apply(ctx: Context, config: Config): void {
     // Early process shutdown can dispose the tree while settlement is pending.
     if (agents === undefined || defaultModel === undefined || sessions === undefined) return
 
+    // Persisted TUI preferences: register the namespace FIRST — before any
+    // agent compose/resume — so the Focus runtime state is restored before
+    // the first model step could assemble (plan §6.1: a resumed agent may
+    // step during startup, and its first prompt assembly must already see
+    // the persisted Focus state). The App-dependent VISUAL applications
+    // (theme/footer/fullscreen/…) still run after the app exists.
+    // Theme values: auto | dark | light | custom:<name>.
+    const tuiSettings = ctx.get('settings')?.register(
+      settingsNamespace('dsh-pi-tui'),
+      z.object({
+        theme: z.string(),
+        footer: z.string(),
+        fullscreen: z.string(),
+        // Busy-Enter delivery mode for plain Enter while the agent is
+        // running (web busyEnter parity): 'queue' (default) or 'steer'.
+        busyEnter: z.string(),
+        // Local-shell sandbox for user-typed `!`/`!!` commands: 'bypass'
+        // (default) runs them outside the dsh sandbox (pi/kimi parity —
+        // the sandbox guards the model's autonomous commands, not the
+        // user's own), 'sandbox' routes them through the dsh shell
+        // capability's policy for deployments that want it applied.
+        localShellSandbox: z.string(),
+        // Home/End navigation behavior (issue #9): 'viewport' (default)
+        // keeps Home/End scrolling the fullscreen conversation; 'input'
+        // makes Home/End move within the input (Ctrl+Home/End scroll).
+        homeEndKeys: z.string(),
+        // Focus Mode: 'on' collapses turn-intermediate activity into a
+        // live Thought block (default 'off' — Focus OFF == current UI).
+        focusMode: z.string(),
+      }),
+      // `history` used to live here (a per-cwd map in the settings
+      // document). It moved to $DSH_HOME/user-history/*.jsonl (see
+      // history.ts); the schema deliberately no longer carries it, so the
+      // stored section drops the key on the next settings write.
+      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
+    )
+    // The ONE authoritative Focus runtime state (plan §5): restored from
+    // the persisted document BEFORE the first compose/resume below, mutated
+    // only through the runner's unified setFocusMode. The system-prompt
+    // section and the TUI projection both read THIS object.
+    const focusState: FocusState = { enabled: focusModeOf(tuiSettings?.get().focusMode) === 'on' }
+
     const selection = defaultModel.currentSelection()
     const agentOptions = { provider: selection.provider, model: selection.model }
     // P6: compose one preset per session when the roster is mounted; with no
     // roster this is exactly the headless shape (model-facing rows in the
     // host plane). The `selected` ref stays process-wide like before.
     const selected: ModelSelectionRef = { current: selection, assembled: undefined }
-    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, selected, presetId)
+    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, selected, presetId, focusState, diag)
     const withPresetMeta = (composition: AgentComposition): { agentPreset?: string } =>
       composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }
 
@@ -2193,10 +2261,21 @@ export function apply(ctx: Context, config: Config): void {
       const match = searchMatches[searchCurrent]
       if (match === undefined) return
       const turn = 'turn' in match ? match.turn : undefined
-      app.setTranscript(activeFolder().messages({
+      // ONE fold snapshot: the anchored message window and the activities
+      // come from the same folder call (plan §19 — a jump must never
+      // combine a fresh window with stale activity data).
+      const folder = activeFolder()
+      app.setTranscript(folder.messages({
         maxTurns: WINDOW_TURNS,
         ...turn === undefined ? {} : { endTurn: turn },
-      }))
+      }), folder.turnActivities())
+      // Focus Mode: the search hits the FULL transcript (hidden process
+      // rows included — plan §23), so a jump into a collapsed turn must
+      // open its Thought for the hit to be visible. The disclosure is not
+      // reverted when search closes.
+      if (turn !== undefined && app.isFocusModeEnabled()) {
+        app.expandFocusTurn(turn)
+      }
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
     /** Enter the read-only subagent viewer for one session (live or persisted). */
@@ -2230,6 +2309,9 @@ export function apply(ctx: Context, config: Config): void {
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
       if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
       viewing = { id: childId, folder: childFolder }
+      // The child's turn numbers are its OWN namespace: the parent's Focus
+      // disclosures must not leak into the child transcript (plan §26).
+      app.enterFocusViewerScope()
       repaint(app, childFolder)
       // The viewer bar covers the editor (read-only placeholder, accent
       // border) and the header badges the mode — the transient notify is
@@ -2243,6 +2325,9 @@ export function apply(ctx: Context, config: Config): void {
       app.clearLocalMessages()
       app.clearNotify() // a viewer notify (if any) is stale now
       app.setViewerMode(undefined)
+      // Restore the parent's Focus disclosures BEFORE the repaint so the
+      // projection uses them (plan §26).
+      app.exitFocusViewerScope()
       repaint(app, folder)
       // The main transcript may have grown while the viewer covered it (the
       // child's result, the parent's streaming): anchor the view to the end
@@ -3464,34 +3549,6 @@ export function apply(ctx: Context, config: Config): void {
         (force) => app.requestRender(force),
       )
     }
-    // Persisted TUI preferences: register the namespace and restore the
-    // theme + footer preset. Theme values: auto | dark | light | custom:<name>.
-    const tuiSettings = ctx.get('settings')?.register(
-      settingsNamespace('dsh-pi-tui'),
-      z.object({
-        theme: z.string(),
-        footer: z.string(),
-        fullscreen: z.string(),
-        // Busy-Enter delivery mode for plain Enter while the agent is
-        // running (web busyEnter parity): 'queue' (default) or 'steer'.
-        busyEnter: z.string(),
-        // Local-shell sandbox for user-typed `!`/`!!` commands: 'bypass'
-        // (default) runs them outside the dsh sandbox (pi/kimi parity —
-        // the sandbox guards the model's autonomous commands, not the
-        // user's own), 'sandbox' routes them through the dsh shell
-        // capability's policy for deployments that want it applied.
-        localShellSandbox: z.string(),
-        // Home/End navigation behavior (issue #9): 'viewport' (default)
-        // keeps Home/End scrolling the fullscreen conversation; 'input'
-        // makes Home/End move within the input (Ctrl+Home/End scroll).
-        homeEndKeys: z.string(),
-      }),
-      // `history` used to live here (a per-cwd map in the settings
-      // document). It moved to $DSH_HOME/user-history/*.jsonl (see
-      // history.ts); the schema deliberately no longer carries it, so the
-      // stored section drops the key on the next settings write.
-      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport' } },
-    )
     // Fullscreen is a persisted preference like the theme and the footer
     // (new installs default to 'on' — alt screen by default): boot applies
     // it FIRST so the alt screen owns the terminal input handler before any
@@ -3986,6 +4043,24 @@ export function apply(ctx: Context, config: Config): void {
         diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
       }
     }
+    /** The UNIFIED Focus setter (plan §7): the runtime state and the TUI
+     * surface mutate IMMEDIATELY (a persistence failure must never leave
+     * the UI on the old state); the settings write is detached and
+     * best-effort — a failure notifies and the next boot may restore the
+     * old value. Every mutation path (/focus, /settings) goes through
+     * this — there is exactly one authoritative state (plan §5). */
+    const setFocusMode = (enabled: boolean): void => {
+      focusState.enabled = enabled
+      app.setFocusMode(enabled)
+      const settings = tuiSettings
+      if (settings !== undefined) {
+        runDetached('settings focus write', () => settings.replace({ ...settings.get(), focusMode: enabled ? 'on' : 'off' }) as Promise<unknown>, {
+          diag,
+          notify: (message) => app.notify(`focus mode persistence failed: ${message}`, 'error'),
+          recoverable: () => true,
+        })
+      }
+    }
     // The per-TUI draft image registry (plan §5.2): staged clipboard/file
     // bytes for the current run. Cleared on submit/session-switch/dispose —
     // never touches durable attachments the harness already accepted.
@@ -4040,6 +4115,10 @@ export function apply(ctx: Context, config: Config): void {
       signal,
       get sessionGeneration() { return sessionGeneration },
       compose,
+      /** Focus Mode surface (plan §32.1): the /focus and /settings commands
+       * read the runtime state and mutate it through the ONE setter. */
+      focusEnabled: () => focusState.enabled,
+      setFocusMode,
       get pendingPreset() { return pendingPreset },
       set pendingPreset(id: string | undefined) { pendingPreset = id },
       /** The effective preset id for COLD (sessionless) reads: the run-local

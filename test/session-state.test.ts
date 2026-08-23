@@ -79,6 +79,8 @@ function stubRunner(
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},
+    focusEnabled: () => false,
+    setFocusMode: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     // The merged /tasks browser: jobs + subagents, Enter routes to
