@@ -689,7 +689,9 @@ test('the subagent mode suffix renders after the label and survives truncation',
   )
   const narrow = narrowPanel.render(40).map(strip).join('\n')
   assert.ok(narrow.includes('· one-shot'), `the mode must survive the narrow frame:\n${narrow}`)
-  assert.ok(narrow.includes('…'), `the clipped label must show the ellipsis:\n${narrow}`)
+  // The SELECTED row marquees (plan §7): the label window shows the label
+  // start (the initial pause), never a static ellipsis; the mode suffix
+  // stays fixed. Unselected rows keep the ellipsis (covered elsewhere).
   assert.ok(!narrow.includes('keeps-growing'), `the label tail should be clipped on the narrow frame:\n${narrow}`)
 })
 
@@ -713,7 +715,10 @@ test('the mode suffix is a HARD layout right: extreme widths compress label and 
   // 30 cols: the label clips, the mode and the tail survive.
   const medium = render(30)
   assert.ok(medium.includes('· one-shot'), `mode must survive 30 cols:\n${medium}`)
-  assert.ok(medium.includes('…'), `clipped label must show the ellipsis:\n${medium}`)
+  // The selected row marquees: no static ellipsis (the label window shows
+  // the label start during the initial pause), and the mode suffix + the
+  // status tail stay fixed (plan §7.5).
+  assert.ok(!medium.includes('…'), `a selected overflow row must marquee, not ellipsis:\n${medium}`)
   assert.ok(medium.includes('inactive'), `tail must survive 30 cols:\n${medium}`)
   // 16 cols (physically fits `→ ● one-shot`): the label and tail yield
   // entirely, the MODE stays — the viewer's interactivity is a pre-Enter

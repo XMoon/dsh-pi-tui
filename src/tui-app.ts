@@ -38,6 +38,7 @@ import {
   type Focusable,
   type OverlayHandle,
   type OverlayOptions,
+  type SelectListTruncatePrimaryContext,
   type SettingItem,
   type SlashCommand,
   type Terminal,
@@ -58,6 +59,7 @@ import {
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
 import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
+import { SelectedMarquee } from './marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
   firstLine,
@@ -928,6 +930,19 @@ export interface PickerOptions {
    * picker opens on `categories[0]`; the caller's `items` argument is only
    * the initial rows (the first category's factory wins on activation). */
   categories?: readonly PickerCategory[]
+  /**
+   * Marquee the SELECTED row's primary label when it overflows (plan §7):
+   * the label scrolls horizontally cell by cell while selected; every
+   * other region (tree connector, current marker, description) stays
+   * fixed. Only the selected row animates, at most one timer per picker,
+   * disposed on close. `labelPartsOf` splits the presentation prefix
+   * (tree connector + current marker) from the marqueeable title so the
+   * prefix never scrolls (plan §7.7); `now` injects the clock (tests).
+   */
+  marquee?: {
+    labelPartsOf?: (label: string) => { prefix: string; title: string }
+    now?: () => number
+  }
 }
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
@@ -7000,11 +7015,33 @@ export class TuiApp {
       return this.openCategorizedPicker(items, onSelect, onCancel,
         options as PickerOptions & { categories: readonly PickerCategory[] })
     }
+    // Selected-row label marquee (plan §7): ONE driver per picker, armed
+    // only while the SELECTED row overflows, disposed on close. The
+    // truncatePrimary seam keeps the tree connector / current marker as a
+    // fixed prefix — only the title scrolls (plan §7.7).
+    const marquee = options.marquee === undefined ? undefined : new SelectedMarquee({
+      requestRender: () => this.requestRender(),
+      now: options.marquee.now,
+    })
+    const layout = marquee === undefined ? {} : {
+      truncatePrimary: (ctx: SelectListTruncatePrimaryContext) => {
+        if (!ctx.isSelected) return truncateToWidth(ctx.text, ctx.maxWidth, '')
+        const parts = options.marquee!.labelPartsOf?.(ctx.text) ?? { prefix: '', title: ctx.text }
+        const prefixWidth = visibleWidth(parts.prefix)
+        const window = marquee.render({
+          key: ctx.item.value,
+          text: parts.title,
+          maxWidth: Math.max(1, ctx.maxWidth - prefixWidth),
+          selected: true,
+        })
+        return parts.prefix + window
+      },
+    }
     const list = new SelectList(
       items.map(item => ({ ...item })),
       10,
       selectListTheme,
-      {},
+      layout,
       {
         enableSearch: options.enableSearch,
         header: options.header,
@@ -7013,6 +7050,10 @@ export class TuiApp {
         initialQuery: options.initialQuery,
       },
     )
+    if (marquee !== undefined) {
+      // A selection move re-anchors the marquee cycle (fresh pause).
+      list.onSelectionChange = () => marquee.reset()
+    }
     const handle = this.showOverlayOnHost(new Frame(list, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
@@ -7040,17 +7081,20 @@ export class TuiApp {
     }
     list.onSelect = (item) => {
       removeAbortListener()
+      marquee?.dispose()
       handle.hide()
       onSelect(item.value)
     }
     list.onCancel = () => {
       removeAbortListener()
+      marquee?.dispose()
       handle.hide()
       onCancel()
     }
     return {
       close: () => {
         removeAbortListener()
+        marquee?.dispose()
         handle.hide()
       },
       setItems: (next) => {
@@ -7080,6 +7124,27 @@ export class TuiApp {
     let currentIndex = 0
     let overlay: OverlayHandle | undefined
     let list: SelectList | undefined
+    // Selected-row label marquee (plan §7): ONE driver for the whole
+    // categorized picker (a category switch rebuilds the SelectList, the
+    // marquee survives — the fresh list re-anchors it), disposed on close.
+    const marquee = options.marquee === undefined ? undefined : new SelectedMarquee({
+      requestRender: () => this.requestRender(),
+      now: options.marquee.now,
+    })
+    const layout = marquee === undefined ? {} : {
+      truncatePrimary: (ctx: SelectListTruncatePrimaryContext) => {
+        if (!ctx.isSelected) return truncateToWidth(ctx.text, ctx.maxWidth, '')
+        const parts = options.marquee!.labelPartsOf?.(ctx.text) ?? { prefix: '', title: ctx.text }
+        const prefixWidth = visibleWidth(parts.prefix)
+        const window = marquee.render({
+          key: ctx.item.value,
+          text: parts.title,
+          maxWidth: Math.max(1, ctx.maxWidth - prefixWidth),
+          selected: true,
+        })
+        return parts.prefix + window
+      },
+    }
     // The live search query, carried across category switches (the rebuilt
     // SelectList re-applies it via initialQuery).
     let query = ''
@@ -7093,6 +7158,7 @@ export class TuiApp {
           options.signal.removeEventListener('abort', onAbort)
           onAbort = undefined
         }
+        marquee?.dispose()
         overlay?.hide()
       },
       cycle: () => {
@@ -7109,7 +7175,7 @@ export class TuiApp {
         category.items().map(item => ({ ...item })),
         10,
         selectListTheme,
-        {},
+        layout,
         {
           enableSearch: options.enableSearch,
           header: category.header,
@@ -7118,6 +7184,7 @@ export class TuiApp {
           initialQuery: query === '' ? options.initialQuery : query,
         },
       )
+      if (marquee !== undefined) next.onSelectionChange = () => marquee.reset()
       next.onSelect = (item) => {
         query = next.getFilter()
         state.close()

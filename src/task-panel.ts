@@ -14,6 +14,7 @@
 import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { color, taskStatusColor } from './theme.ts'
+import { SelectedMarquee } from './marquee.ts'
 
 /** One row of the task browser (the app layer's PickerItem equivalent). */
 export interface TaskPanelItem {
@@ -120,6 +121,9 @@ export class TaskBrowserPanel implements Component, Focusable {
   /** Latched by dispose(): an in-flight tick callback must not render. */
   private disposed = false
   private readonly requestRender: () => void
+  /** The selected-row label marquee (plan §7): ONE per panel, armed only
+   * while a selected overflowing row is visible, disposed with the panel. */
+  private readonly marquee = new SelectedMarquee({ requestRender: () => this.requestRender() })
   private _focused = false
 
   constructor(
@@ -254,6 +258,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.disposed = true
     if (this.tickTimer !== undefined) clearInterval(this.tickTimer)
     this.tickTimer = undefined
+    this.marquee.dispose()
   }
 
   get focused(): boolean {
@@ -480,8 +485,16 @@ export class TaskBrowserPanel implements Component, Focusable {
       // its width; the tree connector + label truncate to the rest; the
       // whole line is truncated as the final backstop).
       const labelBudget = Math.max(0, available - tailWidth - 2 - treeWidth)
-      const truncated = truncateToWidth(item.label, labelBudget, '…')
-      const leftFinal = leftPrefix + tree + (selected ? color.textStrong(truncated) : color.text(truncated))
+      // The SELECTED label marquees inside its fixed budget (plan §7.5);
+      // unselected rows keep the ellipsis. The tree connector, suffix and
+      // tail are separate fixed regions — they never move.
+      const labelWindow = this.marquee.render({
+        key: item.value,
+        text: item.label,
+        maxWidth: labelBudget,
+        selected,
+      })
+      const leftFinal = leftPrefix + tree + (selected ? color.textStrong(labelWindow) : color.text(labelWindow))
       const pad = Math.max(1, available - visibleWidth(leftFinal) - tailWidth)
       const line = leftFinal + ' '.repeat(pad) + tail
       const out = [truncateToWidth(line, width, '…')]
@@ -502,10 +515,15 @@ export class TaskBrowserPanel implements Component, Focusable {
     // suffix and tail leave). The tail is dropped entirely only when the
     // label is already at zero and the mode would otherwise be cut.
     const labelLimit = Math.max(0, available - treeWidth - suffixWidth - tailWidth - 1)
-    const truncated = truncateToWidth(item.label, labelLimit, '…')
+    const labelWindow = this.marquee.render({
+      key: item.value,
+      text: item.label,
+      maxWidth: labelLimit,
+      selected,
+    })
     const leftFinal = leftPrefix
       + tree
-      + (selected ? color.textStrong(truncated) : color.text(truncated))
+      + (selected ? color.textStrong(labelWindow) : color.text(labelWindow))
       + (selected ? color.textStrong(suffix) : color.text(suffix))
     const leftFinalWidth = visibleWidth(leftFinal)
     const tailPart = tailWidth <= width - leftFinalWidth

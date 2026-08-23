@@ -14,6 +14,7 @@ import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   buildSessionTree,
   headerToPickerRow,
+  sessionLabelParts,
   sessionPickerItem,
   type SessionPickerItem,
   type SessionPickerRow,
@@ -357,5 +358,53 @@ test('an ALREADY-aborted signal never mounts the categorized picker', async () =
   assert.ok(!view.includes('sessions · Main'), `the cancelled picker frame must not render:\n${view}`)
   // The handle is inert but safe to close.
   handle.close()
+  app.stop()
+})
+
+test('sessionLabelParts splits the tree prefix and marker from the title', () => {
+  // Flat row: no prefix.
+  assert.deepEqual(sessionLabelParts('long title'), { prefix: '', title: 'long title' })
+  // Current-session marker is a fixed prefix, not marqueeable.
+  assert.deepEqual(sessionLabelParts('● long title'), { prefix: '● ', title: 'long title' })
+  // Lineage connector indents by depth.
+  assert.deepEqual(sessionLabelParts('  └─ long title'), { prefix: '  └─ ', title: 'long title' })
+  assert.deepEqual(sessionLabelParts('    └─ ● long title'), { prefix: '    └─ ● ', title: 'long title' })
+})
+
+test('the session picker marquees a long SELECTED title while the marker and lineage stay fixed', async () => {
+  const { vt, app } = startApp()
+  const longTitle = 'a-very-long-session-title-that-keeps-growing-and-never-fits'
+  const rows = [
+    { value: 'session-root', label: '● short-title', description: 'meta', group: 'w' },
+    { value: 'session-long', label: `  └─ ● ${longTitle}`, description: 'meta', group: 'w' },
+  ]
+  const now = { value: 0 }
+  const handle = app.openPicker(rows, () => {}, () => {}, {
+    enableSearch: false,
+    width: 76,
+    maxHeight: 26,
+    marquee: { labelPartsOf: sessionLabelParts, now: () => now.value },
+  })
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  // The FIRST row is selected initially (the long row is second).
+  assert.ok(view.includes('→ ● short-title'), `first row selected:\n${view}`)
+  // Move down: the long title becomes the selected row.
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('└─ ●'), `the fixed tree+marker prefix must render:\n${view}`)
+  assert.ok(view.includes('a-very-long-session-tit'), `the marquee window must show the title (initial pause):\n${view}`)
+  // Advance the fake clock, then force a repaint (setItems re-renders):
+  // the title window scrolls while the fixed prefix never moves.
+  now.value += 800 + 250
+  handle.setItems(rows)
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('└─ ●'), `the fixed prefix must never scroll:\n${view}`)
+  // At least one cell of motion: the window differs from the start.
+  const row = view.split('\n').find(line => line.includes('└─ ●')) ?? ''
+  assert.ok(!row.includes('a-very-long-session-title-that-keeps-'), 'the window must have moved')
   app.stop()
 })
