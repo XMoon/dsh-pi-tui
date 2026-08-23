@@ -1292,7 +1292,7 @@ export function apply(ctx: Context, config: Config): void {
       heldLock = undefined
     }
     /** Re-take the lock for the still-live current session after a failed
-     * switch (refusal, resume failure, or an internal swap failure). The
+     * switch (refusal, resume failure, or an internal transition failure). The
      * lock was released before the target acquire, so another process may
      * have taken it in the window — the re-take result is checked and a
      * failed re-take surfaces as a notice (the write-path guard remains the
@@ -1569,9 +1569,9 @@ export function apply(ctx: Context, config: Config): void {
      * with another: a fork child could be created (and its seed published
      * to persistence) before a stale check sees the surface already moved —
      * `dispose()` stops the agent but never deletes the persisted session —
-     * and a stale identity check could pass, then yield inside the swap's
-     * dispose await, letting a concurrent switch land and later get
-     * overwritten. The rewind commit holds the gate from BEFORE
+     * and a stale identity check could pass, then yield across an await
+     * inside the commit preparation, letting a concurrent switch land and
+     * later get overwritten. The rewind commit holds the gate from BEFORE
      * `createForkedAgent` (the create itself is inside the exclusive
      * section), so a stale rewind never creates a child at all.
      * @see SessionTransitionGate */
@@ -1728,52 +1728,55 @@ export function apply(ctx: Context, config: Config): void {
     /** Hand the TUI over to another persisted session. Never throws: every
      * failure (unknown session, broken log, preset mount) returns an error
      * string so callers' `.then(error => ...)` need no rejection path. The
-     * whole switch (lock dance → compose → resume → swap) runs inside the
+     * whole switch (lock pre-checks → compose → resume → commit) runs inside the
      * session-transition gate, so it can never interleave with /new, /fork
      * or a rewind commit (the single-writer rule). */
     const switchSession = (sessionId: string): Promise<string | undefined> =>
       transitionGate.run(() => switchSessionLocked(sessionId))
 
     const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
-      // Draft cleanup happens ONLY after the switch committed (swapTo
-      // returned success): a refused/failed switch keeps the CURRENT
+      // Draft cleanup happens ONLY after the switch committed (the
+      // transaction returned ok): a refused/failed switch keeps the CURRENT
       // session and its staged drafts intact — clearing up front would
       // orphan the editor's placeholders on every failed switch (review
       // finding 2).
       try {
-        // The tracker is a single slot: acquiring the target first would
-        // overwrite it, leaving the current session's lock leaked for the
-        // whole TUI lifetime (the transition's release-by-id would then be a
-        // no-op). So release the current lock BEFORE taking the target's. If
-        // the target is refused, re-take the current lock — the current
-        // session stays live and must stay protected. (Flushing happens
-        // inside transitionTo, before the resume.)
+        // The unified transaction: the OLD session is flushed FIRST (with
+        // its lock still held — the flush-before-release rule), then the
+        // `prepare` phase takes the TARGET's lock (the tracker is a single
+        // slot, so the current lock is released before the target acquire;
+        // a refusal re-takes the current lock below), then the resume
+        // publishes the child. A failure anywhere before the create leaves
+        // nothing behind.
         const from = liveAgent?.session.id
-        if (from !== undefined) releaseOpenLock(from)
-        // Refuse to switch into a session another live dsh process holds —
-        // same corruption risk as the --session launch path.
-        let lockHeader: { cwd?: string } | undefined
-        try {
-          const persistence = ctx.get('sessionPersistence')
-          lockHeader = (await persistence?.list())?.find(candidate => candidate.id === sessionId)
-        } catch {
-          // Best-effort; the resume path reports failures.
-        }
-        const lockRefusal = acquireOpenLock(sessionId, lockHeader)
-        if (lockRefusal !== undefined) {
-          ctx.logger.warn(`tui-runner: switch to ${sessionId} refused: ${lockRefusal}`)
-          diag.warn('session lock held on switch', { session: sessionId })
-          // The switch did not happen: the current session is still live and
-          // must keep its lock (best-effort — an unavailable deployment has
-          // no lock to re-take and the guard still protects the write path).
-          reacquireCurrentLock(from)
-          return lockRefusal
-        }
-        // The resume (with the target's recorded preset, exactly like the
-        // launch path) runs inside the unified transaction: the old session
-        // is flushed BEFORE the resume publishes the child, and a failure
-        // anywhere before the create leaves nothing behind.
         const result = await transitionTo({
+          prepare: async () => {
+            // The tracker is a single slot: the target lock may be taken
+            // only after the current lock is released — and the old-session
+            // flush in phase 1 has already run WITH the current lock held
+            // (the flush-before-release rule), so this release is safe.
+            if (from !== undefined) releaseOpenLock(from)
+            // Refuse to switch into a session another live dsh process holds
+            // — same corruption risk as the --session launch path.
+            let lockHeader: { cwd?: string } | undefined
+            try {
+              const persistence = ctx.get('sessionPersistence')
+              lockHeader = (await persistence?.list())?.find(candidate => candidate.id === sessionId)
+            } catch {
+              // Best-effort; the resume path reports failures.
+            }
+            const lockRefusal = acquireOpenLock(sessionId, lockHeader)
+            if (lockRefusal !== undefined) {
+              ctx.logger.warn(`tui-runner: switch to ${sessionId} refused: ${lockRefusal}`)
+              diag.warn('session lock held on switch', { session: sessionId })
+              // The switch did not happen: the current session is still live
+              // and must keep its lock (best-effort — an unavailable
+              // deployment has no lock to re-take and the guard still
+              // protects the write path).
+              reacquireCurrentLock(from)
+              throw new Error(lockRefusal)
+            }
+          },
           create: async () => {
             const composition = await compose(await recordedPreset(ctx, sessionId))
             return agents.resume({
@@ -4125,7 +4128,7 @@ export function apply(ctx: Context, config: Config): void {
      * The conversation rewind picker (the ONE entry shared by the idle
      * empty-editor double-Esc and `/rewind` — plan §22). Lists the completed
      * user turns of the live session; a selection commits through
-     * `commitRewind` (create → swap → prompt restore) as an OWNED task with
+     * `commitRewind` (create → commit → prompt restore) as an OWNED task with
      * the stale-generation gates. Sessionless (deferred start) it notifies
      * and never creates a session.
      */
@@ -4172,11 +4175,11 @@ export function apply(ctx: Context, config: Config): void {
           const candidate = candidates.find(item => String(item.turnStartSeq) === value)
           if (candidate === undefined) return
           runOwned('conversation rewind', () => {
-            // The WHOLE commit — gate 1 → create → swap → restore — runs
+            // The WHOLE commit — gate 1 → create → commit → restore — runs
             // inside the session-transition gate: no other transition can
             // interleave, so a stale rewind is detected BEFORE the child is
             // created (never a published-and-disposed durable ghost), and
-            // the swap can never be overwritten by a concurrent switch.
+            // the commit can never be overwritten by a concurrent switch.
             return transitionGate.run(() => commitRewind(commitHost, source, candidate, {
               sessionId: sourceId,
               generation: sourceGeneration,
@@ -4209,7 +4212,7 @@ export function apply(ctx: Context, config: Config): void {
             onError: (error) => {
               // Failed compose/create keeps the CURRENT session, the picker
               // is closed, the editor draft is untouched (commitRewind never
-              // writes it before the swap commits).
+              // writes it before the transaction commits).
               app.notify(safeErrorMessage(error), 'error')
             },
           })
@@ -4298,7 +4301,7 @@ export function apply(ctx: Context, config: Config): void {
       openTasksBrowser,
       openRewindPicker,
       // The single-writer session-transition gate: /new, /fork and the
-      // command-side switches run their create AND swap inside one
+      // command-side switches run their create AND commit inside one
       // exclusive section via this seam (rewind goes through
       // openRewindPicker's own gate wrapper).
       withSessionTransition: <T>(task: () => Promise<T> | T) => transitionGate.run(task),
