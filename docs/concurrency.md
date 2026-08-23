@@ -155,17 +155,39 @@ overlap across their awaits:
   old-handle `dispose()` await, letting a concurrent switch land and later
   be overwritten by the first continuation.
 
-The fix (`src/transition-gate.ts`) is a **process-local single-writer
-queue**: every transition path runs its whole workflow — prepare/create →
-flush → dispose old → assign new → generation bump — inside
-`SessionTransitionGate.run`, held from BEFORE the child create (for rewind)
-or the resume (for switches) until the swap commits. Tasks are strictly
-FIFO; a rejected task never blocks the queue; re-entering the gate from
-inside a task is refused loudly (AsyncLocalStorage detects it — re-entry
-would deadlock the queue). The runner exposes the gate as
-`runner.withSessionTransition(task)`; the rewind commit wraps
-`commitRewind` itself, so a stale selection is detected before any child
-exists. The swap's `expected`-identity check and the commit's stale gates
-remain as the defensive second line — with the gate held they are
-unreachable in practice, but they protect against future callers that
-forget the gate.
+The fix has two layers. `src/transition-gate.ts` is a **process-local
+single-writer queue**: every transition path runs inside
+`SessionTransitionGate.run`, held from BEFORE the child create (for
+rewind) or the resume (for switches) until the transaction settles. Tasks
+are strictly FIFO; a rejected task fails its own caller and never blocks
+the queue; re-entering the gate from inside a task is refused loudly
+(AsyncLocalStorage detects it — re-entry would deadlock the queue). The
+runner exposes the gate as `runner.withSessionTransition(task)`.
+
+On top of the gate, all paths share ONE transaction shape
+(`runner.transitionTo` / `RewindCommitHost.transitionTo`), whose phase
+order is the durable-ghost fix:
+
+1. flush the OLD session — may fail → abort with ZERO child side effects;
+2. caller-owned `prepare` (rewind's stale-identity gate, switch lock
+   pre-checks) — may fail → abort;
+3. create/resume the CHILD — may fail → abort; once it SUCCEEDS the child
+   is published (`session/created` → persistence may already write its
+   seed) and there is NO failure path after this point that may be
+   interpreted as "the child never happened": `AgentHandle.dispose()`
+   stops an agent but never deletes a persisted session, and dsh has no
+   durable rollback API;
+4. COMMIT — a synchronous critical section (lock handover, guard reset,
+   generation bump, live handle/agent replacement) with no awaits between
+   its steps;
+5. RETIRE — old-handle dispose, whenIdle, surface rebuild, catalog
+   refresh; every failure is recorded as diagnostics and NEVER rolls the
+   committed child back.
+
+The old code created the child first and THEN flushed the old session
+inside the swap: a flush failure after the create left a durable ghost
+branch in `/sessions` (`parentSession` set, `seedLength > 0`) the user
+never entered, and /new + /fork did not even dispose their never-live
+agents. Failures now only happen before the create: a stale rewind never
+creates a child at all, and a failed flush/create leaves the current
+session untouched.

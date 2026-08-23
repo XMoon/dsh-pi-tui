@@ -72,7 +72,10 @@ function stubRunner(
     get sessionGeneration() { return state.generation },
     compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
-    swapTo: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,

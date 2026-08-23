@@ -139,7 +139,10 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
-    swapTo: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
     currentPreset: () => undefined,
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},

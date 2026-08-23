@@ -295,7 +295,19 @@ export interface TuiCommandRunner {
   readonly sessionGeneration: number
   compose(presetId?: string): Promise<{ agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }>
   switchSession(sessionId: string): Promise<string | undefined>
-  swapTo(next: AgentHandle): Promise<string | undefined>
+  /**
+   * The unified session-transition transaction: the old session is flushed
+   * BEFORE the child is created, the commit is a synchronous critical
+   * section, and once `create` succeeds the child is published — there is
+   * NO failure path afterwards that may be interpreted as "the child never
+   * happened" (dsh has no durable rollback; `dispose()` stops an agent but
+   * never deletes a persisted session). Callers create their child INSIDE
+   * this transaction and must run it inside {@link withSessionTransition}.
+   */
+  transitionTo<T extends AgentHandle>(steps: {
+    prepare?: () => Promise<void> | void
+    create: () => Promise<T>
+  }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
   /** The preset chosen with /preset while no session exists yet; the next
@@ -1993,26 +2005,30 @@ export function registerTuiCommands(
     name: 'new',
     description: 'Start a fresh session in this workspace',
     handler: () => runner.withSessionTransition(async () => {
-      const liveAgent = runner.liveAgent
-      const composition = await runner.compose(runner.pendingPreset)
-      const presetId = composition.agentPreset
-      const next = await runner.agents.create({
-        sessionId: SessionId(`session-${randomUUID()}`),
-        meta: metaOf(cwd, presetId),
-        // Before the first session the process-wide selection stands in.
-        agentOptions: {
-          provider: liveAgent?.options.provider ?? runner.selected.current?.provider,
-          model: liveAgent?.options.model ?? runner.selected.current?.model,
+      // The unified transaction: the old session is flushed BEFORE the
+      // fresh session is created, the commit is synchronous, and a failure
+      // anywhere before the create leaves the current session untouched
+      // (no published child to roll back — there is no durable rollback).
+      const result = await runner.transitionTo({
+        create: async () => {
+          const liveAgent = runner.liveAgent
+          const composition = await runner.compose(runner.pendingPreset)
+          const presetId = composition.agentPreset
+          return runner.agents.create({
+            sessionId: SessionId(`session-${randomUUID()}`),
+            meta: metaOf(cwd, presetId),
+            // Before the first session the process-wide selection stands in.
+            agentOptions: {
+              provider: liveAgent?.options.provider ?? runner.selected.current?.provider,
+              model: liveAgent?.options.model ?? runner.selected.current?.model,
+            },
+            setup: composition.setup,
+          })
         },
-        setup: composition.setup,
       })
-      const error = await runner.swapTo(next)
-      if (error !== undefined) {
-        app.notify(error, 'error')
-        return { kind: 'error', text: error }
-      }
-      // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
-      // the UNPINNED ones now, never before (a failed create/swap keeps
+      if (!result.ok) return { kind: 'error', text: result.message }
+      // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
+      // drop the UNPINNED ones now, never before (a failed create keeps
       // the current session and its drafts intact; in-flight submissions
       // keep their pinned drafts — review finding 2).
       runner.imageStore.clearUnpinned()
@@ -2464,24 +2480,19 @@ export function registerTuiCommands(
       // Shared child creation with rewind (plan §6.2): preset inheritance,
       // live session cwd, provider/model inheritance, parentSession +
       // seedLength metadata — one chain, no drift between the two surfaces.
-      // The create AND the swap run inside the transition gate, so the
-      // child can never mix metadata across a concurrent switch and never
-      // stays behind once the surface moved.
-      const next = await createForkedAgent(runner, source, seed)
-      const error = await runner.swapTo(next)
-      if (error !== undefined) {
-        // A failed swap keeps the CURRENT session: report the failure and
-        // never claim success (review finding 6 — same lifecycle rule as
-        // /new).
-        app.notify(error, 'error')
-        return { kind: 'error', text: error }
-      }
-      // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
-      // the UNPINNED ones now (durable attachments are untouched, plan
+      // The create runs inside the unified transaction: the old session is
+      // flushed first, and a failure before the create leaves nothing
+      // behind (no published child, no ghost, no rollback attempt).
+      const result = await runner.transitionTo({
+        create: () => createForkedAgent(runner, source, seed),
+      })
+      if (!result.ok) return { kind: 'error', text: result.message }
+      // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
+      // drop the UNPINNED ones now (durable attachments are untouched, plan
       // §14; in-flight submissions keep their pinned drafts — review
       // finding 2).
       runner.imageStore.clearUnpinned()
-      return { kind: 'success', text: `forked as ${next.agent.session.id}` }
+      return { kind: 'success', text: `forked as ${result.next.agent.session.id}` }
     }),
   })
 

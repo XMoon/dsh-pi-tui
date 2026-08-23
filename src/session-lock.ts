@@ -116,42 +116,6 @@ export const LOCK_FILE_NAME = 'owner.lock'
 /** How many times the takeover path retries the atomic create on EEXIST. */
 export const TAKEOVER_RETRIES = 2
 
-/** The single-slot lock tracker surface the swap-failure repair reads. */
-export interface LockTracker {
-  readonly sessionId: string
-}
-
-/**
- * Decide the lock repair after an INTERNAL swap failure (flush/dispose/
- * whenIdle throwing inside swapTo), given the single-slot tracker state and
- * the outgoing session id. Pure so the three-shape matrix is headless-testable:
- *
- * - tracker holds `from` itself (/new, /fork — the current lock was never
- *   pre-released): nothing to repair — `from` is still locked by us.
- * - tracker holds the TARGET (switchSession pre-released `from` and acquired
- *   the target before calling swapTo): release the target (we never entered
- *   it) and re-acquire `from` (the current session stays live).
- * - tracker is empty (switchSession's target acquire was `unavailable`):
- *   `from`'s lock was released and never re-taken — re-acquire it.
- */
-export function swapFailureLockRepair(
-  tracker: LockTracker | undefined,
-  from: string | undefined,
-): { release: string | undefined; reacquire: string | undefined } {
-  if (from === undefined) {
-    // No current session to protect; release whatever the tracker holds (a
-    // switchSession target we never entered).
-    return tracker === undefined ? { release: undefined, reacquire: undefined } : { release: tracker.sessionId, reacquire: undefined }
-  }
-  if (tracker === undefined || tracker.sessionId !== from) {
-    // switchSession shape: release the target (when one is tracked), then
-    // re-acquire from.
-    return { release: tracker?.sessionId, reacquire: from }
-  }
-  // /new, /fork shape: the tracker still holds from — nothing to repair.
-  return { release: undefined, reacquire: undefined }
-}
-
 /** A tiny deterministic serializer for the lock record (single-line JSON). */
 export function serializeLockInfo(info: SessionLockInfo): string {
   return JSON.stringify(info)

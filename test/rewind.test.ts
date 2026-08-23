@@ -26,7 +26,7 @@ import {
   rewindSeed,
   type RewindCandidate,
 } from '../src/rewind.ts'
-import { commitRewind, createForkedAgent, isRewindIdentityCurrent, SWAP_STALE_MESSAGE, type RewindCommitHost, type RewindLiveIdentity } from '../src/session-fork.ts'
+import { commitRewind, createForkedAgent, isRewindIdentityCurrent, type RewindCommitHost, type RewindLiveIdentity } from '../src/session-fork.ts'
 import { SessionTransitionGate } from '../src/transition-gate.ts'
 import { forkSeed, registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -276,27 +276,29 @@ interface ForkRig {
   host: RewindCommitHost
   created: CreatedCall[]
   resolved: string[]
-  swapped: string[]
-  disposed: string[]
+  committed: AgentHandle[]
   drafts: string[]
   state: { sessionId: string; generation: number }
 }
 
 /** A fully scriptable rewind-commit rig: the identity reads live state, and
- * tests may flip `rig.state` between the gates. */
+ * tests may flip `rig.state` between the gates. The rig's `transitionTo`
+ * models the runner's unified transaction: `prepare` runs first, `create`
+ * runs (a throw becomes a `{ ok: false }` outcome — the runner's
+ * transitionTo never lets a create failure escape), and on success the
+ * child is considered COMMITTED (`committed` records it — the transaction
+ * never rolls a published child back). */
 function makeRig(options: {
   sessionCwd?: string
   composePreset?: string
   createError?: string
-  swapError?: string
-  /** Full swapTo override (wins over swapError); receives the expected identity. */
-  swapTo?: (next: AgentHandle, expected?: RewindLiveIdentity) => Promise<string | undefined>
+  /** Full transitionTo override (wins over the default implementation). */
+  transitionTo?: <T extends AgentHandle>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
   createHook?: (call: CreatedCall) => void
 } = {}): ForkRig {
   const created: CreatedCall[] = []
   const resolved: string[] = []
-  const swapped: string[] = []
-  const disposed: string[] = []
+  const committed: AgentHandle[] = []
   const drafts: string[] = []
   const state = { sessionId: 'session-source', generation: 1 }
   const host: RewindCommitHost = {
@@ -322,15 +324,24 @@ function makeRig(options: {
       },
     },
     liveIdentity: () => ({ sessionId: state.sessionId, generation: state.generation }),
-    swapTo: async (next, expected) => {
-      swapped.push(next.agent.session.id)
-      if (options.swapTo !== undefined) return options.swapTo(next, expected)
-      return options.swapError
+    transitionTo: async (steps) => {
+      if (options.transitionTo !== undefined) return options.transitionTo(steps)
+      await steps.prepare?.()
+      try {
+        const next = await steps.create()
+        // The runner's transaction COMMITS synchronously after the create —
+        // a published child is never rolled back.
+        committed.push(next)
+        return { ok: true, next }
+      } catch (error) {
+        // The runner's transaction maps any create failure to an outcome —
+        // it never lets a create error escape as a rejection.
+        return { ok: false, message: options.createError ?? (error instanceof Error ? error.message : String(error)) }
+      }
     },
-    disposeAgent: async (handle) => { disposed.push(handle.agent.session.id) },
     replaceDraft: (text) => { drafts.push(text) },
   }
-  return { host, created, resolved, swapped, disposed, drafts, state }
+  return { host, created, resolved, committed, drafts, state }
 }
 
 function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent[] = [], agentPreset?: string, cwd = '/ws'): Agent {
@@ -421,7 +432,8 @@ test('I01: commitRewind creates, swaps and restores the selected prompt', async 
   assert.equal(rig.created.length, 1)
   assert.equal(rig.created[0]!.meta.parentSession, 'session-source')
   assert.equal(rig.created[0]!.meta.seedLength, 4, 'seed = everything before turn 2/start')
-  assert.deepEqual(rig.swapped, [rig.created[0]!.sessionId])
+  assert.equal(rig.committed.length, 1, 'the transaction commits the created child')
+  assert.equal(rig.committed[0]!.agent.session.id, rig.created[0]!.sessionId)
   assert.deepEqual(rig.drafts, ['B'], 'the selected prompt restores into the editor')
 })
 
@@ -437,7 +449,7 @@ test('I03: rewinding to the FIRST turn seeds an empty child', async () => {
   assert.equal(rig.created[0]!.meta.seedLength, 0)
 })
 
-test('I05 gate 1: a stale generation cancels BEFORE any create', async () => {
+test('I05: a stale generation cancels BEFORE any create', async () => {
   const rig = makeRig()
   rig.state.generation = 2
   const events = turn(0, 1, 'A')
@@ -448,13 +460,19 @@ test('I05 gate 1: a stale generation cancels BEFORE any create', async () => {
   })
   assert.equal(outcome.kind, 'stale')
   assert.equal(rig.created.length, 0, 'no child may be created for a stale picker')
-  assert.equal(rig.swapped.length, 0)
+  assert.equal(rig.committed.length, 0)
+  assert.deepEqual(rig.drafts, [], 'no prompt restore for a stale picker')
 })
 
-test('I05 gate 2: a surface switch DURING create disposes the ghost child', async () => {
+test('review round-2: once the child is created the transaction only commits (no rollback)', async () => {
+  // The durable-ghost blocker: there is NO failure path after the create
+  // that may be interpreted as "the child never happened" (dispose cannot
+  // delete a persisted session, and dsh has no rollback primitive). Even if
+  // the surface identity moves while the create is in flight (theoretically
+  // impossible inside the transition gate — this asserts the transaction
+  // contract), the child is committed, never disposed, and the prompt is
+  // restored.
   const rig = makeRig({
-    // The session switches while the create is in flight: gate 1 passes,
-    // gate 2 sees the new owner.
     createHook: () => { rig.state.sessionId = 'session-other'; rig.state.generation = 3 },
   })
   const events = turn(0, 1, 'A')
@@ -463,25 +481,29 @@ test('I05 gate 2: a surface switch DURING create disposes the ghost child', asyn
     sessionId: 'session-source',
     generation: 1,
   })
-  assert.equal(outcome.kind, 'stale')
-  assert.equal(rig.created.length, 1, 'the child was created before the switch')
-  assert.equal(rig.swapped.length, 0, 'the swap must not commit into a stale surface')
-  assert.equal(rig.disposed.length, 1, 'the ghost child must be disposed, never left behind')
-  assert.deepEqual(rig.drafts, [], 'no prompt restore for a stale commit')
+  assert.equal(outcome.kind, 'rewound', 'a published child is never rolled back')
+  assert.equal(rig.created.length, 1)
+  assert.equal(rig.committed.length, 1, 'the child is committed')
+  assert.deepEqual(rig.drafts, ['A'], 'the prompt restore happens after the commit')
 })
 
-test('review P1-2: a rewind commit holds the gate across create→swap; a concurrent switch queues behind it', async () => {
+test('review P1-2: a rewind commit holds the gate across create→commit; a concurrent switch queues behind it', async () => {
   const gate = new SessionTransitionGate()
   const events = turn(0, 1, 'A')
   const candidates = collectRewindCandidates(events)
   const source = sourceAgent('session-source', events)
   const order: string[] = []
-  let releaseSwap!: () => void
-  const swapHanging = new Promise<void>(resolve => { releaseSwap = resolve })
-  const rig = makeRig({ swapTo: async () => { await swapHanging; return undefined } })
-  // The commit runs inside the gate (the runner wraps commitRewind in
-  // withSessionTransition) and the swap yields — the exact window where the
-  // old TOCTOU let a concurrent switch land.
+  let releaseCreate!: () => void
+  const createHanging = new Promise<void>(resolve => { releaseCreate = resolve })
+  const rig = makeRig({
+    transitionTo: async (steps) => {
+      await createHanging
+      return steps.create().then(next => ({ ok: true, next }))
+    },
+  })
+  // The commit runs inside the gate (the runner wraps commitRewind in the
+  // transition gate) and the transaction yields inside its create — the
+  // exact window where the old TOCTOU let a concurrent switch land.
   const commit = gate.run(async () => {
     order.push('rewind-commit')
     return commitRewind(rig.host, source, candidates[0]!, { sessionId: 'session-source', generation: 1 })
@@ -489,13 +511,12 @@ test('review P1-2: a rewind commit holds the gate across create→swap; a concur
   await new Promise(resolve => setTimeout(resolve, 0))
   const switched = gate.run(async () => { order.push('switch') })
   await new Promise(resolve => setTimeout(resolve, 0))
-  assert.deepEqual(order, ['rewind-commit'], 'the switch must queue while the rewind swap is in flight')
-  releaseSwap()
+  assert.deepEqual(order, ['rewind-commit'], 'the switch must queue while the rewind transaction is in flight')
+  releaseCreate()
   const outcome = await commit
   assert.equal(outcome.kind, 'rewound')
   await switched
   assert.deepEqual(order, ['rewind-commit', 'switch'], 'the switch runs only after the rewind released the gate')
-  assert.equal(rig.disposed.length, 0, 'nothing was stale — no ghost, no disposal')
 })
 
 test('a vanished rewind point fails cleanly without creating a child', async () => {
@@ -513,8 +534,11 @@ test('a vanished rewind point fails cleanly without creating a child', async () 
   assert.deepEqual(rig.drafts, [], 'the editor is never touched on failure')
 })
 
-test('a failed swap keeps the source and never touches the editor', async () => {
-  const rig = makeRig({ swapError: 'swap failed: lock' })
+test('a failed create keeps the source and never touches the editor (no ghost, no rollback)', async () => {
+  // The durable-ghost contract: failures can only happen BEFORE the create.
+  // A failed create leaves no child at all — there is nothing to dispose
+  // and nothing persisted.
+  const rig = makeRig({ createError: 'roster unavailable' })
   const events = turn(0, 1, 'A')
   const candidates = collectRewindCandidates(events)
   const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, {
@@ -523,18 +547,13 @@ test('a failed swap keeps the source and never touches the editor', async () => 
   })
   assert.equal(outcome.kind, 'failed')
   if (outcome.kind !== 'failed') return
-  assert.equal(outcome.message, 'swap failed: lock')
-  assert.deepEqual(rig.drafts, [], 'a failed swap must never overwrite the editor')
-  // The surface still shows the source (the swap never assigned the child):
-  // the ghost child is disposed through the official path (plan §12).
-  assert.equal(rig.disposed.length, 1, 'the never-live child must be disposed')
+  assert.equal(outcome.message, 'roster unavailable')
+  assert.equal(rig.created.length, 0, 'a failed create publishes nothing')
+  assert.equal(rig.committed.length, 0, 'nothing was committed')
+  assert.deepEqual(rig.drafts, [], 'a failed create must never overwrite the editor')
 })
 
-test('review repro: the swap gate runs even when the surface became sessionless mid-flush', () => {
-  // The gate is unconditional for expected-bearing swaps: a surface that
-  // became sessionless (`sessionId: undefined`) during the flush can never
-  // match the captured source and must refuse the swap — the runner uses
-  // this exact predicate inside its commit boundary.
+test('review repro: the stale-identity predicate refuses switched/sessionless surfaces', () => {
   const expected: RewindLiveIdentity = { sessionId: 'session-source', generation: 1 }
   assert.equal(isRewindIdentityCurrent({ sessionId: 'session-source', generation: 1 }, expected), true)
   assert.equal(isRewindIdentityCurrent({ sessionId: 'session-other', generation: 1 }, expected), false, 'a switched session refuses')
@@ -543,80 +562,24 @@ test('review repro: the swap gate runs even when the surface became sessionless 
   assert.equal(isRewindIdentityCurrent({ sessionId: undefined, generation: 3 }, expected), false, 'sessionless + bumped refuses')
 })
 
-test('review repro: a swap refused at the identity gate is stale and disposes the child', async () => {
-  // The runner's swapTo refuses INSIDE its commit boundary (after the flush,
-  // before any assignment) when the captured surface identity changed — the
-  // swap returns the shared sentinel and mutates nothing.
-  const rig = makeRig({
-    swapTo: async (next, expected) => {
-      assert.equal(expected?.sessionId, 'session-source', 'the expected identity must ride the swap')
-      assert.equal(expected?.generation, 1)
-      return SWAP_STALE_MESSAGE
-    },
-  })
-  const events = turn(0, 1, 'A')
-  const candidates = collectRewindCandidates(events)
-  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, {
-    sessionId: 'session-source',
-    generation: 1,
-  })
-  assert.equal(outcome.kind, 'stale')
-  assert.equal(rig.disposed.length, 1, 'the ghost child is disposed')
-  assert.deepEqual(rig.drafts, [], 'no prompt restore for a refused swap')
-})
-
-test('review: a swap failing BEFORE assignment disposes the child (never a ghost)', async () => {
-  // Flush/dispose-style failure: the swap returns an error WITHOUT making
-  // the child live — the identity still shows the expected source.
-  const rig = makeRig({ swapError: 'swap failed: flush' })
-  const events = turn(0, 1, 'A')
-  const candidates = collectRewindCandidates(events)
-  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, {
-    sessionId: 'session-source',
-    generation: 1,
-  })
-  assert.equal(outcome.kind, 'failed')
-  if (outcome.kind !== 'failed') return
-  assert.equal(outcome.message, 'swap failed: flush')
-  assert.equal(rig.disposed.length, 1, 'a child that never went live is disposed')
-  assert.deepEqual(rig.drafts, [])
-})
-
-test('review: a swap PARTIALLY committed (child live) is never disposed', async () => {
-  // whenIdle-style failure: the swap assigned the child and then failed —
-  // the surface identity moved to the child. Disposing would kill the live
-  // agent; the shared swap failure cleanup owns that path.
-  const rig = makeRig({
-    swapTo: async (next) => {
-      rig.state.sessionId = next.agent.session.id
-      rig.state.generation = 2
-      return 'swap failed: whenIdle'
-    },
-  })
-  const events = turn(0, 1, 'A')
-  const candidates = collectRewindCandidates(events)
-  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, {
-    sessionId: 'session-source',
-    generation: 1,
-  })
-  assert.equal(outcome.kind, 'failed')
-  if (outcome.kind !== 'failed') return
-  assert.equal(outcome.message, 'swap failed: whenIdle')
-  assert.equal(rig.disposed.length, 0, 'a live child must never be disposed')
-  assert.deepEqual(rig.drafts, [], 'no prompt restore for a partial commit')
-})
-
-test('a failed create rejects (the owned task surfaces it) and changes nothing', async () => {
+test('a failed create returns the failure outcome (the transaction never rejects)', async () => {
+  // The runner's transitionTo maps any create failure to an outcome — the
+  // commitRewind caller (runOwned) never sees a rejection for a create
+  // failure, only for a genuinely unexpected host bug.
   const rig = makeRig({ createError: 'roster unavailable' })
   const events = turn(0, 1, 'A')
   const candidates = collectRewindCandidates(events)
-  await assert.rejects(
-    commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, { sessionId: 'session-source', generation: 1 }),
-    /roster unavailable/,
-  )
-  assert.equal(rig.swapped.length, 0)
+  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, {
+    sessionId: 'session-source',
+    generation: 1,
+  })
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind !== 'failed') return
+  assert.equal(outcome.message, 'roster unavailable')
+  assert.equal(rig.committed.length, 0)
   assert.deepEqual(rig.drafts, [])
 })
+
 
 // ── C01–C05: the /rewind command surface ───────────────────────────────────
 
@@ -658,7 +621,10 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
-    swapTo: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
@@ -669,7 +635,7 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     openJobView: () => {},
     openTasksBrowser: () => {},
     openRewindPicker: () => { options.rewinds.push(1) },
-    withSessionTransition: async (task) => task(),
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,
