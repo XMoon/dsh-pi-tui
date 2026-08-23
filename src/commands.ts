@@ -2280,8 +2280,13 @@ export function registerTuiCommands(
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
           return { kind: 'pending', preset: resolved.id }
         }
-        const outcome = await runner.recomposeBlank(id)
-        if (outcome.kind === 'locked') return { kind: 'locked', sessionId: liveAgent.session.id }
+        // The live-session preset swap runs INSIDE the session-transition
+        // gate (review round 27): recompose + the agent-preset/selected
+        // append must never interleave with a concurrent /new, /fork,
+        // rewind or switch — inside the gate the captured agent cannot be
+        // quiesced or have its lock released mid-append.
+        const outcome = await runner.withSessionTransition(() => runner.recomposeBlank(id))
+        if (outcome.kind === 'locked') return { kind: 'locked', sessionId: runner.liveAgent!.session.id }
         // The still-blank session's agent layer changed: refresh the live
         // catalog for the SAME owner (no transition — the old scoped
         // previews are being replaced by the new composition's).

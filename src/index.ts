@@ -2913,6 +2913,16 @@ export function apply(ctx: Context, config: Config): void {
           // prunable for the whole command run. Acquire it HERE, transfer
           // it to the nested fallback, and release it on every other exit.
           const fallbackPin = draftImages.pinReferenced(text)
+          // The session-transition write fence: the guard checks above are
+          // async and can yield across a concurrent /new, /fork, rewind or
+          // switch — once a transition is in flight, executing the command
+          // would write an agent whose lock is about to be released (review
+          // round 27). Refuse and restore the draft instead.
+          if (transitionGate.busy) {
+            fallbackPin()
+            refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
+            return
+          }
           runOwned('command execution', () => commands.execute(agent as Agent, toggled, [], signal), {
             diag,
             sessionId: () => agent.session.id,

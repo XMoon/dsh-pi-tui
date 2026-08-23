@@ -253,12 +253,17 @@ whose lock is about to be released. The transition gate therefore
 doubles as a WRITE FENCE: while a transition is in flight
 (`SessionTransitionGate.busy`), every agent-write entry point — plain
 submit, busy-Enter steer, Ctrl+S steer, the command fallback followup,
-the `!` shell submit, and the per-skill slash invocations — refuses the
-write, restores/keeps the draft or the invocation line (or keeps the
-shell card) and notifies "a session transition is in progress". The
-submission re-validation (agent object + session generation) covers the
-window AFTER the transition commits; the fence covers the window DURING
-it.
+DIRECT slash-command execution (a bare `commands.execute` after the
+async guard checks could write an agent whose lock a concurrent
+transition is about to release — review round 27), the `!` shell
+submit, and the per-skill slash invocations — refuses the write,
+restores/keeps the draft or the invocation line (or keeps the shell
+card) and notifies "a session transition is in progress". The live
+`/preset` swap (recompose + `agent-preset/selected` append) likewise
+runs INSIDE the transition gate, so the captured agent can never be
+quiesced or unlocked mid-append (review round 27). The submission
+re-validation (agent object + session generation) covers the window
+AFTER the transition commits; the fence covers the window DURING it.
 
 The old code created the child first and THEN flushed the old session:
 a flush failure after the create left a durable ghost branch, and the

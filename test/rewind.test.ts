@@ -807,3 +807,40 @@ test('review round 23/24: /fork resolves ONE compose and the recovery reuses the
   assert.equal(createSetup, recoverSetup, 'the recovery uses the IDENTICAL setup object as the create')
   app.stop()
 })
+
+// ── review round 27: the live /preset swap runs inside the transition gate ─
+
+test('review round 27: /preset live-swap runs inside the session-transition gate', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const commands = fakeCommandsService()
+  const ctx = new Context()
+  ctx.provide('commands', commands.service as never)
+  ctx.provide('agentPresets', {
+    composedPreset: () => undefined,
+    defaultId: 'standard',
+  } as never)
+  const rewinds: number[] = []
+  const ensureCalls: string[] = []
+  const base = stubRunner({ ctx, app, rewinds, ensureCalls })
+  let gateRuns = 0
+  const runner: TuiCommandRunner = {
+    ...base,
+    liveAgent: sourceAgent('session-source', [], 'standard'),
+    recomposeBlank: async () => ({ kind: 'switched', preset: 'minimal' }),
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => {
+      gateRuns += 1
+      return task()
+    },
+    refreshCatalog: async () => ({ kind: 'applied', snapshot: {} as never }),
+    updateWelcomeCard: () => {},
+  }
+  registerTuiCommands(runner)
+  const def = commands.defs.find(entry => entry.name === 'preset')
+  assert.ok(def?.handler !== undefined, '/preset handler missing')
+  const outcome = await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'minimal' })
+  assert.deepEqual(outcome, { kind: 'success', text: 'session preset switched to minimal' })
+  assert.equal(gateRuns, 1, 'the live preset swap must run inside the transition gate (recompose + append atomic)')
+  app.stop()
+})
