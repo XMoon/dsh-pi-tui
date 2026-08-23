@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ctrl+R searches your input history.** A modal panel opens over the
+  editor: type to filter the per-directory history live, `Tab` to switch
+  between `Current directory` and `All directories` (the query survives),
+  `↑/↓` to move through the matches, and a details pane shows the full
+  multi-line prompt, its directory, timestamp and session. `Enter` puts
+  the selected history back into the editor for editing — it never
+  submits — and `Esc` cancels with your draft untouched. `↑/↓` recall
+  still seeds from the latest 100 entries, while the search reads the
+  full canonical JSONL (which is no longer trimmed on read). New rows
+  are written in a v2 schema carrying cwd + timestamp, so
+  all-directory results order globally by time; legacy v1 rows stay
+  readable forever and honestly show `Unknown (legacy history)` when
+  their directory cannot be proven.
 - **Continuable subagent viewers are now interactive.** Entering a
   `continuable` child from `/tasks` opens a live conversation surface: the
   editor carries the child's own draft (isolated from your main-session
