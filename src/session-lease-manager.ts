@@ -90,8 +90,8 @@ export interface LeasePhysicalDeps {
 /** The process-global lease registry (HMR-safe, Symbol.for key). The
  *  registry lives on `globalThis`, which is ALREADY per-OS-process — a
  *  fresh process can never inherit the previous process's registry, so
- *  the pid is only a defensive check, and no /proc-based identity is
- *  needed (review: /proc/self/stat broke macOS mounts). */
+ *  the pid is only a defensive check and no platform-specific process
+ *  identity file is read (a Linux-only identity broke macOS mounts). */
 export interface GlobalLeaseRegistry {
   pid: number
   manager: ProcessSessionLeaseManager
