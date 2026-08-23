@@ -140,10 +140,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DurablePublishedUnrecoverableError that ensureSession rethrows — never
   a fallback trigger, so an unrecoverable published child can never be
   silently replaced by a second fresh session). The publication check is
-  THREE-STATE: an unreadable persistence backend settles `unknown` and
-  the target keeps its lock with an explicit "cannot confirm whether the
-  session was published" error — never a release of a maybe-published
-  child (review round 25).
+  THREE-STATE and runs through the persistence coordinator's `inspect()`
+  — the publication barrier that awaits an in-flight retirement before
+  answering, so a "not found" is authoritative (an immediate list() scan
+  is NOT: the materialization of a rejected create can still be
+  settling, and a transient miss would recreate the durable ghost). An
+  unreadable backend — or a deployment without inspect — settles
+  `unknown`: the lock stays and an explicit "cannot confirm whether the
+  session was published" error is reported (review rounds 25/26). An
+  EXISTING target (whose artifact predates the attempt) releases its
+  lock on an unrecoverable failure instead of pinning the session until
+  process exit.
 - **The double-Esc rewind chord is now truly consecutive.** Any real key
   press between the two Esc presses disarms the window — `Esc → Left →
   Esc` no longer opens the rewind picker (Kitty release/repeat events

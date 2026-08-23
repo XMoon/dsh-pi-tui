@@ -79,6 +79,12 @@ export interface TransitionSteps<T> {
    * artifact survives). Runs with the target lock held. A throw keeps the
    * target lock and reports the child as published-but-unrecoverable. */
   recover?: () => Promise<T>
+  /** Whether an unrecoverable/unknown child keeps the target lock. TRUE
+   * for fresh children (a maybe-published child must stay locked); FALSE
+   * for EXISTING targets (switchSession), whose artifact predates this
+   * attempt — a kept lock would pin the session until process exit
+   * (review round 26 P2). Defaults to true. */
+  keepTargetLockOnUnrecoverable?: boolean
 }
 
 /** The settled outcome of a transition. */
@@ -165,9 +171,13 @@ export interface TransitionHost<T> {
  * create may still have PUBLISHED (review round 8) — when the session is
  * durable, `resume` runs (the caller holds the target lock) and its
  * handle is returned; an unrecoverable published child throws
- * {@link DurablePublishedUnrecoverableError} with the lock STILL HELD,
- * so the caller can never fall back past it (review round 17). A
- * pre-publication failure releases the target lock and rethrows. */
+ * {@link DurablePublishedUnrecoverableError} (review round 17). For a
+ * FRESH child the lock STAYS on unrecoverable/unknown (a maybe-published
+ * child must never be released); an EXISTING target (whose artifact
+ * predates this attempt — review round 26 P2) sets
+ * `keepLockOnUnrecoverable: false` so a deterministic setup failure
+ * cannot lock the session until process exit. A pre-publication failure
+ * releases the target lock and rethrows. */
 export async function createWithPublicationRecovery<T>(deps: {
   /** The fresh session id (for diagnostics). */
   targetId: string
@@ -176,11 +186,17 @@ export async function createWithPublicationRecovery<T>(deps: {
   /** Resume the child after a post-publication rejection (lock held). */
   resume(): Promise<T>
   /** The child's durable state (three-state: an unreadable backend is
-   * 'unknown' — the child MAY be published, so the lock stays and no
-   * fallback may run). */
+   * 'unknown' — the child MAY be published; for a fresh child the lock
+   * stays and no fallback may run). */
   isDurablePublished(): Promise<'durable' | 'not-durable' | 'unknown'>
   /** Release the target lock on a PRE-publication failure only. */
   releaseTargetLock(): void
+  /** Whether an unrecoverable/unknown state keeps the target lock. TRUE
+   * for fresh children (a maybe-published child must stay locked); FALSE
+   * for existing targets, whose artifact predates this attempt — there a
+   * kept lock would just pin the session until process exit (review
+   * round 26 P2). Defaults to true. */
+  keepLockOnUnrecoverable?: boolean
 }): Promise<T> {
   try {
     return await deps.create()
@@ -190,14 +206,12 @@ export async function createWithPublicationRecovery<T>(deps: {
       try {
         return await deps.resume()
       } catch (recoverError) {
-        // The child exists and stays locked: never a fallback trigger.
+        if (deps.keepLockOnUnrecoverable === false) deps.releaseTargetLock()
         throw new DurablePublishedUnrecoverableError(deps.targetId, safeErrorMessage(recoverError))
       }
     }
     if (published === 'unknown') {
-      // The child MAY exist (the backend could not be read): keep the lock
-      // and abort — never release a possibly-published child (review
-      // round 25).
+      if (deps.keepLockOnUnrecoverable === false) deps.releaseTargetLock()
       throw new PublicationStateUnknownError(deps.targetId, 'persistence backend unreadable')
     }
     deps.releaseTargetLock()
@@ -265,7 +279,10 @@ export async function runTransitionTo<T>(
       } catch (recoverError) {
         // Published but unrecoverable: keep the target lock (the session
         // exists on disk and must not silently become openable as a ghost
-        // without its owner knowing) and report the explicit state.
+        // without its owner knowing) and report the explicit state — an
+        // EXISTING target (keepTargetLockOnUnrecoverable false) releases
+        // instead, since its artifact predates this attempt (round 26 P2).
+        if (steps.keepTargetLockOnUnrecoverable === false) host.releaseLock(steps.target.id)
         host.recordFailure('create', new Error(`create failed (${safeErrorMessage(error)}); the child was durable-published but could not be recovered (${safeErrorMessage(recoverError)})`))
         return {
           ok: false,
@@ -275,7 +292,9 @@ export async function runTransitionTo<T>(
     } else if (published === 'unknown') {
       // The backend could not confirm the child's state: it MAY exist on
       // disk — keep the lock and abort rather than release a possibly-
-      // published child (review round 25).
+      // published child (review round 25). An EXISTING target releases
+      // (its artifact predates this attempt — review round 26 P2).
+      if (steps.keepTargetLockOnUnrecoverable === false) host.releaseLock(steps.target.id)
       const reason = `cannot confirm whether session ${steps.target.id} was published (${safeErrorMessage(error)}); it stays locked`
       host.recordFailure('create', new Error(reason))
       return { ok: false, message: `transition failed: ${reason}` }

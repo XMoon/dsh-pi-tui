@@ -108,10 +108,15 @@
   child 会保持锁并报告明确状态(专用
   `DurablePublishedUnrecoverableError` 会被 ensureSession 直接重抛——
   绝不会触发 fallback,不可恢复的已发布 child 不可能被第二个新会话
-  静默顶替)。发布状态检测是**三态**的(review round 25):持久化后端
-  不可读时 settle 为 `unknown`——child 可能已存在,因此 target 锁保持、
-  绝不允许 fallback(旧版把"后端不可读"降级为"未发布",可能释放一个
-  实际已发布 child 的锁)。
+  静默顶替)。发布状态检测是**三态**的(review round 25/26),并改走
+  persistence coordinator 的 `inspect()`——真正的 publication barrier:
+  它会先等待该 id 在途的 retirement/materialization 落定再回答,因此
+  "not found" 才是**权威**结论(立即 `list()` 扫描不是:被拒 create 的
+  materialization 可能仍在落盘,瞬时 miss 会重新制造 durable ghost)。
+  后端不可读、或部署没有 inspect 能力时 settle 为 `unknown`——target
+  锁保持、报"无法确认 session 是否已发布",绝不 fallback;**已存在**
+  的 target(其 artifact 早于本次尝试)在不可恢复失败时会释放锁,而
+  不是把 session 钉到进程退出(review round 26 P2)。
 - **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
   都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
   release/repeat 事件仍然不计为按键)。

@@ -410,3 +410,94 @@ test('review round 25: the standalone helper treats an unreadable backend as unk
   )
   assert.equal(releases, 0, 'a maybe-published child is never released')
 })
+
+// ── review round 26 P1: the publication barrier must not race ──────────────
+
+test('review round 26 P1: the detector WAITS for the in-flight materialization — a transient miss never releases', async () => {
+  const { host, events } = fakeHost()
+  let releaseGate!: () => void
+  const gate = new Promise<void>(resolve => { releaseGate = resolve })
+  let observations = 0
+  host.isDurablePublished = async () => {
+    observations += 1
+    // The persistence coordinator's inspect() barrier: it awaits the
+    // in-flight retirement/materialization for the id before answering.
+    await gate
+    return 'durable'
+  }
+  const failing = steps(events, { createError: 'post-publication listener threw' })
+  failing.recover = async () => { events.push('child.recover'); return handle('session-c') }
+  const pending = runTransitionTo(host, failing)
+  await settle()
+  await settle()
+  // The detector is still behind the barrier: the lock must NOT be
+  // released and nothing may commit or recover yet.
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+  ], 'while the barrier is pending the lock stays and nothing commits')
+  assert.equal(observations, 1)
+  // The materialization settles: the child IS durable → recovery commits it.
+  releaseGate()
+  const outcome = await pending
+  assert.equal(outcome.ok, true)
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'child.recover', 'old.lock.release', 'child.commit', 'old.dispose',
+  ], 'the recovered child commits — the durable ghost is impossible')
+})
+
+test('review round 26 P1: an authoritative barrier not-found is the ONLY not-durable', async () => {
+  // The detector sees a settle NOT-FOUND after the barrier: pre-publication.
+  const { host, events } = fakeHost()
+  host.isDurablePublished = async () => 'not-durable'
+  const outcome = await runTransitionTo(host, steps(events, { createError: 'setup threw before session/created' }))
+  assert.equal(outcome.ok, false)
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'target.lock.release:session-c',
+  ], 'an authoritative not-found releases the lock and aborts')
+})
+
+// ── review round 26 P2: an EXISTING target must not be pinned ──────────────
+
+test('review round 26 P2: an EXISTING target releases its lock on an unrecoverable failure', async () => {
+  const { host, events } = fakeHost({ durablePublished: true })
+  const failing = steps(events, { createError: 'post-publication listener threw' })
+  failing.recover = async () => { events.push('child.recover'); throw new Error('resume repair failed') }
+  failing.keepTargetLockOnUnrecoverable = false
+  const outcome = await runTransitionTo(host, failing)
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.ok === false ? outcome.message : '', /durable-published but could not be recovered/)
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'child.recover', 'target.lock.release:session-c',
+  ], 'an existing target releases its lock on unrecoverable failure — never pinned until process exit')
+})
+
+test('review round 26 P2: a FRESH target still KEEPS its lock on an unrecoverable failure (default)', async () => {
+  const { host, events } = fakeHost({ durablePublished: true })
+  const failing = steps(events, { createError: 'post-publication listener threw' })
+  failing.recover = async () => { events.push('child.recover'); throw new Error('resume repair failed') }
+  const outcome = await runTransitionTo(host, failing)
+  assert.equal(outcome.ok, false)
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'child.recover',
+  ], 'a fresh maybe-published child stays locked')
+})
+
+test('review round 26 P2: the helper releases for an EXISTING target (keepLockOnUnrecoverable false)', async () => {
+  let releases = 0
+  await assert.rejects(
+    createWithPublicationRecovery({
+      targetId: 'session-existing',
+      create: async () => { throw new Error('resume publication listener threw') },
+      resume: async () => { throw new Error('resume repair failed') },
+      isDurablePublished: async () => 'durable',
+      releaseTargetLock: () => { releases += 1 },
+      keepLockOnUnrecoverable: false,
+    }),
+    (error: unknown) => error instanceof DurablePublishedUnrecoverableError,
+  )
+  assert.equal(releases, 1, 'an existing target releases its lock on unrecoverable failure')
+})

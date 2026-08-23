@@ -1323,14 +1323,29 @@ export function apply(ctx: Context, config: Config): void {
      * create on a durable id must be RECOVERED, never treated as "never
      * published". Never throws (an unreadable backend degrades to false). */
     const durablePublished = async (sessionId: string): Promise<'durable' | 'not-durable' | 'unknown'> => {
-      const persistence = ctx.get('sessionPersistence') as { list?: () => Promise<{ id: string }[]> } | undefined
+      // The persistence COORDINATOR's inspect() is the publication barrier
+      // (review round 26 P1): it awaits an in-flight retirement /
+      // materialization for the id before answering, so a "not found" is
+      // authoritative — an immediate list() scan is NOT (the JSONL
+      // materialization for a rejected create can still be settling, and a
+      // transient miss would misclassify a child that is about to appear
+      // as never-published, recreating the durable ghost). Only an
+      // authoritative not-found settles 'not-durable'; a read error or an
+      // unavailable barrier settles 'unknown' (the lock stays).
+      const persistence = ctx.get('sessionPersistence') as { inspect?: (id: string, signal?: AbortSignal) => Promise<unknown> } | undefined
+      const inspect = persistence?.inspect
+      if (inspect === undefined) {
+        // No reliable publication barrier: never interpret a miss as
+        // never-published.
+        return 'unknown'
+      }
       try {
-        const rows = await persistence?.list?.()
-        return rows?.some(row => row.id === sessionId) ?? false ? 'durable' : 'not-durable'
-      } catch {
-        // An unreadable backend cannot confirm: the child MAY be published —
-        // the caller must keep its lock and never fall back (review
-        // round 25).
+        await inspect(sessionId)
+        return 'durable'
+      } catch (error) {
+        if ((error as Error | undefined)?.message?.includes('not found')) {
+          return 'not-durable'
+        }
         return 'unknown'
       }
     }
@@ -1390,6 +1405,10 @@ export function apply(ctx: Context, config: Config): void {
           }),
           isDurablePublished: () => durablePublished(sessionId),
           releaseTargetLock: () => releaseOpenLock(sessionId),
+          // An EXISTING target's artifact predates this attempt: an
+          // unrecoverable resume must not pin the session until process
+          // exit — release and report (review round 26 P2).
+          keepLockOnUnrecoverable: false,
         })
         diag.info('resume ok', {
           session: sessionId,
@@ -1822,10 +1841,12 @@ export function apply(ctx: Context, config: Config): void {
           create: () => agents.resume(resumeOptions),
           // A rejected resume may still have PUBLISHED (a later synchronous
           // listener threw — review round 8/21): recover by resuming the
-          // SAME session with the target lock still held; an unrecoverable
-          // durable session keeps its lock and reports explicitly (never a
-          // silent unlock of a session that exists).
+          // SAME session with the target lock still held. The target is
+          // EXISTING — its artifact predates this attempt — so an
+          // unrecoverable recovery releases the lock and reports instead
+          // of pinning the session until process exit (round 26 P2).
           recover: () => agents.resume(resumeOptions),
+          keepTargetLockOnUnrecoverable: false,
         })
         if (!result.ok) {
           // The resume failed before publishing: the transaction already
