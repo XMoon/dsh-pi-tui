@@ -74,6 +74,7 @@ export async function createForkedAgent(
   source: Agent,
   seed: readonly SessionEvent[],
   sessionId: SessionId,
+  composition?: { agentPreset?: string; setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void },
 ): Promise<AgentHandle> {
   // Source-deterministic cwd, captured BEFORE the first await: a concurrent
   // surface switch between the compose await and the create must never mix
@@ -84,8 +85,11 @@ export async function createForkedAgent(
   const cwd = source.session.header.cwd || host.sessionCwd()
   // The child inherits the parent's recorded preset (official fork
   // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
-  const composition = await host.compose(resolveSessionPreset(source.session))
-  const presetId = composition.agentPreset
+  // A caller may supply a PRE-RESOLVED composition (review round 23: the
+  // post-publication recovery must use the IDENTICAL setup that published
+  // the child — never a second, potentially drifting composition).
+  const resolved = composition ?? await host.compose(resolveSessionPreset(source.session))
+  const presetId = resolved.agentPreset
   return host.agents.create({
     sessionId,
     meta: {
@@ -95,7 +99,7 @@ export async function createForkedAgent(
       seedLength: seed.length,
     },
     agentOptions: { provider: source.options.provider, model: source.options.model },
-    setup: composition.setup,
+    setup: resolved.setup,
     seed,
   })
 }
@@ -211,6 +215,9 @@ export async function commitRewind(
   // Failures can only happen before the create; once it succeeds the child
   // IS the surface (no ghost, no rollback).
   const sessionId = SessionId(`session-${randomUUID()}`)
+  // The composition is resolved ONCE; the IDENTICAL setup rides both the
+  // create and the post-publication recovery (review round 23).
+  const composition = await host.compose(resolveSessionPreset(source.session))
   const result = await host.transitionTo({
     target: {
       id: String(sessionId),
@@ -219,19 +226,16 @@ export async function commitRewind(
       header: { cwd: source.session.header.cwd || host.sessionCwd() },
     },
     fresh: true,
-    create: () => createForkedAgent(host, source, seed, sessionId),
+    create: () => createForkedAgent(host, source, seed, sessionId, composition),
     // The publication crossed the durable boundary but the create rejected
     // (a later synchronous listener threw — review round 8): resume the
-    // published child with the target lock still held, under the source's
-    // recorded preset and provider/model.
-    recover: async () => {
-      const composition = await host.compose(resolveSessionPreset(source.session))
-      return host.agents.resume({
-        resumeSessionId: sessionId,
-        agentOptions: { provider: source.options.provider, model: source.options.model },
-        setup: composition.setup,
-      })
-    },
+    // published child with the target lock still held, under the SAME
+    // composition and the source's provider/model.
+    recover: () => host.agents.resume({
+      resumeSessionId: sessionId,
+      agentOptions: { provider: source.options.provider, model: source.options.model },
+      setup: composition.setup,
+    }),
   })
   if (!result.ok) return { kind: 'failed', message: result.message }
   // The transaction COMMITTED: restore the selected prompt (synchronous,

@@ -2054,38 +2054,32 @@ export function registerTuiCommands(
       // is synchronous, and a failure anywhere before the create leaves
       // the current session untouched (no published child to roll back).
       const sessionId = SessionId(`session-${randomUUID()}`)
+      // The composition and agent options are resolved ONCE; the IDENTICAL
+      // setup rides both the create and the post-publication recovery
+      // (review round 23).
+      const composition = await runner.compose(runner.pendingPreset)
+      const newOptions = {
+        provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
+        model: runner.liveAgent?.options.model ?? runner.selected.current?.model,
+      }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd } },
         fresh: true,
-        create: async () => {
-          const liveAgent = runner.liveAgent
-          const composition = await runner.compose(runner.pendingPreset)
-          const presetId = composition.agentPreset
-          return runner.agents.create({
-            sessionId,
-            meta: metaOf(cwd, presetId),
-            // Before the first session the process-wide selection stands in.
-            agentOptions: {
-              provider: liveAgent?.options.provider ?? runner.selected.current?.provider,
-              model: liveAgent?.options.model ?? runner.selected.current?.model,
-            },
-            setup: composition.setup,
-          })
-        },
+        create: () => runner.agents.create({
+          sessionId,
+          meta: metaOf(cwd, composition.agentPreset),
+          // Before the first session the process-wide selection stands in.
+          agentOptions: newOptions,
+          setup: composition.setup,
+        }),
         // The publication crossed the durable boundary but the create
         // rejected (a later synchronous listener threw — review round 8):
         // resume the published child with the target lock still held.
-        recover: async () => {
-          const composition = await runner.compose(runner.pendingPreset)
-          return runner.agents.resume({
-            resumeSessionId: sessionId,
-            agentOptions: {
-              provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
-              model: runner.liveAgent?.options.model ?? runner.selected.current?.model,
-            },
-            setup: composition.setup,
-          })
-        },
+        recover: () => runner.agents.resume({
+          resumeSessionId: sessionId,
+          agentOptions: newOptions,
+          setup: composition.setup,
+        }),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
