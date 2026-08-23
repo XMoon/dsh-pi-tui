@@ -220,10 +220,13 @@ else
   bad "A lost its lock after reactivation"
 fi
 
-# P2 (second real dsh process) tries to open A: must be REFUSED.
+# P2 (second real dsh process) tries to open A: must be REFUSED. The
+# assertion matches ONLY the lock-refusal notice (another live process
+# owns the session), never the resume-failure wording ("stays locked by
+# this TUI" would mean P2's own lock check wrongly passed).
 launch_p2
 sleep 3
-if echo "$(p2_out)" | grep -qi "refus\|held\|locked\|stays"; then ok "P2 was refused for $SESSION_A"; else bad "P2 was NOT refused: $(p2_out)"; fi
+if echo "$(p2_out)" | grep -qi "is open in another dsh process\|cannot lock session\|refusing to resume"; then ok "P2 was refused for $SESSION_A"; else bad "P2 was NOT refused: $(p2_out)"; fi
 
 # ── 5. ABA: cooling#1 → reactivate → cooling#2 ──────────────────────────
 if [ "$RUN_ABA" -eq 1 ]; then
@@ -253,11 +256,13 @@ if [ "$RUN_ABA" -eq 1 ]; then
   else
     bad "cooling#2 began ${ABA_OVERLAP_MS}ms after the cooling#1 Enter — no overlap with the old verifier (race not exercised)"
   fi
-  # The CURRENT cooling epoch cannot settle before quiet 1s + one 0.5s
-  # sample ≈ 1.5s. The OLD verifier #1, if it were NOT epoch-stale, would
-  # release A early (its own samples completed around the last switch).
-  # Measure when the lock disappears: before 1.2s = stale-verifier leak;
-  # after ~1.5s = the CURRENT epoch's release.
+  # The CURRENT cooling epoch cannot settle before quiet 1s + 2×0.5s
+  # interval sleeps ≈ 2.0s (sampling starts right after the quiet). The
+  # OLD verifier #1, if it were NOT epoch-stale, would release A early
+  # (its own samples completed around the last switch, ~0.9s into
+  # cooling#2 given the measured overlap). Measure when the lock
+  # disappears: before 1.5s = stale-verifier leak; after ~2.0s = the
+  # CURRENT epoch's release.
   start_ms=$(now_ms)
   elapsed=0
   while [ -f "$(lock_path $SESSION_A)" ] && [ "$elapsed" -lt 60 ]; do
@@ -269,7 +274,7 @@ if [ "$RUN_ABA" -eq 1 ]; then
   else
     gone_ms=$(now_ms)
     gap_ms=$((gone_ms - start_ms))
-    if [ "$gap_ms" -lt 1200 ]; then
+    if [ "$gap_ms" -lt 1500 ]; then
       bad "A lock released ${gap_ms}ms into cooling#2 — a stale verifier released a later lifecycle"
     else
       ok "lock held through the stale-verifier window; released at ${gap_ms}ms (current epoch)"
@@ -282,6 +287,94 @@ if [ "$RUN_ABA" -eq 1 ]; then
     ok "P2 opened $SESSION_A after the epoch2 release"
   else
     bad "P2 could not open A after release: $(p2_out)"
+  fi
+fi
+
+# ── 6. PINNED sticky quarantine: cooling failure → refused → stale takeover ─
+if [ "$RUN_ABA" -eq 1 ]; then
+  echo "== PINNED: cooling failure → quarantine → P1 reopen refused → P2 refused → P1 exit → stale takeover =="
+  # Use a THIRD session C (A is owned by P2 after the ABA case). P1 is on
+  # B; switch B → C so C becomes live, then C → B so C enters COOLING,
+  # and IMMEDIATELY append an extra durable event to C's log (a simulated
+  # external writer). The cooling verifier's parity triple (event count,
+  # last seq, tail fingerprint) then never matches the final snapshot →
+  # the retirement cannot settle → after the 5s max window C is PINNED.
+  SESSION_C="session-e2e-c"
+  seed_session "$SESSION_C"
+  send_cmd "$PANE1" "/resume $SESSION_C"
+  wait_title "$PANE1" "$SESSION_C" 120
+  send_cmd "$PANE1" "/resume $SESSION_B"
+  wait_title "$PANE1" "$SESSION_B" 120
+  C_DIR="$E2E_HOME/sessions/$PROJECT_KEY/$SESSION_C"
+  # A WELL-FORMED user/message event that the DSH reader ACCEPTS (the
+  # artifact must stay resumable): seq CONTINUOUS with the log (max seq + 1,
+  # the JSONL backend rejects a gap) and a fresh current time. Its
+  # seq/time/content differ from anything P1 wrote, so the cooling
+  # verifier's parity triple (event count, last seq, tail fingerprint)
+  # never matches the final snapshot → the retirement cannot settle →
+  # after the 5s max window C is PINNED.
+  C_LAST_SEQ="$(zstd -q -d -c "$C_DIR/session.jsonl.zstd" 2>/dev/null \
+    | grep -o '"seq":[0-9]*' | sed 's/"seq"://' | sort -n | tail -1 || true)"
+  C_LAST_SEQ="${C_LAST_SEQ:-0}"
+  C_NEXT_SEQ=$((C_LAST_SEQ + 1))
+  C_NOW_MS="$(date +%s%3N)"
+  printf '{"type":"user/message","seq":%s,"time":%s,"data":{"content":[{"type":"text","text":"e2e injected external writer"}],"source":{"kind":"user"},"role":"user","id":"e2e-injected-0001"},"surfaceOp":"append"}\n' \
+    "$C_NEXT_SEQ" "$C_NOW_MS" | zstd -q -c >> "$C_DIR/session.jsonl.zstd"
+  # Wait past the cooling max (5s) so the verifier pins C.
+  sleep 6
+  if [ -f "$(lock_path $SESSION_C)" ]; then ok "C lock still held after the failed cooling"; else bad "C lock lost after the failed cooling"; fi
+  # P1 attempts to reopen the quarantined C: must be REFUSED with the
+  # STICKY-QUARANTINE notice (not a generic failure).
+  send_cmd "$PANE1" "/resume $SESSION_C"
+  sleep 2
+  P1_OUT="$(tmux capture-pane -t "$PANE1" -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr '\n' ' ')"
+  if echo "$P1_OUT" | grep -qi "safety quarantine\|restart this TUI before reopening"; then
+    ok "P1 reopen of the quarantined C was refused (sticky quarantine notice)"
+  else
+    bad "P1 reopen of the quarantined C was NOT refused: $P1_OUT"
+  fi
+  if [[ "$(title_of "$PANE1")" == *"$SESSION_B"* ]]; then ok "P1 stayed on B (the quarantine did not switch)"; else bad "P1 left B after the refused reopen"; fi
+  # P2 (a second real dsh process) tries to open C: must be REFUSED too
+  # (the lock is still held by P1's quarantine). Match ONLY the
+  # cross-process lock-refusal notice — the same precise wording as Case
+  # 4 — never the resume-failure "stays locked by this TUI" (which would
+  # mean P2's own lock check wrongly passed). First quit the OLD dsh
+  # still running in pane 2 (it opened A in the ABA case) so the pane is
+  # a clean shell again.
+  tmux send-keys -t "$PANE2" -l "/exit"
+  sleep 0.4
+  tmux send-keys -t "$PANE2" Enter
+  sleep 2
+  tmux send-keys -t "$PANE2" -l "env -u NO_COLOR DSH_HOME=$E2E_HOME dsh --profile $PROFILE_NAME --session $SESSION_C"
+  sleep 0.4
+  tmux send-keys -t "$PANE2" Enter
+  sleep 3
+  if echo "$(p2_out)" | grep -qi "is open in another dsh process\|cannot lock session\|refusing to resume"; then ok "P2 was refused for the quarantined C"; else bad "P2 was NOT refused for the quarantined C: $(p2_out)"; fi
+  # P1 exits: the editor may hold the refused /resume text, so /exit would
+  # not be a clean command — kill the OWNER of C's lock precisely (the pid
+  # recorded in the lock file IS the dsh process; this is the script's own
+  # process, never a user session). The stale lock remains, and P2's next
+  # open takes it over (stale takeover).
+  C_LOCK="$(lock_path $SESSION_C)"
+  if [ -f "$C_LOCK" ]; then
+    OWNER_PID="$(node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(j.pid)" "$C_LOCK" 2>/dev/null || true)"
+    if [ -n "$OWNER_PID" ]; then
+      kill "$OWNER_PID" 2>/dev/null || true
+    fi
+  fi
+  sleep 3
+  tmux send-keys -t "$PANE2" -l "/exit"
+  sleep 0.4
+  tmux send-keys -t "$PANE2" Enter
+  sleep 2
+  tmux send-keys -t "$PANE2" -l "env -u NO_COLOR DSH_HOME=$E2E_HOME dsh --profile $PROFILE_NAME --session $SESSION_C"
+  sleep 0.4
+  tmux send-keys -t "$PANE2" Enter
+  sleep 5
+  if [[ "$(title_of "$PANE2")" == *"$SESSION_C"* ]]; then
+    ok "P2 opened C after P1 exit (stale takeover of the quarantined lock)"
+  else
+    bad "P2 could not open C after P1 exit: $(p2_out)"
   fi
 fi
 

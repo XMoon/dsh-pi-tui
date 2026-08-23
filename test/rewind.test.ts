@@ -294,7 +294,7 @@ function makeRig(options: {
   composePreset?: string
   createError?: string
   /** Full transitionTo override (wins over the default implementation). */
-  transitionTo?: <T extends AgentHandle>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T>; recover?: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  transitionTo?: <T extends AgentHandle>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
   createHook?: (call: CreatedCall) => void
 } = {}): ForkRig {
   const created: CreatedCall[] = []
@@ -714,9 +714,9 @@ test('forkSeed stays the /fork seed rule (last completed turn, inclusive)', () =
   assert.equal(forkSeed([]), undefined)
 })
 
-// ── review round 23: one composition for create AND recovery ───────────────
+// ── review round 23 (post-recovery-removal): one composition, no retry ───
 
-test('review round 23: /new resolves ONE compose and the recovery reuses the IDENTICAL setup', async () => {
+test('review round 23: /new resolves ONE compose and passes NO recovery step', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -728,8 +728,7 @@ test('review round 23: /new resolves ONE compose and the recovery reuses the IDE
   const base = stubRunner({ ctx, app, rewinds, ensureCalls })
   let composes = 0
   let createSetup: unknown
-  let recoverSetup: unknown
-  let recoverFn: (() => Promise<unknown>) | undefined
+  let sawRecover = false
   const runner: TuiCommandRunner = {
     ...base,
     compose: async () => {
@@ -741,13 +740,9 @@ test('review round 23: /new resolves ONE compose and the recovery reuses the IDE
         createSetup = opts.setup
         return { agent: { session: { id: 'session-new' } } } as unknown as AgentHandle
       },
-      resume: async (opts: { setup: unknown }) => {
-        recoverSetup = opts.setup
-        return { agent: { session: { id: 'session-new' } } } as unknown as AgentHandle
-      },
     } as never,
-    transitionTo: async <T>(steps: { create: () => Promise<T>; recover?: () => Promise<T> }) => {
-      recoverFn = steps.recover
+    transitionTo: async <T>(steps: { create: () => Promise<T> }) => {
+      sawRecover = 'recover' in steps
       return { ok: true, next: await steps.create() }
     },
   }
@@ -755,14 +750,13 @@ test('review round 23: /new resolves ONE compose and the recovery reuses the IDE
   const def = commands.defs.find(entry => entry.name === 'new')
   assert.ok(def?.handler !== undefined, '/new handler missing')
   await (def!.handler as () => Promise<unknown>)()
-  assert.equal(composes, 1, 'the composition is resolved exactly once for create AND recovery')
-  assert.ok(recoverFn !== undefined, 'the transition receives a recovery step')
-  await recoverFn()
-  assert.equal(createSetup, recoverSetup, 'the recovery uses the IDENTICAL setup object — a second composition could drift')
+  assert.equal(composes, 1, 'the composition is resolved exactly once (for the create)')
+  assert.equal(sawRecover, false, 'a rejected create is NEVER retried — no recovery step is passed')
+  assert.ok(createSetup !== undefined, 'the create received the resolved setup')
   app.stop()
 })
 
-test('review round 23/24: /fork resolves ONE compose and the recovery reuses the IDENTICAL setup', async () => {
+test('review round 23/24: /fork resolves ONE compose and passes NO recovery step', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -774,8 +768,7 @@ test('review round 23/24: /fork resolves ONE compose and the recovery reuses the
   const base = stubRunner({ ctx, app, rewinds, ensureCalls })
   let composes = 0
   let createSetup: unknown
-  let recoverSetup: unknown
-  let recoverFn: (() => Promise<unknown>) | undefined
+  let sawRecover = false
   const runner: TuiCommandRunner = {
     ...base,
     liveAgent: sourceAgent('session-source', turn(0, 1, 'A')),
@@ -788,13 +781,9 @@ test('review round 23/24: /fork resolves ONE compose and the recovery reuses the
         createSetup = opts.setup
         return { agent: { session: { id: 'session-fork' } } } as unknown as AgentHandle
       },
-      resume: async (opts: { setup: unknown }) => {
-        recoverSetup = opts.setup
-        return { agent: { session: { id: 'session-fork' } } } as unknown as AgentHandle
-      },
     } as never,
-    transitionTo: async <T>(steps: { create: () => Promise<T>; recover?: () => Promise<T> }) => {
-      recoverFn = steps.recover
+    transitionTo: async <T>(steps: { create: () => Promise<T> }) => {
+      sawRecover = 'recover' in steps
       return { ok: true, next: await steps.create() }
     },
   }
@@ -802,10 +791,9 @@ test('review round 23/24: /fork resolves ONE compose and the recovery reuses the
   const def = commands.defs.find(entry => entry.name === 'fork')
   assert.ok(def?.handler !== undefined, '/fork handler missing')
   await (def!.handler as () => Promise<unknown>)()
-  assert.equal(composes, 1, 'the composition is resolved exactly once for create AND recovery')
-  assert.ok(recoverFn !== undefined, 'the transition receives a recovery step')
-  await recoverFn()
-  assert.equal(createSetup, recoverSetup, 'the recovery uses the IDENTICAL setup object as the create')
+  assert.equal(composes, 1, 'the composition is resolved exactly once (for the create)')
+  assert.equal(sawRecover, false, 'a rejected create is NEVER retried — no recovery step is passed')
+  assert.ok(createSetup !== undefined, 'the create received the resolved setup')
   app.stop()
 })
 

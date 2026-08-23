@@ -231,9 +231,8 @@ export interface AgentsLike {
     // handle detaches from it on publication.
     signal?: AbortSignal
   }): Promise<AgentHandle>
-  /** Resume a session whose publication crossed the durable boundary but
-   * whose create rejected (the post-publication recovery path, review
-   * round 8). */
+  /** Resume a session (the ordinary open path; a rejection is never
+   * retried — see the sticky-quarantine rule in the runner). */
   resume(options: {
     resumeSessionId: SessionId
     agentOptions: { provider?: string; model?: string }
@@ -318,18 +317,15 @@ export interface TuiCommandRunner {
     /** The child's PRE-GENERATED session identity (MANDATORY): the
      * transaction reserves its lease BEFORE the DSH call (while the old
      * lock is still held), so a refusal aborts with zero child side
-     * effects; once the DSH boundary is crossed, a failure gets at most
-     * ONE same-id recovery and then the target is PINNED — never
-     * released. */
+     * effects; a create/resume rejection is NEVER retried (no same-ID
+     * recovery) — once the DSH boundary is crossed, the target is PINNED
+     * immediately and stays locked for this process's lifetime. */
     target: { id: string; header?: { cwd?: string } }
     /** Whether the target is a FRESH session: the target lock must settle
      * as acquired, or the transaction aborts before the create. */
     fresh?: boolean
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
-    /** Post-publication recovery (review round 8): resume the child when
-     * its create rejected but the session became durable. */
-    recover?: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
@@ -2154,9 +2150,10 @@ export function registerTuiCommands(
       // is synchronous, and a failure anywhere before the create leaves
       // the current session untouched (no published child to roll back).
       const sessionId = SessionId(`session-${randomUUID()}`)
-      // The composition and agent options are resolved ONCE; the IDENTICAL
-      // setup rides both the create and the post-publication recovery
-      // (review round 23).
+      // The composition and agent options are resolved ONCE and ride the
+      // create (a rejected create is NEVER retried — the first DSH call
+      // may have left a hidden lifecycle, so the target is PINNED
+      // immediately).
       const composition = await runner.compose(runner.pendingPreset)
       const newOptions = {
         provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
@@ -2169,14 +2166,6 @@ export function registerTuiCommands(
           sessionId,
           meta: metaOf(cwd, composition.agentPreset),
           // Before the first session the process-wide selection stands in.
-          agentOptions: newOptions,
-          setup: composition.setup,
-        }),
-        // The publication crossed the durable boundary but the create
-        // rejected (a later synchronous listener threw — review round 8):
-        // resume the published child with the target lock still held.
-        recover: () => runner.agents.resume({
-          resumeSessionId: sessionId,
           agentOptions: newOptions,
           setup: composition.setup,
         }),
@@ -2647,22 +2636,15 @@ export function registerTuiCommands(
       // no rollback attempt).
       const sessionId = SessionId(`session-${randomUUID()}`)
       const childCwd = source.session.header.cwd || runner.sessionCwd()
-      // The composition is resolved ONCE; the IDENTICAL setup rides both
-      // the create and the post-publication recovery (review round 23/24).
+      // The composition is resolved ONCE and rides the create (a rejected
+      // create is NEVER retried — the first DSH call may have left a
+      // hidden lifecycle, so the target is PINNED immediately).
       const composition = await runner.compose(resolveSessionPreset(source.session))
       const forkOptions = { provider: source.options.provider, model: source.options.model }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
         fresh: true,
         create: () => createForkedAgent(runner, source, seed, sessionId, composition),
-        // The publication crossed the durable boundary but the create
-        // rejected (review round 8): resume the published child with the
-        // target lock still held, under the SAME composition.
-        recover: () => runner.agents.resume({
-          resumeSessionId: sessionId,
-          agentOptions: forkOptions,
-          setup: composition.setup,
-        }),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —

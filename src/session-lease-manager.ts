@@ -17,9 +17,12 @@
  *   ├─ uncertainty / timeout / mismatch → PINNED
  *   └─ same-process reactivation (reserveForActivation) → RESERVED(epoch=N+1)
  * RELEASED → must RE-ACQUIRE the physical lock (requiresReacquire)
- * PINNED → this process keeps the lock for its lifetime; never released
- *          cross-process; local reactivation is allowed but the lock
- *          NEVER leaves the process
+ * PINNED → STICKY QUARANTINE: this process could not prove the session
+ *          has no hidden writer (failed dispose / detach gate / resume /
+ *          unsettled cooling). The lock stays with this process for its
+ *          LIFETIME; reserveForActivation REFUSES it (a new resume does
+ *          not clear the uncertainty); only process exit — and the next
+ *          opener's stale takeover — ends the quarantine.
  * ```
  *
  * **Lifecycle epochs (the reactivation rule).** Every lease carries a
@@ -41,6 +44,13 @@
  *   touched lease; only `releaseAfterVerifiedCooling` (with the CURRENT
  *   cooling epoch) or the process's own lifetime for PINNED may release
  *   it.
+ * - PINNED is a process-lifetime quarantine, NOT a cooling state: it
+ *   means this process could not prove the session has no hidden writer
+ *   (a failed dispose, a failed detach gate, a failed resume/create, an
+ *   unsettled cooling). A same-process re-open must be REFUSED — a new
+ *   resume does not clear the uncertainty, and a later normal cooling
+ *   release would hand the lock to another process while the hidden
+ *   lifecycle could still write (the cross-process writer window).
  * - A RELEASED lease must be RE-ACQUIRED physically before it can become
  *   active again (another process may own it now).
  * - The manager is process-global (mounted on `globalThis` under a
@@ -160,16 +170,28 @@ export class ProcessSessionLeaseManager {
   }
 
   /** LIFECYCLE-layer activation: reserve a session that is about to be
-   *  activated (agents.create/resume) — fresh ids AND existing sessions
-   *  (COOLING / PINNED / RELEASED). This is the ONLY reservation that may
-   *  precede the DSH boundary on an existing lease:
+   *  activated (agents.create/resume) — fresh ids AND existing sessions.
+   *  This is the ONLY reservation that may precede the DSH boundary on an
+   *  existing lease:
    *
-   * - held lease (COOLING / PINNED / ACTIVE / TOUCHED / RESERVED): the
-   *   previous lifecycle epoch is invalidated SYNCHRONOUSLY (epoch++,
-   *   cooling fields cleared, state → RESERVED, untouched) BEFORE any DSH
-   *   call — from this instant every older cooling verifier is stale and
-   *   can neither release nor pin this lease. The physical lock never
-   *   leaves this process.
+   * - held COOLING / ACTIVE / TOUCHED / RESERVED lease: the previous
+   *   lifecycle epoch is invalidated SYNCHRONOUSLY (epoch++, cooling
+   *   fields cleared, state → RESERVED, untouched) BEFORE any DSH call —
+   *   from this instant every older cooling verifier is stale and can
+   *   neither release nor pin this lease. The physical lock never leaves
+   *   this process.
+   * - held PINNED lease: REFUSED. PINNED is a process-lifetime
+   *   quarantine, not a cooling state: it means this process could NOT
+   *   prove the session has no hidden writer (a failed dispose, a failed
+   *   detach gate, a failed resume/create, an unsettled cooling). A new
+   *   resume does NOT clear that uncertainty — the hidden lifecycle may
+   *   still be alive inside this process and could write the session
+   *   after a later normal cooling released the lock (the cross-process
+   *   writer window). Only process exit (and the next opener's stale
+   *   takeover) may end the quarantine.
+   * - lockless PINNED record (pin() without a held lease): REFUSED by
+   *   acquirePhysical for the SAME reason — re-acquiring the physical
+   *   lock does not clear the quarantine, so the record is never demoted.
    * - RELEASED tombstone (physical lock gone): a REAL physical acquire is
    *   required (another process may own the session now); success starts
    *   a new lifecycle on the tombstone.
@@ -178,18 +200,25 @@ export class ProcessSessionLeaseManager {
   reserveForActivation(target: PhysicalTarget): OpenLockResult {
     const existing = this.leases.get(target.id)
     if (existing !== undefined && existing.physicalLockHeld) {
-      // Same-process reactivation (the convergence-model reactivation
-      // path). A PINNED lease keeps its pin reason as diagnostics history
-      // (previousPinReason); everything cooling-related is dropped: a new
+      if (existing.state === 'pinned') {
+        // Sticky quarantine (the reactivation P1): a PINNED lease must
+        // never be demoted to a normal lifecycle. The pin reason is kept
+        // for diagnostics; the lock stays with this process until exit.
+        return {
+          kind: 'refused',
+          message: `session ${target.id} entered a safety quarantine after an unresolved lifecycle failure; it will remain locked by this TUI until the process exits — restart this TUI before reopening it`,
+        }
+      }
+      // Same-process reactivation (COOLING / ACTIVE / TOUCHED / RESERVED):
+      // the previous lifecycle epoch is invalidated synchronously; a new
       // resume establishes a brand-new live lifecycle.
-      const wasPinned = existing.state === 'pinned'
       existing.lifecycleEpoch += 1
       existing.coolingEpoch = undefined
       existing.snapshot = undefined
       existing.coolingStartedAt = undefined
       existing.touchedByDsh = false
       existing.releasedAt = undefined
-      if (!wasPinned) existing.pinReason = undefined
+      existing.pinReason = undefined
       existing.state = 'reserved'
       return { kind: 'acquired' }
     }
@@ -200,11 +229,25 @@ export class ProcessSessionLeaseManager {
     target: PhysicalTarget,
     existing: SessionLeaseRecord | undefined,
   ): OpenLockResult {
+    if (existing !== undefined && existing.state === 'pinned') {
+      // A PINNED lease is a process-lifetime quarantine REGARDLESS of
+      // whether the physical lock is still held (a lockless PINNED record
+      // exists when pin() ran without a held lease). The pin records "this
+      // process cannot prove the session has no hidden writer", and
+      // re-acquiring the physical lock does NOT clear that uncertainty —
+      // demoting the record here would re-open the cross-process writer
+      // window the quarantine exists to close.
+      return {
+        kind: 'refused',
+        message: `session ${target.id} entered a safety quarantine after an unresolved lifecycle failure; it will remain locked by this TUI until the process exits — restart this TUI before reopening it`,
+      }
+    }
     const { result, release } = this.deps.acquire(target)
     if (result.kind === 'acquired') {
       if (existing !== undefined) {
-        // RELEASED tombstone (or a lockless PINNED record): re-activate
-        // with a NEW lifecycle epoch, keeping the record.
+        // Only a RELEASED tombstone reaches this branch (the lockless
+        // PINNED case is refused above): re-activate with a NEW lifecycle
+        // epoch, keeping the record.
         existing.lifecycleEpoch += 1
         existing.coolingEpoch = undefined
         existing.snapshot = undefined
@@ -245,10 +288,16 @@ export class ProcessSessionLeaseManager {
     if (lease.state === 'reserved') lease.state = 'touched'
   }
 
-  /** The committed session is now the live surface. */
+  /** The committed session is now the live surface. A PINNED lease can
+   *  NEVER become active: the quarantine is process-lifetime (a new resume
+   *  does not clear the unresolved-lifecycle uncertainty), so reaching
+   *  this state is a state-machine violation and throws. */
   markActive(sessionId: string): void {
     const lease = this.leases.get(sessionId)
     if (lease === undefined) return
+    if (lease.state === 'pinned') {
+      throw new Error('BUG: a pinned session cannot become active')
+    }
     lease.state = 'active'
   }
 
@@ -256,15 +305,17 @@ export class ProcessSessionLeaseManager {
    *  pre-switch snapshot; the cooling coordinator verifies before any
    *  release. Returns the NEW lifecycle epoch (the verifier is bound to
    *  it), or undefined when there is nothing to cool (unknown session —
-   *  the caller then skips the coordinator) or the lease is PINNED (a
-   *  pinned lease must never downgrade to cooling — review round 37). */
+   *  the caller then skips the coordinator). A PINNED lease can NEVER
+   *  re-enter cooling: the quarantine is process-lifetime, so attempting
+   *  it is a state-machine violation and throws (review round 37 made it
+   *  a silent no-op; the sticky-quarantine model makes it a hard
+   *  invariant). */
   beginCooling(sessionId: string, snapshot: RetiredSessionSnapshot): number | undefined {
     const lease = this.leases.get(sessionId)
     if (lease === undefined) return undefined
-    // Defensive: a PINNED lease must never downgrade to cooling (a failed
-    // dispose or an unsettled verification keeps it pinned for this
-    // process's lifetime — review round 37).
-    if (lease.state === 'pinned') return undefined
+    if (lease.state === 'pinned') {
+      throw new Error('BUG: a pinned session must never re-enter cooling')
+    }
     // A NEW retirement: bump the lifecycle epoch so every verifier of an
     // EARLIER retirement becomes stale (the ABA rule).
     lease.lifecycleEpoch += 1
@@ -278,7 +329,8 @@ export class ProcessSessionLeaseManager {
 
   /** Release a lease that NEVER crossed the DSH boundary. HARD assertion:
    *  releasing a touched lease is a bug — only the verified cooling path
-   *  may release a touched session. */
+   *  may release a touched session. A PINNED lease (held OR lockless) is
+   *  a process-lifetime quarantine and must NEVER be released either. */
   releaseUntouched(sessionId: string): void {
     const lease = this.leases.get(sessionId)
     if (lease === undefined) return
@@ -286,6 +338,9 @@ export class ProcessSessionLeaseManager {
       throw new Error(
         'BUG: attempted to release a session lease after the DSH boundary',
       )
+    }
+    if (lease.state === 'pinned') {
+      throw new Error('BUG: a pinned session lease must never be released')
     }
     lease.physicalLockHeld = false
     // Every held lease carries its acquire-time binding (review

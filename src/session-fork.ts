@@ -44,9 +44,8 @@ export interface ForkAgentHost {
       seed?: readonly SessionEvent[]
       signal?: AbortSignal
     }): Promise<AgentHandle>
-    /** Resume a session whose publication crossed the durable boundary but
-     * whose create rejected (the post-publication recovery path, review
-     * round 8). */
+    /** Resume a session (the ordinary open path; a rejection is never
+     * retried — the runner pins immediately). */
     resume(options: {
       resumeSessionId: SessionId
       agentOptions: { provider?: string; model?: string }
@@ -86,8 +85,8 @@ export async function createForkedAgent(
   // The child inherits the parent's recorded preset (official fork
   // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
   // A caller may supply a PRE-RESOLVED composition (review round 23: the
-  // post-publication recovery must use the IDENTICAL setup that published
-  // the child — never a second, potentially drifting composition).
+  // create must run under the identical setup the caller resolved — never
+  // a second, potentially drifting composition).
   const resolved = composition ?? await host.compose(resolveSessionPreset(source.session))
   const presetId = resolved.agentPreset
   return host.agents.create({
@@ -137,18 +136,14 @@ export interface RewindCommitHost extends ForkAgentHost {
     /** The child's PRE-GENERATED session identity (MANDATORY): the
      * transaction reserves its lease BEFORE the DSH call (while the old
      * lock is still held), so a refusal aborts with zero child side
-     * effects; once the DSH boundary is crossed, a failure gets at most
-     * ONE same-id recovery and then the target is PINNED — never
-     * released. */
+     * effects; once the DSH boundary is crossed, a failure PINNS the
+     * target — never released, never retried. */
     target: { id: string; header?: { cwd?: string } }
     /** Whether the target is a FRESH session: the target lock must settle
      * as acquired, or the transaction aborts before the create. */
     fresh?: boolean
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
-    /** Post-publication recovery (review round 8): resume the child when
-     * its create rejected after the session became durable. */
-    recover?: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
   /** Restore the selected prompt into the editor — runs ONLY after the
    * transaction committed (a failed prepare/create never overwrites the
@@ -216,8 +211,9 @@ export async function commitRewind(
   // Failures can only happen before the create; once it succeeds the child
   // IS the surface (no ghost, no rollback).
   const sessionId = SessionId(`session-${randomUUID()}`)
-  // The composition is resolved ONCE; the IDENTICAL setup rides both the
-  // create and the post-publication recovery (review round 23).
+  // The composition is resolved ONCE and rides the create (a rejected
+  // create is NEVER retried — the first DSH call may have left a hidden
+  // lifecycle, so the target is PINNED immediately).
   const composition = await host.compose(resolveSessionPreset(source.session))
   const result = await host.transitionTo({
     target: {
@@ -228,15 +224,6 @@ export async function commitRewind(
     },
     fresh: true,
     create: () => createForkedAgent(host, source, seed, sessionId, composition),
-    // The publication crossed the durable boundary but the create rejected
-    // (a later synchronous listener threw — review round 8): resume the
-    // published child with the target lock still held, under the SAME
-    // composition and the source's provider/model.
-    recover: () => host.agents.resume({
-      resumeSessionId: sessionId,
-      agentOptions: { provider: source.options.provider, model: source.options.model },
-      setup: composition.setup,
-    }),
   })
   if (!result.ok) return { kind: 'failed', message: result.message }
   // The transaction COMMITTED: restore the selected prompt (synchronous,

@@ -1,15 +1,15 @@
 /**
  * Headless tests for the canonical session transition (the convergence
  * plan flow): quiesce → preflight → target lease → DSH boundary (touched)
- * → create / at most one same-id recovery → synchronous COMMIT (no lock
- * changes) → retire (dispose + cooling handover).
+ * → create (a rejection is NEVER retried — the target is PINNED
+ * immediately) → synchronous COMMIT (no lock changes) → retire (dispose +
+ * cooling handover).
  * @module @xmoon76/dsh-pi-tui/transition.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  createWithPublicationRecovery,
   runTransitionTo,
   type TransitionHost,
   type TransitionSteps,
@@ -135,44 +135,17 @@ test('an UNAVAILABLE target lease fails closed for EVERY writable target', async
   assert.deepEqual(events, ['old.flush', 'prepare', 'target.lock.acquire:session-c'])
 })
 
-test('a create rejection WITHOUT recovery PINNS the target (lock kept, old stays current)', async () => {
+test('a create rejection PINNS the target (lock kept, old stays current, NEVER retried)', async () => {
   const { host, events, failures, pins } = fakeHost()
   const outcome = await runTransitionTo(host, steps(events, { createError: 'DSH publication failed' }))
   assert.equal(outcome.ok, false)
   assert.deepEqual(events, [
     'old.flush', 'prepare', 'target.lock.acquire:session-c', 'target.touched:session-c', 'child.create',
     'target.pinned:session-c',
-  ], 'no second fresh create, no unlock — the target is pinned')
+  ], 'no same-id recovery, no second fresh create, no unlock — the target is pinned')
   assert.equal(pins.length, 1)
   assert.match(pins[0]!, /DSH create\/resume failed: DSH publication failed/)
   assert.deepEqual(failures, ['create:DSH publication failed'])
-})
-
-test('a rejected create RECOVERS with the same id and commits', async () => {
-  const { host, events, failures, pins } = fakeHost()
-  const recovered = steps(events, { createError: 'post-publication listener threw' })
-  recovered.recover = async () => { events.push('recover'); return handle('session-c') }
-  const outcome = await runTransitionTo(host, recovered)
-  assert.equal(outcome.ok, true)
-  assert.deepEqual(events, [
-    'old.flush', 'prepare', 'target.lock.acquire:session-c', 'target.touched:session-c',
-    'child.create', 'recover', 'child.commit', 'old.dispose',
-  ])
-  assert.deepEqual(pins, [], 'a successful same-id recovery is not a pin')
-  assert.deepEqual(failures, [])
-})
-
-test('a create rejection whose SAME-ID recovery also fails PINNS the target', async () => {
-  const { host, events, pins } = fakeHost()
-  const failing = steps(events, { createError: 'post-publication listener threw' })
-  failing.recover = async () => { events.push('recover'); throw new Error('resume repair failed') }
-  const outcome = await runTransitionTo(host, failing)
-  assert.equal(outcome.ok, false)
-  assert.deepEqual(events, [
-    'old.flush', 'prepare', 'target.lock.acquire:session-c', 'target.touched:session-c',
-    'child.create', 'recover', 'target.pinned:session-c',
-  ], 'at most ONE same-id recovery; failure pins the target')
-  assert.match(pins[0]!, /same-ID recovery: resume repair failed/)
 })
 
 test('a retire failure NEVER rolls the committed child back', async () => {
@@ -218,32 +191,6 @@ test('the old lease survives COMMIT + dispose — the transition releases NOTHIN
   assert.equal(manager.canReuseLocally('session-b'), true)
   assert.deepEqual(released, [], 'NOTHING was released inside the transition')
   assert.deepEqual(events, ['acquire:session-b', 'touched:session-b', 'create', 'commit', 'dispose'])
-})
-
-// ── the standalone helper: same-ID recovery, never a release ───────────────
-
-test('the standalone helper retries the SAME id once and throws (the caller pins)', async () => {
-  let creates = 0
-  let resumes = 0
-  await assert.rejects(
-    createWithPublicationRecovery({
-      targetId: 'session-c',
-      create: async () => { creates += 1; throw new Error('post-publication listener threw') },
-      resume: async () => { resumes += 1; throw new Error('resume repair failed') },
-    }),
-    /stays pinned/,
-  )
-  assert.equal(creates, 1, 'exactly one create attempt — no second fresh fallback')
-  assert.equal(resumes, 1, 'exactly one same-id recovery')
-})
-
-test('the helper: a successful same-id recovery returns the recovered handle', async () => {
-  const recovered = await createWithPublicationRecovery({
-    targetId: 'session-c',
-    create: async () => { throw new Error('publication failed') },
-    resume: async () => handle('session-c'),
-  })
-  assert.equal(recovered.agent.session.id, 'session-c')
 })
 
 test('a failed old-handle dispose pins and NEVER starts cooling (the production gate pattern)', async () => {

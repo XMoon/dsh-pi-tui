@@ -208,18 +208,35 @@ test('lease: a remount swaps the physical deps for NEW acquires; releases keep t
   first.release()
 })
 
-test('lease: beginCooling never downgrades a PINNED lease (round 37)', () => {
+test('lease: beginCooling on a PINNED lease THROWS (sticky quarantine, round 37 hardened)', () => {
   const { manager } = deps()
   manager.reserve({ id: 'session-a' })
   manager.markTouched('session-a')
   manager.pin('session-a', 'dispose failed')
-  const epoch = manager.beginCooling('session-a', {
-    sessionId: 'session-a', eventCount: 0, tailFingerprint: '', empty: true, capturedAt: 0,
-  })
-  assert.equal(epoch, undefined, 'a pinned lease never starts a new cooling epoch')
+  // The quarantine is process-lifetime: a pinned lease must NEVER re-enter
+  // cooling — the manager throws instead of silently no-oping.
+  assert.throws(
+    () => manager.beginCooling('session-a', {
+      sessionId: 'session-a', eventCount: 0, tailFingerprint: '', empty: true, capturedAt: 0,
+    }),
+    /pinned session must never re-enter cooling/,
+  )
   assert.equal(manager.state('session-a')?.state, 'pinned', 'a pinned lease stays pinned')
   // The cooling verifier cannot release it either.
   assert.equal(manager.releaseAfterVerifiedCooling('session-a', 1), 'pinned')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, true)
+})
+
+test('lease: markActive on a PINNED lease THROWS (sticky quarantine)', () => {
+  const { manager } = deps()
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.pin('session-a', 'resume failed')
+  assert.throws(
+    () => manager.markActive('session-a'),
+    /pinned session cannot become active/,
+  )
+  assert.equal(manager.state('session-a')?.state, 'pinned')
   assert.equal(manager.state('session-a')?.physicalLockHeld, true)
 })
 
@@ -302,23 +319,146 @@ test('RELEASED → activate: a REAL physical reacquire happens', () => {
   assert.equal(released.length, 1)
 })
 
-test('PINNED → local reactivate: the lock stays, old cooling tokens are invalid', () => {
+test('PINNED → reserveForActivation is REFUSED (sticky quarantine, the reactivation P1)', () => {
   const { manager, released } = deps()
   const epoch1 = cool(manager, 'session-a')
   manager.pinCooling('session-a', epoch1, 'durable mismatch')
   assert.equal(manager.state('session-a')?.state, 'pinned')
-  // Local re-entry into a PINNED session: allowed, lock NEVER leaves.
-  assert.deepEqual(manager.reserveForActivation({ id: 'session-a' }), { kind: 'acquired' })
+  // PINNED is a process-lifetime quarantine: a same-process re-open must
+  // be refused — a new resume does not clear the unresolved-lifecycle
+  // uncertainty, and a later normal cooling release would hand the lock
+  // to another process while the hidden lifecycle could still write.
+  const result = manager.reserveForActivation({ id: 'session-a' })
+  assert.equal(result.kind, 'refused')
+  assert.match((result as { message: string }).message, /safety quarantine/)
   const record = manager.state('session-a')!
-  assert.equal(record.physicalLockHeld, true, 'reactivation never releases a pinned lock')
-  assert.equal(record.state, 'reserved')
-  assert.equal(record.lifecycleEpoch, epoch1 + 1)
-  // Old cooling tokens are invalid after the reactivation.
-  assert.equal(manager.releaseAfterVerifiedCooling('session-a', epoch1), 'stale')
+  assert.equal(record.state, 'pinned', 'the quarantine is NOT cleared')
+  assert.equal(record.physicalLockHeld, true, 'the lock never leaves the process')
+  assert.equal(record.pinReason, 'durable mismatch', 'the pin reason stays for diagnostics')
+  // Old cooling tokens stay invalid regardless (a pinned lease reports
+  // 'pinned' — never released).
+  assert.equal(manager.releaseAfterVerifiedCooling('session-a', epoch1), 'pinned')
   assert.equal(manager.pinCooling('session-a', epoch1, 'late'), 'stale')
   assert.deepEqual(released, [])
-  // A normal new lifecycle works from the reactivated state.
+})
+
+test('PINNED from a resume/create failure is also sticky (business pin)', () => {
+  const { manager, released } = deps()
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.pin('session-a', 'resume failed: provider unavailable')
+  const result = manager.reserveForActivation({ id: 'session-a' })
+  assert.equal(result.kind, 'refused', 'a business-pinned session cannot be reactivated')
+  assert.equal(manager.state('session-a')?.state, 'pinned')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, true)
+  assert.deepEqual(released, [])
+})
+
+test('PINNED from a dispose/detach-gate failure is also sticky (business pin)', () => {
+  const { manager, released } = deps()
+  manager.reserve({ id: 'session-a' })
   manager.markTouched('session-a')
   manager.markActive('session-a')
-  assert.equal(manager.state('session-a')?.state, 'active')
+  manager.pin('session-a', 'old agent/session remained registered after dispose')
+  const result = manager.reserveForActivation({ id: 'session-a' })
+  assert.equal(result.kind, 'refused', 'a detach-gate-pinned session cannot be reactivated')
+  assert.equal(manager.state('session-a')?.state, 'pinned')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, true)
+  assert.deepEqual(released, [])
+})
+
+test('a LOCKLESS PINNED record is refused too (never demoted through acquirePhysical)', () => {
+  const { manager, acquired, released } = deps()
+  // pin() with no lease creates a diagnostics-only record WITHOUT a
+  // physical lock (physicalLockHeld=false). The sticky quarantine must
+  // hold regardless: reserveForActivation falls into acquirePhysical,
+  // which must REFUSE instead of re-acquiring and demoting the record.
+  manager.pin('session-a', 'resume failed before the lock could be held')
+  assert.equal(manager.state('session-a')?.state, 'pinned')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, false)
+  manager.markTouched('session-a')
+  const result = manager.reserveForActivation({ id: 'session-a' })
+  assert.equal(result.kind, 'refused', 'a lockless PINNED record cannot be reactivated')
+  assert.match((result as { message: string }).message, /safety quarantine/)
+  assert.deepEqual(acquired, [], 'no physical re-acquire happens for a quarantined session')
+  const record = manager.state('session-a')!
+  assert.equal(record.state, 'pinned', 'the record is never demoted to RESERVED')
+  assert.equal(record.physicalLockHeld, false, 'the lockless record stays lockless')
+  assert.deepEqual(released, [])
+})
+
+test('releaseUntouched on a PINNED lease THROWS (no release out-edge)', () => {
+  const { manager, released } = deps()
+  manager.pin('session-a', 'unsettled cooling')
+  assert.throws(
+    () => manager.releaseUntouched('session-a'),
+    /BUG: a pinned session lease must never be released/,
+  )
+  assert.equal(manager.state('session-a')?.state, 'pinned')
+  assert.deepEqual(released, [], 'the physical lock is never released')
+})
+
+test('reserve() on a HELD PINNED lease THROWS (physical-layer misuse)', () => {
+  const { manager, acquired } = deps()
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.pin('session-a', 'resume failed')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, true)
+  // reserve() is the PHYSICAL-layer API: calling it on a held PINNED
+  // lease is a misuse and must throw — the activation path is
+  // reserveForActivation (which refuses the quarantine).
+  assert.throws(
+    () => manager.reserve({ id: 'session-a' }),
+    /BUG: reserve\(\) on a pinned lease/,
+  )
+  assert.equal(manager.state('session-a')?.state, 'pinned')
+  assert.deepEqual(acquired, ['session-a'], 'no new physical acquire')
+})
+
+test('reserve() on a LOCKLESS PINNED record is REFUSED (never re-acquired)', () => {
+  const { manager, acquired, released } = deps()
+  // A lockless PINNED record (pin() without a held lease) must NOT be
+  // silently re-acquired by the physical layer either: reserve() falls
+  // into acquirePhysical, whose upfront PINNED refusal returns refused.
+  manager.pin('session-a', 'unsettled cooling')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, false)
+  const result = manager.reserve({ id: 'session-a' })
+  assert.equal(result.kind, 'refused', 'a lockless PINNED record cannot be reserved')
+  assert.match((result as { message: string }).message, /safety quarantine/)
+  assert.deepEqual(acquired, [], 'no physical acquire happens for a quarantined session')
+  assert.equal(manager.state('session-a')?.state, 'pinned', 'the record is never demoted')
+  assert.deepEqual(released, [])
+})
+
+test('PINNED survives an HMR remount (the process-global registry keeps the quarantine)', () => {
+  const first = acquireProcessLeaseManager({
+    acquire: () => ({ result: { kind: 'acquired' }, release: () => {} }),
+  })
+  first.manager.reserve({ id: 'session-a' })
+  first.manager.markTouched('session-a')
+  first.manager.pin('session-a', 'resume failed')
+  // A remount reuses the SAME manager: the quarantine must survive.
+  const second = acquireProcessLeaseManager({
+    acquire: () => ({ result: { kind: 'acquired' }, release: () => {} }),
+  })
+  assert.equal(second.manager, first.manager)
+  assert.equal(second.manager.state('session-a')?.state, 'pinned', 'the remount does not clear the quarantine')
+  assert.equal(second.manager.state('session-a')?.physicalLockHeld, true)
+  const result = second.manager.reserveForActivation({ id: 'session-a' })
+  assert.equal(result.kind, 'refused', 'the remounted manager still refuses the quarantine')
+  second.release()
+  first.release()
+})
+
+test('PINNED keeps the physical lock through cleanup (no release path touches it)', () => {
+  const { manager, released } = deps()
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.pin('session-a', 'unsettled cooling')
+  // Every release path the manager exposes must leave the pinned lock alone.
+  assert.equal(manager.releaseAfterVerifiedCooling('session-a', 1), 'pinned')
+  assert.equal(manager.pinCooling('session-a', 1, 'late'), 'stale')
+  assert.throws(() => manager.releaseUntouched('session-a'), /after the DSH boundary/)
+  assert.deepEqual(released, [], 'the physical lock is never released')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, true)
 })

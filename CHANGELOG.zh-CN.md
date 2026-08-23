@@ -91,8 +91,8 @@
   `/sessions` 切换统一走同一个事务(顺序由 `src/transition.ts` 固定并
   单元测试):先让**旧** agent 安静(`whenIdle`——busy 时的切换现在会
   等待当前活动结束,而不是打断它),在旧锁仍持有下做最终 flush,再创建/
-  恢复子会话,提交(旧锁释放——target 锁已在 create 前获取并保持——
-  加上 live 替换与 generation 递增)是同步临界区,之后的旧 handle 收尾
+  恢复子会话,**COMMIT(同步临界区,不做任何锁变更:guard 重置、
+  live 替换与 generation 递增)**,之后的旧 handle 收尾
   是 best-effort。这关闭了三个 review
   blocker:(1)两个 transition 永远不会交错——身份检查不可能在 await
   间隙被并发切换覆盖;(2)子会话一旦创建就**绝不回滚**——`dispose()`
@@ -107,7 +107,9 @@
   shell 提交、per-skill 斜杠调用)在 transition 进行中都会被**写栅栏**
   拒绝:草稿/调用行恢复保留,提示 "a session transition is in
   progress"。open-lock 持有器改为**多槽**(`src/open-locks.ts`):切换在
-  仍持有旧锁的同时获取目标锁,旧锁只在同步 COMMIT 内释放——被拒绝或
+  仍持有旧锁的同时获取目标锁,**旧锁绝不在 COMMIT 内释放**(那里不做
+  任何锁变更)——它只在旧 handle dispose + detach gate + durable parity
+  验证之后的冷却释放中卸下;被拒绝或
   失败的切换会让当前会话带着自己的锁原样 live(旧的先释放顺序会打开
   真空窗口:另一个进程可能在切换未决时拿走旧会话,re-acquire 失败后
   两个进程同时持有同一会话)。同会话切换在入口被拒绝,失败分支也只
@@ -115,7 +117,8 @@
   目标 id 误伤当前会话的锁。target-lock-before-create 规则现在覆盖
   所有 transition:`/new`、`/fork` 与 rewind 预生成 child 的 session id,
   并在 create 发布它**之前**获取其 open lock(拒绝 → 零 child 副作用
-  中止;create 失败 → 释放 target 锁)——任何 transition 都不可能发布
+  中止;**create/reject → 立即 PINNED,绝不释放、绝不重试**)——任何
+  transition 都不可能发布
   一个自己尚未持锁的 child。fresh 预锁是**物理**的:锁层会预创建
   session 目录(0700),让 owner.lock 在日志 materialize 之前就存在
   (fresh acquire 若 settle 为 `unavailable` 会中止 transition——旧的
@@ -125,25 +128,10 @@
   的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
   在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。
   fork 的 cwd 在第一个 await 之前从父会话捕获——避免出现父/child 的
-  cwd 混合。被拒绝的 `agents.create()` 不再被假定为"从未发布":DSH 的
-  publication 可能在 `session/created` 之后才 reject(后续同步 listener
-  抛错),因此 create 失败时若该 session 已是 durable,会在 target 锁
-  仍持有的情况下**恢复(resume)并作为 transition 结果提交**——"UI 报
-  失败、磁盘却有 child"的第三种状态不可能存在;无法恢复的已发布
-  child 会保持锁并报告明确状态(专用
-  `DurablePublishedUnrecoverableError` 会被 ensureSession 直接重抛——
-  绝不会触发 fallback,不可恢复的已发布 child 不可能被第二个新会话
-  静默顶替)。发布状态检测是**三态**的(review round 25/26),并改走
-  persistence coordinator 的 `inspect()`——真正的 publication barrier:
-  它会先等待该 id 在途的 retirement/materialization 落定再回答,因此
-  "not found" 才是**权威**结论(立即 `list()` 扫描不是:被拒 create 的
-  materialization 可能仍在落盘,瞬时 miss 会重新制造 durable ghost)。
-  后端不可读、或部署没有 inspect 能力时 settle 为 `unknown`——target
-  锁保持、报"无法确认 session 是否已发布",绝不 fallback;**已存在**
-  的 target(其 artifact 早于本次尝试)在不可恢复失败时会释放锁,而
-  不是把 session 钉到进程退出(review round 26 P2)。 随后整个 session ownership 按 rewind_ref 计划收敛:发布阶段推断
+  cwd 混合。 随后整个 session ownership 按 rewind_ref 计划收敛:发布阶段推断
   (durable/三态分类)整体删除——每个可写 target 必须先取得 lease;进入
-  DSH 后失败最多一次 same-ID 恢复,随后一律 PINNED;任何地方都不再
+  DSH 后失败**立即** PINNED(一次性 same-ID 恢复已删除:首次 DSH 调用
+  可能已留下隐藏生命周期,重试无法消除这层不确定);任何地方都不再
   存在"第二个全新 fallback";TUI writer 经 SessionOperationBarrier
   与 transition 互斥;切走的旧 session 进入 COOLING lease(最终快照 +
   SHA-256 tail 指纹 + 静默窗口 + 稳定采样)验证通过后才释放锁,任何
@@ -171,6 +159,23 @@
   套件 + cooling Case A–E)与按需双进程 E2E(`scripts/e2e-session-
   lease.sh`,不进 CI 套件)覆盖:在冷却窗口内驱动 A→B→A,证明超过旧
   释放时间后 P2 仍被拒绝。
+- **PINNED 会话成为粘性、进程寿命级的隔离——绝不能在进程内重新激活,
+  也绝不重返生命周期。** PINNED 是所有"本进程无法证明该会话没有隐藏
+  writer"类失败的落点(dispose 未干净 detach、cooling verifier 无法
+  落定、detach 被拒、create/resume 被拒)。由于一次新的 resume 无法
+  消除这层不确定,而后续一次"正常"的 cooling 释放会把锁交给另一个
+  进程、让隐藏生命周期仍可能写入(跨进程 writer 窗口),PINNED 现在
+  **没有任何业务出边**:`reserveForActivation` 拒绝它(会话在本 TUI
+  退出前保持锁定,提示语要求先重启 TUI 再打开);`beginCooling` 与
+  `markActive` 对 PINNED 直接 throw(内部 BUG)。只有进程退出——以及
+  持有者崩溃后下一个打开者的 stale-takeover——才能结束隔离。用于
+  重试被拒 create/resume 的 same-ID recovery 已整体删除
+  (`TransitionSteps.recover`、`createWithPublicationRecovery` 以及
+  启动、切换、`/new`、`/fork`、rewind-commit 五处 `recover:` 调用点):
+  任何 post-DSH rejection 都立即 PIN。由 lease manager 的 sticky
+  quarantine 用例(3 个拒绝来源、无业务出边、HMR 存活)与 E2E 的
+  PINNED case(冷却失败 → 拒绝重开 → 第二进程被拒 → 持有者退出 →
+  stale takeover)覆盖。
 - **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
   都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
   release/repeat 事件仍然不计为按键)。

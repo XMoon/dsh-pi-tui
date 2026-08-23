@@ -114,10 +114,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent is QUIESCED first (`whenIdle` — a transition while the agent is
   busy now waits for the current activity instead of aborting it), its
   final flush runs with the old lock still held, the child is
-  created/resumed next, the commit (old-lock release — the target lock
-  was acquired before the create and stays held — plus live replacement
-  and generation bump) is a synchronous critical section, and the
-  old-handle teardown after it is best-effort. Three consequences
+  created/resumed next, the COMMIT (a synchronous critical section with
+  NO lock changes: guard reset, live replacement and generation bump)
+  happens, and the old-handle teardown after it is best-effort. Three consequences
   close the review blockers: (1) two transitions can never interleave —
   a stale-identity check can no longer pass and then yield across an
   await while a concurrent transition lands and later gets overwritten;
@@ -136,8 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quiesce → commit — the draft or the skill invocation line is restored
   and the user is told a session transition is in progress.
   The open-lock holder is multi-slot (`src/open-locks.ts`): a switch
-  acquires the TARGET while still holding the OLD lock, and the old lock
-  is released only inside the synchronous COMMIT — a refused or failed
+  acquires the TARGET while still holding the OLD lock. The old lock is
+  NEVER released inside the COMMIT (no lock changes happen there) — it
+  is released only by the verified cooling release after the old
+  handle's dispose + detach gate + durable parity; a refused or failed
   switch leaves the current session live WITH its lock (the old
   release-first order opened a vacuum window where another process could
   take the old session mid-switch, and a failed re-acquire then left two
@@ -148,7 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   create rule now covers EVERY transition: /new, /fork and rewind
   pre-generate the child's session id and acquire its open lock BEFORE
   the create publishes it (a refusal aborts with zero child side
-  effects; a create failure releases the target lock) — no transition
+  effects; a create failure PINNS the target — it is never released, and
+  a rejected create/resume is NEVER retried) — no transition
   can publish a child whose lock it does not already hold. The fresh
   pre-lock is PHYSICAL: the lock layer pre-creates the session artifact
   directory so owner.lock exists before the log is materialized (a
@@ -161,32 +163,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the current session untouched. `/new` and `/fork` dispose nothing "on
   failure" anymore — there is nothing to dispose, because nothing was
   published. The fork cwd is captured from the source session before the
-  first await (parent=A cwd=B mixes are impossible). A rejected
-  `agents.create()` is no longer assumed to mean "never published": DSH's
-  publication can reject after `session/created` fired (a later
-  synchronous listener), so a create failure on an already-durable
-  session is RECOVERED by resuming it with the target lock still held and
-  committing it as the transition result — a UI-failed-but-disk-
-  succeeded child state is impossible. An unrecoverable published child
-  keeps its lock and reports the explicit state (a distinct
-  DurablePublishedUnrecoverableError that ensureSession rethrows — never
-  a fallback trigger, so an unrecoverable published child can never be
-  silently replaced by a second fresh session). The publication check is
-  THREE-STATE and runs through the persistence coordinator's `inspect()`
-  — the publication barrier that awaits an in-flight retirement before
-  answering, so a "not found" is authoritative (an immediate list() scan
-  is NOT: the materialization of a rejected create can still be
-  settling, and a transient miss would recreate the durable ghost). An
-  unreadable backend — or a deployment without inspect — settles
-  `unknown`: the lock stays and an explicit "cannot confirm whether the
-  session was published" error is reported (review rounds 25/26). An
-  EXISTING target (whose artifact predates the attempt) releases its
-  lock on an unrecoverable failure instead of pinning the session until
-  process exit. The whole ownership model was then
+  first await (parent=A cwd=B mixes are impossible). The whole ownership model was then
   converged (the rewind_ref plan): the publication-phase inference
   (durable/unknown taxonomy) is GONE — every writable target requires
-  its physical owner lock, a post-DSH failure gets at most one same-ID
-  recovery and then PINNS, no second-fresh fallback exists anywhere,
+  its physical owner lock, a post-DSH failure pins immediately (one-shot
+  same-ID recovery was REMOVED: the first DSH call may already have left
+  a hidden lifecycle, so a retry cannot clear the uncertainty) and no
+  second-fresh fallback exists anywhere,
   TUI writers serialize through a SessionOperationBarrier, and retired
   sessions enter a COOLING lease (final snapshot + SHA-256 tail
   fingerprint + quiet window + stable samples) before their lock is
@@ -219,6 +202,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cases A–E) and an on-demand two-process E2E (`scripts/e2e-session-
   lease.sh`, not part of the CI suite) that drives A→B→A inside the
   cooling window and proves P2 stays refused past the old release time.
+- **A PINNED session is a sticky, process-lifetime quarantine — it can
+  never be reactivated in-process and never re-enters the lifecycle.**
+  PINNED is where every "the process cannot prove this session has no
+  hidden writer" failure lands (dispose without a clean detach, an
+  unsettled cooling verifier, a refused detach, a rejected create or
+  resume). Because a new resume cannot clear that uncertainty, and a
+  later normal cooling release would hand the lock to another process
+  while the hidden lifecycle could still write, PINNED now has NO
+  business out-edges: `reserveForActivation` REFUSES it (the session
+  stays locked by this TUI until the process exits — the notice says to
+  restart the TUI before reopening it), and `beginCooling`/`markActive`
+  throw as internal bugs. Only process exit — plus the next opener's
+  stale-lock takeover when the holder crashed — ends the quarantine.
+  The same-ID recovery that used to retry a rejected create/resume is
+  REMOVED (`TransitionSteps.recover`,
+  `createWithPublicationRecovery` and all five `recover:` call sites in
+  the launch, switch, `/new`, `/fork` and rewind-commit paths): every
+  post-DSH rejection pins immediately. Covered by the lease-manager
+  sticky-quarantine cases (3 refusal sources, no business out-edges,
+  HMR survival) and the E2E PINNED case (cooling failure → refused
+  reopen → second process refused → holder exit → stale takeover).
 - **The double-Esc rewind chord is now truly consecutive.** Any real key
   press between the two Esc presses disarms the window — `Esc → Left →
   Esc` no longer opens the rewind picker (Kitty release/repeat events

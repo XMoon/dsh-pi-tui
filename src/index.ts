@@ -154,7 +154,7 @@ import {
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
-import { createWithPublicationRecovery, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
+import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 import { OpenLockHolder } from './open-locks.ts'
 import { acquireProcessLeaseManager } from './session-lease-manager.ts'
 import { SessionLeaseCoolingCoordinator, snapshotSession, type CoolingPersistenceLike } from './session-lease-cooling.ts'
@@ -1414,7 +1414,9 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     // Open-time session lock: the ONE session this process currently holds
-    // (acquired at resume/switch, released on switch-away and at exit).
+    // (acquired at resume/switch; a switch-away lock is released only by
+    // the verified cooling release, and a clean exit leaves touched locks
+    // as stale records for the next opener's takeover).
     // `undefined` means either no session yet (deferred start) or no lock
     // (deployment cannot lock — the guard still protects the write path).
     // The multi-slot open-lock registry: a transition may hold the OLD and
@@ -1515,18 +1517,17 @@ export function apply(ctx: Context, config: Config): void {
     coolingCoordinator.resumePending()
     /** Try to reserve the lease for a session about to be ACTIVATED
      * (physical acquire when this process does not hold it; idempotent
-     * for held leases). Uses the LIFECYCLE-layer reservation: an existing
-     * lease that is COOLING/PINNED in this process is reactivated — the
+     * for held leases). Uses the LIFECYCLE-layer reservation: a held
+     * COOLING/ACTIVE/TOUCHED/RESERVED lease is reactivated — the
      * previous lifecycle epoch is invalidated synchronously BEFORE any
      * DSH resume, so an older cooling verifier can never affect the new
-     * lifecycle (the reactivation rule). */
+     * lifecycle (the reactivation rule). A held PINNED lease is a STICKY
+     * QUARANTINE and is REFUSED (never demoted to a new lifecycle). */
     const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult =>
       leaseManager.reserveForActivation({ id: sessionId, header })
-    /** Whether one session already has a DURABLE artifact (the persistence
-     * backend's list only contains materialized sessions). A `create`
-     * rejection can happen AFTER `session/created` fired (a later
-     * synchronous listener threw; DSH's rollback disposes the agent but
-     * never deletes the durable artifact — review round 8). */
+    /** A rejected create/resume is NEVER retried and NEVER falls back (the
+     * first DSH call may have left a hidden lifecycle — see the
+     * sticky-quarantine rule). */
     // A failed --session resume pins the session and the surface starts
     // sessionless (the next input creates a new session); the failure is
     // surfaced as a notify line.
@@ -1576,21 +1577,15 @@ export function apply(ctx: Context, config: Config): void {
         // the DSH boundary; review rounds 32/36). From here on a failure
         // pins it (no release, no automatic fallback).
         leaseManager.markTouched(sessionId)
-        // A rejection gets at most ONE same-id recovery (below) and then
-        // the session is PINNED — no publication-phase inference, no
-        // second fresh fallback (convergence plan phase 4).
-        handle = await createWithPublicationRecovery({
-          targetId: sessionId,
-          create: () => agents.resume({
-            resumeSessionId: SessionId(sessionId),
-            agentOptions,
-            setup: composition.setup,
-          }),
-          resume: () => agents.resume({
-            resumeSessionId: SessionId(sessionId),
-            agentOptions,
-            setup: composition.setup,
-          }),
+        // A rejection is NEVER retried (no same-ID recovery): the first
+        // DSH call may have left a hidden lifecycle, so a retry cannot
+        // clear the uncertainty — the session is PINNED immediately
+        // (fail-closed; no publication-phase inference, no second fresh
+        // fallback).
+        handle = await agents.resume({
+          resumeSessionId: SessionId(sessionId),
+          agentOptions,
+          setup: composition.setup,
         })
         diag.info('resume ok', {
           session: sessionId,
@@ -2042,11 +2037,8 @@ export function apply(ctx: Context, config: Config): void {
         } catch {
           // Best-effort; the resume path reports failures.
         }
-        // The composition is resolved ONCE and the exact same
-        // composition/setup/agentOptions ride BOTH the initial resume and
-        // the post-publication recovery (review round 22: a recovered child
-        // must run under the identical setup — a second composition could
-        // drift and replay the session differently).
+        // The composition is resolved ONCE and drives the resume (there is
+        // no recovery path — a rejected resume is pinned immediately).
         const composition = await compose(await recordedPreset(ctx, sessionId))
         const resumeOptions = {
           resumeSessionId: SessionId(sessionId),
@@ -2058,11 +2050,11 @@ export function apply(ctx: Context, config: Config): void {
         }
         const result = await transitionTo({
           target: { id: sessionId, header: lockHeader },
+          // A rejected resume is NEVER retried: the first DSH call may
+          // have left a hidden lifecycle, so the target is PINNED
+          // immediately (fail-closed; the session stays locked for this
+          // process's lifetime).
           create: () => agents.resume(resumeOptions),
-          // A rejected resume gets at most ONE same-id recovery (below)
-          // and then the target is PINNED (fail-closed; the session stays
-          // locked for this process's lifetime).
-          recover: () => agents.resume(resumeOptions),
         })
         if (!result.ok) {
           // The resume failed: the target is pinned (or refused before
@@ -4599,19 +4591,17 @@ export function apply(ctx: Context, config: Config): void {
           if (lock.kind === 'refused') throw new Error(lock.message)
           if (lock.kind === 'unavailable') throw new Error(`cannot lock the fresh session before creating it (${lock.reason})`)
           // The DSH boundary: from here on this lease is touched — a
-          // failure PINNS it (never released, never a second fresh
-          // fallback; convergence plan phase 4).
+          // failure PINNS it (never released, never retried, never a
+          // second fresh fallback; the first DSH call may have left a
+          // hidden lifecycle, so a same-ID retry cannot clear the
+          // uncertainty).
           leaseManager.markTouched(String(sessionId))
           try {
-            return await createWithPublicationRecovery({
-              targetId: String(sessionId),
-              create: () => agents.create({
-                sessionId,
-                meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-                agentOptions,
-                setup: composition.setup,
-              }),
-              resume: () => agents.resume({ resumeSessionId: sessionId, agentOptions, setup: composition.setup }),
+            return await agents.create({
+              sessionId,
+              meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
+              agentOptions,
+              setup: composition.setup,
             })
           } catch (error) {
             leaseManager.pin(String(sessionId), `first-session creation failed: ${safeErrorMessage(error)}`)

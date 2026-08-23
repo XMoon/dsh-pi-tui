@@ -39,10 +39,11 @@ Every writable target requires its physical owner lock BEFORE any DSH
 call (`acquired` is the only acceptable result; held/unverifiable/
 unavailable fail closed). The transition runs: quiesce old → ALL
 TUI-owned preflight → target lease → markTouched (the DSH boundary) →
-create/resume with at most ONE same-id recovery → synchronous COMMIT
-(no lock changes) → retire (dispose + local detach gate + COOLING). A
-post-DSH failure never unlocks and never falls back to a second fresh
-session: the target is PINNED. The old session's lock is released only
+create/resume (NEVER retried — a rejection is PINNED immediately, see
+the sticky-quarantine rule below) → synchronous COMMIT (no lock changes)
+→ retire (dispose + local detach gate + COOLING). A post-DSH failure
+never unlocks the target: it enters a process-lifetime PINNED quarantine.
+The old session's lock is released only
 by the cooling verifier after quiet + durable parity + stable samples
 (or kept forever on any uncertainty). TUI writers serialize against
 transitions through the SessionOperationBarrier.
@@ -70,16 +71,24 @@ process and REFUSES the open.
   - process alive and matches ⇒ **held** ⇒ refuse the open.
   - probe cannot verify (no /proc, permissions, unparsable stat) ⇒
     **unverifiable** ⇒ refuse (never take over a lock we cannot inspect).
-- **Release**: clean exit and session switch away unlink the lock
-  (idempotent). A crash leaves it behind; the next open's stale check takes
-  it over — no TTL, no heartbeat, no manual cleanup.
+- **Release**: the physical lock file is unlinked ONLY by the verified
+  cooling release of the lease that retired the session (`releaseAfter
+  VerifiedCooling`) — never by the switch-away itself (the old lock
+  stays until quiet + durable parity), and a CLEAN EXIT does NOT release
+  touched locks either: they stay as stale records that the next open's
+  stale check takes over (a crash leaves the same stale record). Release
+  is idempotent; there is no TTL, no heartbeat, no manual cleanup.
 - **No heartbeat, deliberately**: the lock means "this process holds the
   session", not "this process is currently writing". A live matching owner is
   a valid lock even while idle (SIGSTOP, long GC, laptop sleep); expiring it
   early would create the exact double-writer window the lock exists to
   prevent.
 - **Same process**: a re-open of one's own session (e.g. `/sessions` back to
-  the current session) short-circuits on pid + starttime match.
+  the current session) short-circuits the PHYSICAL acquire on pid +
+  starttime match — but the LEASE POLICY still applies: a held COOLING
+  lease is reactivated through `reserveForActivation` (epoch++), while a
+  PINNED lease is REFUSED by the sticky quarantine (a re-open can never
+  demote a quarantine).
 
 ## Lock lifecycle in the TUI
 
@@ -216,8 +225,10 @@ is the whole point:
    multi-slot holder). Every fallible ownership operation happens before
    the durable child is published: a refusal aborts with zero child side
    effects. Once the DSH boundary is crossed (markTouched), a failure
-   gets at most ONE same-id recovery and then the target is PINNED —
-   never released, never a second fresh fallback (the old
+   NEVER gets a same-id recovery — the target is PINNED immediately
+   (fail-closed: the first DSH call may have left a hidden lifecycle, so
+   a retry cannot clear the uncertainty), never released, never a
+   second fresh fallback (the old
    create-then-lock order is historical).
    quiescence (`machine.cancel → whenIdle → scope.dispose`), and a
    cancelled RUNNING turn appends its closure events (interrupted
@@ -255,12 +266,12 @@ is the whole point:
    as diagnostics and NEVER rolls the committed child back.
 
 A rejected `create`/`resume` is handled WITHOUT any publication-phase
-inference (the old `isDurablePublished` three-state taxonomy is gone):
-the target was TOUCHED before the DSH call, so the rejection gets at
-most ONE same-id recovery and then the target is PINNED — its physical
-lock stays with this process (a second fresh session is never created,
-and an unlocked durable ghost is impossible by construction). The
-failure message says the session stays locked.
+inference (the old `isDurablePublished` three-state taxonomy is gone)
+and WITHOUT a same-id recovery (the old retry is gone too): the target
+was TOUCHED before the DSH call, so a rejection PINNS it immediately —
+its physical lock stays with this process (a second fresh session is
+never created, and an unlocked durable ghost is impossible by
+construction). The failure message says the session stays locked.
 
 `whenIdle()` is an INSTANT check, not a freeze: the old agent can be
 woken again by a followup/steer while the transition still awaits
@@ -290,9 +301,11 @@ drain before it quiesces the old agent, and frozen writers are refused.
 ### The retirement lifecycle (convergence plan phases 4-6)
 
 Once the DSH boundary is crossed (`agents.create/resume`), NO business
-path may release the target lease: a rejection gets at most ONE same-id
-recovery, then the target is PINNED (lock kept for this process's
-lifetime) — there is no second-fresh fallback anywhere. The transition
+path may release the target lease: a rejection PINNS the target
+immediately (NO same-id recovery — the first DSH call may have left a
+hidden lifecycle, so a retry cannot clear the uncertainty; lock kept
+for this process's lifetime) — there is no second-fresh fallback
+anywhere. The transition
 COMMIT makes no lock changes at all. The OLD session enters COOLING
 after the dispose (with a local detach gate: the old agent/session must
 be gone from the live registries): the cooling coordinator verifies the
@@ -332,6 +345,36 @@ verifier still runs. An HMR/remount abort of the lifecycle signal is
 NEUTRAL (never a pin): the new mount's `resumePending()` continues the
 SAME cooling epoch.
 
+### PINNED is a sticky process-lifetime quarantine
+
+PINNED has NO business out-edges. It is the fail-closed state for every
+source of "the process cannot prove the session has no hidden writer":
+a dispose that did not pass the local detach gate, a cooling verifier
+that cannot settle, a refused detach, and a rejected create/resume
+(dispose failure, detach-gate failure, and resume/create rejection all
+mean the DSH call may have left a hidden lifecycle — the uncertainty is
+inherently unresolvable, so a new resume cannot clear it, and a LATER
+normal cooling release would hand the lock to another process while
+the hidden lifecycle could still write: a cross-process writer window).
+Therefore:
+
+- `reserveForActivation` on a held PINNED lease REFUSES (the sticky
+  quarantine notice: the session stays locked by this TUI until the
+  process exits — restart this TUI before reopening it). A same-process
+  reactivation is never allowed to demote a quarantine.
+- `beginCooling` and `markActive` on a PINNED lease THROW (BUG: a pinned
+  session must never re-enter the lifecycle).
+- There is NO same-ID recovery after any post-DSH rejection: the
+  create-rejection branch pins immediately (the retry was removed —
+  `TransitionSteps.recover` and `createWithPublicationRecovery` are
+  gone from `runTransitionTo`, `switchSessionLocked`, the `--session`
+  launch and the rewind commit path).
+
+Only process exit — plus the next opener's stale-lock takeover (the
+holder is gone) — ends the quarantine: the lock file survives the pin,
+so a CRASHED TUI's pinned session is safely re-opened by the next
+process, while a LIVE TUI's pinned session stays locked until it exits.
+
 ```text
 ACTIVE
   │ switch away
@@ -341,7 +384,8 @@ COOLING(epoch=N) ── verified parity ──► RELEASED
   │  └─ same-process reactivation (reserveForActivation): epoch=N+1,
   │     state=RESERVED, lock stays — every older verifier goes stale
   ▼
-uncertainty / timeout / mismatch (SAME epoch) → PINNED
+uncertainty / timeout / mismatch (SAME epoch) → PINNED (NO out-edges:
+reserveForActivation refuses, beginCooling/markActive throw)
 old async completion after epoch changed → STALE NO-OP
 ```
 

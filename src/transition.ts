@@ -10,8 +10,9 @@
  * 4. markTargetTouched — the DSH boundary: from here on NO business path
  *    may release the target lease; a failure PINNS it (the lease manager's
  *    releaseUntouched hard-assertion enforces this)
- * 5. create/resume, with at most ONE same-id recovery on rejection; a
- *    failed recovery PINNS the target and the old session stays current
+ * 5. create/resume — a rejection is NEVER retried (no same-ID recovery):
+ *    the target is PINNED immediately (fail-closed) and the old session
+ *    stays current
  * 6. COMMIT — a synchronous critical section (guard reset, generation
  *    bump, live replacement) with NO lock changes
  * 7. RETIRE — dispose the old handle; the old lease enters COOLING
@@ -22,8 +23,13 @@
  * The transaction deliberately does NOT decide when the OLD session may be
  * released cross-process — that is the lease manager / cooling coordinator's
  * job, and it runs after the switch. `isDurablePublished` and the
- * publication taxonomy are GONE: a post-DSH rejection is never unlocked or
- * fallen back; it is pinned (fail-closed).
+ * publication taxonomy are GONE: a post-DSH rejection is never unlocked,
+ * never retried, never fallen back; it is PINNED (fail-closed). The old
+ * same-ID recovery is GONE too: a rejected create/resume may have left a
+ * hidden lifecycle inside this process (the first DSH call already crossed
+ * the boundary), so retrying cannot clear that uncertainty — only the
+ * process-lifetime PINNED quarantine (and the next opener's stale
+ * takeover after exit) may.
  * @module @xmoon76/dsh-pi-tui/transition
  */
 
@@ -49,11 +55,10 @@ export interface TransitionSteps<T> {
   /** ALL TUI-owned preflight — runs BEFORE the target lease is taken and
    * before the DSH boundary. A throw aborts with zero side effects. */
   prepare?: () => Promise<void> | void
-  /** Create or resume the child. A rejection is never treated as "never
-   * published": it triggers at most ONE same-ID recovery, then PIN. */
+  /** Create or resume the child. A rejection is NEVER retried: the target
+   * is PINNED immediately (the first DSH call may have left a hidden
+   * lifecycle, so a same-ID retry cannot clear the uncertainty). */
   create: () => Promise<T>
-  /** Same-ID recovery (at most once) for a rejected create/resume. */
-  recover?: () => Promise<T>
 }
 
 /** The narrow host surface the orchestration drives. */
@@ -87,33 +92,6 @@ export interface TransitionHost<T> {
   pinTarget(sessionId: string, reason: string): void
   /** Record one phase failure (the host owns the diagnostics sink). */
   recordFailure(phase: string, error: unknown): void
-}
-
-/** The create-with-same-ID-recovery helper for the standalone fresh paths
- * (ensureSession, the --session resume and its fallback, which do not run
- * inside runTransitionTo): a rejected create/resume is retried ONCE with
- * the same id (the caller holds the target lease), and a failed recovery
- * throws — the caller PINNS the target (never a release, never a second
- * fresh fallback). */
-export async function createWithPublicationRecovery<T>(deps: {
-  /** The target session id (for diagnostics). */
-  targetId: string
-  /** Create/resume the child (may reject at any point of publication). */
-  create(): Promise<T>
-  /** Same-ID recovery for a rejected create/resume. */
-  resume(): Promise<T>
-}): Promise<T> {
-  try {
-    return await deps.create()
-  } catch (firstError) {
-    try {
-      return await deps.resume()
-    } catch (recoverError) {
-      throw new Error(
-        `session ${deps.targetId} could not be recovered (${safeErrorMessage(firstError)}; same-ID recovery: ${safeErrorMessage(recoverError)}); it stays pinned`,
-      )
-    }
-  }
 }
 
 /** Run one session transition in the canonical order. Must be called inside
@@ -152,29 +130,17 @@ export async function runTransitionTo<T>(
     return { ok: false, message: `transition failed: ${reason}` }
   }
   // Phase 4 — the DSH boundary: the target is touched. From here on NO
-  // failure path may release the lease; a rejection gets at most ONE
-  // same-ID recovery and then the target is PINNED (the old session stays
-  // current; a second fresh-ID fallback is forbidden).
+  // failure path may release the lease; a rejection is NEVER retried (the
+  // first DSH call may have left a hidden lifecycle) — the target is
+  // PINNED immediately and the old session stays current (fail-closed).
   host.markTargetTouched(steps.target.id)
   let next: T
   try {
     next = await steps.create()
-  } catch (firstError) {
-    if (steps.recover === undefined) {
-      host.pinTarget(steps.target.id, `DSH create/resume failed: ${safeErrorMessage(firstError)}`)
-      host.recordFailure('create', firstError)
-      return { ok: false, message: `transition failed: ${safeErrorMessage(firstError)}` }
-    }
-    try {
-      next = await steps.recover()
-    } catch (recoverError) {
-      host.pinTarget(
-        steps.target.id,
-        `DSH boundary failed: ${safeErrorMessage(firstError)}; same-ID recovery: ${safeErrorMessage(recoverError)}`,
-      )
-      host.recordFailure('create', recoverError)
-      return { ok: false, message: `transition failed: ${safeErrorMessage(recoverError)}` }
-    }
+  } catch (error) {
+    host.pinTarget(steps.target.id, `DSH create/resume failed: ${safeErrorMessage(error)}`)
+    host.recordFailure('create', error)
+    return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
   }
   // Phase 5 — COMMIT: a synchronous critical section, no awaits, NO lock
   // changes (the target lease stays; the old lease is released only by the
