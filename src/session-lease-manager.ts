@@ -7,25 +7,40 @@
  * convergence plan (temp/rewind_ref.md):
  *
  * ```text
- * UNOWNED → reserve → RESERVED
+ * UNOWNED → reserve / reserveForActivation → RESERVED (lifecycleEpoch=1)
  *   ├─ preflight failure → releaseUntouched → UNOWNED
  *   └─ markTouched (before the DSH boundary) → TOUCHED
  *        ├─ create/resume success → ACTIVE
  *        └─ ambiguous/failure → PINNED
- * ACTIVE → switch away → beginCooling → COOLING
+ * ACTIVE → switch away → beginCooling → COOLING(epoch=N)
  *   ├─ verified stable (cooling coordinator) → releaseAfterVerifiedCooling → RELEASED
- *   └─ uncertainty / timeout / mismatch → PINNED
- * RELEASED → must reacquire the physical lock (requiresReacquire)
+ *   ├─ uncertainty / timeout / mismatch → PINNED
+ *   └─ same-process reactivation (reserveForActivation) → RESERVED(epoch=N+1)
+ * RELEASED → must RE-ACQUIRE the physical lock (requiresReacquire)
  * PINNED → this process keeps the lock for its lifetime; never released
- *          cross-process
+ *          cross-process; local reactivation is allowed but the lock
+ *          NEVER leaves the process
  * ```
+ *
+ * **Lifecycle epochs (the reactivation rule).** Every lease carries a
+ * monotonically increasing `lifecycleEpoch`; every operation that abandons
+ * prior async lifecycle work bumps it (`beginCooling`, same-process
+ * reactivation, re-acquire of a released lease). A cooling retirement is
+ * bound to the epoch it started with (`coolingEpoch`), and the cooling
+ * verifier may only RELEASE or PIN the lease when `state === 'cooling'`
+ * AND `coolingEpoch === epoch` at that instant. Any verifier whose epoch
+ * is no longer current can only observe a STALE result — it can never
+ * release or pin a later lifecycle (the ABA hazard: cooling #1 →
+ * reactivate → ACTIVE → cooling #2 must be immune to the old verifier
+ * #1 waking up late).
  *
  * Core invariants (the review first line of defense):
  *
  * - A session that crossed the DSH boundary (`markTouched`) can NEVER be
  *   released by a business failure path: `releaseUntouched` throws on a
- *   touched lease; only `releaseAfterVerifiedCooling` (or the process's
- *   own lifetime for PINNED) may release it.
+ *   touched lease; only `releaseAfterVerifiedCooling` (with the CURRENT
+ *   cooling epoch) or the process's own lifetime for PINNED may release
+ *   it.
  * - A RELEASED lease must be RE-ACQUIRED physically before it can become
  *   active again (another process may own it now).
  * - The manager is process-global (mounted on `globalThis` under a
@@ -64,6 +79,14 @@ export interface SessionLeaseRecord {
   state: SessionLeaseState
   physicalLockHeld: boolean
   touchedByDsh: boolean
+  /** Monotonic ownership-lifecycle version. ANY operation that abandons
+   * prior async lifecycle work bumps it (beginCooling, reactivation,
+   * re-acquire of a released lease); a cooling verifier is bound to the
+   * epoch it started with and can never affect a later lifecycle. */
+  lifecycleEpoch: number
+  /** The lifecycle epoch of the CURRENT cooling retirement (set by
+   *  beginCooling; cleared by reactivation / verified release). */
+  coolingEpoch?: number
   snapshot?: RetiredSessionSnapshot
   coolingStartedAt?: number
   releasedAt?: number
@@ -86,6 +109,9 @@ export interface LeasePhysicalDeps {
     release: () => void
   }
 }
+
+/** The physical target a reservation applies to. */
+export type PhysicalTarget = { id: string; header?: { cwd?: string } }
 
 /** The process-global lease registry (HMR-safe, Symbol.for key). The
  *  registry lives on `globalThis`, which is ALREADY per-OS-process — a
@@ -111,24 +137,94 @@ export class ProcessSessionLeaseManager {
     this.deps = deps
   }
 
-  /** Reserve a target's lease: acquire the physical lock when this process
-   * does not already hold it. Idempotent for held leases (RESERVED /
-   * TOUCHED / ACTIVE / COOLING / PINNED). A RELEASED lease MUST re-acquire
-   * (another process may own the session now). */
-  reserve(target: { id: string; header?: { cwd?: string } }): OpenLockResult {
+  /** PHYSICAL-LAYER reserve: acquire the target's lock when this process
+   * does not already hold it; idempotent for held RESERVED / TOUCHED /
+   * ACTIVE leases. NOT an activation API — activating a session must go
+   * through {@link reserveForActivation} (which invalidates the previous
+   * lifecycle epoch). Calling this on a held COOLING / PINNED lease is a
+   * misuse and THROWS (the old silent `acquired` was the reactivation
+   * P1: the session stayed COOLING while a new resume ran beside the old
+   * verifier). A RELEASED lease MUST re-acquire (another process may own
+   * the session now). */
+  reserve(target: PhysicalTarget): OpenLockResult {
     const existing = this.leases.get(target.id)
     if (existing !== undefined && existing.physicalLockHeld) {
+      if (existing.state === 'cooling' || existing.state === 'pinned') {
+        throw new Error(
+          `BUG: reserve() on a ${existing.state} lease — use reserveForActivation() to activate it`,
+        )
+      }
       return { kind: 'acquired' }
     }
+    return this.acquirePhysical(target, existing)
+  }
+
+  /** LIFECYCLE-layer activation: reserve a session that is about to be
+   *  activated (agents.create/resume) — fresh ids AND existing sessions
+   *  (COOLING / PINNED / RELEASED). This is the ONLY reservation that may
+   *  precede the DSH boundary on an existing lease:
+   *
+   * - held lease (COOLING / PINNED / ACTIVE / TOUCHED / RESERVED): the
+   *   previous lifecycle epoch is invalidated SYNCHRONOUSLY (epoch++,
+   *   cooling fields cleared, state → RESERVED, untouched) BEFORE any DSH
+   *   call — from this instant every older cooling verifier is stale and
+   *   can neither release nor pin this lease. The physical lock never
+   *   leaves this process.
+   * - RELEASED tombstone (physical lock gone): a REAL physical acquire is
+   *   required (another process may own the session now); success starts
+   *   a new lifecycle on the tombstone.
+   * - no record: a fresh physical acquire (lifecycle epoch 1).
+   */
+  reserveForActivation(target: PhysicalTarget): OpenLockResult {
+    const existing = this.leases.get(target.id)
+    if (existing !== undefined && existing.physicalLockHeld) {
+      // Same-process reactivation (the convergence-model reactivation
+      // path). A PINNED lease keeps its pin reason as diagnostics history
+      // (previousPinReason); everything cooling-related is dropped: a new
+      // resume establishes a brand-new live lifecycle.
+      const wasPinned = existing.state === 'pinned'
+      existing.lifecycleEpoch += 1
+      existing.coolingEpoch = undefined
+      existing.snapshot = undefined
+      existing.coolingStartedAt = undefined
+      existing.touchedByDsh = false
+      existing.releasedAt = undefined
+      if (!wasPinned) existing.pinReason = undefined
+      existing.state = 'reserved'
+      return { kind: 'acquired' }
+    }
+    return this.acquirePhysical(target, existing)
+  }
+
+  private acquirePhysical(
+    target: PhysicalTarget,
+    existing: SessionLeaseRecord | undefined,
+  ): OpenLockResult {
     const { result, release } = this.deps.acquire(target)
     if (result.kind === 'acquired') {
-      this.leases.set(target.id, {
-        sessionId: target.id,
-        state: 'reserved',
-        physicalLockHeld: true,
-        touchedByDsh: false,
-        release,
-      })
+      if (existing !== undefined) {
+        // RELEASED tombstone (or a lockless PINNED record): re-activate
+        // with a NEW lifecycle epoch, keeping the record.
+        existing.lifecycleEpoch += 1
+        existing.coolingEpoch = undefined
+        existing.snapshot = undefined
+        existing.coolingStartedAt = undefined
+        existing.touchedByDsh = false
+        existing.releasedAt = undefined
+        existing.pinReason = undefined
+        existing.state = 'reserved'
+        existing.physicalLockHeld = true
+        existing.release = release
+      } else {
+        this.leases.set(target.id, {
+          sessionId: target.id,
+          state: 'reserved',
+          physicalLockHeld: true,
+          touchedByDsh: false,
+          lifecycleEpoch: 1,
+          release,
+        })
+      }
     }
     return result
   }
@@ -158,17 +254,26 @@ export class ProcessSessionLeaseManager {
 
   /** The session was switched away: it enters COOLING with the final
    *  pre-switch snapshot; the cooling coordinator verifies before any
-   *  release. */
-  beginCooling(sessionId: string, snapshot: RetiredSessionSnapshot): void {
+   *  release. Returns the NEW lifecycle epoch (the verifier is bound to
+   *  it), or undefined when there is nothing to cool (unknown session —
+   *  the caller then skips the coordinator) or the lease is PINNED (a
+   *  pinned lease must never downgrade to cooling — review round 37). */
+  beginCooling(sessionId: string, snapshot: RetiredSessionSnapshot): number | undefined {
     const lease = this.leases.get(sessionId)
-    if (lease === undefined) return
+    if (lease === undefined) return undefined
     // Defensive: a PINNED lease must never downgrade to cooling (a failed
     // dispose or an unsettled verification keeps it pinned for this
     // process's lifetime — review round 37).
-    if (lease.state === 'pinned') return
+    if (lease.state === 'pinned') return undefined
+    // A NEW retirement: bump the lifecycle epoch so every verifier of an
+    // EARLIER retirement becomes stale (the ABA rule).
+    lease.lifecycleEpoch += 1
+    const epoch = lease.lifecycleEpoch
     lease.state = 'cooling'
+    lease.coolingEpoch = epoch
     lease.snapshot = snapshot
     lease.coolingStartedAt = Date.now()
+    return epoch
   }
 
   /** Release a lease that NEVER crossed the DSH boundary. HARD assertion:
@@ -191,28 +296,71 @@ export class ProcessSessionLeaseManager {
 
   /** Release a lease whose cooling verification succeeded: physical lock
    *  released, record kept as a RELEASED tombstone (mandatory re-acquire).
-   *  Only a COOLING lease may be released here — a PINNED lease stays
-   *  (fail-closed), a RELEASED one is an idempotent no-op, and any other
-   *  state is a verifier misuse and throws. */
-  releaseAfterVerifiedCooling(sessionId: string): void {
+   *  EPOCH-ATOMIC: the release happens ONLY when the lease is still
+   *  COOLING with the verifier's own epoch (a verifier of an earlier
+   *  retirement must never release a later lifecycle). Returns:
+   *  - 'released' — this verifier's cooling epoch released the lease;
+   *  - 'stale' — the lease is no longer this epoch's COOLING (reactivated,
+   *    re-cooled with a newer epoch, released, or gone): NO-OP;
+   *  - 'pinned' — the lease was pinned by another path: NO-OP. */
+  releaseAfterVerifiedCooling(
+    sessionId: string,
+    epoch: number,
+  ): 'released' | 'stale' | 'pinned' {
     const lease = this.leases.get(sessionId)
-    if (lease === undefined) return
-    if (lease.state === 'pinned') return
-    if (lease.state === 'released') return
-    if (lease.state !== 'cooling') {
-      throw new Error(
-        `BUG: verified-cooling release for a non-cooling lease (${lease.state})`,
-      )
+    if (lease === undefined) return 'stale'
+    if (lease.state === 'pinned') return 'pinned'
+    if (lease.state !== 'cooling' || lease.coolingEpoch !== epoch) {
+      // The old code threw on a non-cooling release; the epoch model
+      // makes a stale verifier a legitimate arrival (reactivation or a
+      // newer retirement superseded it), so the ONLY correct outcome is
+      // a silent stale no-op.
+      return 'stale'
     }
     lease.state = 'released'
     lease.physicalLockHeld = false
     lease.releasedAt = Date.now()
+    lease.coolingEpoch = undefined
     // Every acquire carries its per-lease release binding (round 36).
     lease.release!()
+    return 'released'
+  }
+
+  /** EPOCH-ATOMIC fail-closed pin used by the COOLING VERIFIER: pins only
+   *  when the lease is still COOLING with the verifier's own epoch. A
+   *  stale verifier (reactivated / newer retirement) must never PIN a
+   *  later lifecycle. Returns 'pinned' on a real pin, 'stale' otherwise. */
+  pinCooling(sessionId: string, epoch: number, reason: string): 'pinned' | 'stale' {
+    const lease = this.leases.get(sessionId)
+    if (lease === undefined) return 'stale'
+    if (lease.state !== 'cooling' || lease.coolingEpoch !== epoch) {
+      return 'stale'
+    }
+    lease.state = 'pinned'
+    lease.pinReason = reason
+    return 'pinned'
+  }
+
+  /** Whether the cooling verifier for (sessionId, epoch) is still the
+   *  CURRENT cooling lifecycle (the lease is COOLING, held, and cooling
+   *  with exactly this epoch). The verifier must never assemble this
+   *  check itself — the manager is the authoritative epoch source. */
+  isCoolingCurrent(sessionId: string, epoch: number): boolean {
+    const lease = this.leases.get(sessionId)
+    return (
+      lease !== undefined &&
+      lease.state === 'cooling' &&
+      lease.physicalLockHeld &&
+      lease.coolingEpoch === epoch
+    )
   }
 
   /** Fail-closed: a touched/cooling/active/pinned session keeps its
-   *  physical lock for this process's lifetime. */
+   *  physical lock for this process's lifetime. (Business paths only —
+   *  DSH create/resume failure, dispose failure, detach gate failure. The
+   *  cooling VERIFIER must use {@link pinCooling}, which is epoch-atomic.)
+   *  A lockless record is possible when pinning a session that never
+   *  acquired (diagnostics only — physicalLockHeld stays false). */
   pin(sessionId: string, reason: string): void {
     const lease = this.leases.get(sessionId)
     if (lease === undefined) {
@@ -221,6 +369,7 @@ export class ProcessSessionLeaseManager {
         state: 'pinned',
         physicalLockHeld: false,
         touchedByDsh: false,
+        lifecycleEpoch: 1,
         pinReason: reason,
       })
       return

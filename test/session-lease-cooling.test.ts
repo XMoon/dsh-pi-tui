@@ -1,7 +1,8 @@
 /**
  * Headless tests for the cooling verifier: durable parity, stable samples,
- * delayed persistence, late writers, empty-session fast path, and the
- * fail-closed pins.
+ * delayed persistence, late writers, empty-session fast path, the
+ * fail-closed pins, and the EPOCH rules (a reactivated or re-cooled
+ * session makes every older verifier a silent stale no-op).
  * @module @xmoon76/dsh-pi-tui/session-lease-cooling.test
  */
 
@@ -30,6 +31,8 @@ interface Rig {
   manager: ProcessSessionLeaseManager
   released: string[]
   coordinator: SessionLeaseCoolingCoordinator
+  /** The retirement epoch of the last startCooling call. */
+  epoch: number
 }
 
 function makeRig(script: Step[], missingInspect = false): Rig {
@@ -56,7 +59,7 @@ function makeRig(script: Step[], missingInspect = false): Rig {
     diag: { info: () => {}, warn: () => {}, error: () => {} },
     params: { quietMs: 5, intervalMs: 5, requiredStable: 3, maxMs: 150 },
   })
-  return { manager, released, coordinator }
+  return { manager, released, coordinator, epoch: 0 }
 }
 
 function startCooling(rig: Rig, id: string, seed: Ev[]): void {
@@ -64,8 +67,8 @@ function startCooling(rig: Rig, id: string, seed: Ev[]): void {
   rig.manager.reserve({ id })
   rig.manager.markTouched(id)
   rig.manager.markActive(id)
-  rig.manager.beginCooling(id, snapshot)
-  rig.coordinator.start(id, snapshot)
+  rig.epoch = rig.manager.beginCooling(id, snapshot)!
+  rig.coordinator.start(id, snapshot, rig.epoch)
 }
 
 async function settle(ms = 60): Promise<void> {
@@ -173,4 +176,200 @@ test('cooling: a truncated history with the SAME tail fingerprint pins (event co
   await settle(250)
   assert.deepEqual(rig.released, [])
   assert.equal(rig.manager.state('session-a')?.state, 'pinned', 'a shortened history never matches the full snapshot')
+})
+
+// ── epoch rules (spec §21): a stale verifier is a silent no-op ──────────
+
+/** A gated inspect rig: every inspect awaits a deferred the test resolves
+ *  manually, so the test can reactivate BETWEEN the verifier's samples. */
+interface GatedRig extends Rig {
+  inspectCalls: number
+  pending: Array<(value: { events: Ev[] } | { error: Error }) => void>
+  /** Resolve the OLDEST pending inspect with events (or an error). */
+  succeedNext: (value: { events: Ev[] } | { error: Error }) => void
+}
+
+function makeGatedRig(): GatedRig {
+  const base = makeRig([])
+  const pending: Array<(value: { events: Ev[] } | { error: Error }) => void> = []
+  let inspectCalls = 0
+  const manager = base.manager
+  const coordinator = new SessionLeaseCoolingCoordinator({
+    leaseManager: manager,
+    persistence: () => ({
+      inspect: async () => {
+        inspectCalls += 1
+        return new Promise<{ events: Ev[] }>((resolve, reject) => {
+          pending.push(value => {
+            if ('error' in value) reject(value.error)
+            else resolve(value)
+          })
+        })
+      },
+    }),
+    diag: { info: () => {}, warn: () => {}, error: () => {} },
+    params: { quietMs: 5, intervalMs: 5, requiredStable: 3, maxMs: 500 },
+  })
+  return {
+    manager,
+    released: base.released,
+    coordinator,
+    epoch: 0,
+    // GETTER: the object literal must not snapshot the counter by value
+    // (the AGENTS.md mutable-counter trap).
+    get inspectCalls() { return inspectCalls },
+    pending,
+    succeedNext: (value) => { pending.shift()?.(value) },
+  }
+}
+
+/** Wait until the gated rig's inspect has been called N times. */
+async function waitForInspections(rig: GatedRig, count: number): Promise<void> {
+  const deadline = Date.now() + 1000
+  while (rig.inspectCalls < count) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for a gated inspect')
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+}
+
+test('Case A: an old verifier finishing after a reactivation never releases', async () => {
+  const seed = events(100)
+  const rig = makeGatedRig()
+  startCooling(rig, 'session-a', seed)
+  // Sample 1 (stable): the verifier is suspended inside the inspect.
+  await waitForInspections(rig, 1)
+  rig.succeedNext({ events: seed })
+  // Sample 2 (stable).
+  await waitForInspections(rig, 2)
+  rig.succeedNext({ events: seed })
+  // Sample 3 is now suspended mid-flight; REACTIVATE the session
+  // in-process while the old verifier hangs in its durable read.
+  await waitForInspections(rig, 3)
+  rig.manager.reserveForActivation({ id: 'session-a' })
+  rig.manager.markTouched('session-a')
+  rig.manager.markActive('session-a')
+  // The old verifier's final stable sample lands AFTER the reactivation.
+  rig.succeedNext({ events: seed })
+  await settle(80)
+  assert.deepEqual(rig.released, [], 'the stale verifier must NOT release the reactivated session')
+  assert.equal(rig.manager.state('session-a')?.state, 'active')
+  assert.equal(rig.manager.state('session-a')?.physicalLockHeld, true)
+})
+
+test('Case B: a stale verifier failure never pins the reactivated session', async () => {
+  const seed = events(100)
+  const rig = makeGatedRig()
+  startCooling(rig, 'session-a', seed)
+  // The verifier is suspended inside its first inspect.
+  await waitForInspections(rig, 1)
+  rig.manager.reserveForActivation({ id: 'session-a' })
+  rig.manager.markTouched('session-a')
+  rig.manager.markActive('session-a')
+  // The stale inspect now rejects with EIO.
+  rig.succeedNext({ error: Object.assign(new Error('EIO'), { code: 'EIO' }) })
+  await settle(80)
+  assert.equal(rig.manager.state('session-a')?.state, 'active', 'the current lease is NOT pinned')
+  assert.equal(rig.manager.state('session-a')?.pinReason, undefined)
+})
+
+test('Case C: ABA — a stale verifier can neither release nor pin cooling#2', async () => {
+  const seed = events(100)
+  const rig = makeGatedRig()
+  startCooling(rig, 'session-a', seed) // cooling #1 (epoch 2)
+  // The epoch-1 verifier is suspended in its first inspect.
+  await waitForInspections(rig, 1)
+  // Reactivate, then switch away AGAIN: cooling #2 gets a NEW epoch.
+  rig.manager.reserveForActivation({ id: 'session-a' })
+  rig.manager.markTouched('session-a')
+  rig.manager.markActive('session-a')
+  const snapshot2 = snapshotSession({ id: 'session-a', events: seed })
+  const epoch2 = rig.manager.beginCooling('session-a', snapshot2)!
+  assert.notEqual(epoch2, rig.epoch, 'cooling #2 has a different epoch')
+  // A NEW verifier task starts for epoch2 while epoch1 still runs.
+  rig.coordinator.start('session-a', snapshot2, epoch2)
+  // Epoch1's suspended inspect now fails — it must be a stale no-op.
+  rig.succeedNext({ error: Object.assign(new Error('EIO'), { code: 'EIO' }) })
+  await settle(40)
+  assert.equal(rig.manager.state('session-a')?.state, 'cooling', 'epoch2 cooling is untouched')
+  assert.equal(rig.manager.state('session-a')?.coolingEpoch, epoch2)
+  // Epoch2 completes normally: 3 stable samples → release.
+  await waitForInspections(rig, 2)
+  rig.succeedNext({ events: seed })
+  await waitForInspections(rig, 3)
+  rig.succeedNext({ events: seed })
+  await waitForInspections(rig, 4)
+  rig.succeedNext({ events: seed })
+  await settle(80)
+  assert.deepEqual(rig.released, ['session-a'], 'only the CURRENT epoch releases')
+  assert.equal(rig.manager.state('session-a')?.state, 'released')
+})
+
+test('Case D: a newer retirement is accepted while the old task still runs (epoch-keyed inFlight)', async () => {
+  const seed = events(100)
+  const rig = makeGatedRig()
+  startCooling(rig, 'session-a', seed)
+  await waitForInspections(rig, 1)
+  // Cooling #2 starts while cooling #1 is STILL in flight.
+  rig.manager.reserveForActivation({ id: 'session-a' })
+  rig.manager.markTouched('session-a')
+  rig.manager.markActive('session-a')
+  const snapshot2 = snapshotSession({ id: 'session-a', events: seed })
+  const epoch2 = rig.manager.beginCooling('session-a', snapshot2)!
+  rig.coordinator.start('session-a', snapshot2, epoch2)
+  // Both tasks are now awaiting inspects; the SECOND task must run to
+  // completion (it was NOT suppressed by the same session id).
+  await waitForInspections(rig, 2)
+  rig.succeedNext({ events: seed }) // epoch1 sample — stale at its next check
+  rig.succeedNext({ events: seed }) // epoch2 sample 1
+  await waitForInspections(rig, 3)
+  rig.succeedNext({ events: seed }) // epoch2 sample 2
+  await waitForInspections(rig, 4)
+  rig.succeedNext({ events: seed }) // epoch2 sample 3
+  await settle(100)
+  assert.deepEqual(rig.released, ['session-a'], 'epoch2 was accepted and released')
+  assert.equal(rig.manager.state('session-a')?.state, 'released')
+})
+
+test('Case E: an HMR abort is neutral — COOLING stays COOLING, resumePending continues the SAME epoch', async () => {
+  const seed = events(100)
+  const released: string[] = []
+  const manager = new ProcessSessionLeaseManager({
+    acquire: (target) => ({ result: { kind: 'acquired' }, release: () => { released.push(target.id) } }),
+  })
+  const snapshot = snapshotSession({ id: 'session-a', events: seed })
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.markActive('session-a')
+  const epoch = manager.beginCooling('session-a', snapshot)!
+  // The OLD coordinator (with a lifecycle signal) starts the retirement.
+  const controller = new AbortController()
+  const oldCoordinator = new SessionLeaseCoolingCoordinator({
+    leaseManager: manager,
+    persistence: () => ({
+      inspect: async () => ({ events: seed }),
+    }),
+    diag: { info: () => {}, warn: () => {}, error: () => {} },
+    // A LONG quiet window so the abort lands INSIDE the sleep.
+    params: { quietMs: 1000, intervalMs: 5, requiredStable: 3, maxMs: 5000 },
+    signal: controller.signal,
+  })
+  oldCoordinator.start('session-a', snapshot, epoch)
+  // Abort the old lifecycle while the verifier sleeps.
+  controller.abort()
+  await settle(60)
+  assert.equal(manager.state('session-a')?.state, 'cooling', 'an HMR abort must NOT pin')
+  assert.equal(manager.state('session-a')?.coolingEpoch, epoch)
+  // The NEW mount's coordinator resumes the SAME cooling epoch.
+  const fresh = new SessionLeaseCoolingCoordinator({
+    leaseManager: manager,
+    persistence: () => ({
+      inspect: async () => ({ events: seed }),
+    }),
+    diag: { info: () => {}, warn: () => {}, error: () => {} },
+    params: { quietMs: 5, intervalMs: 5, requiredStable: 3, maxMs: 500 },
+  })
+  fresh.resumePending()
+  await settle(80)
+  assert.deepEqual(released, ['session-a'], 'the resumed verifier completes the original retirement')
+  assert.equal(manager.state('session-a')?.state, 'released')
 })

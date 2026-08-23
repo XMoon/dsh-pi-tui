@@ -1513,10 +1513,15 @@ export function apply(ctx: Context, config: Config): void {
     // runner instance must take over the pending COOLING verifications
     // (the old instance's verifier died with its lifecycle signal).
     coolingCoordinator.resumePending()
-    /** Try to reserve the lease for a session (physical acquire when this
-     * process does not hold it yet; idempotent for held leases). */
+    /** Try to reserve the lease for a session about to be ACTIVATED
+     * (physical acquire when this process does not hold it; idempotent
+     * for held leases). Uses the LIFECYCLE-layer reservation: an existing
+     * lease that is COOLING/PINNED in this process is reactivated — the
+     * previous lifecycle epoch is invalidated synchronously BEFORE any
+     * DSH resume, so an older cooling verifier can never affect the new
+     * lifecycle (the reactivation rule). */
     const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult =>
-      leaseManager.reserve({ id: sessionId, header })
+      leaseManager.reserveForActivation({ id: sessionId, header })
     /** Whether one session already has a DURABLE artifact (the persistence
      * backend's list only contains materialized sessions). A `create`
      * rejection can happen AFTER `session/created` fired (a later
@@ -1880,7 +1885,7 @@ export function apply(ctx: Context, config: Config): void {
           await sessions.flush(liveAgent.session)
           return snapshotSession(liveAgent.session)
         },
-        acquireTargetLease: (target) => leaseManager.reserve(target),
+        acquireTargetLease: (target) => leaseManager.reserveForActivation(target),
         releaseUntouchedTarget: (sessionId) => leaseManager.releaseUntouched(sessionId),
         markTargetTouched: (sessionId) => leaseManager.markTouched(sessionId),
         commit: (next) => {
@@ -1952,9 +1957,16 @@ export function apply(ctx: Context, config: Config): void {
                 leaseManager.pin(from, 'old agent/session remained registered after dispose')
                 diag.warn('session lease pinned', { session: from, reason: 'old agent/session remained registered after dispose' })
               } else {
-                leaseManager.beginCooling(from, oldSnapshot)
-                diag.info('session lease cooling started', { session: from, events: oldSnapshot.eventCount })
-                coolingCoordinator.start(from, oldSnapshot)
+                // The old session enters COOLING with a NEW lifecycle
+                // epoch; the cooling coordinator verifies under exactly
+                // that epoch (the reactivation rule: a same-process
+                // re-open invalidates it, and the old verifier then can
+                // never release/pin the new lifecycle).
+                const epoch = leaseManager.beginCooling(from, oldSnapshot)
+                if (epoch !== undefined) {
+                  diag.info('session lease cooling started', { session: from, events: oldSnapshot.eventCount, epoch })
+                  coolingCoordinator.start(from, oldSnapshot, epoch)
+                }
               }
             }
           }
@@ -4629,8 +4641,11 @@ export function apply(ctx: Context, config: Config): void {
         leaseManager.markActive(liveAgent.session.id)
         // The open-time lock was acquired BEFORE the create (above — the
         // createWithLock helper REQUIRED an acquired result, so this record
-        // is an idempotent no-op).
-        acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
+        // is an idempotent no-op). This is a plain PHYSICAL re-record of
+        // the already-ACTIVE lease — NOT an activation, so reserveFor
+        // Activation must not be used (it would invalidate the brand-new
+        // lifecycle's epoch).
+        leaseManager.reserve({ id: liveAgent.session.id, header: liveAgent.session.header })
         // Post-create initialization is best-effort: the child is committed
         // and locked, so failures are recorded, never a fallback (the same
         // retire-warn-only semantics as every other transition).
