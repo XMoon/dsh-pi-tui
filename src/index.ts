@@ -1620,22 +1620,19 @@ export function apply(ctx: Context, config: Config): void {
         acquireTargetLock: (target) => acquireOpenLock(target.id, target.header),
         releaseLock: (sessionId) => releaseOpenLock(sessionId),
         handoverLocks: (next) => {
-          // The OLD lock is released only here — in the synchronous COMMIT,
-          // after the old agent quiesced, was finally flushed, and the child
-          // was created. The TARGET lock was pre-acquired BEFORE the create
-          // (phase 2 — every transition caller passes a target), so the
-          // re-acquire below is an idempotent no-op.
-          if (from !== undefined) releaseOpenLock(from)
-          // The new session is now ours: take its open lock (pre-acquired
-          // for every transition caller — /new, /fork, rewind and
-          // switchSession all pass a target — so this is an idempotent
-          // no-op; a refusal is defensive-only and the write-path guard
-          // still protects the session).
+          // The TARGET lock was pre-acquired BEFORE the create (phase 2 —
+          // target is mandatory for every transition caller), so the
+          // re-acquire below is an idempotent no-op; the OLD lock is
+          // released only AFTER the new one is confirmed held — the
+          // documented invariant (old stays locked until the child's lock
+          // is ours) holds even for a hypothetical caller that skipped the
+          // pre-acquire.
           const transitionLockRefusal = acquireOpenLock(next.agent.session.id, next.agent.session.header)
           if (transitionLockRefusal !== undefined) {
             ctx.logger.warn(`tui-runner: lock refused on transition to ${next.agent.session.id}: ${transitionLockRefusal}`)
             diag.warn('session lock refused on transition', { session: next.agent.session.id })
           }
+          if (from !== undefined) releaseOpenLock(from)
         },
         commit: (next) => {
           guardState = freshGuardState()
@@ -3963,21 +3960,34 @@ export function apply(ctx: Context, config: Config): void {
       creating = transitionGate.run(async () => {
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
+        // The first-session creation follows the SAME target-lock-before-
+        // create rule as every other transition (review round 9): the id is
+        // pre-generated and its open lock is acquired BEFORE the create
+        // publishes the session — a refusal aborts with zero side effects,
+        // and a create failure releases the target lock.
+        const createWithLock = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<Awaited<ReturnType<typeof agents.create>>> => {
+          const sessionId = SessionId(`session-${randomUUID()}`)
+          const lockRefusal = acquireOpenLock(String(sessionId), { cwd: process.cwd() })
+          if (lockRefusal !== undefined) throw new Error(lockRefusal)
+          try {
+            return await agents.create({
+              sessionId,
+              meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
+              agentOptions,
+              setup: composition.setup,
+            })
+          } catch (error) {
+            releaseOpenLock(String(sessionId))
+            throw error
+          }
+        }
         try {
-          const created = await agents.create({
-            sessionId: SessionId(`session-${randomUUID()}`),
-            meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
-            agentOptions,
-            setup: launched.composition.setup,
-          })
+          const created = await createWithLock(launched.composition)
           liveHandle = created
           liveAgent = created.agent
-          // A freshly created session is now a real persisted artifact: take
-          // the open-time lock so another dsh process cannot open it while we
-          // hold it. The lock is best-effort (unavailable deployments skip it
-          // and rely on the write-path guard). A refusal cannot happen here:
-          // the id is a brand-new UUID, so no other process can hold it —
-          // the return value is deliberately ignored (it is not a fatal path).
+          // The open-time lock was acquired BEFORE the create (above); the
+          // re-acquire is an idempotent no-op — kept as the defensive
+          // record for deployments where the pre-acquire was unavailable.
           acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
           await liveAgent.whenIdle()
           bumpSessionGeneration()
@@ -3997,20 +4007,11 @@ export function apply(ctx: Context, config: Config): void {
           diag.warn('preset mount failed', { preset: launchPreset ?? 'default', error: message })
           resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${message}`
           const fallback = await compose()
-          const created = await agents.create({
-            sessionId: SessionId(`session-${randomUUID()}`),
-            meta: { cwd: process.cwd(), ...withPresetMeta(fallback) },
-            agentOptions,
-            setup: fallback.setup,
-          })
+          const created = await createWithLock(fallback)
           liveHandle = created
           liveAgent = created.agent
-          // A freshly created session is now a real persisted artifact: take
-          // the open-time lock so another dsh process cannot open it while we
-          // hold it. The lock is best-effort (unavailable deployments skip it
-          // and rely on the write-path guard). A refusal cannot happen here:
-          // the id is a brand-new UUID, so no other process can hold it —
-          // the return value is deliberately ignored (it is not a fatal path).
+          // The open-time lock was acquired BEFORE the create (above); the
+          // re-acquire is an idempotent no-op.
           acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
           await liveAgent.whenIdle()
           bumpSessionGeneration()

@@ -73,7 +73,7 @@ process and REFUSES the open.
 |---|---|
 | `--session <id>` launch | acquire before `agents.resume()`; refusal is fatal (the runner exits with the refusal message — the user asked for a specific session, there is no safe fallback) |
 | `/resume` / `/sessions` switch | acquire the TARGET lock while STILL HOLDING the current one (multi-slot holder; the acquire is a non-blocking refusal); the current lock is released only in the COMMIT on a successful handover — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window, nothing to re-acquire) |
-| `/new` / `/fork` | acquire in the transaction's COMMIT for the incoming session (covers every transition caller) |
+| `/new` / `/fork` | acquire the child's lock BEFORE the create (pre-generated id, old lock still held — the target-lock-before-create rule); the COMMIT's re-acquire is an idempotent no-op |
 | first deferred message | acquire after the session is created |
 | switch away / clean exit | release (idempotent), AFTER the final flush |
 | crash / kill -9 | lock stays; the next open's stale check takes it over |

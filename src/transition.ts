@@ -41,7 +41,7 @@ import { safeErrorMessage } from './error-boundary.ts'
 /** The caller-owned transition steps (the runner supplies the shared host). */
 export interface TransitionSteps<T> {
   /**
-   * The child's PRE-GENERATED session identity. When provided, the
+   * The child's PRE-GENERATED session identity — MANDATORY. The
    * transition acquires its open lock BEFORE the create — while the old
    * lock is still held — so every fallible ownership operation happens
    * before the durable child is published (review round 6: /new, /fork and
@@ -52,7 +52,7 @@ export interface TransitionSteps<T> {
    * failure releases the target lock and the old session stays live with
    * its own lock.
    */
-  target?: { id: string; header?: { cwd?: string } }
+  target: { id: string; header?: { cwd?: string } }
   /** Runs after the old-session quiesce+flush and the target-lock acquire,
    * before the create. A throw aborts the transaction (the target lock is
    * released); the caller is responsible for undoing anything else it did
@@ -110,12 +110,10 @@ export async function runTransitionTo<T>(
   // Phase 2 — the TARGET lock, BEFORE the create (the old lock is still
   // held). Every fallible ownership operation happens before the durable
   // child is published: a refusal aborts with zero child side effects.
-  if (steps.target !== undefined) {
-    const refusal = host.acquireTargetLock(steps.target)
-    if (refusal !== undefined) {
-      host.recordFailure('target-lock', new Error(refusal))
-      return { ok: false, message: `transition failed: ${refusal}` }
-    }
+  const refusal = host.acquireTargetLock(steps.target)
+  if (refusal !== undefined) {
+    host.recordFailure('target-lock', new Error(refusal))
+    return { ok: false, message: `transition failed: ${refusal}` }
   }
   // Phase 3 — caller-owned preparation. Failures abort before anything is
   // published; the target lock (if acquired) is released.
@@ -123,7 +121,7 @@ export async function runTransitionTo<T>(
     try {
       await steps.prepare()
     } catch (error) {
-      if (steps.target !== undefined) host.releaseLock(steps.target.id)
+      host.releaseLock(steps.target.id)
       host.recordFailure('prepare', error)
       return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
     }
@@ -134,7 +132,7 @@ export async function runTransitionTo<T>(
   try {
     next = await steps.create()
   } catch (error) {
-    if (steps.target !== undefined) host.releaseLock(steps.target.id)
+    host.releaseLock(steps.target.id)
     host.recordFailure('create', error)
     return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
   }

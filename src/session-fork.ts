@@ -122,11 +122,12 @@ export interface RewindCommitHost extends ForkAgentHost {
    * identity check) or `create` throws.
    */
   transitionTo<T extends AgentHandle>(steps: {
-    /** The child's PRE-GENERATED session identity: the transaction
-     * acquires its open lock BEFORE the create (while the old lock is
-     * still held), so a refusal aborts with zero child side effects and a
-     * later create failure releases the target lock (review round 6). */
-    target?: { id: string; header?: { cwd?: string } }
+    /** The child's PRE-GENERATED session identity (MANDATORY): the
+     * transaction acquires its open lock BEFORE the create (while the old
+     * lock is still held), so a refusal aborts with zero child side
+     * effects and a later create failure releases the target lock
+     * (review round 6). */
+    target: { id: string; header?: { cwd?: string } }
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
