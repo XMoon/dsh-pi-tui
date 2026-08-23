@@ -26,10 +26,12 @@
  *      interpreted as "the child never happened": `dispose()` stops an
  *      agent but never deletes a persisted session, and dsh has no
  *      durable rollback API.
- *   4. COMMIT — a synchronous critical section: OLD-lock release (the
- *      target lock was acquired in phase 2 and stays held), guard reset,
- *      generation bump, live handle/agent replacement — no awaits between
- *      its steps.
+ *   4. COMMIT — a synchronous critical section: guard reset, generation
+ *      bump, live handle/agent replacement — no awaits between its steps,
+ *      and NO lock changes (the target lock was acquired in phase 2 and
+ *      stays held; the OLD lock is released only inside RETIRE, after the
+ *      old agent is disposed and its persistence retirement settled —
+ *      review round 10).
  *   5. RETIRE — old-handle dispose (now idle: no abort closures), child
  *      whenIdle, surface rebuild, catalog refresh. Failures are recorded
  *      by the host and NEVER roll the committed child back.
