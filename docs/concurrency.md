@@ -89,7 +89,17 @@ Two orderings are load-bearing and were both bug-fixed in review:
 - **Old lock survives until the COMMIT.** The lock holder is multi-slot
   (`src/open-locks.ts`): a transition acquires the TARGET while still
   holding the OLD lock, and the old lock is released only inside the
-  synchronous COMMIT. Releasing old-first opened a vacuum window where
+  synchronous COMMIT. A FRESH target's lock is physically pre-created:
+  `acquireSessionLock` pre-creates the session artifact directory (0700)
+  when the write would ENOENT, so the lock file exists BEFORE the session
+  log is materialized (review round 7 — otherwise "target-lock-before-
+  create" silently degenerated to publish-before-lock via no-lock-dir).
+  A released lock on an empty pre-created directory best-effort removes
+  the directory, so a failed fresh transition leaves no residue. The
+  acquire result is structured (`acquired | unavailable | refused`): a
+  FRESH target's transition requires `acquired` — `unavailable` means the
+  child would be published without its lock — while an EXISTING target
+  may proceed without a lock (the divergence guard is the backstop). Releasing old-first opened a vacuum window where
   another process could take the old session while the switch was still
   failing — and a failed re-acquire then left the current session live
   WITHOUT its lock (two processes holding one session). With the

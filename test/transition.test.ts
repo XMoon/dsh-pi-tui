@@ -41,6 +41,8 @@ interface FakeHostOptions {
   quiesceError?: string
   /** The target lock is refused (another process holds it). */
   targetLockRefused?: string
+  /** The target lock is unavailable (deployment cannot lock). */
+  targetLockUnavailable?: boolean
   prepareError?: string
   createError?: string
   retireError?: string
@@ -63,7 +65,9 @@ function fakeHost(options: FakeHostOptions = {}): {
     },
     acquireTargetLock: (target) => {
       events.push(`target.lock.acquire:${target.id}`)
-      return options.targetLockRefused
+      if (options.targetLockRefused !== undefined) return { kind: 'refused', message: options.targetLockRefused }
+      if (options.targetLockUnavailable === true) return { kind: 'unavailable', reason: 'no-lock-dir' }
+      return { kind: 'acquired' }
     },
     releaseLock: (sessionId) => { events.push(`target.lock.release:${sessionId}`) },
     handoverLocks: () => {
@@ -180,4 +184,23 @@ test('a retire failure NEVER rolls the committed child back', async () => {
     'old.lock.release', 'child.lock.acquire', 'child.commit', 'old.dispose',
   ])
   assert.deepEqual(failures, ['retire:old dispose exploded'])
+})
+
+test('review round 7: a FRESH target with an unavailable lock aborts BEFORE the create', async () => {
+  const { host, events, failures } = fakeHost({ targetLockRefused: 'no-lock-dir' })
+  const outcome = await runTransitionTo(host, { ...steps(events), fresh: true })
+  assert.equal(outcome.ok, false)
+  assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'target.lock.acquire:session-c'],
+    'the child must never be created without its lock')
+  assert.deepEqual(failures, ['target-lock:no-lock-dir'])
+})
+
+test('an EXISTING target with an unavailable lock may proceed (guard backstop)', async () => {
+  const { host, events } = fakeHost({ targetLockUnavailable: true })
+  const outcome = await runTransitionTo(host, { ...steps(events), fresh: false })
+  assert.equal(outcome.ok, true, 'an existing target tolerates an unavailable lock')
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'old.lock.release', 'child.lock.acquire', 'child.commit', 'old.dispose',
+  ])
 })

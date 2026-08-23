@@ -44,6 +44,8 @@
  */
 
 /** The owner record written into the lock file. */
+import { dirname } from 'node:path'
+
 export interface SessionLockInfo {
   /** Owner process id. */
   pid: number
@@ -71,11 +73,19 @@ export interface SessionLockPersistence {
 /** The filesystem surface the lock needs. `writeFileSync` MUST create
  * exclusively (`wx`) — a plain `w` write would silently overwrite another
  * process's lock and the whole exclusion collapses — and must set the mode
- * explicitly (0600), matching the session log's own file mode. */
+ * explicitly (0600), matching the session log's own file mode. `mkdirSync`
+ * and `rmdirSync` are OPTIONAL: when present, a FRESH session's artifact
+ * directory is pre-created so its lock can exist BEFORE the session log is
+ * materialized (review round 7 — otherwise "target-lock-before-create"
+ * silently degenerates to publish-before-lock via `no-lock-dir`), and a
+ * release best-effort-removes the directory once it is empty (a fresh
+ * target that was never materialized leaves no residue). */
 export interface SessionLockFs {
   readFileSync(path: string): string
   writeFileSync(path: string, content: string, options?: { flag?: string; mode?: number }): void
   unlinkSync(path: string): void
+  mkdirSync?(dir: string, options?: { recursive?: boolean; mode?: number }): void
+  rmdirSync?(dir: string): void
 }
 
 /**
@@ -207,9 +217,25 @@ export function acquireSessionLock(
     }
     if (created.reason === 'error') {
       // A write failure: ENOENT means the session directory does not exist
-      // yet (lazy session) — no lock possible; anything else is a permission
-      // or IO problem. Either way do not block the open (the guard still
-      // protects the write path).
+      // yet (a FRESH session — the persistence layer materializes the
+      // directory on its first write). With the mkdir capability the lock
+      // is pre-created BEFORE the session exists (review round 7: the
+      // target-lock-before-create rule is only real when the lock can
+      // physically exist ahead of the session). Without it, no lock is
+      // possible — do not block (the guard still protects the write path).
+      if (created.error?.code === 'ENOENT' && fs.mkdirSync !== undefined) {
+        try {
+          fs.mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 })
+          // The directory now exists: retry the atomic create in it. A
+          // concurrent taker may have created the lock meanwhile (EEXIST) —
+          // the loop's exists branch reads and judges it.
+          continue
+        } catch {
+          // The directory could not be created (permission, read-only fs):
+          // no lock possible.
+          return { kind: 'unavailable', reason: 'no-lock-dir' }
+        }
+      }
       return {
         kind: 'unavailable',
         reason: created.error?.code === 'ENOENT' ? 'no-lock-dir' : 'write-error',
@@ -293,6 +319,17 @@ function makeRelease(fs: SessionLockFs, lockPath: string, self: SessionLockInfo)
       const owner = parseLockInfo(fs.readFileSync(lockPath))
       if (owner !== undefined && owner.pid === self.pid && owner.starttime === self.starttime) {
         fs.unlinkSync(lockPath)
+        // A fresh target's directory exists only because THIS lock created
+        // it (the session log was never materialized): remove it once it is
+        // empty so a failed fresh transition leaves no residue. A real
+        // session's directory holds its log — the rmdir fails harmlessly.
+        if (fs.rmdirSync !== undefined) {
+          try {
+            fs.rmdirSync(dirname(lockPath))
+          } catch {
+            // Not empty (a real session log) or not ours: nothing to do.
+          }
+        }
       }
       // A missing file, an unreadable file, or a lock owned by someone else:
       // nothing to do — the session is already openable.

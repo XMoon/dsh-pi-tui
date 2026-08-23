@@ -116,7 +116,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-generate the child's session id and acquire its open lock BEFORE
   the create publishes it (a refusal aborts with zero child side
   effects; a create failure releases the target lock) — no transition
-  can publish a child whose lock it does not already hold.
+  can publish a child whose lock it does not already hold. The fresh
+  pre-lock is PHYSICAL: the lock layer pre-creates the session artifact
+  directory so owner.lock exists before the log is materialized (a
+  fresh acquire that settles `unavailable` aborts the transition — the
+  old `string | undefined` result conflated "locked" with "cannot
+  lock"), and releasing a lock on an empty pre-created directory
+  removes it (no residue).
   Failures happen only BEFORE the create: a stale rewind selection
   never creates a child at all, and a failed quiesce/flush/create leaves
   the current session untouched. `/new` and `/fork` dispose nothing "on

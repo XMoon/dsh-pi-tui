@@ -13,7 +13,7 @@
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -1248,19 +1248,26 @@ export function apply(ctx: Context, config: Config): void {
     // target is acquired — releasing first opened a vacuum window where
     // another process could grab the old session while a switch was still
     // failing, and the current session would stay live WITHOUT its lock).
-    // `undefined` in the acquire result still means "no lock" when the
-    // deployment cannot lock — the guard protects the write path.
     const openLocks = new OpenLockHolder()
     // The /proc probe for stale-lock takeover, created once per mount.
     const lockProc = createProcProbe()
-    /** Try to take the open-time lock for a session. Returns the refusal text
-     * when the session is held by another live dsh process (or unverifiable);
-     * undefined when the lock is now ours (or the deployment cannot lock —
-     * proceed as before). Already-held locks (this process) are an idempotent
-     * no-op — the commit's re-acquire of a pre-acquired target hits this.
-     * Never throws. */
-    const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): string | undefined => {
-      if (openLocks.has(sessionId)) return undefined
+    /** One open-lock acquisition's settled result. `unavailable` and
+     * `refused` are DISTINCT: an existing session may proceed without a
+     * lock (the divergence guard is the backstop), but a FRESH session's
+     * target-lock-before-create transaction must see `acquired` — anything
+     * else means the child would be published without its lock (review
+     * round 7: the old `string | undefined` return conflated "locked" with
+     * "cannot lock", so a fresh pre-acquire silently degenerated to
+     * publish-before-lock via no-lock-dir). */
+    type OpenLockResult =
+      | { kind: 'acquired' }
+      | { kind: 'unavailable'; reason: string }
+      | { kind: 'refused'; message: string }
+    /** Try to take the open-time lock for a session. Never throws. A FRESH
+     * session's artifact directory is pre-created by the lock layer when
+     * needed, so the lock can physically exist BEFORE the session log does. */
+    const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult => {
+      if (openLocks.has(sessionId)) return { kind: 'acquired' }
       const persistence = ctx.get('sessionPersistence') as SessionLockPersistence | undefined
       const outcome = acquireSessionLock(
         {
@@ -1269,6 +1276,8 @@ export function apply(ctx: Context, config: Config): void {
             readFileSync: (path) => readFileSync(path, 'utf8'),
             writeFileSync: (path, content, options) => writeFileSync(path, content, options),
             unlinkSync,
+            mkdirSync: (dir, options) => mkdirSync(dir, options),
+            rmdirSync: (dir) => rmdirSync(dir),
           },
           proc: lockProc,
         },
@@ -1282,19 +1291,24 @@ export function apply(ctx: Context, config: Config): void {
           if (outcome.kind === 'taken-over-stale') {
             diag.warn('session lock stale taken over', { session: sessionId })
           }
-          return undefined
+          return { kind: 'acquired' }
         case 'held':
           diag.warn('session lock held', { session: sessionId, pid: outcome.owner.pid })
-          return lockHeldNotice(sessionId, outcome.owner)
+          return { kind: 'refused', message: lockHeldNotice(sessionId, outcome.owner) }
         case 'unverifiable':
           diag.warn('session lock unverifiable', { session: sessionId, pid: outcome.owner?.pid })
-          return outcome.owner === undefined
-            ? `Session ${sessionId} has an unreadable or malformed lock file; refusing to open it here. If no other dsh process is using it, delete the owner.lock file next to the session log and retry.`
-            : `Session ${sessionId} has a lock file whose owner (pid ${outcome.owner.pid}) cannot be verified; refusing to open it here. If that process is gone, delete the owner.lock file next to the session log and retry.`
+          return {
+            kind: 'refused',
+            message: outcome.owner === undefined
+              ? `Session ${sessionId} has an unreadable or malformed lock file; refusing to open it here. If no other dsh process is using it, delete the owner.lock file next to the session log and retry.`
+              : `Session ${sessionId} has a lock file whose owner (pid ${outcome.owner.pid}) cannot be verified; refusing to open it here. If that process is gone, delete the owner.lock file next to the session log and retry.`,
+          }
         case 'unavailable':
-          // No persistence/artifact/write access: proceed without a lock
-          // (the divergence guard remains the write-path backstop).
-          return undefined
+          // No persistence/artifact/dir/write access: proceed without a
+          // lock for EXISTING sessions (the divergence guard remains the
+          // write-path backstop); a FRESH target's transaction treats this
+          // as a failure (see the transition's fresh handling).
+          return { kind: 'unavailable', reason: outcome.reason }
       }
     }
     /** Release the open-time lock for a session (idempotent). */
@@ -1324,9 +1338,9 @@ export function apply(ctx: Context, config: Config): void {
         // its own in-memory seq — the classic seq-collision corruption the
         // write-path guard cannot catch (the second opener's memory matches
         // the file). Refusing here avoids the collision entirely.
-        const lockRefusal = acquireOpenLock(sessionId, lockHeader)
-        if (lockRefusal !== undefined) {
-          throw new SessionLockRefusedError(lockRefusal)
+        const lock = acquireOpenLock(sessionId, lockHeader)
+        if (lock.kind === 'refused') {
+          throw new SessionLockRefusedError(lock.message)
         }
         // The stored session's recorded preset wins (resolved from the log,
         // not the header): a session that switched while blank ran every turn
@@ -1382,8 +1396,9 @@ export function apply(ctx: Context, config: Config): void {
         // session — a refusal aborts with zero side effects, and a create
         // failure releases the target lock.
         const fallbackId = SessionId(`session-${randomUUID()}`)
-        const fallbackLockRefusal = acquireOpenLock(String(fallbackId), { cwd: process.cwd() })
-        if (fallbackLockRefusal !== undefined) throw new Error(fallbackLockRefusal)
+        const fallbackLock = acquireOpenLock(String(fallbackId), { cwd: process.cwd() })
+        if (fallbackLock.kind === 'refused') throw new Error(fallbackLock.message)
+        if (fallbackLock.kind === 'unavailable') throw new Error(`cannot lock the fresh session before creating it (${fallbackLock.reason})`)
         try {
           handle = await agents.create({
             sessionId: fallbackId,
@@ -1641,10 +1656,13 @@ export function apply(ctx: Context, config: Config): void {
           // documented invariant (old stays locked until the child's lock
           // is ours) holds even for a hypothetical caller that skipped the
           // pre-acquire.
-          const transitionLockRefusal = acquireOpenLock(next.agent.session.id, next.agent.session.header)
-          if (transitionLockRefusal !== undefined) {
-            ctx.logger.warn(`tui-runner: lock refused on transition to ${next.agent.session.id}: ${transitionLockRefusal}`)
+          const handoverLock = acquireOpenLock(next.agent.session.id, next.agent.session.header)
+          if (handoverLock.kind === 'refused') {
+            ctx.logger.warn(`tui-runner: lock refused on transition to ${next.agent.session.id}: ${handoverLock.message}`)
             diag.warn('session lock refused on transition', { session: next.agent.session.id })
+          }
+          if (handoverLock.kind === 'unavailable') {
+            diag.warn('session lock unavailable on transition', { session: next.agent.session.id, reason: handoverLock.reason })
           }
           if (from !== undefined) releaseOpenLock(from)
         },
@@ -3981,8 +3999,9 @@ export function apply(ctx: Context, config: Config): void {
         // and a create failure releases the target lock.
         const createWithLock = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<Awaited<ReturnType<typeof agents.create>>> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
-          const lockRefusal = acquireOpenLock(String(sessionId), { cwd: process.cwd() })
-          if (lockRefusal !== undefined) throw new Error(lockRefusal)
+          const lock = acquireOpenLock(String(sessionId), { cwd: process.cwd() })
+          if (lock.kind === 'refused') throw new Error(lock.message)
+          if (lock.kind === 'unavailable') throw new Error(`cannot lock the fresh session before creating it (${lock.reason})`)
           try {
             return await agents.create({
               sessionId,

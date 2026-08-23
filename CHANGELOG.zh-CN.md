@@ -90,7 +90,11 @@
   所有 transition:`/new`、`/fork` 与 rewind 预生成 child 的 session id,
   并在 create 发布它**之前**获取其 open lock(拒绝 → 零 child 副作用
   中止;create 失败 → 释放 target 锁)——任何 transition 都不可能发布
-  一个自己尚未持锁的 child。现在失败只
+  一个自己尚未持锁的 child。fresh 预锁是**物理**的:锁层会预创建
+  session 目录(0700),让 owner.lock 在日志 materialize 之前就存在
+  (fresh acquire 若 settle 为 `unavailable` 会中止 transition——旧的
+  `string | undefined` 返回把"已加锁"与"无法加锁"混为一谈),释放空
+  预创建目录上的锁时会顺带移除该目录(零残留)。现在失败只
   发生在 create **之前**:stale 的 rewind 选择根本不会创建子会话,失败
   的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
   在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。

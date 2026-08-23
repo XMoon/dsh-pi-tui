@@ -53,6 +53,12 @@ export interface TransitionSteps<T> {
    * its own lock.
    */
   target: { id: string; header?: { cwd?: string } }
+  /** Whether the target is a FRESH session (not yet materialized): when
+   * true, the target lock MUST settle as `acquired` — an `unavailable`
+   * result means the child would be published without its lock (review
+   * round 7), so the transaction aborts. An existing target may proceed
+   * without a lock (the divergence guard is the backstop). */
+  fresh?: boolean
   /** Runs after the old-session quiesce+flush and the target-lock acquire,
    * before the create. A throw aborts the transaction (the target lock is
    * released); the caller is responsible for undoing anything else it did
@@ -66,6 +72,19 @@ export interface TransitionSteps<T> {
 /** The settled outcome of a transition. */
 export type TransitionOutcome<T> = { ok: true; next: T } | { ok: false; message: string }
 
+/** One open-lock acquisition's settled result (the host's acquire surface).
+ * `unavailable` and `refused` are DISTINCT: an EXISTING target may proceed
+ * without a lock (the divergence guard is the write-path backstop), but a
+ * FRESH target's target-lock-before-create transaction must see
+ * `acquired` — anything else means the child would be published without
+ * its lock (review round 7: the old `string | undefined` return conflated
+ * "locked" with "cannot lock", so a fresh pre-acquire silently degenerated
+ * to publish-before-lock via no-lock-dir). */
+export type OpenLockResult =
+  | { kind: 'acquired' }
+  | { kind: 'unavailable'; reason: string }
+  | { kind: 'refused'; message: string }
+
 /** The narrow host surface the orchestration drives. */
 export interface TransitionHost<T> {
   /** Quiesce the OLD agent (`whenIdle`) and run its FINAL flush — with the
@@ -73,9 +92,10 @@ export interface TransitionHost<T> {
    * side effects. A no-op when there is no live agent. */
   quiesceOld(): Promise<void>
   /** Acquire the TARGET's open lock BEFORE the child is created (the old
-   * lock is still held — the multi-slot holder). Returns the refusal text
-   * or undefined. Never throws. */
-  acquireTargetLock(target: { id: string; header?: { cwd?: string } }): string | undefined
+   * lock is still held — the multi-slot holder; a FRESH target's artifact
+   * directory is pre-created by the host so the lock can physically exist
+   * before the session log does). Never throws. */
+  acquireTargetLock(target: { id: string; header?: { cwd?: string } }): OpenLockResult
   /** Release one open lock (idempotent) — the failure paths release the
    * target lock here; the COMMIT releases the old lock. */
   releaseLock(sessionId: string): void
@@ -109,11 +129,18 @@ export async function runTransitionTo<T>(
   }
   // Phase 2 — the TARGET lock, BEFORE the create (the old lock is still
   // held). Every fallible ownership operation happens before the durable
-  // child is published: a refusal aborts with zero child side effects.
-  const refusal = host.acquireTargetLock(steps.target)
-  if (refusal !== undefined) {
-    host.recordFailure('target-lock', new Error(refusal))
-    return { ok: false, message: `transition failed: ${refusal}` }
+  // child is published: a refusal aborts with zero child side effects, and
+  // a FRESH target treats an unavailable lock as a failure too — the
+  // child must never be published without its lock (review round 7).
+  const lock = host.acquireTargetLock(steps.target)
+  if (lock.kind === 'refused') {
+    host.recordFailure('target-lock', new Error(lock.message))
+    return { ok: false, message: `transition failed: ${lock.message}` }
+  }
+  if (lock.kind === 'unavailable' && steps.fresh === true) {
+    const reason = `cannot lock the fresh session before creating it (${lock.reason})`
+    host.recordFailure('target-lock', new Error(reason))
+    return { ok: false, message: `transition failed: ${reason}` }
   }
   // Phase 3 — caller-owned preparation. Failures abort before anything is
   // published; the target lock (if acquired) is released.

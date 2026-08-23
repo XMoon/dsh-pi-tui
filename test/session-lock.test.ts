@@ -364,3 +364,54 @@ test('acquire: a flapping lock (repeated read-ENOENT) is bounded, never infinite
   const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
   assert.equal(outcome.kind, 'unverifiable')
 })
+
+// ── review round 7: a FRESH session's lock exists BEFORE its log ───────────
+
+import { existsSync, mkdirSync as fsMkdirSync, mkdtempSync, rmdirSync as fsRmdirSync, writeFileSync as fsWriteFileSync, readFileSync as fsReadFileSync, unlinkSync as fsUnlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+
+test('review round 7: a fresh session\'s lock is acquired BEFORE its log exists (pre-created dir)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-lock-fresh-'))
+  const id = `session-${randomUUID()}`
+  const sessionDir = join(root, id)
+  const logPath = join(sessionDir, 'session.jsonl.zstd')
+  assert.equal(existsSync(sessionDir), false, 'the fresh session directory must not exist yet')
+  const realFs: SessionLockFs = {
+    readFileSync: (path) => fsReadFileSync(path, 'utf8'),
+    writeFileSync: (path, content, options) => fsWriteFileSync(path, content, options),
+    unlinkSync: (path) => fsUnlinkSync(path),
+    mkdirSync: (dir, options) => fsMkdirSync(dir, options),
+    rmdirSync: (dir) => fsRmdirSync(dir),
+  }
+  const persistence = {
+    locate: () => ({ kind: 'jsonl', path: logPath }),
+  }
+  const first = acquireSessionLock(
+    { persistence, fs: realFs, proc: scriptedProc([]) },
+    { id, header: { cwd: root } },
+    SELF,
+  )
+  assert.equal(first.kind, 'acquired', 'the fresh pre-lock must settle as acquired (review round 7)')
+  assert.equal(existsSync(join(sessionDir, 'session.jsonl.zstd.owner.lock')), true, 'owner.lock exists BEFORE the log')
+  assert.equal(existsSync(logPath), false, 'the session log must NOT exist yet')
+  // Another process cannot grab the published session in the gap: the
+  // pre-created lock refuses it.
+  const second = acquireSessionLock(
+    { persistence, fs: realFs, proc: scriptedProc([{ kind: 'alive' }]) },
+    { id, header: { cwd: root } },
+    OTHER,
+  )
+  assert.equal(second.kind, 'held', 'a second process is refused while the pre-acquired lock is held')
+  // The lock stays continuously owned through the create window.
+  assert.equal(existsSync(join(sessionDir, 'session.jsonl.zstd.owner.lock')), true, 'the lock is never dropped mid-transition')
+  // Simulate a FAILED create: release removes the lock and the empty
+  // pre-created directory (no residue), and the parent root survives.
+  if (first.kind === 'acquired') first.release()
+  assert.equal(existsSync(join(sessionDir, 'session.jsonl.zstd.owner.lock')), false, 'release removes the lock')
+  assert.equal(existsSync(sessionDir), false, 'an empty pre-created fresh dir is removed (best-effort)')
+  assert.equal(existsSync(root), true, 'the parent root is never removed')
+  // Cleanup the temp root.
+  fsRmdirSync(root)
+})

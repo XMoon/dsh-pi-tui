@@ -312,6 +312,9 @@ export interface TuiCommandRunner {
      * effects and a later create failure releases the target lock
      * (review round 6). */
     target: { id: string; header?: { cwd?: string } }
+    /** Whether the target is a FRESH session: the target lock must settle
+     * as acquired, or the transaction aborts before the create. */
+    fresh?: boolean
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
@@ -2042,6 +2045,7 @@ export function registerTuiCommands(
       const sessionId = SessionId(`session-${randomUUID()}`)
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd } },
+        fresh: true,
         create: async () => {
           const liveAgent = runner.liveAgent
           const composition = await runner.compose(runner.pendingPreset)
@@ -2521,6 +2525,7 @@ export function registerTuiCommands(
       const childCwd = source.session.header.cwd || runner.sessionCwd()
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
+        fresh: true,
         create: () => createForkedAgent(runner, source, seed, sessionId),
       })
       if (!result.ok) return { kind: 'error', text: result.message }

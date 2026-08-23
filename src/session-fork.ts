@@ -128,6 +128,9 @@ export interface RewindCommitHost extends ForkAgentHost {
      * effects and a later create failure releases the target lock
      * (review round 6). */
     target: { id: string; header?: { cwd?: string } }
+    /** Whether the target is a FRESH session: the target lock must settle
+     * as acquired, or the transaction aborts before the create. */
+    fresh?: boolean
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
@@ -204,6 +207,7 @@ export async function commitRewind(
       // rule createForkedAgent uses (the live surface cwd is the fallback).
       header: { cwd: source.session.header.cwd || host.sessionCwd() },
     },
+    fresh: true,
     create: () => createForkedAgent(host, source, seed, sessionId),
   })
   if (!result.ok) return { kind: 'failed', message: result.message }
