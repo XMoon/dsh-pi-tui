@@ -35,7 +35,6 @@
  * @module @xmoon76/dsh-pi-tui/session-lease-manager
  */
 
-import { readFileSync } from 'node:fs'
 import type { OpenLockResult } from './transition.ts'
 
 /** One lease's business state. */
@@ -88,28 +87,20 @@ export interface LeasePhysicalDeps {
   }
 }
 
-/** The process-global lease registry (HMR-safe, Symbol.for key). */
+/** The process-global lease registry (HMR-safe, Symbol.for key). The
+ *  registry lives on `globalThis`, which is ALREADY per-OS-process — a
+ *  fresh process can never inherit the previous process's registry, so
+ *  the pid is only a defensive check, and no /proc-based identity is
+ *  needed (review: /proc/self/stat broke macOS mounts). */
 export interface GlobalLeaseRegistry {
-  processIdentity: {
-    pid: number
-    startedAt: number
-  }
+  pid: number
   manager: ProcessSessionLeaseManager
   refCount: number
 }
 
 const LEASE_MANAGER_SYMBOL: symbol = Symbol.for(
-  '@xmoon76/dsh-pi-tui/process-session-lease-manager',
+  '@xmoon-dsh-pi-tui/process-session-lease-manager',
 )
-
-/** The process start timestamp the registry identity binds to (pid-reuse
- *  guard across a process restart within the same OS pid). */
-function processStartedAt(): number {
-  const stat = readFileSync('/proc/self/stat', 'utf8')
-  // Field 22 (starttime in ticks) after the comm field in parentheses.
-  const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-  return Number(after[19])
-}
 
 /** The per-process session lease manager (one instance per OS process). */
 export class ProcessSessionLeaseManager {
@@ -278,9 +269,7 @@ export function acquireProcessLeaseManager(
 ): { manager: ProcessSessionLeaseManager; release: () => void } {
   const g = globalThis as Record<symbol, GlobalLeaseRegistry | undefined>
   const existing = g[LEASE_MANAGER_SYMBOL]
-  if (existing !== undefined
-    && existing.processIdentity.pid === process.pid
-    && existing.processIdentity.startedAt === processStartedAt()) {
+  if (existing !== undefined && existing.pid === process.pid) {
     // HMR/remount: NEW acquires must route through the current mount's
     // closures (ctx/persistence/holder); per-lease release bindings stay
     // with their original holder (review round 34).
@@ -293,7 +282,7 @@ export function acquireProcessLeaseManager(
   }
   const manager = new ProcessSessionLeaseManager(deps)
   g[LEASE_MANAGER_SYMBOL] = {
-    processIdentity: { pid: process.pid, startedAt: processStartedAt() },
+    pid: process.pid,
     manager,
     refCount: 1,
   }

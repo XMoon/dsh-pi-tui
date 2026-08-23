@@ -2220,6 +2220,10 @@ export function apply(ctx: Context, config: Config): void {
       // as stale records; the next opener's stale-takeover mechanism
       // handles them (the system must support kill -9 stale locks anyway).
       lifecycleController.abort()
+      // The process-global lease registry's ref count: this mount is done
+      // with the manager (bookkeeping only — the physical locks stay;
+      // review: a missing release leaked refCount across HMR remounts).
+      leaseWorld.release()
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
