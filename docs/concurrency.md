@@ -72,7 +72,7 @@ process and REFUSES the open.
 | Entry | Behavior |
 |---|---|
 | `--session <id>` launch | acquire before `agents.resume()`; refusal is fatal (the runner exits with the refusal message — the user asked for a specific session, there is no safe fallback) |
-| `/resume` / `/sessions` switch | acquire the TARGET lock while STILL HOLDING the current one (multi-slot holder; the acquire is a non-blocking refusal); the current lock is released only in the COMMIT on a successful handover — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window, nothing to re-acquire) |
+| `/resume` / `/sessions` switch | acquire the TARGET lock while STILL HOLDING the current one (multi-slot holder; the acquire is a non-blocking refusal); the current lock is released only in the COMMIT on a successful handover — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window, nothing to re-take) |
 | `/new` / `/fork` | acquire the child's lock BEFORE the create (pre-generated id, old lock still held — the target-lock-before-create rule); the COMMIT only releases the old lock |
 | first deferred message | acquire the child's lock BEFORE the create (pre-generated id — the target-lock-before-create rule) |
 | switch away / clean exit | release (idempotent), AFTER the final flush |
@@ -99,14 +99,14 @@ Two orderings are load-bearing and were both bug-fixed in review:
   acquire result is structured (`acquired | unavailable | refused`): a
   FRESH target's transition requires `acquired` — `unavailable` means the
   child would be published without its lock — while an EXISTING target
-  may proceed without a lock (the divergence guard is the backstop). Releasing old-first opened a vacuum window where
-  another process could take the old session while the switch was still
-  failing — and a failed re-acquire then left the current session live
-  WITHOUT its lock (two processes holding one session). With the
-  multi-slot order a failed switch never drops the old lock in the first
-  place, and two processes switching in opposite directions both refuse
-  (the acquire is a non-blocking refusal, never a wait) and keep their
-  own locks.
+  may proceed without a lock (the divergence guard is the backstop).
+  With the multi-slot order a failed switch never drops the old lock in
+  the first place (the OLD single-slot design released old-first and its
+  failed re-take then left the current session live WITHOUT its lock —
+  two processes holding one session; that ordering is what this model
+  eliminates), and two processes switching in opposite directions both
+  refuse (the acquire is a non-blocking refusal, never a wait) and keep
+  their own locks.
 
 ## How the guard works (the decision)
 

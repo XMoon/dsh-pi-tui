@@ -1411,8 +1411,9 @@ export function apply(ctx: Context, config: Config): void {
           throw error
         }
         // The fallback session is now a real persisted artifact: its open
-        // lock was acquired BEFORE the create (above); the re-acquire is an
-        // idempotent no-op.
+        // lock was acquired BEFORE the create (above — the fallback
+        // REQUIRES an acquired result), so this record is an idempotent
+        // no-op.
         acquireOpenLock(handle.agent.session.id, handle.agent.session.header)
       }
     } else {

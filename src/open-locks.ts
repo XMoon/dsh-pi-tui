@@ -2,11 +2,11 @@
  * The multi-slot open-lock holder: this process may legitimately hold the
  * open lock of MORE THAN ONE session at a time — during a session
  * transition the OLD session keeps its lock while the TARGET's lock is
- * acquired (review round 5: releasing the old lock first opened a vacuum
- * window where another process could grab the old session while the
- * switch was still failing; a failed re-acquire then left the current
- * session live WITHOUT its lock — two processes holding one session, the
- * exact corruption the lock exists to prevent).
+ * acquired (review round 5: the OLD design released the old lock first,
+ * opening a vacuum window where another process could grab the old
+ * session while the switch was still failing; its failed re-take then
+ * left the current session live WITHOUT its lock — two processes holding
+ * one session, the exact corruption the lock exists to prevent).
  *
  * With the multi-slot holder the handoff order becomes: old stays locked
  * → target acquired (non-blocking refusal — never a wait, so two

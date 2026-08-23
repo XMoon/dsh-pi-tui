@@ -129,9 +129,9 @@ export function textOf(blocks: readonly ContentBlock[]): string {
  * blocks as an inline `🖼️ name` marker AT their position (the queue-preview
  * format; U+FE0F keeps the marker 2 cells wide in emoji fonts). A marker
  * boundary always carries a single separating space — the /image insertion
- * leaves NO space before the placeholder, so `这张图是啥[image…]` must not
- * read as `这张图是啥🖼️ shot.png` — while a space the user already typed is
- * never doubled. The structured `content` blocks stay the canonical form
+ * leaves NO space before the placeholder, so `what is this [image…]` must
+ * not read as `what is this 🖼️ shot.png` — while a space the user already
+ * typed is never doubled. The structured `content` blocks stay the canonical form
  * for thumbnail rendering; this projection feeds the flat-text consumers
  * (transcript search, loader-less fallback rendering, the user bubble's
  * inline marker) so a mixed message never reads as if the image was not

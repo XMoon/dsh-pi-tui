@@ -4590,7 +4590,7 @@ export class TuiApp {
   /**
    * A user message with images: ONE bubble whose text keeps an inline
    * `🖼️ name` placeholder at every image's ORIGINAL position — the user's
-   * own words then read like the draft they submitted (`这张图是啥 🖼️
+   * own words then read like the draft they submitted (`what is this 🖼️
    * shot.png`), instead of a bubble with the image silently moved to its
    * own row. The thumbnails follow as attachment rows in block order; the
    * bubble marker carries the position, the thumbnail carries the picture.
