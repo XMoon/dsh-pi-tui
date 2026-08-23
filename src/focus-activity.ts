@@ -311,12 +311,18 @@ function lastAssistant(
   return undefined
 }
 
-/** Whether one assistant message renders any rows at all: empty text with
- * no content blocks is a zero-row entry (e.g. a never-streamed step) and
- * can never be presented as a final answer. An image-only assistant
- * (`content` present) IS renderable. */
+/** Whether one assistant message truly renders visible rows. The flat
+ * `text` already aggregates EVERY text block (textOf), so the only
+ * non-text block the TUI's assistant renderer paints is an `image` —
+ * `reasoning` / `tool-call` / `tool-result` content (and any future
+ * merge-extended block) is SKIPPED by renderBlockSequence. A content
+ * array made only of those renders zero rows and can never be presented
+ * as a final answer: a max-tokens turn must not end in a bare
+ * "(output may be truncated)" marker with no actual output (review
+ * edge). Keep this in sync with the renderer's painted block types. */
 function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
-  return assistant.text !== '' || assistant.content !== undefined
+  if (assistant.text !== '') return true
+  return assistant.content?.some(block => block.type === 'image') === true
 }
 
 /** The turn's final assistant selection: only after the authoritative

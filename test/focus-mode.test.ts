@@ -550,7 +550,7 @@ test('an image-only final assistant is the EXACT final (never falls back to the 
   const last = messages.findLast(m => m.kind === 'assistant')
   assert.ok(last !== undefined && last.kind === 'assistant' && last.text === '' && last.content !== undefined,
     'precondition: the exact last assistant is image-only')
-  const blocks = projectFocusBlocks(folder.messages(), folder.turnActivities(), new Set())
+  const blocks = projectTools(folder.messages(), folder.turnActivities(), new Set())
   const assistants = blocks.filter((b): b is Extract<FocusProjectedBlock, { kind: 'message' }> =>
     b.kind === 'message' && b.message.kind === 'assistant')
   assert.equal(assistants.length, 1, 'exactly one assistant survives collapsed')
@@ -560,6 +560,50 @@ test('an image-only final assistant is the EXACT final (never falls back to the 
   } else {
     assert.fail('the final block must be an assistant message')
   }
+})
+
+test('a reasoning-only exact last assistant is NOT renderable — no final', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...completedTurn(0, 0, 1000).slice(0, -1), // earlier text assistant
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: {
+        id: 'rsn', role: 'assistant',
+        // The assistant renderer paints only text/image blocks: reasoning
+        // content renders ZERO rows, so it must not qualify as a final.
+        content: [{ type: 'reasoning', text: 'thinking only' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 1000 + 11, 21),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
+  ])
+  const messages = folder.messages()
+  const last = messages.findLast(m => m.kind === 'assistant')
+  assert.ok(last !== undefined && last.kind === 'assistant' && last.text === '' && last.content !== undefined,
+    'precondition: the exact last assistant is reasoning-only')
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
+    'a reasoning-only last step must not be promoted to the final')
+})
+
+test('a tool-call-only exact last assistant is NOT renderable — no final', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...completedTurn(0, 0, 1000).slice(0, -1), // earlier text assistant
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: {
+        id: 'tc', role: 'assistant',
+        content: [{ type: 'tool-call', id: CallId('late-call'), name: 'bash', arguments: '{}' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 1000 + 11, 21),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 1000 + 12, 22),
+  ])
+  const blocks = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
+    'a tool-call-only last step must not end in a bare truncated marker')
 })
 
 test('max-tokens also never falls back to an earlier assistant', () => {
@@ -610,7 +654,7 @@ test('the Thought component never renders a line wider than the terminal', () =>
 })
 
 /** projectFocus helper with the focus-mode flag preset. */
-function projectFocusBlocks(
+function projectTools(
   messages: readonly TranscriptMessage[],
   activities: ReadonlyMap<number, import('../src/transcript.ts').TurnActivity>,
   expanded: ReadonlySet<number>,
