@@ -1695,6 +1695,18 @@ export function apply(ctx: Context, config: Config): void {
       transitionGate.run(() => switchSessionLocked(sessionId))
 
     const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
+      // A switch INTO the session we are already on is a no-op — refusing
+      // it up front also keeps the failure branches from ever releasing the
+      // CURRENT session's lock through a same-session target id (review
+      // round 7: the idempotent acquire would not record a new lock, but an
+      // unconditional releaseOpenLock(target) would drop the live one).
+      if (liveAgent !== undefined && liveAgent.session.id === sessionId) {
+        return 'already on this session'
+      }
+      // Whether THIS switch newly acquired the target lock (set in the
+      // prepare phase; the failure branches release the target only when it
+      // is true — never the current lock, review round 7).
+      let targetLocked = false
       // Draft cleanup happens ONLY after the switch committed (the
       // transaction returned ok): a refused/failed switch keeps the CURRENT
       // session and its staged drafts intact — clearing up front would
@@ -1734,6 +1746,10 @@ export function apply(ctx: Context, config: Config): void {
               // live and still holds its own lock.
               throw new Error(lockRefusal)
             }
+            // The target lock was NEWLY acquired (the same-session case is
+            // refused above, so this is always a fresh lock): the failure
+            // branches release it explicitly — never the current lock.
+            targetLocked = true
           },
           create: async () => {
             const composition = await compose(await recordedPreset(ctx, sessionId))
@@ -1749,10 +1765,13 @@ export function apply(ctx: Context, config: Config): void {
         })
         if (!result.ok) {
           // The resume failed before publishing: release the target's lock
-          // so it is not left locked for a session we never entered. The
-          // CURRENT session is still live AND still holds its own lock —
-          // the COMMIT will release it only on a successful handover.
-          releaseOpenLock(sessionId)
+          // so it is not left locked for a session we never entered — but
+          // ONLY when this switch actually acquired it (a same-session
+          // target was refused above, so the idempotent acquire can never
+          // alias the CURRENT lock; review round 7). The CURRENT session
+          // is still live AND still holds its own lock — the COMMIT will
+          // release it only on a successful handover.
+          if (targetLocked) releaseOpenLock(sessionId)
           return result.message
         }
         // The switch COMMITTED: staged drafts are per-session UI state —
@@ -1768,9 +1787,10 @@ export function apply(ctx: Context, config: Config): void {
         diag.error('switch failed', { session: sessionId, error: message })
         // If the resume failed after we took the target's lock, release it so
         // the target session is not left locked for a session we never
-        // entered. The CURRENT session is still live and still holds its
-        // own lock.
-        releaseOpenLock(sessionId)
+        // entered (only when THIS switch acquired it — never the current
+        // lock). The CURRENT session is still live and still holds its own
+        // lock.
+        if (targetLocked) releaseOpenLock(sessionId)
         return `switch failed: ${message}`
       }
     }

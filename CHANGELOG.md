@@ -108,7 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch leaves the current session live WITH its lock (the old
   release-first order opened a vacuum window where another process could
   take the old session mid-switch, and a failed re-acquire then left two
-  processes holding one session).
+  processes holding one session). A same-session switch is refused up
+  front, and the failure branches release the target lock only when this
+  switch actually acquired it — a failed switch can never drop the
+  current session's lock through a target id.
   Failures happen only BEFORE the create: a stale rewind selection
   never creates a child at all, and a failed quiesce/flush/create leaves
   the current session untouched. `/new` and `/fork` dispose nothing "on

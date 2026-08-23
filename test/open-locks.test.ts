@@ -61,3 +61,34 @@ test('releaseAll covers the clean-exit path (a transition may hold two)', () => 
   holder.releaseAll()
   assert.deepEqual(released.sort(), ['session-a', 'session-b'])
 })
+
+// ── review round 7: failed-switch release must never touch the current lock ─
+
+test('a failed switch releases ONLY the newly acquired target lock (current lock survives)', () => {
+  const holder = new OpenLockHolder()
+  const released: string[] = []
+  holder.add('session-a', () => { released.push('session-a') })
+  // The switch acquires the target while still holding the current lock.
+  const targetLocked = holder.add('session-b', () => { released.push('session-b') })
+  assert.equal(targetLocked, true, 'the target is a NEW acquisition')
+  // Resume fails: release the target only when THIS switch acquired it.
+  if (targetLocked) holder.release('session-b')
+  assert.deepEqual(released, ['session-b'])
+  assert.equal(holder.has('session-a'), true, 'the current session keeps its lock')
+  assert.equal(holder.has('session-b'), false)
+})
+
+test('a same-session acquire is idempotent — the failure branch must not release the current lock', () => {
+  const holder = new OpenLockHolder()
+  const released: string[] = []
+  holder.add('session-a', () => { released.push('session-a') })
+  // A switch whose target IS the current session: the idempotent acquire
+  // records NO new lock...
+  const targetLocked = holder.add('session-a', () => { released.push('dup') })
+  assert.equal(targetLocked, false, 'nothing new was acquired')
+  // ...so the failure branch (release only when targetLocked) is a no-op
+  // and the current session's lock survives.
+  if (targetLocked) holder.release('session-a')
+  assert.deepEqual(released, [], 'the current lock must never be released by a same-session switch failure')
+  assert.equal(holder.has('session-a'), true)
+})
