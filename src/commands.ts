@@ -2542,21 +2542,22 @@ export function registerTuiCommands(
       // no rollback attempt).
       const sessionId = SessionId(`session-${randomUUID()}`)
       const childCwd = source.session.header.cwd || runner.sessionCwd()
+      // The composition is resolved ONCE; the IDENTICAL setup rides both
+      // the create and the post-publication recovery (review round 23/24).
+      const composition = await runner.compose(resolveSessionPreset(source.session))
+      const forkOptions = { provider: source.options.provider, model: source.options.model }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
         fresh: true,
-        create: () => createForkedAgent(runner, source, seed, sessionId),
+        create: () => createForkedAgent(runner, source, seed, sessionId, composition),
         // The publication crossed the durable boundary but the create
         // rejected (review round 8): resume the published child with the
-        // target lock still held, under the source's recorded preset.
-        recover: async () => {
-          const composition = await runner.compose(resolveSessionPreset(source.session))
-          return runner.agents.resume({
-            resumeSessionId: sessionId,
-            agentOptions: { provider: source.options.provider, model: source.options.model },
-            setup: composition.setup,
-          })
-        },
+        // target lock still held, under the SAME composition.
+        recover: () => runner.agents.resume({
+          resumeSessionId: sessionId,
+          agentOptions: forkOptions,
+          setup: composition.setup,
+        }),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —

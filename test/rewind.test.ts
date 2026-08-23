@@ -758,3 +758,50 @@ test('review round 23: /new resolves ONE compose and the recovery reuses the IDE
   assert.equal(createSetup, recoverSetup, 'the recovery uses the IDENTICAL setup object — a second composition could drift')
   app.stop()
 })
+
+test('review round 23/24: /fork resolves ONE compose and the recovery reuses the IDENTICAL setup', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const commands = fakeCommandsService()
+  const ctx = new Context()
+  ctx.provide('commands', commands.service as never)
+  const rewinds: number[] = []
+  const ensureCalls: string[] = []
+  const base = stubRunner({ ctx, app, rewinds, ensureCalls })
+  let composes = 0
+  let createSetup: unknown
+  let recoverSetup: unknown
+  let recoverFn: (() => Promise<unknown>) | undefined
+  const runner: TuiCommandRunner = {
+    ...base,
+    liveAgent: sourceAgent('session-source', turn(0, 1, 'A')),
+    compose: async () => {
+      composes += 1
+      return { agentPreset: 'minimal', setup: () => {} }
+    },
+    agents: {
+      create: async (opts: { setup: unknown }) => {
+        createSetup = opts.setup
+        return { agent: { session: { id: 'session-fork' } } } as unknown as AgentHandle
+      },
+      resume: async (opts: { setup: unknown }) => {
+        recoverSetup = opts.setup
+        return { agent: { session: { id: 'session-fork' } } } as unknown as AgentHandle
+      },
+    } as never,
+    transitionTo: async <T>(steps: { create: () => Promise<T>; recover?: () => Promise<T> }) => {
+      recoverFn = steps.recover
+      return { ok: true, next: await steps.create() }
+    },
+  }
+  registerTuiCommands(runner)
+  const def = commands.defs.find(entry => entry.name === 'fork')
+  assert.ok(def?.handler !== undefined, '/fork handler missing')
+  await (def!.handler as () => Promise<unknown>)()
+  assert.equal(composes, 1, 'the composition is resolved exactly once for create AND recovery')
+  assert.ok(recoverFn !== undefined, 'the transition receives a recovery step')
+  await recoverFn()
+  assert.equal(createSetup, recoverSetup, 'the recovery uses the IDENTICAL setup object as the create')
+  app.stop()
+})
