@@ -1824,6 +1824,22 @@ export function apply(ctx: Context, config: Config): void {
               setup: composition.setup,
             })
           },
+          // A rejected resume may still have PUBLISHED (a later synchronous
+          // listener threw — review round 8/21): recover by resuming the
+          // SAME session with the target lock still held; an unrecoverable
+          // durable session keeps its lock and reports explicitly (never a
+          // silent unlock of a session that exists).
+          recover: async () => {
+            const composition = await compose(await recordedPreset(ctx, sessionId))
+            return agents.resume({
+              resumeSessionId: SessionId(sessionId),
+              agentOptions: {
+                provider: liveAgent?.options.provider ?? selection.provider,
+                model: liveAgent?.options.model ?? selection.model,
+              },
+              setup: composition.setup,
+            })
+          },
         })
         if (!result.ok) {
           // The resume failed before publishing: the transaction already
