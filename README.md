@@ -338,9 +338,11 @@ the Advanced/Unstable roadmap).
   searchable list (type to filter rows by kind/label/status — `subagent`,
   `bash`, `failed`…). Subagent rows show their mode as part of the label
   (`subagent · <label> · continuable` / `… · one-shot`) — you know before
-  Enter whether the viewer will be interactive. `Enter` opens the detail
-  (child viewer for a subagent, status viewer for a job), `i` interrupts
-  the selected subagent. `/subagents` is an alias.
+  Enter whether the viewer will be interactive — and the durable descendant
+  tree renders as indented rows (`├─` per depth), so a subagent's subagent
+  is visible here without entering its parent. `Enter` opens the detail
+  (child viewer for a subagent — nested rows read-only — status viewer for
+  a job), `i` interrupts the selected subagent. `/subagents` is an alias.
 - `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
 - `/status` — show the current session's stats and identity (turn counts,
   token usage, workspace, installed dsh version).
@@ -370,6 +372,12 @@ the Advanced/Unstable roadmap).
   draft, if any) into the running turn at once; otherwise sends the draft
   alone. An idle agent starts a fresh turn with everything.
 - `Alt+↑` — dequeue: pull every queued message back into the editor draft.
+- `Ctrl+O` — expand/collapse the most recent turns' collapsible entries
+  (thinking, tool cards). The same master switch expands the local
+  `!`/`!!` shell cards (see Local shell below).
+- `Alt+K` — dismiss the SETTLED local `!`/`!!` shell cards from the live
+  view; a RUNNING card is never dismissed and the process is not
+  cancelled (Esc owns that). See Local shell below.
 - `Ctrl+T` — toggle the full todo list (in fullscreen, clicking the panel
   expands it to the full list and back); the dock above the editor always
   shows the todo summary and background tasks, and queued input renders
@@ -379,20 +387,26 @@ the Advanced/Unstable roadmap).
   fallback otherwise). The literal `@path` is submitted and the model reads
   the file itself. With background work running, an empty editor's `↓` opens
   the same merged task browser as `/tasks`:
-  - **subagent rows** (live children, labeled with their catalog mode:
-    `continuable` or `one-shot`) — `Enter` opens the child's viewer:
-    a **continuable** child's viewer is **interactive** — type a
-    follow-up and press Enter, and it is delivered as the child's NEXT
-    turn through `ctx.subagents.followup` (FIFO — a running child is
-    never interrupted or steered; an inactive child cold-resumes
+  - **subagent rows** (the durable descendant tree, labeled with their
+    catalog mode: `continuable` or `one-shot`, indented by depth with a
+    `├─` connector — a subagent's subagent is visible right here, in
+    stable pre-order) — `Enter` opens the child's viewer:
+    a **direct (depth-1) continuable** child's viewer is **interactive**
+    — type a follow-up and press Enter, and it is delivered as the
+    child's NEXT turn through `ctx.subagents.followup` (FIFO — a running
+    child is never interrupted or steered; an inactive child cold-resumes
     automatically), while `Esc` returns to your session. A **one-shot**
-    child's viewer stays **read-only** (`Esc` returns; the editor shows
-    the read-only placeholder). While a viewer is open the footer
-    switches to the CHILD's own identity (`[subagent · continuable]`
-    badge, label, activity, cwd, the child's own turns/steps/stats) and
-    returns to your session's on exit. `i` interrupts the selected
-    child. They never register job records, so this browser is their
-    only glanceable home.
+    child's viewer stays **read-only**, and so does any **nested
+    (depth > 1)** descendant — even a continuable one (`continuable ·
+    nested · read-only from this parent`): the root may only continue
+    its own direct children. A FINISHED one-shot child stays in the
+    browser — `inactive` is live-store presence, not an outcome — and
+    Enter opens its persisted transcript. While a viewer is open the
+    footer switches to the CHILD's own identity (`[subagent ·
+    continuable]` badge, label, activity, cwd, the child's own
+    turns/steps/stats) and returns to your session's on exit. `i`
+    interrupts the selected child. They never register job records, so
+    this browser is their only glanceable home.
   - **job rows** (bash and one-shot subagent jobs) — `Enter` shows the status
     viewer only: a bash job's output read cursor belongs to the model's
     `job_output`, and a one-shot subagent job record carries no child session
@@ -419,6 +433,20 @@ Opening the TUI with no `--session` creates **no session at all**: the first
 user message (text, slash command, `Ctrl+S` steer, or `!` shell) starts it
 lazily. `--session <id>` still resumes immediately, and a local `!!` command
 runs without needing a session.
+
+## Local shell (`!` / `!!`)
+
+`! command` runs the command locally and submits the completed command +
+output to the session as an ordinary user message; `!! command` runs purely
+locally — the card is the only record (never sent to the model). The card
+is COLLAPSED by default so a long log cannot fill the TUI: a running card
+shows the newest 5 lines, a settled card at most 20 visual rows (long
+lines wrap and count as several), each with an honest hidden-line marker.
+`Ctrl+O` (the same master switch as the recent-turn fold) expands the card
+to the retained buffer — live while the command still streams; `Alt+K`
+quick-dismisses the SETTLED cards (a running card is never dismissed, the
+process is not cancelled, and an already-submitted `!` context payload is
+untouched).
 
 ## Verified in the P0 spike
 

@@ -189,3 +189,81 @@ no steer. Decisions a future change must not silently reverse:
   turn/step segment would otherwise duplicate the child counters with the
   parent's. Header extension badges keep rendering (they do not conflict
   with the child identity). No extension API changed (additive-only).
+
+## Durable hierarchical task browser
+
+The `/tasks` browser (and the ↓ empty-editor trigger, and the footer badge)
+read the DURABLE descendant catalog, not the live-child list:
+
+- **The lineage source is `subagents.listDescendants`**, never a
+  re-implemented traversal over session headers, and never `listChildren`
+  for the browser (the badge may scope to running descendants of the same
+  listing). `parentId` + `depth` ride every row from the catalog facts —
+  never guessed from labels or order.
+- **Subagent rows keep the DSH stable pre-order VERBATIM.** Activity never
+  re-sorts a row above its parent (a running grandchild stays under its
+  inactive parent). The "first running subagent" rule is a CURSOR policy
+  (`TaskBrowserHandle.setItems(items, preferredValue)`), never a sort.
+- **A finished one-shot child stays reachable.** `inactive` is live-store
+  presence, never an outcome; Enter opens its persisted transcript
+  read-only. No activity filter exists in `buildTaskRows`.
+- **Jobs are a separate flat group**, sorted by their own registry
+  ordering; the background one-shot duplication (job row + child row with
+  no cross-reference) is contract, locked in by test.
+- **Viewer authority is a separate `access` dimension** (`ViewerAccess`):
+  mode stays the durable semantic; only a depth-1 continuable child is
+  interactive from the root. Nested (depth > 1) rows open read-only even
+  when continuable, advertised as `continuable · nested · read-only from
+  this parent` — never relabeled one-shot. The read-only gate sits in the
+  INPUT ROUTING layer (Enter and the plugin submit path hard-reject), not
+  only at send time; there is no fallback to the main session as a nested
+  direct parent, and no `ctx.agents.get(childId).followup(...)` bypass.
+- **The footer badge counts RUNNING descendants at every depth** (the user
+  cares that a deep agent is still working); durable inactive children
+  never keep the badge armed.
+
+## Focus fullscreen disclosure
+
+The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
+
+- **Anchored expand**: clicking a collapsed Thought in fullscreen expands
+  it and scrolls the viewport so the Thought HEADER sits near the top
+  (one row of context above), with follow-end disabled — the freshly
+  revealed content cannot snap the view back to the tail.
+- **The regular surface never gets an ANSI scrollback anchor**: its
+  viewport is owned by the terminal emulator / tmux / the SSH chain; the
+  TUI does not fight it.
+- **Expanded-body click collapses the owner turn**: thinking, tool call,
+  tool result and ordinary process rows of an expanded Thought collapse
+  the WHOLE turn (anchored to the header) instead of toggling the single
+  card. **Attachment hit areas win first**: clicking an image's info bar
+  inside an expanded Thought toggles only that attachment.
+- **Transcript-search jumps keep their own scroll policy**: the search
+  caller owns the jump target; `expandFocusTurn` never forces a
+  Thought-header anchor.
+
+## Selected-row marquee
+
+- Only the SELECTED row's main label scrolls (pause → one cell per 250ms →
+  tail pause → loop). Tree connectors, the current-session marker, mode
+  suffixes, status and elapsed are fixed layout regions.
+- The window slices by VISIBLE CELLS (CJK/emoji/ZWJ never split); one
+  timer per panel, unref'd, disposed on close; only an overflowing
+  selected row arms it.
+- The session picker uses the vendored SelectList's `truncatePrimary` seam
+  (no fork divergence): the label is split into a fixed presentation
+  prefix (lineage + marker) and the marqueeable title.
+
+## Local shell display policy
+
+- The capture layer (bounded-output byte/line/disk caps) is the memory
+  safety boundary and is UNCHANGED; this policy only bounds what the card
+  PRESENTS: a running card collapses to the newest 5 source lines, a
+  settled card to at most 20 VISUAL rows, with an honest hidden-line
+  marker. Ctrl+O (the existing master switch) expands to the retained
+  buffer; a running card's result is re-chained to the bounded tail on a
+  throttle.
+- Quick dismiss (Alt+K) removes SETTLED cards only: a running card is
+  never dismissed, the shell process is never cancelled (Esc owns that),
+  no session event is deleted, and an already-submitted `!` context
+  payload is untouched. `!!` stays local-only.
