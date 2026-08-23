@@ -156,6 +156,21 @@
   的 inspect barrier)之后才释放——另一个进程绝不可能在旧 session 仍
   有 writer 或未定稿的 final flush 时 resume 它;retirement 无法落定时
   旧锁保持并告警(review round 10)。
+- **COOLING 中的会话可以在同一进程内重新打开,过期的 cooling verifier
+  永远无法影响后续生命周期。** 在冷却窗口内(约 2 秒释放期)通过
+  `/sessions` 或 `/resume` 切回仍在 COOLING 的会话时,现在走
+  `reserveForActivation` 重新激活:物理锁始终留在本进程,DSH resume
+  之前同步作废旧的生命周期 epoch;RELEASED tombstone 仍然强制真正的
+  物理重获取。每次 retirement 都带一个 epoch(租约的单调
+  `lifecycleEpoch`,`beginCooling` 返回它);cooling verifier 绑定在
+  **自己的** epoch 上(每个 await 之后复查,lease manager 里的
+  release/pin 均为 epoch-atomic);in-flight 跟踪按 epoch 键控;HMR/
+  cleanup abort 是中性的——新 mount 的 `resumePending()` 继续**同一个**
+  cooling epoch。ABA 风险关闭:cooling#1 → 重新激活 → cooling#2 绝不
+  会被过期的 verifier #1 释放或 PIN。新增单测(lease manager 重新激活
+  套件 + cooling Case A–E)与按需双进程 E2E(`scripts/e2e-session-
+  lease.sh`,不进 CI 套件)覆盖:在冷却窗口内驱动 A→B→A,证明超过旧
+  释放时间后 P2 仍被拒绝。
 - **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
   都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
   release/repeat 事件仍然不计为按键)。

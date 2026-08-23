@@ -101,11 +101,15 @@ Two orderings are load-bearing and were both bug-fixed in review:
   a window where a racing opener's resume synthesizes closers into the
   shared log while our flush still appends from our in-memory seq — the
   exact corruption the lock exists to prevent.
-- **Old lock survives until RETIRE.** The lock holder is multi-slot
-  (`src/open-locks.ts`): the transition acquires the TARGET while still
-  holding the OLD lock, and the old lock is released only inside RETIRE
-  — after the old handle is disposed and its persistence retirement
-  settled (review round 10). A FRESH target's lock is physically pre-created:
+- **Old lock survives until RETIRE — and RETIRE does NOT release it.**
+  The lock holder is multi-slot (`src/open-locks.ts`): the transition
+  acquires the TARGET while still holding the OLD lock. RETIRE disposes
+  the old handle, runs the local detach gate, and hands the old session
+  to COOLING — the transition itself NEVER releases the old lock. The
+  release happens only afterwards, inside the cooling coordinator, after
+  the durable parity verification succeeds (review round 10; corrected
+  for the reactivation model — the old "released inside RETIRE" wording
+  is gone). A FRESH target's lock is physically pre-created:
   `acquireSessionLock` pre-creates the session artifact directory (0700)
   when the write would ENOENT, so the lock file exists BEFORE the session
   log is materialized (review round 7 — otherwise "target-lock-before-
@@ -300,6 +304,46 @@ physical lock; any uncertainty
 (missing inspect, read error, mismatch that never settles, empty
 session that materialized, non-empty that disappeared) PINNS it.
 `DSH_PI_TUI_SESSION_COOLING_RELEASE=0` disables releases (emergency).
+
+### COOLING can be superseded: the same-process reactivation rule
+
+COOLING is NOT terminal. The user may re-enter the retired session in
+the SAME process (a `/sessions`/`/resume` switch or a remount while the
+old session is still cooling). That path runs through
+`reserveForActivation` (NEVER the physical-layer `reserve`, which throws
+on a held COOLING/PINNED lease): the previous lifecycle epoch is
+invalidated SYNCHRONOUSLY (epoch++, cooling fields cleared, state →
+RESERVED, untouched) before any DSH resume, and the physical lock never
+leaves this process. A RELEASED tombstone, by contrast, MUST be
+re-acquired physically (another process may own the session now).
+
+**Each retirement carries an epoch/token** (`lifecycleEpoch` +
+`coolingEpoch` on the lease record; `beginCooling` returns the new
+epoch). The cooling verifier is bound to ITS epoch: it re-checks
+`isCoolingCurrent(sessionId, epoch)` at every await boundary, and its
+release/pin go through the manager's epoch-atomic
+`releaseAfterVerifiedCooling(sessionId, epoch)` /
+`pinCooling(sessionId, epoch, reason)`. A verifier whose epoch is no
+longer current (reactivated, or superseded by a newer retirement) is a
+silent stale no-op — it can never release nor pin a later lifecycle,
+and it never logs a release success. The in-flight tracker is keyed by
+(sessionId → epoch), so a newer retirement is accepted while the older
+verifier still runs. An HMR/remount abort of the lifecycle signal is
+NEUTRAL (never a pin): the new mount's `resumePending()` continues the
+SAME cooling epoch.
+
+```text
+ACTIVE
+  │ switch away
+  ▼
+COOLING(epoch=N) ── verified parity ──► RELEASED
+  │  ▲
+  │  └─ same-process reactivation (reserveForActivation): epoch=N+1,
+  │     state=RESERVED, lock stays — every older verifier goes stale
+  ▼
+uncertainty / timeout / mismatch (SAME epoch) → PINNED
+old async completion after epoch changed → STALE NO-OP
+```
 
 The old code created the child first and flushed the old session:
 a flush failure after the create left a durable ghost branch, and the

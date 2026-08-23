@@ -11,10 +11,18 @@
  * With the multi-slot holder the handoff order becomes: old stays locked
  * → target acquired (non-blocking refusal — never a wait, so two
  * processes switching in opposite directions both refuse and keep their
- * own locks) → commit → old released. A failed switch never drops the old
- * lock in the first place, so there is nothing to re-acquire.
+ * own locks) → COMMIT (no lock changes) → old disposed + detached →
+ * COOLING → verified release. A failed switch never drops the old lock
+ * in the first place, so there is nothing to re-acquire.
  *
- * All operations are idempotent; `releaseAll` covers the exit path.
+ * The transition itself NEVER releases the old lock: after the old
+ * handle's dispose + local detach gate, the old session enters COOLING
+ * and its physical lock is released only by the cooling verifier after
+ * durable parity (or stays pinned on any uncertainty). A clean exit does
+ * NOT release touched locks either — they stay as stale records that the
+ * next opener's stale-takeover owns. `releaseAll` is a low-level helper
+ * (tests / teardown utilities) and is NOT part of the production exit
+ * path.
  * @module @xmoon76/dsh-pi-tui/open-locks
  */
 

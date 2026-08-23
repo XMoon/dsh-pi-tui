@@ -201,6 +201,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never resume the old session while it still has writers or an
   unsettled final flush; an unsettled retirement keeps the lock, warned
   (review round 10).
+- **A COOLING session can be reopened in the same process, and a stale
+  cooling verifier can never touch a later lifecycle.** Switching back
+  into a session that is still cooling (e.g. `/sessions` or `/resume`
+  during the ~2s release window) now reactivates it through
+  `reserveForActivation`: the physical lock stays with this process, the
+  previous lifecycle epoch is invalidated synchronously before the DSH
+  resume, and a RELEASED tombstone still forces a real re-acquire. Every
+  retirement carries an epoch (the lease's monotonic `lifecycleEpoch`;
+  `beginCooling` returns it), the cooling verifier is bound to ITS epoch
+  (re-checked after every await, epoch-atomic release/pin in the lease
+  manager), the in-flight tracker is epoch-keyed, and an HMR/cleanup
+  abort is neutral — the new mount's `resumePending()` continues the
+  SAME cooling epoch. The ABA hazard is closed: cooling#1 → reactivate →
+  cooling#2 can never be released or pinned by the stale verifier #1.
+  Covered by new unit cases (lease manager reactivation suite + cooling
+  Cases A–E) and an on-demand two-process E2E (`scripts/e2e-session-
+  lease.sh`, not part of the CI suite) that drives A→B→A inside the
+  cooling window and proves P2 stays refused past the old release time.
 - **The double-Esc rewind chord is now truly consecutive.** Any real key
   press between the two Esc presses disarms the window — `Esc → Left →
   Esc` no longer opens the rewind picker (Kitty release/repeat events
