@@ -1620,9 +1620,10 @@ export function apply(ctx: Context, config: Config): void {
      *      be interpreted as "the child never happened" (`dispose()` stops
      *      an agent but never deletes a persisted session; dsh has no
      *      durable rollback);
-     *   4. COMMIT — a synchronous critical section (old-lock release,
-     *      new-lock acquire, guard reset, generation bump, live handle /
-     *      agent replacement) with no awaits between its steps;
+     *   4. COMMIT — a synchronous critical section (OLD-lock release — the
+     *      target lock was acquired in phase 2 and stays held; guard reset,
+     *      generation bump, live handle/agent replacement) with no awaits
+     *      between its steps;
      *   5. RETIRE — old-handle dispose (now idle: no abort closures), child
      *      whenIdle, surface rebuild, catalog refresh — failures WARN ONLY,
      *      the committed child always stands.

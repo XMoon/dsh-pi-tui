@@ -26,9 +26,10 @@
  *      interpreted as "the child never happened": `dispose()` stops an
  *      agent but never deletes a persisted session, and dsh has no
  *      durable rollback API.
- *   4. COMMIT — a synchronous critical section: old-lock release, new-lock
- *      acquire, guard reset, generation bump, live handle/agent
- *      replacement — no awaits between its steps.
+ *   4. COMMIT — a synchronous critical section: OLD-lock release (the
+ *      target lock was acquired in phase 2 and stays held), guard reset,
+ *      generation bump, live handle/agent replacement — no awaits between
+ *      its steps.
  *   5. RETIRE — old-handle dispose (now idle: no abort closures), child
  *      whenIdle, surface rebuild, catalog refresh. Failures are recorded
  *      by the host and NEVER roll the committed child back.
@@ -99,9 +100,9 @@ export interface TransitionHost<T> {
   /** Release one open lock (idempotent) — the failure paths release the
    * target lock here; the COMMIT releases the old lock. */
   releaseLock(sessionId: string): void
-  /** Synchronous lock handover: release the old session's lock, acquire
-   * the new one (an idempotent no-op when the target was pre-acquired; a
-   * refusal is defensive-only and recorded, never fatal). */
+  /** Synchronous lock handover: release the OLD session's lock. The TARGET
+   * lock was already acquired and verified in phase 2 (before the create)
+   * and stays held — there is deliberately no re-acquire here. */
   handoverLocks(next: T): void
   /** Synchronous commit: guard reset, generation bump, live replacement. */
   commit(next: T): void

@@ -73,7 +73,7 @@ process and REFUSES the open.
 |---|---|
 | `--session <id>` launch | acquire before `agents.resume()`; refusal is fatal (the runner exits with the refusal message — the user asked for a specific session, there is no safe fallback) |
 | `/resume` / `/sessions` switch | acquire the TARGET lock while STILL HOLDING the current one (multi-slot holder; the acquire is a non-blocking refusal); the current lock is released only in the COMMIT on a successful handover — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window, nothing to re-acquire) |
-| `/new` / `/fork` | acquire the child's lock BEFORE the create (pre-generated id, old lock still held — the target-lock-before-create rule); the COMMIT's re-acquire is an idempotent no-op |
+| `/new` / `/fork` | acquire the child's lock BEFORE the create (pre-generated id, old lock still held — the target-lock-before-create rule); the COMMIT only releases the old lock |
 | first deferred message | acquire the child's lock BEFORE the create (pre-generated id — the target-lock-before-create rule) |
 | switch away / clean exit | release (idempotent), AFTER the final flush |
 | crash / kill -9 | lock stays; the next open's stale check takes it over |
@@ -214,9 +214,10 @@ is the whole point:
    interpreted as "the child never happened": `dispose()` stops an agent
    but never deletes a persisted session, and dsh has no durable
    rollback API;
-4. COMMIT — a synchronous critical section (old-lock release, new-lock
-   acquire, guard reset, generation bump, live handle/agent replacement)
-   with no awaits between its steps;
+4. COMMIT — a synchronous critical section (OLD-lock release — the target
+   lock was acquired in phase 2 and stays held; guard reset, generation
+   bump, live handle/agent replacement) with no awaits between its
+   steps;
 5. RETIRE — old-handle dispose (now idle: no abort closures), child
    whenIdle, surface rebuild, catalog refresh; every failure is recorded
    as diagnostics and NEVER rolls the committed child back.
