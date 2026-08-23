@@ -6405,9 +6405,6 @@ export class TuiApp {
   /** Rebuild the two footer lines from the current status and plan badge. */
   private renderFooter(): void {
     const width = Math.max(1, this.terminal.columns)
-    const exitHint = this.ctrlCExitArmed
-      ? 'Press Ctrl+C again to exit'
-      : ''
     // The subagent viewer is host-owned chrome: the footer switches to the
     // VIEWED child's own identity (the parent's permission/model/plan/task
     // badges and the extension footer segments describe a session the user
@@ -6427,9 +6424,11 @@ export class TuiApp {
         footer.cwd === '' ? '' : footer.cwd,
         `t${footer.turns}/s${footer.steps}`,
       ].filter(part => part !== '')
-      const line2Final = exitHint !== ''
-        ? exitHint
-        : this.footerPreset === 'compact' ? '' : footer.statsLine
+      // The parent's Ctrl+C exit hint is meaningless inside the viewer
+      // (Ctrl+C is inert there — the viewer guard consumes it), so it is
+      // never rendered: the child's stats line shows instead (compact
+      // preset keeps its usual behavior of dropping line 2).
+      const line2Final = this.footerPreset === 'compact' ? '' : footer.statsLine
       this.footer.setText(this.footerRows(line1, line2Final, width))
       this.requestRender()
       return

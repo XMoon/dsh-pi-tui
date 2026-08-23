@@ -517,3 +517,32 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
   app.setViewerMode(undefined)
   app.stop()
 })
+
+test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 finding)', async () => {
+  // The parent arms the exit window (Ctrl+C on a non-empty draft), then
+  // the user opens a viewer before the timer expires: Ctrl+C is inert
+  // inside the viewer, so "Press Ctrl+C again to exit" must never render
+  // there — the child's stats line shows instead.
+  const { vt, app } = await startApp()
+  app.setDraft('unsent text')
+  vt.sendInput('\x03') // Ctrl+C arms the exit window
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  app.setViewerFooter({
+    label: 'research',
+    mode: 'continuable',
+    activity: 'running',
+    cwd: '',
+    turns: 1,
+    steps: 1,
+    statsLine: 'child stats line',
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Press Ctrl+C again'), `the parent exit hint must never leak into the viewer footer:\n${view}`)
+  assert.ok(view.includes('child stats line'), `the child stats line must show instead:\n${view}`)
+  app.setViewerFooter(undefined)
+  app.setViewerMode(undefined)
+  app.stop()
+})
