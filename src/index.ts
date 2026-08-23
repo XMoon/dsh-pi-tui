@@ -4295,6 +4295,11 @@ export function apply(ctx: Context, config: Config): void {
       openJobView,
       openTasksBrowser,
       openRewindPicker,
+      // The transition write fence: agent-write entry points (plain
+      // submits, steers, skill invocations, shell submits) refuse while a
+      // transition is in flight (quiesce → commit) — the old agent may be
+      // woken again between whenIdle and the lock handover.
+      sessionTransitionPending: () => transitionGate.busy,
       // The single-writer session-transition gate: /new, /fork and the
       // command-side switches run their create AND commit inside one
       // exclusive section via this seam (rewind goes through

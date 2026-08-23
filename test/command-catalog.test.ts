@@ -53,6 +53,7 @@ function stubRunner(
   app: TuiApp,
   state: { agent: Agent | undefined },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  options: { transitionPending?: boolean } = {},
 ): TuiCommandRunner {
   return {
     ctx,
@@ -89,6 +90,7 @@ function stubRunner(
     openJobView: () => {},
     openTasksBrowser: () => {},
     openRewindPicker: () => {},
+    sessionTransitionPending: () => options.transitionPending ?? false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
@@ -790,5 +792,58 @@ test('a throwing skill steer releases the image pin (review finding)', async () 
     /steer failed/,
   )
   assert.equal(runner.imageStore.isPinned(draft.id), false, 'the pin releases even when steer throws')
+  app.stop()
+})
+
+// ── review round 5: the transition fence refuses skill invocations ─────────
+
+test('the transition fence refuses a skill invocation mid-transition (zero writes, line restored)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  registerTuiCommands(
+    stubRunner(ctx, app, { agent }, createDiag({ filePath: undefined, stderrLevel: 'off' }), { transitionPending: true }),
+    { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) },
+  )
+  const wrapper = services.defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined, 'the skill wrapper must be registered')
+  const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'fix the pipeline' })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /transition is in progress/, 'the refusal explains the retry')
+  assert.equal(delivered.length, 0, 'the skill must never write the old agent during a transition')
+  assert.ok(app.getDraft().includes('/glab fix'), 'the invocation line is restored to the editor')
+  app.stop()
+})
+
+test('the transition fence does NOT refuse skill invocations when no transition is in flight', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+    skills: [{ name: 'glab', description: 'GitLab CLI' }],
+  }) })
+  const wrapper = services.defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
+  assert.equal(result.kind, 'success')
+  assert.equal(delivered.length, 2, 'the skill delivers the line and the body as usual')
   app.stop()
 })

@@ -98,9 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written (the two-writers seq collision the lock exists to prevent).
   Writes are fenced while the transition is in flight: `whenIdle()` is an
   instant, not a freeze, so every submission path (plain submit, busy-Enter
-  steer, Ctrl+S, the command fallback, the `!` shell submit) refuses to
-  write the old agent during quiesce → commit — the draft is restored and
-  the user is told a session transition is in progress.
+  steer, Ctrl+S, the command fallback, the `!` shell submit AND the
+  per-skill slash invocations) refuses to write the old agent during
+  quiesce → commit — the draft or the skill invocation line is restored
+  and the user is told a session transition is in progress.
   Failures carry happen only BEFORE the create: a stale rewind selection
   never creates a child at all, and a failed quiesce/flush/create leaves
   the current session untouched. `/new` and `/fork` dispose nothing "on

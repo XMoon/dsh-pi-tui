@@ -25,6 +25,7 @@ import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
@@ -350,6 +351,15 @@ export interface TuiCommandRunner {
    * session just to be rewound.
    */
   openRewindPicker(): void
+  /**
+   * The session-transition write fence: true while a session transition is
+   * in flight (quiesce → commit). Agent-write entry points (plain submits,
+   * steers, skill invocations, shell submits) check it right before the
+   * write and refuse — the old agent may be woken again between whenIdle
+   * and the lock handover, so a write in that window would target a
+   * session whose lock is about to be released.
+   */
+  sessionTransitionPending(): boolean
   /**
    * Run one session-transition workflow exclusively through the
    * process-local single-writer gate: /new, /fork and /rewind must create
@@ -1613,6 +1623,19 @@ export function registerTuiCommands(
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
+      // The session-transition write fence (review round 5): while a
+      // transition is in flight the old agent may be woken again — a steer
+      // in that window would target a session whose lock is about to be
+      // released. Refuse WITHOUT injecting the body; the invocation line is
+      // restored to the editor (nothing is lost) and the user retries after
+      // the transition settles.
+      if (runner.sessionTransitionPending()) {
+        const merged = mergeDraft(app.getDraft(), line)
+        app.setEditorText(merged)
+        return { kind: 'error', text: merged === line
+          ? 'a session transition is in progress — try again in a moment'
+          : 'the draft changed while transitioning — review it before submitting again' }
+      }
       // The invocation COMMITTED: consume the image drafts it referenced
       // (the prepared message holds the durable refs now; a concurrent
       // intake's newer draft survives — review finding).

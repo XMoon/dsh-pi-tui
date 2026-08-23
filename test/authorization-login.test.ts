@@ -171,6 +171,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     openJobView: () => {},
     openTasksBrowser: () => {},
     openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},

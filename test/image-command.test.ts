@@ -90,6 +90,7 @@ function setup(): {
     openJobView: () => {},
     openTasksBrowser: () => {},
     openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},

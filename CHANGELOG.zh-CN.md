@@ -78,8 +78,9 @@
   `whenIdle()` 只是瞬时检查而非冻结——transition 进行期间(quiesce →
   flush → create)旧 agent 仍可能被 followup/steer 重新唤醒,因此所有
   写入路径(普通提交、busy-Enter steer、Ctrl+S、命令 fallback、`!`
-  shell 提交)在 transition 进行中都会被**写栅栏**拒绝:草稿恢复/保留,
-  提示 "a session transition is in progress"。现在失败只
+  shell 提交、per-skill 斜杠调用)在 transition 进行中都会被**写栅栏**
+  拒绝:草稿/调用行恢复保留,提示 "a session transition is in
+  progress"。现在失败只
   发生在 create **之前**:stale 的 rewind 选择根本不会创建子会话,失败
   的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
   在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。
