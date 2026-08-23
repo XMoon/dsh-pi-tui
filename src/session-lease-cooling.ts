@@ -197,12 +197,14 @@ export class SessionLeaseCoolingCoordinator {
         let current: string
         try {
           const persistence = this.deps.persistence()
-          const inspect = persistence?.inspect
-          if (inspect === undefined) {
+          if (persistence?.inspect === undefined) {
             // No reliable durable read: fail-closed.
             return this.pin(sessionId, 'no persistence inspect for cooling verification')
           }
-          const inspection = await inspect(sessionId, signal)
+          // Called as a METHOD on the service object — the coordinator's
+          // inspect uses `this` (retirement barrier); a detached call
+          // would throw on this.coordinator (e2e round 39 finding).
+          const inspection = await persistence.inspect(sessionId, signal)
           if (snapshot.empty && inspection.events.length > 0) {
             return this.pin(sessionId, 'empty retired session became materialized during cooling')
           }
