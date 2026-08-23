@@ -184,9 +184,11 @@ export class SessionLeaseCoolingCoordinator {
         this.deps.leaseManager.pin(sessionId, 'DSH_PI_TUI_SESSION_COOLING_RELEASE=0')
         return
       }
+      // The observation window INCLUDES the initial quiet (review
+      // round 32 P2: the plan's 5s maximum covers quiet + sampling).
+      const deadline = Date.now() + this.params.maxMs
       // Initial quiet window: any in-flight retirement settles.
       await sleep(this.params.quietMs, signal)
-      const deadline = Date.now() + this.params.maxMs
       let stable = 0
       let previous: string | undefined
       let samples = 0
@@ -206,7 +208,7 @@ export class SessionLeaseCoolingCoordinator {
           }
           current = snapshot.empty
             ? 'absent'
-            : fingerprintOfInspection(inspection)
+            : durableParityOf(inspection)
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           const absent = message === `session "${sessionId}" not found`
@@ -226,7 +228,7 @@ export class SessionLeaseCoolingCoordinator {
           if (current !== 'absent') {
             return this.pin(sessionId, 'empty retired session became materialized during cooling')
           }
-        } else if (current !== snapshot.tailFingerprint) {
+        } else if (current !== snapshotParity(snapshot)) {
           // Persistence may still be catching up: reset and keep sampling
           // (a later sample may match the final snapshot).
           stable = 0
@@ -260,8 +262,18 @@ export class SessionLeaseCoolingCoordinator {
   }
 }
 
-function fingerprintOfInspection(inspection: { events: readonly FingerprintEventLike[] }): string {
-  return tailFingerprintOf(inspection.events)
+/** The durable parity triple (event count, last seq, tail fingerprint) —
+ *  the cooling verifier requires ALL THREE to match the final snapshot
+ *  (review round 32 P1: fingerprint alone could mask a truncated/altered
+ *  history that kept the same tail). */
+function snapshotParity(snapshot: RetiredSessionSnapshot): string {
+  return `${snapshot.eventCount}|${snapshot.lastSeq ?? ''}|${snapshot.tailFingerprint}`
+}
+
+function durableParityOf(inspection: { events: readonly FingerprintEventLike[] }): string {
+  const events = inspection.events
+  const lastSeq = events.length > 0 ? events[events.length - 1]!.seq : undefined
+  return `${events.length}|${lastSeq ?? ''}|${tailFingerprintOf(events)}`
 }
 
 async function sleep(ms: number, signal?: AbortSignal): Promise<void> {

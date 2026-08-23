@@ -1546,10 +1546,6 @@ export function apply(ctx: Context, config: Config): void {
         if (lock.kind === 'refused') {
           throw new SessionLockRefusedError(lock.message)
         }
-        // The DSH boundary: the resume target is touched — a failure pins
-        // it (no release, no second fresh fallback; convergence plan
-        // phase 4).
-        leaseManager.markTouched(sessionId)
         // Fail-closed (convergence plan phase 2): a writable existing
         // session REQUIRES its physical owner lock — an unavailable lock
         // means this deployment cannot guarantee single-owner writes, so
@@ -1564,10 +1560,15 @@ export function apply(ctx: Context, config: Config): void {
         // replay tool calls the model can no longer make.
         const recorded = await recordedPreset(ctx, sessionId)
         const composition = await compose(recorded)
-        // The resume crosses the DSH boundary (the target was touched):
-        // a rejection gets at most ONE same-id recovery (below) and then
+        // The DSH boundary: the resume target is touched IMMEDIATELY
+        // before the DSH call (ALL fallible preflight above already ran —
+        // a preflight failure must not pin a session that never entered
+        // the DSH boundary; review round 32). From here on a failure pins
+        // it (no release, no second fresh fallback).
+        leaseManager.markTouched(sessionId)
+        // A rejection gets at most ONE same-id recovery (below) and then
         // the session is PINNED — no publication-phase inference, no
-        // second fresh fallback (convergence plan phase 4/8).
+        // second fresh fallback (convergence plan phase 4).
         handle = await createWithPublicationRecovery({
           targetId: sessionId,
           create: () => agents.resume({
@@ -1629,7 +1630,12 @@ export function apply(ctx: Context, config: Config): void {
     }
     let liveHandle = handle
     let liveAgent = handle?.agent
-    if (liveAgent !== undefined) await liveAgent.whenIdle()
+    if (liveAgent !== undefined) {
+      // The committed live session's lease becomes ACTIVE (a successful
+      // launch resume must not stay TOUCHED — review round 32).
+      leaseManager.markActive(liveAgent.session.id)
+      await liveAgent.whenIdle()
+    }
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
     // a resumed agent prefetches its effective catalog (a live read emits no
     // session events); the deferred start reads the cold HUMAN SKILL catalog
@@ -4608,6 +4614,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         liveHandle = created
         liveAgent = created.agent
+        leaseManager.markActive(liveAgent.session.id)
         // The open-time lock was acquired BEFORE the create (above — the
         // createWithLock helper REQUIRED an acquired result, so this record
         // is an idempotent no-op).

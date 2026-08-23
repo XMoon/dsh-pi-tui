@@ -306,9 +306,11 @@ lifetime) — there is no second-fresh fallback anywhere. The transition
 COMMIT makes no lock changes at all. The OLD session enters COOLING
 after the dispose (with a local detach gate: the old agent/session must
 be gone from the live registries): the cooling coordinator verifies the
-durable state against the FINAL pre-switch snapshot (event count, last
-seq, SHA-256 tail fingerprint) — 1s quiet, 500ms samples, 3 stable
-samples, 5s max — then releases the physical lock; any uncertainty
+durable state against the FINAL pre-switch snapshot — the FULL parity
+triple (event count, last seq, SHA-256 tail fingerprint; a truncated
+history with the same tail never matches) — 1s quiet, 500ms samples,
+3 stable samples, 5s max (including the quiet) — then releases the
+physical lock; any uncertainty
 (missing inspect, read error, mismatch that never settles, empty
 session that materialized, non-empty that disappeared) PINNS it.
 `DSH_PI_TUI_SESSION_COOLING_RELEASE=0` disables releases (emergency).

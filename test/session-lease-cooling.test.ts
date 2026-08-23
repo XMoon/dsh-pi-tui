@@ -10,6 +10,7 @@ import test from 'node:test'
 import {
   SessionLeaseCoolingCoordinator,
   snapshotSession,
+  tailFingerprintOf,
   type CoolingPersistenceLike,
 } from '../src/session-lease-cooling.ts'
 import { ProcessSessionLeaseManager } from '../src/session-lease-manager.ts'
@@ -159,4 +160,18 @@ test('cooling: the DSH_PI_TUI_SESSION_COOLING_RELEASE=0 emergency fallback pins'
     if (previous === undefined) delete process.env.DSH_PI_TUI_SESSION_COOLING_RELEASE
     else process.env.DSH_PI_TUI_SESSION_COOLING_RELEASE = previous
   }
+})
+
+test('cooling: a truncated history with the SAME tail fingerprint pins (event count + last seq matter)', async () => {
+  // A truncated durable history whose LAST 16 events are identical to the
+  // final snapshot's tail has the same tail fingerprint — only the full
+  // parity triple (event count, last seq, fingerprint) catches it.
+  const full = events(100)
+  const truncated = full.slice(84)
+  assert.equal(tailFingerprintOf(full), tailFingerprintOf(truncated), 'the tail is byte-identical')
+  const rig = makeRig([{ events: truncated }, { events: truncated }, { events: truncated }, { events: truncated }])
+  startCooling(rig, 'session-a', full)
+  await settle(250)
+  assert.deepEqual(rig.released, [])
+  assert.equal(rig.manager.state('session-a')?.state, 'pinned', 'a shortened history never matches the full snapshot')
 })
