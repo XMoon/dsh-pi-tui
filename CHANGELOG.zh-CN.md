@@ -16,7 +16,10 @@
   或 steer,非活跃的子代理会自动冷恢复。查看器内的编辑器绝不触达父会话
   (其中的 Ctrl+S/Ctrl+Enter/Alt+↑ 均失效),投递失败时文本会合并回子
   代理草稿(不丢失、不错发),发送期间切换查看器时,结果只恢复到原子
-  代理的草稿槽。one-shot 子代理保持严格只读。
+  代理的草稿槽。one-shot 子代理保持严格只读。查看器打开期间,页脚
+  切换为**子代理自己的身份**(`[subagent · continuable]` 徽章、标签、
+  activity、cwd 与子代理自己的 turns/steps/stats),退出后恢复主会话
+  页脚。
 - **任务浏览器显示子代理 mode。** 每个子代理行都标注为
   `subagent · <label> · continuable` / `· one-shot`,按下 Enter 之前就
   能知道查看器是否可交互;mode 是不可截断的后缀(长标签会被截断,mode

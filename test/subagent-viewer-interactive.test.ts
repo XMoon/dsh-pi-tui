@@ -461,3 +461,59 @@ test('parking keeps NEW replacement-editor text even when it is a SUBSTRING of t
   assert.ok(draft.includes('abcdef'), `the older slotted text must survive parking:\n${draft}`)
   app.stop()
 })
+
+test('the footer switches to the viewed child\u2019s identity and back on exit', async () => {
+  const { vt, app } = await startApp()
+  app.setStatus({ model: 'parent-model', cwd: '/parent', branch: '', turns: 9, steps: 9, statsLine: 'parent stats' })
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  app.setViewerFooter({
+    label: 'research',
+    mode: 'continuable',
+    activity: 'running',
+    cwd: '/child-workspace',
+    turns: 3,
+    steps: 5,
+    statsLine: 'child stats line',
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[subagent · continuable]'), `subagent footer badge missing:\n${view}`)
+  assert.ok(view.includes('research'), `child label missing from the footer:\n${view}`)
+  assert.ok(view.includes('t3/s5'), `child turn/step counters missing:\n${view}`)
+  assert.ok(view.includes('child stats line'), `child stats line missing:\n${view}`)
+  assert.ok(!view.includes('parent-model'), `the parent model must not leak into the viewer footer:\n${view}`)
+  // Clearing restores the parent footer.
+  app.setViewerFooter(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('parent-model'), `the parent footer must return:\n${view}`)
+  assert.ok(!view.includes('[subagent · continuable]'), `subagent footer badge must clear:\n${view}`)
+  app.setViewerMode(undefined)
+  app.stop()
+})
+
+test('the one-shot viewer footer carries the one-shot badge and no stats line under compact', async () => {
+  const { vt, app } = await startApp()
+  app.setFooterPreset('compact')
+  await vt.waitForRender()
+  app.setViewerMode(oneShot())
+  await vt.waitForRender()
+  app.setViewerFooter({
+    label: 'audit',
+    mode: 'one-shot',
+    activity: 'inactive',
+    cwd: '',
+    turns: 1,
+    steps: 2,
+    statsLine: 'child stats',
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[subagent · one-shot]'), `one-shot badge missing:\n${view}`)
+  assert.ok(!view.includes('child stats'), `compact preset must drop the stats line:\n${view}`)
+  app.setViewerFooter(undefined)
+  app.setViewerMode(undefined)
+  app.stop()
+})

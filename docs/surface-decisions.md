@@ -175,3 +175,17 @@ no steer. Decisions a future change must not silently reverse:
 - **Images are out of scope** for viewer follow-ups: the main-session image
   draft store is deliberately never shared with the child (a per-child
   image store is a later milestone).
+- **The footer switches to the VIEWED child while a subagent viewer is
+  open.** The parent session's status (permission/model/plan/task badges,
+  extension footer segments) describes a session the user is not looking
+  at, so the runner pushes a `SubagentViewerFooter` (label, mode badge
+  `[subagent · continuable]` / `[subagent · one-shot]`, activity, cwd,
+  the child's OWN turns/steps and stats line from a per-viewer StatsFolder
+  fed only the child's own events) and clears it on exit / session swap.
+  The footer is refreshed at step/end and turn/end (never on streaming
+  deltas). **Extension footer segments do not render while viewing**:
+  viewer mode is host-owned chrome, the extension surface already exposes
+  `viewerMode` in its session state, and the first-party builtin's
+  turn/step segment would otherwise duplicate the child counters with the
+  parent's. Header extension badges keep rendering (they do not conflict
+  with the child identity). No extension API changed (additive-only).

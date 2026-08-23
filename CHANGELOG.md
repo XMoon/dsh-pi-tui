@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Ctrl+S/Ctrl+Enter/Alt+↑ are inert inside it), a failed delivery merges
   the text back into the child's draft (never lost, never mis-sent), and
   sends that outlive a viewer switch restore into the original child's
-  slot. One-shot children stay strictly read-only.
+  slot. One-shot children stay strictly read-only. While a viewer is open
+  the footer switches to the CHILD's own identity (`[subagent ·
+  continuable]` badge, label, activity, cwd, the child's own
+  turns/steps/stats) and returns to your session's on exit.
 - **The task browser shows the subagent mode.** Every subagent row is
   labeled `subagent · <label> · continuable` / `· one-shot`, so you know
   before Enter whether the viewer will be interactive; the mode is a

@@ -2210,10 +2210,14 @@ export function apply(ctx: Context, config: Config): void {
     let viewing: {
       id: SessionId
       folder: TranscriptFolder
+      /** The child's OWN event stats (turns/steps/tokens) for the footer. */
+      stats: StatsFolder
       parentSessionId: SessionId
       label: string
       mode: 'one-shot' | 'continuable'
       activity: 'running' | 'inactive'
+      /** The child session's workspace ('' when unknown, e.g. a cold child). */
+      cwd: string
     } | undefined
     // Unsettled subagent delegations in the live session, in tool/call order.
     // The viewer matches one of these by description when the user opens a
@@ -2281,6 +2285,7 @@ export function apply(ctx: Context, config: Config): void {
         app.clearLocalMessages()
         app.clearNotify()
         app.setViewerMode(undefined)
+        app.setViewerFooter(undefined)
         repaint(app, folder)
         app.scrollToBottom()
         refreshStatus()
@@ -2307,6 +2312,22 @@ export function apply(ctx: Context, config: Config): void {
      * viewerOpen token), so a slow open can never commit an obsolete child
      * over the current surface (round-4/5 findings). */
     const viewerOpen = createViewerOpenToken()
+    /** Push the viewed child's OWN identity into the footer (label/mode/
+     * activity/cwd + the child's own turns/steps/stats line) — the parent
+     * session's status describes a session the user is not looking at. */
+    const refreshViewerFooter = (): void => {
+      if (viewing === undefined) return
+      const stats = viewing.stats.snapshot()
+      app.setViewerFooter({
+        label: viewing.label,
+        mode: viewing.mode,
+        activity: viewing.activity,
+        cwd: viewing.cwd,
+        turns: stats.turns,
+        steps: stats.steps,
+        statsLine: formatStats(stats),
+      })
+    }
     const enterView = async (
       childId: SessionId,
       label: string | undefined,
@@ -2316,19 +2337,30 @@ export function apply(ctx: Context, config: Config): void {
     ): Promise<void> => {
       const request = viewerOpen.open()
       const childFolder = new TranscriptFolder()
+      const childStats = new StatsFolder()
+      let childCwd = ''
       // Only the child's OWN events enter the viewer: a fork provider seeds
       // the child with the parent's completed-turn history (session/end-seed
       // boundary), and the parent's records — its subagent completion
       // notices included — must never render as the child's transcript.
       const child = sessions.get(childId)
       if (child !== undefined) {
-        childFolder.apply(childOwnEvents(child.events))
+        const own = childOwnEvents(child.events)
+        childFolder.apply(own)
+        childStats.apply(own)
+        // The live child's session header carries its workspace (the child
+        // may have been born in another directory).
+        childCwd = typeof (child as { header?: { cwd?: unknown } }).header?.cwd === 'string'
+          ? (child as { header: { cwd: string } }).header.cwd
+          : ''
       } else {
         // An inactive child is no longer in the live store; load its log.
         const persistence = ctx.get('sessionPersistence')
         if (persistence !== undefined) {
           try {
-            childFolder.apply(childOwnEvents((await persistence.inspect(childId)).events))
+            const own = childOwnEvents((await persistence.inspect(childId)).events)
+            childFolder.apply(own)
+            childStats.apply(own)
           } catch {
             // No persisted log either: the view stays empty.
           }
@@ -2350,13 +2382,24 @@ export function apply(ctx: Context, config: Config): void {
       if (!viewerOpen.isCurrent(request)) return
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
       if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
-      viewing = { id: childId, folder: childFolder, parentSessionId, label: label ?? childId, mode, activity }
+      viewing = {
+        id: childId,
+        folder: childFolder,
+        stats: childStats,
+        parentSessionId,
+        label: label ?? childId,
+        mode,
+        activity,
+        cwd: childCwd,
+      }
       repaint(app, childFolder)
       // The viewer bar covers the editor (a read-only placeholder for
       // one-shot, the child's own draft for continuable) and the header
       // badges the mode — the transient notify is no longer the only "you
-      // are elsewhere" signal.
+      // are elsewhere" signal. The FOOTER switches to the child's own
+      // identity at the same time.
       app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity })
+      refreshViewerFooter()
     }
     /** Leave the subagent viewer (single Esc). Returns whether it exited.
      * Invalidates any in-flight viewer OPEN UNCONDITIONALLY — an Esc (or a
@@ -2370,6 +2413,7 @@ export function apply(ctx: Context, config: Config): void {
       app.clearLocalMessages()
       app.clearNotify() // a viewer notify (if any) is stale now
       app.setViewerMode(undefined)
+      app.setViewerFooter(undefined) // the parent footer returns
       repaint(app, folder)
       // The main transcript may have grown while the viewer covered it (the
       // child's result, the parent's streaming): anchor the view to the end
@@ -4405,7 +4449,12 @@ export function apply(ctx: Context, config: Config): void {
       if (viewing !== undefined) {
         if (session.id === viewing.id) {
           viewing.folder.apply([event])
+          viewing.stats.apply([event])
           schedulePaint()
+          // The child's turn/step/stats counters move at step boundaries
+          // (the stats fold counts at step/end) — the footer follows then,
+          // never on every streaming delta.
+          if (event.type === 'step/end' || event.type === 'turn/end') refreshViewerFooter()
           if (event.type === 'turn/end') paintNow()
           return
         }

@@ -376,9 +376,12 @@ the Advanced/Unstable roadmap).
     never interrupted or steered; an inactive child cold-resumes
     automatically), while `Esc` returns to your session. A **one-shot**
     child's viewer stays **read-only** (`Esc` returns; the editor shows
-    the read-only placeholder). `i` interrupts the selected child. They
-    never register job records, so this browser is their only glanceable
-    home.
+    the read-only placeholder). While a viewer is open the footer
+    switches to the CHILD's own identity (`[subagent · continuable]`
+    badge, label, activity, cwd, the child's own turns/steps/stats) and
+    returns to your session's on exit. `i` interrupts the selected
+    child. They never register job records, so this browser is their
+    only glanceable home.
   - **job rows** (bash and one-shot subagent jobs) — `Enter` shows the status
     viewer only: a bash job's output read cursor belongs to the model's
     `job_output`, and a one-shot subagent job record carries no child session

@@ -613,6 +613,28 @@ export interface SubagentViewerSubmit {
   readonly text: string
 }
 
+/** The footer override while the subagent viewer is open: the footer shows
+ * the VIEWED child's own identity instead of the parent session's (the
+ * parent's permission/model/plan/task badges describe a session the user
+ * is not looking at). The runner sets this on viewer open, refreshes it as
+ * the child's own events fold (turns/steps/stats), and clears it on exit. */
+export interface SubagentViewerFooter {
+  /** The child's durable creation label. */
+  readonly label: string
+  /** Catalog classification (the viewer's interactivity). */
+  readonly mode: 'one-shot' | 'continuable'
+  /** Store snapshot activity (running / inactive). */
+  readonly activity: 'running' | 'inactive'
+  /** The child session's workspace ('' when unknown, e.g. a cold child). */
+  readonly cwd: string
+  /** Completed child turns (from the child's OWN event log). */
+  readonly turns: number
+  /** Child model requests (steps). */
+  readonly steps: number
+  /** The child's own stats line (formatStats of its event log). */
+  readonly statsLine: string
+}
+
 /** Base callbacks every TuiApp host must provide; the external-editor
  * pair is bound on top of this (see {@link TuiAppEvents}). */
 export interface TuiAppEventsBase {
@@ -1484,6 +1506,12 @@ export class TuiApp {
    * bound work (follow-up sends) captures it at start and refuses to
    * touch the surface once it changed. */
   private viewerGeneration = 0
+  /** While the subagent viewer is up, the footer shows the viewed child's
+   * own identity (label/mode/activity/turns/stats) instead of the parent
+   * session's status — set/cleared by the runner on viewer open/close.
+   * Viewer mode is host-owned chrome: extension footer segments (main-
+   * session semantics) do not render while it is set. */
+  private viewerFooter: SubagentViewerFooter | undefined
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
     // The external-editor capability is a BOUND pair: the Ctrl+G flow
@@ -3488,6 +3516,16 @@ export class TuiApp {
    * changed (a viewer open/close/switch bumps it). */
   getViewerGeneration(): number {
     return this.viewerGeneration
+  }
+
+  /** Replace the footer while the subagent viewer is open: the footer
+   * shows the VIEWED child's own identity (label/mode/activity/turns/
+   * stats) instead of the parent session's status. Pass `undefined` to
+   * restore the parent footer. The runner sets it on viewer open,
+   * refreshes it as the child's own events fold, and clears it on exit. */
+  setViewerFooter(footer: SubagentViewerFooter | undefined): void {
+    this.viewerFooter = footer
+    this.renderFooter()
   }
 
   /** Park one child's unsent draft when its viewer session ends (exit or
@@ -6366,6 +6404,36 @@ export class TuiApp {
 
   /** Rebuild the two footer lines from the current status and plan badge. */
   private renderFooter(): void {
+    const width = Math.max(1, this.terminal.columns)
+    const exitHint = this.ctrlCExitArmed
+      ? 'Press Ctrl+C again to exit'
+      : ''
+    // The subagent viewer is host-owned chrome: the footer switches to the
+    // VIEWED child's own identity (the parent's permission/model/plan/task
+    // badges and the extension footer segments describe a session the user
+    // is not looking at — extension segments do not render while viewing).
+    if (this.viewerFooter !== undefined) {
+      const footer = this.viewerFooter
+      const modeBadge = color.accent(footer.mode === 'one-shot'
+        ? '[subagent · one-shot]'
+        : '[subagent · continuable]')
+      const activity = footer.activity === 'running'
+        ? color.primary('● running')
+        : color.textMuted('inactive')
+      const line1 = [
+        modeBadge,
+        footer.label === '' ? '' : footer.label,
+        activity,
+        footer.cwd === '' ? '' : footer.cwd,
+        `t${footer.turns}/s${footer.steps}`,
+      ].filter(part => part !== '')
+      const line2Final = exitHint !== ''
+        ? exitHint
+        : this.footerPreset === 'compact' ? '' : footer.statsLine
+      this.footer.setText(this.footerRows(line1, line2Final, width))
+      this.requestRender()
+      return
+    }
     const context = this.status.contextTokens !== undefined && this.status.contextWindow !== undefined
       && this.status.contextWindow > 0
       ? contextBar(this.status.contextTokens, this.status.contextWindow)
@@ -6425,15 +6493,17 @@ export class TuiApp {
     const line2 = this.ctrlCExitArmed
       ? 'Press Ctrl+C again to exit'
       : this.footerPreset === 'compact' ? '' : this.status.statsLine
-    // Narrow-screen footer (plan §14): the host line-1 WRAPS instead of
-    // being hard-truncated (v0.1.x behavior — the multi-row footer returns,
-    // and the layout already budgets footer rows via
-    // footer.render(width).length). The caps are the overflow BACKSTOP,
-    // not the normal compression: host line-1 keeps ≤3 physical rows, the
-    // stats line ≤1, total ≤4 — a long extension segment folds from the
-    // tail first, matching the FooterSegmentOutlet's own priority folding
-    // (the 0710746 overflow concern stays covered by the outlet budget).
-    const width = Math.max(1, this.terminal.columns)
+    this.footer.setText(this.footerRows(line1, line2, width))
+    this.requestRender()
+  }
+
+  /** The shared footer layout (plan §14): line 1 wraps with the host row
+   * budget (≤3 physical rows), the stats line caps to one row; the caps
+   * are the overflow BACKSTOP, not the normal compression — a long
+   * extension segment folds from the tail first, matching the
+   * FooterSegmentOutlet's own priority folding (the 0710746 overflow
+   * concern stays covered by the outlet budget). */
+  private footerRows(line1: readonly string[], line2: string, width: number): string {
     const hostBudget = TuiApp.FOOTER_MAX_LINES - (line2 === '' ? 0 : 1)
     const line1Rows = wrapTextWithAnsi(line1.join('  '), width)
     const rows: string[] = []
@@ -6447,8 +6517,7 @@ export class TuiApp {
       const statsRows = wrapTextWithAnsi(line2, width)
       rows.push(statsRows.length > 1 ? TuiApp.capRowWithEllipsis(statsRows[0]!, width) : statsRows[0]!)
     }
-    this.footer.setText(rows.map(row => dim(row)).join('\n'))
-    this.requestRender()
+    return rows.map(row => dim(row)).join('\n')
   }
 
   /** Force a visible `…` on a wrapped row that still has hidden content
