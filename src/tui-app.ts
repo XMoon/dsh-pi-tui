@@ -124,6 +124,11 @@ import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapsh
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
 
+/** Fullscreen Focus anchoring (plan §8.6): the expanded Thought's header
+ * lands one row below the viewport top so the previous context row stays
+ * visible above it. */
+export const FOCUS_ANCHOR_TOP_PADDING = 1
+
 /** The compaction lifecycle phase the working row advertises: idle (no
  * compaction), summarizing (compaction/start seen, the summary is being
  * generated), or applying (the summary landed, the compacted surface is
@@ -3016,24 +3021,80 @@ export class TuiApp {
 
   /** Toggle one turn's Thought disclosure (click on the header — plan
    * §16.1). Running turns are toggleable; turn/end never reverts the
-   * choice. */
+   * choice. In fullscreen the viewport anchors to the Thought header on
+   * BOTH directions (plan §8): expanding shows the header near the top
+   * instead of the block's tail; collapsing keeps the Thought in view. */
   toggleFocusTurn(turn: number): void {
-    if (this.focusExpandedTurns.has(turn)) {
-      this.focusExpandedTurns.delete(turn)
-    } else {
-      this.focusExpandedTurns.add(turn)
-    }
-    this.rebuildMessages()
-    this.requestRender()
+    this.setFocusTurnExpanded(turn, !this.focusExpandedTurns.has(turn), { anchorFullscreen: true })
   }
 
   /** Force one turn's Thought open (transcript-search jumps — plan §23:
-   * the match must be visible without a second click). */
+   * the match must be visible without a second click). Deliberately NO
+   * anchor: the search caller owns the jump target, and an unconditional
+   * Thought-header anchor would fight the match's own position (plan
+   * §8.9). */
   expandFocusTurn(turn: number): void {
-    if (this.focusExpandedTurns.has(turn)) return
-    this.focusExpandedTurns.add(turn)
+    this.setFocusTurnExpanded(turn, true)
+  }
+
+  /**
+   * The unified Focus disclosure transition (plan §8.4): every entry
+   * point — header click, expanded-body click, search jumps — funnels
+   * through here. With `anchorFullscreen` (user clicks only, never the
+   * search path), the fullscreen viewport is anchored to the turn's
+   * Thought header AFTER the rebuild, with follow-end disabled so the
+   * growing content cannot drag the view back to the tail (plan §8.6/§8.7).
+   */
+  private setFocusTurnExpanded(
+    turn: number,
+    expanded: boolean,
+    options: { anchorFullscreen?: boolean } = {},
+  ): void {
+    if (this.focusExpandedTurns.has(turn) === expanded) return
+    if (expanded) this.focusExpandedTurns.add(turn)
+    else this.focusExpandedTurns.delete(turn)
+    // 1. flip the set → 2. rebuild the projection (rebuildMessages already
+    // requests a render) → 3. re-measure the row map at the current width
+    // (a thumbnail that just finished loading must not shift the anchor).
     this.rebuildMessages()
+    if (options.anchorFullscreen && this.fullscreenScroll !== undefined) {
+      this.refreshMessageRows()
+      // 4. locate the turn's header in the projected row map.
+      const transcriptRow = this.focusTurnTranscriptRow(turn)
+      if (transcriptRow !== undefined) {
+        const width = this.terminal.columns
+        const welcomeHeight = this.welcomeCard.render(width).length
+        // The ScrollView's content height must reflect the NEW projection
+        // BEFORE the anchor, or scrollTo would clamp against the stale
+        // collapsed height. The layout pass uses the same rendered line
+        // count the frame will paint (cached renders make this cheap).
+        const contentHeight = this.messagesView.render(width).length
+        const viewportHeight = this.fullscreenScroll.viewportHeight
+        this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+        // 5. anchor: the header lands `FOCUS_ANCHOR_TOP_PADDING` rows
+        // below the viewport top (one row of previous context stays
+        // visible); disableFollow breaks follow-end so the freshly
+        // expanded content cannot snap back to the tail (plan §8.7).
+        this.fullscreenScroll.scrollTo(
+          welcomeHeight + transcriptRow - FOCUS_ANCHOR_TOP_PADDING,
+          { disableFollow: true },
+        )
+      }
+    }
     this.requestRender()
+  }
+
+  /** The projected transcript row (in `messageRows` coordinates, welcome
+   * card excluded) where a turn's Thought header starts. Returns undefined
+   * when the turn is not currently projected (e.g. Focus off, or the turn
+   * was windowed away). */
+  private focusTurnTranscriptRow(turn: number): number | undefined {
+    let row = 0
+    for (const entry of this.messageRows) {
+      if (entry.activity?.turn === turn) return row
+      row += entry.height
+    }
+    return undefined
   }
 
   /** Enter the subagent-viewer scope: the child session's turn numbers are
@@ -3445,6 +3506,18 @@ export class TuiApp {
     }
   }
 
+  /** M5 test hook: the fullscreen ScrollView's live geometry (plan §14.2 —
+   * tests assert `scrollTop` / `isFollowingEnd` / `viewportHeight` directly,
+   * never a terminal screenshot). Undefined while not fullscreen. */
+  fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number } | undefined {
+    if (this.fullscreenScroll === undefined) return undefined
+    return {
+      scrollTop: this.fullscreenScroll.scrollTop,
+      isFollowingEnd: this.fullscreenScroll.isFollowingEnd,
+      viewportHeight: this.fullscreenScroll.viewportHeight,
+    }
+  }
+
   /**
    * Set the live session's auto-generated title (from the session/title
    * log) for the header; undefined clears it.
@@ -3553,16 +3626,26 @@ export class TuiApp {
         const message = entry.message
         if (message === undefined) return
         const inMessage = messageRow - row
-        // Attachment rows win: a click on an image's info bar or its image
-        // rows toggles THAT OCCURRENCE's display — the identity stays, the
-        // picture collapses/expands, and a repeated attachment elsewhere
-        // stays untouched. Rows outside every attachment span fall through
-        // to the message-level toggle (cards/thinking).
+        // Attachment rows win FIRST (plan §8.3): a click on an image's
+        // info bar or its image rows toggles THAT OCCURRENCE's display —
+        // the identity stays, the picture collapses/expands, and a
+        // repeated attachment elsewhere stays untouched. A click on an
+        // attachment inside an EXPANDED Thought must never collapse the
+        // whole turn (the attachment's own hit area is the intent).
         for (const attachment of entry.attachments) {
           if (inMessage >= attachment.start && inMessage < attachment.end) {
             this.toggleAttachmentCollapsed(message, attachment.imageIndex)
             return
           }
+        }
+        // A message that BELONGS to an expanded Focus turn (its thinking /
+        // tool / result rows are projected as ordinary messages, plan
+        // §15): clicking any of them collapses the OWNER turn — the
+        // Thought header stays anchored in view (plan §8.8). Only rows
+        // OUTSIDE every expanded turn reach the ordinary card toggle.
+        if (this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)) {
+          this.setFocusTurnExpanded(message.turn, false, { anchorFullscreen: true })
+          return
         }
         this.toggleMessageExpanded(message)
         return
