@@ -44,6 +44,14 @@ export interface ForkAgentHost {
       seed?: readonly SessionEvent[]
       signal?: AbortSignal
     }): Promise<AgentHandle>
+    /** Resume a session whose publication crossed the durable boundary but
+     * whose create rejected (the post-publication recovery path, review
+     * round 8). */
+    resume(options: {
+      resumeSessionId: SessionId
+      agentOptions: { provider?: string; model?: string }
+      setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void
+    }): Promise<AgentHandle>
   }
 }
 
@@ -133,6 +141,9 @@ export interface RewindCommitHost extends ForkAgentHost {
     fresh?: boolean
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
+    /** Post-publication recovery (review round 8): resume the child when
+     * its create rejected after the session became durable. */
+    recover?: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
   /** Restore the selected prompt into the editor — runs ONLY after the
    * transaction committed (a failed prepare/create never overwrites the
@@ -209,6 +220,18 @@ export async function commitRewind(
     },
     fresh: true,
     create: () => createForkedAgent(host, source, seed, sessionId),
+    // The publication crossed the durable boundary but the create rejected
+    // (a later synchronous listener threw — review round 8): resume the
+    // published child with the target lock still held, under the source's
+    // recorded preset and provider/model.
+    recover: async () => {
+      const composition = await host.compose(resolveSessionPreset(source.session))
+      return host.agents.resume({
+        resumeSessionId: sessionId,
+        agentOptions: { provider: source.options.provider, model: source.options.model },
+        setup: composition.setup,
+      })
+    },
   })
   if (!result.ok) return { kind: 'failed', message: result.message }
   // The transaction COMMITTED: restore the selected prompt (synchronous,

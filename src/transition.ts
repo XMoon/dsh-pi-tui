@@ -65,9 +65,20 @@ export interface TransitionSteps<T> {
    * released); the caller is responsible for undoing anything else it did
    * here (e.g. switchSession's own pre-checks). */
   prepare?: () => Promise<void> | void
-  /** Create or resume the child. A throw aborts the transaction (the
-   * target lock is released) with no child published. */
+  /** Create or resume the child. A throw may be a PRE-publication failure
+   * (the child was never durable — the target lock is released and the
+   * old session stays) OR a POST-publication failure (DSH's `session/
+   * created` already fired and the seed is durable — review round 8): when
+   * {@link TransitionHost.isDurablePublished} reports the child durable,
+   * `recover` is invoked with the target lock STILL HELD to resume the
+   * published child; a successful recovery commits it as the transition
+   * result (it can no longer be treated as "never happened"). */
   create: () => Promise<T>
+  /** Resume a child whose publication crossed the durable boundary but
+   * whose `create` rejected (the agent was rolled back by DSH; the session
+   * artifact survives). Runs with the target lock held. A throw keeps the
+   * target lock and reports the child as published-but-unrecoverable. */
+  recover?: () => Promise<T>
 }
 
 /** The settled outcome of a transition. */
@@ -110,6 +121,14 @@ export interface TransitionHost<T> {
    * surface rebuild, catalog refresh. Never throws — every failure is
    * recorded by the host and the committed child stands. */
   retire(next: T): Promise<void>
+  /** Whether one session already has a DURABLE artifact (materialized in
+   * the persistence backend). The host checks this after a rejected
+   * `create`: DSH's `agents.create()` publication can reject AFTER
+   * `session/created` fired (a later synchronous listener threw; the
+   * rollback disposes the agent but never deletes the durable artifact —
+   * review round 8), so a rejection does NOT imply the child was never
+   * published. Never throws. */
+  isDurablePublished(sessionId: string): Promise<boolean>
   /** Record one phase failure (the host owns the diagnostics sink). */
   recordFailure(phase: string, error: unknown): void
 }
@@ -154,15 +173,37 @@ export async function runTransitionTo<T>(
       return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
     }
   }
-  // Phase 4 — create the child. From here on there is NO rollback. A create
-  // failure releases the target lock and leaves the old session untouched.
+  // Phase 4 — create the child. A PRE-publication failure (the child was
+  // never durable) releases the target lock and leaves the old session
+  // untouched. A POST-publication failure is different: DSH's publication
+  // can reject AFTER session/created fired (a later synchronous listener
+  // threw; the rollback disposes the agent but never deletes the durable
+  // artifact), so a rejection does NOT imply "never published". When the
+  // child is durable, `recover` resumes it WITH THE TARGET LOCK STILL HELD
+  // and the recovered child commits as the transition result — the third
+  // state (UI says failed, disk has a child) is never allowed.
   let next: T
   try {
     next = await steps.create()
   } catch (error) {
-    host.releaseLock(steps.target.id)
-    host.recordFailure('create', error)
-    return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
+    if (steps.recover !== undefined && await host.isDurablePublished(steps.target.id)) {
+      try {
+        next = await steps.recover()
+      } catch (recoverError) {
+        // Published but unrecoverable: keep the target lock (the session
+        // exists on disk and must not silently become openable as a ghost
+        // without its owner knowing) and report the explicit state.
+        host.recordFailure('create', new Error(`${safeErrorMessage(error)}; the child was durable-published but could not be recovered (${safeErrorMessage(recoverError)})`))
+        return {
+          ok: false,
+          message: `transition failed: the child session ${steps.target.id} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); it exists and stays locked`,
+        }
+      }
+    } else {
+      host.releaseLock(steps.target.id)
+      host.recordFailure('create', error)
+      return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
+    }
   }
   // Phase 5 — COMMIT: a synchronous critical section, no awaits.
   host.handoverLocks(next)

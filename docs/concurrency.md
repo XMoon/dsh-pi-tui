@@ -222,6 +222,19 @@ is the whole point:
    whenIdle, surface rebuild, catalog refresh; every failure is recorded
    as diagnostics and NEVER rolls the committed child back.
 
+A rejected `create` is NOT assumed to mean "never published": DSH's
+publication can reject AFTER `session/created` fired (a later
+synchronous listener threw; the rollback disposes the agent but never
+deletes the durable artifact — review round 8). The transition checks
+`isDurablePublished` on a create rejection: a PRE-publication failure
+releases the target lock and aborts cleanly; a POST-publication failure
+resumes the published child WITH THE TARGET LOCK STILL HELD and commits
+it as the transition result — the third state (UI says failed, disk has
+a child) is never allowed. A durable child that cannot be recovered
+keeps its lock and reports the explicit state. The same detection
+guards ensureSession's createWithLock and the --session resume
+fallback.
+
 `whenIdle()` is an INSTANT check, not a freeze: the old agent can be
 woken again by a followup/steer while the transition still awaits
 (flush, prepare, create). A write in that window would target a session

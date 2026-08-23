@@ -230,6 +230,14 @@ export interface AgentsLike {
     // handle detaches from it on publication.
     signal?: AbortSignal
   }): Promise<AgentHandle>
+  /** Resume a session whose publication crossed the durable boundary but
+   * whose create rejected (the post-publication recovery path, review
+   * round 8). */
+  resume(options: {
+    resumeSessionId: SessionId
+    agentOptions: { provider?: string; model?: string }
+    setup: (agentCtx: Context) => Promise<void> | void
+  }): Promise<AgentHandle>
 }
 
 /** Everything the TUI-owned commands read from the runner. */
@@ -317,6 +325,9 @@ export interface TuiCommandRunner {
     fresh?: boolean
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
+    /** Post-publication recovery (review round 8): resume the child when
+     * its create rejected but the session became durable. */
+    recover?: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
@@ -2061,6 +2072,20 @@ export function registerTuiCommands(
             setup: composition.setup,
           })
         },
+        // The publication crossed the durable boundary but the create
+        // rejected (a later synchronous listener threw — review round 8):
+        // resume the published child with the target lock still held.
+        recover: async () => {
+          const composition = await runner.compose(runner.pendingPreset)
+          return runner.agents.resume({
+            resumeSessionId: sessionId,
+            agentOptions: {
+              provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
+              model: runner.liveAgent?.options.model ?? runner.selected.current?.model,
+            },
+            setup: composition.setup,
+          })
+        },
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
@@ -2527,6 +2552,17 @@ export function registerTuiCommands(
         target: { id: String(sessionId), header: { cwd: childCwd } },
         fresh: true,
         create: () => createForkedAgent(runner, source, seed, sessionId),
+        // The publication crossed the durable boundary but the create
+        // rejected (review round 8): resume the published child with the
+        // target lock still held, under the source's recorded preset.
+        recover: async () => {
+          const composition = await runner.compose(resolveSessionPreset(source.session))
+          return runner.agents.resume({
+            resumeSessionId: sessionId,
+            agentOptions: { provider: source.options.provider, model: source.options.model },
+            setup: composition.setup,
+          })
+        },
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —

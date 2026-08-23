@@ -1315,6 +1315,22 @@ export function apply(ctx: Context, config: Config): void {
     const releaseOpenLock = (sessionId: string): void => {
       openLocks.release(sessionId)
     }
+    /** Whether one session already has a DURABLE artifact (the persistence
+     * backend's list only contains materialized sessions). A `create`
+     * rejection can happen AFTER `session/created` fired (a later
+     * synchronous listener threw; DSH's rollback disposes the agent but
+     * never deletes the durable artifact — review round 8), so a rejected
+     * create on a durable id must be RECOVERED, never treated as "never
+     * published". Never throws (an unreadable backend degrades to false). */
+    const durablePublished = async (sessionId: string): Promise<boolean> => {
+      const persistence = ctx.get('sessionPersistence') as { list?: () => Promise<{ id: string }[]> } | undefined
+      try {
+        const rows = await persistence?.list?.()
+        return rows?.some(row => row.id === sessionId) ?? false
+      } catch {
+        return false
+      }
+    }
 
     // A stale --session id must not kill the TUI: resume falls back to a
     // fresh session and the failure is surfaced as a notify line.
@@ -1407,8 +1423,19 @@ export function apply(ctx: Context, config: Config): void {
             setup: launched.composition.setup,
           })
         } catch (error) {
-          releaseOpenLock(String(fallbackId))
-          throw error
+          // A publication-stage rejection may still have made the session
+          // durable (review round 8): recover by resuming it with the lock
+          // still held.
+          if (await durablePublished(String(fallbackId))) {
+            try {
+              handle = await agents.resume({ resumeSessionId: fallbackId, agentOptions, setup: launched.composition.setup })
+            } catch (recoverError) {
+              throw new Error(`session ${fallbackId} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); it exists and stays locked`)
+            }
+          } else {
+            releaseOpenLock(String(fallbackId))
+            throw error
+          }
         }
         // The fallback session is now a real persisted artifact: its open
         // lock was acquired BEFORE the create (above — the fallback
@@ -1650,6 +1677,21 @@ export function apply(ctx: Context, config: Config): void {
         },
         acquireTargetLock: (target) => acquireOpenLock(target.id, target.header),
         releaseLock: (sessionId) => releaseOpenLock(sessionId),
+        isDurablePublished: async (sessionId) => {
+          // The persistence backend's LIST only contains materialized
+          // sessions: presence means the child crossed the durable boundary
+          // (a `create` rejection after `session/created` — review round 8).
+          const persistence = ctx.get('sessionPersistence') as { list?: () => Promise<{ id: string }[]> } | undefined
+          try {
+            const rows = await persistence?.list?.()
+            return rows?.some(row => row.id === sessionId) ?? false
+          } catch {
+            // An unreadable backend degrades to "not published": the
+            // recovery path is not entered and the pre-publication abort
+            // runs (the divergence guard remains the write-path backstop).
+            return false
+          }
+        },
         handoverLocks: (next) => {
           // The TARGET lock was REQUIRED and acquired BEFORE the create
           // (phase 2 — target is mandatory and the pre-acquire is verified
@@ -4005,6 +4047,17 @@ export function apply(ctx: Context, config: Config): void {
               setup: composition.setup,
             })
           } catch (error) {
+            // A rejected create may still have PUBLISHED: if the session is
+            // already durable (a later synchronous listener threw during
+            // publication — review round 8), resume it with the lock still
+            // held instead of pretending nothing happened.
+            if (await durablePublished(String(sessionId))) {
+              try {
+                return await agents.resume({ resumeSessionId: sessionId, agentOptions, setup: composition.setup })
+              } catch (recoverError) {
+                throw new Error(`session ${sessionId} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); it exists and stays locked`)
+              }
+            }
             releaseOpenLock(String(sessionId))
             throw error
           }
@@ -4202,9 +4255,10 @@ export function apply(ctx: Context, config: Config): void {
             sessionId: () => sourceId,
             onResult: (outcome) => {
               if (outcome.kind === 'stale') {
-                // Gate 1 or 2: another path switched the surface while the
-                // picker was open — never commit into it (a gate-2 child was
-                // already disposed inside commitRewind).
+                // The stale gate runs BEFORE any create (inside the gate a
+                // switch cannot interleave): the picker's selection is
+                // refused while the surface is still the source — no child
+                // was created, nothing to dispose (review round 8).
                 app.notify('session changed — rewind cancelled', 'info')
                 return
               }

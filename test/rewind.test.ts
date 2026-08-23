@@ -294,7 +294,7 @@ function makeRig(options: {
   composePreset?: string
   createError?: string
   /** Full transitionTo override (wins over the default implementation). */
-  transitionTo?: <T extends AgentHandle>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  transitionTo?: <T extends AgentHandle>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T>; recover?: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
   createHook?: (call: CreatedCall) => void
 } = {}): ForkRig {
   const created: CreatedCall[] = []
@@ -323,6 +323,7 @@ function makeRig(options: {
         options.createHook?.(record)
         return { agent: { session: { id: record.sessionId } } } as unknown as AgentHandle
       },
+      resume: async (call) => ({ agent: { session: { id: String(call.resumeSessionId) } } }) as unknown as AgentHandle,
     },
     liveIdentity: () => ({ sessionId: state.sessionId, generation: state.generation }),
     transitionTo: async (steps) => {
@@ -394,6 +395,7 @@ test('review P2: the cwd is captured BEFORE the compose await (no parent=A cwd=B
         created.push({ sessionId: String(call.sessionId), meta: call.meta, agentOptions: call.agentOptions, seed: call.seed })
         return { agent: { session: { id: String(call.sessionId) } } } as unknown as AgentHandle
       },
+      resume: async (call) => ({ agent: { session: { id: String(call.resumeSessionId) } } }) as unknown as AgentHandle,
     },
   }
   // The source header has NO cwd: the fallback is the live cwd captured at

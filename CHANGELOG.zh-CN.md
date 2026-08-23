@@ -100,7 +100,12 @@
   的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
   在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。
   fork 的 cwd 在第一个 await 之前从父会话捕获——避免出现父/child 的
-  cwd 混合。
+  cwd 混合。被拒绝的 `agents.create()` 不再被假定为"从未发布":DSH 的
+  publication 可能在 `session/created` 之后才 reject(后续同步 listener
+  抛错),因此 create 失败时若该 session 已是 durable,会在 target 锁
+  仍持有的情况下**恢复(resume)并作为 transition 结果提交**——"UI 报
+  失败、磁盘却有 child"的第三种状态不可能存在;无法恢复的已发布
+  child 会保持锁并报告明确状态。
 - **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
   都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
   release/repeat 事件仍然不计为按键)。

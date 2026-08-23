@@ -43,6 +43,8 @@ interface FakeHostOptions {
   targetLockRefused?: string
   /** The target lock is unavailable (deployment cannot lock). */
   targetLockUnavailable?: boolean
+  /** Whether the child is durable-published when create rejects. */
+  durablePublished?: boolean
   prepareError?: string
   createError?: string
   retireError?: string
@@ -70,6 +72,7 @@ function fakeHost(options: FakeHostOptions = {}): {
       return { kind: 'acquired' }
     },
     releaseLock: (sessionId) => { events.push(`target.lock.release:${sessionId}`) },
+    isDurablePublished: async () => options.durablePublished === true,
     handoverLocks: () => {
       // The child lock was pre-acquired in phase 2; the COMMIT only
       // releases the old lock (review round 12: no redundant re-acquire).
@@ -186,13 +189,14 @@ test('a retire failure NEVER rolls the committed child back', async () => {
   assert.deepEqual(failures, ['retire:old dispose exploded'])
 })
 
-test('review round 7: a FRESH target with an unavailable lock aborts BEFORE the create', async () => {
-  const { host, events, failures } = fakeHost({ targetLockRefused: 'no-lock-dir' })
+test('review round 7: a FRESH target with an UNAVAILABLE lock aborts BEFORE the create', async () => {
+  const { host, events, failures } = fakeHost({ targetLockUnavailable: true })
   const outcome = await runTransitionTo(host, { ...steps(events), fresh: true })
   assert.equal(outcome.ok, false)
+  assert.match(outcome.ok === false ? outcome.message : '', /cannot lock the fresh session/)
   assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'target.lock.acquire:session-c'],
     'the child must never be created without its lock')
-  assert.deepEqual(failures, ['target-lock:no-lock-dir'])
+  assert.deepEqual(failures, ['target-lock:cannot lock the fresh session before creating it (no-lock-dir)'])
 })
 
 test('an EXISTING target with an unavailable lock may proceed (guard backstop)', async () => {
@@ -203,4 +207,46 @@ test('an EXISTING target with an unavailable lock may proceed (guard backstop)',
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
     'old.lock.release', 'child.commit', 'old.dispose',
   ])
+})
+
+// ── review round 8: a rejected create may still have published durably ─────
+
+test('a create rejection BEFORE publication releases the target lock and aborts', async () => {
+  const { host, events, failures } = fakeHost()
+  const outcome = await runTransitionTo(host, steps(events, { createError: 'pre-publication' }))
+  assert.equal(outcome.ok, false)
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'target.lock.release:session-c',
+  ], 'a genuine pre-publication failure releases the lock and leaves the old session untouched')
+  assert.deepEqual(failures, ['create:pre-publication'])
+})
+
+test('a rejected create AFTER durable publication is RECOVERED and committed (never a ghost)', async () => {
+  const { host, events, failures } = fakeHost({ durablePublished: true })
+  const recovered = steps(events, { createError: 'post-publication listener threw' })
+  recovered.recover = async () => { events.push('child.recover'); return handle('session-c') }
+  const outcome = await runTransitionTo(host, recovered)
+  assert.equal(outcome.ok, true, 'the recovered child commits as the transition result')
+  if (outcome.ok) assert.equal(outcome.next.agent.session.id, 'session-c')
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'child.recover', 'old.lock.release', 'child.commit', 'old.dispose',
+  ], 'the target lock is NEVER released — the recovered child is committed, the old lock is released at COMMIT')
+  assert.deepEqual(failures, [], 'a successful recovery is not a failure')
+})
+
+test('a durable-published child that CANNOT be recovered keeps its lock and reports the explicit state', async () => {
+  const { host, events, failures } = fakeHost({ durablePublished: true })
+  const failing = steps(events, { createError: 'post-publication listener threw' })
+  failing.recover = async () => { events.push('child.recover'); throw new Error('resume repair failed') }
+  const outcome = await runTransitionTo(host, failing)
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.ok === false ? outcome.message : '', /durable-published but could not be recovered/)
+  assert.match(outcome.ok === false ? outcome.message : '', /stays locked/)
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'child.recover',
+  ], 'the target lock is NEVER released — the published child must not silently become an openable ghost')
+  assert.deepEqual(failures, ['create:post-publication listener threw; the child was durable-published but could not be recovered (resume repair failed)'])
 })

@@ -129,7 +129,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the current session untouched. `/new` and `/fork` dispose nothing "on
   failure" anymore — there is nothing to dispose, because nothing was
   published. The fork cwd is captured from the source session before the
-  first await (parent=A cwd=B mixes are impossible).
+  first await (parent=A cwd=B mixes are impossible). A rejected
+  `agents.create()` is no longer assumed to mean "never published": DSH's
+  publication can reject after `session/created` fired (a later
+  synchronous listener), so a create failure on an already-durable
+  session is RECOVERED by resuming it with the target lock still held and
+  committing it as the transition result — a UI-failed-but-disk-
+  succeeded child state is impossible. An unrecoverable published child
+  keeps its lock and reports the explicit state.
 - **The double-Esc rewind chord is now truly consecutive.** Any real key
   press between the two Esc presses disarms the window — `Esc → Left →
   Esc` no longer opens the rewind picker (Kitty release/repeat events
