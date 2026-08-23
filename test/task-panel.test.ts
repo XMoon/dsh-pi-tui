@@ -38,6 +38,7 @@ const subagent = (overrides: Partial<TaskPanelItem> = {}): TaskPanelItem => ({
   status: 'running',
   detail: 'has children',
   group: 'subagents',
+  interruptible: true,
   ...overrides,
 })
 
@@ -349,11 +350,34 @@ test('i on a selected subagent row fires the interrupt action while search is cl
   panel.handleInput('\x1b[B')
   panel.handleInput('i')
   assert.deepEqual(acted, { value: 'agent:child-1', action: 'interrupt' }, 'i must interrupt the selected subagent')
-  // A job row under the cursor: the action still fires with the job value
-  // (the host ignores non-subagent rows).
+  // A NON-interruptible row under the cursor (a job, or a one-shot
+  // subagent): i does NOT fire — the panel only reports rows the
+  // interrupt transport can actually stop.
+  acted = undefined
   panel.handleInput('\x1b[A')
   panel.handleInput('i')
-  assert.deepEqual(acted, { value: 'job:bash-1', action: 'interrupt' }, 'i reports the selected row whatever its kind')
+  assert.equal(acted, undefined, 'i on a non-interruptible row must not fire the interrupt action')
+})
+
+test('a one-shot subagent row never fires the interrupt action (accepted no-op would lie)', () => {
+  let acted = 0
+  const panel = new TaskBrowserPanel(
+    [subagent({ value: 'agent:one-shot-1', label: 'subagent · audit', interruptible: false })],
+    10,
+    {
+      header: 'tasks · subagents',
+      onAction: () => { acted += 1 },
+    },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.render(100)
+  panel.handleInput('i')
+  assert.equal(acted, 0, 'one-shot rows are not interruptible')
+  // And the hint must not advertise it.
+  const joined = panel.render(100).map(strip).join('\n')
+  assert.ok(!joined.includes('i interrupt'), `one-shot-only list must not advertise i interrupt:\n${joined}`)
 })
 
 test('i is a query character once a search query is active, never an action', () => {
@@ -608,4 +632,82 @@ test('Kitty CSI-u Esc cancels and CSI-u Enter confirms', () => {
   panel4.render(100)
   panel4.handleInput('\x1b')
   assert.equal(cancelled, 3, `legacy Esc must still cancel: got ${cancelled}`)
+})
+
+test('the subagent mode suffix renders after the label and survives truncation', () => {
+  // The mode (continuable / one-shot) is the panel's non-truncatable
+  // SUFFIX: a narrow screen or a long label may clip the label, never the
+  // mode — the viewer's interactivity must be readable before Enter.
+  const { panel, rendered } = makePanel([
+    { value: 'agent:child-1', label: 'subagent · research', suffix: 'continuable', status: 'inactive', group: 'subagents' },
+    { value: 'agent:child-2', label: 'subagent · a-very-long-reviewer-label-that-keeps-growing', suffix: 'one-shot', status: 'running', group: 'subagents' },
+  ])
+  const wide = rendered().map(strip).join('\n')
+  assert.ok(wide.includes('subagent · research · continuable'), `mode suffix missing on the wide frame:\n${wide}`)
+  assert.ok(wide.includes('subagent · a-very-long-reviewer-label-that-keeps-growing · one-shot'), `full label + suffix missing:\n${wide}`)
+
+  // Narrow frame: the label truncates from its own end, the mode stays.
+  const narrowPanel = new TaskBrowserPanel(
+    [subagent({ label: 'subagent · a-very-long-reviewer-label-that-keeps-growing', suffix: 'one-shot' })],
+    10,
+    { header: 'tasks', enableSearch: false, noMatchText: 'no active tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const narrow = narrowPanel.render(40).map(strip).join('\n')
+  assert.ok(narrow.includes('· one-shot'), `the mode must survive the narrow frame:\n${narrow}`)
+  assert.ok(narrow.includes('…'), `the clipped label must show the ellipsis:\n${narrow}`)
+  assert.ok(!narrow.includes('keeps-growing'), `the label tail should be clipped on the narrow frame:\n${narrow}`)
+})
+
+test('the mode suffix is a HARD layout right: extreme widths compress label and tail, never the mode', () => {
+  const item: TaskPanelItem = {
+    value: 'agent:child-1',
+    label: 'subagent · a-very-long-reviewer-label',
+    suffix: 'one-shot',
+    status: 'inactive',
+    group: 'subagents',
+  }
+  const render = (width: number): string =>
+    new TaskBrowserPanel([item], 10, { header: 'tasks', enableSearch: false, noMatchText: '' }, () => {}, () => {}, () => {})
+      .render(width).map(strip).join('\n')
+  // 60 cols: the mode and the tail survive with the label nearly complete
+  // (one cell yields to the pad between the mode and the status).
+  const wide = render(60)
+  assert.ok(wide.includes('subagent · a-very-long-reviewer'), `label clipped too far:\n${wide}`)
+  assert.ok(wide.includes('· one-shot'), `mode missing:\n${wide}`)
+  assert.ok(wide.includes('inactive'), `tail missing:\n${wide}`)
+  // 30 cols: the label clips, the mode and the tail survive.
+  const medium = render(30)
+  assert.ok(medium.includes('· one-shot'), `mode must survive 30 cols:\n${medium}`)
+  assert.ok(medium.includes('…'), `clipped label must show the ellipsis:\n${medium}`)
+  assert.ok(medium.includes('inactive'), `tail must survive 30 cols:\n${medium}`)
+  // 16 cols (physically fits `→ ● one-shot`): the label and tail yield
+  // entirely, the MODE stays — the viewer's interactivity is a pre-Enter
+  // fact and the final whole-line truncation may never cut it.
+  const narrow = render(16)
+  assert.ok(narrow.includes('one-shot'), `the mode must survive an extreme width:\n${narrow}`)
+  assert.ok(!narrow.includes('long-reviewer'), `the label must yield first:\n${narrow}`)
+})
+
+test('search matches the mode suffix too', () => {
+  const { panel, rendered } = makePanel([
+    subagent({ label: 'subagent · research', suffix: 'continuable', status: 'inactive' }),
+    subagent({ label: 'subagent · audit', suffix: 'one-shot', status: 'inactive', value: 'agent:child-2' }),
+  ], { enableSearch: true })
+  // Type "one-shot" — only the audit row matches (the suffix is part of
+  // the searchable text, so the mode is reachable by filter).
+  panel.handleInput('o')
+  panel.handleInput('n')
+  panel.handleInput('e')
+  panel.handleInput('-')
+  panel.handleInput('s')
+  panel.handleInput('h')
+  panel.handleInput('o')
+  panel.handleInput('t')
+  const lines = rendered().map(strip)
+  const joined = lines.join('\n')
+  assert.ok(joined.includes('subagent · audit · one-shot'), `the one-shot row must match:\n${joined}`)
+  assert.ok(!joined.includes('subagent · research · continuable'), `the continuable row must not match:\n${joined}`)
 })

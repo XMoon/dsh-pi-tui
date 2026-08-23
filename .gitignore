@@ -12,3 +12,6 @@ temp/
 .pnm-cache/
 .pnpm-cache/
 .pnpm-data/
+
+# Real-machine acceptance smoke home (never committed)
+.smoke-home/

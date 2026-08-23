@@ -21,6 +21,11 @@ export interface TaskPanelItem {
   value: string
   /** Primary label (`bash · pnpm build` / `subagent · research`). */
   label: string
+  /** An always-visible TAIL appended after the label (`continuable` /
+   * `one-shot`): truncation applies to the label only, so a narrow screen
+   * or a long label can never silently cut the mode off (the viewer's
+   * interactivity must be readable before Enter). */
+  suffix?: string
   /** Status word (running / completed / …). */
   status: string
   /** Optional detail line (job detail / has-children note). */
@@ -33,6 +38,11 @@ export interface TaskPanelItem {
    * (bash / pwsh / …). Absent rows never match a type filter and only
    * appear under All. */
   type?: string
+  /** Whether the row supports the `i` interrupt action (a CONTINUABLE
+   * subagent only — `ctx.subagents.interrupt` on a one-shot id is an
+   * accepted no-op, so a one-shot row must never advertise or fire it).
+   * Absent = not interruptible. */
+  interruptible?: boolean
 }
 
 /** Options for {@link TaskBrowserPanel}. */
@@ -261,12 +271,18 @@ export class TaskBrowserPanel implements Component, Focusable {
     const isNavDown = matchesKey(data, 'down') || (!this.searchEnabled && data === 'j')
     const isPage = matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')
     // Row-level interrupt (`i`): fires while the search box is CLOSED, or
-    // while it is open but EMPTY and the selection sits on a subagent row
-    // (`agent:` value). An empty query means no filtering is in progress —
-    // `i` on a subagent row is the interrupt intent, not a query letter.
-    // With a non-empty query (or a job row selected) `i` stays a query
-    // character, exactly like `k`/`j` while search is on.
-    if (data === 'i' && this.onAction !== undefined && !this.searchEnabled) {
+    // while it is open but EMPTY and the selection sits on an
+    // INTERRUPTIBLE row (a continuable subagent — the only kind
+    // `ctx.subagents.interrupt` can actually stop). An empty query means
+    // no filtering is in progress — `i` on a continuable row is the
+    // interrupt intent, not a query letter. One-shot subagents and job
+    // rows are NOT interruptible: with them selected, `i` stays a search
+    // character exactly like `k`/`j` while search is on.
+    const interruptibleSelected = (): boolean => {
+      const item = this.filtered[this.selected]
+      return item !== undefined && item.interruptible === true
+    }
+    if (data === 'i' && this.onAction !== undefined && !this.searchEnabled && interruptibleSelected()) {
       const item = this.filtered[this.selected]
       if (item !== undefined) this.onAction(item.value, 'interrupt')
       return
@@ -274,12 +290,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (
       data === 'i' && this.onAction !== undefined && this.searchEnabled
       && (this.searchInput.getValue() ?? '') === ''
+      && interruptibleSelected()
     ) {
       const item = this.filtered[this.selected]
-      if (item !== undefined && item.value.startsWith('agent:')) {
-        this.onAction(item.value, 'interrupt')
-        return
-      }
+      if (item !== undefined) this.onAction(item.value, 'interrupt')
+      return
     }
     // Tab cycles the type filter (All → subagent → bash → pwsh → …).
     // Consumed before the search input so a query can never contain a tab.
@@ -341,7 +356,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       const needle = query.toLowerCase()
       this.filtered = this.items.filter(item =>
         (!typeActive || item.type === this.activeType)
-        && (query === '' || `${item.value}\n${item.label}\n${item.status}\n${item.detail ?? ''}\n${item.group ?? ''}`.toLowerCase().includes(needle)))
+        && (query === '' || `${item.value}\n${item.label}\n${item.suffix ?? ''}\n${item.status}\n${item.detail ?? ''}\n${item.group ?? ''}`.toLowerCase().includes(needle)))
     }
     this.selected = 0
     this.scroll = 0
@@ -424,7 +439,6 @@ export class TaskBrowserPanel implements Component, Focusable {
     // Left column: pointer + dot + label.
     const leftPrefix = `${pointer} ${dot} `
     const leftWidth = visibleWidth(leftPrefix)
-    const label = selected ? color.textStrong(item.label) : color.text(item.label)
 
     // Right column: status + elapsed, right-aligned. The tail reserves its
     // width on the right; the label wraps to the rest (2-cell gap minimum).
@@ -435,11 +449,55 @@ export class TaskBrowserPanel implements Component, Focusable {
     const tailWidth = visibleWidth(tail)
     const available = width - leftWidth
     const labelBudget = Math.max(1, available - tailWidth - 2)
-    const leftFinal = leftPrefix + truncateToWidth(label, labelBudget, '…')
-    const pad = Math.max(1, available - visibleWidth(leftFinal) - tailWidth)
-    const line = leftFinal + ' '.repeat(pad) + tail
+    const suffix = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
+    const suffixWidth = visibleWidth(suffix)
+    if (suffix === '') {
+      // No mode suffix: the classic single-column layout (the tail reserves
+      // its width; the label truncates to the rest; the whole line is
+      // truncated as the final backstop).
+      const truncated = truncateToWidth(item.label, labelBudget, '…')
+      const leftFinal = leftPrefix + (selected ? color.textStrong(truncated) : color.text(truncated))
+      const pad = Math.max(1, available - visibleWidth(leftFinal) - tailWidth)
+      const line = leftFinal + ' '.repeat(pad) + tail
+      const out = [truncateToWidth(line, width, '…')]
+      if (item.detail !== undefined && item.detail !== '') {
+        const indent = ' '.repeat(leftWidth)
+        const detailLines = wrapTextWithAnsi(color.textDim(item.detail), Math.max(1, width - leftWidth))
+        for (const wrapped of detailLines.slice(0, 2)) {
+          out.push(truncateToWidth(indent + wrapped, width, '…'))
+        }
+      }
+      return out
+    }
+    // The mode suffix is a HARD layout contract (plan §4.0): the mode must
+    // stay readable on ANY width that physically fits it. The suffix is
+    // reserved FIRST; the status tail (the activity dimension — mode and
+    // activity are independent, never traded) keeps its full width next;
+    // only the LABEL compresses (its truncation budget is whatever the
+    // suffix and tail leave). The tail is dropped entirely only when the
+    // label is already at zero and the mode would otherwise be cut.
+    // The mode suffix is a HARD layout contract (plan §4.0): the mode must
+    // stay readable on ANY width that physically fits it. The suffix is
+    // reserved FIRST; the status tail (the activity dimension — mode and
+    // activity are independent, never traded) keeps its full width next;
+    // only the LABEL compresses (its truncation budget is whatever the
+    // suffix and tail leave, minus one cell for the pad). The tail is
+    // dropped entirely only when the label is already at zero and the
+    // mode would otherwise be cut.
+    const labelLimit = Math.max(0, available - suffixWidth - tailWidth - 1)
+    const truncated = truncateToWidth(item.label, labelLimit, '…')
+    const leftFinal = leftPrefix
+      + (selected ? color.textStrong(truncated) : color.text(truncated))
+      + (selected ? color.textStrong(suffix) : color.text(suffix))
+    const leftFinalWidth = visibleWidth(leftFinal)
+    const tailPart = tailWidth <= width - leftFinalWidth
+      ? tail
+      : (labelLimit === 0 && width - leftFinalWidth > 0
+          ? truncateToWidth(tail, width - leftFinalWidth, '…')
+          : '')
+    const pad = Math.max(0, width - leftFinalWidth - visibleWidth(tailPart))
+    const line = leftFinal + ' '.repeat(pad) + tailPart
     const out = [truncateToWidth(line, width, '…')]
-
     if (item.detail !== undefined && item.detail !== '') {
       const indent = ' '.repeat(leftWidth)
       const detailLines = wrapTextWithAnsi(color.textDim(item.detail), Math.max(1, width - leftWidth))
@@ -456,12 +514,13 @@ export class TaskBrowserPanel implements Component, Focusable {
     // has at least two entries (All + one type — a single-kind list would
     // advertise a no-op toggle).
     const typeHint = this.typeOrder.length > 1 ? 'tab type · ' : ''
-    // The interrupt verbatim shows only while a subagent row is selectable
-    // (search off, or an empty query on a subagent row): `i` on a job row
+    // The interrupt verbatim shows only while an INTERRUPTIBLE row is
+    // selectable (a continuable subagent — the only kind the interrupt
+    // transport can actually stop): `i` on a job row or a one-shot row
     // is a search letter, so advertising it unconditionally would lie.
     // Without the hint the merged /tasks surface hid its only terminate
     // entry — the old /subagents submenu is gone (ec74c9b).
-    const interrupt = this.filtered.some(item => item.value.startsWith('agent:'))
+    const interrupt = this.filtered.some(item => item.interruptible === true)
       ? 'i interrupt · '
       : ''
     return `${search}${typeHint}${interrupt}↑↓ navigate · enter open · esc close`

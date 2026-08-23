@@ -167,6 +167,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
     refreshStatus: () => {},
+    focusEnabled: () => false,
+    setFocusMode: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},

@@ -71,15 +71,46 @@ test('continuable children map to viewable rows; running one-shot children join 
   // passes listChildren's createdAt order).
   assert.equal(first.childId, 'child-b')
   assert.equal(first.activity, 'running')
+  assert.equal(first.mode, 'continuable')
   assert.equal(first.value, `${AGENT_ROW_PREFIX}child-b`)
-  assert.equal(taskRowLabel(first), 'subagent · research')
+  // The label carries the catalog MODE — never inferred from activity.
+  assert.equal(taskRowLabel(first), 'subagent · research · continuable')
   assert.equal(rowGroup(first), SUBAGENT_GROUP)
   assert.equal(describeTaskRow(first, 5_000), 'running')
   assert.equal(second.childId, 'child-c')
   assert.equal(second.activity, 'running')
-  assert.equal(taskRowLabel(second), 'subagent · research')
+  assert.equal(second.mode, 'one-shot')
+  assert.equal(taskRowLabel(second), 'subagent · research · one-shot')
   assert.equal(third.childId, 'child-a')
+  assert.equal(third.mode, 'continuable')
   assert.equal(describeTaskRow(third, 5_000), 'inactive')
+})
+
+test('mode and activity are independent dimensions on every subagent row', () => {
+  const rows = buildTaskRows([], [
+    // Running continuable, inactive continuable, running one-shot: each
+    // combination keeps BOTH facts — neither may be inferred from the
+    // other.
+    agent({ id: 'child-run-cont', mode: 'continuable', activity: 'running' }),
+    agent({ id: 'child-idle-cont', mode: 'continuable', activity: 'inactive' }),
+    agent({ id: 'child-run-one', mode: 'one-shot', activity: 'running' }),
+  ])
+  const subagentRows = rows as Extract<TaskBrowserRow, { kind: 'subagent' }>[]
+  assert.deepEqual(subagentRows.map(row => `${row.mode}/${row.activity}`), [
+    'continuable/running',
+    'one-shot/running',
+    'continuable/inactive',
+  ])
+})
+
+test('a catalog entry with a MISSING mode is never treated as a healthy child', () => {
+  // The catalog contract always classifies a child, but a structurally
+  // mode-less entry must not silently degrade into an interactive row
+  // (it can neither default to continuable nor be guessed from activity).
+  const rows = buildTaskRows([], [
+    { kind: 'child', id: 'child-nomode', label: 'mystery', activity: 'running', hasChildren: false },
+  ])
+  assert.deepEqual(rows, [], 'a mode-less child stays out of the browser')
 })
 
 test('one-shot children without a label fall back to the child id', () => {
@@ -87,7 +118,7 @@ test('one-shot children without a label fall back to the child id', () => {
     { kind: 'child', id: 'child-nolabel', mode: 'one-shot', activity: 'running', hasChildren: false },
   ])
   assert.equal(rows.length, 1)
-  assert.equal(taskRowLabel(rows[0]!), 'subagent · child-nolabel')
+  assert.equal(taskRowLabel(rows[0]!), 'subagent · child-nolabel · one-shot')
 })
 
 test('diagnostic children never become rows', () => {
@@ -132,9 +163,15 @@ test('empty inputs produce an empty browser', () => {
   assert.deepEqual(buildTaskRows([], []), [])
 })
 
-test('subagent job rows stay status-only with their kind label', () => {
+test('subagent job rows stay status-only with their kind label and the one-shot mode', () => {
   const rows = buildTaskRows([job({ id: 'subagent-2', kind: 'subagent', label: 'audit', status: 'running' })], [])
   const row = rows[0]
-  assert.equal(taskRowLabel(row), 'subagent · audit')
+  // The jobs registry's `subagent` kind IS the reliable contract for a
+  // background one-shot delegation (continuable children never register
+  // jobs), so the label carries `one-shot` — but the row stays status-only.
+  assert.equal(taskRowLabel(row), 'subagent job · audit · one-shot')
   assert.equal(describeTaskRow(row, 10_000), 'running · 9s')
+  // Any other job kind keeps its own semantics — no fabricated mode.
+  const bash = buildTaskRows([job({ id: 'bash-3', kind: 'bash', label: 'build' })], [])[0]!
+  assert.equal(taskRowLabel(bash), 'bash · build')
 })

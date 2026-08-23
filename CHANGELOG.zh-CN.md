@@ -9,6 +9,31 @@
 
 ### 新增
 
+- **continuable 子代理查看器现在可交互。** 从 `/tasks` 进入 `continuable`
+  子代理时,打开的是一个实时对话界面:编辑器持有子代理自己的草稿(与主
+  会话草稿隔离,再次进入时保留),回车把文本作为子代理的**下一回合**
+  通过 `ctx.subagents.followup` 投递——FIFO,运行中的子代理不会被中断
+  或 steer,非活跃的子代理会自动冷恢复。查看器内的编辑器绝不触达父会话
+  (其中的 Ctrl+S/Ctrl+Enter/Alt+↑ 均失效),投递失败时文本会合并回子
+  代理草稿(不丢失、不错发),发送期间切换查看器时,结果只恢复到原子
+  代理的草稿槽。one-shot 子代理保持严格只读。查看器打开期间,页脚
+  切换为**子代理自己的身份**(`[subagent · continuable]` 徽章、标签、
+  activity、cwd 与子代理自己的 turns/steps/stats),退出后恢复主会话
+  页脚。
+- **任务浏览器显示子代理 mode。** 每个子代理行都标注为
+  `subagent · <label> · continuable` / `· one-shot`,按下 Enter 之前就
+  能知道查看器是否可交互;mode 是不可截断的后缀(长标签会被截断,mode
+  不会),且绝不由 running/inactive 状态推断。
+- **Focus Mode: 把运行中 turn 的中间过程折叠进一个 live Thought 区块。**
+  `/focus`(或 `/settings` 中的 `Focus mode` 行)将 transcript 切换为投影
+  模式:agent 工作时,每个 turn 的思考、工具调用与中间回复会折叠成一张
+  紧凑的 `◐ Thought 16s · 8 tools · read ×4 …` 卡片,带 reasoning 预览与
+  最新一次工具调用。随时点击卡片——即使 turn 仍在运行——即可展开完整
+  过程;展开区域会持续接收新的流式内容,`turn/end` 不会收回你的展开选择。
+  Focus 开启时还会向 system prompt 注入一条指令:用户只能看到最终文本
+  消息,所以一切结论都必须写进最终回复。WorkingIndicator、session
+  数据、search/export、subagent viewer 与其它交互全部保持不变;Focus
+  OFF 与之前的版本行为完全一致。
 - **`/settings` 新增 `Home/End keys` 可配置项。** fullscreen 下 Home/End
   存在两种用户习惯:有人期望它们控制输入框,有人期望它们滚动对话。新的
   `Home/End keys` 行选择行为——`Input`(Home/End 在输入框内移动,

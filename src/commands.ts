@@ -213,8 +213,8 @@ export function presetDisplayText(preset: {
  * $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
  * document anymore. */
 export interface TuiSettingsLike {
-  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string }
-  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string }): unknown
+  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string; focusMode: string }
+  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string; focusMode: string }): unknown
 }
 
 /** The agents-service surface /new and /fork create sessions through. */
@@ -348,6 +348,12 @@ export interface TuiCommandRunner {
   /** Re-compose a still-blank session onto another preset (see recomposeBlank). */
   recomposeBlank(presetId: string): Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshStatus(): void
+  /** Whether Focus Mode is currently on (the authoritative runtime state). */
+  focusEnabled(): boolean
+  /** The UNIFIED Focus setter: mutates the runtime state and the TUI
+   * surface immediately, persists best-effort (plan §7 — /settings and
+   * /focus both route through this, never a direct settings write). */
+  setFocusMode(enabled: boolean): void
   /** Repaint the welcome card from the live agent's current facts (e.g. after a preset switch). */
   updateWelcomeCard(): void
   /**
@@ -390,7 +396,19 @@ export interface TuiCommandRunner {
    * gate from inside a task is refused loudly (it would deadlock).
    */
   withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
-  enterView(childId: SessionId, label?: string): Promise<void>
+  /**
+   * Enter the subagent viewer for one child session: the target carries
+   * the catalog MODE (continuable = interactive editor, one-shot =
+   * read-only) and the exact direct-parent session id the follow-up write
+   * path is pinned to.
+   */
+  enterView(
+    childId: SessionId,
+    label: string | undefined,
+    mode: 'one-shot' | 'continuable',
+    parentSessionId: SessionId,
+    activity: 'running' | 'inactive',
+  ): Promise<void>
   exit(code: number): void
   /**
    * The M5 extension registries (commands/themes/settings/autocomplete/
@@ -1241,10 +1259,17 @@ export function registerTuiCommands(
             label: 'Home/End keys',
             description: 'Input: Home/End move within the input; Ctrl+Home/End scroll the conversation. Viewport: Home/End scroll the conversation; Ctrl+Home/End move within the input',
             // The fallback applies HERE too: an invalid persisted value
-            // must never render a row outside the values list (round-1
+            // must never render as a row outside the values list (round-1
             // finding).
             currentValue: homeEndKeysModeOf(tuiSettings?.get().homeEndKeys),
             values: ['input', 'viewport'],
+          },
+          {
+            id: 'focus-mode',
+            label: 'Focus mode',
+            description: 'Collapse intermediate activity into a live Thought block; click to reveal the full turn',
+            currentValue: runner.focusEnabled() ? 'on' : 'off',
+            values: ['off', 'on'],
           },
           {
             id: 'fullscreen',
@@ -1416,6 +1441,12 @@ export function registerTuiCommands(
                 detach('settings home end keys write', () => settings.replace({ ...settings.get(), homeEndKeys: value }) as Promise<unknown>, { notify: true })
               }
             }
+          } else if (id === 'focus-mode') {
+            if (value === 'off' || value === 'on') {
+              // The UNIFIED setter: runtime mutation first, persistence
+              // best-effort (plan §7 — never a direct settings write).
+              runner.setFocusMode(value === 'on')
+            }
           } else if (id === 'fullscreen') {
             if (value === 'off' || value === 'on') {
               app.setFullscreen(value === 'on')
@@ -1427,6 +1458,48 @@ export function registerTuiCommands(
         () => {},
       )
       return { kind: 'success' }
+    },
+  })
+
+  // `/focus` — the Focus Mode control (plan §8): LOCAL + SESSIONLESS (the
+  // runner's ownership sets), so it always executes directly — never
+  // queued/steered while busy, never sent to the model, and usable before
+  // the first session exists (the first real prompt then composes with the
+  // Focus section already installed). Every mutation goes through the
+  // runner's ONE setter.
+  commands.register({
+    name: 'focus',
+    description: 'Toggle Focus Mode (intermediate activity folds into a live Thought block)',
+    input: { hint: '[on|off|toggle|status]' },
+    handler: (invocation) => {
+      const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+      const enabled = runner.focusEnabled()
+      // The command feedback is a transient notify (the same pattern as
+      // /reload): a sessionless local command writes no command/done card,
+      // so the success text must be surfaced HERE or the toggle would be
+      // silent.
+      const report = (text: string): { kind: 'success'; text: string } => {
+        app.notify(text, 'info')
+        return { kind: 'success', text }
+      }
+      if (verb === '' || verb === 'toggle') {
+        runner.setFocusMode(!enabled)
+        return report(`Focus mode ${enabled ? 'off' : 'on'}.`)
+      }
+      if (verb === 'on') {
+        if (enabled) return report('Focus mode is on.')
+        runner.setFocusMode(true)
+        return report('Focus mode on.')
+      }
+      if (verb === 'off') {
+        if (!enabled) return report('Focus mode is off.')
+        runner.setFocusMode(false)
+        return report('Focus mode off.')
+      }
+      if (verb === 'status') {
+        return report(`Focus mode is ${enabled ? 'on' : 'off'}.`)
+      }
+      return { kind: 'error', text: `unknown /focus verb "${verb}" (on|off|toggle|status)` }
     },
   })
 

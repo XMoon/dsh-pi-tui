@@ -1064,6 +1064,40 @@ export function foldedCallPreview(name: string, argsRaw: string): string {
   return ''
 }
 
+/** The summary key preference per tool variant (args-derived), shared by
+ * the Focus latest-operation preview (deriveSummary is variant-private). */
+const FOCUS_SUMMARY_KEYS: Record<string, string[]> = {
+  bash: ['description', 'command'],
+  read: ['path', 'file_path', 'url'],
+  search: ['query', 'pattern', 'url'],
+  write: ['path', 'file_path'],
+  edit: ['path', 'file_path'],
+  code: ['description'],
+}
+
+/**
+ * The Focus latest-operation one-liner for a tool call: `read
+ * src/transcript.ts`, `bash pnpm test`, `search "systemPrompt.section"`.
+ * The preview prefers the tool's natural summary key (path/command/query),
+ * falling back to the first string arg, then to the raw args' first line.
+ * A tool with no derivable preview keeps the bare name. Never throws on a
+ * malformed arguments payload (the parse is guarded — plan §40).
+ * @param name - the tool name.
+ * @param argsRaw - the raw arguments JSON (may be malformed).
+ * @returns the preview text, e.g. `read src/transcript.ts`.
+ */
+export function focusToolPreview(name: string, argsRaw: string): string {
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null) return name
+  const args = parsed as Record<string, unknown>
+  const picked = pickString(args, FOCUS_SUMMARY_KEYS[name] ?? [])
+  if (picked !== undefined) return `${name} ${firstLine(picked)}`
+  for (const value of Object.values(args)) {
+    if (typeof value === 'string' && value !== '') return `${name} ${firstLine(value)}`
+  }
+  return name
+}
+
 /**
  * The tool-definition surface a presenter needs (presentCall/presentResult).
  * Structural, so the runner can hand over a registry read without importing

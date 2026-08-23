@@ -25,7 +25,7 @@ function context(overrides: Partial<Parameters<InputRouter['route']>[1]> = {}): 
   return {
     questionActive: false,
     approvalActive: false,
-    viewerLocked: false,
+    viewerInputMode: 'none',
     hasOverlay: false,
     searchActive: false,
     ...overrides,
@@ -64,7 +64,7 @@ test('InputRouter: an approval prompt owns input before plugins', () => {
 
 test('InputRouter: the read-only viewer locks everything except Esc/Ctrl+O', () => {
   const r = router()
-  const locked = context({ viewerLocked: true })
+  const locked = context({ viewerInputMode: 'readonly' })
   assert.equal(r.route('a', locked, () => 'open-search' as TuiAction).kind, 'consumed')
   // Esc and Ctrl+O pass the VIEWER branch (the host runs the viewer-exit
   // and fold-toggle paths); they are reserved lifecycle keys, so the
@@ -72,6 +72,45 @@ test('InputRouter: the read-only viewer locks everything except Esc/Ctrl+O', () 
   // editor.
   assert.equal(r.route('\x1b', locked, () => 'open-search' as TuiAction).kind, 'consumed')
   assert.equal(r.route('\x1b[111;13u', locked, () => 'open-search' as TuiAction).kind, 'consumed')
+})
+
+test('InputRouter: the interactive (continuable) viewer keeps the editor live as viewer-editor', () => {
+  const r = router()
+  const interactive = context({ viewerInputMode: 'continuable' })
+  // A printable key is the editor's — but the route NAMES the subagent
+  // viewer as the submission target (the semantic difference the router
+  // must not hide).
+  assert.equal(r.route('a', interactive, noBindings()).kind, 'viewer-editor')
+  // An editor-owned non-printable key (arrow, Tab) is viewer-editor too —
+  // plugin bindings only claim keys the focused editor DECLINES (the
+  // editorAccepts probe).
+  assert.equal(r.route('\x1b[A', interactive, noBindings()).kind, 'viewer-editor')
+  const probed = context({
+    viewerInputMode: 'continuable',
+    editorAccepts: () => true,
+  })
+  assert.equal(r.route('\x1b[A', probed, () => 'open-search' as TuiAction).kind, 'viewer-editor')
+  // A chord the editor declines (Ctrl+Alt+X) still consults plugin
+  // bindings LAST in the ladder — but its route is NOT viewer-editor.
+  const chord = r.route('\x1b\x18', interactive, () => 'open-search' as TuiAction)
+  assert.equal(chord.kind, 'plugin-action')
+  // Reserved keys stay consumed (the HOST consumes Enter and the parent
+  // chords BEFORE the router — see the TuiApp-level tests).
+  assert.equal(r.route('\r', interactive, noBindings()).kind, 'consumed')
+  assert.equal(r.route('\x1b[13;5u', interactive, noBindings()).kind, 'consumed')
+  assert.equal(r.route('\x1b[115;5u', interactive, noBindings()).kind, 'consumed')
+})
+
+test('InputRouter: a replacement editor inside the interactive viewer still routes editor-first', () => {
+  const r = router()
+  const interactive = context({ viewerInputMode: 'continuable', editorReplacement: true })
+  let bindingCalls = 0
+  const result = r.route('\x1b[1;7x', interactive, () => {
+    bindingCalls += 1
+    return 'open-search' as TuiAction
+  })
+  assert.equal(result.kind, 'viewer-editor', 'the replacement editor gets the viewer-editor route first')
+  assert.equal(bindingCalls, 0, 'plugin bindings are not consulted before the editor route')
 })
 
 test('InputRouter: Ctrl+F transcript search is reserved from plugin bindings', () => {

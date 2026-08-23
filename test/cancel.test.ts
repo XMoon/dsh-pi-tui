@@ -449,7 +449,13 @@ test('E10: the subagent viewer owns its Esc (exits, never rewinds)', async () =>
     onSingleEscape: () => { singleEscapes += 1; return true },
   })
   app.start()
-  app.setViewerMode({ id: 'session-child', label: 'research' })
+  app.setViewerMode({
+    parentSessionId: 'session-parent',
+    childSessionId: 'session-child',
+    label: 'research',
+    mode: 'one-shot',
+    activity: 'inactive',
+  })
   await vt.waitForRender()
   vt.sendInput('\x1b')
   vt.sendInput('\x1b')

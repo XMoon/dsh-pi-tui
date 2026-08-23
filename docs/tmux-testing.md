@@ -90,11 +90,25 @@ private `/tmp/tui-demo.XXXXXX/` (`.txt` plain + `.html` colored).
    `[N tasks running · ↓ view]` badge, `↓` opening the task browser while
    running, Enter showing the output viewer, and the completion notification
    being handled by the model.
-3. **Subagent viewing and the submit guard**: `/subagents` → pick a
-   subagent → View transcript → read-only viewing mode
-   (`ℹ viewing subagent … — Esc returns`); typing + Enter while viewing must
-   be intercepted (`ℹ viewing a subagent — Esc returns before submitting`),
-   with the draft preserved; Esc returns.
+3. **Subagent viewing — mode-aware**: `/tasks` → the subagent rows must
+   read `subagent · <label> · continuable` / `· one-shot` (mode is part of
+   the label; a long label truncates, the mode never does). Enter on a
+   **continuable** child opens the INTERACTIVE viewer:
+   - the header shows `[viewing subagent · continuable]`, the empty editor
+     shows the `Message <label>… — Enter send · Esc back` placeholder, and
+     your main-session draft is preserved;
+   - type a follow-up (paced `send-keys -l`, sleep, Enter — trap 1) and
+     press Enter: the draft clears, a `sent to <label> — queued for the
+     next turn` notice appears, and the child's own transcript shows the
+     user message from its real session events (never a fake row); while
+     the child is running, its current turn is NOT interrupted;
+   - Ctrl+S / Ctrl+Enter inside the viewer must be inert (no parent steer,
+     no parent queue); Esc returns to the main session with the main draft
+     exactly restored; re-entering the same child restores the child's
+     unsent draft.
+   Enter a **one-shot** child: the viewer is read-only (`viewing subagent:
+   … — one-shot · read-only · Esc returns`; typing + Enter must be
+   intercepted, with the draft preserved); Esc returns.
 4. Finish with `/exit` to run the flush flow, then `tmux kill-session`.
 
 ## Plain-exit and input-history verification
