@@ -237,40 +237,24 @@ is the whole point:
 5. RETIRE — in this order: (1) the OLD handle is disposed — `whenIdle`
    only idles the agent machine; session-scoped async writers (e.g. the
    title generator awaiting a provider) are aborted only by
-   `session/disposed`, which the dispose fires; (2) the old session's
-   persistence retirement is awaited via the coordinator's `inspect()`
-   barrier (the fire-and-forget `session/disposed` retire flushes the old
-   log asynchronously); (3) ONLY THEN the old session's open lock is
-   released — the old lock is deliberately held across the whole
-   transition, so a second process can never resume the old session while
-   it still has writers or an unsettled retirement (review round 10; a
-   barrier that cannot settle keeps the lock, warned); (4) child
+   `session/disposed`, which the dispose fires; (2) the LOCAL DETACH
+   GATE: the old agent/session must be gone from the live registries —
+   otherwise the old lease is PINNED (a dispose that did not detach
+   means the old session may still be written); (3) the old session
+   enters COOLING with its final snapshot — its physical lock is
+   released ONLY by the cooling verifier (quiet + durable parity +
+   stable samples), never by the transition (review round 10; a
+   verifier that cannot settle keeps the lock, pinned); (4) child
    whenIdle, surface rebuild, catalog refresh. Every failure is recorded
    as diagnostics and NEVER rolls the committed child back.
 
-A rejected `create` is NOT assumed to mean "never published": DSH's
-publication can reject AFTER `session/created` fired (a later
-synchronous listener threw; the rollback disposes the agent but never
-deletes the durable artifact — review round 8). The transition checks
-`isDurablePublished` on a create rejection: a PRE-publication failure
-releases the target lock and aborts cleanly; a POST-publication failure
-resumes the published child WITH THE TARGET LOCK STILL HELD and commits
-it as the transition result — the third state (UI says failed, disk has
-a child) is never allowed. A durable child that cannot be recovered
-keeps its lock and reports the explicit state. The publication check is
-THREE-STATE (review rounds 25/26): the check runs through the
-persistence COORDINATOR's `inspect()` — the publication barrier that
-awaits an in-flight retirement/materialization for the id before
-answering, so a "not found" is AUTHORITATIVE (an immediate `list()`
-scan is not: the materialization of a rejected create can still be
-settling, and a transient miss would recreate the durable ghost).
-An unreadable backend — or a deployment without the barrier —
-settles `unknown`: the child MAY exist, so the lock stays and no
-fallback may run. EXISTING targets (whose artifact predates the
-attempt) release their lock on an unrecoverable failure instead of
-pinning the session until process exit (review round 26 P2). The same
-detection guards ensureSession's createWithLock and the --session
-resume fallback.
+A rejected `create`/`resume` is handled WITHOUT any publication-phase
+inference (the old `isDurablePublished` three-state taxonomy is gone):
+the target was TOUCHED before the DSH call, so the rejection gets at
+most ONE same-id recovery and then the target is PINNED — its physical
+lock stays with this process (a second fresh session is never created,
+and an unlocked durable ghost is impossible by construction). The
+failure message says the session stays locked.
 
 `whenIdle()` is an INSTANT check, not a freeze: the old agent can be
 woken again by a followup/steer while the transition still awaits
