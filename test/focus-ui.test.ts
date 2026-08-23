@@ -337,6 +337,55 @@ test('a session switch with the SAME turn number and revision renders the NEW ac
   app.stop()
 })
 
+test('boot restore: a persisted Focus ON applies to the app BEFORE the first frame (runner contract)', async () => {
+  // The runner restores the persisted focusMode into focusState and then —
+  // at the boot visual-settings stage, BEFORE the first normal display —
+  // calls app.setFocusMode(focusState.enabled) (index.ts). This test locks
+  // THAT ordering contract: an app receiving setFocusMode before its first
+  // transcript snapshot renders a running turn collapsed WITHOUT any
+  // /focus command — the model-side and UI-side halves of Focus cannot
+  // split across restarts (review blocker).
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true) // boot restore — no /focus involved
+  show(app, folder)      // the first snapshot lands AFTER the restore
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('◐ Thought'), `restored Focus must project the running turn:\n${joined}`)
+  assert.ok(!joined.includes('🐳'), `restored Focus must hide the process:\n${joined}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('Alt+T (hideThinking) cannot hide thinking inside an EXPANDED Thought; Focus OFF restores it', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  app.toggleThinkingHidden() // Alt+T: hideThinking = true
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Collapsed: thinking stays hidden (the process rows are absent anyway).
+  assert.ok(!vt.getViewport().join('\n').includes('🐳'), 'collapsed stays hidden under Alt+T')
+  // Expand: the user asked for the full turn — thinking must appear even
+  // though hideThinking is on (plan §15.1; review fix).
+  let y = findRow(vt.getViewport(), '◐ Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.ok(expanded.includes('🐳'), `an expanded Thought must reveal thinking under Alt+T:\n${expanded}`)
+  // Focus OFF: the plain Alt+T semantics come back (thinking hidden again).
+  app.setFocusMode(false)
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(!restored.includes('locating the transcript path'), `Focus OFF must restore hideThinking:\n${restored}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('Focus OFF renders the ordinary transcript (strong regression)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()

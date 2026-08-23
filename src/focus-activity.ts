@@ -47,7 +47,9 @@ export function focusStatusLabel(activity: TurnActivity, duration: string | unde
   if (!activity.completed) return `Thought${time}`
   switch (activity.reason?.kind) {
     case 'error':
-      return `Failed after${time}`
+      // A legacy/corrupt log without turn/start must not read
+      // "Failed after" with nothing after it (review fix).
+      return duration === undefined ? 'Failed' : `Failed after ${duration}`
     case 'aborted':
     case 'interrupted':
       return `Interrupted${time}`
@@ -132,11 +134,15 @@ export function focusOperationLine(operation: string, running: boolean): string 
   return settled === operation ? operation : `Last: ${settled}`
 }
 
-/** One collapsed body line, truncated to the content width. */
+/** One collapsed body line, truncated to the content width: the body
+ * budget is the width MINUS the lead ('Thinking: ' / 'Error: '), and a
+ * lead that alone exceeds the width truncates too — a preview line can
+ * never wrap (the fullscreen row hit-map depends on that). */
 function previewLine(prefix: string | undefined, text: string, width: number): string {
   const lead = prefix ?? ''
-  const body = truncateToWidth(text, Math.max(1, width - visibleWidth(lead)), '…')
-  return `${lead}${body}`
+  const bodyBudget = width - visibleWidth(lead)
+  const body = bodyBudget > 0 ? truncateToWidth(text, bodyBudget, '…') : ''
+  return truncateToWidth(`${lead}${body}`, Math.max(1, width), '…')
 }
 
 /** The collapsed card body: narrative (Thinking: … when reasoning), the
@@ -189,7 +195,10 @@ export class FocusActivityComponent {
     const lines: string[] = []
     const indent = '  '
     const contentWidth = Math.max(1, width - visibleWidth(indent))
-    lines.push(`${indent}${color.textDim(formatFocusHeaderLine(this.activity, this.expanded, this.now, width))}`)
+    // The header formatter budgets the CONTENT width (the indent is added
+    // after), so a header that fits never wraps past the terminal — the
+    // fullscreen row hit-map depends on that (review fix).
+    lines.push(`${indent}${color.textDim(formatFocusHeaderLine(this.activity, this.expanded, this.now, contentWidth))}`)
     if (!this.expanded) {
       for (const line of focusCollapsedBody(this.activity, contentWidth)) {
         lines.push(`${indent}${color.textDim(line)}`)
@@ -256,52 +265,73 @@ export function projectFocus(
     }
     // 2. The Thought disclosure follows the user rows.
     if (activity !== undefined) out.push({ kind: 'activity', activity })
-    // 3. Compaction cards keep their existing lifecycle (plan §12.3 v1).
-    for (const member of group) {
-      if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
-    }
-    // 4. The turn process: everything (expanded) or the final only (collapsed).
-    const process = group.filter(member => member.kind !== 'user' && member.kind !== 'compaction')
+    // The final assistant is decided ONCE from the exact last assistant
+    // row (shared by the expanded and collapsed branches — one semantic,
+    // never two drifting copies).
+    const final = finalAssistantSelection(activity, group)
     if (expanded) {
-      // The max-tokens marker rides the LAST assistant in an open Thought
-      // too (plan §13.8 — the settled output stays visible with the
-      // truncated indication in every disclosure state).
-      const lastAssistant = lastNonEmptyAssistant(process)
-      for (const member of process) {
-        const truncated = activity?.reason?.kind === 'max-tokens' && member === lastAssistant
-        out.push(truncated ? { kind: 'message', message: member, truncated: true } : { kind: 'message', message: member })
+      // The open Thought reveals the FULL process in ORIGINAL order —
+      // compaction cards included at their chronological position — with
+      // the final assistant held back and appended LAST (a max-tokens
+      // turn's `max tokens reached` system row must never land after the
+      // final: the settled order is User → Thought → process → final).
+      for (const member of group) {
+        if (member.kind === 'user') continue
+        if (final !== undefined && member === final.message) continue
+        out.push({ kind: 'message', message: member })
+      }
+      if (final !== undefined) {
+        out.push(final.truncated ? { kind: 'message', message: final.message, truncated: true } : { kind: 'message', message: final.message })
       }
       continue
     }
-    const final = finalAssistantBlock(activity, process)
-    if (final !== undefined) out.push(final)
+    // Compaction cards keep their existing lifecycle in the collapsed
+    // view (plan §12.3 v1 — never hidden into the Thought).
+    for (const member of group) {
+      if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+    }
+    // The collapsed final: only after the authoritative turn/end.
+    if (final !== undefined) {
+      out.push(final.truncated ? { kind: 'message', message: final.message, truncated: true } : { kind: 'message', message: final.message })
+    }
   }
   return out
 }
 
-/** The LAST non-empty assistant message of a turn's process rows. */
-function lastNonEmptyAssistant(process: readonly TranscriptMessage[]): TranscriptMessage | undefined {
-  let last: TranscriptMessage | undefined
-  for (const member of process) {
-    if (member.kind === 'assistant' && member.text !== '') last = member
+/** The EXACT last assistant message of a turn (by position — an empty or
+ * image-only step still owns the final slot; there is NEVER a fallback to
+ * an earlier assistant, review fix). */
+function lastAssistant(
+  group: readonly TranscriptMessage[],
+): Extract<TranscriptMessage, { kind: 'assistant' }> | undefined {
+  for (let index = group.length - 1; index >= 0; index -= 1) {
+    const member = group[index]
+    if (member?.kind === 'assistant') return member
   }
-  return last
+  return undefined
 }
 
-/** The collapsed turn's final assistant block: only after the authoritative
- * turn/end, only for a reason that presents output (completed / max-tokens),
- * and never an empty bubble. The max-tokens final carries the truncated
- * marker (plan §13.8). */
-function finalAssistantBlock(
+/** Whether one assistant message renders any rows at all: empty text with
+ * no content blocks is a zero-row entry (e.g. a never-streamed step) and
+ * can never be presented as a final answer. An image-only assistant
+ * (`content` present) IS renderable. */
+function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
+  return assistant.text !== '' || assistant.content !== undefined
+}
+
+/** The turn's final assistant selection: only after the authoritative
+ * turn/end, only for a reason the system presents output (completed /
+ * max-tokens), and only when the EXACT last assistant renders rows. An
+ * empty last step yields NO final — never an earlier assistant (review
+ * fix). The max-tokens final carries the truncated marker (plan §13.8). */
+function finalAssistantSelection(
   activity: TurnActivity | undefined,
-  process: readonly TranscriptMessage[],
-): FocusProjectedBlock | undefined {
+  group: readonly TranscriptMessage[],
+): { message: Extract<TranscriptMessage, { kind: 'assistant' }>; truncated: boolean } | undefined {
   if (activity === undefined || !activity.completed) return undefined
   const reason = activity.reason?.kind
   if (reason !== 'completed' && reason !== 'max-tokens') return undefined
-  const lastAssistant = lastNonEmptyAssistant(process)
-  if (lastAssistant === undefined) return undefined
-  return reason === 'max-tokens'
-    ? { kind: 'message', message: lastAssistant, truncated: true }
-    : { kind: 'message', message: lastAssistant }
+  const last = lastAssistant(group)
+  if (last === undefined || !assistantRenderable(last)) return undefined
+  return { message: last, truncated: reason === 'max-tokens' }
 }

@@ -511,6 +511,113 @@ test('turnActivities returns the SAME objects by reference (no per-repaint copy)
   assert.equal(first.get(0)?.narrative?.kind, 'thinking')
 })
 
+test('the final is the EXACT last assistant: an empty last step yields NO final (no earlier fallback)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1 settles 'final answer text'
+    // step 2 streams then settles to EMPTY text (the folder keeps the
+    // entry, text becomes '').
+    eventAt('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: 'partial' } }, 1000 + 10, 20),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('empty'), role: 'assistant', content: [{ type: 'text', text: '' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1000 + 11, 21),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
+  ])
+  const messages = folder.messages()
+  const last = messages.findLast(m => m.kind === 'assistant')
+  assert.ok(last !== undefined && last.kind === 'assistant' && last.text === '', 'fixture: the exact last assistant is empty')
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
+    'an empty last step must suppress the final — never fall back to the earlier text assistant')
+})
+
+test('an image-only final assistant is the EXACT final (never falls back to the earlier text step)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1: 'final answer text'
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: {
+        id: 'img', role: 'assistant',
+        content: [{ type: 'image', attachment: { attachmentId: 'att-9', mediaType: 'image/png', bytes: 100, width: 1920, height: 1080, name: 'shot.png' } }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 1000 + 11, 21),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
+  ])
+  const messages = folder.messages()
+  const last = messages.findLast(m => m.kind === 'assistant')
+  assert.ok(last !== undefined && last.kind === 'assistant' && last.text === '' && last.content !== undefined,
+    'precondition: the exact last assistant is image-only')
+  const blocks = projectFocusBlocks(folder.messages(), folder.turnActivities(), new Set())
+  const assistants = blocks.filter((b): b is Extract<FocusProjectedBlock, { kind: 'message' }> =>
+    b.kind === 'message' && b.message.kind === 'assistant')
+  assert.equal(assistants.length, 1, 'exactly one assistant survives collapsed')
+  const final = assistants[0]!
+  if (final.message.kind === 'assistant') {
+    assert.equal(final.message.text, '', 'the image-only assistant is the final — not the earlier text one')
+  } else {
+    assert.fail('the final block must be an assistant message')
+  }
+})
+
+test('max-tokens also never falls back to an earlier assistant', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...completedTurn(0, 0, 1000).slice(0, -1),
+    eventAt('assistant/chunk', { turn: 0, step: 3, chunk: { type: 'text-delta', index: 0, text: 'partial' } }, 1000 + 11, 21),
+    eventAt('assistant/message', {
+      turn: 0, step: 3,
+      message: { id: 'empty3', role: 'assistant', content: [{ type: 'text', text: '' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1000 + 12, 22),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 1000 + 13, 23),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
+    'max-tokens must not promote an earlier text assistant when the last step is empty')
+})
+
+test('the EXPANDED final is always the LAST block (a max-tokens system row cannot precede it)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...completedTurn(0, 0, 1000).slice(0, -1), // assistant step 1 settles
+    eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 1000 + 13, 23),
+  ])
+  // The folder appends `system: max tokens reached` AFTER the assistant —
+  // the expanded projection must hold the final back and emit it last.
+  const messages = folder.messages()
+  assert.equal(messages.at(-1)?.kind, 'system', 'precondition: the raw fold ends with the max-tokens system row')
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set([0]), true)
+  const last = blocks.at(-1)
+  assert.ok(last !== undefined && last.kind === 'message' && last.message.kind === 'assistant',
+    `the final assistant must be the LAST expanded block, got: ${blocks.map(b => b.kind === 'message' ? b.message.kind : 'activity').join(',')}`)
+  const assistants = blocks.filter(b => b.kind === 'message' && b.message.kind === 'assistant')
+  assert.equal(assistants.length, 1, 'the expanded final never duplicates')
+})
+
+test('the Thought component never renders a line wider than the terminal', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(completedTurn(0, 0, 1000))
+  const activity = folder.turnActivity(0)!
+  const running = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
+  const open = new FocusActivityComponent({ activity, expanded: true, now: () => 35000 })
+  for (const width of [12, 20, 40, 80]) {
+    for (const line of [...running.render(width), ...open.render(width)]) {
+      assert.ok(visibleWidth(line) <= width, `line ${JSON.stringify(line)} exceeds width ${width}`)
+    }
+  }
+})
+
+/** projectFocus helper with the focus-mode flag preset. */
+function projectFocusBlocks(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, import('../src/transcript.ts').TurnActivity>,
+  expanded: ReadonlySet<number>,
+): FocusProjectedBlock[] {
+  return projectFocus(messages, activities, expanded, true)
+}
+
 test('collapsed turns never render process rows at all (no Ctrl+O leak)', () => {
   const folder = new TranscriptFolder()
   folder.apply([

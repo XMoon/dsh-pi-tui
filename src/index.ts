@@ -3555,6 +3555,12 @@ export function apply(ctx: Context, config: Config): void {
     // theme query below targets "the active screen" — a query sent while the
     // main screen still owned input would have its reply swallowed by the
     // alt screen's OSC 11 consumer and time out, silently disabling `auto`.
+    // Focus Mode's TUI projection is a persisted visual preference like
+    // Home/End/fullscreen/theme: the app must reflect the RESTORED state
+    // before the first frame — otherwise the system prompt would tell the
+    // model the user cannot see the process while the UI still shows it in
+    // full (review blocker: the two halves of Focus would split).
+    app.setFocusMode(focusState.enabled)
     // Issue #9: the Home/End navigation preset is applied BEFORE the first
     // fullscreen frame so the first frame and later behavior agree (plan
     // §4.8); an invalid persisted value falls back to `viewport`.

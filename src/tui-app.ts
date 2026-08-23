@@ -2885,6 +2885,19 @@ export class TuiApp {
     return projectFocus(this.messages, this.turnActivities, this.focusExpandedTurns, this.focusModeEnabled)
   }
 
+  /** Alt+T's hideThinking filter over one projected block. An EXPANDED
+   * Thought is the user's explicit full-reveal request — thinking stays
+   * visible inside it even when hideThinking is on (plan §15.1: the outer
+   * disclosure IS the reveal). Focus-collapsed turns hide thinking anyway
+   * (their rows are absent), and Focus OFF restores the plain Alt+T
+   * semantics. rebuildMessages and refreshMessageRows SHARE this decision
+   * so the screen and the click map can never drift. */
+  private shouldHideThinkingBlock(block: FocusProjectedBlock): boolean {
+    if (block.kind !== 'message' || block.message.kind !== 'thinking') return false
+    if (this.focusModeEnabled && this.focusExpandedTurns.has(block.message.turn)) return false
+    return this.hideThinking
+  }
+
   /** Get (or rebuild) the FocusActivityComponent for one turn: rebuilds
    * when the activity OBJECT changed (session/viewer switches mint fresh
    * folder objects, so the same turn number from another session can
@@ -2931,8 +2944,7 @@ export class TuiApp {
     // row is charged to the preceding block's height, keeping the fullscreen
     // click hit-testing aligned with the rendered layout.
     const blocks: FocusProjectedBlock[] = [
-      ...this.projectedBlocks().filter(block =>
-        block.kind !== 'message' || !(block.message.kind === 'thinking' && this.hideThinking)),
+      ...this.projectedBlocks().filter(block => !this.shouldHideThinkingBlock(block)),
       ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
     ]
     blocks.forEach((block, index) => {
@@ -3074,8 +3086,7 @@ export class TuiApp {
     const width = this.terminal.columns
     const boundary = this.expandBoundary()
     const blocks: FocusProjectedBlock[] = [
-      ...this.projectedBlocks().filter(block =>
-        block.kind !== 'message' || !(block.message.kind === 'thinking' && this.hideThinking)),
+      ...this.projectedBlocks().filter(block => !this.shouldHideThinkingBlock(block)),
       ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
     ]
     const rows: Array<{
