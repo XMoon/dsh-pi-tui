@@ -4081,7 +4081,12 @@ export function apply(ctx: Context, config: Config): void {
         const row = rows.find(candidate => candidate.value === value)
         if (row === undefined) return
         if (row.kind === 'subagent') {
-          const parentSessionId = liveAgent?.session.id
+          // The viewer target carries the row's OWN parent (plan §6.10:
+          // childId + parentId + depth + mode + activity — never just
+          // childId + mode). A nested row's durable parent is the exact
+          // direct parent recorded by DSH; only a direct child falls back
+          // to the browser root (the live main session).
+          const parentSessionId = row.parentId !== '' ? row.parentId as SessionId : liveAgent?.session.id
           if (parentSessionId === undefined) return
           // The row carries the catalog MODE + activity + DEPTH: the viewer
           // target is pinned to them (continuable → interactive editor only
