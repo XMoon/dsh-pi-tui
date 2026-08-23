@@ -57,6 +57,7 @@ import {
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
 import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
+import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
   firstLine,
@@ -592,11 +593,14 @@ export type OwnedRunner = <T>(
 ) => void
 
 /** The subagent viewer address: the exact direct parent + the child, the
- * catalog mode and the store activity. The mode is the single authority
- * for interactivity — the viewer is interactive ONLY for `continuable`
- * children — and the parent session id pins the follow-up write path (the
- * DSH continuation contract requires the EXACT live direct parent Agent;
- * the UI never guesses the parent from the current live agent). */
+ * catalog mode, the store activity, and the SURFACE authority. The mode
+ * is the child's DURABLE semantic; the access is the CURRENT viewer
+ * authority (plan §6.10) — a depth-1 continuable child is interactive,
+ * everything else is read-only from this surface (a nested descendant
+ * belongs to its exact parent, never to the root). The parent session id
+ * pins the follow-up write path (the DSH continuation contract requires
+ * the EXACT live direct parent Agent; the UI never guesses the parent
+ * from the current live agent). */
 export interface SubagentViewerTarget {
   /** The durable direct-parent session id authorizing the child. */
   readonly parentSessionId: string
@@ -610,6 +614,14 @@ export interface SubagentViewerTarget {
   /** Store snapshot activity (running = live record, inactive = persisted
    * only). Display-only; it is NOT the success/failure of anything. */
   readonly activity: 'running' | 'inactive'
+  /** The viewer's interaction authority (plan §6.10): mode is the durable
+   * semantic, access is what THIS surface may do. `interactive-direct-child`
+   * enables the follow-up editor; `readonly-one-shot` and `readonly-nested`
+   * lock it (the mode is still displayed truthfully — a nested continuable
+   * child is never relabeled one-shot). Absent = derived from the mode
+   * (continuable → interactive-direct-child, one-shot → readonly-one-shot);
+   * a nested row's caller must pass `readonly-nested` explicitly. */
+  readonly access?: ViewerAccess
 }
 
 /** A semantic follow-up submit from the interactive subagent viewer: the
@@ -966,8 +978,12 @@ export interface PickerHandle {
 export interface TaskBrowserHandle {
   /** Close the browser without a selection. */
   close(): void
-  /** Replace the rows while the browser is open; the active query re-applies. */
-  setItems(items: readonly TaskPanelItem[]): void
+  /** Replace the rows while the browser is open; the active query
+   * re-applies. `preferredValue` is the row the cursor should land on when
+   * the user has NOT moved it yet (plan §6.6 — the first running subagent,
+   * else the first active job; the tree itself never re-sorts for the
+   * cursor). */
+  setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
 }
 
 /** Footer status data supplied by the runner. */
@@ -1649,7 +1665,7 @@ export class TuiApp {
       // history: an ↑ recall in the MAIN editor would otherwise resend a
       // child-scoped follow-up to the parent.
       const target = this.viewerMode
-      if (target !== undefined && target.mode === 'continuable') {
+      if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
         this.clearNotify()
         this.events.onSubagentSubmit?.({
           parentSessionId: target.parentSessionId,
@@ -1676,7 +1692,7 @@ export class TuiApp {
       // is up: mirror every change into the per-child slot (the runner's
       // restore and stale guards read the slot, not the live component).
       const viewer = this.viewerMode
-      if (viewer !== undefined && viewer.mode === 'continuable') {
+      if (viewer !== undefined && isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
         this.subagentDrafts.set(viewer.childSessionId, this.seatEditor().getText())
       }
       // P1-11: every HOST-driven editor mutation notifies the seat
@@ -2133,7 +2149,7 @@ export class TuiApp {
     //   session or exit the TUI from inside the child view.
     if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
       const viewer = this.viewerMode
-      if (viewer.mode === 'one-shot') {
+      if (!isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
         if (!matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
           return { consume: true }
         }
@@ -2473,12 +2489,13 @@ export class TuiApp {
     return {
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
-      // The viewer's input mode: 'readonly' locks the editor (one-shot),
-      // 'continuable' keeps it live (the HOST guard already consumed the
-      // parent-owned chords before the router is consulted).
+      // The viewer's input mode: 'readonly' locks the editor (one-shot AND
+      // nested — only an interactive direct child edits), 'continuable'
+      // keeps it live (the HOST guard already consumed the parent-owned
+      // chords before the router is consulted).
       viewerInputMode: this.viewerMode === undefined || this.activeScreen.hasOverlayEntries
         ? 'none'
-        : this.viewerMode.mode === 'one-shot' ? 'readonly' : 'continuable',
+        : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
       hasOverlay: this.activeScreen.hasOverlayEntries,
       searchActive: this.searchOverlay !== undefined,
       editorReplacement: this.seatEditor().handleInput !== undefined,
@@ -3687,7 +3704,7 @@ export class TuiApp {
    */
   setEditorText(text: string): void {
     const target = this.viewerMode
-    if (target !== undefined && target.mode === 'continuable') {
+    if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
       this.seatEditor().setText(text)
       this.editorSeatHolder.notifyChanged()
@@ -3715,7 +3732,7 @@ export class TuiApp {
    */
   insertIntoEditor(text: string): void {
     const target = this.viewerMode
-    if (target !== undefined && target.mode === 'continuable') {
+    if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       const editor = this.seatEditor()
       if (editor.insertTextAtCursor !== undefined) {
         editor.insertTextAtCursor(text)
@@ -3767,7 +3784,7 @@ export class TuiApp {
       // mirrors through onChange). A visible text the map already
       // contains (equal or a substring of the merge) never duplicates —
       // a stale restore's merged text survives an exit exactly once.
-      if (leaving.mode === 'continuable') {
+      if (isViewerAccessInteractive(resolveViewerAccess(leaving.mode, leaving.access))) {
         this.parkSubagentDraft(leaving.childSessionId)
       }
       // M9 (round-2 finding 1): the viewer restore writes the preserved
@@ -3793,7 +3810,7 @@ export class TuiApp {
       // rebuilt from the child content.
       this.localMessages.length = 0
       this.rebuildMessages()
-    } else if (this.viewerMode.mode === 'continuable') {
+    } else if (isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))) {
       // Switching child: park the outgoing child's draft first.
       this.parkSubagentDraft(this.viewerMode.childSessionId)
     }
@@ -3804,14 +3821,14 @@ export class TuiApp {
     // in their own slots).
     const seat = this.seatEditor()
     seat.borderColor = color.accent
-    if (mode.mode === 'continuable') {
+    if (isViewerAccessInteractive(resolveViewerAccess(mode.mode, mode.access))) {
       // The empty-draft placeholder advertises the viewer's OWN verbs
       // (Enter sends to the CHILD — never the parent — Esc returns).
       this.setViewerPlaceholder(`Message ${mode.label}… — Enter send · Esc back`)
       seat.setText(this.subagentDrafts.get(mode.childSessionId) ?? '')
     } else {
       this.clearViewerPlaceholder()
-      seat.setText(`viewing subagent: ${mode.label} — one-shot · read-only · Esc returns`)
+      seat.setText(`viewing subagent: ${mode.label} — ${viewerAccessHint(resolveViewerAccess(mode.mode, mode.access))} · Esc returns`)
     }
     seat.invalidate()
     this.editorSeatHolder.notifyChanged()
@@ -6446,9 +6463,13 @@ export class TuiApp {
     // header wrap even though the badge run fits its own budget). Re-derived
     // on EVERY render so a resize or a title change re-bakes the budget.
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
-    const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent(this.viewerMode.mode === 'one-shot'
-      ? '[viewing subagent · one-shot · read-only]'
-      : '[viewing subagent · continuable]')}`
+    const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent(
+      isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))
+        ? '[viewing subagent · continuable]'
+        : this.viewerMode.access === 'readonly-nested'
+          ? '[viewing subagent · nested · read-only]'
+          : '[viewing subagent · one-shot · read-only]',
+    )}`
     const title = this.viewerMode !== undefined
       ? ` · ${color.textMuted(this.viewerMode.label)}`
       : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
@@ -6589,7 +6610,7 @@ export class TuiApp {
    */
   setDraft(text: string): void {
     const target = this.viewerMode
-    if (target !== undefined && target.mode === 'continuable') {
+    if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
       this.seatEditor().setText(text)
       this.editorSeatHolder.notifyChanged()
@@ -6618,7 +6639,7 @@ export class TuiApp {
   getDraft(): string {
     const target = this.viewerMode
     if (target === undefined) return this.seatEditor().getText()
-    if (target.mode === 'continuable') {
+    if (isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       return this.seatEditor().getText()
     }
     return this.mainDraftBeforeViewer ?? ''
@@ -6648,7 +6669,7 @@ export class TuiApp {
     // exit chord (and its footer hint) must not survive into the next
     // interaction.
     this.clearCtrlCExit()
-    if (target !== undefined && target.mode === 'continuable') {
+    if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       // A plugin action inside an interactive viewer submits to the
       // SUBAGENT (the semantic target of the visible editor), never the
       // parent — and the queue verb is meaningless for the child (its
@@ -7222,8 +7243,8 @@ export class TuiApp {
     }
     return {
       close,
-      setItems: (next: readonly TaskPanelItem[]) => {
-        panel.setItems(next.map(item => ({ ...item })))
+      setItems: (next: readonly TaskPanelItem[], preferredValue?: string) => {
+        panel.setItems(next.map(item => ({ ...item })), preferredValue)
         this.requestRender()
       },
     }

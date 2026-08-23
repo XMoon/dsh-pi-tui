@@ -199,6 +199,38 @@ test('an UNTOUCHED selection follows the enriched list head (the /tasks race)', 
     `untouched selection must follow the preferred head (first running subagent):\n${enriched}`)
 })
 
+test('an UNTOUCHED selection honors an EXPLICIT preferredValue without moving the row (plan §6.6)', () => {
+  // The tree order is immutable — the cursor follows the caller's
+  // preferred row (first running subagent, else first active job), never
+  // a re-sort. Here the preferred value is the SECOND row: a running
+  // grandchild BELOW its inactive parent.
+  const { panel, rendered } = makePanel([
+    { value: 'agent:parent', label: 'subagent · planner', status: 'inactive', group: 'subagents', treePrefix: '├─ ' },
+    { value: 'agent:grand', label: 'subagent · deep', status: 'running', group: 'subagents', treePrefix: '  ├─ ' },
+  ])
+  panel.setItems([
+    { value: 'agent:parent', label: 'subagent · planner', status: 'inactive', group: 'subagents', treePrefix: '├─ ' },
+    { value: 'agent:grand', label: 'subagent · deep', status: 'running', group: 'subagents', treePrefix: '  ├─ ' },
+  ], 'agent:grand')
+  const view = rendered().map(strip).join('\n')
+  assert.ok(view.includes('→ ●   ├─ subagent · deep'), `preferred row must be selected:\n${view}`)
+  // The row ORDER must not have changed (the cursor moved, the tree did
+  // not) — the tree renderer never re-sorts for the cursor.
+  const parentIndex = view.indexOf('subagent · planner')
+  const grandIndex = view.indexOf('subagent · deep')
+  assert.ok(parentIndex >= 0 && grandIndex > parentIndex, `tree order must survive:\n${view}`)
+})
+
+test('treePrefix renders as a fixed connector region before the label', () => {
+  const { panel, rendered } = makePanel([
+    { value: 'agent:child-1', label: 'subagent · research', status: 'running', group: 'subagents', treePrefix: '├─ ' },
+    { value: 'agent:child-2', label: 'subagent · nested', status: 'inactive', group: 'subagents', treePrefix: '  ├─ ' },
+  ])
+  const view = rendered().map(strip).join('\n')
+  assert.ok(view.includes('├─ subagent · research'), `depth-1 connector missing:\n${view}`)
+  assert.ok(view.includes('  ├─ subagent · nested'), `depth-2 connector missing:\n${view}`)
+})
+
 test('a USER-touched selection survives a later enrichment (no focus stealing)', () => {
   const { panel, rendered } = makePanel(
     [typed(runningJob(), 'bash'), typed(doneJob(), 'bash')],

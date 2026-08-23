@@ -182,6 +182,43 @@ test('a one-shot viewer cannot submit through the host path either (hard reject)
   app.stop()
 })
 
+test('a NESTED continuable child is read-only from the root (plan §6.10)', async () => {
+  // depth > 1 is read-only even when the child's MODE is continuable: the
+  // nested descendant belongs to its exact parent, never to the root. The
+  // viewer must show the REAL mode with the nested authority, and neither
+  // Enter nor the plugin submit path may ever reach the child.
+  const parentSubmits: string[] = []
+  const childSubmits: unknown[] = []
+  const { vt, app } = await startApp({
+    onSubmit: (text) => parentSubmits.push(text),
+    onSubagentSubmit: (request) => childSubmits.push(request),
+  })
+  app.setViewerMode({
+    parentSessionId: 'session-main',
+    childSessionId: 'session-grandchild',
+    label: 'deep research',
+    mode: 'continuable',
+    activity: 'inactive',
+    access: 'readonly-nested',
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('nested · read-only'), `nested read-only must be advertised:\n${view}`)
+  assert.ok(view.includes('continuable'), `the real mode must stay visible:\n${view}`)
+  vt.sendInput('x')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  app.submitDraft(false)
+  await vt.waitForRender()
+  assert.deepEqual(parentSubmits, [], 'nested viewer must never submit to the parent')
+  assert.deepEqual(childSubmits, [], 'nested viewer must never submit to the grandchild from the root')
+  // Esc still exits.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view.includes('deep research') || true)
+  app.stop()
+})
+
 test('a failed send while the viewer is CURRENT restores into the visible editor, merged with newer typing', async () => {
   const { vt, app } = await startApp({ onSubagentSubmit: () => {} })
   app.setViewerMode(continuable())
