@@ -22,8 +22,12 @@
  * - acquire (`O_CREAT|O_EXCL`): the first opener wins. The lock file records
  *   the owner's pid, its `/proc/<pid>/stat` starttime (the pid-reuse guard),
  *   the profile, and a human-readable start time.
- * - release: the owner deletes the file on a clean exit or session switch.
- *   Idempotent — a missing file is not an error.
+ * - release: the physical lock file is unlinked ONLY by the lease layer —
+ *   an UNTOUCHED pre-DSH reservation may be released, and a touched session
+ *   is released only by the VERIFIED COOLING release. A clean exit does NOT
+ *   release touched/PINNED locks: they stay as stale records for the next
+ *   opener's stale takeover (idempotent release — a missing file is not an
+ *   error).
  * - stale takeover: a crashed/killed owner leaves the file behind. The next
  *   opener reads it and probes the recorded pid against /proc: a missing
  *   process, a zombie, a reused pid (starttime mismatch) or a different
@@ -32,6 +36,11 @@
  *   process is currently writing". A live, matching owner is a valid lock
  *   even while idle (SIGSTOP, long GC, laptop sleep) — expiring it early
  *   would create the exact double-writer window the lock exists to prevent.
+ *
+ * `unavailable` means this deployment could not establish the low-level lock
+ * (no persistence / no artifact / no lock dir / write error). Writable TUI
+ * callers MUST FAIL CLOSED on it — the divergence guard is a backstop, never
+ * permission to proceed without an owner lock.
  *
  * The lock only guards TUI-vs-TUI opens. A web surface or an older TUI that
  * knows nothing about the lock can still write concurrently; the divergence
@@ -44,6 +53,8 @@
  */
 
 /** The owner record written into the lock file. */
+import { dirname } from 'node:path'
+
 export interface SessionLockInfo {
   /** Owner process id. */
   pid: number
@@ -71,11 +82,19 @@ export interface SessionLockPersistence {
 /** The filesystem surface the lock needs. `writeFileSync` MUST create
  * exclusively (`wx`) — a plain `w` write would silently overwrite another
  * process's lock and the whole exclusion collapses — and must set the mode
- * explicitly (0600), matching the session log's own file mode. */
+ * explicitly (0600), matching the session log's own file mode. `mkdirSync`
+ * and `rmdirSync` are OPTIONAL: when present, a FRESH session's artifact
+ * directory is pre-created so its lock can exist BEFORE the session log is
+ * materialized (review round 7 — otherwise "target-lock-before-create"
+ * silently degenerates to publish-before-lock via `no-lock-dir`), and a
+ * release best-effort-removes the directory once it is empty (a fresh
+ * target that was never materialized leaves no residue). */
 export interface SessionLockFs {
   readFileSync(path: string): string
   writeFileSync(path: string, content: string, options?: { flag?: string; mode?: number }): void
   unlinkSync(path: string): void
+  mkdirSync?(dir: string, options?: { recursive?: boolean; mode?: number }): void
+  rmdirSync?(dir: string): void
 }
 
 /**
@@ -115,42 +134,6 @@ export const LOCK_FILE_NAME = 'owner.lock'
 
 /** How many times the takeover path retries the atomic create on EEXIST. */
 export const TAKEOVER_RETRIES = 2
-
-/** The single-slot lock tracker surface the swap-failure repair reads. */
-export interface LockTracker {
-  readonly sessionId: string
-}
-
-/**
- * Decide the lock repair after an INTERNAL swap failure (flush/dispose/
- * whenIdle throwing inside swapTo), given the single-slot tracker state and
- * the outgoing session id. Pure so the three-shape matrix is headless-testable:
- *
- * - tracker holds `from` itself (/new, /fork — the current lock was never
- *   pre-released): nothing to repair — `from` is still locked by us.
- * - tracker holds the TARGET (switchSession pre-released `from` and acquired
- *   the target before calling swapTo): release the target (we never entered
- *   it) and re-acquire `from` (the current session stays live).
- * - tracker is empty (switchSession's target acquire was `unavailable`):
- *   `from`'s lock was released and never re-taken — re-acquire it.
- */
-export function swapFailureLockRepair(
-  tracker: LockTracker | undefined,
-  from: string | undefined,
-): { release: string | undefined; reacquire: string | undefined } {
-  if (from === undefined) {
-    // No current session to protect; release whatever the tracker holds (a
-    // switchSession target we never entered).
-    return tracker === undefined ? { release: undefined, reacquire: undefined } : { release: tracker.sessionId, reacquire: undefined }
-  }
-  if (tracker === undefined || tracker.sessionId !== from) {
-    // switchSession shape: release the target (when one is tracked), then
-    // re-acquire from.
-    return { release: tracker?.sessionId, reacquire: from }
-  }
-  // /new, /fork shape: the tracker still holds from — nothing to repair.
-  return { release: undefined, reacquire: undefined }
-}
 
 /** A tiny deterministic serializer for the lock record (single-line JSON). */
 export function serializeLockInfo(info: SessionLockInfo): string {
@@ -211,8 +194,9 @@ function tryCreate(
  * Returns `acquired` (with an idempotent `release`), `held` (another live dsh
  * process owns it), `taken-over-stale` (a dead owner's lock was replaced),
  * `unverifiable` (the owner could not be probed — refuse), or `unavailable`
- * (this deployment cannot lock; callers should proceed as before, the guard
- * still protects the write path). Never throws.
+ * (this deployment could not establish the lock — writable TUI callers MUST
+ * fail closed on it; the divergence guard is a backstop, never permission to
+ * proceed). Never throws.
  */
 export function acquireSessionLock(
   deps: { persistence: SessionLockPersistence | undefined; fs: SessionLockFs; proc: SessionLockProc },
@@ -232,6 +216,10 @@ export function acquireSessionLock(
   // create after a removal is a TAKEOVER, not a first open — callers use the
   // distinction for the notice wording.
   let tookOver = false
+  // Whether the fresh-target directory pre-creation was attempted: at most
+  // once, so a persistently-ENOENT filesystem cannot spin the loop forever
+  // (review round 12).
+  let dirPrecreated = false
 
   for (let attempt = 0; ; attempt += 1) {
     // Missing lock file (or a fresh create attempt): try to take ownership.
@@ -243,9 +231,28 @@ export function acquireSessionLock(
     }
     if (created.reason === 'error') {
       // A write failure: ENOENT means the session directory does not exist
-      // yet (lazy session) — no lock possible; anything else is a permission
-      // or IO problem. Either way do not block the open (the guard still
-      // protects the write path).
+      // yet (a FRESH session — the persistence layer materializes the
+      // directory on its first write). With the mkdir capability the lock
+      // is pre-created BEFORE the session exists (review round 7: the
+      // target-lock-before-create rule is only real when the lock can
+      // physically exist ahead of the session). Without it, no lock is
+      // possible — the acquire settles `unavailable` and the writable
+      // TUI caller fails closed on it (the divergence guard is a
+      // backstop, never permission to proceed).
+      if (created.error?.code === 'ENOENT' && fs.mkdirSync !== undefined && !dirPrecreated) {
+        try {
+          fs.mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 })
+          dirPrecreated = true
+          // The directory now exists: retry the atomic create in it. A
+          // concurrent taker may have created the lock meanwhile (EEXIST) —
+          // the loop's exists branch reads and judges it.
+          continue
+        } catch {
+          // The directory could not be created (permission, read-only fs):
+          // no lock possible.
+          return { kind: 'unavailable', reason: 'no-lock-dir' }
+        }
+      }
       return {
         kind: 'unavailable',
         reason: created.error?.code === 'ENOENT' ? 'no-lock-dir' : 'write-error',
@@ -329,6 +336,17 @@ function makeRelease(fs: SessionLockFs, lockPath: string, self: SessionLockInfo)
       const owner = parseLockInfo(fs.readFileSync(lockPath))
       if (owner !== undefined && owner.pid === self.pid && owner.starttime === self.starttime) {
         fs.unlinkSync(lockPath)
+        // A fresh target's directory exists only because THIS lock created
+        // it (the session log was never materialized): remove it once it is
+        // empty so a failed fresh transition leaves no residue. A real
+        // session's directory holds its log — the rmdir fails harmlessly.
+        if (fs.rmdirSync !== undefined) {
+          try {
+            fs.rmdirSync(dirname(lockPath))
+          } catch {
+            // Not empty (a real session log) or not ours: nothing to do.
+          }
+        }
       }
       // A missing file, an unreadable file, or a lock owned by someone else:
       // nothing to do — the session is already openable.

@@ -13,7 +13,6 @@ import {
   lockPathOf,
   parseLockInfo,
   serializeLockInfo,
-  swapFailureLockRepair,
   TAKEOVER_RETRIES,
   type SessionLockFs,
   type SessionLockInfo,
@@ -366,27 +365,72 @@ test('acquire: a flapping lock (repeated read-ENOENT) is bounded, never infinite
   assert.equal(outcome.kind, 'unverifiable')
 })
 
-test('swapFailureLockRepair: /new-/fork shape (tracker holds from) repairs nothing', () => {
-  const repair = swapFailureLockRepair({ sessionId: 'session-a' }, 'session-a')
-  assert.deepEqual(repair, { release: undefined, reacquire: undefined })
+// ── review round 7: a FRESH session's lock exists BEFORE its log ───────────
+
+import { existsSync, mkdirSync as fsMkdirSync, mkdtempSync, rmdirSync as fsRmdirSync, writeFileSync as fsWriteFileSync, readFileSync as fsReadFileSync, unlinkSync as fsUnlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+
+test('review round 7: a fresh session\'s lock is acquired BEFORE its log exists (pre-created dir)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-lock-fresh-'))
+  const id = `session-${randomUUID()}`
+  const sessionDir = join(root, id)
+  const logPath = join(sessionDir, 'session.jsonl.zstd')
+  assert.equal(existsSync(sessionDir), false, 'the fresh session directory must not exist yet')
+  const realFs: SessionLockFs = {
+    readFileSync: (path) => fsReadFileSync(path, 'utf8'),
+    writeFileSync: (path, content, options) => fsWriteFileSync(path, content, options),
+    unlinkSync: (path) => fsUnlinkSync(path),
+    mkdirSync: (dir, options) => fsMkdirSync(dir, options),
+    rmdirSync: (dir) => fsRmdirSync(dir),
+  }
+  const persistence = {
+    locate: () => ({ kind: 'jsonl', path: logPath }),
+  }
+  const first = acquireSessionLock(
+    { persistence, fs: realFs, proc: scriptedProc([]) },
+    { id, header: { cwd: root } },
+    SELF,
+  )
+  assert.equal(first.kind, 'acquired', 'the fresh pre-lock must settle as acquired (review round 7)')
+  assert.equal(existsSync(join(sessionDir, 'session.jsonl.zstd.owner.lock')), true, 'owner.lock exists BEFORE the log')
+  assert.equal(existsSync(logPath), false, 'the session log must NOT exist yet')
+  // Another process cannot grab the published session in the gap: the
+  // pre-created lock refuses it.
+  const second = acquireSessionLock(
+    { persistence, fs: realFs, proc: scriptedProc([{ kind: 'alive' }]) },
+    { id, header: { cwd: root } },
+    OTHER,
+  )
+  assert.equal(second.kind, 'held', 'a second process is refused while the pre-acquired lock is held')
+  // The lock stays continuously owned through the create window.
+  assert.equal(existsSync(join(sessionDir, 'session.jsonl.zstd.owner.lock')), true, 'the lock is never dropped mid-transition')
+  // Simulate a FAILED create: release removes the lock and the empty
+  // pre-created directory (no residue), and the parent root survives.
+  if (first.kind === 'acquired') first.release()
+  assert.equal(existsSync(join(sessionDir, 'session.jsonl.zstd.owner.lock')), false, 'release removes the lock')
+  assert.equal(existsSync(sessionDir), false, 'an empty pre-created fresh dir is removed (best-effort)')
+  assert.equal(existsSync(root), true, 'the parent root is never removed')
+  // Cleanup the temp root.
+  fsRmdirSync(root)
 })
 
-test('swapFailureLockRepair: switchSession shape (tracker holds target) releases target and re-acquires from', () => {
-  const repair = swapFailureLockRepair({ sessionId: 'session-b' }, 'session-a')
-  assert.deepEqual(repair, { release: 'session-b', reacquire: 'session-a' })
-})
-
-test('swapFailureLockRepair: switchSession with unavailable target acquire (tracker empty) re-acquires from', () => {
-  const repair = swapFailureLockRepair(undefined, 'session-a')
-  assert.deepEqual(repair, { release: undefined, reacquire: 'session-a' })
-})
-
-test('swapFailureLockRepair: no current session releases a tracked target and re-acquires nothing', () => {
-  const repair = swapFailureLockRepair({ sessionId: 'session-b' }, undefined)
-  assert.deepEqual(repair, { release: 'session-b', reacquire: undefined })
-})
-
-test('swapFailureLockRepair: no tracker and no current session repairs nothing', () => {
-  const repair = swapFailureLockRepair(undefined, undefined)
-  assert.deepEqual(repair, { release: undefined, reacquire: undefined })
+test('review round 12: a persistently-ENOENT fs with mkdir pre-creation fails ONCE, never loops', () => {
+  const fs = memFs()
+  fs.mkdirSync = () => {}
+  // The fs has the mkdir capability but the directory keeps vanishing (a
+  // racing remover or a stale-ENOENT filesystem): the pre-creation is
+  // attempted at most once and the acquire settles unavailable instead of
+  // spinning forever. Exactly two writes: the original and the post-mkdir
+  // retry — never a third.
+  let writes = 0
+  fs.writeFileSync = ((path: string, content: string, options?: { flag?: string; mode?: number }) => {
+    writes += 1
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  }) as never
+  const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
+  assert.equal(outcome.kind, 'unavailable')
+  assert.equal((outcome as { kind: 'unavailable'; reason: string }).reason, 'no-lock-dir')
+  assert.equal(writes, 2, 'the create retry happens exactly once after the pre-creation — never an unbounded loop')
 })

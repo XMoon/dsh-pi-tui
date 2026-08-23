@@ -166,3 +166,18 @@ test('localShellSandboxPreferenceOf defaults to bypass and honors only sandbox',
   assert.equal(localShellSandboxPreferenceOf({ localShellSandbox: 'sandbox' }), 'sandbox')
   assert.equal(localShellSandboxPreferenceOf({ localShellSandbox: 'something-else' }), 'bypass')
 })
+
+// ── review round 4: the session-transition write fence ─────────────────────
+
+test('the transition fence refuses the shell followup (output stays on the card)', async () => {
+  const agent = fakeAgent()
+  const { deps, notices, cleared } = makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) })
+  deps.fence = () => true
+  deps.fenceNotice = () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles'
+  const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
+  assert.equal(outcome, 'stale')
+  assert.equal(agent.followed.length, 0, 'no followup may reach the old agent while a transition is in flight')
+  assert.equal(cleared.count, 0, 'the card stays (the output is not lost)')
+  assert.equal(notices.at(-1)?.kind, 'info')
+  assert.ok(notices.at(-1)!.message.includes('transition is in progress'))
+})

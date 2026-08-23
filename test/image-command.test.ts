@@ -76,7 +76,10 @@ function setup(): {
     get sessionGeneration() { return 1 },
     compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
-    swapTo: async () => undefined,
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
@@ -88,6 +91,10 @@ function setup(): {
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

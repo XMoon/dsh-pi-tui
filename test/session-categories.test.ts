@@ -15,6 +15,7 @@ import {
   buildSessionTree,
   headerToPickerRow,
   sessionPickerItem,
+  type SessionPickerItem,
   type SessionPickerRow,
 } from '../src/sessions.ts'
 import { sessionPickerCategories } from '../src/commands.ts'
@@ -30,24 +31,131 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; picked: string[] } {
   return { vt, app, picked }
 }
 
-test('buildSessionTree hangs subagents under their parent chain', () => {
+test('buildSessionTree hangs every parentSession row under its parent chain', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-root-1', createdAt: 5, live: false },
     { id: 'session-child-1', createdAt: 4, origin: 'subagent', parentSession: 'session-root-1', live: false },
     { id: 'session-root-2', createdAt: 3, live: false },
     { id: 'session-grandchild', createdAt: 2, origin: 'subagent', parentSession: 'session-child-1', live: false },
-    { id: 'session-orphan', createdAt: 1, origin: 'subagent', live: false },
+    // A subagent WITHOUT a parentSession is a root now: `parentSession`
+    // decides the hierarchy, `origin` only the badge (plan §20).
+    { id: 'session-unparented', createdAt: 1, origin: 'subagent', live: false },
   ]
   const tree = buildSessionTree(rows)
   const byId = new Map(tree.map(entry => [entry.row.id, entry.depth]))
   assert.equal(byId.get('session-root-1'), 0, 'roots sit at depth 0')
   assert.equal(byId.get('session-child-1'), 1, 'direct children hang one level down')
   assert.equal(byId.get('session-grandchild'), 2, 'the chain continues deeper')
-  assert.equal(byId.get('session-orphan'), 1, 'orphan subagents sit at depth 1')
+  assert.equal(byId.get('session-unparented'), 0, 'a row without parentSession is a root')
   // Input (newest-first) order preserved per level: root-2 precedes its
   // sibling subtree only if it came first in the input.
   assert.equal(tree[0]!.row.id, 'session-root-1')
   assert.equal(tree[1]!.row.id, 'session-child-1', 'children follow their root immediately')
+})
+
+// ── session lineage (plan §20): /fork + rewind children in the tree ───────
+
+test('S01: a plain /fork child hangs under its parent', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-parent', createdAt: 4, live: false },
+    { id: 'session-fork', createdAt: 3, parentSession: 'session-parent', live: false },
+  ]
+  const tree = buildSessionTree(rows)
+  assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
+    ['session-parent', 0],
+    ['session-fork', 1],
+  ])
+})
+
+test('S02: a rewind-of-rewind chain nests deeper', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-parent', createdAt: 5, live: false },
+    { id: 'session-child1', createdAt: 4, parentSession: 'session-parent', live: false },
+    { id: 'session-child2', createdAt: 3, parentSession: 'session-child1', live: false },
+  ]
+  const tree = buildSessionTree(rows)
+  assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
+    ['session-parent', 0],
+    ['session-child1', 1],
+    ['session-child2', 2],
+  ])
+})
+
+test('S03: a subagent still hangs under its parent', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-parent', createdAt: 4, live: false },
+    { id: 'session-sub', createdAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
+  ]
+  const tree = buildSessionTree(rows)
+  assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
+    ['session-parent', 0],
+    ['session-sub', 1],
+  ])
+})
+
+test('S04: fork and subagent siblings keep the input order', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-parent', createdAt: 5, live: false },
+    { id: 'session-fork', createdAt: 4, parentSession: 'session-parent', live: false },
+    { id: 'session-sub', createdAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
+    { id: 'session-parent2', createdAt: 2, live: false },
+    { id: 'session-fork2', createdAt: 1, parentSession: 'session-parent2', live: false },
+  ]
+  const tree = buildSessionTree(rows)
+  assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
+    ['session-parent', 0],
+    ['session-fork', 1],
+    ['session-sub', 1],
+    ['session-parent2', 0],
+    ['session-fork2', 1],
+  ])
+})
+
+test('S05: an orphan child (parent outside the window) sits at depth 1', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-orphan-fork', createdAt: 3, parentSession: 'session-missing', live: false },
+    { id: 'session-root', createdAt: 2, live: false },
+    { id: 'session-orphan-sub', createdAt: 1, origin: 'subagent', parentSession: 'session-missing', live: false },
+  ]
+  const tree = buildSessionTree(rows)
+  const byId = new Map(tree.map(entry => [entry.row.id, entry.depth]))
+  assert.equal(byId.get('session-root'), 0)
+  assert.equal(byId.get('session-orphan-fork'), 1, 'orphan fork children must not be lost')
+  assert.equal(byId.get('session-orphan-sub'), 1, 'orphan subagents stay at depth 1')
+})
+
+test('S06: parent cycles never loop and each row appears once', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-a', createdAt: 3, parentSession: 'session-b', live: false },
+    { id: 'session-b', createdAt: 2, parentSession: 'session-a', live: false },
+    { id: 'session-self', createdAt: 1, parentSession: 'session-self', live: false },
+  ]
+  const tree = buildSessionTree(rows)
+  const ids = tree.map(entry => entry.row.id)
+  assert.equal(new Set(ids).size, ids.length, 'no row may be output twice')
+  assert.ok(!ids.some(id => ids.filter(candidate => candidate === id).length > 1), 'cycle rows must not repeat')
+})
+
+test('the All category indents fork children under their parent (plan §20)', () => {
+  const plainItem = (row: SessionPickerRow, indent = 0): { value: string; label: string; description: string; group: string } =>
+    sessionPickerItem(row, '', indent)
+  const categories = sessionPickerCategories(
+    [
+      { id: 'session-parent', createdAt: 4, cwd: '/ws', live: false },
+      { id: 'session-fork', createdAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
+      { id: 'session-other', createdAt: 2, cwd: '/ws', live: false },
+    ],
+    '/ws',
+    'sessions',
+    plainItem,
+  )
+  const all = categories[1]!.items()
+  const parent = all.find(item => item.value === 'session-parent')
+  const fork = all.find(item => item.value === 'session-fork')
+  assert.ok(parent !== undefined && !parent.label.includes('└─'), 'the root row stays flat')
+  assert.ok(fork !== undefined, 'fork child must be listed')
+  assert.ok(fork!.label.startsWith('  └─ '), `fork child must be indented:\n${fork!.label}`)
+  assert.ok(fork!.description !== undefined && fork!.description.includes('fork'), 'the fork badge stays on the indented row')
 })
 
 // ── the Current directory / All directories scopes (plan item 3) ──────────
@@ -89,6 +197,30 @@ test('sessionPickerCategories treats a trailing-slash cwd as the same workspace'
   const currentIds = categories[0]!.items().map(row => row.value).sort()
   assert.deepEqual(currentIds, ['session-current-1', 'session-current-2'],
     `/ws/project-a/ scopes the same sessions as /ws/project-a:\n${JSON.stringify(currentIds)}`)
+})
+
+test('the Current category indents fork children in the current workspace', () => {
+  const treeItem = (row: SessionPickerRow, indent = 0): SessionPickerItem => sessionPickerItem(row, '', indent)
+  const categories = sessionPickerCategories(
+    [
+      { id: 'session-parent', createdAt: 4, cwd: '/ws', live: false },
+      { id: 'session-fork', createdAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
+      { id: 'session-other-cwd', createdAt: 2, cwd: '/other', parentSession: 'session-parent', live: false },
+      { id: 'session-orphan', createdAt: 1, cwd: '/ws', parentSession: 'session-missing', live: false },
+    ],
+    '/ws',
+    'sessions',
+    treeItem,
+  )
+  const current = categories[0]!.items()
+  const parent = current.find(item => item.value === 'session-parent')
+  const fork = current.find(item => item.value === 'session-fork')
+  const otherCwd = current.find(item => item.value === 'session-other-cwd')
+  const orphan = current.find(item => item.value === 'session-orphan')
+  assert.ok(parent !== undefined && !parent.label.includes('└─'), 'the workspace root stays flat')
+  assert.ok(fork !== undefined && fork.label.startsWith('  └─ '), `a fork child in the current workspace must be indented:\n${fork!.label}`)
+  assert.equal(otherCwd, undefined, 'a child in ANOTHER workspace is out of the Current scope')
+  assert.ok(orphan !== undefined && orphan!.label.startsWith('  └─ '), 'an orphan (parent outside the workspace/window) sits at depth 1, never lost')
 })
 
 test('sessionPickerItem indents subagent rows in the All category', () => {

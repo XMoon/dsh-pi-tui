@@ -1,0 +1,94 @@
+/**
+ * Tests for the multi-slot open-lock holder (src/open-locks.ts): a session
+ * transition may hold the OLD and the TARGET lock at once — the old lock is
+ * never released before the target is acquired (review round 5: the old
+ * release-first order opened a vacuum window where another process could
+ * take the old session while a switch was still failing; a failed re-acquire
+ * then left the current session live WITHOUT its lock).
+ * @module @xmoon76/dsh-pi-tui/open-locks.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { OpenLockHolder } from '../src/open-locks.ts'
+
+test('a transition holds the OLD and the TARGET lock at once', () => {
+  const holder = new OpenLockHolder()
+  const released: string[] = []
+  holder.add('session-a', () => { released.push('session-a') })
+  // The target is acquired while the old lock is still held — the handoff
+  // order that closes the vacuum window.
+  assert.equal(holder.add('session-b', () => { released.push('session-b') }), true)
+  assert.equal(holder.size, 2)
+  assert.equal(holder.has('session-a'), true)
+  assert.equal(holder.has('session-b'), true)
+  // Commit: the old lock is released, the target stays.
+  holder.release('session-a')
+  assert.deepEqual(released, ['session-a'])
+  assert.equal(holder.has('session-a'), false)
+  assert.equal(holder.has('session-b'), true)
+  holder.release('session-b')
+  assert.deepEqual(released, ['session-a', 'session-b'])
+  assert.equal(holder.size, 0)
+})
+
+test('adding an already-held session is an idempotent no-op (the first release wins)', () => {
+  const holder = new OpenLockHolder()
+  const released: string[] = []
+  holder.add('session-a', () => { released.push('first') })
+  assert.equal(holder.add('session-a', () => { released.push('second') }), false)
+  assert.equal(holder.size, 1)
+  holder.release('session-a')
+  assert.deepEqual(released, ['first'], 'the FIRST release must win — a re-acquire never overwrites')
+})
+
+test('releasing an unknown session is a no-op', () => {
+  const holder = new OpenLockHolder()
+  holder.release('session-nope')
+  assert.equal(holder.size, 0)
+})
+
+test('releaseAllForTests drops every recorded lock (test-only helper; a transition may hold two)', () => {
+  const holder = new OpenLockHolder()
+  const released: string[] = []
+  holder.add('session-a', () => { released.push('session-a') })
+  holder.add('session-b', () => { released.push('session-b') })
+  holder.releaseAllForTests()
+  assert.deepEqual(released.sort(), ['session-a', 'session-b'])
+  assert.equal(holder.size, 0)
+  assert.equal(holder.has('session-a'), false)
+  // releaseAllForTests is idempotent.
+  holder.releaseAllForTests()
+  assert.deepEqual(released.sort(), ['session-a', 'session-b'])
+})
+
+// ── review round 7: failed-switch release must never touch the current lock ─
+
+test('a failed switch releases ONLY the newly acquired target lock (current lock survives)', () => {
+  const holder = new OpenLockHolder()
+  const released: string[] = []
+  holder.add('session-a', () => { released.push('session-a') })
+  // The switch acquires the target while still holding the current lock.
+  const targetLocked = holder.add('session-b', () => { released.push('session-b') })
+  assert.equal(targetLocked, true, 'the target is a NEW acquisition')
+  // Resume fails: release the target only when THIS switch acquired it.
+  if (targetLocked) holder.release('session-b')
+  assert.deepEqual(released, ['session-b'])
+  assert.equal(holder.has('session-a'), true, 'the current session keeps its lock')
+  assert.equal(holder.has('session-b'), false)
+})
+
+test('a same-session acquire is idempotent — the failure branch must not release the current lock', () => {
+  const holder = new OpenLockHolder()
+  const released: string[] = []
+  holder.add('session-a', () => { released.push('session-a') })
+  // A switch whose target IS the current session: the idempotent acquire
+  // records NO new lock...
+  const targetLocked = holder.add('session-a', () => { released.push('dup') })
+  assert.equal(targetLocked, false, 'nothing new was acquired')
+  // ...so the failure branch (release only when targetLocked) is a no-op
+  // and the current session's lock survives.
+  if (targetLocked) holder.release('session-a')
+  assert.deepEqual(released, [], 'the current lock must never be released by a same-session switch failure')
+  assert.equal(holder.has('session-a'), true)
+})

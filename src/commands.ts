@@ -20,10 +20,13 @@ import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor } from '@deepseek-ai/dsh-commands'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import { TransitionInProgressError } from './session-operation-barrier.ts'
+import { createForkedAgent } from './session-fork.ts'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
@@ -43,6 +46,7 @@ import {
   MAX_PICKER_SESSIONS,
   TITLE_BATCH_SIZE,
   TITLE_FIRST_BATCH,
+  buildSessionTree,
   findSessionMatch,
   headerToPickerRow,
   loadSessionTitleBatch,
@@ -137,15 +141,23 @@ export function sessionPickerCategories(
       id: 'current',
       label: 'Current directory',
       header: `${header} · Current directory`,
-      items: () => mainRows
-        .filter(row => sameWorkspace(row.cwd, currentCwd))
-        .map(row => itemFor(row)),
+      // The same lineage tree as "All directories", built over the CURRENT
+      // workspace's subset: a fork/rewind branch whose parent lives in
+      // another workspace (or outside the window) is an orphan at depth 1 —
+      // never lost, never mis-nested under an unrelated root.
+      items: () => buildSessionTree(
+        mainRows.filter(row => sameWorkspace(row.cwd, currentCwd)),
+      ).map(entry => itemFor(entry.row, entry.depth)),
     },
     {
       id: 'all',
       label: 'All directories',
       header: `${header} · All directories`,
-      items: () => mainRows.map(row => itemFor(row)),
+      // The lineage tree (plan §20): fork/rewind children and subagents
+      // hang under their parentSession chain with a └─ prefix — never flat
+      // roots. Orphans sit at depth 1; the tree's `placed` guard keeps
+      // corrupt metadata from looping.
+      items: () => buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth)),
     },
   ]
 }
@@ -219,6 +231,13 @@ export interface AgentsLike {
     // handle detaches from it on publication.
     signal?: AbortSignal
   }): Promise<AgentHandle>
+  /** Resume a session (the ordinary open path; a rejection is never
+   * retried — see the sticky-quarantine rule in the runner). */
+  resume(options: {
+    resumeSessionId: SessionId
+    agentOptions: { provider?: string; model?: string }
+    setup: (agentCtx: Context) => Promise<void> | void
+  }): Promise<AgentHandle>
 }
 
 /** Everything the TUI-owned commands read from the runner. */
@@ -285,7 +304,29 @@ export interface TuiCommandRunner {
   readonly sessionGeneration: number
   compose(presetId?: string): Promise<{ agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }>
   switchSession(sessionId: string): Promise<string | undefined>
-  swapTo(next: AgentHandle): Promise<string | undefined>
+  /**
+   * The unified session-transition transaction: the old session is flushed
+   * BEFORE the child is created, the commit is a synchronous critical
+   * section, and once `create` succeeds the child is published — there is
+   * NO failure path afterwards that may be interpreted as "the child never
+   * happened" (dsh has no durable rollback; `dispose()` stops an agent but
+   * never deletes a persisted session). Callers create their child INSIDE
+   * this transaction and must run it inside {@link withSessionTransition}.
+   */
+  transitionTo<T extends AgentHandle>(steps: {
+    /** The child's PRE-GENERATED session identity (MANDATORY): the
+     * transaction reserves its lease BEFORE the DSH call (while the old
+     * lock is still held), so a refusal aborts with zero child side
+     * effects; a create/resume rejection is NEVER retried (no same-ID
+     * recovery) — once the DSH boundary is crossed, the target is PINNED
+     * immediately and stays locked for this process's lifetime. */
+    target: { id: string; header?: { cwd?: string } }
+    /** Whether the target is a FRESH session: the target lock must settle
+     * as acquired, or the transaction aborts before the create. */
+    fresh?: boolean
+    prepare?: () => Promise<void> | void
+    create: () => Promise<T>
+  }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
   /** The preset chosen with /preset while no session exists yet; the next
@@ -325,6 +366,41 @@ export interface TuiCommandRunner {
    * `/tasks` (and its `subagents` alias) — identical to the ↓ trigger.
    */
   openTasksBrowser(): void
+  /**
+   * Open the conversation rewind picker (plan: the ONE entry shared by the
+   * idle empty-editor double-Esc and `/rewind`). The runner decides what
+   * rewind means: it lists the completed user turns, and a selection forks
+   * a child session before the chosen turn and restores its prompt into
+   * the editor. Sessionless it degrades to a notify — it never creates a
+   * session just to be rewound.
+   */
+  openRewindPicker(): void
+  /**
+   * The session-transition write fence: true while a session transition is
+   * in flight (quiesce → commit). Agent-write entry points (plain submits,
+   * steers, skill invocations, shell submits) check it right before the
+   * write and refuse — the old agent may be woken again between whenIdle
+   * and the lock handover, so a write in that window would target a
+   * session whose lock is about to be released.
+   */
+  sessionTransitionPending(): boolean
+  /**
+   * Run one session-transition workflow exclusively through the
+   * process-local single-writer gate: /new, /fork and /rewind must create
+   * their child AND swap inside ONE exclusive section, so a transition can
+   * never interleave with another — no mixed-parent child (cwd captured
+   * across a concurrent switch), no stale commit after a switch, no ghost
+   * child published to persistence once the surface moved. Re-entering the
+   * gate from inside a task is refused loudly (it would deadlock).
+   */
+  withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
+  /**
+   * Run one TUI-owned session write inside the session operation barrier
+   * (convergence plan phase 3): a transition started while this write
+   * awaits drains it first; a write entering during a transition throws
+   * TransitionInProgressError (the caller refuses with the fence UX).
+   */
+  withSessionWriter<T>(sessionId: string, task: () => Promise<T> | T): Promise<T>
   /**
    * Enter the subagent viewer for one child session: the target carries
    * the catalog MODE (continuable = interactive editor, one-shot =
@@ -1645,10 +1721,41 @@ export function registerTuiCommands(
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
+      // The session-transition write fence (review round 5): while a
+      // transition is in flight the old agent may be woken again — a steer
+      // in that window would target a session whose lock is about to be
+      // released. Refuse WITHOUT injecting the body; the invocation line is
+      // restored to the editor (nothing is lost) and the user retries after
+      // the transition settles.
+      if (runner.sessionTransitionPending()) {
+        const merged = mergeDraft(app.getDraft(), line)
+        app.setEditorText(merged)
+        return { kind: 'error', text: merged === line
+          ? 'a session transition is in progress — try again in a moment'
+          : 'the draft changed while transitioning — review it before submitting again' }
+      }
+      // The invocation's own write runs inside the operation barrier
+      // (convergence plan phase 3): a transition started while the draft
+      // prepared drains it first; a transition already running refuses the
+      // write with the standard fence UX (the check above is the quick
+      // path, this is the authoritative one).
+      try {
+        await runner.withSessionWriter(agent.session.id, async () => {
+          agent.steer(userMessage)
+        })
+      } catch (error) {
+        if (error instanceof TransitionInProgressError) {
+          const merged = mergeDraft(app.getDraft(), line)
+          app.setEditorText(merged)
+          return { kind: 'error', text: merged === line
+            ? 'a session transition is in progress — try again in a moment'
+            : 'the draft changed while transitioning — review it before submitting again' }
+        }
+        throw error
+      }
       // The invocation COMMITTED: consume the image drafts it referenced
       // (the prepared message holds the durable refs now; a concurrent
       // intake's newer draft survives — review finding).
-      agent.steer(userMessage)
       consumeDraftImages(line, runner.imageStore)
     } finally {
       // The pin releases on EVERY exit — including a synchronous steer
@@ -2036,32 +2143,41 @@ export function registerTuiCommands(
   commands.register({
     name: 'new',
     description: 'Start a fresh session in this workspace',
-    handler: async () => {
-      const liveAgent = runner.liveAgent
+    handler: () => runner.withSessionTransition(async () => {
+      // The unified transaction: the old session is flushed BEFORE the
+      // fresh session is created, the child's lock is acquired BEFORE the
+      // create publishes it (pre-generated id — review round 6), the commit
+      // is synchronous, and a failure anywhere before the create leaves
+      // the current session untouched (no published child to roll back).
+      const sessionId = SessionId(`session-${randomUUID()}`)
+      // The composition and agent options are resolved ONCE and ride the
+      // create (a rejected create is NEVER retried — the first DSH call
+      // may have left a hidden lifecycle, so the target is PINNED
+      // immediately).
       const composition = await runner.compose(runner.pendingPreset)
-      const presetId = composition.agentPreset
-      const next = await runner.agents.create({
-        sessionId: SessionId(`session-${randomUUID()}`),
-        meta: metaOf(cwd, presetId),
-        // Before the first session the process-wide selection stands in.
-        agentOptions: {
-          provider: liveAgent?.options.provider ?? runner.selected.current?.provider,
-          model: liveAgent?.options.model ?? runner.selected.current?.model,
-        },
-        setup: composition.setup,
-      })
-      const error = await runner.swapTo(next)
-      if (error !== undefined) {
-        app.notify(error, 'error')
-        return { kind: 'error', text: error }
+      const newOptions = {
+        provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
+        model: runner.liveAgent?.options.model ?? runner.selected.current?.model,
       }
-      // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
-      // the UNPINNED ones now, never before (a failed create/swap keeps
+      const result = await runner.transitionTo({
+        target: { id: String(sessionId), header: { cwd } },
+        fresh: true,
+        create: () => runner.agents.create({
+          sessionId,
+          meta: metaOf(cwd, composition.agentPreset),
+          // Before the first session the process-wide selection stands in.
+          agentOptions: newOptions,
+          setup: composition.setup,
+        }),
+      })
+      if (!result.ok) return { kind: 'error', text: result.message }
+      // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
+      // drop the UNPINNED ones now, never before (a failed create keeps
       // the current session and its drafts intact; in-flight submissions
       // keep their pinned drafts — review finding 2).
       runner.imageStore.clearUnpinned()
       return { kind: 'success', text: 'started a fresh session' }
-    },
+    }),
   })
 
   registerTuiCommand({
@@ -2180,8 +2296,13 @@ export function registerTuiCommands(
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
           return { kind: 'pending', preset: resolved.id }
         }
-        const outcome = await runner.recomposeBlank(id)
-        if (outcome.kind === 'locked') return { kind: 'locked', sessionId: liveAgent.session.id }
+        // The live-session preset swap runs INSIDE the session-transition
+        // gate (review round 27): recompose + the agent-preset/selected
+        // append must never interleave with a concurrent /new, /fork,
+        // rewind or switch — inside the gate the captured agent cannot be
+        // quiesced or have its lock released mid-append.
+        const outcome = await runner.withSessionTransition(() => runner.recomposeBlank(id))
+        if (outcome.kind === 'locked') return { kind: 'locked', sessionId: runner.liveAgent!.session.id }
         // The still-blank session's agent layer changed: refresh the live
         // catalog for the SAME owner (no transition — the old scoped
         // previews are being replaced by the new composition's).
@@ -2501,35 +2622,49 @@ export function registerTuiCommands(
   commands.register({
     name: 'fork',
     description: 'Fork this session at the last completed turn',
-    handler: async () => {
-      const liveAgent = runner.liveAgent
-      const seed = liveAgent === undefined ? undefined : forkSeed(liveAgent.session.events)
-      if (seed === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
-      // The child inherits the parent's recorded preset (official fork
-      // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
-      const composition = await runner.compose(resolveSessionPreset(liveAgent!.session))
-      const presetId = composition.agentPreset
-      const next = await runner.agents.create({
-        sessionId: SessionId(`session-${randomUUID()}`),
-        meta: { ...metaOf(cwd, presetId), parentSession: liveAgent!.session.id, seedLength: seed.length },
-        agentOptions: { provider: liveAgent!.options.provider, model: liveAgent!.options.model },
-        setup: composition.setup,
-        seed,
+    handler: () => runner.withSessionTransition(async () => {
+      const source = runner.liveAgent
+      const seed = source === undefined ? undefined : forkSeed(source.session.events)
+      if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
+      // Shared child creation with rewind (plan §6.2): preset inheritance,
+      // live session cwd, provider/model inheritance, parentSession +
+      // seedLength metadata — one chain, no drift between the two surfaces.
+      // The child's id is PRE-GENERATED so the transaction acquires its
+      // open lock BEFORE the create publishes it (review round 6); the
+      // create runs inside the unified transaction, and a failure before
+      // the create leaves nothing behind (no published child, no ghost,
+      // no rollback attempt).
+      const sessionId = SessionId(`session-${randomUUID()}`)
+      const childCwd = source.session.header.cwd || runner.sessionCwd()
+      // The composition is resolved ONCE and rides the create (a rejected
+      // create is NEVER retried — the first DSH call may have left a
+      // hidden lifecycle, so the target is PINNED immediately).
+      const composition = await runner.compose(resolveSessionPreset(source.session))
+      const forkOptions = { provider: source.options.provider, model: source.options.model }
+      const result = await runner.transitionTo({
+        target: { id: String(sessionId), header: { cwd: childCwd } },
+        fresh: true,
+        create: () => createForkedAgent(runner, source, seed, sessionId, composition),
       })
-      const error = await runner.swapTo(next)
-      if (error !== undefined) {
-        // A failed swap keeps the CURRENT session: report the failure and
-        // never claim success (review finding 6 — same lifecycle rule as
-        // /new).
-        app.notify(error, 'error')
-        return { kind: 'error', text: error }
-      }
-      // The swap COMMITTED: staged drafts are per-TUI-run UI state — drop
-      // the UNPINNED ones now (durable attachments are untouched, plan
+      if (!result.ok) return { kind: 'error', text: result.message }
+      // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
+      // drop the UNPINNED ones now (durable attachments are untouched, plan
       // §14; in-flight submissions keep their pinned drafts — review
       // finding 2).
       runner.imageStore.clearUnpinned()
-      return { kind: 'success', text: `forked as ${next.agent.session.id}` }
+      return { kind: 'success', text: `forked as ${result.next.agent.session.id}` }
+    }),
+  })
+
+  commands.register({
+    name: 'rewind',
+    description: 'Fork this conversation from an earlier user turn (the workspace is not reverted)',
+    handler: () => {
+      // The SAME surface as the idle empty-editor double-Esc — one
+      // implementation, two entries (plan §22). Sessionless it notifies
+      // "no conversation to rewind" and never creates a session.
+      runner.openRewindPicker()
+      return { kind: 'success' }
     },
   })
 
@@ -2760,7 +2895,7 @@ export function registerTuiCommands(
       const rows: SettingItem[] = [        { id: 'k-enter', label: 'Enter', description: 'Submit (steers the running turn while busy when Enter while busy is Steer; skill commands steer too, UI commands run locally)', currentValue: '' },
         { id: 'k-queue', label: 'Ctrl+Enter', description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
         { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
-        { id: 'k-cancel', label: 'Esc', description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle)', currentValue: '' },
+        { id: 'k-cancel', label: 'Esc', description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
         { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool output and thinking', currentValue: '' },
         { id: 'k-todo', label: 'Ctrl+T', description: 'Toggle the todo panel', currentValue: '' },
         { id: 'k-think', label: 'Alt+T', description: 'Hide/show thinking blocks', currentValue: '' },

@@ -63,6 +63,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cursor also lands on the first *running* subagent when the browser
   opens, instead of staying stuck on the first job while the subagent
   catalog loads in the background.
+- **Pi-style conversation rewind: `Esc Esc` (or `/rewind`) forks the
+  conversation from an earlier user turn.** With an empty editor and the
+  agent idle, a fast second Esc opens a picker of the session's completed
+  user prompts (newest first, one row per turn, searchable). Choosing one
+  creates a new child session whose history ends right before that turn
+  (`parentSession` + `seedLength` recorded), swaps to it, and restores the
+  selected prompt into the editor for editing — nothing is sent
+  automatically. The original session is never modified, truncated or
+  deleted and stays reachable through `/sessions`, whose picker now renders
+  the full lineage tree in BOTH scopes — fork children, rewind branches and
+  subagents hang under their parent with a `└─` prefix (in the
+  Current-directory scope, a branch whose parent lives in another workspace
+  is shown as a depth-1 orphan, never lost). Rewind is a conversation
+  operation only: workspace and external side effects are never reverted,
+  historic image attachments are not re-staged (the picker marks
+  multimodal prompts and the restore warns), and a busy single Esc still
+  cancels — only an idle empty-editor double-Esc opens the picker.
+- **`/fork` and `/rewind` share one fork chain.** Both create their child
+  session through the same code path (recorded-preset resolution →
+  composition → agent creation with `parentSession`/`seedLength`), so
+  preset, provider/model and cwd inheritance can never drift between the
+  two surfaces; `/fork` now uses the live session's cwd instead of the
+  launch-time value.
 
 ### Changed
 
@@ -84,6 +107,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keys you would expect.
 
 ### Fixed
+
+- **Session transitions are now a single-writer transaction.** `/new`,
+  `/fork`, `/rewind` and `/sessions` switches all run through one unified
+  transaction (`transitionTo`, ordered in `src/transition.ts`): the OLD
+  agent is QUIESCED first (`whenIdle` — a transition while the agent is
+  busy now waits for the current activity instead of aborting it), its
+  final flush runs with the old lock still held, the child is
+  created/resumed next, the COMMIT (a synchronous critical section with
+  NO lock changes: guard reset, live replacement and generation bump)
+  happens, and the old-handle teardown after it is best-effort. Three consequences
+  close the review blockers: (1) two transitions can never interleave —
+  a stale-identity check can no longer pass and then yield across an
+  await while a concurrent transition lands and later gets overwritten;
+  (2) once the child is created it is never "rolled back" — `dispose()`
+  stops an agent but never deletes a persisted session, so a failed
+  flush after the create could no longer leave a durable ghost branch;
+  (3) the old session's open lock is only released after the old agent
+  has quiesced — a cancelled RUNNING turn appends its closure events in
+  finally blocks, and releasing the lock earlier would let another dsh
+  process resume the session while those closures are still being
+  written (the two-writers seq collision the lock exists to prevent).
+  Writes are fenced while the transition is in flight: `whenIdle()` is an
+  instant, not a freeze, so every submission path (plain submit, busy-Enter
+  steer, Ctrl+S, the command fallback, the `!` shell submit AND the
+  per-skill slash invocations) refuses to write the old agent during
+  quiesce → commit — the draft or the skill invocation line is restored
+  and the user is told a session transition is in progress.
+  The open-lock holder is multi-slot (`src/open-locks.ts`): a switch
+  acquires the TARGET while still holding the OLD lock. The old lock is
+  NEVER released inside the COMMIT (no lock changes happen there) — it
+  is released only by the verified cooling release after the old
+  handle's dispose + detach gate + durable parity; a refused or failed
+  switch leaves the current session live WITH its lock (the old
+  release-first order opened a vacuum window where another process could
+  take the old session mid-switch, and a failed re-acquire then left two
+  processes holding one session). A same-session switch is refused up
+  front, and the failure branches release the target lock only when this
+  switch actually acquired it — a failed switch can never drop the
+  current session's lock through a target id. The target-lock-before-
+  create rule now covers EVERY transition: /new, /fork and rewind
+  pre-generate the child's session id and acquire its open lock BEFORE
+  the create publishes it (a refusal aborts with zero child side
+  effects; a create failure PINNS the target — it is never released, and
+  a rejected create/resume is NEVER retried) — no transition
+  can publish a child whose lock it does not already hold. The fresh
+  pre-lock is PHYSICAL: the lock layer pre-creates the session artifact
+  directory so owner.lock exists before the log is materialized (a
+  fresh acquire that settles `unavailable` aborts the transition — the
+  old `string | undefined` result conflated "locked" with "cannot
+  lock"), and releasing a lock on an empty pre-created directory
+  removes it (no residue).
+  Failures happen only BEFORE the create: a stale rewind selection
+  never creates a child at all, and a failed quiesce/flush/create leaves
+  the current session untouched. `/new` and `/fork` dispose nothing "on
+  failure" anymore — there is nothing to dispose, because nothing was
+  published. The fork cwd is captured from the source session before the
+  first await (parent=A cwd=B mixes are impossible). The whole ownership model was then
+  converged (the rewind_ref plan): the publication-phase inference
+  (durable/unknown taxonomy) is GONE — every writable target requires
+  its physical owner lock, a post-DSH failure pins immediately (one-shot
+  same-ID recovery was REMOVED: the first DSH call may already have left
+  a hidden lifecycle, so a retry cannot clear the uncertainty) and no
+  second-fresh fallback exists anywhere,
+  TUI writers serialize through a SessionOperationBarrier, and retired
+  sessions enter a COOLING lease (final snapshot + SHA-256 tail
+  fingerprint + quiet window + stable samples) before their lock is
+  released — any uncertainty pins instead. A clean TUI exit no longer
+  releases touched locks (stale takeover handles them). Owner locking is now FAIL-CLOSED for every
+  writable target (fresh AND existing): an unavailable physical lock
+  refuses the transition/resume — the divergence guard stays as a
+  second line of defense only, never a stand-in for the lock. The OLD session's lock now outlives the COMMIT: it is
+  released only after the old handle is disposed (aborting session-scoped
+  async writers via session/disposed) AND its persistence retirement has
+  settled (the coordinator's inspect barrier) — a second process can
+  never resume the old session while it still has writers or an
+  unsettled final flush; an unsettled retirement keeps the lock, warned
+  (review round 10).
+- **A COOLING session can be reopened in the same process, and a stale
+  cooling verifier can never touch a later lifecycle.** Switching back
+  into a session that is still cooling (e.g. `/sessions` or `/resume`
+  during the ~2s release window) now reactivates it through
+  `reserveForActivation`: the physical lock stays with this process, the
+  previous lifecycle epoch is invalidated synchronously before the DSH
+  resume, and a RELEASED tombstone still forces a real re-acquire. Every
+  retirement carries an epoch (the lease's monotonic `lifecycleEpoch`;
+  `beginCooling` returns it), the cooling verifier is bound to ITS epoch
+  (re-checked after every await, epoch-atomic release/pin in the lease
+  manager), the in-flight tracker is epoch-keyed, and an HMR/cleanup
+  abort is neutral — the new mount's `resumePending()` continues the
+  SAME cooling epoch. The ABA hazard is closed: cooling#1 → reactivate →
+  cooling#2 can never be released or pinned by the stale verifier #1.
+  Covered by new unit cases (lease manager reactivation suite + cooling
+  Cases A–E) and an on-demand two-process E2E (`scripts/e2e-session-
+  lease.sh`, not part of the CI suite) that drives A→B→A inside the
+  cooling window and proves P2 stays refused past the old release time.
+- **A PINNED session is a sticky, process-lifetime quarantine — it can
+  never be reactivated in-process and never re-enters the lifecycle.**
+  PINNED is where every "the process cannot prove this session has no
+  hidden writer" failure lands (dispose without a clean detach, an
+  unsettled cooling verifier, a refused detach, a rejected create or
+  resume). Because a new resume cannot clear that uncertainty, and a
+  later normal cooling release would hand the lock to another process
+  while the hidden lifecycle could still write, PINNED now has NO
+  business out-edges: `reserveForActivation` REFUSES it (the session
+  stays locked by this TUI until the process exits — the notice says to
+  restart the TUI before reopening it), and `beginCooling`/`markActive`
+  throw as internal bugs. Only process exit — plus the next opener's
+  stale-lock takeover when the holder crashed — ends the quarantine.
+  The same-ID recovery that used to retry a rejected create/resume is
+  REMOVED (`TransitionSteps.recover`,
+  `createWithPublicationRecovery` and all five `recover:` call sites in
+  the launch, switch, `/new`, `/fork` and rewind-commit paths): every
+  post-DSH rejection pins immediately. Covered by the lease-manager
+  sticky-quarantine cases (3 refusal sources, no business out-edges,
+  HMR survival) and the E2E PINNED case (cooling failure → refused
+  reopen → second process refused → holder exit → stale takeover).
+- **The double-Esc rewind chord is now truly consecutive.** Any real key
+  press between the two Esc presses disarms the window — `Esc → Left →
+  Esc` no longer opens the rewind picker (Kitty release/repeat events
+  still never count as presses).
 
 - **Fullscreen drag selection and `/copy` no longer fake a successful
   copy.** A bare OSC 52 write silently left the system clipboard

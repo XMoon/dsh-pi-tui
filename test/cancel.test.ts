@@ -4,7 +4,9 @@
  * fires it; overlays keep their own Esc. The runner-side handler
  * (`interruptAgent`) is covered below — its `keepInbox: true` preserves
  * the pending queue (web Stop parity), so an interrupt never destroys
- * queued input.
+ * queued input. The conversation-rewind mapping (idle + EMPTY editor +
+ * double-Esc → onRewind, fork_rewind plan E01–E11) lives in the second
+ * half, including the headless Esc-Esc → picker → select E2E.
  * @module @xmoon76/dsh-pi-tui/cancel.test
  */
 
@@ -12,6 +14,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SettingItem } from '@xmoon76/pi-tui'
 import { interruptAgent } from '../src/index.ts'
+import { rewindPickerItem } from '../src/rewind.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -21,6 +24,21 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; cancels: number } {
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => { cancels += 1 } })
   app.start()
   return { vt, app, get cancels() { return cancels } }
+}
+
+/** A host WITH conversation rewind wired (the runner's onRewind). */
+function startAppWithRewind(): { vt: VirtualTerminal; app: TuiApp; cancels: number; rewinds: number } {
+  const vt = new VirtualTerminal(100, 24)
+  let cancels = 0
+  let rewinds = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+    onRewind: () => { rewinds += 1 },
+  })
+  app.start()
+  return { vt, app, get cancels() { return cancels }, get rewinds() { return rewinds } }
 }
 
 test('a single Esc does not cancel', async () => {
@@ -329,6 +347,193 @@ test('a single Esc while IDLE only arms the double-Esc window', async () => {
   surface.vt.sendInput('\x1b')
   await surface.vt.waitForRender()
   assert.equal(surface.cancels, 0, 'idle: one Esc must not cancel')
+})
+
+// ── conversation rewind (fork_rewind plan): idle empty double-Esc ─────────
+
+test('E03: an idle EMPTY single Esc never rewinds', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 0, 'one Esc must only arm the window')
+  assert.equal(surface.cancels, 0)
+})
+
+test('E04: an idle EMPTY double-Esc opens rewind, never cancel', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b')
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 1, 'empty editor + fast second Esc must rewind')
+  assert.equal(surface.cancels, 0)
+})
+
+test('E05: an idle NON-EMPTY double-Esc keeps the cancel semantics', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('half-written draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b')
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 0, 'a non-empty draft must never open rewind')
+  assert.equal(surface.cancels, 1, 'the historical idle double-Esc cancel stays')
+})
+
+test('E06: a slow second Esc never rewinds', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b')
+  await new Promise(resolve => setTimeout(resolve, 500))
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 0)
+  assert.equal(surface.cancels, 0)
+})
+
+test('E12: an intervening key press disarms the double-Esc window', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b') // arm
+  surface.vt.sendInput('\x1b[D') // Left between the presses: disarms
+  surface.vt.sendInput('\x1b') // a third Esc within the window: re-arms only
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 0, 'Esc + Left + Esc must NOT rewind')
+  assert.equal(surface.cancels, 0, 'Esc + Left + Esc must NOT cancel either')
+  // A clean consecutive double-Esc after the disarm still fires.
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 1, 'a clean consecutive double-Esc still rewinds')
+})
+
+test('E01/E02: busy Esc stays a pure cancel — a quick second Esc never rewinds a half turn', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.app.setBusy(true)
+  surface.vt.sendInput('\x1b')
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 2, 'busy: every Esc cancels at once')
+  assert.equal(surface.rewinds, 0, 'busy Esc must never open rewind')
+})
+
+test('E07: an open autocomplete owns Esc (closes it, never rewinds)', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.app.setCommandCompletions(
+    [{ name: 'rewind', description: 'Fork this conversation from an earlier user turn', argumentHint: '' }],
+    '/ws',
+  )
+  surface.vt.sendInput('/')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b')
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 0, 'autocomplete Esc must close the dropdown, never rewind')
+  assert.equal(surface.cancels, 0)
+})
+
+test('E10: the subagent viewer owns its Esc (exits, never rewinds)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let cancels = 0
+  let rewinds = 0
+  let singleEscapes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+    onRewind: () => { rewinds += 1 },
+    // The runner's viewer exit hook consumes the first Esc.
+    onSingleEscape: () => { singleEscapes += 1; return true },
+  })
+  app.start()
+  app.setViewerMode({
+    parentSessionId: 'session-parent',
+    childSessionId: 'session-child',
+    label: 'research',
+    mode: 'one-shot',
+    activity: 'inactive',
+  })
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(singleEscapes, 2, 'every viewer Esc exits through the single-Esc hook')
+  assert.equal(rewinds, 0, 'the viewer owns Esc — rewind must never fire')
+  assert.equal(cancels, 0)
+})
+
+test('E11: Kitty release/repeat escapes never count toward the double-Esc window', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b[27;1:3u') // release
+  surface.vt.sendInput('\x1b[27;1:2u') // repeat
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 0)
+  assert.equal(surface.cancels, 0)
+  // Real presses still arm and fire the window.
+  surface.vt.sendInput('\x1b')
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 1, 'release/repeat noise must not break real presses')
+})
+
+// ── headless E2E: Esc Esc → rewind picker → select (plan §28) ─────────────
+
+test('Esc Esc opens the rewind picker and Enter selects the turn (headless E2E)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const picked: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The runner's onRewind shape: collect candidates, open the picker.
+    onRewind: () => {
+      app.openPicker(
+        [
+          rewindPickerItem({ turnStartSeq: 8, turn: 3, messageSeq: 9, editorText: 'C', preview: 'C', hasNonTextContent: false }),
+          rewindPickerItem({ turnStartSeq: 4, turn: 2, messageSeq: 5, editorText: 'B', preview: 'B', hasNonTextContent: false }),
+          rewindPickerItem({ turnStartSeq: 0, turn: 1, messageSeq: 1, editorText: 'A', preview: 'A', hasNonTextContent: false }),
+        ],
+        (value) => picked.push(value),
+        () => {},
+        { header: 'Rewind conversation · workspace unchanged', enableSearch: true, noMatchText: 'No matching turn', width: 72, maxHeight: 24, showHint: true },
+      )
+    },
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Rewind conversation'), `the picker must open:\n${view}`)
+  assert.ok(view.includes('turn 3 · C'), `the newest candidate must render:\n${view}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(picked, ['8'], 'Enter selects the highlighted turnStartSeq')
+  app.stop()
+})
+
+test('Esc Esc while busy never opens the rewind picker (plan §28 second half)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let cancels = 0
+  let pickerOpened = false
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+    onRewind: () => { pickerOpened = true },
+  })
+  app.start()
+  app.setBusy(true)
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancels, 2, 'busy Esc only aborts')
+  assert.equal(pickerOpened, false, 'no picker while the agent streams')
 })
 
 // ── interruptAgent: the runner-side cancel preserves the queue ────────────

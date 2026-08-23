@@ -50,6 +50,25 @@
   Tab 循环 `All → subagent → bash → pwsh → …`;header 显示当前作用域
   (`[bash]`)且计数随之变化。浏览器打开时,光标也会落在第一个 *运行中*
   的 subagent 上,而不是在 subagent 目录异步加载期间一直停在第一个 job。
+- **Pi 风格对话 rewind:`Esc Esc`(或 `/rewind`)从更早的用户回合 fork
+  当前对话。** 编辑器为空且 agent 空闲时,快速按两次 Esc 会打开一个
+  选择器,列出会话中所有已完成的用户提示(最新在上,每回合一行,可搜索)。
+  选中一个会创建新的子会话,其历史恰好止于该回合之前(记录
+  `parentSession` 与 `seedLength`),切换到它,并把选中的提示回填到编辑器
+  供修改——不会自动发送任何内容。原会话从不被修改、截断或删除,仍可
+  通过 `/sessions` 回到;`/sessions` 的两个视图(Current directory 与
+  All directories)现在都渲染完整的 lineage 树(fork 子会话、rewind 分支
+  与 subagent 都挂在各自的 parent 之下,带 `└─` 前缀;Current 范围内,
+  父在别的工作区/窗口外的分支以深度 1 孤儿显示,不会丢失)。Rewind 只回退
+  对话:工作区与外部副作用从不回滚,历史
+  图片附件不会被重新暂存(选择器会标记多模态提示,恢复时给出警告),
+  忙碌时按一次 Esc 仍只取消——只有空闲 + 空编辑器 + 双击 Esc 才会打开
+  选择器。
+- **`/fork` 与 `/rewind` 共用同一条 fork 链路。** 两者都通过同一段代码
+  创建子会话(解析记录 preset → composition → 带
+  `parentSession`/`seedLength` 的 agent 创建),因此 preset、provider/model
+  与 cwd 的继承在两个表面之间永远不会漂移;`/fork` 现在使用当前会话的
+  cwd,而不是启动时捕获的值。
 
 ### 变更
 
@@ -67,6 +86,99 @@
   ——只有你直觉里的那几个按键。
 
 ### 修复
+
+- **Session transition 现在是单写事务。** `/new`、`/fork`、`/rewind` 与
+  `/sessions` 切换统一走同一个事务(顺序由 `src/transition.ts` 固定并
+  单元测试):先让**旧** agent 安静(`whenIdle`——busy 时的切换现在会
+  等待当前活动结束,而不是打断它),在旧锁仍持有下做最终 flush,再创建/
+  恢复子会话,**COMMIT(同步临界区,不做任何锁变更:guard 重置、
+  live 替换与 generation 递增)**,之后的旧 handle 收尾
+  是 best-effort。这关闭了三个 review
+  blocker:(1)两个 transition 永远不会交错——身份检查不可能在 await
+  间隙被并发切换覆盖;(2)子会话一旦创建就**绝不回滚**——`dispose()`
+  只能停止 agent,不会删除已持久化的会话,旧的"先创建后 flush"顺序在
+  flush 失败时会留下用户从未进入的持久分支;(3)**旧会话的 owner.lock
+  只在旧 agent 安静之后才释放**——被中止的正在运行的回合会在 finally
+  中追加 closure 事件,过早释放锁会让另一个 dsh 进程在 closure 仍在
+  写入时 resume 同一会话(正是该锁要防止的双写 seq 冲突)。此外,
+  `whenIdle()` 只是瞬时检查而非冻结——transition 进行期间(quiesce →
+  flush → create)旧 agent 仍可能被 followup/steer 重新唤醒,因此所有
+  写入路径(普通提交、busy-Enter steer、Ctrl+S、命令 fallback、`!`
+  shell 提交、per-skill 斜杠调用)在 transition 进行中都会被**写栅栏**
+  拒绝:草稿/调用行恢复保留,提示 "a session transition is in
+  progress"。open-lock 持有器改为**多槽**(`src/open-locks.ts`):切换在
+  仍持有旧锁的同时获取目标锁,**旧锁绝不在 COMMIT 内释放**(那里不做
+  任何锁变更)——它只在旧 handle dispose + detach gate + durable parity
+  验证之后的冷却释放中卸下;被拒绝或
+  失败的切换会让当前会话带着自己的锁原样 live(旧的先释放顺序会打开
+  真空窗口:另一个进程可能在切换未决时拿走旧会话,re-acquire 失败后
+  两个进程同时持有同一会话)。同会话切换在入口被拒绝,失败分支也只
+  在本次切换确实新获取了目标锁时才释放它——失败的切换永远不会通过
+  目标 id 误伤当前会话的锁。target-lock-before-create 规则现在覆盖
+  所有 transition:`/new`、`/fork` 与 rewind 预生成 child 的 session id,
+  并在 create 发布它**之前**获取其 open lock(拒绝 → 零 child 副作用
+  中止;**create/reject → 立即 PINNED,绝不释放、绝不重试**)——任何
+  transition 都不可能发布
+  一个自己尚未持锁的 child。fresh 预锁是**物理**的:锁层会预创建
+  session 目录(0700),让 owner.lock 在日志 materialize 之前就存在
+  (fresh acquire 若 settle 为 `unavailable` 会中止 transition——旧的
+  `string | undefined` 返回把"已加锁"与"无法加锁"混为一谈),释放空
+  预创建目录上的锁时会顺带移除该目录(零残留)。现在失败只
+  发生在 create **之前**:stale 的 rewind 选择根本不会创建子会话,失败
+  的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
+  在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。
+  fork 的 cwd 在第一个 await 之前从父会话捕获——避免出现父/child 的
+  cwd 混合。 随后整个 session ownership 按 rewind_ref 计划收敛:发布阶段推断
+  (durable/三态分类)整体删除——每个可写 target 必须先取得 lease;进入
+  DSH 后失败**立即** PINNED(一次性 same-ID 恢复已删除:首次 DSH 调用
+  可能已留下隐藏生命周期,重试无法消除这层不确定);任何地方都不再
+  存在"第二个全新 fallback";TUI writer 经 SessionOperationBarrier
+  与 transition 互斥;切走的旧 session 进入 COOLING lease(最终快照 +
+  SHA-256 tail 指纹 + 静默窗口 + 稳定采样)验证通过后才释放锁,任何
+  不确定都 PIN;干净的 TUI 退出也不再主动释放自己的锁(stale
+  takeover 接管)。 owner lock 现在对**所有**可写 target(fresh 与 existing 一致)一律
+  fail-closed:锁不可用时拒绝 transition/resume——divergence guard 只
+  保留为第二道防线,不再充当锁的替代。旧 session 的锁现在
+  **活过 COMMIT**:只在旧 handle dispose(经 session/disposed 中止
+  session 级异步 writer)且其 persistence retirement 落定(coordinator
+  的 inspect barrier)之后才释放——另一个进程绝不可能在旧 session 仍
+  有 writer 或未定稿的 final flush 时 resume 它;retirement 无法落定时
+  旧锁保持并告警(review round 10)。
+- **COOLING 中的会话可以在同一进程内重新打开,过期的 cooling verifier
+  永远无法影响后续生命周期。** 在冷却窗口内(约 2 秒释放期)通过
+  `/sessions` 或 `/resume` 切回仍在 COOLING 的会话时,现在走
+  `reserveForActivation` 重新激活:物理锁始终留在本进程,DSH resume
+  之前同步作废旧的生命周期 epoch;RELEASED tombstone 仍然强制真正的
+  物理重获取。每次 retirement 都带一个 epoch(租约的单调
+  `lifecycleEpoch`,`beginCooling` 返回它);cooling verifier 绑定在
+  **自己的** epoch 上(每个 await 之后复查,lease manager 里的
+  release/pin 均为 epoch-atomic);in-flight 跟踪按 epoch 键控;HMR/
+  cleanup abort 是中性的——新 mount 的 `resumePending()` 继续**同一个**
+  cooling epoch。ABA 风险关闭:cooling#1 → 重新激活 → cooling#2 绝不
+  会被过期的 verifier #1 释放或 PIN。新增单测(lease manager 重新激活
+  套件 + cooling Case A–E)与按需双进程 E2E(`scripts/e2e-session-
+  lease.sh`,不进 CI 套件)覆盖:在冷却窗口内驱动 A→B→A,证明超过旧
+  释放时间后 P2 仍被拒绝。
+- **PINNED 会话成为粘性、进程寿命级的隔离——绝不能在进程内重新激活,
+  也绝不重返生命周期。** PINNED 是所有"本进程无法证明该会话没有隐藏
+  writer"类失败的落点(dispose 未干净 detach、cooling verifier 无法
+  落定、detach 被拒、create/resume 被拒)。由于一次新的 resume 无法
+  消除这层不确定,而后续一次"正常"的 cooling 释放会把锁交给另一个
+  进程、让隐藏生命周期仍可能写入(跨进程 writer 窗口),PINNED 现在
+  **没有任何业务出边**:`reserveForActivation` 拒绝它(会话在本 TUI
+  退出前保持锁定,提示语要求先重启 TUI 再打开);`beginCooling` 与
+  `markActive` 对 PINNED 直接 throw(内部 BUG)。只有进程退出——以及
+  持有者崩溃后下一个打开者的 stale-takeover——才能结束隔离。用于
+  重试被拒 create/resume 的 same-ID recovery 已整体删除
+  (`TransitionSteps.recover`、`createWithPublicationRecovery` 以及
+  启动、切换、`/new`、`/fork`、rewind-commit 五处 `recover:` 调用点):
+  任何 post-DSH rejection 都立即 PIN。由 lease manager 的 sticky
+  quarantine 用例(3 个拒绝来源、无业务出边、HMR 存活)与 E2E 的
+  PINNED case(冷却失败 → 拒绝重开 → 第二进程被拒 → 持有者退出 →
+  stale takeover)覆盖。
+- **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
+  都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
+  release/repeat 事件仍然不计为按键)。
 
 - **fullscreen 拖选与 `/copy` 不再假报复制成功。** 裸 OSC 52 写入在
   tmux(`set-clipboard external`)、无透传的 SSH 链路以及限制 OSC 52 的

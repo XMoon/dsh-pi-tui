@@ -665,10 +665,21 @@ export interface TuiAppEventsBase {
   isImageDraft?: () => boolean
   /** The user asked to quit (Ctrl+C in the TUI's own raw mode). */
   onExit: () => void
-  /** Stop the current activity (busy: a SINGLE Esc fires this; idle: a
-   * double-Esc within the window). The runner's handler interrupts the
-   * agent while preserving its queue (web Stop parity). Optional. */
+  /** Stop the current activity (busy: a SINGLE Esc fires this directly;
+   * idle: a double-Esc within the window fires it when the editor is
+   * non-empty — an empty editor opens the rewind picker instead, see
+   * {@link onRewind}). The runner's handler interrupts the agent while
+   * preserving its queue (web Stop parity). Optional. */
   onCancel?: () => void
+  /**
+   * Conversation rewind (pi parity): an idle double-Esc within the window
+   * with an EMPTY editor asks the host to open the rewind picker (fork the
+   * conversation from an earlier user turn). Busy Esc, overlays,
+   * autocomplete, replacement editors and a NON-empty draft never reach
+   * this (they keep their existing semantics). Optional; absent keeps the
+   * historical double-Esc cancel.
+   */
+  onRewind?: () => void
   /**
    * Ctrl+S: steer with the current draft (possibly empty). The runner sends
    * the whole queue when it has messages, with the draft riding along, and
@@ -2093,6 +2104,11 @@ export class TuiApp {
     // of Esc would trip the double-Esc cancel. The framework already filters
     // releases for the focused component; listeners are on their own.
     if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
+    // The double-Esc window is a CONSECUTIVE-press chord: any real
+    // non-Esc key press between the two Esc presses disarms it (review
+    // E12 — `Esc → Left → Esc` must not rewind). Releases/repeats already
+    // returned above, so only genuine presses reach this line.
+    if (!matchesKey(data, 'escape')) this.lastEscapeAt = undefined
     if (this.activeQuestions !== undefined) {
       return this.handleQuestionKey(data)
     }
@@ -2241,7 +2257,15 @@ export class TuiApp {
       const now = Date.now()
       if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
         this.lastEscapeAt = undefined
-        this.events.onCancel?.()
+        // Conversation rewind (pi parity): an EMPTY editor opens the rewind
+        // picker; a non-empty draft keeps the historical cancel semantics —
+        // a half-written draft is never dragged into a rewind (plan Case C).
+        // A host without rewind keeps the cancel for both cases.
+        if (this.seatEditor().getText().trim() === '' && this.events.onRewind !== undefined) {
+          this.events.onRewind()
+        } else {
+          this.events.onCancel?.()
+        }
       } else {
         this.lastEscapeAt = now
       }
@@ -5128,7 +5152,7 @@ export class TuiApp {
   /**
    * A user message with images: ONE bubble whose text keeps an inline
    * `🖼️ name` placeholder at every image's ORIGINAL position — the user's
-   * own words then read like the draft they submitted (`这张图是啥 🖼️
+   * own words then read like the draft they submitted (`what is this 🖼️
    * shot.png`), instead of a bubble with the image silently moved to its
    * own row. The thumbnails follow as attachment rows in block order; the
    * bubble marker carries the position, the thumbnail carries the picture.

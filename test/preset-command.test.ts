@@ -129,7 +129,10 @@ function stubRunner(options: {
     get sessionGeneration() { return 0 },
     compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
-    swapTo: async () => undefined,
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
     currentPreset: () => undefined,
     get pendingPreset() { return pending.value },
     set pendingPreset(id: string | undefined) { pending.value = id },
@@ -145,6 +148,10 @@ function stubRunner(options: {
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: options.extensions,

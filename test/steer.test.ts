@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mergeDraft, sessionUnchanged, steerAll, type SteerAgentLike, type SteerDeps, type SteerGuard } from '../src/steer.ts'
+import { mergeDraft, refuseByTransitionFence, sessionUnchanged, steerAll, type SteerAgentLike, type SteerDeps, type SteerGuard } from '../src/steer.ts'
 
 type GuardVerdict = { kind: 'ok' | 'forced' } | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed' }
 
@@ -459,4 +459,63 @@ test('two INDEPENDENT different-text operations failing in sequence: both surviv
   assert.equal(await pendingB, 'blocked')
   assert.deepEqual(restored, ['alpha', 'beta'], 'each failed operation restores exactly once')
   assert.ok(editor.includes('alpha') && editor.includes('beta'), `both submissions must survive:\n${editor}`)
+})
+
+// ── review round 4: the session-transition write fence ─────────────────────
+
+test('the transition fence refuses the write, restores the draft and never calls steer/followup', async () => {
+  const agent = fakeAgent([])
+  const writes: string[] = []
+  const writespied = new Proxy(agent, {
+    get(target, prop, receiver) {
+      if (prop === 'steer' || prop === 'followup') {
+        return (message: unknown): void => { writes.push(String(prop)) }
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const notices: string[] = []
+  const restored: string[] = []
+  const deps = makeDeps({ agent: () => writespied as never, guard: Promise.resolve({ kind: 'ok' }), notices, restored })
+  deps.fence = () => true
+  deps.fenceNotice = () => 'a session transition is in progress — try again in a moment'
+  const outcome = await steerAll(deps, 'draft')
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(writes, [], 'the fence must never let steer/followup reach the agent')
+  assert.deepEqual(restored, ['draft'], 'the draft comes back')
+  assert.deepEqual(notices, ['info: a session transition is in progress — try again in a moment'])
+})
+
+test('the fence is a no-op when no transition is in flight', async () => {
+  const agent = fakeAgent([])
+  const writes: string[] = []
+  const spied = new Proxy(agent, {
+    get(target, prop, receiver) {
+      if (prop === 'steer' || prop === 'followup') {
+        return (message: unknown): void => { writes.push(String(prop)) }
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const deps = makeDeps({ agent: () => spied as never, guard: Promise.resolve({ kind: 'ok' }) })
+  deps.fence = () => false
+  const outcome = await steerAll(deps, 'draft')
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(writes, ['followup'], 'an idle agent takes the draft as a followup')
+})
+
+test('refuseByTransitionFence restores the draft verbatim and notifies the retry hint', () => {
+  let editor = ''
+  const notices: string[] = []
+  refuseByTransitionFence('hello', () => editor, (text) => { editor = text }, (m: string, k: 'info' | 'error') => notices.push(`${k}: ${m}`))
+  assert.equal(editor, 'hello', 'the refused submission comes back verbatim on an empty editor')
+  assert.deepEqual(notices, ['info: a session transition is in progress — try again in a moment'])
+})
+
+test('refuseByTransitionFence MERGES newer input below the unsent submission', () => {
+  let editor = 'newer draft'
+  const notices: string[] = []
+  refuseByTransitionFence('older unsent', () => editor, (text) => { editor = text }, (m: string, k: 'info' | 'error') => notices.push(`${k}: ${m}`))
+  assert.ok(editor.includes('newer draft') && editor.includes('older unsent'), 'nothing is lost')
+  assert.deepEqual(notices, ['info: the draft changed while transitioning — review it before submitting again'])
 })

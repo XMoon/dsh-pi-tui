@@ -143,19 +143,21 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
 }
 
 /**
- * Build the session tree for the picker's "All" category: non-subagent rows
- * are roots (depth 0), and subagent rows hang under their parentSession
- * chain (depth = distance to the nearest root). Orphan subagents — a parent
- * outside the shown window, or a missing parent id — sit at depth 1. The
- * input order (newest first) is preserved per level; a `placed` set guards
- * against parent cycles in corrupt data.
+ * Build the session tree for the picker's "All" category: rows WITHOUT a
+ * parentSession are roots (depth 0), and every row WITH a parentSession —
+ * fork children, rewind branches AND subagents alike (plan §20: `origin`
+ * only decides the badge, `parentSession` decides the hierarchy) — hangs
+ * under its parent chain (depth = distance to the nearest root). Orphans —
+ * a parent outside the shown window, or a missing parent id — sit at
+ * depth 1. The input order (newest first) is preserved per level; a
+ * `placed` set guards against parent cycles in corrupt data.
  * @param rows - the picker rows, newest first.
  * @returns rows in display order with their tree depth.
  */
 export function buildSessionTree(rows: readonly SessionPickerRow[]): { row: SessionPickerRow; depth: number }[] {
   const children = new Map<string, SessionPickerRow[]>()
   for (const row of rows) {
-    if (row.origin === 'subagent' && row.parentSession !== undefined) {
+    if (row.parentSession !== undefined) {
       const list = children.get(row.parentSession)
       if (list === undefined) children.set(row.parentSession, [row])
       else list.push(row)
@@ -170,10 +172,10 @@ export function buildSessionTree(rows: readonly SessionPickerRow[]): { row: Sess
     for (const child of children.get(row.id) ?? []) place(child, depth + 1)
   }
   for (const row of rows) {
-    if (row.origin !== 'subagent') place(row, 0)
+    if (row.parentSession === undefined) place(row, 0)
   }
   for (const row of rows) {
-    if (row.origin === 'subagent') place(row, 1)
+    if (row.parentSession !== undefined) place(row, 1)
   }
   return result
 }
