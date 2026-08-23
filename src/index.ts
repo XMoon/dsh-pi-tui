@@ -1505,6 +1505,10 @@ export function apply(ctx: Context, config: Config): void {
       diag,
       signal: lifecycleController.signal,
     })
+    // HMR/plugin remount: the lease manager is process-global, so a new
+    // runner instance must take over the pending COOLING verifications
+    // (the old instance's verifier died with its lifecycle signal).
+    coolingCoordinator.resumePending()
     /** Try to reserve the lease for a session (physical acquire when this
      * process does not hold it yet; idempotent for held leases). */
     const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult =>
@@ -2205,11 +2209,13 @@ export function apply(ctx: Context, config: Config): void {
       cleanedUp = true
       // A pending force token is stale once the process tears down.
       guardToken = undefined
-      // Release EVERY open-time lock this process holds (normally just the
-      // live session's; a transition may briefly hold two): a clean exit
-      // must leave every session openable immediately. (A crash skips this —
-      // the stale-lock takeover on the next open handles that.)
-      openLocks.releaseAll()
+      // The touched-session physical locks are DELIBERATELY NOT released
+      // here (convergence plan phase 7): a clean TUI exit is not a proof
+      // that the DSH persistence tree is quiet, so releasing an active /
+      // cooling / pinned session's owner.lock would hand another process a
+      // session this process may still be flushing. The locks stay on disk
+      // as stale records; the next opener's stale-takeover mechanism
+      // handles them (the system must support kill -9 stale locks anyway).
       lifecycleController.abort()
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.

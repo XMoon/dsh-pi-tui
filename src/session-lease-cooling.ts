@@ -142,14 +142,37 @@ export class SessionLeaseCoolingCoordinator {
     }
   }
 
-  /** Start verifying one retired session (fire-and-forget; the outcome
-   *  decides RELEASED vs PINNED). The verification runs as an owned
-   *  detached task (never a bare void promise — the failure model). */
+  private readonly inFlight = new Set<string>()
+
+  /** Start verifying that a retired session (fire-and-forget; the outcome
+   *  decides RELEASED vs PINNED). Idempotent per session. The verification
+   *  runs as an owned detached task (never a bare void promise — the
+   *  failure model). */
   start(sessionId: string, snapshot: RetiredSessionSnapshot): void {
-    runDetached('session lease cooling', () => this.verify(sessionId, snapshot), {
+    if (this.inFlight.has(sessionId)) return
+    this.inFlight.add(sessionId)
+    runDetached('session lease cooling', async () => {
+      try {
+        await this.verify(sessionId, snapshot)
+      } finally {
+        this.inFlight.delete(sessionId)
+      }
+    }, {
       diag: this.deps.diag as never,
       sessionId: () => sessionId,
     })
+  }
+
+  /** HMR/remount recovery: re-verify every lease the process-global
+   *  manager still has in COOLING (a remounted runner's fresh coordinator
+   *  takes over the pending verifications; the old tasks were aborted with
+   *  the old lifecycle signal). */
+  resumePending(): void {
+    for (const record of this.deps.leaseManager.snapshot()) {
+      if (record.state === 'cooling' && record.physicalLockHeld && record.snapshot !== undefined) {
+        this.start(record.sessionId, record.snapshot)
+      }
+    }
   }
 
   private async verify(sessionId: string, snapshot: RetiredSessionSnapshot): Promise<void> {
