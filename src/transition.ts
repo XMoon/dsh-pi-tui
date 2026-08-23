@@ -139,17 +139,28 @@ export interface TransitionHost<T> {
    * before the session log does). Never throws. */
   acquireTargetLock(target: { id: string; header?: { cwd?: string } }): OpenLockResult
   /** Release one open lock (idempotent) — the failure paths release the
-   * target lock here; the COMMIT releases the old lock. */
+   * target lock here. */
   releaseLock(sessionId: string): void
-  /** Synchronous lock handover: release the OLD session's lock. The TARGET
-   * lock was already acquired and verified in phase 2 (before the create)
-   * and stays held — there is deliberately no re-acquire here. */
-  handoverLocks(next: T): void
-  /** Synchronous commit: guard reset, generation bump, live replacement. */
+  /** Synchronous commit: guard reset, generation bump, live replacement.
+   * NO lock changes happen here — the old session's lock is released only
+   * inside {@link retire}, after the old agent is disposed and its
+   * persistence retirement settled (review round 10: `whenIdle` does not
+   * stop session-scoped async writers like the title generator — only
+   * `session/disposed`, fired by the old-handle dispose, aborts them, and
+   * the persistence retire is fire-and-forget, so releasing the old lock
+   * in the COMMIT would open a double-writer window with another process). */
   commit(next: T): void
-  /** Async teardown AFTER the commit: old-handle dispose, child whenIdle,
-   * surface rebuild, catalog refresh. Never throws — every failure is
-   * recorded by the host and the committed child stands. */
+  /** Async teardown AFTER the commit, in this order: (1) dispose the OLD
+   * handle (aborts session-scoped async writers via `session/disposed`);
+   * (2) wait the old session's persistence retirement to SETTLE (the
+   * coordinator's inspect barrier — a fire-and-forget `session/disposed`
+   * retire flushes the old log asynchronously); (3) only then release the
+   * OLD session's open lock (the target lock stays held throughout);
+   * (4) the remaining child work (child whenIdle, surface rebuild, catalog
+   * refresh). Every failure is recorded by the host — an old lock whose
+   * retirement could not be settled STAYS held (the host warns; releasing
+   * it would reopen the double-writer window). The committed child always
+   * stands. */
   retire(next: T): Promise<void>
   /** Whether one session already has a DURABLE artifact (materialized in
    * the persistence backend). The host checks this after a rejected
@@ -281,21 +292,30 @@ export async function runTransitionTo<T>(
         // exists on disk and must not silently become openable as a ghost
         // without its owner knowing) and report the explicit state — an
         // EXISTING target (keepTargetLockOnUnrecoverable false) releases
-        // instead, since its artifact predates this attempt (round 26 P2).
-        if (steps.keepTargetLockOnUnrecoverable === false) host.releaseLock(steps.target.id)
+        // instead, since its artifact predates this attempt (round 26 P2),
+        // and the message then says so (review round 10 P2: the wording
+        // must not claim a lock that was released).
+        const kept = steps.keepTargetLockOnUnrecoverable !== false
+        if (!kept) host.releaseLock(steps.target.id)
         host.recordFailure('create', new Error(`create failed (${safeErrorMessage(error)}); the child was durable-published but could not be recovered (${safeErrorMessage(recoverError)})`))
         return {
           ok: false,
-          message: `transition failed: the child session ${steps.target.id} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); it exists and stays locked`,
+          message: kept
+            ? `transition failed: the child session ${steps.target.id} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); it exists and stays locked`
+            : `transition failed: the session ${steps.target.id} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); its lock was released`,
         }
       }
     } else if (published === 'unknown') {
       // The backend could not confirm the child's state: it MAY exist on
       // disk — keep the lock and abort rather than release a possibly-
       // published child (review round 25). An EXISTING target releases
-      // (its artifact predates this attempt — review round 26 P2).
-      if (steps.keepTargetLockOnUnrecoverable === false) host.releaseLock(steps.target.id)
-      const reason = `cannot confirm whether session ${steps.target.id} was published (${safeErrorMessage(error)}); it stays locked`
+      // (its artifact predates this attempt — review round 26 P2) and the
+      // wording follows the lock reality (review round 10 P2).
+      const kept = steps.keepTargetLockOnUnrecoverable !== false
+      if (!kept) host.releaseLock(steps.target.id)
+      const reason = kept
+        ? `cannot confirm whether session ${steps.target.id} was published (${safeErrorMessage(error)}); it stays locked`
+        : `cannot confirm whether session ${steps.target.id} was published (${safeErrorMessage(error)}); its lock was released`
       host.recordFailure('create', new Error(reason))
       return { ok: false, message: `transition failed: ${reason}` }
     } else {
@@ -304,8 +324,10 @@ export async function runTransitionTo<T>(
       return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
     }
   }
-  // Phase 5 — COMMIT: a synchronous critical section, no awaits.
-  host.handoverLocks(next)
+  // Phase 5 — COMMIT: a synchronous critical section, no awaits. NO lock
+  // changes here: the old session's lock is released only inside RETIRE,
+  // after the old agent is disposed and its persistence retirement
+  // settled (review round 10).
   host.commit(next)
   // Phase 6 — RETIRE: best-effort teardown; failures are recorded and the
   // committed child always stands.

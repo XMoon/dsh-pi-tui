@@ -218,8 +218,18 @@ is the whole point:
    lock was acquired in phase 2 and stays held; guard reset, generation
    bump, live handle/agent replacement) with no awaits between its
    steps;
-5. RETIRE — old-handle dispose (now idle: no abort closures), child
-   whenIdle, surface rebuild, catalog refresh; every failure is recorded
+5. RETIRE — in this order: (1) the OLD handle is disposed — `whenIdle`
+   only idles the agent machine; session-scoped async writers (e.g. the
+   title generator awaiting a provider) are aborted only by
+   `session/disposed`, which the dispose fires; (2) the old session's
+   persistence retirement is awaited via the coordinator's `inspect()`
+   barrier (the fire-and-forget `session/disposed` retire flushes the old
+   log asynchronously); (3) ONLY THEN the old session's open lock is
+   released — the old lock is deliberately held across the whole
+   transition, so a second process can never resume the old session while
+   it still has writers or an unsettled retirement (review round 10; a
+   barrier that cannot settle keeps the lock, warned); (4) child
+   whenIdle, surface rebuild, catalog refresh. Every failure is recorded
    as diagnostics and NEVER rolls the committed child back.
 
 A rejected `create` is NOT assumed to mean "never published": DSH's

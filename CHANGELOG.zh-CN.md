@@ -141,7 +141,12 @@
   后端不可读、或部署没有 inspect 能力时 settle 为 `unknown`——target
   锁保持、报"无法确认 session 是否已发布",绝不 fallback;**已存在**
   的 target(其 artifact 早于本次尝试)在不可恢复失败时会释放锁,而
-  不是把 session 钉到进程退出(review round 26 P2)。
+  不是把 session 钉到进程退出(review round 26 P2)。旧 session 的锁现在
+  **活过 COMMIT**:只在旧 handle dispose(经 session/disposed 中止
+  session 级异步 writer)且其 persistence retirement 落定(coordinator
+  的 inspect barrier)之后才释放——另一个进程绝不可能在旧 session 仍
+  有 writer 或未定稿的 final flush 时 resume 它;retirement 无法落定时
+  旧锁保持并告警(review round 10)。
 - **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
   都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
   release/repeat 事件仍然不计为按键)。

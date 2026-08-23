@@ -1514,7 +1514,12 @@ export function apply(ctx: Context, config: Config): void {
         await inspect(sessionId)
         return 'durable'
       } catch (error) {
-        if ((error as Error | undefined)?.message?.includes('not found')) {
+        // The coordinator's authoritative absence error is EXACTLY
+        // `session "<id>" not found` (prepareCore). Anything else — a read
+        // error, a torn artifact, a different message — is 'unknown' (the
+        // lock stays); an includes() match would be too wide (review
+        // round 10 P2).
+        if ((error as Error | undefined)?.message === `session "${sessionId}" not found`) {
           return 'not-durable'
         }
         return 'unknown'
@@ -1891,17 +1896,6 @@ export function apply(ctx: Context, config: Config): void {
         acquireTargetLock: (target) => acquireOpenLock(target.id, target.header),
         releaseLock: (sessionId) => releaseOpenLock(sessionId),
         isDurablePublished: async (sessionId) => durablePublished(sessionId),
-        handoverLocks: (next) => {
-          // The TARGET lock was REQUIRED and acquired BEFORE the create
-          // (phase 2 — target is mandatory and the pre-acquire is verified
-          // there, so a fresh transition either holds the child's lock or
-          // never creates the child). There is deliberately NO re-acquire
-          // here: a refusal at this point could not be recovered anyway
-          // (the child is already published and must not be rolled back),
-          // so the only safe handover is releasing the OLD lock while the
-          // pre-acquired child lock stays held (review round 12).
-          if (from !== undefined) releaseOpenLock(from)
-        },
         commit: (next) => {
           guardState = freshGuardState()
           guardToken = undefined
@@ -1914,11 +1908,46 @@ export function apply(ctx: Context, config: Config): void {
         },
         retire: async (next) => {
           const retired: string[] = []
+          // 1. Dispose the OLD handle FIRST: whenIdle only idles the agent
+          // machine — session-scoped async writers (e.g. the title
+          // generator awaiting a provider) are aborted only by
+          // session/disposed, which the dispose fires. The old session's
+          // lock is still held throughout (review round 10).
           if (oldHandle !== undefined) {
             try {
               await oldHandle.dispose()
             } catch (error) {
               retired.push(`old handle dispose: ${safeErrorMessage(error)}`)
+            }
+          }
+          // 2. Wait the old session's persistence retirement to SETTLE
+          // before releasing its lock: session/disposed fires a
+          // fire-and-forget persistence retire whose final flush is
+          // asynchronous — releasing the lock while it drains would reopen
+          // a double-writer window with another process resuming the old
+          // session. The coordinator's inspect() is the retirement
+          // barrier. If it cannot confirm (no barrier, read error), the
+          // OLD LOCK STAYS (warned) — a pinned old session is safer than
+          // an open double-write window.
+          if (from !== undefined) {
+            const persistence = ctx.get('sessionPersistence') as { inspect?: (id: string, signal?: AbortSignal) => Promise<unknown> } | undefined
+            const inspect = persistence?.inspect
+            let settled = inspect === undefined
+            if (inspect !== undefined) {
+              try {
+                await inspect(from)
+                settled = true
+              } catch (error) {
+                settled = false
+                retired.push(`old retirement barrier: ${safeErrorMessage(error)}`)
+              }
+            } else {
+              retired.push('old retirement barrier: no inspect() — the old lock stays')
+            }
+            if (settled) {
+              releaseOpenLock(from)
+            } else {
+              diag.warn('old session lock kept (retirement could not be settled)', { session: from })
             }
           }
           try {

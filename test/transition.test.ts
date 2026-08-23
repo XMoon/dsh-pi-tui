@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, PublicationStateUnknownError, runTransitionTo, type TransitionHost, type TransitionSteps } from '../src/transition.ts'
+import { OpenLockHolder } from '../src/open-locks.ts'
 
 /** The handle shape the host drives (structurally the AgentHandle). */
 interface Handle {
@@ -47,6 +48,10 @@ interface FakeHostOptions {
   durablePublished?: boolean
   /** Whether the child's publication state cannot be verified. */
   durablePublishedUnknown?: boolean
+  /** The old session's retirement barrier hangs until released. */
+  retirementGate?: Promise<void>
+  /** The old session's retirement cannot settle — the lock stays. */
+  retirementUnsettled?: boolean
   prepareError?: string
   createError?: string
   retireError?: string
@@ -79,16 +84,21 @@ function fakeHost(options: FakeHostOptions = {}): {
       : options.durablePublishedUnknown === true
         ? 'unknown'
         : 'not-durable',
-    handoverLocks: () => {
-      // The child lock was pre-acquired in phase 2; the COMMIT only
-      // releases the old lock (review round 12: no redundant re-acquire).
-      events.push('old.lock.release')
-    },
-    commit: () => { events.push('child.commit') },
     retire: async () => {
+      // The retire ORDER is the lock contract (review round 10): dispose
+      // the old handle, wait its persistence retirement (the inspect
+      // barrier), and only then release the old lock — the COMMIT releases
+      // nothing.
       events.push('old.dispose')
+      if (options.retirementGate !== undefined) await options.retirementGate
+      if (options.retirementUnsettled === true) {
+        events.push('old.lock.kept')
+      } else {
+        events.push('old.lock.release')
+      }
       if (options.retireError !== undefined) throw new Error(options.retireError)
     },
+    commit: () => { events.push('child.commit') },
     recordFailure: (phase, error) => {
       failures.push(`${phase}:${error instanceof Error ? error.message : String(error)}`)
     },
@@ -118,9 +128,9 @@ test('the canonical order is quiesce → flush → prepare → create → lock h
     'target.lock.acquire:session-c', // 3. the TARGET lock BEFORE the create (review round 6)
     'prepare',                 // 4. caller gates
     'child.create',            // 5. create — published from here on
-    'old.lock.release',        // 6. old lock released only AFTER old is idle+flushed
-    'child.commit',            // 7. synchronous commit
-    'old.dispose',             // 8. dispose of the now-idle old agent
+    'child.commit',            // 6. synchronous commit (no lock changes)
+    'old.dispose',             // 7. old handle disposed first
+    'old.lock.release',        // 8. old lock released only after dispose + retirement barrier
   ])
 })
 
@@ -139,7 +149,7 @@ test('review: a RUNNING old agent blocks the transition — no create, no lock r
   assert.equal(outcome.ok, true)
   assert.deepEqual(events, [
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'old.lock.release', 'child.commit', 'old.dispose',
+    'child.commit', 'old.dispose', 'old.lock.release',
   ])
 })
 
@@ -190,7 +200,7 @@ test('a retire failure NEVER rolls the committed child back', async () => {
   if (outcome.ok) assert.equal(outcome.next.agent.session.id, 'session-c')
   assert.deepEqual(events, [
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'old.lock.release', 'child.commit', 'old.dispose',
+    'child.commit', 'old.dispose', 'old.lock.release',
   ])
   assert.deepEqual(failures, ['retire:old dispose exploded'])
 })
@@ -211,7 +221,7 @@ test('an EXISTING target with an unavailable lock may proceed (guard backstop)',
   assert.equal(outcome.ok, true, 'an existing target tolerates an unavailable lock')
   assert.deepEqual(events, [
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'old.lock.release', 'child.commit', 'old.dispose',
+    'child.commit', 'old.dispose', 'old.lock.release',
   ])
 })
 
@@ -237,8 +247,8 @@ test('a rejected create AFTER durable publication is RECOVERED and committed (ne
   if (outcome.ok) assert.equal(outcome.next.agent.session.id, 'session-c')
   assert.deepEqual(events, [
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.recover', 'old.lock.release', 'child.commit', 'old.dispose',
-  ], 'the target lock is NEVER released — the recovered child is committed, the old lock is released at COMMIT')
+    'child.recover', 'child.commit', 'old.dispose', 'old.lock.release',
+  ], 'the target lock is NEVER released — the recovered child is committed; the OLD lock is released only after dispose + retirement barrier')
   assert.deepEqual(failures, [], 'a successful recovery is not a failure')
 })
 
@@ -442,8 +452,8 @@ test('review round 26 P1: the detector WAITS for the in-flight materialization �
   assert.equal(outcome.ok, true)
   assert.deepEqual(events, [
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.recover', 'old.lock.release', 'child.commit', 'old.dispose',
-  ], 'the recovered child commits — the durable ghost is impossible')
+    'child.recover', 'child.commit', 'old.dispose', 'old.lock.release',
+  ], 'the recovered child commits — the durable ghost is impossible; the old lock releases after dispose + barrier')
 })
 
 test('review round 26 P1: an authoritative barrier not-found is the ONLY not-durable', async () => {
@@ -500,4 +510,63 @@ test('review round 26 P2: the helper releases for an EXISTING target (keepLockOn
     (error: unknown) => error instanceof DurablePublishedUnrecoverableError,
   )
   assert.equal(releases, 1, 'an existing target releases its lock on unrecoverable failure')
+})
+
+// ── review round 10: the OLD lock outlives the COMMIT, dispose and the ─────
+// ── retirement barrier — the final ownership lifecycle ─────────────────────
+
+test('review round 10: the old lock survives COMMIT + dispose + the retirement barrier — a second process stays held until settle', async () => {
+  const holder = new OpenLockHolder()
+  const released: string[] = []
+  holder.add('session-a', () => released.push('session-a'))
+  let releaseRetirement!: () => void
+  const retirement = new Promise<void>(resolve => { releaseRetirement = resolve })
+  const events: string[] = []
+  const host: TransitionHost<Handle> = {
+    quiesceOld: async () => { events.push('old.flush') },
+    acquireTargetLock: (target) => {
+      holder.add(target.id, () => released.push(target.id))
+      return { kind: 'acquired' }
+    },
+    releaseLock: (id) => holder.release(id),
+    isDurablePublished: async () => 'not-durable',
+    commit: () => { events.push('child.commit') },
+    retire: async () => {
+      events.push('old.dispose')
+      // The persistence retirement (fire-and-forget final flush) drains.
+      await retirement
+      events.push('old.lock.release')
+      holder.release('session-a')
+    },
+    recordFailure: () => {},
+  }
+  const run = runTransitionTo(host, {
+    target: { id: 'session-b' },
+    create: async () => { events.push('child.create'); return handle('session-b') },
+  })
+  await settle()
+  await settle()
+  // COMMIT happened; the old lock is STILL held (the child lock too).
+  assert.equal(holder.has('session-a'), true, 'the old lock survives the COMMIT')
+  assert.equal(holder.has('session-b'), true, 'the child lock is held throughout')
+  // A second process trying to resume A while the retirement drains: held.
+  assert.equal(holder.add('session-a', () => released.push('dup')), false, 'a second process is refused while the retirement drains')
+  // The retirement settles: the old lock is released, the child keeps its.
+  releaseRetirement()
+  const outcome = await run
+  assert.equal(outcome.ok, true)
+  assert.deepEqual(released, ['session-a'])
+  assert.equal(holder.has('session-a'), false, 'the old lock releases only after the barrier settles')
+  assert.equal(holder.has('session-b'), true, 'the child lock stays')
+  assert.equal(holder.add('session-a', () => released.push('after')), true, 'a second process may acquire A only after the barrier')
+})
+
+test('review round 10: an UNSETTLED retirement keeps the old lock (the child still commits)', async () => {
+  const { host, events } = fakeHost({ retirementUnsettled: true })
+  const outcome = await runTransitionTo(host, steps(events))
+  assert.equal(outcome.ok, true, 'the child commits regardless')
+  assert.deepEqual(events, [
+    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
+    'child.commit', 'old.dispose', 'old.lock.kept',
+  ], 'an unsettled retirement keeps the old lock (warned) — never an open double-write window')
 })
