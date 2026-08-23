@@ -80,6 +80,8 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},
+    focusEnabled: () => false,
+    setFocusMode: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},

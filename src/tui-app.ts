@@ -91,7 +91,8 @@ import {
 import { TranscriptSearchComponent } from './search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
-import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage } from './transcript.ts'
+import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
+import { FocusActivityComponent, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { WorkingIndicator } from './working.ts'
 import { indeterminateProgressFrames } from './progress.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
@@ -1405,6 +1406,39 @@ export class TuiApp {
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
   /**
+   * Focus Mode (plan): the persisted preference is applied through
+   * {@link setFocusMode}; while ON, the transcript projection replaces each
+   * turn's intermediate activity with a live Thought block (see
+   * focus-activity.ts). The WorkingIndicator is NEVER hidden by Focus —
+   * the two surfaces are independent (plan §3).
+   */
+  private focusModeEnabled = false
+  /**
+   * The user's per-turn Thought disclosures. LIVE running turns are
+   * allowed (plan §2.3) and `turn/end` NEVER clears the choice (plan
+   * §16.2/Invariant 7); session switches and subagent-viewer scope
+   * changes do. Focus off keeps the set but stops consulting it (plan
+   * §16.4).
+   */
+  private readonly focusExpandedTurns = new Set<number>()
+  /** The folder's per-turn activities (same fold state as `messages`). */
+  private turnActivities: ReadonlyMap<number, TurnActivity> = new Map()
+  /** The FocusActivityComponent cache, keyed by turn: rebuilds on the
+   * activity revision, the expansion state, or the theme revision (plan
+   * §39). render() still re-reads Date.now() per frame, so the running
+   * duration refreshes on the WorkingIndicator's repaint heartbeat. */
+  private readonly focusActivityComponents = new Map<number, {
+    /** The activity object the component was built from (identity key). */
+    activity: TurnActivity
+    component: FocusActivityComponent
+    revision: number
+    expanded: boolean
+    themeRev: number
+  }>()
+  /** The parent session's expansion set while the subagent viewer covers
+   * the surface (turn numbers are per-session — plan §26). */
+  private readonly focusExpansionsStack: Set<number>[] = []
+  /**
    * Per-OCCURRENCE image-display collapse overrides from fullscreen clicks:
    * a collapsed attachment occurrence renders its constant info bar
    * (`🖼️ name · W×H · bytes`) only — the image rows collapse, the identity
@@ -1417,11 +1451,15 @@ export class TuiApp {
    * switch with the other click overrides.
    */
   private readonly collapsedOccurrences = new Map<TranscriptMessage, Set<number>>()
-  /** Rendered row heights per transcript message, for mouse hit-testing. */
+  /** Rendered row heights per transcript block, for mouse hit-testing.
+   * Message rows carry their message + attachment spans; Focus activity
+   * rows carry the activity (the whole collapsed Thought block — and the
+   * expanded header — is the toggle hit area, plan §17.1). */
   private messageRows: ReadonlyArray<{
-    message: TranscriptMessage
+    message?: TranscriptMessage
+    activity?: TurnActivity
     height: number
-    /** The row span (message-relative) of every attachment's click region. */
+    /** The row span (block-relative) of every attachment's click region. */
     attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
   }> = []
   /** ONE external-editor ownership at a time: set synchronously at launch,
@@ -2717,9 +2755,13 @@ export class TuiApp {
    * entries (thinking, tool cards) render folded unless the Ctrl+O master
    * switch is on and the entry belongs to the most recent turns.
    * @param messages - the folded transcript.
+   * @param activities - the same fold state's per-turn Focus activities
+   *   (plan §19: messages and activities must come from ONE fold snapshot,
+   *   so a repaint never shows a stale header against fresh rows).
    */
-  setTranscript(messages: readonly TranscriptMessage[]): void {
+  setTranscript(messages: readonly TranscriptMessage[], activities?: ReadonlyMap<number, TurnActivity>): void {
     this.messages = messages
+    if (activities !== undefined) this.turnActivities = activities
     // Repaints do NOT clear the transient notify line: an active session
     // repaints every frame (streaming chunks, tool cards), and clearing on
     // each repaint would make every notice — including error blocks like
@@ -2727,6 +2769,72 @@ export class TuiApp {
     // its 8s auto-clear timer or an explicit clear (user submit, session
     // switch, stop).
     // (The component cache is pruned inside rebuildMessages below.)
+    this.rebuildMessages()
+  }
+
+  /** Replace ONLY the turn activities (the messages stay). The runner
+   * prefers the combined {@link setTranscript} snapshot — this setter is
+   * for callers that repaint messages separately. */
+  setTurnActivities(activities: ReadonlyMap<number, TurnActivity>): void {
+    this.turnActivities = activities
+    this.rebuildMessages()
+  }
+
+  /** Whether Focus Mode is currently projecting the transcript. */
+  isFocusModeEnabled(): boolean {
+    return this.focusModeEnabled
+  }
+
+  /** Turn Focus Mode on/off (the runner's unified setter — the persisted
+   * preference, the system-prompt section and this surface all read the
+   * SAME runtime state). Off restores the ordinary transcript projection
+   * immediately; the expansion set is kept but not consulted (plan §16.4). */
+  setFocusMode(enabled: boolean): void {
+    if (this.focusModeEnabled === enabled) return
+    this.focusModeEnabled = enabled
+    this.rebuildMessages()
+    this.requestRender()
+  }
+
+  /** Toggle one turn's Thought disclosure (click on the header — plan
+   * §16.1). Running turns are toggleable; turn/end never reverts the
+   * choice. */
+  toggleFocusTurn(turn: number): void {
+    if (this.focusExpandedTurns.has(turn)) {
+      this.focusExpandedTurns.delete(turn)
+    } else {
+      this.focusExpandedTurns.add(turn)
+    }
+    this.rebuildMessages()
+    this.requestRender()
+  }
+
+  /** Force one turn's Thought open (transcript-search jumps — plan §23:
+   * the match must be visible without a second click). */
+  expandFocusTurn(turn: number): void {
+    if (this.focusExpandedTurns.has(turn)) return
+    this.focusExpandedTurns.add(turn)
+    this.rebuildMessages()
+    this.requestRender()
+  }
+
+  /** Enter the subagent-viewer scope: the child session's turn numbers are
+   * its own namespace, so the parent's disclosures must not leak into it
+   * (plan §26). The parent set is PRESERVED BY COPY and restored on exit
+   * (pushing the live set itself would hand the stack the object this
+   * method then empties). */
+  enterFocusViewerScope(): void {
+    this.focusExpansionsStack.push(new Set(this.focusExpandedTurns))
+    this.focusExpandedTurns.clear()
+    this.rebuildMessages()
+  }
+
+  /** Leave the subagent-viewer scope, restoring the parent's disclosures. */
+  exitFocusViewerScope(): void {
+    const restored = this.focusExpansionsStack.pop()
+    if (restored === undefined) return
+    this.focusExpandedTurns.clear()
+    for (const turn of restored) this.focusExpandedTurns.add(turn)
     this.rebuildMessages()
   }
 
@@ -2740,6 +2848,20 @@ export class TuiApp {
    * too (a replaced running card must not linger in the cache).
    */
   private pruneMessageComponents(): void {
+    // The FocusActivityComponent cache is pruned to the LIVE projected
+    // blocks INDEPENDENTLY of the message cache: a turn that left the
+    // window — or Focus turned off — must not keep a stale Thought
+    // component around, and a cleared message cache must not leave one
+    // either.
+    if (this.focusActivityComponents.size > 0) {
+      const liveTurns = new Set<number>()
+      for (const block of this.projectedBlocks()) {
+        if (block.kind === 'activity') liveTurns.add(block.activity.turn)
+      }
+      for (const turn of this.focusActivityComponents.keys()) {
+        if (!liveTurns.has(turn)) this.focusActivityComponents.delete(turn)
+      }
+    }
     if (this.messageComponents.size === 0) return
     const live = new Set<TranscriptMessage>(this.messages)
     for (const message of this.localMessages) live.add(message)
@@ -2757,6 +2879,49 @@ export class TuiApp {
     }
   }
 
+  /** The Focus projection over the current transcript (identity = the raw
+   * messages when Focus is off — plan §12.1). */
+  private projectedBlocks(): FocusProjectedBlock[] {
+    return projectFocus(this.messages, this.turnActivities, this.focusExpandedTurns, this.focusModeEnabled)
+  }
+
+  /** Alt+T's hideThinking filter over one projected block. An EXPANDED
+   * Thought is the user's explicit full-reveal request — thinking stays
+   * visible inside it even when hideThinking is on (plan §15.1: the outer
+   * disclosure IS the reveal). Focus-collapsed turns hide thinking anyway
+   * (their rows are absent), and Focus OFF restores the plain Alt+T
+   * semantics. rebuildMessages and refreshMessageRows SHARE this decision
+   * so the screen and the click map can never drift. */
+  private shouldHideThinkingBlock(block: FocusProjectedBlock): boolean {
+    if (block.kind !== 'message' || block.message.kind !== 'thinking') return false
+    if (this.focusModeEnabled && this.focusExpandedTurns.has(block.message.turn)) return false
+    return this.hideThinking
+  }
+
+  /** Get (or rebuild) the FocusActivityComponent for one turn: rebuilds
+   * when the activity OBJECT changed (session/viewer switches mint fresh
+   * folder objects, so the same turn number from another session can
+   * never reuse this one's component), the activity revision moved, the
+   * disclosure flipped, or the theme switched (plan §39). render() re-
+   * reads Date.now() every frame, so the running duration is always live. */
+  private focusActivityComponentFor(activity: TurnActivity, expanded: boolean): FocusActivityComponent {
+    const entry = this.focusActivityComponents.get(activity.turn)
+    if (entry !== undefined && entry.activity === activity
+      && entry.revision === activity.revision
+      && entry.expanded === expanded && entry.themeRev === this.themeRevision) {
+      return entry.component
+    }
+    const component = new FocusActivityComponent({ activity, expanded })
+    this.focusActivityComponents.set(activity.turn, {
+      activity,
+      component,
+      revision: activity.revision,
+      expanded,
+      themeRev: this.themeRevision,
+    })
+    return component
+  }
+
   /** Rebuild the message component tree from the current transcript state. */
   private rebuildMessages(): void {
     // Every rebuild path (transcript updates AND local-card push/replace/
@@ -2769,27 +2934,41 @@ export class TuiApp {
     // the same width the frame pass uses, so the heights match the screen.
     const width = this.terminal.columns
     const rows: Array<{
-      message: TranscriptMessage
+      message?: TranscriptMessage
+      activity?: TurnActivity
       height: number
       attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
     }> = []
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
     // a session never reads as one undifferentiated wall of text. The spacer
-    // row is charged to the preceding message's height, keeping the fullscreen
+    // row is charged to the preceding block's height, keeping the fullscreen
     // click hit-testing aligned with the rendered layout.
-    const blocks: TranscriptMessage[] = [
-      ...this.messages.filter(message => !(message.kind === 'thinking' && this.hideThinking)),
-      ...this.localMessages,
+    const blocks: FocusProjectedBlock[] = [
+      ...this.projectedBlocks().filter(block => !this.shouldHideThinkingBlock(block)),
+      ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
     ]
-    blocks.forEach((message, index) => {
-      // Persistent per-message components (stage J): unchanged messages
-      // reuse their component, so the fork's text-identity render caches
-      // actually hit — markdown is not re-parsed and heights are not
-      // recomputed for content that did not change. Only streaming/changed
-      // messages rebuild.
-      const component = this.componentForMessage(message, boundary)
-      const rendered = component.render(width)
-      if (rendered.length === 0) {
+    blocks.forEach((block, index) => {
+      let component: Component
+      let rendered: string[]
+      let truncatedMarker = false
+      let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
+      if (block.kind === 'activity') {
+        // The live Thought disclosure; the hidden process rows (if any)
+        // render as ordinary message blocks below it (plan §15).
+        component = this.focusActivityComponentFor(block.activity, this.focusExpandedTurns.has(block.activity.turn))
+        rendered = component.render(width)
+      } else {
+        // Persistent per-message components (stage J): unchanged messages
+        // reuse their component, so the fork's text-identity render caches
+        // actually hit — markdown is not re-parsed and heights are not
+        // recomputed for content that did not change. Only streaming/changed
+        // messages rebuild.
+        component = this.componentForMessage(block.message, boundary)
+        rendered = component.render(width)
+        truncatedMarker = block.truncated === true
+        attachments = this.attachmentRangesOf(component, width)
+      }
+      if (rendered.length === 0 && !truncatedMarker) {
         // A zero-row block must not occupy a spacer row: the image
         // pipeline's non-text-block retention keeps reasoning-only
         // assistant messages (no text, no image) as empty entries, and an
@@ -2797,12 +2976,25 @@ export class TuiApp {
         // between the surrounding cards. Skip the component, the spacer
         // and the row height — the click map stays aligned (height 0
         // never hits, see handleFullscreenClick).
-        rows.push({ message, height: 0, attachments: [] })
+        rows.push({
+          ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+          height: 0,
+          attachments: [],
+        })
         return
       }
       this.messagesView.addChild(component)
-      const height = rendered.length + (index < blocks.length - 1 ? 1 : 0)
-      rows.push({ message, height, attachments: this.attachmentRangesOf(component, width) })
+      // The max-tokens truncated marker rides under the final assistant
+      // (plan §13.8): one muted row, charged to the message's hit region.
+      if (truncatedMarker) {
+        this.messagesView.addChild(new Text(color.textMuted('  (output may be truncated)'), 0, 0))
+      }
+      const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
+      rows.push({
+        ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+        height,
+        attachments,
+      })
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
     })
     if (this.notifyText !== '') {
@@ -2893,26 +3085,46 @@ export class TuiApp {
   private refreshMessageRows(): void {
     const width = this.terminal.columns
     const boundary = this.expandBoundary()
-    const blocks: TranscriptMessage[] = [
-      ...this.messages.filter(message => !(message.kind === 'thinking' && this.hideThinking)),
-      ...this.localMessages,
+    const blocks: FocusProjectedBlock[] = [
+      ...this.projectedBlocks().filter(block => !this.shouldHideThinkingBlock(block)),
+      ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
     ]
     const rows: Array<{
-      message: TranscriptMessage
+      message?: TranscriptMessage
+      activity?: TurnActivity
       height: number
       attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
     }> = []
-    blocks.forEach((message, index) => {
-      const component = this.componentForMessage(message, boundary)
-      const rendered = component.render(width)
-      if (rendered.length === 0) {
+    blocks.forEach((block, index) => {
+      let component: Component
+      let rendered: string[]
+      let truncatedMarker = false
+      let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
+      if (block.kind === 'activity') {
+        component = this.focusActivityComponentFor(block.activity, this.focusExpandedTurns.has(block.activity.turn))
+        rendered = component.render(width)
+      } else {
+        component = this.componentForMessage(block.message, boundary)
+        rendered = component.render(width)
+        truncatedMarker = block.truncated === true
+        attachments = this.attachmentRangesOf(component, width)
+      }
+      if (rendered.length === 0 && !truncatedMarker) {
         // Same zero-row rule as rebuildMessages: no spacer row, no height —
         // the click map must mirror the rendered layout exactly.
-        rows.push({ message, height: 0, attachments: [] })
+        rows.push({
+          ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+          height: 0,
+          attachments: [],
+        })
         return
       }
-      const height = rendered.length + (index < blocks.length - 1 ? 1 : 0)
-      rows.push({ message, height, attachments: this.attachmentRangesOf(component, width) })
+      const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
+      rows.push({
+        ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+        height,
+        attachments,
+      })
     })
     this.messageRows = rows
   }
@@ -3100,6 +3312,17 @@ export class TuiApp {
     let row = 0
     for (const entry of this.messageRows) {
       if (messageRow < row + entry.height) {
+        // A Focus Thought block: the whole rendered block (collapsed body
+        // AND expanded header) toggles the turn disclosure (plan §17.1 —
+        // the header is always a hit area; the collapsed preview rows too).
+        if (entry.activity !== undefined) {
+          this.toggleFocusTurn(entry.activity.turn)
+          return
+        }
+        // A message row (activity rows never reach here): narrow the
+        // optional message for the attachment/message toggles below.
+        const message = entry.message
+        if (message === undefined) return
         const inMessage = messageRow - row
         // Attachment rows win: a click on an image's info bar or its image
         // rows toggles THAT OCCURRENCE's display — the identity stays, the
@@ -3108,11 +3331,11 @@ export class TuiApp {
         // to the message-level toggle (cards/thinking).
         for (const attachment of entry.attachments) {
           if (inMessage >= attachment.start && inMessage < attachment.end) {
-            this.toggleAttachmentCollapsed(entry.message, attachment.imageIndex)
+            this.toggleAttachmentCollapsed(message, attachment.imageIndex)
             return
           }
         }
-        this.toggleMessageExpanded(entry.message)
+        this.toggleMessageExpanded(message)
         return
       }
       row += entry.height
@@ -3134,6 +3357,10 @@ export class TuiApp {
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
     this.expandedOverride.clear()
+    // The Focus disclosures are session-scoped transient state too: a
+    // switched-in session must never inherit the old session's turn
+    // numbers (plan §16.3). The persisted Focus preference survives.
+    this.focusExpandedTurns.clear()
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
     this.collapsedOccurrences.clear()
@@ -4384,8 +4611,13 @@ export class TuiApp {
    * switch (clearSessionOverrides).
    */
   private componentForMessage(message: TranscriptMessage, boundary: number): Component {
+    // Focus-expanded turns render their foldable rows FULLY (plan §15.1:
+    // the outer disclosure IS the reveal — no second per-card disclosure
+    // inside an open Thought). Collapsed Focus turns never reach this
+    // method: their process rows are absent from the projection.
+    const focusExpanded = this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)
     const expanded = (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
-      && (message.turn >= boundary || this.expandedOverride.get(message) === true)
+      && (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
     // affected components (an HMR must never hit an old component).
@@ -4443,8 +4675,11 @@ export class TuiApp {
   ): MessageComponentEntry {
     const registry = this.renderers
     const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, boundary)
+    // Focus-expanded turns render their foldable rows FULLY (the outer
+    // disclosure IS the reveal — plan §15.1, no double disclosure).
+    const focusExpanded = this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)
     return {
-      component: rendered === undefined ? this.renderMessage(message, boundary) : rendered.component,
+      component: rendered === undefined ? this.renderMessage(message, boundary, focusExpanded) : rendered.component,
       boundary,
       themeRev: this.themeRevision,
       expanded,
@@ -4596,7 +4831,7 @@ export class TuiApp {
     return container
   }
 
-  private renderMessage(message: TranscriptMessage, boundary: number): Component {
+  private renderMessage(message: TranscriptMessage, boundary: number, focusExpanded = false): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
       // `--dsw-specific-bubble` background block) with a brand-blue ❯ —
@@ -4626,7 +4861,7 @@ export class TuiApp {
       return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), `${color.primary('🐋')}  `)
     }
     if (message.kind === 'thinking') {
-      const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
+      const expanded = focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true
       if (expanded) {
         // Expanded thinking stays dim+italic so reasoning never reads like
         // the assistant's actual output (web parity: a distinct style).
@@ -4657,7 +4892,7 @@ export class TuiApp {
       return new Text(rows.join('\n'), 0, 0)
     }
     if (message.kind === 'system') {
-      const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
+      const expanded = focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true
       // Labeled entries are context injections: the row names the producer
       // like the Web ContextInjectionRow (Context injection · label), with a notice
       // form's one-line account on the folded row. Unlabeled entries keep
@@ -4716,7 +4951,7 @@ export class TuiApp {
       // Compaction card (web CompactionItem parity): a title row with the
       // shadowed item/token counts, expandable to the summary body. The
       // running card shows "Compacting context…" until the summary lands.
-      const expanded = message.turn >= boundary || this.expandedOverride.get(message) === true
+      const expanded = focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true
       const title = message.error !== undefined
         ? color.error('🗜 Compaction failed')
         : message.running === true
@@ -4758,11 +4993,12 @@ export class TuiApp {
         ? color.error('[error]')
         : color.textDim('[running]')
     const head = `${color.textDim(`${emoji}  ${header.title}${summary}`)} ${pill}`
-    if (message.turn >= boundary || this.expandedOverride.get(message) === true) {
+    if (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true) {
       card.addChild(new Text(head, 0, 0))
-      // An explicitly expanded card (mouse click) renders diff bodies in
-      // full; the default recent-turn view caps them (kimi parity).
-      this.renderToolBody(card, message, this.expandedOverride.get(message) === true)
+      // An explicitly expanded card (mouse click, or an open Focus Thought)
+      // renders diff bodies in full; the default recent-turn view caps
+      // them (kimi parity).
+      this.renderToolBody(card, message, focusExpanded || this.expandedOverride.get(message) === true)
     } else {
       // Folded cards render 2–3 rows instead of one cramped line: the header
       // row, then the call preview (bash `$ command` / edit-write diff —
