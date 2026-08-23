@@ -85,11 +85,12 @@ process and REFUSES the open.
 
 | Entry | Behavior |
 |---|---|
-| `--session <id>` launch | acquire before `agents.resume()`; refusal is fatal (the runner exits with the refusal message — the user asked for a specific session, there is no safe fallback) |
-| `/resume` / `/sessions` switch | acquire the TARGET lock while STILL HOLDING the current one (multi-slot holder; the acquire is a non-blocking refusal); the current lock is released only in RETIRE, after the old handle is disposed AND its persistence retirement settled (review round 10) — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window, nothing to re-take) |
-| `/new` / `/fork` | acquire the child's lock BEFORE the create (pre-generated id, old lock still held — the target-lock-before-create rule); the OLD lock is released only in RETIRE after dispose + the retirement barrier |
-| first deferred message | acquire the child's lock BEFORE the create (pre-generated id — the target-lock-before-create rule) |
-| switch away / clean exit | release (idempotent), AFTER the final flush |
+| `--session <id>` launch | ALL preflight first, then acquire before `agents.resume()`; refusal/unavailable is fatal (the user asked for a specific session, there is no safe fallback); a post-DSH failure pins the session |
+| `/resume` / `/sessions` switch | acquire the TARGET lease while STILL HOLDING the current one (multi-slot holder; a non-blocking refusal); the current lock is released only by the COOLING verifier after the old handle's dispose + detach gate + durable parity (review round 10) — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window) |
+| `/new` / `/fork` | acquire the child's lease BEFORE the create (pre-generated id, old lease still held — the target-before-DSH rule); the OLD lease is released only by the cooling verifier |
+| first deferred message | acquire the child's lease BEFORE the create (pre-generated id — the target-before-DSH rule) |
+| switch away | the old session enters COOLING; its lock is released only after verified quiet + durable parity (or stays PINNED) |
+| clean exit | touched locks are NOT released — they stay as stale records; the next open's stale-takeover handles them |
 | crash / kill -9 | lock stays; the next open's stale check takes it over |
 
 Two orderings are load-bearing and were both bug-fixed in review:
@@ -156,12 +157,14 @@ deliberate act — see `repair-session.md`.)
 
 ## Guard vs lock: the division of labor
 
-- The **lock** prevents TUI-vs-TUI double opens — the common corruption
-  source. It is best-effort: unavailable deployments (no persistence, no
-  write access) proceed unlocked.
-- The **guard** remains the backstop for everything the lock cannot see:
-  the web surface, older TUIs that know nothing about the lock, a force-open
-  after the refusal, or a lock file lost to manual deletion.
+- The **lease/lock** prevents TUI-vs-TUI double opens — the common
+  corruption source. It is REQUIRED (fail-closed): every writable target
+  must settle `acquired` before any DSH call; unavailable deployments
+  cannot safely open sessions.
+- The **guard** remains the second line of defense for everything the
+  lock cannot see: the web surface, older TUIs that know nothing about
+  the lock, a force-open after the refusal, or a lock file lost to
+  manual deletion.
 
 ## Counting events in a session file (trap)
 

@@ -1443,10 +1443,10 @@ export function apply(ctx: Context, config: Config): void {
      * physically exist BEFORE the session log does. */
     const physicalAcquire = (target: { id: string; header?: { cwd?: string } }): {
       result: OpenLockResult
-      release?: () => void
+      release: () => void
     } => {
       const { id: sessionId, header } = target
-      if (openLocks.has(sessionId)) return { result: { kind: 'acquired' } }
+      if (openLocks.has(sessionId)) return { result: { kind: 'acquired' }, release: () => openLocks.release(sessionId) }
       const persistence = ctx.get('sessionPersistence') as SessionLockPersistence | undefined
       const outcome = acquireSessionLock(
         {
@@ -1473,7 +1473,7 @@ export function apply(ctx: Context, config: Config): void {
           return { result: { kind: 'acquired' }, release: () => openLocks.release(sessionId) }
         case 'held':
           diag.warn('session lock held', { session: sessionId, pid: outcome.owner.pid })
-          return { result: { kind: 'refused', message: lockHeldNotice(sessionId, outcome.owner) } }
+          return { result: { kind: 'refused', message: lockHeldNotice(sessionId, outcome.owner) }, release: () => {} }
         case 'unverifiable':
           diag.warn('session lock unverifiable', { session: sessionId, pid: outcome.owner?.pid })
           return {
@@ -1483,12 +1483,13 @@ export function apply(ctx: Context, config: Config): void {
                 ? `Session ${sessionId} has an unreadable or malformed lock file; refusing to open it here. If no other dsh process is using it, delete the owner.lock file next to the session log and retry.`
                 : `Session ${sessionId} has a lock file whose owner (pid ${outcome.owner.pid}) cannot be verified; refusing to open it here. If that process is gone, delete the owner.lock file next to the session log and retry.`,
             },
+            release: () => {},
           }
         case 'unavailable':
           // No persistence/artifact/dir/write access: proceed without a
           // lock for EXISTING sessions (fail-closed at the transition);
           // a fresh target's transition treats this as a failure too.
-          return { result: { kind: 'unavailable', reason: outcome.reason } }
+          return { result: { kind: 'unavailable', reason: outcome.reason }, release: () => {} }
       }
     }
     /** The process-global lease manager: ownership policy over the physical
@@ -1496,7 +1497,6 @@ export function apply(ctx: Context, config: Config): void {
      * forgets the locks it physically holds. */
     const leaseWorld = acquireProcessLeaseManager({
       acquire: physicalAcquire,
-      release: (sessionId) => openLocks.release(sessionId),
     })
     const leaseManager = leaseWorld.manager
     // The retired-session cooling verifier: after a switch, the OLD
@@ -1540,6 +1540,14 @@ export function apply(ctx: Context, config: Config): void {
         } catch {
           // Header lookup is best-effort; the resume path reports failures.
         }
+        // The stored session's recorded preset wins (resolved from the log,
+        // not the header): a session that switched while blank ran every turn
+        // under the newer composition, and rebuilding it differently would
+        // replay tool calls the model can no longer make. ALL fallible
+        // preflight runs BEFORE the physical lock is taken (review
+        // round 36): a preflight failure leaves no lock to release or pin.
+        const recorded = await recordedPreset(ctx, sessionId)
+        const composition = await compose(recorded)
         // Refuse to resume a session another live dsh process holds: the
         // second open makes persistence synthesize interrupted-turn closers
         // into the shared log while the first process keeps appending from
@@ -1558,17 +1566,11 @@ export function apply(ctx: Context, config: Config): void {
         if (lock.kind === 'unavailable') {
           throw new SessionLockRefusedError(`cannot lock session ${sessionId} (${lock.reason}); refusing to resume without an owner lock`)
         }
-        // The stored session's recorded preset wins (resolved from the log,
-        // not the header): a session that switched while blank ran every turn
-        // under the newer composition, and rebuilding it differently would
-        // replay tool calls the model can no longer make.
-        const recorded = await recordedPreset(ctx, sessionId)
-        const composition = await compose(recorded)
         // The DSH boundary: the resume target is touched IMMEDIATELY
         // before the DSH call (ALL fallible preflight above already ran —
         // a preflight failure must not pin a session that never entered
-        // the DSH boundary; review round 32). From here on a failure pins
-        // it (no release, no second fresh fallback).
+        // the DSH boundary; review rounds 32/36). From here on a failure
+        // pins it (no release, no automatic fallback).
         leaseManager.markTouched(sessionId)
         // A rejection gets at most ONE same-id recovery (below) and then
         // the session is PINNED — no publication-phase inference, no
@@ -1614,15 +1616,16 @@ export function apply(ctx: Context, config: Config): void {
         if (error instanceof SessionLockRefusedError) {
           throw error
         }
-        // The resume crossed the DSH boundary (the target was touched):
-        // there is NO second fresh fallback (convergence plan phase 4).
-        // The failed target is PINNED — its lock stays with this process
-        // (another TUI cannot open it while this process lives) — and the
-        // surface starts sessionless; the next user input creates a new
-        // session.
+        // The failed target is PINNED ONLY if it crossed the DSH boundary
+        // (touched) — a PREFLIGHT failure leaves no lock and nothing to
+        // pin (review round 36). There is NO second fresh fallback
+        // (convergence plan phase 4): the surface starts sessionless and
+        // the next user input creates a new session.
         const message = safeErrorMessage(error)
-        leaseManager.pin(sessionId, `resume failed: ${message}`)
-        diag.warn('session lease pinned', { session: sessionId, reason: `resume failed: ${message}` })
+        if (leaseManager.state(sessionId)?.touchedByDsh === true) {
+          leaseManager.pin(sessionId, `resume failed: ${message}`)
+          diag.warn('session lease pinned', { session: sessionId, reason: `resume failed: ${message}` })
+        }
         ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
         diag.error('resume failed', { session: sessionId, error: message })
         resumeFailure = `session ${sessionId} could not be resumed; it stays locked by this TUI`

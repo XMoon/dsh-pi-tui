@@ -35,8 +35,7 @@ interface Rig {
 function makeRig(script: Step[], missingInspect = false): Rig {
   const released: string[] = []
   const manager = new ProcessSessionLeaseManager({
-    acquire: () => ({ result: { kind: 'acquired' } }),
-    release: (id) => { released.push(id) },
+    acquire: (target) => ({ result: { kind: 'acquired' }, release: () => { released.push(target.id) } }),
   })
   let cursor = 0
   const persistence = (): CoolingPersistenceLike | undefined => {

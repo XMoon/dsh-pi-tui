@@ -29,9 +29,8 @@ function deps(): {
   const manager = new ProcessSessionLeaseManager({
     acquire: (target) => {
       acquired.push(target.id)
-      return { result: { kind: 'acquired' } }
+      return { result: { kind: 'acquired' }, release: () => { released.push(target.id) } }
     },
-    release: (id) => { released.push(id) },
   })
   return { manager, acquired, released }
 }
@@ -160,13 +159,11 @@ test('lease: multiple session leases coexist (the transition holds old+new)', ()
 
 test('lease: the process-global registry reuses the manager across remounts (HMR)', () => {
   const first = acquireProcessLeaseManager({
-    acquire: () => ({ result: { kind: 'acquired' } }),
-    release: () => {},
+    acquire: () => ({ result: { kind: 'acquired' }, release: () => {} }),
   })
   first.manager.reserve({ id: 'session-hmr' })
   const second = acquireProcessLeaseManager({
-    acquire: () => ({ result: { kind: 'acquired' } }),
-    release: () => {},
+    acquire: () => ({ result: { kind: 'acquired' }, release: () => {} }),
   })
   assert.equal(second.manager, first.manager, 'a remount reuses the SAME manager')
   assert.equal(second.manager.canReuseLocally('session-hmr'), true, 'physical ownership survives the remount')
@@ -182,7 +179,6 @@ test('lease: a remount swaps the physical deps for NEW acquires; releases keep t
       void target
       return { result: { kind: 'acquired' }, release: () => { oldReleases += 1 } }
     },
-    release: () => {},
   })
   first.manager.reserve({ id: 'session-a' })
   first.manager.markTouched('session-a')
@@ -191,9 +187,8 @@ test('lease: a remount swaps the physical deps for NEW acquires; releases keep t
     acquire: (target) => {
       newAcquires += 1
       void target
-      return { result: { kind: 'acquired' } }
+      return { result: { kind: 'acquired' }, release: () => {} }
     },
-    release: () => {},
   })
   assert.equal(second.manager, first.manager, 'the SAME manager is reused')
   // NEW acquires route through the remount's deps.

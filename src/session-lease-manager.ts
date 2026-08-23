@@ -74,19 +74,18 @@ export interface SessionLeaseRecord {
   release?: () => void
 }
 
-/** The physical-lock surface the manager drives (the index.ts closure owns
- *  the persistence/fs/proc wiring). `acquire` returns the settled result
- *  PLUS a per-lease release binding: the binding is captured at acquire
- *  time so a HMR/remount that swaps the physical deps can never release a
- *  lease through a stale holder (review round 34). */
+/** The physical-lock surface the manager drives (the `index.ts` closure
+ *  owns the persistence/fs/proc wiring). `acquire` returns the settled
+ *  result PLUS the per-lease release binding (MANDATORY): the binding is
+ *  captured at acquire time so a HMR/remount that swaps the physical deps
+ *  can never release a lease through a stale holder (review rounds
+ *  34/36). */
 export interface LeasePhysicalDeps {
   acquire(target: { id: string; header?: { cwd?: string } }): {
     result: OpenLockResult
-    /** The per-lease release binding (the wrapper's holder entry). */
-    release?: () => void
+    /** The per-lease release binding (no-op for a non-acquired result). */
+    release: () => void
   }
-  /** Fallback release (used only when the per-lease binding is absent). */
-  release(sessionId: string): void
 }
 
 /** The process-global lease registry (HMR-safe, Symbol.for key). */
@@ -189,8 +188,9 @@ export class ProcessSessionLeaseManager {
       )
     }
     lease.physicalLockHeld = false
-    if (lease.release !== undefined) lease.release()
-    else this.deps.release(sessionId)
+    // Every held lease carries its acquire-time binding (review
+    // round 36 P2: no fallback through the mutable deps).
+    lease.release!()
     this.leases.delete(sessionId)
   }
 
@@ -212,8 +212,8 @@ export class ProcessSessionLeaseManager {
     lease.state = 'released'
     lease.physicalLockHeld = false
     lease.releasedAt = Date.now()
-    if (lease.release !== undefined) lease.release()
-    else this.deps.release(sessionId)
+    // Every acquire carries its per-lease release binding (round 36).
+    lease.release!()
   }
 
   /** Fail-closed: a touched/cooling/active/pinned session keeps its
