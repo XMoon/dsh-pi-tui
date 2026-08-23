@@ -105,7 +105,10 @@
   抛错),因此 create 失败时若该 session 已是 durable,会在 target 锁
   仍持有的情况下**恢复(resume)并作为 transition 结果提交**——"UI 报
   失败、磁盘却有 child"的第三种状态不可能存在;无法恢复的已发布
-  child 会保持锁并报告明确状态。
+  child 会保持锁并报告明确状态(专用
+  `DurablePublishedUnrecoverableError` 会被 ensureSession 直接重抛——
+  绝不会触发 fallback,不可恢复的已发布 child 不可能被第二个新会话
+  静默顶替)。
 - **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
   都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
   release/repeat 事件仍然不计为按键)。

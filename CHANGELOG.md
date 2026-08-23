@@ -136,7 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session is RECOVERED by resuming it with the target lock still held and
   committing it as the transition result — a UI-failed-but-disk-
   succeeded child state is impossible. An unrecoverable published child
-  keeps its lock and reports the explicit state.
+  keeps its lock and reports the explicit state (a distinct
+  DurablePublishedUnrecoverableError that ensureSession rethrows — never
+  a fallback trigger, so an unrecoverable published child can never be
+  silently replaced by a second fresh session).
 - **The double-Esc rewind chord is now truly consecutive.** Any real key
   press between the two Esc presses disarms the window — `Esc → Left →
   Esc` no longer opens the rewind picker (Kitty release/repeat events

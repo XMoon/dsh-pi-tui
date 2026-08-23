@@ -84,7 +84,18 @@ export interface TransitionSteps<T> {
 /** The settled outcome of a transition. */
 export type TransitionOutcome<T> = { ok: true; next: T } | { ok: false; message: string }
 
-/** One open-lock acquisition's settled result (the host's acquire surface).
+/** A child that crossed the durable publication boundary but whose create
+ * rejected AND could not be recovered: the session exists on disk and
+ * stays locked. This is NOT a pre-publication failure — callers must
+ * abort, never fall back to a second fresh session (review round 17). */
+export class DurablePublishedUnrecoverableError extends Error {
+  constructor(sessionId: string, detail: string) {
+    super(`session ${sessionId} was durable-published but could not be recovered (${detail}); it exists and stays locked`)
+    this.name = 'DurablePublishedUnrecoverableError'
+  }
+}
+
+/** One open-lock acquisition's state (the host's acquire surface).
  * `unavailable` and `refused` are DISTINCT: an EXISTING target may proceed
  * without a lock (the divergence guard is the write-path backstop), but a
  * FRESH target's target-lock-before-create transaction must see

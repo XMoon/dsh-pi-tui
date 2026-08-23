@@ -142,7 +142,7 @@ import {
   type RewindLiveIdentity,
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
-import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
+import { DurablePublishedUnrecoverableError, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 import { OpenLockHolder } from './open-locks.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
@@ -1430,7 +1430,7 @@ export function apply(ctx: Context, config: Config): void {
             try {
               handle = await agents.resume({ resumeSessionId: fallbackId, agentOptions, setup: launched.composition.setup })
             } catch (recoverError) {
-              throw new Error(`session ${fallbackId} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); it exists and stays locked`)
+              throw new DurablePublishedUnrecoverableError(String(fallbackId), safeErrorMessage(recoverError))
             }
           } else {
             releaseOpenLock(String(fallbackId))
@@ -4055,7 +4055,7 @@ export function apply(ctx: Context, config: Config): void {
               try {
                 return await agents.resume({ resumeSessionId: sessionId, agentOptions, setup: composition.setup })
               } catch (recoverError) {
-                throw new Error(`session ${sessionId} was durable-published but could not be recovered (${safeErrorMessage(recoverError)}); it exists and stays locked`)
+                throw new DurablePublishedUnrecoverableError(String(sessionId), safeErrorMessage(recoverError))
               }
             }
             releaseOpenLock(String(sessionId))
@@ -4066,6 +4066,10 @@ export function apply(ctx: Context, config: Config): void {
         try {
           created = await createWithLock(launched.composition)
         } catch (error) {
+          // A durable-published child that could not be recovered is NOT a
+          // preset-mount fault: the child exists and stays locked — never
+          // fall back to a second fresh session (review round 17).
+          if (error instanceof DurablePublishedUnrecoverableError) throw error
           // A preset that resolves but fails to MOUNT (e.g. a row waiting for
           // a host service) rejects inside the agent-factory setup. Surface it
           // and fall back to the default rather than killing the TUI. The

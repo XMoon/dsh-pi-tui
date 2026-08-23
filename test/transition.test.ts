@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { runTransitionTo, type TransitionHost, type TransitionSteps } from '../src/transition.ts'
+import { DurablePublishedUnrecoverableError, runTransitionTo, type TransitionHost, type TransitionSteps } from '../src/transition.ts'
 
 /** The handle shape the host drives (structurally the AgentHandle). */
 interface Handle {
@@ -249,4 +249,15 @@ test('a durable-published child that CANNOT be recovered keeps its lock and repo
     'child.recover',
   ], 'the target lock is NEVER released — the published child must not silently become an openable ghost')
   assert.deepEqual(failures, ['create:post-publication listener threw; the child was durable-published but could not be recovered (resume repair failed)'])
+})
+
+test('review round 17: the unrecoverable-published error is a distinct class, never a fallback trigger', () => {
+  const error = new DurablePublishedUnrecoverableError('session-c', 'resume repair failed')
+  assert.equal(error.name, 'DurablePublishedUnrecoverableError')
+  assert.match(error.message, /durable-published but could not be recovered/)
+  assert.match(error.message, /stays locked/)
+  // ensureSession's preset fallback must NOT run for this class — it
+  // rethrows it (the child exists and stays locked; a second fresh session
+  // would be a lie about the surface state).
+  assert.ok(!(new Error('preset mount failed') instanceof DurablePublishedUnrecoverableError))
 })
