@@ -38,6 +38,7 @@ const subagent = (overrides: Partial<TaskPanelItem> = {}): TaskPanelItem => ({
   status: 'running',
   detail: 'has children',
   group: 'subagents',
+  interruptible: true,
   ...overrides,
 })
 
@@ -349,11 +350,34 @@ test('i on a selected subagent row fires the interrupt action while search is cl
   panel.handleInput('\x1b[B')
   panel.handleInput('i')
   assert.deepEqual(acted, { value: 'agent:child-1', action: 'interrupt' }, 'i must interrupt the selected subagent')
-  // A job row under the cursor: the action still fires with the job value
-  // (the host ignores non-subagent rows).
+  // A NON-interruptible row under the cursor (a job, or a one-shot
+  // subagent): i does NOT fire — the panel only reports rows the
+  // interrupt transport can actually stop.
+  acted = undefined
   panel.handleInput('\x1b[A')
   panel.handleInput('i')
-  assert.deepEqual(acted, { value: 'job:bash-1', action: 'interrupt' }, 'i reports the selected row whatever its kind')
+  assert.equal(acted, undefined, 'i on a non-interruptible row must not fire the interrupt action')
+})
+
+test('a one-shot subagent row never fires the interrupt action (accepted no-op would lie)', () => {
+  let acted = 0
+  const panel = new TaskBrowserPanel(
+    [subagent({ value: 'agent:one-shot-1', label: 'subagent · audit', interruptible: false })],
+    10,
+    {
+      header: 'tasks · subagents',
+      onAction: () => { acted += 1 },
+    },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.render(100)
+  panel.handleInput('i')
+  assert.equal(acted, 0, 'one-shot rows are not interruptible')
+  // And the hint must not advertise it.
+  const joined = panel.render(100).map(strip).join('\n')
+  assert.ok(!joined.includes('i interrupt'), `one-shot-only list must not advertise i interrupt:\n${joined}`)
 })
 
 test('i is a query character once a search query is active, never an action', () => {

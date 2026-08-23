@@ -546,3 +546,33 @@ test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 
   app.setViewerMode(undefined)
   app.stop()
 })
+
+test('a plugin keybinding still REACHES the runner inside a continuable viewer (the capability gate is the guard)', async () => {
+  // The raw-key guard consumes the parent chords, but a plugin binding
+  // for a non-reserved chord (Ctrl+Alt+X) is routed through even while
+  // viewing — the SEMANTIC gate in the runner (viewerActionCapability)
+  // is what must block its parent side effects. This test pins the
+  // ROUTING half: the action arrives, so the gate is the only defense.
+  const actions: string[] = []
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onExtensionAction: (action) => actions.push(action),
+  }, {
+    pluginActionFor: (key) => {
+      if (key.key === 'x' && key.ctrl && key.alt) return 'cancel-activity'
+      return undefined
+    },
+  })
+  app.start()
+  await vt.waitForRender()
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  vt.sendInput('\x1b\x18') // Ctrl+Alt+X
+  await vt.waitForRender()
+  assert.deepEqual(actions, ['cancel-activity'],
+    'the semantic action must reach the runner even inside the viewer (the gate blocks it there)')
+  app.setViewerMode(undefined)
+  app.stop()
+})

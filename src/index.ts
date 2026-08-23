@@ -101,6 +101,7 @@ import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
+import { expandFileMentionsForSubmit } from './mentions.ts'
 import {
   resolveSubagentSettleTarget,
   submitSubagentFollowup,
@@ -433,6 +434,40 @@ export function teardownViewerForSessionSwap(
   if (!mounted) return false
   closeMounted()
   return true
+}
+
+/**
+ * The viewer capability gate for SEMANTIC plugin actions (pure, exported
+ * for the headless suite — the runner closure is not drivable there).
+ * While a subagent viewer is open, only actions that stay CHILD- or
+ * SURFACE-local are allowed; every action with PARENT-session side
+ * effects (steer, cancel/interrupt, permission cycling, the main
+ * transcript search) is blocked, so a plugin keybinding can never
+ * interrupt/steer/reconfigure the parent from inside the viewer. The
+ * raw-key viewer guard already consumes the parent chords — this gate
+ * closes the plugin-keybinding path, the only other way a semantic
+ * action reaches the runner.
+ * @param action - the semantic action the plugin requested.
+ * @param viewer - the open viewer (mode), or undefined when no viewer.
+ * @returns whether the runner may execute the action.
+ */
+export function viewerActionCapability(
+  action: import('./extension/public-types.ts').TuiAction,
+  viewer: { mode: 'one-shot' | 'continuable' } | undefined,
+): boolean {
+  if (viewer === undefined) return true
+  switch (action) {
+    case 'submit-draft':
+    case 'queue-draft':
+    case 'toggle-fullscreen':
+      // Child- or surface-local: submitDraft routes to the child (and
+      // hard-rejects in a one-shot viewer); fullscreen is chrome-local.
+      return true
+    default:
+      // steer-draft / cancel-activity / cycle-permission / open-search
+      // all target the parent session — never while viewing.
+      return false
+  }
 }
 
 /**
@@ -2282,6 +2317,8 @@ export function apply(ctx: Context, config: Config): void {
       // editor — cross-session draft retention is the existing behavior.
       teardownViewerForSessionSwap(viewerOpen, viewing !== undefined, () => {
         viewing = undefined
+        viewerSessionAbort?.abort()
+        viewerSessionAbort = undefined
         app.clearLocalMessages()
         app.clearNotify()
         app.setViewerMode(undefined)
@@ -2312,6 +2349,13 @@ export function apply(ctx: Context, config: Config): void {
      * viewerOpen token), so a slow open can never commit an obsolete child
      * over the current surface (round-4/5 findings). */
     const viewerOpen = createViewerOpenToken()
+    /** The CURRENT viewer session's abort source: aborted when the viewer
+     * session ends (Esc / child switch / session swap), so an in-flight
+     * follow-up that has NOT reached inbox acceptance is cancelled (the
+     * rejected send restores the draft into the child's slot). Once a
+     * follow-up is accepted the DSH continuation contract hands ownership
+     * to the child — the signal no longer matters. */
+    let viewerSessionAbort: AbortController | undefined
     /** Push the viewed child's OWN identity into the footer (label/mode/
      * activity/cwd + the child's own turns/steps/stats line) — the parent
      * session's status describes a session the user is not looking at. */
@@ -2382,6 +2426,7 @@ export function apply(ctx: Context, config: Config): void {
       if (!viewerOpen.isCurrent(request)) return
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
       if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
+      viewerSessionAbort = new AbortController()
       viewing = {
         id: childId,
         folder: childFolder,
@@ -2410,6 +2455,8 @@ export function apply(ctx: Context, config: Config): void {
       viewerOpen.invalidate()
       if (viewing === undefined) return false
       viewing = undefined
+      viewerSessionAbort?.abort() // cancel an in-flight, not-yet-accepted follow-up
+      viewerSessionAbort = undefined
       app.clearLocalMessages()
       app.clearNotify() // a viewer notify (if any) is stale now
       app.setViewerMode(undefined)
@@ -3139,6 +3186,18 @@ export function apply(ctx: Context, config: Config): void {
       // host's own paths (plan §2.2 — the host never lets a plugin bypass
       // submission/session safety).
       onExtensionAction: (action) => {
+        // VIEWER CAPABILITY GATE: while a subagent viewer is open (either
+        // mode), semantic actions with PARENT-session side effects are
+        // blocked — the viewer's input must never interrupt/steer/queue/
+        // reconfigure the parent (a plugin keybinding reaching this runner
+        // is the ONLY path that could, since the raw-key viewer guard
+        // already consumes the parent chords). submit-draft/queue-draft
+        // route to the CHILD through the viewer-aware submitDraft (a
+        // one-shot viewer hard-rejects them), toggle-fullscreen is
+        // surface-local; every other action is consumed as a no-op.
+        if (viewing !== undefined && !viewerActionCapability(action, { mode: viewing.mode })) {
+          return
+        }
         switch (action) {
           case 'submit-draft': {
             // Host-owned submit path: history + notify clear + draft
@@ -3413,10 +3472,23 @@ export function apply(ctx: Context, config: Config): void {
           // hard reject (never route the text to a different main Agent).
           currentParent: () => liveAgent as SubagentParentLike | undefined,
           subagents: () => ctx.get('subagents') as SubagentFollowupService | undefined,
-          makeSignal: () => new AbortController().signal,
+          // The caller signal owns lookup/materialization/admission only
+          // until inbox acceptance (the DSH continuation contract): a TUI
+          // cleanup / exit, OR the viewer session ending (Esc / child
+          // switch / session swap — viewerSessionAbort) cancels a send
+          // that has NOT been accepted yet; once accepted the child owns
+          // the message and no restore happens. Never a dropped controller
+          // whose signal can never fire.
+          makeSignal: () => viewerSessionAbort === undefined
+            ? lifecycleController.signal
+            : AbortSignal.any([lifecycleController.signal, viewerSessionAbort.signal]),
           // Durable attribution: a plain user-sourced message (the same
           // source the main editor's messages carry).
           makeSource: () => ({ kind: 'user' }),
+          // Same `@`-file mention canonicalization as the main session's
+          // submissions (the editor keeps `@src/foo.ts`, the child model
+          // receives the absolute path).
+          canonicalizeText: (text) => expandFileMentionsForSubmit(text, sessionCwd()),
         }), {
           diag,
           sessionId: () => liveAgent?.session.id,
@@ -3608,7 +3680,11 @@ export function apply(ctx: Context, config: Config): void {
       }
       const actionRow = (value: string, action: 'interrupt'): void => {
         const row = rows.find(candidate => candidate.value === value)
-        if (row === undefined || row.kind !== 'subagent') return
+        // ONLY continuable children are interruptible: `subagents.interrupt`
+        // on a one-shot id is an accepted no-op, so firing it for a
+        // one-shot row would be a fake action (the panel already hides the
+        // verb, this is the runner-side guard).
+        if (row === undefined || row.kind !== 'subagent' || row.mode !== 'continuable') return
         const service = ctx.get('subagents')
         if (service === undefined || liveAgent === undefined) {
           app.notify('subagent service unavailable', 'error')
@@ -3644,6 +3720,9 @@ export function apply(ctx: Context, config: Config): void {
               detail: row.hasChildren ? 'has children' : undefined,
               group: rowGroup(row),
               type: 'subagent',
+              // Only continuable children are interruptible (one-shot ids
+              // are accepted no-ops for the interrupt transport).
+              interruptible: row.mode === 'continuable',
             })
       const handle = app.openTaskBrowser(
         taskPanelItems(rows),
@@ -4450,11 +4529,19 @@ export function apply(ctx: Context, config: Config): void {
         if (session.id === viewing.id) {
           viewing.folder.apply([event])
           viewing.stats.apply([event])
+          // The store-activity snapshot moves with the child's own
+          // lifecycle: a turn starting means the child is live again
+          // (cold resume), a turn ending parks it. The footer's activity
+          // field follows, so an inactive child that cold-resumes shows
+          // running while it streams.
+          if (event.type === 'turn/start') viewing.activity = 'running'
+          else if (event.type === 'turn/end') viewing.activity = 'inactive'
           schedulePaint()
           // The child's turn/step/stats counters move at step boundaries
           // (the stats fold counts at step/end) — the footer follows then,
-          // never on every streaming delta.
-          if (event.type === 'step/end' || event.type === 'turn/end') refreshViewerFooter()
+          // never on every streaming delta. A turn START also refreshes so
+          // the activity flips to running the moment a cold resume begins.
+          if (event.type === 'turn/start' || event.type === 'step/end' || event.type === 'turn/end') refreshViewerFooter()
           if (event.type === 'turn/end') paintNow()
           return
         }

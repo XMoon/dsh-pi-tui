@@ -61,6 +61,12 @@ export interface SubagentViewerSubmitDeps {
   makeSignal(): AbortSignal
   /** Build the durable message source for the delivered message. */
   makeSource(): unknown
+  /** Canonicalize the final user text BEFORE delivery (the main session's
+   * `@`-file mention expansion — `@src/foo.ts` → the absolute path — must
+   * apply to viewer follow-ups too, or the model would see the concise
+   * relative form it cannot resolve). The default passes the text through
+   * untouched; the runner wires the real expansion. */
+  canonicalizeText?(text: string): string
 }
 
 /** Why a follow-up was NOT accepted (the child inbox never received it). */
@@ -148,8 +154,12 @@ export async function submitSubagentFollowup(
     const signal = deps.makeSignal()
     // 2. Text-only follow-ups (the viewer phase-1 scope; images are a
     //    later milestone — the main-session image store is deliberately
-    //    never shared with the child).
-    const content = [{ type: 'text', text: request.text }] as const
+    //    never shared with the child). The text runs through the same
+    //    canonicalization as the main session's submissions (`@`-file
+    //    mention expansion), so the child sees exactly what the parent
+    //    would have sent.
+    const canonical = deps.canonicalizeText?.(request.text) ?? request.text
+    const content = [{ type: 'text', text: canonical }] as const
     // 3. The ONE correct write path: the continuation manager owns the
     //    child's inbox (enqueue while running, wake while waiting, cold
     //    resume when absent) and the direct-parent authority.

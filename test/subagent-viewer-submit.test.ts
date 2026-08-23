@@ -63,6 +63,42 @@ test('delivers through the continuation runtime with the EXACT live parent and t
   assert.deepEqual(calls[0]!.content, [{ type: 'text', text: request.text }])
 })
 
+test('the follow-up text runs through the SAME canonicalization as the main session (@-mention expansion)', async () => {
+  // The viewer editor keeps the concise `@src/foo.ts` form; the child
+  // model must receive the absolute path exactly like a main-session
+  // submission (expandFileMentionsForSubmit is the runner's wiring).
+  const calls: Array<{ parent: SubagentParentLike; childId: string; content: readonly { type: 'text'; text: string }[] }> = []
+  const outcome = await submitSubagentFollowup(
+    { ...request, text: 'review @src/foo.ts' },
+    deps({
+      subagents: () => service(calls),
+      canonicalizeText: (text) => text.replace('@src/foo.ts', '@/home/xmoon/project/src/foo.ts'),
+    }),
+  )
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(calls[0]!.content[0]!.text, 'review @/home/xmoon/project/src/foo.ts',
+    'the follow-up content must carry the canonicalized absolute path')
+})
+
+test('the caller signal is the one passed to followup (cancellation is real, never a dropped controller)', async () => {
+  const controller = new AbortController()
+  let seen: AbortSignal | undefined
+  const calls: unknown[] = []
+  const outcome = await submitSubagentFollowup(request, deps({
+    makeSignal: () => controller.signal,
+    subagents: () => ({
+      followup: async (_parent, _childId, _content, options) => {
+        seen = options.signal
+        calls.push(options.signal)
+        return 'inbox-1'
+      },
+    }),
+  }))
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(seen, controller.signal, 'followup must observe the caller-owned signal')
+  assert.equal(calls.length, 1)
+})
+
 test('rejects when there is no live parent at send time', async () => {
   const calls: unknown[] = []
   const outcome = await submitSubagentFollowup(request, deps({
