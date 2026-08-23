@@ -144,6 +144,43 @@ export interface TransitionHost<T> {
   recordFailure(phase: string, error: unknown): void
 }
 
+/** The create-with-publication-recovery helper shared by the standalone
+ * fresh-creation paths (ensureSession's createWithLock and the --session
+ * resume fallback, which do not run inside runTransitionTo): a rejected
+ * create may still have PUBLISHED (review round 8) — when the session is
+ * durable, `resume` runs (the caller holds the target lock) and its
+ * handle is returned; an unrecoverable published child throws
+ * {@link DurablePublishedUnrecoverableError} with the lock STILL HELD,
+ * so the caller can never fall back past it (review round 17). A
+ * pre-publication failure releases the target lock and rethrows. */
+export async function createWithPublicationRecovery<T>(deps: {
+  /** The fresh session id (for diagnostics). */
+  targetId: string
+  /** Create the child (may reject before OR after publication). */
+  create(): Promise<T>
+  /** Resume the child after a post-publication rejection (lock held). */
+  resume(): Promise<T>
+  /** Whether the child is already durable (persistence list). */
+  isDurablePublished(): Promise<boolean>
+  /** Release the target lock on a PRE-publication failure only. */
+  releaseTargetLock(): void
+}): Promise<T> {
+  try {
+    return await deps.create()
+  } catch (error) {
+    if (await deps.isDurablePublished()) {
+      try {
+        return await deps.resume()
+      } catch (recoverError) {
+        // The child exists and stays locked: never a fallback trigger.
+        throw new DurablePublishedUnrecoverableError(deps.targetId, safeErrorMessage(recoverError))
+      }
+    }
+    deps.releaseTargetLock()
+    throw error
+  }
+}
+
 /** Run one session transition in the canonical order. Must be called inside
  * the session-transition gate by the caller (the single-writer rule). */
 export async function runTransitionTo<T>(

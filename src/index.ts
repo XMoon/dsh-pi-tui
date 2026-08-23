@@ -142,7 +142,7 @@ import {
   type RewindLiveIdentity,
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
-import { DurablePublishedUnrecoverableError, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
+import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 import { OpenLockHolder } from './open-locks.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
@@ -1415,28 +1415,18 @@ export function apply(ctx: Context, config: Config): void {
         const fallbackLock = acquireOpenLock(String(fallbackId), { cwd: process.cwd() })
         if (fallbackLock.kind === 'refused') throw new Error(fallbackLock.message)
         if (fallbackLock.kind === 'unavailable') throw new Error(`cannot lock the fresh session before creating it (${fallbackLock.reason})`)
-        try {
-          handle = await agents.create({
+        handle = await createWithPublicationRecovery({
+          targetId: String(fallbackId),
+          create: () => agents.create({
             sessionId: fallbackId,
             meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
             agentOptions,
             setup: launched.composition.setup,
-          })
-        } catch (error) {
-          // A publication-stage rejection may still have made the session
-          // durable (review round 8): recover by resuming it with the lock
-          // still held.
-          if (await durablePublished(String(fallbackId))) {
-            try {
-              handle = await agents.resume({ resumeSessionId: fallbackId, agentOptions, setup: launched.composition.setup })
-            } catch (recoverError) {
-              throw new DurablePublishedUnrecoverableError(String(fallbackId), safeErrorMessage(recoverError))
-            }
-          } else {
-            releaseOpenLock(String(fallbackId))
-            throw error
-          }
-        }
+          }),
+          resume: () => agents.resume({ resumeSessionId: fallbackId, agentOptions, setup: launched.composition.setup }),
+          isDurablePublished: () => durablePublished(String(fallbackId)),
+          releaseTargetLock: () => releaseOpenLock(String(fallbackId)),
+        })
         // The fallback session is now a real persisted artifact: its open
         // lock was acquired BEFORE the create (above — the fallback
         // REQUIRES an acquired result), so this record is an idempotent
@@ -4039,28 +4029,18 @@ export function apply(ctx: Context, config: Config): void {
           const lock = acquireOpenLock(String(sessionId), { cwd: process.cwd() })
           if (lock.kind === 'refused') throw new Error(lock.message)
           if (lock.kind === 'unavailable') throw new Error(`cannot lock the fresh session before creating it (${lock.reason})`)
-          try {
-            return await agents.create({
-              sessionId,
-              meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-              agentOptions,
-              setup: composition.setup,
-            })
-          } catch (error) {
-            // A rejected create may still have PUBLISHED: if the session is
-            // already durable (a later synchronous listener threw during
-            // publication — review round 8), resume it with the lock still
-            // held instead of pretending nothing happened.
-            if (await durablePublished(String(sessionId))) {
-              try {
-                return await agents.resume({ resumeSessionId: sessionId, agentOptions, setup: composition.setup })
-              } catch (recoverError) {
-                throw new DurablePublishedUnrecoverableError(String(sessionId), safeErrorMessage(recoverError))
-              }
-            }
-            releaseOpenLock(String(sessionId))
-            throw error
-          }
+        return createWithPublicationRecovery({
+          targetId: String(sessionId),
+          create: () => agents.create({
+            sessionId,
+            meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
+            agentOptions,
+            setup: composition.setup,
+          }),
+          resume: () => agents.resume({ resumeSessionId: sessionId, agentOptions, setup: composition.setup }),
+          isDurablePublished: () => durablePublished(String(sessionId)),
+          releaseTargetLock: () => releaseOpenLock(String(sessionId)),
+        })
         }
         let created: Awaited<ReturnType<typeof agents.create>>
         try {

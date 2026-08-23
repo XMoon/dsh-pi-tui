@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DurablePublishedUnrecoverableError, runTransitionTo, type TransitionHost, type TransitionSteps } from '../src/transition.ts'
+import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, runTransitionTo, type TransitionHost, type TransitionSteps } from '../src/transition.ts'
 
 /** The handle shape the host drives (structurally the AgentHandle). */
 interface Handle {
@@ -260,4 +260,53 @@ test('review round 17: the unrecoverable-published error is a distinct class, ne
   // rethrows it (the child exists and stays locked; a second fresh session
   // would be a lie about the surface state).
   assert.ok(!(new Error('preset mount failed') instanceof DurablePublishedUnrecoverableError))
+})
+
+test('review round 17/18: an unrecoverable published child — no second create, lock kept (end to end)', async () => {
+  // The createWithLock / resume-fallback shape: a rejected create that
+  // crossed the durable boundary and whose resume ALSO fails must throw
+  // DurablePublishedUnrecoverableError with the target lock still held —
+  // the caller (ensureSession) rethrows it, so NO second agents.create()
+  // ever runs and the lock is never released.
+  let creates = 0
+  let releases = 0
+  let resumes = 0
+  await assert.rejects(
+    createWithPublicationRecovery({
+      targetId: 'session-c',
+      create: async () => {
+        creates += 1
+        throw new Error('post-publication listener threw')
+      },
+      resume: async () => {
+        resumes += 1
+        throw new Error('resume repair failed')
+      },
+      isDurablePublished: async () => true,
+      releaseTargetLock: () => { releases += 1 },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof DurablePublishedUnrecoverableError, 'the unrecoverable class escapes')
+      assert.match((error as Error).message, /stays locked/)
+      return true
+    },
+  )
+  assert.equal(creates, 1, 'exactly one create attempt — no second fallback create')
+  assert.equal(releases, 0, 'the target lock is NEVER released for a published child')
+  assert.equal(resumes, 1)
+})
+
+test('review round 8: a PRE-publication failure releases the lock and rethrows the original error', async () => {
+  let releases = 0
+  await assert.rejects(
+    createWithPublicationRecovery({
+      targetId: 'session-c',
+      create: async () => { throw new Error('pre-publication') },
+      resume: async () => { throw new Error('must not resume') },
+      isDurablePublished: async () => false,
+      releaseTargetLock: () => { releases += 1 },
+    }),
+    /pre-publication/,
+  )
+  assert.equal(releases, 1, 'the pre-publication failure releases the lock')
 })
