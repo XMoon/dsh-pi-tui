@@ -283,7 +283,23 @@ every TUI-owned session write inside `runWriter` and every transition
 inside `runTransition`: a transition waits for in-flight writers to
 drain before it quiesces the old agent, and frozen writers are refused.
 
-The old code created the child first and THEN flushed the old session:
+### The retirement lifecycle (convergence plan phases 4-6)
+
+Once the DSH boundary is crossed (`agents.create/resume`), NO business
+path may release the target lease: a rejection gets at most ONE same-id
+recovery, then the target is PINNED (lock kept for this process's
+lifetime) — there is no second-fresh fallback anywhere. The transition
+COMMIT makes no lock changes at all. The OLD session enters COOLING
+after the dispose (with a local detach gate: the old agent/session must
+be gone from the live registries): the cooling coordinator verifies the
+durable state against the FINAL pre-switch snapshot (event count, last
+seq, SHA-256 tail fingerprint) — 1s quiet, 500ms samples, 3 stable
+samples, 5s max — then releases the physical lock; any uncertainty
+(missing inspect, read error, mismatch that never settles, empty
+session that materialized, non-empty that disappeared) PINNS it.
+`DSH_PI_TUI_SESSION_COOLING_RELEASE=0` disables releases (emergency).
+
+The old code created the child first and flushed the old session:
 a flush failure after the create left a durable ghost branch, and the
 old lock was released before the old agent had quiesced. Failures now
 only happen before the create: a stale rewind never creates a child at

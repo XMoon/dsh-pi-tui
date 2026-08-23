@@ -154,9 +154,10 @@ import {
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
-import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, PublicationStateUnknownError, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
+import { createWithPublicationRecovery, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 import { OpenLockHolder } from './open-locks.ts'
 import { acquireProcessLeaseManager } from './session-lease-manager.ts'
+import { SessionLeaseCoolingCoordinator, snapshotSession, type CoolingPersistenceLike } from './session-lease-cooling.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -1494,6 +1495,16 @@ export function apply(ctx: Context, config: Config): void {
       release: (sessionId) => openLocks.release(sessionId),
     })
     const leaseManager = leaseWorld.manager
+    // The retired-session cooling verifier: after a switch, the OLD
+    // session's lease is verified (quiet window + durable parity) before
+    // its physical lock may be released cross-process (convergence plan
+    // phase 6).
+    const coolingCoordinator = new SessionLeaseCoolingCoordinator({
+      leaseManager,
+      persistence: () => ctx.get('sessionPersistence') as CoolingPersistenceLike | undefined,
+      diag,
+      signal: lifecycleController.signal,
+    })
     /** Try to reserve the lease for a session (physical acquire when this
      * process does not hold it yet; idempotent for held leases). */
     const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult =>
@@ -1510,39 +1521,6 @@ export function apply(ctx: Context, config: Config): void {
      * never deletes the durable artifact — review round 8), so a rejected
      * create on a durable id must be RECOVERED, never treated as "never
      * published". Never throws (an unreadable backend degrades to false). */
-    const durablePublished = async (sessionId: string): Promise<'durable' | 'not-durable' | 'unknown'> => {
-      // The persistence COORDINATOR's inspect() is the publication barrier
-      // (review round 26 P1): it awaits an in-flight retirement /
-      // materialization for the id before answering, so a "not found" is
-      // authoritative — an immediate list() scan is NOT (the JSONL
-      // materialization for a rejected create can still be settling, and a
-      // transient miss would misclassify a child that is about to appear
-      // as never-published, recreating the durable ghost). Only an
-      // authoritative not-found settles 'not-durable'; a read error or an
-      // unavailable barrier settles 'unknown' (the lock stays).
-      const persistence = ctx.get('sessionPersistence') as { inspect?: (id: string, signal?: AbortSignal) => Promise<unknown> } | undefined
-      const inspect = persistence?.inspect
-      if (inspect === undefined) {
-        // No reliable publication barrier: never interpret a miss as
-        // never-published.
-        return 'unknown'
-      }
-      try {
-        await inspect(sessionId)
-        return 'durable'
-      } catch (error) {
-        // The coordinator's authoritative absence error is EXACTLY
-        // `session "<id>" not found` (prepareCore). Anything else — a read
-        // error, a torn artifact, a different message — is 'unknown' (the
-        // lock stays); an includes() match would be too wide (review
-        // round 10 P2).
-        if ((error as Error | undefined)?.message === `session "${sessionId}" not found`) {
-          return 'not-durable'
-        }
-        return 'unknown'
-      }
-    }
-
     // A stale --session id must not kill the TUI: resume falls back to a
     // fresh session and the failure is surfaced as a notify line.
     let resumeFailure: string | undefined
@@ -1569,6 +1547,10 @@ export function apply(ctx: Context, config: Config): void {
         if (lock.kind === 'refused') {
           throw new SessionLockRefusedError(lock.message)
         }
+        // The DSH boundary: the resume target is touched — a failure pins
+        // it (no release, no second fresh fallback; convergence plan
+        // phase 4).
+        leaseManager.markTouched(sessionId)
         // Fail-closed (convergence plan phase 2): a writable existing
         // session REQUIRES its physical owner lock — an unavailable lock
         // means this deployment cannot guarantee single-owner writes, so
@@ -1604,12 +1586,6 @@ export function apply(ctx: Context, config: Config): void {
             agentOptions,
             setup: composition.setup,
           }),
-          isDurablePublished: () => durablePublished(sessionId),
-          releaseTargetLock: () => releaseOpenLock(sessionId),
-          // An EXISTING target's artifact predates this attempt: an
-          // unrecoverable resume must not pin the session until process
-          // exit — release and report (review round 26 P2).
-          keepLockOnUnrecoverable: false,
         })
         diag.info('resume ok', {
           session: sessionId,
@@ -1633,58 +1609,24 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       } catch (error) {
-        // A lock refusal is NOT recoverable by falling back to a fresh
-        // session: the user asked for a specific held session. Re-throw so
-        // the runner exits with the refusal as the message.
+        // A lock refusal is NOT recoverable: the user asked for a specific
+        // held session. Re-throw so the runner exits with the refusal as
+        // the message.
         if (error instanceof SessionLockRefusedError) {
           throw error
         }
-        // A durable-published session that could not be recovered is NOT a
-        // fallback case either: it exists and stays locked (review round
-        // 17/19) — never silently replace it with a fresh session.
-        if (error instanceof DurablePublishedUnrecoverableError) {
-          throw error
-        }
-        if (error instanceof PublicationStateUnknownError) {
-          throw error
-        }
+        // The resume crossed the DSH boundary (the target was touched):
+        // there is NO second fresh fallback (convergence plan phase 4).
+        // The failed target is PINNED — its lock stays with this process
+        // (another TUI cannot open it while this process lives) — and the
+        // surface starts sessionless; the next user input creates a new
+        // session.
         const message = safeErrorMessage(error)
+        leaseManager.pin(sessionId, `resume failed: ${message}`)
+        diag.warn('session lease pinned', { session: sessionId, reason: `resume failed: ${message}` })
         ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
         diag.error('resume failed', { session: sessionId, error: message })
-        resumeFailure = `session ${sessionId} could not be resumed; started a fresh session`
-        // The failed target's lock (if we took one) must not leak: we are
-        // about to hand the surface to a different session. (The recovery
-        // helper already released it for a pre-publication failure; the
-        // idempotent release covers the pre-helper paths.)
-        releaseOpenLock(sessionId)
-        const launched = await launchComposition()
-        if (launched.failure !== undefined) resumeFailure = launched.failure
-        // The fallback follows the SAME target-lock-before-create rule as
-        // every other transition (review round 10): the id is pre-generated
-        // and its open lock is acquired BEFORE the create publishes the
-        // session — a refusal aborts with zero side effects, and a create
-        // failure releases the target lock.
-        const fallbackId = SessionId(`session-${randomUUID()}`)
-        const fallbackLock = acquireOpenLock(String(fallbackId), { cwd: process.cwd() })
-        if (fallbackLock.kind === 'refused') throw new Error(fallbackLock.message)
-        if (fallbackLock.kind === 'unavailable') throw new Error(`cannot lock the fresh session before creating it (${fallbackLock.reason})`)
-        handle = await createWithPublicationRecovery({
-          targetId: String(fallbackId),
-          create: () => agents.create({
-            sessionId: fallbackId,
-            meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
-            agentOptions,
-            setup: launched.composition.setup,
-          }),
-          resume: () => agents.resume({ resumeSessionId: fallbackId, agentOptions, setup: launched.composition.setup }),
-          isDurablePublished: () => durablePublished(String(fallbackId)),
-          releaseTargetLock: () => releaseOpenLock(String(fallbackId)),
-        })
-        // The fallback session is now a real persisted artifact: its open
-        // lock was acquired BEFORE the create (above — the fallback
-        // REQUIRES an acquired result), so this record is an idempotent
-        // no-op.
-        acquireOpenLock(handle.agent.session.id, handle.agent.session.header)
+        resumeFailure = `session ${sessionId} could not be resumed; it stays locked by this TUI`
       }
     } else {
       // Deferred session creation: without --session the TUI opens with NO
@@ -1917,7 +1859,7 @@ export function apply(ctx: Context, config: Config): void {
       const oldHandle = liveHandle
       return runTransitionTo<T>({
         quiesceOld: async () => {
-          if (liveAgent === undefined) return
+          if (liveAgent === undefined) return undefined
           // QUIESCE first: after whenIdle the old agent can no longer
           // produce turn events, so the final flush below is truly final —
           // releasing its open lock afterwards cannot race our own
@@ -1925,12 +1867,16 @@ export function apply(ctx: Context, config: Config): void {
           // WAITS for the current activity instead of aborting it — the
           // deliberate product semantics, see docs/concurrency.md.)
           await liveAgent.whenIdle()
-          // Final flush, with the old session's lock still held.
+          // Final flush, with the old session's lock still held; the
+          // FINAL snapshot (event count, tail fingerprint) is captured
+          // here — the cooling verifier compares the durable state
+          // against it (convergence plan phase 5/6).
           await sessions.flush(liveAgent.session)
+          return snapshotSession(liveAgent.session)
         },
-        acquireTargetLock: (target) => acquireOpenLock(target.id, target.header),
-        releaseLock: (sessionId) => releaseOpenLock(sessionId),
-        isDurablePublished: async (sessionId) => durablePublished(sessionId),
+        acquireTargetLease: (target) => leaseManager.reserve(target),
+        releaseUntouchedTarget: (sessionId) => leaseManager.releaseUntouched(sessionId),
+        markTargetTouched: (sessionId) => leaseManager.markTouched(sessionId),
         commit: (next) => {
           guardState = freshGuardState()
           guardToken = undefined
@@ -1940,52 +1886,65 @@ export function apply(ctx: Context, config: Config): void {
           bumpSessionGeneration()
           liveHandle = next
           liveAgent = next.agent
+          leaseManager.markActive(next.agent.session.id)
         },
-        retire: async (next) => {
+        pinTarget: (sessionId, reason) => {
+          leaseManager.pin(sessionId, reason)
+          diag.warn('session lease pinned', { session: sessionId, reason })
+        },
+        retireOld: async (next, oldSnapshot) => {
           const retired: string[] = []
           // 1. Dispose the OLD handle FIRST: whenIdle only idles the agent
           // machine — session-scoped async writers (e.g. the title
           // generator awaiting a provider) are aborted only by
           // session/disposed, which the dispose fires. The old session's
-          // lock is still held throughout (review round 10).
+          // lock is still held throughout.
           if (oldHandle !== undefined) {
             try {
               await oldHandle.dispose()
             } catch (error) {
+              // A failed dispose means the old session may still have
+              // writers: PIN it (never release), the child stays current.
+              if (from !== undefined) {
+                leaseManager.pin(from, `old handle dispose failed: ${safeErrorMessage(error)}`)
+                diag.warn('session lease pinned', { session: from, reason: 'old handle dispose failed' })
+              }
               retired.push(`old handle dispose: ${safeErrorMessage(error)}`)
             }
           }
-          // 2. Wait the old session's persistence retirement to SETTLE
-          // before releasing its lock: session/disposed fires a
-          // fire-and-forget persistence retire whose final flush is
-          // asynchronous — releasing the lock while it drains would reopen
-          // a double-writer window with another process resuming the old
-          // session. The coordinator's inspect() is the retirement
-          // barrier. If it cannot confirm (no barrier, read error), the
-          // OLD LOCK STAYS (warned) — a pinned old session is safer than
-          // an open double-write window.
+          // 2. The OLD session enters COOLING: the transition is done with
+          // it — the lease manager / cooling coordinator decides when its
+          // physical lock may be released (quiet window + durable parity +
+          // stable samples; any uncertainty pins it). The old lock is
+          // deliberately NOT released here (convergence plan phase 5).
           if (from !== undefined) {
-            const persistence = ctx.get('sessionPersistence') as { inspect?: (id: string, signal?: AbortSignal) => Promise<unknown> } | undefined
-            const inspect = persistence?.inspect
-            // The lock is released ONLY on a positively settled barrier; a
-            // MISSING inspect is not a settle (review round 11 — the old
-            // code initialized settled to true when inspect was absent,
-            // releasing the old lock despite the warning).
-            let settled = false
-            if (inspect !== undefined) {
+            if (oldSnapshot === undefined) {
+              leaseManager.pin(from, 'no final snapshot captured before the switch')
+              diag.warn('session lease pinned', { session: from, reason: 'no final snapshot' })
+            } else {
+              // Local detach gate (convergence plan appendix): the dispose
+              // must have REMOVED the old agent/session from the live
+              // registries — release eligibility requires the old session
+              // to be truly closed locally before any cross-process
+              // handover can be considered.
+              const agents = ctx.get('agents') as { get?: (id: string) => unknown } | undefined
+              const sessions = ctx.get('sessions') as { get?: (id: string) => unknown } | undefined
+              let detached = true
               try {
-                await inspect(from)
-                settled = true
-              } catch (error) {
-                retired.push(`old retirement barrier: ${safeErrorMessage(error)}`)
+                if (agents?.get?.(from) !== undefined || sessions?.get?.(from) !== undefined) {
+                  detached = false
+                }
+              } catch {
+                detached = false
               }
-            } else {
-              retired.push('old retirement barrier: no inspect() — the old lock stays')
-            }
-            if (settled) {
-              releaseOpenLock(from)
-            } else {
-              diag.warn('old session lock kept (retirement could not be settled)', { session: from })
+              if (!detached) {
+                leaseManager.pin(from, 'old agent/session remained registered after dispose')
+                diag.warn('session lease pinned', { session: from, reason: 'old agent/session remained registered after dispose' })
+              } else {
+                leaseManager.beginCooling(from, oldSnapshot)
+                diag.info('session lease cooling started', { session: from, events: oldSnapshot.eventCount })
+                coolingCoordinator.start(from, oldSnapshot)
+              }
             }
           }
           try {
@@ -2084,7 +2043,6 @@ export function apply(ctx: Context, config: Config): void {
           // unrecoverable recovery releases the lock and reports instead
           // of pinning the session until process exit (round 26 P2).
           recover: () => agents.resume(resumeOptions),
-          keepTargetLockOnUnrecoverable: false,
         })
         if (!result.ok) {
           // The resume failed before publishing: the transaction already
@@ -4614,42 +4572,43 @@ export function apply(ctx: Context, config: Config): void {
           const lock = acquireOpenLock(String(sessionId), { cwd: process.cwd() })
           if (lock.kind === 'refused') throw new Error(lock.message)
           if (lock.kind === 'unavailable') throw new Error(`cannot lock the fresh session before creating it (${lock.reason})`)
-        return createWithPublicationRecovery({
-          targetId: String(sessionId),
-          create: () => agents.create({
-            sessionId,
-            meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-            agentOptions,
-            setup: composition.setup,
-          }),
-          resume: () => agents.resume({ resumeSessionId: sessionId, agentOptions, setup: composition.setup }),
-          isDurablePublished: () => durablePublished(String(sessionId)),
-          releaseTargetLock: () => releaseOpenLock(String(sessionId)),
-        })
+          // The DSH boundary: from here on this lease is touched — a
+          // failure PINNS it (never released, never a second fresh
+          // fallback; convergence plan phase 4).
+          leaseManager.markTouched(String(sessionId))
+          try {
+            return await createWithPublicationRecovery({
+              targetId: String(sessionId),
+              create: () => agents.create({
+                sessionId,
+                meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
+                agentOptions,
+                setup: composition.setup,
+              }),
+              resume: () => agents.resume({ resumeSessionId: sessionId, agentOptions, setup: composition.setup }),
+            })
+          } catch (error) {
+            leaseManager.pin(String(sessionId), `first-session creation failed: ${safeErrorMessage(error)}`)
+            diag.warn('session lease pinned', { session: String(sessionId), reason: 'first-session creation failed' })
+            throw error
+          }
         }
         let created: Awaited<ReturnType<typeof agents.create>>
         try {
           created = await createWithLock(launched.composition)
         } catch (error) {
-          // A durable-published child that could not be recovered is NOT a
-          // preset-mount fault: the child exists and stays locked — never
-          // fall back to a second fresh session (review round 17).
-          if (error instanceof DurablePublishedUnrecoverableError) throw error
-          if (error instanceof PublicationStateUnknownError) throw error
-          // A preset that resolves but fails to MOUNT (e.g. a row waiting for
-          // a host service) rejects inside the agent-factory setup. Surface it
-          // and fall back to the default rather than killing the TUI. The
-          // catch is NARROW: it covers only the create/setup — once the
-          // child is created and locked, later initialization failures are
-          // recorded, never a second fallback child (review round 10: a
-          // fallback after a committed child would leave two live agents and
-          // a leaked lock).
+          // Once the DSH boundary was crossed, NO second fresh fallback may
+          // run (convergence plan phase 4): the failed session is pinned
+          // (inside createWithLock) and the surface stays sessionless — the
+          // next user input starts a NEW attempt. Preset mount failures are
+          // no longer auto-replaced; the resolve-level fallback (requested →
+          // default) already happened inside launchComposition, BEFORE any
+          // DSH call.
           const message = safeErrorMessage(error)
-          ctx.logger.warn(`tui-runner: failed to start with preset "${launchPreset ?? 'default'}": ${message}`)
-          diag.warn('preset mount failed', { preset: launchPreset ?? 'default', error: message })
-          resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${message}`
-          const fallback = await compose()
-          created = await createWithLock(fallback)
+          ctx.logger.warn(`tui-runner: failed to create the first session: ${message}`)
+          diag.warn('first session creation failed', { error: message })
+          resumeFailure = `could not create the first session: ${message}`
+          throw error
         }
         liveHandle = created
         liveAgent = created.agent

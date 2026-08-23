@@ -1,109 +1,76 @@
 /**
- * Tests for the session-transition orchestration (src/transition.ts): the
- * ONE canonical phase order every live-session writer must follow, and its
- * failure semantics. The runner's `transitionTo` is a thin host adapter
- * over `runTransitionTo` — this suite fixes the order itself (review
- * round-3 finding: the old lock must not be released before the old agent
- * has quiesced and been finally flushed).
+ * Headless tests for the canonical session transition (the convergence
+ * plan flow): quiesce → preflight → target lease → DSH boundary (touched)
+ * → create / at most one same-id recovery → synchronous COMMIT (no lock
+ * changes) → retire (dispose + cooling handover).
  * @module @xmoon76/dsh-pi-tui/transition.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, PublicationStateUnknownError, runTransitionTo, type TransitionHost, type TransitionSteps } from '../src/transition.ts'
-import { OpenLockHolder } from '../src/open-locks.ts'
+import {
+  createWithPublicationRecovery,
+  runTransitionTo,
+  type TransitionHost,
+  type TransitionSteps,
+} from '../src/transition.ts'
+import { ProcessSessionLeaseManager } from '../src/session-lease-manager.ts'
 
-/** The handle shape the host drives (structurally the AgentHandle). */
 interface Handle {
-  agent: { session: { id: string; header?: { cwd?: string } } }
+  agent: { session: { id: string } }
 }
 
-function handle(id: string): Handle {
-  return { agent: { session: { id, header: { cwd: '/ws' } } } }
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
-  let resolve!: (value: T) => void
-  let reject!: (error: unknown) => void
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res
-    reject = rej
-  })
-  return { promise, resolve, reject }
-}
-
-async function settle(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 0))
+function handle(sessionId: string): Handle {
+  return { agent: { session: { id: sessionId } } }
 }
 
 interface FakeHostOptions {
-  /** whenIdle of the old agent hangs until released (the agent is RUNNING). */
-  quiesceHang?: Promise<void>
   quiesceError?: string
-  /** The target lock is refused (another process holds it). */
-  targetLockRefused?: string
-  /** The target lock is unavailable (deployment cannot lock). */
-  targetLockUnavailable?: boolean
-  /** Whether the child is durable-published when create rejects. */
-  durablePublished?: boolean
-  /** Whether the child's publication state cannot be verified. */
-  durablePublishedUnknown?: boolean
-  /** The old session's retirement barrier hangs until released. */
-  retirementGate?: Promise<void>
-  /** The old session's retirement cannot settle — the lock stays. */
-  retirementUnsettled?: boolean
   prepareError?: string
   createError?: string
   retireError?: string
+  targetLockRefused?: string
+  targetLockUnavailable?: boolean
+  snapshot?: { sessionId: string; eventCount: number; tailFingerprint: string; empty: boolean; capturedAt: number }
 }
 
 function fakeHost(options: FakeHostOptions = {}): {
   host: TransitionHost<Handle>
   events: string[]
   failures: string[]
+  pins: string[]
 } {
   const events: string[] = []
   const failures: string[] = []
-  const hang = options.quiesceHang
+  const pins: string[] = []
   const host: TransitionHost<Handle> = {
     quiesceOld: async () => {
-      events.push('old.whenIdle')
-      if (hang !== undefined) await hang
       events.push('old.flush')
       if (options.quiesceError !== undefined) throw new Error(options.quiesceError)
+      return options.snapshot
     },
-    acquireTargetLock: (target) => {
+    acquireTargetLease: (target) => {
       events.push(`target.lock.acquire:${target.id}`)
       if (options.targetLockRefused !== undefined) return { kind: 'refused', message: options.targetLockRefused }
       if (options.targetLockUnavailable === true) return { kind: 'unavailable', reason: 'no-lock-dir' }
       return { kind: 'acquired' }
     },
-    releaseLock: (sessionId) => { events.push(`target.lock.release:${sessionId}`) },
-    isDurablePublished: async () => options.durablePublished === true
-      ? 'durable'
-      : options.durablePublishedUnknown === true
-        ? 'unknown'
-        : 'not-durable',
-    retire: async () => {
-      // The retire ORDER is the lock contract (review round 10): dispose
-      // the old handle, wait its persistence retirement (the inspect
-      // barrier), and only then release the old lock — the COMMIT releases
-      // nothing.
+    releaseUntouchedTarget: (sessionId: string) => { events.push(`target.lock.release:${sessionId}`) },
+    markTargetTouched: (sessionId) => { events.push(`target.touched:${sessionId}`) },
+    commit: () => { events.push('child.commit') },
+    retireOld: async () => {
       events.push('old.dispose')
-      if (options.retirementGate !== undefined) await options.retirementGate
-      if (options.retirementUnsettled === true) {
-        events.push('old.lock.kept')
-      } else {
-        events.push('old.lock.release')
-      }
       if (options.retireError !== undefined) throw new Error(options.retireError)
     },
-    commit: () => { events.push('child.commit') },
+    pinTarget: (sessionId, reason) => {
+      events.push(`target.pinned:${sessionId}`)
+      pins.push(reason)
+    },
     recordFailure: (phase, error) => {
       failures.push(`${phase}:${error instanceof Error ? error.message : String(error)}`)
     },
   }
-  return { host, events, failures }
+  return { host, events, failures, pins }
 }
 
 function steps(events: string[], options: { prepareError?: string; createError?: string } = {}): TransitionSteps<Handle> {
@@ -118,79 +85,94 @@ function steps(events: string[], options: { prepareError?: string; createError?:
   }
 }
 
-test('the canonical order is quiesce → flush → prepare → create → lock handover → commit → dispose', async () => {
-  const { host, events } = fakeHost()
+test('the canonical order is flush → prepare → target lease → touched → create → commit → dispose', async () => {
+  const { host, events } = fakeHost({ snapshot: { sessionId: 'session-a', eventCount: 0, tailFingerprint: '', empty: true, capturedAt: 0 } })
   const outcome = await runTransitionTo(host, steps(events))
   assert.equal(outcome.ok, true)
   assert.deepEqual(events, [
-    'old.whenIdle',            // 1. the old agent quiesces FIRST (no abort closures later)
-    'old.flush',               // 2. final flush, old lock still held
-    'target.lock.acquire:session-c', // 3. the TARGET lock BEFORE the create (review round 6)
-    'prepare',                 // 4. caller gates
-    'child.create',            // 5. create — published from here on
-    'child.commit',            // 6. synchronous commit (no lock changes)
-    'old.dispose',             // 7. old handle disposed first
-    'old.lock.release',        // 8. old lock released only after dispose + retirement barrier
-  ])
-})
-
-test('review: a RUNNING old agent blocks the transition — no create, no lock release until idle', async () => {
-  const release = deferred<void>()
-  const { host, events } = fakeHost({ quiesceHang: release.promise })
-  const pending = runTransitionTo(host, steps(events))
-  await settle()
-  await settle()
-  // The old agent is still streaming: nothing may be created or released.
-  assert.deepEqual(events, ['old.whenIdle'],
-    'create/release/commit must all wait for the old agent to quiesce')
-  // The old activity settles: the transition proceeds in the canonical order.
-  release.resolve()
-  const outcome = await pending
-  assert.equal(outcome.ok, true)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.commit', 'old.dispose', 'old.lock.release',
-  ])
+    'old.flush',              // 1. old quiesce + final flush (lock held)
+    'prepare',                // 2. ALL preflight BEFORE the DSH boundary
+    'target.lock.acquire:session-c', // 3. target lease (old lock still held)
+    'target.touched:session-c',      // 4. the DSH boundary
+    'child.create',         // 5. create — published from here on
+    'child.commit',           // 6. synchronous COMMIT (NO lock changes)
+    'old.dispose',            // 7. old handle disposed; the old lease goes to cooling
+  ], 'the old lock is NOT released anywhere in the transition')
 })
 
 test('a quiesce/flush failure aborts with zero child side effects', async () => {
   const { host, events, failures } = fakeHost({ quiesceError: 'flush disk full' })
   const outcome = await runTransitionTo(host, steps(events))
   assert.deepEqual(outcome, { ok: false, message: 'transition failed: flush disk full' })
-  assert.deepEqual(events, ['old.whenIdle', 'old.flush'], 'nothing was created, locked or committed')
+  assert.deepEqual(events, ['old.flush'], 'nothing was locked, touched or created')
   assert.deepEqual(failures, ['quiesce:flush disk full'])
 })
 
-test('a prepare failure aborts before anything is published and releases the target lock', async () => {
+test('a PREFLIGHT failure aborts BEFORE the target is even locked', async () => {
   const { host, events, failures } = fakeHost()
-  const outcome = await runTransitionTo(host, steps(events, { prepareError: 'lock refused' }))
+  const outcome = await runTransitionTo(host, steps(events, { prepareError: 'roster unavailable' }))
   assert.equal(outcome.ok, false)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare',
-    'target.lock.release:session-c',
-  ], 'the create and the lock handover must not run; the target lock is released')
-  assert.deepEqual(failures, ['prepare:lock refused'])
+  assert.deepEqual(events, ['old.flush', 'prepare'],
+    'the target lease is never taken — zero side effects')
+  assert.deepEqual(failures, ['prepare:roster unavailable'])
 })
 
-test('a create failure aborts, releases the target lock and never touches the old lock', async () => {
-  const { host, events, failures } = fakeHost()
-  const outcome = await runTransitionTo(host, steps(events, { createError: 'roster unavailable' }))
-  assert.equal(outcome.ok, false)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'target.lock.release:session-c',
-  ], 'the old lock stays held, the target lock is released, nothing is committed')
-  assert.deepEqual(failures, ['create:roster unavailable'])
-})
-
-test('review round 6: a REFUSED target lock aborts BEFORE the create (zero child side effects)', async () => {
+test('a refused target lease fails closed before the DSH boundary', async () => {
   const { host, events, failures } = fakeHost({ targetLockRefused: 'held by another process' })
   const outcome = await runTransitionTo(host, steps(events))
   assert.equal(outcome.ok, false)
   assert.match(outcome.ok === false ? outcome.message : '', /held by another process/)
-  assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'target.lock.acquire:session-c'],
-    'the child must never be created when its lock is refused')
+  assert.deepEqual(events, ['old.flush', 'prepare', 'target.lock.acquire:session-c'],
+    'no create, no touched, nothing published')
   assert.deepEqual(failures, ['target-lock:held by another process'])
+})
+
+test('an UNAVAILABLE target lease fails closed for EVERY writable target', async () => {
+  const { host, events } = fakeHost({ targetLockUnavailable: true })
+  const outcome = await runTransitionTo(host, steps(events))
+  assert.equal(outcome.ok, false, 'fresh AND existing require the physical owner lock')
+  assert.match(outcome.ok === false ? outcome.message : '', /cannot lock the session/)
+  assert.deepEqual(events, ['old.flush', 'prepare', 'target.lock.acquire:session-c'])
+})
+
+test('a create rejection WITHOUT recovery PINNS the target (lock kept, old stays current)', async () => {
+  const { host, events, failures, pins } = fakeHost()
+  const outcome = await runTransitionTo(host, steps(events, { createError: 'DSH publication failed' }))
+  assert.equal(outcome.ok, false)
+  assert.deepEqual(events, [
+    'old.flush', 'prepare', 'target.lock.acquire:session-c', 'target.touched:session-c', 'child.create',
+    'target.pinned:session-c',
+  ], 'no second fresh create, no unlock — the target is pinned')
+  assert.equal(pins.length, 1)
+  assert.match(pins[0]!, /DSH create\/resume failed: DSH publication failed/)
+  assert.deepEqual(failures, ['create:DSH publication failed'])
+})
+
+test('a rejected create RECOVERS with the same id and commits', async () => {
+  const { host, events, failures, pins } = fakeHost()
+  const recovered = steps(events, { createError: 'post-publication listener threw' })
+  recovered.recover = async () => { events.push('recover'); return handle('session-c') }
+  const outcome = await runTransitionTo(host, recovered)
+  assert.equal(outcome.ok, true)
+  assert.deepEqual(events, [
+    'old.flush', 'prepare', 'target.lock.acquire:session-c', 'target.touched:session-c',
+    'child.create', 'recover', 'child.commit', 'old.dispose',
+  ])
+  assert.deepEqual(pins, [], 'a successful same-id recovery is not a pin')
+  assert.deepEqual(failures, [])
+})
+
+test('a create rejection whose SAME-ID recovery also fails PINNS the target', async () => {
+  const { host, events, pins } = fakeHost()
+  const failing = steps(events, { createError: 'post-publication listener threw' })
+  failing.recover = async () => { events.push('recover'); throw new Error('resume repair failed') }
+  const outcome = await runTransitionTo(host, failing)
+  assert.equal(outcome.ok, false)
+  assert.deepEqual(events, [
+    'old.flush', 'prepare', 'target.lock.acquire:session-c', 'target.touched:session-c',
+    'child.create', 'recover', 'target.pinned:session-c',
+  ], 'at most ONE same-id recovery; failure pins the target')
+  assert.match(pins[0]!, /same-ID recovery: resume repair failed/)
 })
 
 test('a retire failure NEVER rolls the committed child back', async () => {
@@ -199,372 +181,68 @@ test('a retire failure NEVER rolls the committed child back', async () => {
   assert.equal(outcome.ok, true, 'the child is committed and stands despite the retire failure')
   if (outcome.ok) assert.equal(outcome.next.agent.session.id, 'session-c')
   assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.commit', 'old.dispose', 'old.lock.release',
+    'old.flush', 'prepare', 'target.lock.acquire:session-c', 'target.touched:session-c',
+    'child.create', 'child.commit', 'old.dispose',
   ])
   assert.deepEqual(failures, ['retire:old dispose exploded'])
 })
 
-test('convergence phase 2: a FRESH target with an UNAVAILABLE lock aborts BEFORE the create', async () => {
-  const { host, events, failures } = fakeHost({ targetLockUnavailable: true })
-  const outcome = await runTransitionTo(host, { ...steps(events), fresh: true })
-  assert.equal(outcome.ok, false)
-  assert.match(outcome.ok === false ? outcome.message : '', /cannot lock the session/)
-  assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'target.lock.acquire:session-c'],
-    'the child must never be created without its lock')
-  assert.deepEqual(failures, ['target-lock:cannot lock the session before the transition (no-lock-dir)'])
-})
+// ── the ownership lifecycle: the old lease outlives the whole transition ───
 
-test('convergence phase 2: an EXISTING target with an unavailable lock FAILS CLOSED too', async () => {
-  const { host, events } = fakeHost({ targetLockUnavailable: true })
-  const outcome = await runTransitionTo(host, { ...steps(events), fresh: false })
-  assert.equal(outcome.ok, false, 'every writable target requires its physical owner lock')
-  assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'target.lock.acquire:session-c'],
-    'no resume happens without an acquired lock — the divergence guard is no stand-in')
-})
-
-// ── review round 8: a rejected create may still have published durably ─────
-
-test('a create rejection BEFORE publication releases the target lock and aborts', async () => {
-  const { host, events, failures } = fakeHost()
-  const outcome = await runTransitionTo(host, steps(events, { createError: 'pre-publication' }))
-  assert.equal(outcome.ok, false)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'target.lock.release:session-c',
-  ], 'a genuine pre-publication failure releases the lock and leaves the old session untouched')
-  assert.deepEqual(failures, ['create:pre-publication'])
-})
-
-test('a rejected create AFTER durable publication is RECOVERED and committed (never a ghost)', async () => {
-  const { host, events, failures } = fakeHost({ durablePublished: true })
-  const recovered = steps(events, { createError: 'post-publication listener threw' })
-  recovered.recover = async () => { events.push('child.recover'); return handle('session-c') }
-  const outcome = await runTransitionTo(host, recovered)
-  assert.equal(outcome.ok, true, 'the recovered child commits as the transition result')
-  if (outcome.ok) assert.equal(outcome.next.agent.session.id, 'session-c')
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.recover', 'child.commit', 'old.dispose', 'old.lock.release',
-  ], 'the target lock is NEVER released — the recovered child is committed; the OLD lock is released only after dispose + retirement barrier')
-  assert.deepEqual(failures, [], 'a successful recovery is not a failure')
-})
-
-test('a durable-published child that CANNOT be recovered keeps its lock and reports the explicit state', async () => {
-  const { host, events, failures } = fakeHost({ durablePublished: true })
-  const failing = steps(events, { createError: 'post-publication listener threw' })
-  failing.recover = async () => { events.push('child.recover'); throw new Error('resume repair failed') }
-  const outcome = await runTransitionTo(host, failing)
-  assert.equal(outcome.ok, false)
-  assert.match(outcome.ok === false ? outcome.message : '', /durable-published but could not be recovered/)
-  assert.match(outcome.ok === false ? outcome.message : '', /stays locked/)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.recover',
-  ], 'the target lock is NEVER released — the published child must not silently become an openable ghost')
-  assert.deepEqual(failures, ['create:create failed (post-publication listener threw); the child was durable-published but could not be recovered (resume repair failed)'])
-})
-
-test('review round 17: the unrecoverable-published error is a distinct class, never a fallback trigger', () => {
-  const error = new DurablePublishedUnrecoverableError('session-c', 'resume repair failed')
-  assert.equal(error.name, 'DurablePublishedUnrecoverableError')
-  assert.match(error.message, /durable-published but could not be recovered/)
-  assert.match(error.message, /stays locked/)
-  // ensureSession's preset fallback must NOT run for this class — it
-  // rethrows it (the child exists and stays locked; a second fresh session
-  // would be a lie about the surface state).
-  assert.ok(!(new Error('preset mount failed') instanceof DurablePublishedUnrecoverableError))
-})
-
-test('review round 17/18: an unrecoverable published child — no second create, lock kept (end to end)', async () => {
-  // The createWithLock / resume-fallback shape: a rejected create that
-  // crossed the durable boundary and whose resume ALSO fails must throw
-  // DurablePublishedUnrecoverableError with the target lock still held —
-  // the caller (ensureSession) rethrows it, so NO second agents.create()
-  // ever runs and the lock is never released.
-  let creates = 0
-  let releases = 0
-  let resumes = 0
-  await assert.rejects(
-    createWithPublicationRecovery({
-      targetId: 'session-c',
-      create: async () => {
-        creates += 1
-        throw new Error('post-publication listener threw')
-      },
-      resume: async () => {
-        resumes += 1
-        throw new Error('resume repair failed')
-      },
-      isDurablePublished: async () => 'durable',
-      releaseTargetLock: () => { releases += 1 },
-    }),
-    (error: unknown) => {
-      assert.ok(error instanceof DurablePublishedUnrecoverableError, 'the unrecoverable class escapes')
-      assert.match((error as Error).message, /stays locked/)
-      return true
-    },
-  )
-  assert.equal(creates, 1, 'exactly one create attempt — no second fallback create')
-  assert.equal(releases, 0, 'the target lock is NEVER released for a published child')
-  assert.equal(resumes, 1)
-})
-
-test('review round 8: a PRE-publication failure releases the lock and rethrows the original error', async () => {
-  let releases = 0
-  await assert.rejects(
-    createWithPublicationRecovery({
-      targetId: 'session-c',
-      create: async () => { throw new Error('pre-publication') },
-      resume: async () => { throw new Error('must not resume') },
-      isDurablePublished: async () => 'not-durable',
-      releaseTargetLock: () => { releases += 1 },
-    }),
-    /pre-publication/,
-  )
-  assert.equal(releases, 1, 'the pre-publication failure releases the lock')
-})
-
-test('review round 19: a resume failure on a durable session recovers the SAME session (lock kept)', async () => {
-  // The --session resume shape: the first resume rejects AFTER publication
-  // (durable), the recovery resumes the SAME session id with the lock
-  // still held — never a fresh fallback session.
-  let resumes = 0
-  let releases = 0
-  const recovered = await createWithPublicationRecovery({
-    targetId: 'session-existing',
-    create: async () => {
-      resumes += 1
-      throw new Error('resume publication listener threw')
-    },
-    resume: async () => {
-      resumes += 1
-      return { id: 'session-existing' }
-    },
-    isDurablePublished: async () => 'durable',
-    releaseTargetLock: () => { releases += 1 },
-  })
-  assert.equal(resumes, 2, 'the recovery resumes the same session once')
-  assert.equal(releases, 0, 'the lock is never released for a durable session')
-  assert.deepEqual(recovered, { id: 'session-existing' })
-})
-
-test('review round 19: an unrecoverable durable RESUME failure escapes with the lock kept (no fresh fallback)', async () => {
-  let releases = 0
-  await assert.rejects(
-    createWithPublicationRecovery({
-      targetId: 'session-existing',
-      create: async () => { throw new Error('resume publication listener threw') },
-      resume: async () => { throw new Error('resume repair failed') },
-      isDurablePublished: async () => 'durable',
-      releaseTargetLock: () => { releases += 1 },
-    }),
-    (error: unknown) => {
-      assert.ok(error instanceof DurablePublishedUnrecoverableError)
-      return true
-    },
-  )
-  assert.equal(releases, 0, 'the durable session stays locked — the launch path must NOT fall back to a fresh session')
-})
-
-test('review round 19/20: a stale (never-durable) --session id releases the lock and rethrows for the fresh fallback', async () => {
-  // The --session stale-id shape: the id was never materialized (durable
-  // false) — the recovery helper releases the target lock and rethrows
-  // the original error, which is exactly the signal the launch catch uses
-  // to fall back to a fresh session and notify. No resume is attempted.
-  let releases = 0
-  let resumes = 0
-  await assert.rejects(
-    createWithPublicationRecovery({
-      targetId: 'session-stale',
-      create: async () => { throw new Error('session not found') },
-      resume: async () => { resumes += 1; throw new Error('must not resume') },
-      isDurablePublished: async () => 'not-durable',
-      releaseTargetLock: () => { releases += 1 },
-    }),
-    /session not found/,
-  )
-  assert.equal(releases, 1, 'the never-durable id releases the lock (the caller falls back to a fresh session)')
-  assert.equal(resumes, 0, 'no recovery resume for a session that never existed')
-})
-
-test('review round 25: an UNVERIFIABLE publication state keeps the lock and aborts (never releases a maybe-published child)', async () => {
-  const { host, events, failures } = fakeHost({ durablePublishedUnknown: true })
-  const outcome = await runTransitionTo(host, steps(events, { createError: 'post-publication listener threw' }))
-  assert.equal(outcome.ok, false)
-  assert.match(outcome.ok === false ? outcome.message : '', /cannot confirm whether session/)
-  assert.match(outcome.ok === false ? outcome.message : '', /stays locked/)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-  ], 'the target lock is NEVER released when the publication state is unverifiable')
-  assert.equal(failures.length, 1)
-})
-
-test('review round 25: the standalone helper treats an unreadable backend as unknown — lock kept, no fallback', async () => {
-  let releases = 0
-  await assert.rejects(
-    createWithPublicationRecovery({
-      targetId: 'session-c',
-      create: async () => { throw new Error('post-publication listener threw') },
-      resume: async () => { throw new Error('must not resume') },
-      isDurablePublished: async () => 'unknown',
-      releaseTargetLock: () => { releases += 1 },
-    }),
-    (error: unknown) => {
-      assert.ok(error instanceof PublicationStateUnknownError, 'the unknown state escapes as its own class')
-      assert.match((error as Error).message, /stays locked/)
-      return true
-    },
-  )
-  assert.equal(releases, 0, 'a maybe-published child is never released')
-})
-
-// ── review round 26 P1: the publication barrier must not race ──────────────
-
-test('review round 26 P1: the detector WAITS for the in-flight materialization — a transient miss never releases', async () => {
-  const { host, events } = fakeHost()
-  let releaseGate!: () => void
-  const gate = new Promise<void>(resolve => { releaseGate = resolve })
-  let observations = 0
-  host.isDurablePublished = async () => {
-    observations += 1
-    // The persistence coordinator's inspect() barrier: it awaits the
-    // in-flight retirement/materialization for the id before answering.
-    await gate
-    return 'durable'
-  }
-  const failing = steps(events, { createError: 'post-publication listener threw' })
-  failing.recover = async () => { events.push('child.recover'); return handle('session-c') }
-  const pending = runTransitionTo(host, failing)
-  await settle()
-  await settle()
-  // The detector is still behind the barrier: the lock must NOT be
-  // released and nothing may commit or recover yet.
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-  ], 'while the barrier is pending the lock stays and nothing commits')
-  assert.equal(observations, 1)
-  // The materialization settles: the child IS durable → recovery commits it.
-  releaseGate()
-  const outcome = await pending
-  assert.equal(outcome.ok, true)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.recover', 'child.commit', 'old.dispose', 'old.lock.release',
-  ], 'the recovered child commits — the durable ghost is impossible; the old lock releases after dispose + barrier')
-})
-
-test('review round 26 P1: an authoritative barrier not-found is the ONLY not-durable', async () => {
-  // The detector sees a settle NOT-FOUND after the barrier: pre-publication.
-  const { host, events } = fakeHost()
-  host.isDurablePublished = async () => 'not-durable'
-  const outcome = await runTransitionTo(host, steps(events, { createError: 'setup threw before session/created' }))
-  assert.equal(outcome.ok, false)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'target.lock.release:session-c',
-  ], 'an authoritative not-found releases the lock and aborts')
-})
-
-// ── review round 26 P2: an EXISTING target must not be pinned ──────────────
-
-test('review round 26 P2: an EXISTING target releases its lock on an unrecoverable failure', async () => {
-  const { host, events } = fakeHost({ durablePublished: true })
-  const failing = steps(events, { createError: 'post-publication listener threw' })
-  failing.recover = async () => { events.push('child.recover'); throw new Error('resume repair failed') }
-  failing.keepTargetLockOnUnrecoverable = false
-  const outcome = await runTransitionTo(host, failing)
-  assert.equal(outcome.ok, false)
-  assert.match(outcome.ok === false ? outcome.message : '', /durable-published but could not be recovered/)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.recover', 'target.lock.release:session-c',
-  ], 'an existing target releases its lock on unrecoverable failure — never pinned until process exit')
-})
-
-test('review round 26 P2: a FRESH target still KEEPS its lock on an unrecoverable failure (default)', async () => {
-  const { host, events } = fakeHost({ durablePublished: true })
-  const failing = steps(events, { createError: 'post-publication listener threw' })
-  failing.recover = async () => { events.push('child.recover'); throw new Error('resume repair failed') }
-  const outcome = await runTransitionTo(host, failing)
-  assert.equal(outcome.ok, false)
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.recover',
-  ], 'a fresh maybe-published child stays locked')
-})
-
-test('review round 26 P2: the helper releases for an EXISTING target (keepLockOnUnrecoverable false)', async () => {
-  let releases = 0
-  await assert.rejects(
-    createWithPublicationRecovery({
-      targetId: 'session-existing',
-      create: async () => { throw new Error('resume publication listener threw') },
-      resume: async () => { throw new Error('resume repair failed') },
-      isDurablePublished: async () => 'durable',
-      releaseTargetLock: () => { releases += 1 },
-      keepLockOnUnrecoverable: false,
-    }),
-    (error: unknown) => error instanceof DurablePublishedUnrecoverableError,
-  )
-  assert.equal(releases, 1, 'an existing target releases its lock on unrecoverable failure')
-})
-
-// ── review round 10: the OLD lock outlives the COMMIT, dispose and the ─────
-// ── retirement barrier — the final ownership lifecycle ─────────────────────
-
-test('review round 10: the old lock survives COMMIT + dispose + the retirement barrier — a second process stays held until settle', async () => {
-  const holder = new OpenLockHolder()
+test('the old lease survives COMMIT + dispose — the transition releases NOTHING', async () => {
+  const acquired: string[] = []
   const released: string[] = []
-  holder.add('session-a', () => released.push('session-a'))
-  let releaseRetirement!: () => void
-  const retirement = new Promise<void>(resolve => { releaseRetirement = resolve })
+  const manager = new ProcessSessionLeaseManager({
+    acquire: (target) => { acquired.push(target.id); return { kind: 'acquired' } },
+    release: (id) => { released.push(id) },
+  })
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.markActive('session-a')
   const events: string[] = []
   const host: TransitionHost<Handle> = {
-    quiesceOld: async () => { events.push('old.flush') },
-    acquireTargetLock: (target) => {
-      holder.add(target.id, () => released.push(target.id))
-      return { kind: 'acquired' }
-    },
-    releaseLock: (id) => holder.release(id),
-    isDurablePublished: async () => 'not-durable',
-    commit: () => { events.push('child.commit') },
-    retire: async () => {
-      events.push('old.dispose')
-      // The persistence retirement (fire-and-forget final flush) drains.
-      await retirement
-      events.push('old.lock.release')
-      holder.release('session-a')
-    },
+    quiesceOld: async () => ({ sessionId: 'session-a', eventCount: 2, tailFingerprint: 'h', empty: false, capturedAt: 0 }),
+    acquireTargetLease: (target) => { events.push(`acquire:${target.id}`); return manager.reserve(target) },
+    releaseUntouchedTarget: () => {},
+    markTargetTouched: (id) => { events.push(`touched:${id}`) },
+    commit: () => { events.push('commit') },
+    retireOld: async () => { events.push('dispose') },
+    pinTarget: (id, reason) => { manager.pin(id, reason) },
     recordFailure: () => {},
   }
-  const run = runTransitionTo(host, {
+  const outcome = await runTransitionTo(host, {
     target: { id: 'session-b' },
-    create: async () => { events.push('child.create'); return handle('session-b') },
+    create: async () => { events.push('create'); return handle('session-b') },
   })
-  await settle()
-  await settle()
-  // COMMIT happened; the old lock is STILL held (the child lock too).
-  assert.equal(holder.has('session-a'), true, 'the old lock survives the COMMIT')
-  assert.equal(holder.has('session-b'), true, 'the child lock is held throughout')
-  // A second process trying to resume A while the retirement drains: held.
-  assert.equal(holder.add('session-a', () => released.push('dup')), false, 'a second process is refused while the retirement drains')
-  // The retirement settles: the old lock is released, the child keeps its.
-  releaseRetirement()
-  const outcome = await run
   assert.equal(outcome.ok, true)
-  assert.deepEqual(released, ['session-a'])
-  assert.equal(holder.has('session-a'), false, 'the old lock releases only after the barrier settles')
-  assert.equal(holder.has('session-b'), true, 'the child lock stays')
-  assert.equal(holder.add('session-a', () => released.push('after')), true, 'a second process may acquire A only after the barrier')
+  assert.equal(manager.canReuseLocally('session-a'), true, 'the OLD lease is still held after the whole transition')
+  assert.equal(manager.canReuseLocally('session-b'), true)
+  assert.deepEqual(released, [], 'NOTHING was released inside the transition')
+  assert.deepEqual(events, ['acquire:session-b', 'touched:session-b', 'create', 'commit', 'dispose'])
 })
 
-test('review round 10: an UNSETTLED retirement keeps the old lock (the child still commits)', async () => {
-  const { host, events } = fakeHost({ retirementUnsettled: true })
-  const outcome = await runTransitionTo(host, steps(events))
-  assert.equal(outcome.ok, true, 'the child commits regardless')
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.commit', 'old.dispose', 'old.lock.kept',
-  ], 'an unsettled retirement keeps the old lock (warned) — never an open double-write window')
+// ── the standalone helper: same-ID recovery, never a release ───────────────
+
+test('the standalone helper retries the SAME id once and throws (the caller pins)', async () => {
+  let creates = 0
+  let resumes = 0
+  await assert.rejects(
+    createWithPublicationRecovery({
+      targetId: 'session-c',
+      create: async () => { creates += 1; throw new Error('post-publication listener threw') },
+      resume: async () => { resumes += 1; throw new Error('resume repair failed') },
+    }),
+    /stays pinned/,
+  )
+  assert.equal(creates, 1, 'exactly one create attempt — no second fresh fallback')
+  assert.equal(resumes, 1, 'exactly one same-id recovery')
+})
+
+test('the helper: a successful same-id recovery returns the recovered handle', async () => {
+  const recovered = await createWithPublicationRecovery({
+    targetId: 'session-c',
+    create: async () => { throw new Error('publication failed') },
+    resume: async () => handle('session-c'),
+  })
+  assert.equal(recovered.agent.session.id, 'session-c')
 })
