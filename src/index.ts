@@ -1376,14 +1376,28 @@ export function apply(ctx: Context, config: Config): void {
         releaseOpenLock(sessionId)
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
-        handle = await agents.create({
-          sessionId: SessionId(`session-${randomUUID()}`),
-          meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
-          agentOptions,
-          setup: launched.composition.setup,
-        })
-        // The fallback session is now a real persisted artifact: take its
-        // open lock like any other created session.
+        // The fallback follows the SAME target-lock-before-create rule as
+        // every other transition (review round 10): the id is pre-generated
+        // and its open lock is acquired BEFORE the create publishes the
+        // session — a refusal aborts with zero side effects, and a create
+        // failure releases the target lock.
+        const fallbackId = SessionId(`session-${randomUUID()}`)
+        const fallbackLockRefusal = acquireOpenLock(String(fallbackId), { cwd: process.cwd() })
+        if (fallbackLockRefusal !== undefined) throw new Error(fallbackLockRefusal)
+        try {
+          handle = await agents.create({
+            sessionId: fallbackId,
+            meta: { cwd: process.cwd(), ...withPresetMeta(launched.composition) },
+            agentOptions,
+            setup: launched.composition.setup,
+          })
+        } catch (error) {
+          releaseOpenLock(String(fallbackId))
+          throw error
+        }
+        // The fallback session is now a real persisted artifact: its open
+        // lock was acquired BEFORE the create (above); the re-acquire is an
+        // idempotent no-op.
         acquireOpenLock(handle.agent.session.id, handle.agent.session.header)
       }
     } else {
@@ -3981,42 +3995,54 @@ export function apply(ctx: Context, config: Config): void {
             throw error
           }
         }
+        let created: Awaited<ReturnType<typeof agents.create>>
         try {
-          const created = await createWithLock(launched.composition)
-          liveHandle = created
-          liveAgent = created.agent
-          // The open-time lock was acquired BEFORE the create (above); the
-          // re-acquire is an idempotent no-op — kept as the defensive
-          // record for deployments where the pre-acquire was unavailable.
-          acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
-          await liveAgent.whenIdle()
-          bumpSessionGeneration()
-          await initLiveSession(liveAgent)
-          // The first real session's catalog comes from the REAL agent:
-          // await the coordinator refresh so the first submission rides the
-          // live scope (the probe snapshot is never execution
-          // authorization). Provider issues degrade fields inside the
-          // snapshot; a failed attempt is warned, never fatal.
-          await refreshLiveCatalog(liveAgent)
+          created = await createWithLock(launched.composition)
         } catch (error) {
           // A preset that resolves but fails to MOUNT (e.g. a row waiting for
           // a host service) rejects inside the agent-factory setup. Surface it
-          // and fall back to the default rather than killing the TUI.
+          // and fall back to the default rather than killing the TUI. The
+          // catch is NARROW: it covers only the create/setup — once the
+          // child is created and locked, later initialization failures are
+          // recorded, never a second fallback child (review round 10: a
+          // fallback after a committed child would leave two live agents and
+          // a leaked lock).
           const message = safeErrorMessage(error)
           ctx.logger.warn(`tui-runner: failed to start with preset "${launchPreset ?? 'default'}": ${message}`)
           diag.warn('preset mount failed', { preset: launchPreset ?? 'default', error: message })
           resumeFailure = `failed to start with preset "${launchPreset ?? 'default'}": ${message}`
           const fallback = await compose()
-          const created = await createWithLock(fallback)
-          liveHandle = created
-          liveAgent = created.agent
-          // The open-time lock was acquired BEFORE the create (above); the
-          // re-acquire is an idempotent no-op.
-          acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
+          created = await createWithLock(fallback)
+        }
+        liveHandle = created
+        liveAgent = created.agent
+        // The open-time lock was acquired BEFORE the create (above); the
+        // re-acquire is an idempotent no-op — kept as the defensive record
+        // for deployments where the pre-acquire was unavailable.
+        acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
+        // Post-create initialization is best-effort: the child is committed
+        // and locked, so failures are recorded, never a fallback (the same
+        // retire-warn-only semantics as every other transition).
+        try {
           await liveAgent.whenIdle()
-          bumpSessionGeneration()
+        } catch (error) {
+          diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
+        }
+        bumpSessionGeneration()
+        try {
           await initLiveSession(liveAgent)
+        } catch (error) {
+          diag.warn('first session surface rebuild failed', { error: safeErrorMessage(error) })
+        }
+        // The first real session's catalog comes from the REAL agent:
+        // await the coordinator refresh so the first submission rides the
+        // live scope (the probe snapshot is never execution
+        // authorization). Provider issues degrade fields inside the
+        // snapshot; a failed attempt is warned, never fatal.
+        try {
           await refreshLiveCatalog(liveAgent)
+        } catch (error) {
+          diag.warn('first session catalog refresh failed', { error: safeErrorMessage(error) })
         }
         if (resumeFailure !== undefined) {
           app.notify(resumeFailure, 'error')
