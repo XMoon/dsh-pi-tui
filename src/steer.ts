@@ -67,7 +67,47 @@ export interface SteerDeps {
   /** The notice when the draft had to be MERGED with newer input: the
    * submission changed, so no force promise can be made. */
   mergedNotice(): string
+  /**
+   * The session-transition write fence: returns true while a session
+   * transition is in flight (quiesce → commit). The old agent may be
+   * woken again between whenIdle and the lock release, so a write in that
+   * window would target a session whose lock is about to be handed over —
+   * the two-writers race. Optional; absent keeps the historical behavior.
+   */
+  fence?: () => boolean
+  /** The fence refusal notice (defaults to {@link staleNotice}). */
+  fenceNotice?: () => string
 }
+
+/** The notice for a submission refused by the session-transition fence. */
+export const TRANSITION_FENCE_NOTICE = 'a session transition is in progress — try again in a moment'
+/** The notice when the fence refusal had to MERGE the draft with newer input. */
+export const TRANSITION_FENCE_MERGED_NOTICE = 'the draft changed while transitioning — review it before submitting again'
+
+/**
+ * The refusal action for the session-transition write fence: restore the
+ * draft (nothing is lost) and notify. The caller decides WHEN to refuse —
+ * normally by checking the transition gate's `busy` — and calls this to
+ * perform the refusal consistently across every write entry point. Pure
+ * and headless-testable.
+ * @param text - the submission that was refused.
+ * @param getDraft - read the current editor draft (may hold newer input).
+ * @param setEditorText - restore the merged draft.
+ * @param notify - the runner's notify sink.
+ */
+export function refuseByTransitionFence(
+  text: string,
+  getDraft: () => string,
+  setEditorText: (text: string) => void,
+  notify: (message: string, kind: 'info' | 'error') => void,
+): void {
+  const merged = mergeDraft(getDraft(), text)
+  setEditorText(merged)
+  notify(merged === text ? TRANSITION_FENCE_NOTICE : TRANSITION_FENCE_MERGED_NOTICE, 'info')
+}
+
+/** The steers' fence notice source (the runner wires it to the gate). */
+export const transitionFenceNotice = (): string => TRANSITION_FENCE_NOTICE
 
 /**
  * Merge a draft back after an aborted send so NOTHING is lost.
@@ -152,6 +192,16 @@ export async function steerAll(deps: SteerDeps, text: string, options: SteerAllO
   if (now === undefined || !sessionUnchanged({ agent, generation }, now, deps.currentGeneration())) {
     const verbatim = deps.restoreDraft(text)
     deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
+    return 'stale'
+  }
+  // The session-transition write fence: while a transition is in flight
+  // (quiesce → commit) the old agent may be woken again by a followup or
+  // steer — writing would target a session whose lock is about to be
+  // released (the two-writers race). Refuse with a retry notice; the
+  // draft is restored, nothing is lost.
+  if (deps.fence?.() === true) {
+    deps.restoreDraft(text)
+    deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
     return 'stale'
   }
   if (onlyDraft) {

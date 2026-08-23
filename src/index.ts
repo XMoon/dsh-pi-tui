@@ -100,7 +100,7 @@ import { consumeDraftImages, draftHasImages, prepareUserMessage, pruneUnreferenc
 import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
-import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
+import { mergeDraft, refuseByTransitionFence, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -2054,6 +2054,11 @@ export function apply(ctx: Context, config: Config): void {
                 : 'This session may be open in another dsh process (TUI/web) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)',
           forcedNotice: () => GUARD_FORCED_NOTIFY,
           staleNotice: () => 'the session changed while the submission was being checked — the output was not submitted',
+          // The session-transition write fence (review round 4): while a
+          // transition is in flight the followup would target a session
+          // whose lock is about to be released.
+          fence: () => transitionGate.busy,
+          fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
           createMessage: (text) => createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
@@ -2567,6 +2572,14 @@ export function apply(ctx: Context, config: Config): void {
                           : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
                         return
                       }
+                      // The session-transition write fence: a transition is
+                      // in flight — the fallback must not write an agent
+                      // whose lock is about to be released (review round 4).
+                      if (transitionGate.busy) {
+                        fallbackPin()
+                        refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
+                        return
+                      }
                       agent.followup(message)
                       // Consume ONLY the referenced drafts — a concurrent
                       // intake's newer image survives (round-5 finding 1).
@@ -2620,6 +2633,14 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(merged === text
             ? 'the session changed while sending — try again'
             : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+          return
+        }
+        // The session-transition write fence: while a transition is in
+        // flight (quiesce → commit) the old agent may be woken again — a
+        // followup in that window would target a session whose lock is
+        // about to be released (review round 4). The draft is restored.
+        if (transitionGate.busy) {
+          refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
           return
         }
         agent.followup(message)
@@ -2774,6 +2795,12 @@ export function apply(ctx: Context, config: Config): void {
             app.setEditorText(merged)
             return merged === draft
           },
+          // The session-transition write fence: while a transition is in
+          // flight (quiesce → commit) the old agent may be woken again —
+          // a steer in that window would target a session whose lock is
+          // about to be released (the two-writers race, review round 4).
+          fence: () => transitionGate.busy,
+          fenceNotice: () => 'a session transition is in progress — try again in a moment',
           createDraft: () => prepared,
           blockedNotice: (reason) => reason === 'removed'
             ? GUARD_REMOVED_NOTIFY('save')

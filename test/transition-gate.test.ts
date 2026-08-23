@@ -95,3 +95,18 @@ test('results propagate to the caller unchanged', async () => {
   const result = await gate.run(async () => ({ rewound: true, sessionId: 'session-c' }))
   assert.deepEqual(result, { rewound: true, sessionId: 'session-c' })
 })
+
+// ── review round 4: the gate doubles as the transition write fence ─────────
+
+test('a transition in flight is visible to concurrent submissions (write fence)', async () => {
+  const gate = new SessionTransitionGate()
+  const block = deferred<void>()
+  const pending = gate.run(async () => { await block.promise })
+  await settle()
+  // While the transition is in flight (quiesce → commit), the gate reports
+  // busy — the submission paths refuse writes on exactly this signal.
+  assert.equal(gate.busy, true, 'submissions must see the transition in flight')
+  block.resolve()
+  await pending
+  assert.equal(gate.busy, false, 'the fence lifts once the transition settles')
+})

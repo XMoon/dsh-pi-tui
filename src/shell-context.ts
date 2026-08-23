@@ -50,6 +50,16 @@ export interface ShellSubmitDeps {
   forcedNotice(): string
   /** Notice for a session switch detected after the guard. */
   staleNotice(): string
+  /**
+   * The session-transition write fence: returns true while a session
+   * transition is in flight (quiesce → commit) — a followup in that
+   * window would target a session whose lock is about to be released
+   * (the old agent may be woken again between whenIdle and the lock
+   * handover). Optional; absent keeps the historical behavior.
+   */
+  fence?: () => boolean
+  /** The fence refusal notice (defaults to {@link staleNotice}). */
+  fenceNotice?: () => string
   /** Build the user message (runner-side creation, keeps this module dsh-free). */
   createMessage(text: string): unknown
   /** Called once the message was accepted by the agent (followup sent). */
@@ -77,6 +87,15 @@ export async function submitShellResult(deps: ShellSubmitDeps, text: string): Pr
   // session (which needs its own guard).
   if (!sessionUnchanged({ agent, generation }, deps.currentAgent(), deps.currentGeneration())) {
     deps.notify(deps.staleNotice(), 'error')
+    return 'stale'
+  }
+  // The session-transition write fence: while a transition is in flight
+  // the old agent may be woken again — writing would target a session
+  // whose lock is about to be released (the two-writers race). The
+  // caller's card keeps the output visible; the `!` line can be re-run
+  // after the transition settles.
+  if (deps.fence?.() === true) {
+    deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
     return 'stale'
   }
   if (verdict.kind === 'forced') deps.notify(deps.forcedNotice(), 'error')

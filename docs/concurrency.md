@@ -196,6 +196,19 @@ is the whole point:
    whenIdle, surface rebuild, catalog refresh; every failure is recorded
    as diagnostics and NEVER rolls the committed child back.
 
+`whenIdle()` is an INSTANT check, not a freeze: the old agent can be
+woken again by a followup/steer while the transition still awaits
+(flush, prepare, create). A write in that window would target a session
+whose lock is about to be released. The transition gate therefore
+doubles as a WRITE FENCE: while a transition is in flight
+(`SessionTransitionGate.busy`), every agent-write entry point — plain
+submit, busy-Enter steer, Ctrl+S steer, the command fallback followup,
+the `!` shell submit — refuses the write, restores/keeps the draft (or
+keeps the shell card) and notifies "a session transition is in
+progress". The submission re-validation (agent object + session
+generation) covers the window AFTER the transition commits; the fence
+covers the window DURING it.
+
 The old code created the child first and THEN flushed the old session:
 a flush failure after the create left a durable ghost branch, and the
 old lock was released before the old agent had quiesced. Failures now

@@ -96,9 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finally blocks, and releasing the lock earlier would let another dsh
   process resume the session while those closures are still being
   written (the two-writers seq collision the lock exists to prevent).
-  Failures only happen BEFORE the create: a stale rewind selection never
-  creates a child at all, and a failed quiesce/flush/create leaves the
-  current session untouched. `/new` and `/fork` dispose nothing "on
+  Writes are fenced while the transition is in flight: `whenIdle()` is an
+  instant, not a freeze, so every submission path (plain submit, busy-Enter
+  steer, Ctrl+S, the command fallback, the `!` shell submit) refuses to
+  write the old agent during quiesce → commit — the draft is restored and
+  the user is told a session transition is in progress.
+  Failures carry happen only BEFORE the create: a stale rewind selection
+  never creates a child at all, and a failed quiesce/flush/create leaves
+  the current session untouched. `/new` and `/fork` dispose nothing "on
   failure" anymore — there is nothing to dispose, because nothing was
   published. The fork cwd is captured from the source session before the
   first await (parent=A cwd=B mixes are impossible).
