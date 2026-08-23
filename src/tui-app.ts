@@ -6879,7 +6879,7 @@ export class TuiApp {
         initialQuery: options.initialQuery,
       },
     )
-    const handle = this.showOverlayOnHost(new Frame(list), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    const handle = this.showOverlayOnHost(new Frame(list, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
     // is removed on a normal select/cancel AND on the handle's close
@@ -6996,7 +6996,7 @@ export class TuiApp {
       }
       overlay?.hide()
       list = next
-      overlay = this.showOverlayOnHost(new Frame(next), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+      overlay = this.showOverlayOnHost(new Frame(next, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     }
     // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
     // onCancel. The listener lives once on the signal — category switches
@@ -7096,7 +7096,7 @@ export class TuiApp {
       },
       () => this.requestRender(),
     )
-    const handle = this.showOverlayOnHost(new Frame(panel), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
+    const handle = this.showOverlayOnHost(new Frame(panel, true), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
     // One close path: hide the overlay AND stop the panel's 1s elapsed tick
     // (an unref'd interval must still be cleared — the panel is gone).
     // `close` is a `let` declared before the panel callbacks above reference
@@ -7154,7 +7154,7 @@ export class TuiApp {
       handle?.hide()
       onCancel()
     }, { enableSearch: true })
-    handle = this.showOverlayOnHost(new Frame(settings), { width: 72, maxHeight: 28 })
+    handle = this.showOverlayOnHost(new Frame(settings, true), { width: 72, maxHeight: 28 })
     return () => handle?.hide()
   }
 
@@ -7190,7 +7190,7 @@ export class TuiApp {
         options.onStop?.()
       }
     }
-    const handle = this.showOverlayOnHost(new Frame(panel), { width: 88, maxHeight: 24 })
+    const handle = this.showOverlayOnHost(new Frame(panel, true), { width: 88, maxHeight: 24 })
     timer = setInterval(() => {
       if (closed) return
       panel.setBody(options.refresh())
