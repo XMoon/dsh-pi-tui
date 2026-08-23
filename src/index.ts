@@ -1441,9 +1441,12 @@ export function apply(ctx: Context, config: Config): void {
      * surface). Never throws. A FRESH session's artifact directory is
      * pre-created by the lock layer when needed, so the lock can
      * physically exist BEFORE the session log does. */
-    const physicalAcquire = (target: { id: string; header?: { cwd?: string } }): OpenLockResult => {
+    const physicalAcquire = (target: { id: string; header?: { cwd?: string } }): {
+      result: OpenLockResult
+      release?: () => void
+    } => {
       const { id: sessionId, header } = target
-      if (openLocks.has(sessionId)) return { kind: 'acquired' }
+      if (openLocks.has(sessionId)) return { result: { kind: 'acquired' } }
       const persistence = ctx.get('sessionPersistence') as SessionLockPersistence | undefined
       const outcome = acquireSessionLock(
         {
@@ -1467,24 +1470,25 @@ export function apply(ctx: Context, config: Config): void {
           if (outcome.kind === 'taken-over-stale') {
             diag.warn('session lock stale taken over', { session: sessionId })
           }
-          return { kind: 'acquired' }
+          return { result: { kind: 'acquired' }, release: () => openLocks.release(sessionId) }
         case 'held':
           diag.warn('session lock held', { session: sessionId, pid: outcome.owner.pid })
-          return { kind: 'refused', message: lockHeldNotice(sessionId, outcome.owner) }
+          return { result: { kind: 'refused', message: lockHeldNotice(sessionId, outcome.owner) } }
         case 'unverifiable':
           diag.warn('session lock unverifiable', { session: sessionId, pid: outcome.owner?.pid })
           return {
-            kind: 'refused',
-            message: outcome.owner === undefined
-              ? `Session ${sessionId} has an unreadable or malformed lock file; refusing to open it here. If no other dsh process is using it, delete the owner.lock file next to the session log and retry.`
-              : `Session ${sessionId} has a lock file whose owner (pid ${outcome.owner.pid}) cannot be verified; refusing to open it here. If that process is gone, delete the owner.lock file next to the session log and retry.`,
+            result: {
+              kind: 'refused',
+              message: outcome.owner === undefined
+                ? `Session ${sessionId} has an unreadable or malformed lock file; refusing to open it here. If no other dsh process is using it, delete the owner.lock file next to the session log and retry.`
+                : `Session ${sessionId} has a lock file whose owner (pid ${outcome.owner.pid}) cannot be verified; refusing to open it here. If that process is gone, delete the owner.lock file next to the session log and retry.`,
+            },
           }
         case 'unavailable':
           // No persistence/artifact/dir/write access: proceed without a
-          // lock for EXISTING sessions (the divergence guard remains the
-          // write-path backstop); a fresh target's target treats this
-          // as a failure (see the transition's fresh handling).
-          return { kind: 'unavailable', reason: outcome.reason }
+          // lock for EXISTING sessions (fail-closed at the transition);
+          // a fresh target's transition treats this as a failure too.
+          return { result: { kind: 'unavailable', reason: outcome.reason } }
       }
     }
     /** The process-global lease manager: ownership policy over the physical

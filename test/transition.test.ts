@@ -193,7 +193,7 @@ test('the old lease survives COMMIT + dispose — the transition releases NOTHIN
   const acquired: string[] = []
   const released: string[] = []
   const manager = new ProcessSessionLeaseManager({
-    acquire: (target) => { acquired.push(target.id); return { kind: 'acquired' } },
+    acquire: (target) => { acquired.push(target.id); return { result: { kind: 'acquired' } } },
     release: (id) => { released.push(id) },
   })
   manager.reserve({ id: 'session-a' })

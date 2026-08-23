@@ -69,12 +69,23 @@ export interface SessionLeaseRecord {
   coolingStartedAt?: number
   releasedAt?: number
   pinReason?: string
+  /** The per-lease physical release binding (captured at acquire time; a
+   * remount that swaps the deps must not release through a stale holder). */
+  release?: () => void
 }
 
 /** The physical-lock surface the manager drives (the index.ts closure owns
- *  the persistence/fs/proc wiring). */
+ *  the persistence/fs/proc wiring). `acquire` returns the settled result
+ *  PLUS a per-lease release binding: the binding is captured at acquire
+ *  time so a HMR/remount that swaps the physical deps can never release a
+ *  lease through a stale holder (review round 34). */
 export interface LeasePhysicalDeps {
-  acquire(target: { id: string; header?: { cwd?: string } }): OpenLockResult
+  acquire(target: { id: string; header?: { cwd?: string } }): {
+    result: OpenLockResult
+    /** The per-lease release binding (the wrapper's holder entry). */
+    release?: () => void
+  }
+  /** Fallback release (used only when the per-lease binding is absent). */
   release(sessionId: string): void
 }
 
@@ -104,7 +115,7 @@ function processStartedAt(): number {
 /** The per-process session lease manager (one instance per OS process). */
 export class ProcessSessionLeaseManager {
   private readonly leases = new Map<string, SessionLeaseRecord>()
-  private readonly deps: LeasePhysicalDeps
+  private deps: LeasePhysicalDeps
 
   constructor(deps: LeasePhysicalDeps) {
     this.deps = deps
@@ -119,16 +130,24 @@ export class ProcessSessionLeaseManager {
     if (existing !== undefined && existing.physicalLockHeld) {
       return { kind: 'acquired' }
     }
-    const result = this.deps.acquire(target)
+    const { result, release } = this.deps.acquire(target)
     if (result.kind === 'acquired') {
       this.leases.set(target.id, {
         sessionId: target.id,
         state: 'reserved',
         physicalLockHeld: true,
         touchedByDsh: false,
+        release,
       })
     }
     return result
+  }
+
+  /** HMR/remount: swap the physical deps so NEW acquires route through the
+   * current mount's closures, while per-lease release bindings stay with
+   * their original holder (review round 34). */
+  updatePhysicalDeps(deps: LeasePhysicalDeps): void {
+    this.deps = deps
   }
 
   /** The target is about to enter the DSH boundary (agents.create/resume).
@@ -170,7 +189,8 @@ export class ProcessSessionLeaseManager {
       )
     }
     lease.physicalLockHeld = false
-    this.deps.release(sessionId)
+    if (lease.release !== undefined) lease.release()
+    else this.deps.release(sessionId)
     this.leases.delete(sessionId)
   }
 
@@ -192,7 +212,8 @@ export class ProcessSessionLeaseManager {
     lease.state = 'released'
     lease.physicalLockHeld = false
     lease.releasedAt = Date.now()
-    this.deps.release(sessionId)
+    if (lease.release !== undefined) lease.release()
+    else this.deps.release(sessionId)
   }
 
   /** Fail-closed: a touched/cooling/active/pinned session keeps its
@@ -268,6 +289,10 @@ export function acquireProcessLeaseManager(
   if (existing !== undefined
     && existing.processIdentity.pid === process.pid
     && existing.processIdentity.startedAt === processStartedAt()) {
+    // HMR/remount: NEW acquires must route through the current mount's
+    // closures (ctx/persistence/holder); per-lease release bindings stay
+    // with their original holder (review round 34).
+    existing.manager.updatePhysicalDeps(deps)
     existing.refCount += 1
     return {
       manager: existing.manager,

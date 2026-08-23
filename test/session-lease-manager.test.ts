@@ -29,7 +29,7 @@ function deps(): {
   const manager = new ProcessSessionLeaseManager({
     acquire: (target) => {
       acquired.push(target.id)
-      return { kind: 'acquired' }
+      return { result: { kind: 'acquired' } }
     },
     release: (id) => { released.push(id) },
   })
@@ -160,16 +160,51 @@ test('lease: multiple session leases coexist (the transition holds old+new)', ()
 
 test('lease: the process-global registry reuses the manager across remounts (HMR)', () => {
   const first = acquireProcessLeaseManager({
-    acquire: () => ({ kind: 'acquired' }),
+    acquire: () => ({ result: { kind: 'acquired' } }),
     release: () => {},
   })
   first.manager.reserve({ id: 'session-hmr' })
   const second = acquireProcessLeaseManager({
-    acquire: () => ({ kind: 'acquired' }),
+    acquire: () => ({ result: { kind: 'acquired' } }),
     release: () => {},
   })
   assert.equal(second.manager, first.manager, 'a remount reuses the SAME manager')
   assert.equal(second.manager.canReuseLocally('session-hmr'), true, 'physical ownership survives the remount')
+  second.release()
+  first.release()
+})
+
+test('lease: a remount swaps the physical deps for NEW acquires; releases keep their original binding', () => {
+  let oldReleases = 0
+  let newAcquires = 0
+  const first = acquireProcessLeaseManager({
+    acquire: (target) => {
+      void target
+      return { result: { kind: 'acquired' }, release: () => { oldReleases += 1 } }
+    },
+    release: () => {},
+  })
+  first.manager.reserve({ id: 'session-a' })
+  first.manager.markTouched('session-a')
+  first.manager.markActive('session-a')
+  const second = acquireProcessLeaseManager({
+    acquire: (target) => {
+      newAcquires += 1
+      void target
+      return { result: { kind: 'acquired' } }
+    },
+    release: () => {},
+  })
+  assert.equal(second.manager, first.manager, 'the SAME manager is reused')
+  // NEW acquires route through the remount's deps.
+  second.manager.reserve({ id: 'session-b' })
+  assert.equal(newAcquires, 1, 'a new acquisition uses the current mount deps')
+  // Releases of pre-remount leases keep their ORIGINAL binding.
+  second.manager.beginCooling('session-a', {
+    sessionId: 'session-a', eventCount: 0, tailFingerprint: '', empty: true, capturedAt: 0,
+  })
+  second.manager.releaseAfterVerifiedCooling('session-a')
+  assert.equal(oldReleases, 1, 'the original per-lease binding released the lock')
   second.release()
   first.release()
 })

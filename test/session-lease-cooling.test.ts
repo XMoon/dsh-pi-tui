@@ -35,7 +35,7 @@ interface Rig {
 function makeRig(script: Step[], missingInspect = false): Rig {
   const released: string[] = []
   const manager = new ProcessSessionLeaseManager({
-    acquire: () => ({ kind: 'acquired' }),
+    acquire: () => ({ result: { kind: 'acquired' } }),
     release: (id) => { released.push(id) },
   })
   let cursor = 0
