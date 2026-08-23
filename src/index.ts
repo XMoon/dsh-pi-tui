@@ -2048,16 +2048,14 @@ export function apply(ctx: Context, config: Config): void {
           target: { id: sessionId, header: lockHeader },
           create: () => agents.resume(resumeOptions),
           // A rejected resume gets at most ONE same-id recovery (below)
-          // and then the target is PINNED. The target is EXISTING — its
-          // artifact predates the attempt — so an
-          // unrecoverable recovery releases the lock and reports instead
-          // of pinning the session until process exit (round 26 P2).
+          // and then the target is PINNED (fail-closed; the session stays
+          // locked for this process's lifetime).
           recover: () => agents.resume(resumeOptions),
         })
         if (!result.ok) {
-          // The resume failed before publishing: the transaction already
-          // released the target lock it acquired (never the current lock).
-          // The CURRENT session is still live AND still holds its own lock.
+          // The resume failed: the target is pinned (or refused before
+          // the DSH call). The CURRENT session is still live AND still
+          // holds its own lock.
           return result.message
         }
         // The switch COMMITTED: staged drafts are per-session UI state —
@@ -2071,9 +2069,8 @@ export function apply(ctx: Context, config: Config): void {
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
         diag.error('switch failed', { session: sessionId, error: message })
-        // The transaction released the target lock on its own failure
-        // paths; the CURRENT session is still live and still holds its own
-        // lock.
+        // The CURRENT session is still live and still holds its own lock;
+        // a target that crossed the DSH boundary stays pinned.
         return `switch failed: ${message}`
       }
     }

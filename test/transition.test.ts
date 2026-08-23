@@ -245,3 +245,37 @@ test('the helper: a successful same-id recovery returns the recovered handle', a
   })
   assert.equal(recovered.agent.session.id, 'session-c')
 })
+
+test('a failed old-handle dispose pins and NEVER starts cooling (the production gate pattern)', async () => {
+  // The production retireOld runs: dispose → on failure PIN (never
+  // beginCooling) → the detach/cooling handover is skipped entirely.
+  const released: string[] = []
+  const manager = new ProcessSessionLeaseManager({
+    acquire: (target) => ({ result: { kind: 'acquired' }, release: () => { released.push(target.id) } }),
+  })
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.markActive('session-a')
+  const host: TransitionHost<Handle> = {
+    quiesceOld: async () => ({ sessionId: 'session-a', eventCount: 1, tailFingerprint: 'h', empty: false, capturedAt: 0 }),
+    acquireTargetLease: (target) => manager.reserve(target),
+    releaseUntouchedTarget: () => {},
+    markTargetTouched: (id) => { manager.markTouched(id) },
+    commit: () => {},
+    retireOld: async () => {
+      // The production pattern: dispose FAILED → pin, and the cooling
+      // handover below it is gated on disposeSucceeded (round 37).
+      manager.pin('session-a', 'old handle dispose failed')
+    },
+    pinTarget: (id, reason) => { manager.pin(id, reason) },
+    recordFailure: () => {},
+  }
+  const outcome = await runTransitionTo(host, {
+    target: { id: 'session-b' },
+    create: async () => handle('session-b'),
+  })
+  assert.equal(outcome.ok, true, 'the committed child stands')
+  assert.equal(manager.state('session-a')?.state, 'pinned', 'a failed dispose never enters cooling')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, true, 'the old lock stays')
+  assert.deepEqual(released, [], 'nothing was released')
+})

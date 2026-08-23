@@ -135,10 +135,11 @@ export interface RewindCommitHost extends ForkAgentHost {
    */
   transitionTo<T extends AgentHandle>(steps: {
     /** The child's PRE-GENERATED session identity (MANDATORY): the
-     * transaction acquires its open lock BEFORE the create (while the old
+     * transaction reserves its lease BEFORE the DSH call (while the old
      * lock is still held), so a refusal aborts with zero child side
-     * effects and a later create failure releases the target lock
-     * (review round 6). */
+     * effects; once the DSH boundary is crossed, a failure gets at most
+     * ONE same-id recovery and then the target is PINNED — never
+     * released. */
     target: { id: string; header?: { cwd?: string } }
     /** Whether the target is a FRESH session: the target lock must settle
      * as acquired, or the transaction aborts before the create. */
