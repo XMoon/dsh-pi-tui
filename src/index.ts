@@ -200,6 +200,10 @@ interface AppExit {
 const WINDOW_TURNS = 15
 /** Coalesced repaint interval for streaming events, in ms. */
 const REPAINT_FLUSH_MS = 50
+/** Throttle for re-chaining a RUNNING local shell card's result to the
+ * bounded tail (plan §5.1): the running preview refreshes at most this
+ * often, so a high-throughput log cannot rebuild the view per chunk. */
+const LOCAL_SHELL_TAIL_FLUSH_MS = 200
 
 /**
  * Slash commands that need no session: before the first user message
@@ -2296,8 +2300,10 @@ export function apply(ctx: Context, config: Config): void {
       const localSignal = localShellController.signal
       // The card reference this run owns: settling by identity keeps a
       // settled old run from overwriting a newer run's card (updateLastLocal
-      // Message would hit whatever card is newest at settle time).
-      const card = app.pushLocalMessage({
+      // Message would hit whatever card is newest at settle time). The
+      // reference is RE-CHAINED on every in-flight tail update (the array
+      // element is replaced, so the old reference would no longer index).
+      let card = app.pushLocalMessage({
         kind: 'tool',
         turn: Number.POSITIVE_INFINITY,
         name: 'shell',
@@ -2457,18 +2463,46 @@ export function apply(ctx: Context, config: Config): void {
       // sequences and decodes across that stream's chunk boundaries.
       const stdoutDecoder = new StringDecoder('utf8')
       const stderrDecoder = new StringDecoder('utf8')
+      // In-flight tail refresh (plan §5.1): the running card's result is
+      // re-chained to the bounded TAIL on a throttle, so a streaming log
+      // previews its newest rows instead of an empty body. The throttle
+      // keeps high-throughput output from rebuilding the whole view per
+      // chunk; settle/close clears the timer (dispose contract).
+      let tailTimer: NodeJS.Timeout | undefined
+      const clearTailTimer = (): void => {
+        if (tailTimer !== undefined) {
+          clearTimeout(tailTimer)
+          tailTimer = undefined
+        }
+      }
+      const scheduleTailFlush = (): void => {
+        if (tailTimer !== undefined) return
+        tailTimer = setTimeout(() => {
+          tailTimer = undefined
+          card = app.updateLocalMessage(card, {
+            kind: 'tool',
+            turn: Number.POSITIVE_INFINITY,
+            name: 'shell',
+            args: command,
+            result: bounded.tail,
+            status: 'running',
+          })
+        }, LOCAL_SHELL_TAIL_FLUSH_MS)
+      }
       const onData = (decoder: StringDecoder, chunk: Buffer): void => {
         // The wire byte count rides along: an incomplete multi-byte
         // sequence buffered by the decoder produces no text yet, but its
         // bytes are real and must count toward the totals.
         bounded.append(decoder.write(chunk), chunk.length)
         full.append(chunk)
+        scheduleTailFlush()
       }
       child.stdout.on('data', (chunk) => onData(stdoutDecoder, chunk))
       child.stderr.on('data', (chunk) => onData(stderrDecoder, chunk))
       localSignal.addEventListener('abort', () => child.kill(), { once: true })
       child.on('error', (error) => {
         releaseController()
+        clearTailTimer()
         // A spawn failure leaves nothing worth keeping: drop the capture.
         full.dispose()
         shellTempFiles.delete(fullPath)
@@ -2476,6 +2510,7 @@ export function apply(ctx: Context, config: Config): void {
       })
       child.on('close', (code, childSignal) => {
         releaseController()
+        clearTailTimer()
         // Flush each decoder's remaining partial sequence. An incomplete
         // trailing multi-byte character surfaces as U+FFFD from end() — it
         // is shown as-is (the bytes were real); its wire bytes were already

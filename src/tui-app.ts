@@ -99,6 +99,13 @@ import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './input-router.ts'
+import {
+  isLocalShellCard,
+  localShellHiddenMarker,
+  localShellPreview,
+  RUNNING_PREVIEW_LINES,
+  SETTLED_PREVIEW_VISUAL_ROWS,
+} from './local-shell-card.ts'
 import { RESERVED_HOST_KEYS } from './keybinding-registry.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
@@ -2199,6 +2206,16 @@ export class TuiApp {
       this.events.onDequeue?.()
       return { consume: true }
     }
+    if (matchesKey(data, 'alt+k')) {
+      // Dismiss settled local shell cards (Alt+K — plan §5.4 quick clear):
+      // completed `!`/`!!` runs leave the live view; running cards never
+      // do (the process is NOT cancelled — Esc owns that). Overlays keep
+      // the key for themselves like the other Alt chords.
+      if (this.activeScreen.hasOverlayEntries) return undefined
+      this.dismissSettledLocalShell()
+      this.requestRender()
+      return { consume: true }
+    }
     if (matchesKey(data, 'ctrl+enter')) {
       // The busy-Enter opposite chord (web busyEnter parity): Ctrl+Enter
       // forces the QUEUE delivery mode while the agent is busy, regardless
@@ -2686,12 +2703,24 @@ export class TuiApp {
    * after a newer one was pushed must not overwrite the newer card.
    * @param message - the card reference {@link pushLocalMessage} returned.
    * @param next - the settled replacement.
+   * @returns the stored replacement (`next`), so a caller that keeps the
+   *   card reference (e.g. a streaming tail refresher) can chain updates —
+   *   the array element is replaced, so the OLD reference no longer indexes.
    */
-  updateLocalMessage(message: TranscriptMessage, next: TranscriptMessage): void {
+  updateLocalMessage(message: TranscriptMessage, next: TranscriptMessage): TranscriptMessage {
     const index = this.localMessages.indexOf(message)
-    if (index === -1) return
+    if (index === -1) return next
+    // A click-expanded local card keeps its override across the running →
+    // settled replacement: the message identity changes, the presentation
+    // state must not (plan §5.2 — never key expansion on the object alone).
+    const override = this.expandedOverride.get(message)
+    if (override !== undefined) {
+      this.expandedOverride.delete(message)
+      this.expandedOverride.set(next, override)
+    }
     this.localMessages[index] = next
     this.rebuildMessages()
+    return next
   }
 
   /** Replace the most recent local card (running → settled). */
@@ -2722,6 +2751,18 @@ export class TuiApp {
     this.localMessages.length = 0
     this.localMessages.push(...running)
     this.rebuildMessages()
+  }
+
+  /**
+   * The quick-dismiss semantic action for settled local shell cards (plan
+   * §5.4): removes completed `!`/`!!` runs from the live view. A RUNNING
+   * card is never dismissed (a live stream survives), the shell process is
+   * NOT cancelled (Esc owns that), no session event is deleted, and an
+   * already-submitted `!` context payload is untouched — the transcript's
+   * user row is the durable record either way. `!!` stays local-only.
+   */
+  dismissSettledLocalShell(): void {
+    this.clearSettledLocalMessages()
   }
 
   /**
@@ -4967,8 +5008,15 @@ export class TuiApp {
     // inside an open Thought). Collapsed Focus turns never reach this
     // method: their process rows are absent from the projection.
     const focusExpanded = this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)
-    const expanded = (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
-      && (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
+    // LOCAL `!`/`!!` shell cards (the 2026-08-24 plan §5.3) read the SAME
+    // master Ctrl+O switch as the recent-turn fold — never the unbounded
+    // turn marker (POSITIVE_INFINITY would keep them permanently expanded
+    // and a long log would fill the TUI). A per-card click override still
+    // wins, exactly like every other card.
+    const expanded = isLocalShellCard(message)
+      ? (this.toolOutputExpanded || this.expandedOverride.get(message) === true)
+      : (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
+        && (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
     // affected components (an HMR must never hit an old component).
@@ -5344,7 +5392,14 @@ export class TuiApp {
         ? color.error('[error]')
         : color.textDim('[running]')
     const head = `${color.textDim(`${emoji}  ${header.title}${summary}`)} ${pill}`
-    if (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true) {
+    // LOCAL `!`/`!!` shell cards read the master Ctrl+O switch (plan §5.3),
+    // never the unbounded turn marker: collapsed by default so a long log
+    // cannot fill the TUI, expanded only while Ctrl+O is on.
+    const localShell = isLocalShellCard(message)
+    const expanded = localShell
+      ? (this.toolOutputExpanded || this.expandedOverride.get(message) === true)
+      : (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
+    if (expanded) {
       card.addChild(new Text(head, 0, 0))
       // An explicitly expanded card (mouse click, or an open Focus Thought)
       // renders diff bodies in full; the default recent-turn view caps
@@ -5357,6 +5412,14 @@ export class TuiApp {
       // expanding), then the result preview. Read cards keep the envelope
       // summary (`— N lines`), never a dump of the raw XML. Every row
       // truncates to the terminal width, so a folded block never wraps.
+      // LOCAL `!`/`!!` shell cards get their OWN folded layout (plan §5.1):
+      // the command row plus the newest 5 (running) / 20 visual (settled)
+      // rows of output with a hidden-count marker — a long log previews
+      // instead of filling the TUI.
+      if (localShell) {
+        this.renderLocalShellFolded(card, message, head)
+        return card
+      }
       const rows: string[] = []
       const callPreview = parseCallPreview(message.name, message.args)
       // The header already carries friendly summaries (todo counts, web
@@ -5560,6 +5623,42 @@ export class TuiApp {
   }
 
   /**
+   * The folded (collapsed) layout of a LOCAL `!`/`!!` shell card (plan
+   * §5.1): the card head, the `$ command` row, the newest preview rows
+   * (5 source lines while running, up to 20 visual rows once settled),
+   * and the hidden-count marker when content was cut. The capture layer
+   * (bounded-output caps) is untouched — this is display policy only.
+   * @param card - the card container to fill.
+   * @param message - the local shell tool message (name 'shell', unbounded
+   *   turn — see {@link isLocalShellCard}).
+   * @param head - the already-rendered card head line.
+   */
+  private renderLocalShellFolded(
+    card: Container,
+    message: Extract<TranscriptMessage, { kind: 'tool' }>,
+    head: string,
+  ): void {
+    const running = message.status === 'running'
+    const indent = '  '
+    const contentWidth = Math.max(1, this.terminal.columns - visibleWidth(indent) - 2)
+    const budget = running ? RUNNING_PREVIEW_LINES : SETTLED_PREVIEW_VISUAL_ROWS
+    const mode = running ? 'lines' : 'visual'
+    const preview = localShellPreview(message.result, contentWidth, budget, mode)
+    const rows = [truncateToWidth(head, this.terminal.columns, '…')]
+    // The command row (kimi ShellExecution layout): the local shell card's
+    // `args` IS the raw command string (never JSON).
+    const prompt = color.shellMode('$ ')
+    rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(message.args), contentWidth, '…')}`)
+    for (const line of preview.rows) {
+      rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
+    }
+    if (preview.hidden > 0) {
+      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running)}`))
+    }
+    card.addChild(new Text(rows.join('\n'), 0, 0))
+  }
+
+  /**
    * Render one expanded tool card's body. When the runner wired a presenter,
    * the body follows the tool's own render intent (presentResult): a read
    * card shows numbered lines plus the relativized path and total line
@@ -5579,6 +5678,20 @@ export class TuiApp {
     message: Extract<TranscriptMessage, { kind: 'tool' }>,
     explicitlyExpanded: boolean,
   ): void {
+    // LOCAL `!`/`!!` shell cards render their own expanded body (plan
+    // §5.1): the `$ command` row (the card's `args` IS the raw command
+    // string, never JSON) plus the retained buffer — while running that is
+    // the live bounded tail, once settled the final output. No presenter,
+    // no diff, no image pipeline applies to a local run.
+    if (isLocalShellCard(message)) {
+      this.addTerminalCommandRow(card, message.args, '$ ')
+      if (message.result !== '') {
+        for (const line of message.result.split('\n')) {
+          card.addChild(new Text(color.textDim(line), 0, 0))
+        }
+      }
+      return
+    }
     // Workflow run cards: the body is the run's member tree, grouped by phase
     // in arrival order (Web WorkflowRunPanel parity). Rows render even while
     // the run is still streaming (members land incrementally).

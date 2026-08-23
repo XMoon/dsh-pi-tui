@@ -64,6 +64,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'tab', ctrl: false, alt: false, shift: true, super: false },   // Shift+Tab permission cycle
   { key: 'up', ctrl: false, alt: true, shift: false, super: false },    // Alt+Up dequeue
   { key: 't', ctrl: false, alt: true, shift: false, super: false },     // Alt+T thinking toggle
+  { key: 'k', ctrl: false, alt: true, shift: false, super: false },     // Alt+K dismiss settled local shell cards
 ]
 
 /** Whether a key is reserved by the host lifecycle (the single check the
