@@ -310,3 +310,45 @@ test('review round 8: a PRE-publication failure releases the lock and rethrows t
   )
   assert.equal(releases, 1, 'the pre-publication failure releases the lock')
 })
+
+test('review round 19: a resume failure on a durable session recovers the SAME session (lock kept)', async () => {
+  // The --session resume shape: the first resume rejects AFTER publication
+  // (durable), the recovery resumes the SAME session id with the lock
+  // still held — never a fresh fallback session.
+  let resumes = 0
+  let releases = 0
+  const recovered = await createWithPublicationRecovery({
+    targetId: 'session-existing',
+    create: async () => {
+      resumes += 1
+      throw new Error('resume publication listener threw')
+    },
+    resume: async () => {
+      resumes += 1
+      return { id: 'session-existing' }
+    },
+    isDurablePublished: async () => true,
+    releaseTargetLock: () => { releases += 1 },
+  })
+  assert.equal(resumes, 2, 'the recovery resumes the same session once')
+  assert.equal(releases, 0, 'the lock is never released for a durable session')
+  assert.deepEqual(recovered, { id: 'session-existing' })
+})
+
+test('review round 19: an unrecoverable durable RESUME failure escapes with the lock kept (no fresh fallback)', async () => {
+  let releases = 0
+  await assert.rejects(
+    createWithPublicationRecovery({
+      targetId: 'session-existing',
+      create: async () => { throw new Error('resume publication listener threw') },
+      resume: async () => { throw new Error('resume repair failed') },
+      isDurablePublished: async () => true,
+      releaseTargetLock: () => { releases += 1 },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof DurablePublishedUnrecoverableError)
+      return true
+    },
+  )
+  assert.equal(releases, 0, 'the durable session stays locked — the launch path must NOT fall back to a fresh session')
+})

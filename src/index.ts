@@ -1364,10 +1364,29 @@ export function apply(ctx: Context, config: Config): void {
         // replay tool calls the model can no longer make.
         const recorded = await recordedPreset(ctx, sessionId)
         const composition = await compose(recorded)
-        handle = await agents.resume({
-          resumeSessionId: SessionId(sessionId),
-          agentOptions,
-          setup: composition.setup,
+        // The resume follows the SAME publication taxonomy as a fresh create
+        // (review round 19): a rejection AFTER the durable publication (a
+        // later synchronous listener threw; the rollback disposes the agent
+        // but the session artifact survives) is recovered by resuming the
+        // SAME session with the target lock still held — a stale/missing id
+        // (never durable) releases the lock and falls back to a fresh
+        // session as before, and an unrecoverable published session escapes
+        // as DurablePublishedUnrecoverableError WITHOUT releasing the lock
+        // or invoking the fallback.
+        handle = await createWithPublicationRecovery({
+          targetId: sessionId,
+          create: () => agents.resume({
+            resumeSessionId: SessionId(sessionId),
+            agentOptions,
+            setup: composition.setup,
+          }),
+          resume: () => agents.resume({
+            resumeSessionId: SessionId(sessionId),
+            agentOptions,
+            setup: composition.setup,
+          }),
+          isDurablePublished: () => durablePublished(sessionId),
+          releaseTargetLock: () => releaseOpenLock(sessionId),
         })
         diag.info('resume ok', {
           session: sessionId,
@@ -1397,12 +1416,20 @@ export function apply(ctx: Context, config: Config): void {
         if (error instanceof SessionLockRefusedError) {
           throw error
         }
+        // A durable-published session that could not be recovered is NOT a
+        // fallback case either: it exists and stays locked (review round
+        // 17/19) — never silently replace it with a fresh session.
+        if (error instanceof DurablePublishedUnrecoverableError) {
+          throw error
+        }
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
         diag.error('resume failed', { session: sessionId, error: message })
         resumeFailure = `session ${sessionId} could not be resumed; started a fresh session`
         // The failed target's lock (if we took one) must not leak: we are
-        // about to hand the surface to a different session.
+        // about to hand the surface to a different session. (The recovery
+        // helper already released it for a pre-publication failure; the
+        // idempotent release covers the pre-helper paths.)
         releaseOpenLock(sessionId)
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
