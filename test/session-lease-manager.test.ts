@@ -203,3 +203,17 @@ test('lease: a remount swaps the physical deps for NEW acquires; releases keep t
   second.release()
   first.release()
 })
+
+test('lease: beginCooling never downgrades a PINNED lease (round 37)', () => {
+  const { manager } = deps()
+  manager.reserve({ id: 'session-a' })
+  manager.markTouched('session-a')
+  manager.pin('session-a', 'dispose failed')
+  manager.beginCooling('session-a', {
+    sessionId: 'session-a', eventCount: 0, tailFingerprint: '', empty: true, capturedAt: 0,
+  })
+  assert.equal(manager.state('session-a')?.state, 'pinned', 'a pinned lease stays pinned')
+  // The cooling verifier cannot release it either.
+  manager.releaseAfterVerifiedCooling('session-a')
+  assert.equal(manager.state('session-a')?.physicalLockHeld, true)
+})

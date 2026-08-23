@@ -1521,11 +1521,10 @@ export function apply(ctx: Context, config: Config): void {
      * backend's list only contains materialized sessions). A `create`
      * rejection can happen AFTER `session/created` fired (a later
      * synchronous listener threw; DSH's rollback disposes the agent but
-     * never deletes the durable artifact — review round 8), so a rejected
-     * create on a durable id must be RECOVERED, never treated as "never
-     * published". Never throws (an unreadable backend degrades to false). */
-    // A stale --session id must not kill the TUI: resume falls back to a
-    // fresh session and the failure is surfaced as a notify line.
+     * never deletes the durable artifact — review round 8). */
+    // A failed --session resume pins the session and the surface starts
+    // sessionless (the next input creates a new session); the failure is
+    // surfaced as a notify line.
     let resumeFailure: string | undefined
     let handle: Awaited<ReturnType<typeof agents.resume>> | undefined
     if (sessionId !== undefined) {
@@ -1906,12 +1905,16 @@ export function apply(ctx: Context, config: Config): void {
           // generator awaiting a provider) are aborted only by
           // session/disposed, which the dispose fires. The old session's
           // lock is still held throughout.
+          let disposeSucceeded = true
           if (oldHandle !== undefined) {
             try {
               await oldHandle.dispose()
             } catch (error) {
               // A failed dispose means the old session may still have
-              // writers: PIN it (never release), the child stays current.
+              // writers: PIN it (never release), the child stays current,
+              // and COOLING MUST NOT START (a pinned lease never
+              // downgrades — review round 37).
+              disposeSucceeded = false
               if (from !== undefined) {
                 leaseManager.pin(from, `old handle dispose failed: ${safeErrorMessage(error)}`)
                 diag.warn('session lease pinned', { session: from, reason: 'old handle dispose failed' })
@@ -1919,12 +1922,13 @@ export function apply(ctx: Context, config: Config): void {
               retired.push(`old handle dispose: ${safeErrorMessage(error)}`)
             }
           }
-          // 2. The OLD session enters COOLING: the transition is done with
-          // it — the lease manager / cooling coordinator decides when its
-          // physical lock may be released (quiet window + durable parity +
-          // stable samples; any uncertainty pins it). The old lock is
-          // deliberately NOT released here (convergence plan phase 5).
-          if (from !== undefined) {
+          // 2. The OLD session enters COOLING — ONLY after a successful
+          // dispose (review round 37): the lease manager / cooling
+          // coordinator decides when its physical lock may be released
+          // (quiet window + durable parity + stable signals; any
+          // uncertainty pins it). The old lock is deliberately NOT
+          // released here (convergence plan phase 5).
+          if (from !== undefined && disposeSucceeded) {
             if (oldSnapshot === undefined) {
               leaseManager.pin(from, 'no final snapshot captured before the switch')
               diag.warn('session lease pinned', { session: from, reason: 'no final snapshot' })
@@ -2043,10 +2047,9 @@ export function apply(ctx: Context, config: Config): void {
         const result = await transitionTo({
           target: { id: sessionId, header: lockHeader },
           create: () => agents.resume(resumeOptions),
-          // A rejected resume may still have PUBLISHED (a later synchronous
-          // listener threw — review round 8/21): recover by resuming the
-          // SAME session with the target lock still held. The target is
-          // EXISTING — its artifact predates this attempt — so an
+          // A rejected resume gets at most ONE same-id recovery (below)
+          // and then the target is PINNED. The target is EXISTING — its
+          // artifact predates the attempt — so an
           // unrecoverable recovery releases the lock and reports instead
           // of pinning the session until process exit (round 26 P2).
           recover: () => agents.resume(resumeOptions),
@@ -4571,11 +4574,12 @@ export function apply(ctx: Context, config: Config): void {
       creating = transitionGate.run(() => operationBarrier.runTransition(async () => {
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
-        // The first-session creation follows the SAME target-lock-before-
-        // create rule as every other transition (review round 9): the id is
-        // pre-generated and its open lock is acquired BEFORE the create
-        // publishes the session — a refusal aborts with zero side effects,
-        // and a create failure releases the target lock.
+        // The first-session creation follows the SAME target-before-DSH
+        // rule as every other transition: the id is pre-generated and its
+        // lease is acquired BEFORE the create publishes the session — a
+        // refusal aborts with zero side effects, and a create failure
+        // PINNS the target (never a release, never a second fresh
+        // fallback).
         const createWithLock = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<Awaited<ReturnType<typeof agents.create>>> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
           const lock = acquireOpenLock(String(sessionId), { cwd: process.cwd() })

@@ -171,6 +171,10 @@ export class ProcessSessionLeaseManager {
   beginCooling(sessionId: string, snapshot: RetiredSessionSnapshot): void {
     const lease = this.leases.get(sessionId)
     if (lease === undefined) return
+    // Defensive: a PINNED lease must never downgrade to cooling (a failed
+    // dispose or an unsettled verification keeps it pinned for this
+    // process's lifetime — review round 37).
+    if (lease.state === 'pinned') return
     lease.state = 'cooling'
     lease.snapshot = snapshot
     lease.coolingStartedAt = Date.now()
