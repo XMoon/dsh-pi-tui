@@ -1649,21 +1649,14 @@ export function apply(ctx: Context, config: Config): void {
         acquireTargetLock: (target) => acquireOpenLock(target.id, target.header),
         releaseLock: (sessionId) => releaseOpenLock(sessionId),
         handoverLocks: (next) => {
-          // The TARGET lock was pre-acquired BEFORE the create (phase 2 —
-          // target is mandatory for every transition caller), so the
-          // re-acquire below is an idempotent no-op; the OLD lock is
-          // released only AFTER the new one is confirmed held — the
-          // documented invariant (old stays locked until the child's lock
-          // is ours) holds even for a hypothetical caller that skipped the
-          // pre-acquire.
-          const handoverLock = acquireOpenLock(next.agent.session.id, next.agent.session.header)
-          if (handoverLock.kind === 'refused') {
-            ctx.logger.warn(`tui-runner: lock refused on transition to ${next.agent.session.id}: ${handoverLock.message}`)
-            diag.warn('session lock refused on transition', { session: next.agent.session.id })
-          }
-          if (handoverLock.kind === 'unavailable') {
-            diag.warn('session lock unavailable on transition', { session: next.agent.session.id, reason: handoverLock.reason })
-          }
+          // The TARGET lock was REQUIRED and acquired BEFORE the create
+          // (phase 2 — target is mandatory and the pre-acquire is verified
+          // there, so a fresh transition either holds the child's lock or
+          // never creates the child). There is deliberately NO re-acquire
+          // here: a refusal at this point could not be recovered anyway
+          // (the child is already published and must not be rolled back),
+          // so the only safe handover is releasing the OLD lock while the
+          // pre-acquired child lock stays held (review round 12).
           if (from !== undefined) releaseOpenLock(from)
         },
         commit: (next) => {

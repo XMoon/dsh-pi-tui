@@ -415,3 +415,22 @@ test('review round 7: a fresh session\'s lock is acquired BEFORE its log exists 
   // Cleanup the temp root.
   fsRmdirSync(root)
 })
+
+test('review round 12: a persistently-ENOENT fs with mkdir pre-creation fails ONCE, never loops', () => {
+  const fs = memFs()
+  fs.mkdirSync = () => {}
+  // The fs has the mkdir capability but the directory keeps vanishing (a
+  // racing remover or a stale-ENOENT filesystem): the pre-creation is
+  // attempted at most once and the acquire settles unavailable instead of
+  // spinning forever. Exactly two writes: the original and the post-mkdir
+  // retry — never a third.
+  let writes = 0
+  fs.writeFileSync = ((path: string, content: string, options?: { flag?: string; mode?: number }) => {
+    writes += 1
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  }) as never
+  const outcome = acquireSessionLock(deps(fs, scriptedProc([])), SESSION, SELF)
+  assert.equal(outcome.kind, 'unavailable')
+  assert.equal((outcome as { kind: 'unavailable'; reason: string }).reason, 'no-lock-dir')
+  assert.equal(writes, 2, 'the create retry happens exactly once after the pre-creation — never an unbounded loop')
+})

@@ -71,8 +71,9 @@ function fakeHost(options: FakeHostOptions = {}): {
     },
     releaseLock: (sessionId) => { events.push(`target.lock.release:${sessionId}`) },
     handoverLocks: () => {
+      // The child lock was pre-acquired in phase 2; the COMMIT only
+      // releases the old lock (review round 12: no redundant re-acquire).
       events.push('old.lock.release')
-      events.push('child.lock.acquire')
     },
     commit: () => { events.push('child.commit') },
     retire: async () => {
@@ -109,7 +110,6 @@ test('the canonical order is quiesce → flush → prepare → create → lock h
     'prepare',                 // 4. caller gates
     'child.create',            // 5. create — published from here on
     'old.lock.release',        // 6. old lock released only AFTER old is idle+flushed
-    'child.lock.acquire',
     'child.commit',            // 7. synchronous commit
     'old.dispose',             // 8. dispose of the now-idle old agent
   ])
@@ -130,7 +130,7 @@ test('review: a RUNNING old agent blocks the transition — no create, no lock r
   assert.equal(outcome.ok, true)
   assert.deepEqual(events, [
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'old.lock.release', 'child.lock.acquire', 'child.commit', 'old.dispose',
+    'old.lock.release', 'child.commit', 'old.dispose',
   ])
 })
 
@@ -181,7 +181,7 @@ test('a retire failure NEVER rolls the committed child back', async () => {
   if (outcome.ok) assert.equal(outcome.next.agent.session.id, 'session-c')
   assert.deepEqual(events, [
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'old.lock.release', 'child.lock.acquire', 'child.commit', 'old.dispose',
+    'old.lock.release', 'child.commit', 'old.dispose',
   ])
   assert.deepEqual(failures, ['retire:old dispose exploded'])
 })
@@ -201,6 +201,6 @@ test('an EXISTING target with an unavailable lock may proceed (guard backstop)',
   assert.equal(outcome.ok, true, 'an existing target tolerates an unavailable lock')
   assert.deepEqual(events, [
     'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'old.lock.release', 'child.lock.acquire', 'child.commit', 'old.dispose',
+    'old.lock.release', 'child.commit', 'old.dispose',
   ])
 })

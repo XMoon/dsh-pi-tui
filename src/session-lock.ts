@@ -206,6 +206,10 @@ export function acquireSessionLock(
   // create after a removal is a TAKEOVER, not a first open — callers use the
   // distinction for the notice wording.
   let tookOver = false
+  // Whether the fresh-target directory pre-creation was attempted: at most
+  // once, so a persistently-ENOENT filesystem cannot spin the loop forever
+  // (review round 12).
+  let dirPrecreated = false
 
   for (let attempt = 0; ; attempt += 1) {
     // Missing lock file (or a fresh create attempt): try to take ownership.
@@ -223,9 +227,10 @@ export function acquireSessionLock(
       // target-lock-before-create rule is only real when the lock can
       // physically exist ahead of the session). Without it, no lock is
       // possible — do not block (the guard still protects the write path).
-      if (created.error?.code === 'ENOENT' && fs.mkdirSync !== undefined) {
+      if (created.error?.code === 'ENOENT' && fs.mkdirSync !== undefined && !dirPrecreated) {
         try {
           fs.mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 })
+          dirPrecreated = true
           // The directory now exists: retry the atomic create in it. A
           // concurrent taker may have created the lock meanwhile (EEXIST) —
           // the loop's exists branch reads and judges it.
