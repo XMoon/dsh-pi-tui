@@ -352,3 +352,24 @@ test('review round 19: an unrecoverable durable RESUME failure escapes with the 
   )
   assert.equal(releases, 0, 'the durable session stays locked — the launch path must NOT fall back to a fresh session')
 })
+
+test('review round 19/20: a stale (never-durable) --session id releases the lock and rethrows for the fresh fallback', async () => {
+  // The --session stale-id shape: the id was never materialized (durable
+  // false) — the recovery helper releases the target lock and rethrows
+  // the original error, which is exactly the signal the launch catch uses
+  // to fall back to a fresh session and notify. No resume is attempted.
+  let releases = 0
+  let resumes = 0
+  await assert.rejects(
+    createWithPublicationRecovery({
+      targetId: 'session-stale',
+      create: async () => { throw new Error('session not found') },
+      resume: async () => { resumes += 1; throw new Error('must not resume') },
+      isDurablePublished: async () => false,
+      releaseTargetLock: () => { releases += 1 },
+    }),
+    /session not found/,
+  )
+  assert.equal(releases, 1, 'the never-durable id releases the lock (the caller falls back to a fresh session)')
+  assert.equal(resumes, 0, 'no recovery resume for a session that never existed')
+})
