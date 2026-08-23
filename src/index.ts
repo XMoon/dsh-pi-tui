@@ -87,7 +87,8 @@ import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner 
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
-import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
+import { appendHistoryLine, appendHistoryRecord, historyFilePath, loadHistoryFile } from './history.ts'
+import { FileHistorySearchSource } from './history-search.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { DraftImageStore } from './image/draft-store.ts'
 import { ImageInputError } from './image/errors.ts'
@@ -2092,6 +2093,24 @@ export function apply(ctx: Context, config: Config): void {
      * (the process cwd) stays for launch-relative concerns (/export paths).
      */
     const sessionCwd = (): string => liveAgent?.session.header.cwd ?? cwd
+    /**
+     * The known-cwd identity map for Ctrl+R all-directory history recovery
+     * (plan §6.2 Rule 2): `md5(cwd) → cwd` for every workspace this process
+     * knows — the launch cwd and the live session's header cwd. This is an
+     * IDENTITY match, never a hash break: an unknown hash simply stays
+     * unresolved (Rule 3 excludes its legacy rows from the all-scope view).
+     */
+    const knownHistoryCwds = (): Map<string, string> => {
+      const map = new Map<string, string>()
+      const seed = (dir: string): void => {
+        if (dir === '' || dir === undefined) return
+        const hash = historyFilePath(dshHome(process.env), dir).split('/').pop()!.replace(/\.jsonl$/, '')
+        map.set(hash, dir)
+      }
+      seed(cwd)
+      seed(sessionCwd())
+      return map
+    }
     /** The footer model label: the live selection (with effort) when one exists. */
     const modelLabel = (): string => {
       const selection = selected.current
@@ -3337,10 +3356,20 @@ export function apply(ctx: Context, config: Config): void {
       // from the model input (review finding 3). Structured attachment
       // history (text + refs, recalled on recall) is a post-v1 extension.
       if (trimmed !== '' && trimmed !== lastHistoryContent && !draftHasImages(text, draftImages)) {
-        const file = historyFilePath(dshHome(process.env), sessionCwd())
+        // The cwd is captured ONCE per submission: the file path and the row
+        // metadata must agree even if the working directory changes between
+        // the submission and the detatched write.
+        const historyCwd = sessionCwd()
+        const file = historyFilePath(dshHome(process.env), historyCwd)
         runDetached('input history write', () => {
-          appendHistoryLine(file, trimmed, lastHistoryContent)
-          lastHistoryContent = trimmed
+          const written = appendHistoryRecord(file, {
+            v: 2,
+            content: trimmed,
+            cwd: historyCwd,
+            ts: Date.now(),
+            sessionId: liveAgent?.session.id,
+          }, lastHistoryContent)
+          if (written) lastHistoryContent = trimmed
         }, {
           diag,
           notify: (message) => app.notify(message, 'error'),
@@ -3870,6 +3899,14 @@ export function apply(ctx: Context, config: Config): void {
         })
       },
     }, {
+      // Ctrl+R input-history search: the runner owns the IO (the file-backed
+      // source + the known-cwd identity map), the surface owns the panel
+      // lifecycle (plan §27 — TuiApp never touches the filesystem).
+      historySearchSource: new FileHistorySearchSource({
+        dshHome: dshHome(process.env),
+        knownCwds: knownHistoryCwds(),
+      }),
+      historySearchCwd: () => sessionCwd(),
       // The transcript image surface (plan M8/M9): the durable loader plus
       // the dim fallback coloring.
       imageLoader,
