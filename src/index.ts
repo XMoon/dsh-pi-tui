@@ -1811,35 +1811,29 @@ export function apply(ctx: Context, config: Config): void {
         } catch {
           // Best-effort; the resume path reports failures.
         }
+        // The composition is resolved ONCE and the exact same
+        // composition/setup/agentOptions ride BOTH the initial resume and
+        // the post-publication recovery (review round 22: a recovered child
+        // must run under the identical setup — a second composition could
+        // drift and replay the session differently).
+        const composition = await compose(await recordedPreset(ctx, sessionId))
+        const resumeOptions = {
+          resumeSessionId: SessionId(sessionId),
+          agentOptions: {
+            provider: liveAgent?.options.provider ?? selection.provider,
+            model: liveAgent?.options.model ?? selection.model,
+          },
+          setup: composition.setup,
+        }
         const result = await transitionTo({
           target: { id: sessionId, header: lockHeader },
-          create: async () => {
-            const composition = await compose(await recordedPreset(ctx, sessionId))
-            return agents.resume({
-              resumeSessionId: SessionId(sessionId),
-              agentOptions: {
-                provider: liveAgent?.options.provider ?? selection.provider,
-                model: liveAgent?.options.model ?? selection.model,
-              },
-              setup: composition.setup,
-            })
-          },
+          create: () => agents.resume(resumeOptions),
           // A rejected resume may still have PUBLISHED (a later synchronous
           // listener threw — review round 8/21): recover by resuming the
           // SAME session with the target lock still held; an unrecoverable
           // durable session keeps its lock and reports explicitly (never a
           // silent unlock of a session that exists).
-          recover: async () => {
-            const composition = await compose(await recordedPreset(ctx, sessionId))
-            return agents.resume({
-              resumeSessionId: SessionId(sessionId),
-              agentOptions: {
-                provider: liveAgent?.options.provider ?? selection.provider,
-                model: liveAgent?.options.model ?? selection.model,
-              },
-              setup: composition.setup,
-            })
-          },
+          recover: () => agents.resume(resumeOptions),
         })
         if (!result.ok) {
           // The resume failed before publishing: the transaction already
