@@ -4029,9 +4029,9 @@ export function apply(ctx: Context, config: Config): void {
         }
         liveHandle = created
         liveAgent = created.agent
-        // The open-time lock was acquired BEFORE the create (above); the
-        // re-acquire is an idempotent no-op — kept as the defensive record
-        // for deployments where the pre-acquire was unavailable.
+        // The open-time lock was acquired BEFORE the create (above — the
+        // createWithLock helper REQUIRED an acquired result, so this record
+        // is an idempotent no-op).
         acquireOpenLock(liveAgent.session.id, liveAgent.session.header)
         // Post-create initialization is best-effort: the child is committed
         // and locked, so failures are recorded, never a fallback (the same

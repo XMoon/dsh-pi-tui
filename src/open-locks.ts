@@ -35,8 +35,8 @@ export class OpenLockHolder {
   /**
    * Record one acquired lock. Idempotent per session: a second `add` for a
    * session this process already holds is a no-op (the caller keeps the
-   * FIRST release — the commit's re-acquire of a pre-acquired target hits
-   * this).
+   * FIRST release — e.g. the transition's idempotent phase-2 acquire of a
+   * target the caller already recorded).
    * @returns true when the lock was newly recorded, false when this
    *   process already held it.
    */

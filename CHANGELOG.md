@@ -82,9 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent is QUIESCED first (`whenIdle` — a transition while the agent is
   busy now waits for the current activity instead of aborting it), its
   final flush runs with the old lock still held, the child is
-  created/resumed next, the commit (old-lock release, new-lock acquire,
-  live replacement, generation bump) is a synchronous critical section,
-  and the old-handle teardown after it is best-effort. Three consequences
+  created/resumed next, the commit (old-lock release — the target lock
+  was acquired before the create and stays held — plus live replacement
+  and generation bump) is a synchronous critical section, and the
+  old-handle teardown after it is best-effort. Three consequences
   close the review blockers: (1) two transitions can never interleave —
   a stale-identity check can no longer pass and then yield across an
   await while a concurrent transition lands and later gets overwritten;

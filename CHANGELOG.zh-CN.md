@@ -66,8 +66,9 @@
   `/sessions` 切换统一走同一个事务(顺序由 `src/transition.ts` 固定并
   单元测试):先让**旧** agent 安静(`whenIdle`——busy 时的切换现在会
   等待当前活动结束,而不是打断它),在旧锁仍持有下做最终 flush,再创建/
-  恢复子会话,提交(旧锁释放 + 新锁 + live 替换 + generation 递增)是
-  同步临界区,之后的旧 handle 收尾是 best-effort。这关闭了三个 review
+  恢复子会话,提交(旧锁释放——target 锁已在 create 前获取并保持——
+  加上 live 替换与 generation 递增)是同步临界区,之后的旧 handle 收尾
+  是 best-effort。这关闭了三个 review
   blocker:(1)两个 transition 永远不会交错——身份检查不可能在 await
   间隙被并发切换覆盖;(2)子会话一旦创建就**绝不回滚**——`dispose()`
   只能停止 agent,不会删除已持久化的会话,旧的"先创建后 flush"顺序在
