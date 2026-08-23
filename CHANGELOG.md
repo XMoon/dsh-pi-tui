@@ -182,7 +182,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session was published" error is reported (review rounds 25/26). An
   EXISTING target (whose artifact predates the attempt) releases its
   lock on an unrecoverable failure instead of pinning the session until
-  process exit. Owner locking is now FAIL-CLOSED for every
+  process exit. The whole ownership model was then
+  converged (the rewind_ref plan): the publication-phase inference
+  (durable/unknown taxonomy) is GONE — every writable target requires
+  its physical owner lock, a post-DSH failure gets at most one same-ID
+  recovery and then PINNS, no second-fresh fallback exists anywhere,
+  TUI writers serialize through a SessionOperationBarrier, and retired
+  sessions enter a COOLING lease (final snapshot + SHA-256 tail
+  fingerprint + quiet window + stable samples) before their lock is
+  released — any uncertainty pins instead. A clean TUI exit no longer
+  releases touched locks (stale takeover handles them). Owner locking is now FAIL-CLOSED for every
   writable target (fresh AND existing): an unavailable physical lock
   refuses the transition/resume — the divergence guard stays as a
   second line of defense only, never a stand-in for the lock. The OLD session's lock now outlives the COMMIT: it is

@@ -33,7 +33,21 @@ worst corruption shape, observed in the field:
    events and corrupting the log. A's guard then reports `unreadable`
    (the file is damaged) while B sails through.
 
-The write-path guard cannot catch this: at B's first write, B's memory equals
+### The ownership model (convergence plan — final)
+
+Every writable target requires its physical owner lock BEFORE any DSH
+call (`acquired` is the only acceptable result; held/unverifiable/
+unavailable fail closed). The transition runs: quiesce old → ALL
+TUI-owned preflight → target lease → markTouched (the DSH boundary) →
+create/resume with at most ONE same-id recovery → synchronous COMMIT
+(no lock changes) → retire (dispose + local detach gate + COOLING). A
+post-DSH failure never unlocks and never falls back to a second fresh
+session: the target is PINNED. The old session's lock is released only
+by the cooling verifier after quiet + durable parity + stable samples
+(or kept forever on any uncertainty). TUI writers serialize against
+transitions through the SessionOperationBarrier.
+
+The write-path guard cannot fix this: the document's first write, B's memory equals
 the file. The open-time lock (`src/session-lock.ts`) closes the OPEN path so
 the scenario never starts: whoever opens a session first records a tiny lock
 file next to the log; a second opener verifies the owner is still a live dsh

@@ -1513,11 +1513,6 @@ export function apply(ctx: Context, config: Config): void {
      * process does not hold it yet; idempotent for held leases). */
     const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult =>
       leaseManager.reserve({ id: sessionId, header })
-    /** Release a lease that never crossed the DSH boundary (the hard
-     * assertion inside the manager guards touched leases). */
-    const releaseOpenLock = (sessionId: string): void => {
-      leaseManager.releaseUntouched(sessionId)
-    }
     /** Whether one session already has a DURABLE artifact (the persistence
      * backend's list only contains materialized sessions). A `create`
      * rejection can happen AFTER `session/created` fired (a later
@@ -1569,15 +1564,10 @@ export function apply(ctx: Context, config: Config): void {
         // replay tool calls the model can no longer make.
         const recorded = await recordedPreset(ctx, sessionId)
         const composition = await compose(recorded)
-        // The resume follows the SAME publication taxonomy as a fresh create
-        // (review round 19): a rejection AFTER the durable publication (a
-        // later synchronous listener threw; the rollback disposes the agent
-        // but the session artifact survives) is recovered by resuming the
-        // SAME session with the target lock still held — a stale/missing id
-        // (never durable) releases the lock and falls back to a fresh
-        // session as before, and an unrecoverable published session escapes
-        // as DurablePublishedUnrecoverableError WITHOUT releasing the lock
-        // or invoking the fallback.
+        // The resume crosses the DSH boundary (the target was touched):
+        // a rejection gets at most ONE same-id recovery (below) and then
+        // the session is PINNED — no publication-phase inference, no
+        // second fresh fallback (convergence plan phase 4/8).
         handle = await createWithPublicationRecovery({
           targetId: sessionId,
           create: () => agents.resume({
