@@ -155,6 +155,7 @@ import {
 import { SessionTransitionGate } from './transition-gate.ts'
 import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, PublicationStateUnknownError, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 import { OpenLockHolder } from './open-locks.ts'
+import { acquireProcessLeaseManager } from './session-lease-manager.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -1434,10 +1435,12 @@ export function apply(ctx: Context, config: Config): void {
       | { kind: 'acquired' }
       | { kind: 'unavailable'; reason: string }
       | { kind: 'refused'; message: string }
-    /** Try to take the open-time lock for a session. Never throws. A FRESH
-     * session's artifact directory is pre-created by the lock layer when
-     * needed, so the lock can physically exist BEFORE the session log does. */
-    const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult => {
+    /** The PHYSICAL open-time lock take (the lease manager's low-level
+     * surface). Never throws. A FRESH session's artifact directory is
+     * pre-created by the lock layer when needed, so the lock can
+     * physically exist BEFORE the session log does. */
+    const physicalAcquire = (target: { id: string; header?: { cwd?: string } }): OpenLockResult => {
+      const { id: sessionId, header } = target
       if (openLocks.has(sessionId)) return { kind: 'acquired' }
       const persistence = ctx.get('sessionPersistence') as SessionLockPersistence | undefined
       const outcome = acquireSessionLock(
@@ -1477,14 +1480,27 @@ export function apply(ctx: Context, config: Config): void {
         case 'unavailable':
           // No persistence/artifact/dir/write access: proceed without a
           // lock for EXISTING sessions (the divergence guard remains the
-          // write-path backstop); a FRESH target's transaction treats this
+          // write-path backstop); a fresh target's target treats this
           // as a failure (see the transition's fresh handling).
           return { kind: 'unavailable', reason: outcome.reason }
       }
     }
-    /** Release the open-time lock for a session (idempotent). */
+    /** The process-global lease manager: ownership policy over the physical
+     * locks. A remount (HMR) reuses the SAME manager so this process never
+     * forgets the locks it physically holds. */
+    const leaseWorld = acquireProcessLeaseManager({
+      acquire: physicalAcquire,
+      release: (sessionId) => openLocks.release(sessionId),
+    })
+    const leaseManager = leaseWorld.manager
+    /** Try to reserve the lease for a session (physical acquire when this
+     * process does not hold it yet; idempotent for held leases). */
+    const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult =>
+      leaseManager.reserve({ id: sessionId, header })
+    /** Release a lease that never crossed the DSH boundary (the hard
+     * assertion inside the manager guards touched leases). */
     const releaseOpenLock = (sessionId: string): void => {
-      openLocks.release(sessionId)
+      leaseManager.releaseUntouched(sessionId)
     }
     /** Whether one session already has a DURABLE artifact (the persistence
      * backend's list only contains materialized sessions). A `create`
