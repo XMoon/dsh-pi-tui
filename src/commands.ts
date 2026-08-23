@@ -338,6 +338,16 @@ export interface TuiCommandRunner {
    * session just to be rewound.
    */
   openRewindPicker(): void
+  /**
+   * Run one session-transition workflow exclusively through the
+   * process-local single-writer gate: /new, /fork and /rewind must create
+   * their child AND swap inside ONE exclusive section, so a transition can
+   * never interleave with another — no mixed-parent child (cwd captured
+   * across a concurrent switch), no stale commit after a switch, no ghost
+   * child published to persistence once the surface moved. Re-entering the
+   * gate from inside a task is refused loudly (it would deadlock).
+   */
+  withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
   enterView(childId: SessionId, label?: string): Promise<void>
   exit(code: number): void
   /**
@@ -1982,7 +1992,7 @@ export function registerTuiCommands(
   commands.register({
     name: 'new',
     description: 'Start a fresh session in this workspace',
-    handler: async () => {
+    handler: () => runner.withSessionTransition(async () => {
       const liveAgent = runner.liveAgent
       const composition = await runner.compose(runner.pendingPreset)
       const presetId = composition.agentPreset
@@ -2007,7 +2017,7 @@ export function registerTuiCommands(
       // keep their pinned drafts — review finding 2).
       runner.imageStore.clearUnpinned()
       return { kind: 'success', text: 'started a fresh session' }
-    },
+    }),
   })
 
   registerTuiCommand({
@@ -2447,13 +2457,16 @@ export function registerTuiCommands(
   commands.register({
     name: 'fork',
     description: 'Fork this session at the last completed turn',
-    handler: async () => {
+    handler: () => runner.withSessionTransition(async () => {
       const source = runner.liveAgent
       const seed = source === undefined ? undefined : forkSeed(source.session.events)
       if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
       // Shared child creation with rewind (plan §6.2): preset inheritance,
       // live session cwd, provider/model inheritance, parentSession +
       // seedLength metadata — one chain, no drift between the two surfaces.
+      // The create AND the swap run inside the transition gate, so the
+      // child can never mix metadata across a concurrent switch and never
+      // stays behind once the surface moved.
       const next = await createForkedAgent(runner, source, seed)
       const error = await runner.swapTo(next)
       if (error !== undefined) {
@@ -2469,7 +2482,7 @@ export function registerTuiCommands(
       // finding 2).
       runner.imageStore.clearUnpinned()
       return { kind: 'success', text: `forked as ${next.agent.session.id}` }
-    },
+    }),
   })
 
   commands.register({

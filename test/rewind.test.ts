@@ -27,6 +27,7 @@ import {
   type RewindCandidate,
 } from '../src/rewind.ts'
 import { commitRewind, createForkedAgent, isRewindIdentityCurrent, SWAP_STALE_MESSAGE, type RewindCommitHost, type RewindLiveIdentity } from '../src/session-fork.ts'
+import { SessionTransitionGate } from '../src/transition-gate.ts'
 import { forkSeed, registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -332,26 +333,28 @@ function makeRig(options: {
   return { host, created, resolved, swapped, disposed, drafts, state }
 }
 
-function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent[] = [], agentPreset?: string): Agent {
+function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent[] = [], agentPreset?: string, cwd = '/ws'): Agent {
   return {
     session: {
       id: sessionId,
-      header: { version: 0, id: sessionId, createdAt: 1, cwd: '/ws', ...(agentPreset === undefined ? {} : { agentPreset }) },
+      header: { version: 0, id: sessionId, createdAt: 1, cwd, ...(agentPreset === undefined ? {} : { agentPreset }) },
       events,
     },
     options: { provider: 'deepseek', model: 'deepseek-chat' },
   } as unknown as Agent
 }
 
-test('C04: createForkedAgent records preset, live cwd, parent, seedLength, provider/model', async () => {
+test('C04: createForkedAgent records preset, source cwd, parent, seedLength, provider/model', async () => {
   const rig = makeRig({ sessionCwd: '/other-cwd', composePreset: 'minimal' })
   const seed = turn(0, 1, 'A')
-  // The source's recorded preset (header) resolves to 'minimal'.
+  // The source's recorded preset (header) resolves to 'minimal'; its header
+  // cwd is '/ws' — the child's cwd is the SOURCE's workspace (the live
+  // surface cwd '/other-cwd' only matters for a header without one).
   const next = await createForkedAgent(rig.host, sourceAgent('session-parent', [], 'minimal'), seed)
   assert.deepEqual(rig.resolved, ['minimal'])
   assert.equal(rig.created.length, 1)
   const call = rig.created[0]!
-  assert.equal(call.meta.cwd, '/other-cwd', 'the LIVE session cwd, never a captured value')
+  assert.equal(call.meta.cwd, '/ws', 'the SOURCE workspace wins, never a live-surface value')
   assert.equal(call.meta.agentPreset, 'minimal')
   assert.equal(call.meta.parentSession, 'session-parent')
   assert.equal(call.meta.seedLength, 4)
@@ -359,6 +362,40 @@ test('C04: createForkedAgent records preset, live cwd, parent, seedLength, provi
   assert.equal(call.seed, seed)
   assert.equal(next.agent.session.id, call.sessionId)
   assert.ok(call.sessionId.startsWith('session-'))
+})
+
+test('review P2: the cwd is captured BEFORE the compose await (no parent=A cwd=B mix)', async () => {
+  let liveCwd = '/ws-a'
+  const created: CreatedCall[] = []
+  const rig = makeRig({ sessionCwd: '/ws-a' })
+  // The compose await is where a concurrent switch could land; the helper
+  // must have already captured the cwd.
+  const host: RewindCommitHost = {
+    ...rig.host,
+    sessionCwd: () => liveCwd,
+    compose: async () => {
+      liveCwd = '/ws-b' // a switch lands DURING the compose await
+      return { setup: () => {} }
+    },
+    agents: {
+      create: async (call) => {
+        created.push({ sessionId: String(call.sessionId), meta: call.meta, agentOptions: call.agentOptions, seed: call.seed })
+        return { agent: { session: { id: String(call.sessionId) } } } as unknown as AgentHandle
+      },
+    },
+  }
+  // The source header has NO cwd: the fallback is the live cwd captured at
+  // entry — '/ws-a', never the post-switch '/ws-b'.
+  const source = sourceAgent('session-parent', [], undefined, '')
+  await createForkedAgent(host, source, [])
+  assert.equal(created[0]!.meta.cwd, '/ws-a', 'the cwd is the pre-await capture, never the post-switch value')
+})
+
+test('review P2: a source header WITHOUT a cwd falls back to the live surface cwd', async () => {
+  const rig = makeRig({ sessionCwd: '/live-fallback' })
+  const source = sourceAgent('session-parent', [], undefined, '')
+  await createForkedAgent(rig.host, source, [])
+  assert.equal(rig.created[0]!.meta.cwd, '/live-fallback')
 })
 
 test('createForkedAgent without a preset omits agentPreset from the meta', async () => {
@@ -431,6 +468,34 @@ test('I05 gate 2: a surface switch DURING create disposes the ghost child', asyn
   assert.equal(rig.swapped.length, 0, 'the swap must not commit into a stale surface')
   assert.equal(rig.disposed.length, 1, 'the ghost child must be disposed, never left behind')
   assert.deepEqual(rig.drafts, [], 'no prompt restore for a stale commit')
+})
+
+test('review P1-2: a rewind commit holds the gate across create→swap; a concurrent switch queues behind it', async () => {
+  const gate = new SessionTransitionGate()
+  const events = turn(0, 1, 'A')
+  const candidates = collectRewindCandidates(events)
+  const source = sourceAgent('session-source', events)
+  const order: string[] = []
+  let releaseSwap!: () => void
+  const swapHanging = new Promise<void>(resolve => { releaseSwap = resolve })
+  const rig = makeRig({ swapTo: async () => { await swapHanging; return undefined } })
+  // The commit runs inside the gate (the runner wraps commitRewind in
+  // withSessionTransition) and the swap yields — the exact window where the
+  // old TOCTOU let a concurrent switch land.
+  const commit = gate.run(async () => {
+    order.push('rewind-commit')
+    return commitRewind(rig.host, source, candidates[0]!, { sessionId: 'session-source', generation: 1 })
+  })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const switched = gate.run(async () => { order.push('switch') })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(order, ['rewind-commit'], 'the switch must queue while the rewind swap is in flight')
+  releaseSwap()
+  const outcome = await commit
+  assert.equal(outcome.kind, 'rewound')
+  await switched
+  assert.deepEqual(order, ['rewind-commit', 'switch'], 'the switch runs only after the rewind released the gate')
+  assert.equal(rig.disposed.length, 0, 'nothing was stale — no ghost, no disposal')
 })
 
 test('a vanished rewind point fails cleanly without creating a child', async () => {
@@ -604,6 +669,7 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     openJobView: () => {},
     openTasksBrowser: () => {},
     openRewindPicker: () => { options.rewinds.push(1) },
+    withSessionTransition: async (task) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

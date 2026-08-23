@@ -103,6 +103,7 @@ function stubRunner(
       )
     },
     openRewindPicker: () => {},
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

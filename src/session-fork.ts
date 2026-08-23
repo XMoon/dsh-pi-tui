@@ -61,6 +61,13 @@ export async function createForkedAgent(
   source: Agent,
   seed: readonly SessionEvent[],
 ): Promise<AgentHandle> {
+  // Source-deterministic cwd, captured BEFORE the first await: a concurrent
+  // surface switch between the compose await and the create must never mix
+  // parent=A with cwd=B (review P2). The SOURCE's own workspace wins (the
+  // child is a branch of that session); an empty/missing header cwd falls
+  // back to the live surface cwd — inside the transition gate the two are
+  // identical anyway, which makes the helper independent of that invariant.
+  const cwd = source.session.header.cwd || host.sessionCwd()
   // The child inherits the parent's recorded preset (official fork
   // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
   const composition = await host.compose(resolveSessionPreset(source.session))
@@ -68,7 +75,7 @@ export async function createForkedAgent(
   return host.agents.create({
     sessionId: SessionId(`session-${randomUUID()}`),
     meta: {
-      cwd: host.sessionCwd(),
+      cwd,
       ...(presetId === undefined ? {} : { agentPreset: presetId }),
       parentSession: source.session.id,
       seedLength: seed.length,
@@ -134,6 +141,13 @@ export type RewindCommitOutcome =
  * Ordering contract (plan §29): create → swap COMMIT → replaceDraft. A
  * failed create or swap keeps the CURRENT session and never touches the
  * editor; the source session is never modified at any point.
+ *
+ * MUST run inside the caller's session-transition gate (the runner wraps
+ * the commit in `withSessionTransition`): the gates below are the defensive
+ * second line — with the gate held, no other transition can interleave, so
+ * a stale rewind is detected BEFORE the create (never a published-and-
+ * disposed durable ghost child) and the swap cannot be overwritten by a
+ * concurrent switch.
  *
  * @param host - the commit host.
  * @param source - the live agent whose session the picker listed.

@@ -144,6 +144,7 @@ import {
   type RewindCommitHost,
   type RewindLiveIdentity,
 } from './session-fork.ts'
+import { SessionTransitionGate } from './transition-gate.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -1563,6 +1564,22 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
 
+    /** The ONE writer for the live session: every path that changes which
+     * session owns the surface — /new, /fork, rewind, `/sessions` switch,
+     * the first-session creation — runs its WHOLE workflow (prepare/create
+     * → flush → dispose old → assign new → generation bump) inside
+     * {@link transitionGate}. Without the gate a transition can interleave
+     * with another: a fork child could be created (and its seed published
+     * to persistence) before a stale check sees the surface already moved —
+     * `dispose()` stops the agent but never deletes the persisted session —
+     * and a stale identity check could pass, then yield inside the swap's
+     * dispose await, letting a concurrent switch land and later get
+     * overwritten. The rewind commit holds the gate from BEFORE
+     * `createForkedAgent` (the create itself is inside the exclusive
+     * section), so a stale rewind never creates a child at all.
+     * @see SessionTransitionGate */
+    const transitionGate = new SessionTransitionGate()
+
     /** Swap the live agent to a new handle, repainting for its session.
      * `expected` is OPTIONAL (conversation rewind only): the surface
      * identity the caller captured. When it is given, the swap refuses —
@@ -1573,7 +1590,14 @@ export function apply(ctx: Context, config: Config): void {
      * the flush but BEFORE the current handle is disposed or the new one
      * assigned, so the current session stays live and the caller can
      * dispose the never-live child. Other callers (no `expected`) keep the
-     * historical unconditional behavior. */
+     * historical unconditional behavior.
+     *
+     * MUST be called inside {@link transitionGate}: the gate is the
+     * authoritative serialization (the expected check is the defensive
+     * second line); without it the check-to-commit gap across the dispose
+     * await is a real TOCTOU. Every in-process caller (/new, /fork,
+     * rewind, switchSession) runs its workflow through
+     * `runner.withSessionTransition`. */
     const swapTo = async (next: Awaited<ReturnType<typeof agents.resume>>, expected?: RewindLiveIdentity): Promise<string | undefined> => {
       const from = liveAgent?.session.id
       // The from-session's header, captured BEFORE the swap: the repair path
@@ -1660,8 +1684,14 @@ export function apply(ctx: Context, config: Config): void {
 
     /** Hand the TUI over to another persisted session. Never throws: every
      * failure (unknown session, broken log, preset mount) returns an error
-     * string so callers' `.then(error => ...)` need no rejection path. */
-    const switchSession = async (sessionId: string): Promise<string | undefined> => {
+     * string so callers' `.then(error => ...)` need no rejection path. The
+     * whole switch (lock dance → compose → resume → swap) runs inside the
+     * session-transition gate, so it can never interleave with /new, /fork
+     * or a rewind commit (the single-writer rule). */
+    const switchSession = (sessionId: string): Promise<string | undefined> =>
+      transitionGate.run(() => switchSessionLocked(sessionId))
+
+    const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
       // Draft cleanup happens ONLY after the switch committed (swapTo
       // returned success): a refused/failed switch keeps the CURRENT
       // session and its staged drafts intact — clearing up front would
@@ -3894,7 +3924,10 @@ export function apply(ctx: Context, config: Config): void {
     const ensureSession = async (): Promise<void> => {
       if (liveAgent !== undefined) return
       if (creating !== undefined) return creating
-      creating = (async () => {
+      // The first-session creation is a session transition too: it runs
+      // inside the single-writer gate so it can never interleave with a
+      // /new, /fork, rewind or switch that is already in flight.
+      creating = transitionGate.run(async () => {
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
         try {
@@ -3955,7 +3988,7 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(resumeFailure, 'error')
           resumeFailure = undefined
         }
-      })().finally(() => { creating = undefined })
+      }).finally(() => { creating = undefined })
       return creating
     }
     // The TUI-owned slash commands live on the commands service's global
@@ -4082,10 +4115,17 @@ export function apply(ctx: Context, config: Config): void {
         (value) => {
           const candidate = candidates.find(item => String(item.turnStartSeq) === value)
           if (candidate === undefined) return
-          runOwned('conversation rewind', () => commitRewind(commitHost, source, candidate, {
-            sessionId: sourceId,
-            generation: sourceGeneration,
-          }), {
+          runOwned('conversation rewind', () => {
+            // The WHOLE commit — gate 1 → create → swap → restore — runs
+            // inside the session-transition gate: no other transition can
+            // interleave, so a stale rewind is detected BEFORE the child is
+            // created (never a published-and-disposed durable ghost), and
+            // the swap can never be overwritten by a concurrent switch.
+            return transitionGate.run(() => commitRewind(commitHost, source, candidate, {
+              sessionId: sourceId,
+              generation: sourceGeneration,
+            }))
+          }, {
             diag,
             sessionId: () => sourceId,
             onResult: (outcome) => {
@@ -4201,6 +4241,11 @@ export function apply(ctx: Context, config: Config): void {
       openJobView,
       openTasksBrowser,
       openRewindPicker,
+      // The single-writer session-transition gate: /new, /fork and the
+      // command-side switches run their create AND swap inside one
+      // exclusive section via this seam (rewind goes through
+      // openRewindPicker's own gate wrapper).
+      withSessionTransition: <T>(task: () => Promise<T> | T) => transitionGate.run(task),
       enterView,
       requestExit,
       exit,

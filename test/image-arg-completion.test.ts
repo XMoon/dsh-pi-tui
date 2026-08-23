@@ -84,6 +84,7 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     openJobView: () => {},
     openTasksBrowser: () => {},
     openRewindPicker: () => {},
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,

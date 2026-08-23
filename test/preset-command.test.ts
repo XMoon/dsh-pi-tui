@@ -144,6 +144,7 @@ function stubRunner(options: {
     openJobView: () => {},
     openTasksBrowser: () => {},
     openRewindPicker: () => {},
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: options.extensions,

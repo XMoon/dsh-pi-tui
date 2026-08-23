@@ -136,3 +136,36 @@ File rows are the **storage format**, not events. Packed `*-chunks` rows
 (`seq0` + `dt`) expand via `decodeStorageRecord` into individual events with
 real `seq` values. Any code that counts "events in the file" must expand rows
 first — the guard's `readFrom` does; naive line-counting does not.
+
+## In-process session transitions: the single-writer gate
+
+The lock and the guard protect the session FILE from cross-process writers.
+A separate hazard is IN-PROCESS interleaving between the TUI's own
+transition paths — `/new`, `/fork`, `/rewind`, `/sessions` switch/resume
+and the first-session creation. Before the gate, two such workflows could
+overlap across their awaits:
+
+- a fork child could be created — `session/created` published, persistence
+  already writing its seed — and THEN the stale check notice the surface
+  had moved; `AgentHandle.dispose()` stops the agent and removes it from
+  the live registry, but it does **not** delete the persisted session, so a
+  durable ghost branch would appear in `/sessions` that the user never
+  entered;
+- a rewind swap's identity check could pass, then yield across the
+  old-handle `dispose()` await, letting a concurrent switch land and later
+  be overwritten by the first continuation.
+
+The fix (`src/transition-gate.ts`) is a **process-local single-writer
+queue**: every transition path runs its whole workflow — prepare/create →
+flush → dispose old → assign new → generation bump — inside
+`SessionTransitionGate.run`, held from BEFORE the child create (for rewind)
+or the resume (for switches) until the swap commits. Tasks are strictly
+FIFO; a rejected task never blocks the queue; re-entering the gate from
+inside a task is refused loudly (AsyncLocalStorage detects it — re-entry
+would deadlock the queue). The runner exposes the gate as
+`runner.withSessionTransition(task)`; the rewind commit wraps
+`commitRewind` itself, so a stale selection is detected before any child
+exists. The swap's `expected`-identity check and the commit's stale gates
+remain as the defensive second line — with the gate held they are
+unreachable in practice, but they protect against future callers that
+forget the gate.
