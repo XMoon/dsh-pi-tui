@@ -256,18 +256,6 @@ export class ProcessSessionLeaseManager {
     return [...this.leases.values()]
   }
 
-  /** Release every physical lock (EXIT path only — never a touched lease
-   *  business release; the exit path deliberately keeps touched locks so
-   *  the stale-takeover mechanism protects the session after exit). */
-  releaseAllPhysical(): void {
-    for (const lease of this.leases.values()) {
-      if (lease.physicalLockHeld) {
-        lease.physicalLockHeld = false
-        this.deps.release(lease.sessionId)
-      }
-    }
-    this.leases.clear()
-  }
 }
 
 /** TEST-ONLY: drop the process-global registry (headless suite isolation —
