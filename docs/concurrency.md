@@ -72,8 +72,8 @@ process and REFUSES the open.
 | Entry | Behavior |
 |---|---|
 | `--session <id>` launch | acquire before `agents.resume()`; refusal is fatal (the runner exits with the refusal message — the user asked for a specific session, there is no safe fallback) |
-| `/resume` / `/sessions` switch | acquire the TARGET lock while STILL HOLDING the current one (multi-slot holder; the acquire is a non-blocking refusal); the current lock is released only in the COMMIT on a successful handover — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window, nothing to re-take) |
-| `/new` / `/fork` | acquire the child's lock BEFORE the create (pre-generated id, old lock still held — the target-lock-before-create rule); the COMMIT only releases the old lock |
+| `/resume` / `/sessions` switch | acquire the TARGET lock while STILL HOLDING the current one (multi-slot holder; the acquire is a non-blocking refusal); the current lock is released only in RETIRE, after the old handle is disposed AND its persistence retirement settled (review round 10) — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window, nothing to re-take) |
+| `/new` / `/fork` | acquire the child's lock BEFORE the create (pre-generated id, old lock still held — the target-lock-before-create rule); the OLD lock is released only in RETIRE after dispose + the retirement barrier |
 | first deferred message | acquire the child's lock BEFORE the create (pre-generated id — the target-lock-before-create rule) |
 | switch away / clean exit | release (idempotent), AFTER the final flush |
 | crash / kill -9 | lock stays; the next open's stale check takes it over |
@@ -81,15 +81,16 @@ process and REFUSES the open.
 Two orderings are load-bearing and were both bug-fixed in review:
 
 - **Flush before release.** The transaction flushes the outgoing session
-  (phase 1, with its lock still held), THEN the lock handover happens in
-  the synchronous COMMIT. Releasing first would open a window where a
-  racing opener's resume synthesizes closers into the shared log while our
-  flush still appends from our in-memory seq — the exact corruption the
-  lock exists to prevent.
-- **Old lock survives until the COMMIT.** The lock holder is multi-slot
-  (`src/open-locks.ts`): a transition acquires the TARGET while still
-  holding the OLD lock, and the old lock is released only inside the
-  synchronous COMMIT. A FRESH target's lock is physically pre-created:
+  (phase 1, with its lock still held); the lock handover itself happens
+  in RETIRE, after the old handle is disposed. Releasing first would open
+  a window where a racing opener's resume synthesizes closers into the
+  shared log while our flush still appends from our in-memory seq — the
+  exact corruption the lock exists to prevent.
+- **Old lock survives until RETIRE.** The lock holder is multi-slot
+  (`src/open-locks.ts`): the transition acquires the TARGET while still
+  holding the OLD lock, and the old lock is released only inside RETIRE
+  — after the old handle is disposed and its persistence retirement
+  settled (review round 10). A FRESH target's lock is physically pre-created:
   `acquireSessionLock` pre-creates the session artifact directory (0700)
   when the write would ENOENT, so the lock file exists BEFORE the session
   log is materialized (review round 7 — otherwise "target-lock-before-
@@ -196,7 +197,7 @@ is the whole point:
    while the old session stays live with its own lock (review round 6:
    /new, /fork and rewind used to create the child first and acquire its
    lock only in the COMMIT, leaving a window where another process could
-   grab the published child's lock). `AgentHandle.dispose()` is an async
+   grab the published child's lock — historical). `AgentHandle.dispose()` is an async
    quiescence (`machine.cancel → whenIdle → scope.dispose`), and a
    cancelled RUNNING turn appends its closure events (interrupted
    assistant/message, step/end, turn/end) in `finally` blocks — releasing
@@ -214,10 +215,10 @@ is the whole point:
    interpreted as "the child never happened": `dispose()` stops an agent
    but never deletes a persisted session, and dsh has no durable
    rollback API;
-4. COMMIT — a synchronous critical section (OLD-lock release — the target
-   lock was acquired in phase 2 and stays held; guard reset, generation
-   bump, live handle/agent replacement) with no awaits between its
-   steps;
+4. COMMIT — a synchronous critical section (guard reset, generation
+   bump, live handle/agent replacement — the target lock was acquired in
+   phase 2 and stays held; NO lock changes happen here, review round 10)
+   with no awaits between its steps;
 5. RETIRE — in this order: (1) the OLD handle is disposed — `whenIdle`
    only idles the agent machine; session-scoped async writers (e.g. the
    title generator awaiting a provider) are aborted only by

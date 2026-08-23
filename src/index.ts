@@ -1932,13 +1932,16 @@ export function apply(ctx: Context, config: Config): void {
           if (from !== undefined) {
             const persistence = ctx.get('sessionPersistence') as { inspect?: (id: string, signal?: AbortSignal) => Promise<unknown> } | undefined
             const inspect = persistence?.inspect
-            let settled = inspect === undefined
+            // The lock is released ONLY on a positively settled barrier; a
+            // MISSING inspect is not a settle (review round 11 — the old
+            // code initialized settled to true when inspect was absent,
+            // releasing the old lock despite the warning).
+            let settled = false
             if (inspect !== undefined) {
               try {
                 await inspect(from)
                 settled = true
               } catch (error) {
-                settled = false
                 retired.push(`old retirement barrier: ${safeErrorMessage(error)}`)
               }
             } else {
