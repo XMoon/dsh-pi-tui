@@ -393,6 +393,21 @@ test('E06: a slow second Esc never rewinds', async () => {
   assert.equal(surface.cancels, 0)
 })
 
+test('E12: an intervening key press disarms the double-Esc window', async () => {
+  const surface = startAppWithRewind()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b') // arm
+  surface.vt.sendInput('\x1b[D') // Left between the presses: disarms
+  surface.vt.sendInput('\x1b') // a third Esc within the window: re-arms only
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 0, 'Esc + Left + Esc must NOT rewind')
+  assert.equal(surface.cancels, 0, 'Esc + Left + Esc must NOT cancel either')
+  // A clean consecutive double-Esc after the disarm still fires.
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.equal(surface.rewinds, 1, 'a clean consecutive double-Esc still rewinds')
+})
+
 test('E01/E02: busy Esc stays a pure cancel — a quick second Esc never rewinds a half turn', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()

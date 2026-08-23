@@ -1965,6 +1965,11 @@ export class TuiApp {
     // of Esc would trip the double-Esc cancel. The framework already filters
     // releases for the focused component; listeners are on their own.
     if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
+    // The double-Esc window is a CONSECUTIVE-press chord: any real
+    // non-Esc key press between the two Esc presses disarms it (review
+    // E12 — `Esc → Left → Esc` must not rewind). Releases/repeats already
+    // returned above, so only genuine presses reach this line.
+    if (!matchesKey(data, 'escape')) this.lastEscapeAt = undefined
     if (this.activeQuestions !== undefined) {
       return this.handleQuestionKey(data)
     }
