@@ -104,8 +104,11 @@ function processStartedAt(): number {
 /** The per-process session lease manager (one instance per OS process). */
 export class ProcessSessionLeaseManager {
   private readonly leases = new Map<string, SessionLeaseRecord>()
+  private readonly deps: LeasePhysicalDeps
 
-  constructor(private readonly deps: LeasePhysicalDeps) {}
+  constructor(deps: LeasePhysicalDeps) {
+    this.deps = deps
+  }
 
   /** Reserve a target's lease: acquire the physical lock when this process
    * does not already hold it. Idempotent for held leases (RESERVED /

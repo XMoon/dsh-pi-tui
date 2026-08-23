@@ -205,24 +205,22 @@ test('a retire failure NEVER rolls the committed child back', async () => {
   assert.deepEqual(failures, ['retire:old dispose exploded'])
 })
 
-test('review round 7: a FRESH target with an UNAVAILABLE lock aborts BEFORE the create', async () => {
+test('convergence phase 2: a FRESH target with an UNAVAILABLE lock aborts BEFORE the create', async () => {
   const { host, events, failures } = fakeHost({ targetLockUnavailable: true })
   const outcome = await runTransitionTo(host, { ...steps(events), fresh: true })
   assert.equal(outcome.ok, false)
-  assert.match(outcome.ok === false ? outcome.message : '', /cannot lock the fresh session/)
+  assert.match(outcome.ok === false ? outcome.message : '', /cannot lock the session/)
   assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'target.lock.acquire:session-c'],
     'the child must never be created without its lock')
-  assert.deepEqual(failures, ['target-lock:cannot lock the fresh session before creating it (no-lock-dir)'])
+  assert.deepEqual(failures, ['target-lock:cannot lock the session before the transition (no-lock-dir)'])
 })
 
-test('an EXISTING target with an unavailable lock may proceed (guard backstop)', async () => {
+test('convergence phase 2: an EXISTING target with an unavailable lock FAILS CLOSED too', async () => {
   const { host, events } = fakeHost({ targetLockUnavailable: true })
   const outcome = await runTransitionTo(host, { ...steps(events), fresh: false })
-  assert.equal(outcome.ok, true, 'an existing target tolerates an unavailable lock')
-  assert.deepEqual(events, [
-    'old.whenIdle', 'old.flush', 'target.lock.acquire:session-c', 'prepare', 'child.create',
-    'child.commit', 'old.dispose', 'old.lock.release',
-  ])
+  assert.equal(outcome.ok, false, 'every writable target requires its physical owner lock')
+  assert.deepEqual(events, ['old.whenIdle', 'old.flush', 'target.lock.acquire:session-c'],
+    'no resume happens without an acquired lock — the divergence guard is no stand-in')
 })
 
 // ── review round 8: a rejected create may still have published durably ─────

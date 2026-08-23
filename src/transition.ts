@@ -256,8 +256,13 @@ export async function runTransitionTo<T>(
     host.recordFailure('target-lock', new Error(lock.message))
     return { ok: false, message: `transition failed: ${lock.message}` }
   }
-  if (lock.kind === 'unavailable' && steps.fresh === true) {
-    const reason = `cannot lock the fresh session before creating it (${lock.reason})`
+  if (lock.kind === 'unavailable') {
+    // Fail-closed for EVERY writable target (fresh AND existing — review
+    // round 2 of the convergence plan): without a physical owner lock the
+    // transition would publish or resume a session another process may
+    // already own. The divergence guard is no longer a stand-in for the
+    // lock (it stays as a second line of defense only).
+    const reason = `cannot lock the session before the transition (${lock.reason})`
     host.recordFailure('target-lock', new Error(reason))
     return { ok: false, message: `transition failed: ${reason}` }
   }

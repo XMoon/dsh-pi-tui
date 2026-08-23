@@ -141,7 +141,9 @@
   后端不可读、或部署没有 inspect 能力时 settle 为 `unknown`——target
   锁保持、报"无法确认 session 是否已发布",绝不 fallback;**已存在**
   的 target(其 artifact 早于本次尝试)在不可恢复失败时会释放锁,而
-  不是把 session 钉到进程退出(review round 26 P2)。旧 session 的锁现在
+  不是把 session 钉到进程退出(review round 26 P2)。 owner lock 现在对**所有**可写 target(fresh 与 existing 一致)一律
+  fail-closed:锁不可用时拒绝 transition/resume——divergence guard 只
+  保留为第二道防线,不再充当锁的替代。旧 session 的锁现在
   **活过 COMMIT**:只在旧 handle dispose(经 session/disposed 中止
   session 级异步 writer)且其 persistence retirement 落定(coordinator
   的 inspect barrier)之后才释放——另一个进程绝不可能在旧 session 仍

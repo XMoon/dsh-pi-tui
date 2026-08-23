@@ -1568,6 +1568,14 @@ export function apply(ctx: Context, config: Config): void {
         if (lock.kind === 'refused') {
           throw new SessionLockRefusedError(lock.message)
         }
+        // Fail-closed (convergence plan phase 2): a writable existing
+        // session REQUIRES its physical owner lock — an unavailable lock
+        // means this deployment cannot guarantee single-owner writes, so
+        // the resume is refused instead of proceeding with only the
+        // divergence guard as a stand-in.
+        if (lock.kind === 'unavailable') {
+          throw new SessionLockRefusedError(`cannot lock session ${sessionId} (${lock.reason}); refusing to resume without an owner lock`)
+        }
         // The stored session's recorded preset wins (resolved from the log,
         // not the header): a session that switched while blank ran every turn
         // under the newer composition, and rebuilding it differently would

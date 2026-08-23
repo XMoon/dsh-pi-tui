@@ -98,9 +98,10 @@ Two orderings are load-bearing and were both bug-fixed in review:
   A released lock on an empty pre-created directory best-effort removes
   the directory, so a failed fresh transition leaves no residue. The
   acquire result is structured (`acquired | unavailable | refused`): a
-  FRESH target's transition requires `acquired` — `unavailable` means the
-  child would be published without its lock — while an EXISTING target
-  may proceed without a lock (the divergence guard is the backstop).
+  EVERY writable target's transition requires `acquired` — fresh AND
+  existing — `unavailable` fails closed (the convergence plan phase 2:
+  the divergence guard is no longer a stand-in for the lock; it remains
+  a second line of defense only).
   With the multi-slot order a failed switch never drops the old lock in
   the first place (the OLD single-slot design released old-first and its
   failed re-take then left the current session live WITHOUT its lock —

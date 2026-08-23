@@ -182,7 +182,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session was published" error is reported (review rounds 25/26). An
   EXISTING target (whose artifact predates the attempt) releases its
   lock on an unrecoverable failure instead of pinning the session until
-  process exit. The OLD session's lock now outlives the COMMIT: it is
+  process exit. Owner locking is now FAIL-CLOSED for every
+  writable target (fresh AND existing): an unavailable physical lock
+  refuses the transition/resume — the divergence guard stays as a
+  second line of defense only, never a stand-in for the lock. The OLD session's lock now outlives the COMMIT: it is
   released only after the old handle is disposed (aborting session-scoped
   async writers via session/disposed) AND its persistence retirement has
   settled (the coordinator's inspect barrier) — a second process can
