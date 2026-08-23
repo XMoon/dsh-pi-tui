@@ -18,6 +18,7 @@
  */
 
 import { sessionUnchanged } from './steer.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 
 /** The minimal agent surface the shell submit needs (the runner's live agent). */
 export interface ShellSubmitAgentLike {
@@ -60,6 +61,12 @@ export interface ShellSubmitDeps {
   fence?: () => boolean
   /** The fence refusal notice (defaults to {@link staleNotice}). */
   fenceNotice?: () => string
+  /**
+   * The session operation barrier (convergence plan phase 3): the shell
+   * write runs inside `runWriter`, so a transition started while the
+   * shell result awaits drains it first.
+   */
+  barrier?: SessionOperationBarrier
   /** Build the user message (runner-side creation, keeps this module dsh-free). */
   createMessage(text: string): unknown
   /** Called once the message was accepted by the agent (followup sent). */

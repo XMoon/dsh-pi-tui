@@ -20,6 +20,7 @@ import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor } from '@deepseek-ai/dsh-commands'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -396,6 +397,13 @@ export interface TuiCommandRunner {
    * gate from inside a task is refused loudly (it would deadlock).
    */
   withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
+  /**
+   * Run one TUI-owned session write inside the session operation barrier
+   * (convergence plan phase 3): a transition started while this write
+   * awaits drains it first; a write entering during a transition throws
+   * TransitionInProgressError (the caller refuses with the fence UX).
+   */
+  withSessionWriter<T>(sessionId: string, task: () => Promise<T> | T): Promise<T>
   /**
    * Enter the subagent viewer for one child session: the target carries
    * the catalog MODE (continuable = interactive editor, one-shot =
@@ -1729,10 +1737,28 @@ export function registerTuiCommands(
           ? 'a session transition is in progress — try again in a moment'
           : 'the draft changed while transitioning — review it before submitting again' }
       }
+      // The invocation's own write runs inside the operation barrier
+      // (convergence plan phase 3): a transition started while the draft
+      // prepared drains it first; a transition already running refuses the
+      // write with the standard fence UX (the check above is the quick
+      // path, this is the authoritative one).
+      try {
+        await runner.withSessionWriter(agent.session.id, async () => {
+          agent.steer(userMessage)
+        })
+      } catch (error) {
+        if (error instanceof TransitionInProgressError) {
+          const merged = mergeDraft(app.getDraft(), line)
+          app.setEditorText(merged)
+          return { kind: 'error', text: merged === line
+            ? 'a session transition is in progress — try again in a moment'
+            : 'the draft changed while transitioning — review it before submitting again' }
+        }
+        throw error
+      }
       // The invocation COMMITTED: consume the image drafts it referenced
       // (the prepared message holds the durable refs now; a concurrent
       // intake's newer draft survives — review finding).
-      agent.steer(userMessage)
       consumeDraftImages(line, runner.imageStore)
     } finally {
       // The pin releases on EVERY exit — including a synchronous steer

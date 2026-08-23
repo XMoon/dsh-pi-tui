@@ -16,6 +16,7 @@
  */
 
 import { savePayloadIdentity } from './guard.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 
 /** The minimal agent surface the steer needs (the runner's live agent). */
 export interface SteerAgentLike {
@@ -77,6 +78,13 @@ export interface SteerDeps {
   fence?: () => boolean
   /** The fence refusal notice (defaults to {@link staleNotice}). */
   fenceNotice?: () => string
+  /**
+   * The session operation barrier (convergence plan phase 3): the WHOLE
+   * steer write runs inside `runWriter`, so a transition started while
+   * this steer awaits drains it first — the `fence` quick-refusal alone
+   * cannot stop a writer that started BEFORE the transition.
+   */
+  barrier?: SessionOperationBarrier
 }
 
 /** The notice for a submission refused by the session-transition fence. */
@@ -171,6 +179,29 @@ export interface SteerAllOptions {
  * draft alone is steered (or followed up when the agent is idle).
  */
 export async function steerAll(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
+  // The WHOLE steer write runs inside the operation barrier (convergence
+  // plan phase 3): a transition that starts while this steer awaits
+  // (guard, identity checks) drains it before quiescing the old agent —
+  // the `fence` quick-refusal below only covers writers that START during
+  // a transition, not writers already in flight.
+  const barrier = deps.barrier
+  const sessionId = deps.currentAgent()?.session.id
+  if (barrier !== undefined && sessionId !== undefined) {
+    try {
+      return await barrier.runWriter(sessionId, () => steerAllCore(deps, text, options))
+    } catch (error) {
+      if (error instanceof TransitionInProgressError) {
+        deps.restoreDraft(text)
+        deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+        return 'stale'
+      }
+      throw error
+    }
+  }
+  return steerAllCore(deps, text, options)
+}
+
+async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
   const onlyDraft = options.onlyDraft === true
   const agent = deps.currentAgent()
   if (agent === undefined) return 'ok'

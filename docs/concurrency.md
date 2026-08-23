@@ -276,6 +276,12 @@ runs INSIDE the transition gate, so the captured agent can never be
 quiesced or unlocked mid-append (review round 27). The submission
 re-validation (agent object + session generation) covers the window
 AFTER the transition commits; the fence covers the window DURING it.
+The `busy` flag alone cannot stop a writer that started BEFORE the
+transition and is still awaiting a provider/IO — the
+`SessionOperationBarrier` (convergence plan phase 3) therefore runs
+every TUI-owned session write inside `runWriter` and every transition
+inside `runTransition`: a transition waits for in-flight writers to
+drain before it quiesces the old agent, and frozen writers are refused.
 
 The old code created the child first and THEN flushed the old session:
 a flush failure after the create left a durable ghost branch, and the

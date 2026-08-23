@@ -153,6 +153,7 @@ import {
   type RewindLiveIdentity,
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 import { createWithPublicationRecovery, DurablePublishedUnrecoverableError, PublicationStateUnknownError, runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 import { OpenLockHolder } from './open-locks.ts'
 import { acquireProcessLeaseManager } from './session-lease-manager.ts'
@@ -1864,6 +1865,15 @@ export function apply(ctx: Context, config: Config): void {
      * section), so a stale rewind never creates a child at all.
      * @see SessionTransitionGate */
     const transitionGate = new SessionTransitionGate()
+    // The writer/transition barrier: transitions freeze TUI writers and
+    // wait for in-flight ones to drain; writers run inside runWriter so a
+    // transition started later can never interleave with a write already
+    // awaiting a provider/IO (convergence plan phase 3).
+    const operationBarrier = new SessionOperationBarrier()
+    // The writer/transition barrier: transitions freeze TUI writers and
+    // wait for in-flight ones to drain; writers run inside runWriter so a
+    // transition started later can never interleave with a write already
+    // awaiting a provider/IO (convergence plan phase 3).
 
     /**
      * The ONE session-transition transaction, shared by /new, /fork,
@@ -2017,7 +2027,7 @@ export function apply(ctx: Context, config: Config): void {
      * session-transition gate, so it can never interleave with /new, /fork
      * or a rewind commit (the single-writer rule). */
     const switchSession = (sessionId: string): Promise<string | undefined> =>
-      transitionGate.run(() => switchSessionLocked(sessionId))
+      transitionGate.run(() => operationBarrier.runTransition(() => switchSessionLocked(sessionId)))
 
     const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
       // A switch INTO the session we are already on is a no-op — refusing
@@ -2369,6 +2379,7 @@ export function apply(ctx: Context, config: Config): void {
           // transition is in flight the followup would target a session
           // whose lock is about to be released.
           fence: () => transitionGate.busy,
+          barrier: operationBarrier,
           fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
           createMessage: (text) => createUserMessage({
             content: [{ type: 'text', text }],
@@ -3020,29 +3031,38 @@ export function apply(ctx: Context, config: Config): void {
                     // handoff pin forever).
                     reserve: () => fallbackPin,
                     run: async () => {
-                      const message = await prepareUserMessage(text, draftImages, submitDeps)
-                      // Re-check the captured session identity AFTER the
-                      // async admission (the guard-window rule, AGENTS.md).
-                      if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
-                        const merged = mergeDraft(app.getDraft(), text)
-                        app.setEditorText(merged)
-                        app.notify(merged === text
-                          ? 'the session changed while sending — try again'
-                          : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-                        return
+                      // The WHOLE write (admission → identity check →
+                      // followup) runs inside the operation barrier: a
+                      // transition started while the admission awaits waits
+                      // for this writer to drain, and a writer entering
+                      // during a transition is refused (convergence plan
+                      // phase 3).
+                      try {
+                        await operationBarrier.runWriter(agent.session.id, async () => {
+                          const message = await prepareUserMessage(text, draftImages, submitDeps)
+                          // Re-check the captured session identity AFTER the
+                          // async admission (the guard-window rule, AGENTS.md).
+                          if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+                            const merged = mergeDraft(app.getDraft(), text)
+                            app.setEditorText(merged)
+                            app.notify(merged === text
+                              ? 'the session changed while sending — try again'
+                              : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+                            return
+                          }
+                          agent.followup(message)
+                          // Consume ONLY the referenced drafts — a concurrent
+                          // intake's newer image survives (round-5 finding 1).
+                          consumeDraftImages(text, draftImages)
+                        })
+                      } catch (error) {
+                        if (error instanceof TransitionInProgressError) {
+                          fallbackPin()
+                          refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
+                          return
+                        }
+                        throw error
                       }
-                      // The session-transition write fence: a transition is
-                      // in flight — the fallback must not write an agent
-                      // whose lock is about to be released (review round 4).
-                      if (transitionGate.busy) {
-                        fallbackPin()
-                        refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
-                        return
-                      }
-                      agent.followup(message)
-                      // Consume ONLY the referenced drafts — a concurrent
-                      // intake's newer image survives (round-5 finding 1).
-                      consumeDraftImages(text, draftImages)
                     },
                     restore: (t) => restoreSubmissionDraft(t),
                   }, text), {
@@ -3080,32 +3100,38 @@ export function apply(ctx: Context, config: Config): void {
           })
           return
         }
-        // No commands service: plain follow-up on the CAPTURED agent (see
+        // No commands service: direct follow-up on the CAPTURED agent (see
         // the note above — never a re-read closure variable). Images ride
-        // the same prepared message as every other path (§13).
-        const message = await prepareUserMessage(text, draftImages, submitDeps)
-        // Re-check the captured session identity AFTER the async admission
-        // (the guard-window rule, AGENTS.md).
-        if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
-          const merged = mergeDraft(app.getDraft(), text)
-          app.setEditorText(merged)
-          app.notify(merged === text
-            ? 'the session changed while sending — try again'
-            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-          return
+        // the same prepared message as every other path (§13). The WHOLE
+        // write runs inside the operation barrier (convergence plan
+        // phase 3): a transition started during the admission waits for
+        // this writer to drain; a writer entering during a transition is
+        // refused.
+        try {
+          await operationBarrier.runWriter(agent.session.id, async () => {
+            const message = await prepareUserMessage(text, draftImages, submitDeps)
+            // Re-check the captured session identity AFTER the async
+            // admission (the guard-window rule, AGENTS.md).
+            if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+              const merged = mergeDraft(app.getDraft(), text)
+              app.setEditorText(merged)
+              app.notify(merged === text
+                ? 'the session changed while sending — try again'
+                : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+              return
+            }
+            agent.followup(message)
+            // Consume ONLY the referenced drafts — a concurrent intake's
+            // newer image survives (round-5 finding 1).
+            consumeDraftImages(text, draftImages)
+          })
+        } catch (error) {
+          if (error instanceof TransitionInProgressError) {
+            refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
+            return
+          }
+          throw error
         }
-        // The session-transition write fence: while a transition is in
-        // flight (quiesce → commit) the old agent may be woken again — a
-        // followup in that window would target a session whose lock is
-        // about to be released (review round 4). The draft is restored.
-        if (transitionGate.busy) {
-          refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
-          return
-        }
-        agent.followup(message)
-        // Consume ONLY the referenced drafts — a concurrent intake's newer
-        // image survives (round-5 finding 1).
-        consumeDraftImages(text, draftImages)
         },
         restore: (t) => restoreSubmissionDraft(t),
       }, text), {
@@ -3259,6 +3285,7 @@ export function apply(ctx: Context, config: Config): void {
           // a steer in that window would target a session whose lock is
           // about to be released (the two-writers race, review round 4).
           fence: () => transitionGate.busy,
+          barrier: operationBarrier,
           fenceNotice: () => 'a session transition is in progress — try again in a moment',
           createDraft: () => prepared,
           blockedNotice: (reason) => reason === 'removed'
@@ -4574,7 +4601,7 @@ export function apply(ctx: Context, config: Config): void {
       // The first-session creation is a session transition too: it runs
       // inside the single-writer gate so it can never interleave with a
       // /new, /fork, rewind or switch that is already in flight.
-      creating = transitionGate.run(async () => {
+      creating = transitionGate.run(() => operationBarrier.runTransition(async () => {
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
         // The first-session creation follows the SAME target-lock-before-
@@ -4658,7 +4685,7 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(resumeFailure, 'error')
           resumeFailure = undefined
         }
-      }).finally(() => { creating = undefined })
+      })).finally(() => { creating = undefined })
       return creating
     }
     // The TUI-owned slash commands live on the commands service's global
@@ -4807,10 +4834,10 @@ export function apply(ctx: Context, config: Config): void {
             // interleave, so a stale rewind is detected BEFORE the child is
             // created (never a published-and-disposed durable ghost), and
             // the commit can never be overwritten by a concurrent switch.
-            return transitionGate.run(() => commitRewind(commitHost, source, candidate, {
+            return transitionGate.run(() => operationBarrier.runTransition(() => commitRewind(commitHost, source, candidate, {
               sessionId: sourceId,
               generation: sourceGeneration,
-            }))
+            })))
           }, {
             diag,
             sessionId: () => sourceId,
@@ -4941,7 +4968,10 @@ export function apply(ctx: Context, config: Config): void {
       // command-side switches run their create AND commit inside one
       // exclusive section via this seam (rewind goes through
       // openRewindPicker's own gate wrapper).
-      withSessionTransition: <T>(task: () => Promise<T> | T) => transitionGate.run(task),
+      withSessionTransition: <T>(task: () => Promise<T> | T) =>
+        transitionGate.run(() => operationBarrier.runTransition(async () => task())),
+      withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
+        operationBarrier.runWriter(sessionId, async () => task()),
       enterView,
       requestExit,
       exit,
