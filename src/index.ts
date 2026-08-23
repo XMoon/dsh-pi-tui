@@ -143,6 +143,7 @@ import {
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
 import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
+import { OpenLockHolder } from './open-locks.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -1242,14 +1243,24 @@ export function apply(ctx: Context, config: Config): void {
     // (acquired at resume/switch, released on switch-away and at exit).
     // `undefined` means either no session yet (deferred start) or no lock
     // (deployment cannot lock — the guard still protects the write path).
-    let heldLock: { sessionId: string; release: () => void } | undefined
+    // The multi-slot open-lock registry: a transition may hold the OLD and
+    // the TARGET lock at once (the old lock is never released before the
+    // target is acquired — releasing first opened a vacuum window where
+    // another process could grab the old session while a switch was still
+    // failing, and the current session would stay live WITHOUT its lock).
+    // `undefined` in the acquire result still means "no lock" when the
+    // deployment cannot lock — the guard protects the write path.
+    const openLocks = new OpenLockHolder()
     // The /proc probe for stale-lock takeover, created once per mount.
     const lockProc = createProcProbe()
     /** Try to take the open-time lock for a session. Returns the refusal text
      * when the session is held by another live dsh process (or unverifiable);
      * undefined when the lock is now ours (or the deployment cannot lock —
-     * proceed as before). Never throws. */
+     * proceed as before). Already-held locks (this process) are an idempotent
+     * no-op — the commit's re-acquire of a pre-acquired target hits this.
+     * Never throws. */
     const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): string | undefined => {
+      if (openLocks.has(sessionId)) return undefined
       const persistence = ctx.get('sessionPersistence') as SessionLockPersistence | undefined
       const outcome = acquireSessionLock(
         {
@@ -1267,7 +1278,7 @@ export function apply(ctx: Context, config: Config): void {
       switch (outcome.kind) {
         case 'acquired':
         case 'taken-over-stale':
-          heldLock = { sessionId, release: outcome.release }
+          openLocks.add(sessionId, outcome.release)
           if (outcome.kind === 'taken-over-stale') {
             diag.warn('session lock stale taken over', { session: sessionId })
           }
@@ -1288,30 +1299,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     /** Release the open-time lock for a session (idempotent). */
     const releaseOpenLock = (sessionId: string): void => {
-      if (heldLock === undefined || heldLock.sessionId !== sessionId) return
-      heldLock.release()
-      heldLock = undefined
-    }
-    /** Re-take the lock for the still-live current session after a failed
-     * switch (refusal, resume failure, or an internal transition failure). The
-     * lock was released before the target acquire, so another process may
-     * have taken it in the window — the re-take result is checked and a
-     * failed re-take surfaces as a notice (the write-path guard remains the
-     * backstop, but the user must know the session is no longer locked by
-     * this TUI). */
-    const reacquireCurrentLock = (from: string | undefined, fromHeader?: { cwd?: string }): void => {
-      if (from === undefined) return
-      // The header determines the lock path: prefer the caller-supplied
-      // from-header (correct even after `liveAgent` was reassigned), falling
-      // back to the live header (the switchSession refusal/failure paths run
-      // before any reassignment, so the live header is still from's).
-      const refusal = acquireOpenLock(from, fromHeader ?? liveAgent?.session.header)
-      if (refusal !== undefined) {
-        const message = `the current session ${from} is no longer locked by this TUI (${refusal})`
-        ctx.logger.warn(`tui-runner: ${message}`)
-        diag.warn('session lock lost on failed switch', { session: from })
-        app?.notify(message, 'error')
-      }
+      openLocks.release(sessionId)
     }
 
     // A stale --session id must not kill the TUI: resume falls back to a
@@ -1630,12 +1618,16 @@ export function apply(ctx: Context, config: Config): void {
           await sessions.flush(liveAgent.session)
         },
         handoverLocks: (next) => {
+          // The OLD lock is released only here — in the synchronous COMMIT,
+          // after the old agent quiesced, was finally flushed, and the child
+          // was created (a switchSession that pre-acquired the target in its
+          // prepare phase still holds the old lock until this point; the
+          // re-acquire below is an idempotent no-op via the lock holder).
           if (from !== undefined) releaseOpenLock(from)
           // The new session is now ours: take its open lock (a switchSession
-          // that pre-acquired it hits the same-process shortcut and is a
-          // no-op; a refusal is defensive-only — a fresh UUID or a
-          // pre-checked switch cannot be held — and the write-path guard
-          // still protects the session).
+          // that pre-acquired it is an idempotent no-op; a refusal is
+          // defensive-only — a fresh UUID or a pre-checked switch cannot be
+          // held — and the write-path guard still protects the session).
           const transitionLockRefusal = acquireOpenLock(next.agent.session.id, next.agent.session.header)
           if (transitionLockRefusal !== undefined) {
             ctx.logger.warn(`tui-runner: lock refused on transition to ${next.agent.session.id}: ${transitionLockRefusal}`)
@@ -1711,21 +1703,22 @@ export function apply(ctx: Context, config: Config): void {
       try {
         // The unified transaction: the OLD session is flushed FIRST (with
         // its lock still held — the flush-before-release rule), then the
-        // `prepare` phase takes the TARGET's lock (the tracker is a single
-        // slot, so the current lock is released before the target acquire;
-        // a refusal re-takes the current lock below), then the resume
-        // publishes the child. A failure anywhere before the create leaves
-        // nothing behind.
-        const from = liveAgent?.session.id
+        // `prepare` phase takes the TARGET's lock WHILE STILL HOLDING the
+        // current one (the multi-slot lock holder; the acquire is a
+        // non-blocking refusal, never a wait), then the resume publishes
+        // the child. A failure anywhere before the create leaves the
+        // current session live WITH its lock — there is no vacuum window
+        // and nothing to re-acquire.
         const result = await transitionTo({
           prepare: async () => {
-            // The tracker is a single slot: the target lock may be taken
-            // only after the current lock is released — and the old-session
-            // flush in phase 1 has already run WITH the current lock held
-            // (the flush-before-release rule), so this release is safe.
-            if (from !== undefined) releaseOpenLock(from)
-            // Refuse to switch into a session another live dsh process holds
-            // — same corruption risk as the --session launch path.
+            // Refuse to switch into a session another live dsh process
+            // holds — same corruption risk as the --session launch path.
+            // The CURRENT lock is deliberately NOT released here: if the
+            // target is refused (or the resume fails), the old session
+            // keeps its lock and stays live with full ownership (review
+            // round 5: the old release-first order opened a vacuum window
+            // where another process could take the old session while the
+            // switch was still failing).
             let lockHeader: { cwd?: string } | undefined
             try {
               const persistence = ctx.get('sessionPersistence')
@@ -1737,11 +1730,8 @@ export function apply(ctx: Context, config: Config): void {
             if (lockRefusal !== undefined) {
               ctx.logger.warn(`tui-runner: switch to ${sessionId} refused: ${lockRefusal}`)
               diag.warn('session lock held on switch', { session: sessionId })
-              // The switch did not happen: the current session is still live
-              // and must keep its lock (best-effort — an unavailable
-              // deployment has no lock to re-take and the guard still
-              // protects the write path).
-              reacquireCurrentLock(from)
+              // The switch did not happen; the current session is still
+              // live and still holds its own lock.
               throw new Error(lockRefusal)
             }
           },
@@ -1760,10 +1750,9 @@ export function apply(ctx: Context, config: Config): void {
         if (!result.ok) {
           // The resume failed before publishing: release the target's lock
           // so it is not left locked for a session we never entered. The
-          // CURRENT session is still live: re-take its lock, which was
-          // released before the target acquire.
+          // CURRENT session is still live AND still holds its own lock —
+          // the COMMIT will release it only on a successful handover.
           releaseOpenLock(sessionId)
-          reacquireCurrentLock(liveAgent?.session.id)
           return result.message
         }
         // The switch COMMITTED: staged drafts are per-session UI state —
@@ -1779,10 +1768,9 @@ export function apply(ctx: Context, config: Config): void {
         diag.error('switch failed', { session: sessionId, error: message })
         // If the resume failed after we took the target's lock, release it so
         // the target session is not left locked for a session we never
-        // entered. The CURRENT session is still live (the switch failed):
-        // re-take its lock, which was released before the target acquire.
+        // entered. The CURRENT session is still live and still holds its
+        // own lock.
         releaseOpenLock(sessionId)
-        reacquireCurrentLock(liveAgent?.session.id)
         return `switch failed: ${message}`
       }
     }
@@ -1924,13 +1912,11 @@ export function apply(ctx: Context, config: Config): void {
       cleanedUp = true
       // A pending force token is stale once the process tears down.
       guardToken = undefined
-      // Release the open-time lock for the session we hold: a clean exit
-      // must leave the session openable immediately. (A crash skips this —
+      // Release EVERY open-time lock this process holds (normally just the
+      // live session's; a transition may briefly hold two): a clean exit
+      // must leave every session openable immediately. (A crash skips this —
       // the stale-lock takeover on the next open handles that.)
-      if (heldLock !== undefined) {
-        heldLock.release()
-        heldLock = undefined
-      }
+      openLocks.releaseAll()
       lifecycleController.abort()
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.

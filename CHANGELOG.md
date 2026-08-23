@@ -102,7 +102,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-skill slash invocations) refuses to write the old agent during
   quiesce → commit — the draft or the skill invocation line is restored
   and the user is told a session transition is in progress.
-  Failures carry happen only BEFORE the create: a stale rewind selection
+  The open-lock holder is multi-slot (`src/open-locks.ts`): a switch
+  acquires the TARGET while still holding the OLD lock, and the old lock
+  is released only inside the synchronous COMMIT — a refused or failed
+  switch leaves the current session live WITH its lock (the old
+  release-first order opened a vacuum window where another process could
+  take the old session mid-switch, and a failed re-acquire then left two
+  processes holding one session).
+  Failures happen only BEFORE the create: a stale rewind selection
   never creates a child at all, and a failed quiesce/flush/create leaves
   the current session untouched. `/new` and `/fork` dispose nothing "on
   failure" anymore — there is nothing to dispose, because nothing was

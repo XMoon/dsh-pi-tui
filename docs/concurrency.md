@@ -72,7 +72,7 @@ process and REFUSES the open.
 | Entry | Behavior |
 |---|---|
 | `--session <id>` launch | acquire before `agents.resume()`; refusal is fatal (the runner exits with the refusal message — the user asked for a specific session, there is no safe fallback) |
-| `/resume` / `/sessions` switch | release the CURRENT lock, then acquire the target before `agents.resume()`; a refusal re-takes the current lock (the switch did not happen) and returns an error text to the picker |
+| `/resume` / `/sessions` switch | acquire the TARGET lock while STILL HOLDING the current one (multi-slot holder; the acquire is a non-blocking refusal); the current lock is released only in the COMMIT on a successful handover — a refusal or resume failure leaves the current session live WITH its lock (no vacuum window, nothing to re-acquire) |
 | `/new` / `/fork` | acquire in the transaction's COMMIT for the incoming session (covers every transition caller) |
 | first deferred message | acquire after the session is created |
 | switch away / clean exit | release (idempotent), AFTER the final flush |
@@ -86,11 +86,17 @@ Two orderings are load-bearing and were both bug-fixed in review:
   racing opener's resume synthesizes closers into the shared log while our
   flush still appends from our in-memory seq — the exact corruption the
   lock exists to prevent.
-- **Release old before acquire new.** The lock tracker is a single slot;
-  acquiring the target first overwrites it and the outgoing session's lock
-  leaks for the whole TUI lifetime (a later release-by-id is a no-op). The
-  switch therefore releases the current lock first; a refused or failed
-  switch re-takes it because the current session stays live.
+- **Old lock survives until the COMMIT.** The lock holder is multi-slot
+  (`src/open-locks.ts`): a transition acquires the TARGET while still
+  holding the OLD lock, and the old lock is released only inside the
+  synchronous COMMIT. Releasing old-first opened a vacuum window where
+  another process could take the old session while the switch was still
+  failing — and a failed re-acquire then left the current session live
+  WITHOUT its lock (two processes holding one session). With the
+  multi-slot order a failed switch never drops the old lock in the first
+  place, and two processes switching in opposite directions both refuse
+  (the acquire is a non-blocking refusal, never a wait) and keep their
+  own locks.
 
 ## How the guard works (the decision)
 

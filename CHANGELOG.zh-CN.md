@@ -80,7 +80,11 @@
   写入路径(普通提交、busy-Enter steer、Ctrl+S、命令 fallback、`!`
   shell 提交、per-skill 斜杠调用)在 transition 进行中都会被**写栅栏**
   拒绝:草稿/调用行恢复保留,提示 "a session transition is in
-  progress"。现在失败只
+  progress"。open-lock 持有器改为**多槽**(`src/open-locks.ts`):切换在
+  仍持有旧锁的同时获取目标锁,旧锁只在同步 COMMIT 内释放——被拒绝或
+  失败的切换会让当前会话带着自己的锁原样 live(旧的先释放顺序会打开
+  真空窗口:另一个进程可能在切换未决时拿走旧会话,re-acquire 失败后
+  两个进程同时持有同一会话)。现在失败只
   发生在 create **之前**:stale 的 rewind 选择根本不会创建子会话,失败
   的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
   在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。
