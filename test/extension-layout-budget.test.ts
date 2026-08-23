@@ -333,7 +333,7 @@ test('the header badge budget accounts for host title, plan and viewer badges', 
   // so a 3-cell badge no longer fits and is truncated/dropped.
   app.setSessionTitle('a-very-long-session-title-that-keeps-growing')
   app.setPlanMode(true)
-  app.setViewerMode({ id: 'c', label: 'research subagent' })
+  app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'c', label: 'research subagent', mode: 'one-shot', activity: 'running' })
   host.refreshOutlets()
   app.refreshChrome()
   await vt.waitForRender()
@@ -341,10 +341,10 @@ test('the header badge budget accounts for host title, plan and viewer badges', 
   const viewport = vt.getViewport().join('\n').split('\n')
   const headerRow = viewport[0] ?? ''
   // The badge run must be bounded by what the host chrome leaves free:
-  // `🐋  dsh-pi-tui · research subagent [plan] [viewing subagent]` alone
+  // `🐋  dsh-pi-tui · research subagent [plan] [viewing subagent · one-shot · read-only]` alone
   // exceeds 40 columns, so the remaining budget is tiny — the badge text
   // (with its 1 leading space + 3-cell run) cannot fit and is truncated.
-  const hostOwned = visibleWidth('🐋  dsh-pi-tui · research subagent [plan] [viewing subagent]')
+  const hostOwned = visibleWidth('🐋  dsh-pi-tui · research subagent [plan] [viewing subagent · one-shot · read-only]')
   const budget = Math.max(1, 40 - hostOwned - 2)
   assert.ok(
     visibleWidth(host.headerBadgeText()) <= Math.max(4, budget + 1) || !host.headerBadgeText().includes('[B]'),

@@ -306,6 +306,64 @@ test('the subagent-viewer scope preserves and restores the parent disclosures', 
   app.stop()
 })
 
+test('discardFocusViewerScope never restores the parked disclosures (Esc exits restore; swaps discard)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const y = findRow(vt.getViewport(), '◐ Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('▾ Thought'), 'parent turn expanded')
+  app.enterFocusViewerScope()
+  await vt.waitForRender()
+  // Discard WITHOUT a session-override clear: the parked snapshot must be
+  // dropped, never restored (the swap teardown's explicit intent).
+  app.discardFocusViewerScope()
+  show(app, folder)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('◐ Thought'), `discard must leave the turn collapsed:\n${joined}`)
+  assert.ok(!joined.includes('▾ Thought'), `discard must never restore the old disclosure:\n${joined}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a session switch while viewing DISCARDS the parent Focus disclosures (never restores them)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const y = findRow(vt.getViewport(), '◐ Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('▾ Thought'), 'session A turn expanded')
+  // Enter the child scope: the parent's expansion parks in the stack.
+  app.enterFocusViewerScope()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('◐ Thought'), 'viewer scope starts collapsed')
+  // Session swap while viewing: the runner clears the old session's
+  // transient state, then tears the viewer down. The swap must DISCARD
+  // the parked parent disclosure — restoring it (the old exitFocusViewerScope
+  // in the teardown) would leak Session A's turn expansion into Session B,
+  // which the new session's SAME turn number would then render expanded.
+  app.clearSessionOverrides()
+  app.discardFocusViewerScope()
+  show(app, folder)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('◐ Thought'), `the new session must NOT inherit the old disclosure:\n${joined}`)
+  assert.ok(!joined.includes('▾ Thought'), `no restore into the new session:\n${joined}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('a session switch with the SAME turn number and revision renders the NEW activity (no stale Thought)', async () => {
   const { vt, app } = startApp()
   // Session A: turn 1 with one read call (revision 2 after 2 events).

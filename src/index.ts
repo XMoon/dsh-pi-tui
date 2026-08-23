@@ -102,6 +102,16 @@ import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
+import { expandFileMentionsForSubmit } from './mentions.ts'
+import {
+  resolveSubagentSettleTarget,
+  submitSubagentFollowup,
+  type SubagentFollowupOutcome,
+  type SubagentFollowupReject,
+  type SubagentFollowupService,
+  type SubagentParentLike,
+  type SubagentViewerSubmitRequest,
+} from './subagent-viewer-submit.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -366,6 +376,99 @@ export function interruptAgent(agent: InterruptAgentLike | undefined): void {
 export interface PendingSubagentCall {
   readonly callId: string
   readonly description: string
+}
+
+/**
+ * The async viewer-OPEN invalidation token (pure, exported for the headless
+ * suite — the runner closure itself is not drivable in the headless tests,
+ * so the lifecycle rule is tested through these token semantics). An open
+ * request captures a token; EVERY viewer session change — opening another
+ * child, leaving the viewer (Esc), or a session swap (which routes through
+ * exitView) — invalidates the token, so a slow transcript inspection can
+ * never commit an obsolete child over the current surface. Invalidation is
+ * unconditional: an exit that finds NO mounted viewer still invalidates,
+ * because the open is exactly then still in flight (round-5 finding).
+ */
+export interface ViewerOpenToken {
+  /** The current token value (bumped by every open and every invalidate). */
+  readonly current: number
+  /** Start one async open; returns the request's token. */
+  open(): number
+  /** Invalidate every in-flight open (a viewer session change). */
+  invalidate(): void
+  /** Whether a request may still commit. */
+  isCurrent(request: number): boolean
+}
+
+export function createViewerOpenToken(): ViewerOpenToken {
+  let value = 0
+  return {
+    get current(): number {
+      return value
+    },
+    open: () => ++value,
+    invalidate: () => {
+      value += 1
+    },
+    isCurrent: (request) => request === value,
+  }
+}
+
+/**
+ * Session-swap viewer teardown (pure, exported for the headless suite —
+ * the runner closure is not headless-drivable, so the rule is pinned
+ * through this seam). A session swap must do BOTH: invalidate any
+ * in-flight viewer OPEN — UNCONDITIONALLY, because the open may still be
+ * loading when nothing is mounted yet, and the swap must still cancel it
+ * (round-6 finding) — and close a MOUNTED viewer when there is one.
+ * @param token - the shared viewer-open token.
+ * @param mounted - whether a viewer is currently mounted.
+ * @param closeMounted - closes the mounted viewer (a no-op when unmounted).
+ * @returns whether a mounted viewer was closed.
+ */
+export function teardownViewerForSessionSwap(
+  token: ViewerOpenToken,
+  mounted: boolean,
+  closeMounted: () => void,
+): boolean {
+  token.invalidate()
+  if (!mounted) return false
+  closeMounted()
+  return true
+}
+
+/**
+ * The viewer capability gate for SEMANTIC plugin actions (pure, exported
+ * for the headless suite — the runner closure is not drivable there).
+ * While a subagent viewer is open, only actions that stay CHILD- or
+ * SURFACE-local are allowed; every action with PARENT-session side
+ * effects (steer, cancel/interrupt, permission cycling, the main
+ * transcript search) is blocked, so a plugin keybinding can never
+ * interrupt/steer/reconfigure the parent from inside the viewer. The
+ * raw-key viewer guard already consumes the parent chords — this gate
+ * closes the plugin-keybinding path, the only other way a semantic
+ * action reaches the runner.
+ * @param action - the semantic action the plugin requested.
+ * @param viewer - the open viewer (mode), or undefined when no viewer.
+ * @returns whether the runner may execute the action.
+ */
+export function viewerActionCapability(
+  action: import('./extension/public-types.ts').TuiAction,
+  viewer: { mode: 'one-shot' | 'continuable' } | undefined,
+): boolean {
+  if (viewer === undefined) return true
+  switch (action) {
+    case 'submit-draft':
+    case 'queue-draft':
+    case 'toggle-fullscreen':
+      // Child- or surface-local: submitDraft routes to the child (and
+      // hard-rejects in a one-shot viewer); fullscreen is chrome-local.
+      return true
+    default:
+      // steer-draft / cancel-activity / cycle-permission / open-search
+      // all target the parent session — never while viewing.
+      return false
+  }
 }
 
 /**
@@ -2201,8 +2304,24 @@ export function apply(ctx: Context, config: Config): void {
     // and immediately on turn/end.
     let repaintTimer: NodeJS.Timeout | undefined
     // P7d: subagent viewer — while set, the transcript shows another live
-    // session's log read-only and Esc returns to the parent session.
-    let viewing: { id: SessionId; folder: TranscriptFolder } | undefined
+    // session's log and Esc returns to the parent session. The target is
+    // MODE-AWARE: a continuable child's viewer is INTERACTIVE (the editor
+    // submits follow-ups through ctx.subagents.followup), a one-shot
+    // child's viewer stays read-only. The parent session id is pinned at
+    // open time — follow-ups require the exact live direct parent, and
+    // the viewer never guesses it from the current live agent.
+    let viewing: {
+      id: SessionId
+      folder: TranscriptFolder
+      /** The child's OWN event stats (turns/steps/tokens) for the footer. */
+      stats: StatsFolder
+      parentSessionId: SessionId
+      label: string
+      mode: 'one-shot' | 'continuable'
+      activity: 'running' | 'inactive'
+      /** The child session's workspace ('' when unknown, e.g. a cold child). */
+      cwd: string
+    } | undefined
     // Unsettled subagent delegations in the live session, in tool/call order.
     // The viewer matches one of these by description when the user opens a
     // child transcript, so the child's tool/result can pop the viewer back.
@@ -2255,6 +2374,33 @@ export function apply(ctx: Context, config: Config): void {
       searchCurrent = -1
       app.setSearchResult(0, 0)
       app.clearSessionOverrides()
+      // A new session owns the surface: tear down the subagent viewer. The
+      // old viewer's parent session is gone (the continuation contract
+      // requires the EXACT live parent), so the child transcript, the
+      // viewer editor and the per-child drafts must not leak into the new
+      // session. The teardown is UNCONDITIONAL — an open may still be
+      // loading when nothing is mounted, and the swap must still cancel
+      // it — and closes the mounted viewer when there is one. The MAIN
+      // draft (the user's unsent text) restores into the new session's
+      // editor — cross-session draft retention is the existing behavior.
+      teardownViewerForSessionSwap(viewerOpen, viewing !== undefined, () => {
+        viewing = undefined
+        viewerSessionAbort?.abort()
+        viewerSessionAbort = undefined
+        app.clearLocalMessages()
+        app.clearNotify()
+        app.setViewerMode(undefined)
+        app.setViewerFooter(undefined)
+        // Session swap: the OLD parent session is gone — its parked Focus
+        // disclosures must be DISCARDED, never restored into the new
+        // session (clearSessionOverrides already dropped the stack; this
+        // keeps the teardown's intent explicit and ordering-safe). The
+        // Esc path uses exitFocusViewerScope instead (restore).
+        app.discardFocusViewerScope()
+        repaint(app, folder)
+        app.scrollToBottom()
+        refreshStatus()
+      })
       return sessionGeneration
     }
     const jumpToSearchMatch = (): void => {
@@ -2278,22 +2424,72 @@ export function apply(ctx: Context, config: Config): void {
       }
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
-    /** Enter the read-only subagent viewer for one session (live or persisted). */
-    const enterView = async (childId: SessionId, label?: string): Promise<void> => {
+    /** Enter the subagent viewer for one session (live or persisted). The
+     * target carries the catalog MODE (continuable = interactive editor,
+     * one-shot = read-only — never guessed from running/inactive) and the
+     * exact direct-parent session id the follow-up write path is pinned
+     * to. The open is ASYNC (a cold child's log is read from persistence);
+     * a viewer open/close/child switch — or a session swap — that lands
+     * while the inspection is in flight invalidates this request (the
+     * viewerOpen token), so a slow open can never commit an obsolete child
+     * over the current surface (round-4/5 findings). */
+    const viewerOpen = createViewerOpenToken()
+    /** The CURRENT viewer session's abort source: aborted when the viewer
+     * session ends (Esc / child switch / session swap), so an in-flight
+     * follow-up that has NOT reached inbox acceptance is cancelled (the
+     * rejected send restores the draft into the child's slot). Once a
+     * follow-up is accepted the DSH continuation contract hands ownership
+     * to the child — the signal no longer matters. */
+    let viewerSessionAbort: AbortController | undefined
+    /** Push the viewed child's OWN identity into the footer (label/mode/
+     * activity/cwd + the child's own turns/steps/stats line) — the parent
+     * session's status describes a session the user is not looking at. */
+    const refreshViewerFooter = (): void => {
+      if (viewing === undefined) return
+      const stats = viewing.stats.snapshot()
+      app.setViewerFooter({
+        label: viewing.label,
+        mode: viewing.mode,
+        activity: viewing.activity,
+        cwd: viewing.cwd,
+        turns: stats.turns,
+        steps: stats.steps,
+        statsLine: formatStats(stats),
+      })
+    }
+    const enterView = async (
+      childId: SessionId,
+      label: string | undefined,
+      mode: 'one-shot' | 'continuable',
+      parentSessionId: SessionId,
+      activity: 'running' | 'inactive',
+    ): Promise<void> => {
+      const request = viewerOpen.open()
       const childFolder = new TranscriptFolder()
+      const childStats = new StatsFolder()
+      let childCwd = ''
       // Only the child's OWN events enter the viewer: a fork provider seeds
       // the child with the parent's completed-turn history (session/end-seed
       // boundary), and the parent's records — its subagent completion
       // notices included — must never render as the child's transcript.
       const child = sessions.get(childId)
       if (child !== undefined) {
-        childFolder.apply(childOwnEvents(child.events))
+        const own = childOwnEvents(child.events)
+        childFolder.apply(own)
+        childStats.apply(own)
+        // The live child's session header carries its workspace (the child
+        // may have been born in another directory).
+        childCwd = typeof (child as { header?: { cwd?: unknown } }).header?.cwd === 'string'
+          ? (child as { header: { cwd: string } }).header.cwd
+          : ''
       } else {
         // An inactive child is no longer in the live store; load its log.
         const persistence = ctx.get('sessionPersistence')
         if (persistence !== undefined) {
           try {
-            childFolder.apply(childOwnEvents((await persistence.inspect(childId)).events))
+            const own = childOwnEvents((await persistence.inspect(childId)).events)
+            childFolder.apply(own)
+            childStats.apply(own)
           } catch {
             // No persisted log either: the view stays empty.
           }
@@ -2306,25 +2502,53 @@ export function apply(ctx: Context, config: Config): void {
       // user is most likely watching); an empty/absent label falls back to a
       // lone pending call, and no match simply disables the auto-pop (the
       // user exits with Esc as before).
+      //
+      // STALE-OPEN GUARD: while the inspection above was in flight the user
+      // may have exited, switched children, or swapped sessions — every one
+      // of those invalidates the viewerOpen token. A stale request must not
+      // commit its child over the current surface (no viewing write, no
+      // repaint, no viewer mount, no auto-pop match).
+      if (!viewerOpen.isCurrent(request)) return
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
       if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
-      viewing = { id: childId, folder: childFolder }
+      viewerSessionAbort = new AbortController()
+      viewing = {
+        id: childId,
+        folder: childFolder,
+        stats: childStats,
+        parentSessionId,
+        label: label ?? childId,
+        mode,
+        activity,
+        cwd: childCwd,
+      }
       // The child's turn numbers are its OWN namespace: the parent's Focus
       // disclosures must not leak into the child transcript (plan §26).
       app.enterFocusViewerScope()
       repaint(app, childFolder)
-      // The viewer bar covers the editor (read-only placeholder, accent
-      // border) and the header badges the mode — the transient notify is
-      // no longer the only "you are elsewhere" signal.
-      app.setViewerMode({ id: childId, label: label ?? childId })
+      // The viewer bar covers the editor (a read-only placeholder for
+      // one-shot, the child's own draft for continuable) and the header
+      // badges the mode — the transient notify is no longer the only "you
+      // are elsewhere" signal. The FOOTER switches to the child's own
+      // identity at the same time.
+      app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity })
+      refreshViewerFooter()
     }
-    /** Leave the subagent viewer (single Esc). Returns whether it exited. */
+    /** Leave the subagent viewer (single Esc). Returns whether it exited.
+     * Invalidates any in-flight viewer OPEN UNCONDITIONALLY — an Esc (or a
+     * session swap, which routes through this) must prevent a slow
+     * transcript inspection from reopening the viewer afterwards, even when
+     * no viewer is currently mounted (the open is still in flight). */
     const exitView = (): boolean => {
+      viewerOpen.invalidate()
       if (viewing === undefined) return false
       viewing = undefined
+      viewerSessionAbort?.abort() // cancel an in-flight, not-yet-accepted follow-up
+      viewerSessionAbort = undefined
       app.clearLocalMessages()
       app.clearNotify() // a viewer notify (if any) is stale now
       app.setViewerMode(undefined)
+      app.setViewerFooter(undefined) // the parent footer returns
       // Restore the parent's Focus disclosures BEFORE the repaint so the
       // projection uses them (plan §26).
       app.exitFocusViewerScope()
@@ -3053,6 +3277,18 @@ export function apply(ctx: Context, config: Config): void {
       // host's own paths (plan §2.2 — the host never lets a plugin bypass
       // submission/session safety).
       onExtensionAction: (action) => {
+        // VIEWER CAPABILITY GATE: while a subagent viewer is open (either
+        // mode), semantic actions with PARENT-session side effects are
+        // blocked — the viewer's input must never interrupt/steer/queue/
+        // reconfigure the parent (a plugin keybinding reaching this runner
+        // is the ONLY path that could, since the raw-key viewer guard
+        // already consumes the parent chords). submit-draft/queue-draft
+        // route to the CHILD through the viewer-aware submitDraft (a
+        // one-shot viewer hard-rejects them), toggle-fullscreen is
+        // surface-local; every other action is consumed as a no-op.
+        if (viewing !== undefined && !viewerActionCapability(action, { mode: viewing.mode })) {
+          return
+        }
         switch (action) {
           case 'submit-draft': {
             // Host-owned submit path: history + notify clear + draft
@@ -3313,6 +3549,48 @@ export function apply(ctx: Context, config: Config): void {
       // row-level `i` = interrupt on subagent rows (kimi's stop-on-row
       // pattern; the old /subagents SettingsList-submenu panel is gone).
       onOpenTasks: () => openTasksBrowser(),
+      // Enter in an INTERACTIVE (continuable) subagent viewer: deliver the
+      // follow-up through ctx.subagents.followup — the continuation
+      // manager's child inbox (enqueue while running, wake while waiting,
+      // cold resume when absent). NEVER the parent's submit/steer/queue
+      // path. The app already cleared the child draft; a rejection
+      // restores it (merged) into the child's own draft slot.
+      onSubagentSubmit: (request) => {
+        const viewerGeneration = app.getViewerGeneration()
+        runOwned('subagent followup', () => submitSubagentFollowup(request, {
+          // The exact live direct parent: read at SEND time so a session
+          // switch / /new / /resume that landed while the user typed is a
+          // hard reject (never route the text to a different main Agent).
+          currentParent: () => liveAgent as SubagentParentLike | undefined,
+          subagents: () => ctx.get('subagents') as SubagentFollowupService | undefined,
+          // The caller signal owns lookup/materialization/admission only
+          // until inbox acceptance (the DSH continuation contract): a TUI
+          // cleanup / exit, OR the viewer session ending (Esc / child
+          // switch / session swap — viewerSessionAbort) cancels a send
+          // that has NOT been accepted yet; once accepted the child owns
+          // the message and no restore happens. Never a dropped controller
+          // whose signal can never fire.
+          makeSignal: () => viewerSessionAbort === undefined
+            ? lifecycleController.signal
+            : AbortSignal.any([lifecycleController.signal, viewerSessionAbort.signal]),
+          // Durable attribution: a plain user-sourced message (the same
+          // source the main editor's messages carry).
+          makeSource: () => ({ kind: 'user' }),
+          // Same `@`-file mention canonicalization as the main session's
+          // submissions (the editor keeps `@src/foo.ts`, the child model
+          // receives the absolute path).
+          canonicalizeText: (text) => expandFileMentionsForSubmit(text, sessionCwd()),
+        }), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onResult: (outcome) => settleSubagentSubmit(request, outcome, viewerGeneration),
+          onError: (error) => settleSubagentSubmit(
+            request,
+            { kind: 'rejected', reason: { kind: 'error', message: safeErrorMessage(error) } },
+            viewerGeneration,
+          ),
+        })
+      },
     }, {
       // The transcript image surface (plan M8/M9): the durable loader plus
       // the dim fallback coloring.
@@ -3364,6 +3642,78 @@ export function apply(ctx: Context, config: Config): void {
       unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
       unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
     })
+    /**
+     * One follow-up send settled (plan §10/§11/§12):
+     * - ACCEPTED: the child inbox owns the message — never restore the
+     *   draft, never insert a fake transcript row; the child's OWN session
+     *   events update the viewer transcript through the normal folding.
+     *   Only a transient `sent` notice is shown, and only while the SAME
+     *   child is still being viewed.
+     * - REJECTED: the user's text must NEVER be lost. It is restored into
+     *   the CHILD's own draft slot, merged with whatever the user typed
+     *   while the request was in flight. The current surface is touched
+     *   ONLY while the same child is still being viewed — a viewer
+     *   closed/switched during the send restores into the OLD child's
+     *   slot and never pollutes the new surface (the generation guard).
+     */
+    const settleSubagentSubmit = (
+      request: SubagentViewerSubmitRequest,
+      outcome: SubagentFollowupOutcome,
+      viewerGeneration: number,
+    ): void => {
+      // The viewer target is CURRENT only while the SAME child is still
+      // being viewed AND the viewer generation is unchanged (a viewer
+      // open/close/switch bumps it — a close → reopen of the SAME child
+      // is therefore STALE) AND the parent session is still the one the
+      // viewer was opened from. The shared pure decision keeps the
+      // current/stale split unit-testable (test/subagent-viewer-submit).
+      const settleTarget = resolveSubagentSettleTarget(request, {
+        viewingChildId: viewing?.id,
+        viewingLabel: viewing?.label,
+        viewingParentSessionId: viewing?.parentSessionId,
+        viewerGenerationAtSend: viewerGeneration,
+        viewerGenerationNow: app.getViewerGeneration(),
+        liveParentSessionId: liveAgent?.session.id,
+      })
+      if (outcome.kind === 'ok') {
+        if (settleTarget.kind === 'current') {
+          app.notify(`sent to ${settleTarget.label} — queued for the next turn`, 'info')
+        }
+        return
+      }
+      const reason = outcome.reason
+      if (reason.kind === 'cancelled') {
+        // Aborted before inbox acceptance: the message never entered the
+        // child's inbox — restore. Current viewer session: visible merge;
+        // stale viewer (closed/switched/reopened): map-only (never the
+        // current surface).
+        if (settleTarget.kind === 'current') {
+          app.setEditorText(mergeDraft(app.getDraft(), request.text))
+        } else {
+          app.restoreSubagentDraft(request.childSessionId, request.text)
+        }
+        return
+      }
+      if (settleTarget.kind === 'stale') {
+        app.restoreSubagentDraft(request.childSessionId, request.text)
+        return
+      }
+      app.setEditorText(mergeDraft(app.getDraft(), request.text))
+      app.notify(subagentFollowupNotice(reason, settleTarget.label), 'error')
+    }
+
+    /** The user-facing reason for a rejected follow-up (plan §18). */
+    const subagentFollowupNotice = (reason: SubagentFollowupReject, label: string): string => {
+      switch (reason.kind) {
+        case 'parent-unavailable': return 'Cannot send: parent session is no longer active'
+        case 'stale-child': return 'Cannot continue this subagent'
+        case 'unauthorized': return 'Cannot send: subagent ownership changed'
+        case 'unavailable': return 'Subagent continuation is temporarily unavailable'
+        case 'error': return `could not send to ${label}: ${reason.message}`
+        case 'cancelled': return 'send cancelled — draft restored'
+      }
+    }
+
     // ↓ with an empty editor: the task browser over BOTH background
     // surfaces. Job rows (bash + background one-shot subagent jobs) are
     // status-only: the bash output read cursor belongs to the model's
@@ -3403,7 +3753,14 @@ export function apply(ctx: Context, config: Config): void {
         const row = rows.find(candidate => candidate.value === value)
         if (row === undefined) return
         if (row.kind === 'subagent') {
-          runOwned('subagent view from tasks', () => enterView(row.childId as SessionId, row.label), {
+          const parentSessionId = liveAgent?.session.id
+          if (parentSessionId === undefined) return
+          // The row carries the catalog MODE + activity: the viewer target
+          // is pinned to them (continuable → interactive editor, one-shot →
+          // read-only), and the follow-up write path to the exact parent.
+          runOwned('subagent view from tasks', () => enterView(
+            row.childId as SessionId, row.label, row.mode, parentSessionId, row.activity,
+          ), {
             diag,
             sessionId: () => liveAgent?.session.id,
             onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
@@ -3414,7 +3771,11 @@ export function apply(ctx: Context, config: Config): void {
       }
       const actionRow = (value: string, action: 'interrupt'): void => {
         const row = rows.find(candidate => candidate.value === value)
-        if (row === undefined || row.kind !== 'subagent') return
+        // ONLY continuable children are interruptible: `subagents.interrupt`
+        // on a one-shot id is an accepted no-op, so firing it for a
+        // one-shot row would be a fake action (the panel already hides the
+        // verb, this is the runner-side guard).
+        if (row === undefined || row.kind !== 'subagent' || row.mode !== 'continuable') return
         const service = ctx.get('subagents')
         if (service === undefined || liveAgent === undefined) {
           app.notify('subagent service unavailable', 'error')
@@ -3427,7 +3788,11 @@ export function apply(ctx: Context, config: Config): void {
         target.map(row => row.kind === 'job'
           ? {
               value: row.value,
-              label: taskRowLabel(row),
+              // A `subagent`-kind job is the registry's reliable contract
+              // for a background one-shot delegation: its `one-shot` mode
+              // rides as the non-truncatable suffix, like the child rows.
+              label: row.jobKind === 'subagent' ? `subagent job · ${row.label}` : taskRowLabel(row),
+              suffix: row.jobKind === 'subagent' ? 'one-shot' : undefined,
               status: row.status,
               detail: row.detail,
               startedAt: row.startedAt,
@@ -3437,11 +3802,18 @@ export function apply(ctx: Context, config: Config): void {
             }
           : {
               value: row.value,
-              label: taskRowLabel(row),
+              // The mode rides as the panel's non-truncatable SUFFIX
+              // (`subagent · <label> · continuable`): the label itself may
+              // truncate on a narrow screen, the mode never silently does.
+              label: `subagent · ${row.label}`,
+              suffix: row.mode,
               status: row.activity,
               detail: row.hasChildren ? 'has children' : undefined,
               group: rowGroup(row),
               type: 'subagent',
+              // Only continuable children are interruptible (one-shot ids
+              // are accepted no-ops for the interrupt transport).
+              interruptible: row.mode === 'continuable',
             })
       const handle = app.openTaskBrowser(
         taskPanelItems(rows),
@@ -3768,7 +4140,13 @@ export function apply(ctx: Context, config: Config): void {
       if (snapshot.kind === 'subagent') {
         const childSessionId = subagentJobTranscriptId(snapshot)
         if (childSessionId !== undefined) {
-          runOwned('subagent view from tasks', () => enterView(childSessionId as SessionId, snapshot.label), {
+          // The jobs registry's `subagent` kind IS the reliable contract
+          // for a background ONE-SHOT delegation (the registry never
+          // records continuable children): the transcript viewer opens
+          // read-only. The parent is the job owner.
+          runOwned('subagent view from tasks', () => enterView(
+            childSessionId as SessionId, snapshot.label, 'one-shot', owner.session.id, 'inactive',
+          ), {
             diag,
             sessionId: () => owner.session.id,
             onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
@@ -4241,7 +4619,20 @@ export function apply(ctx: Context, config: Config): void {
       if (viewing !== undefined) {
         if (session.id === viewing.id) {
           viewing.folder.apply([event])
+          viewing.stats.apply([event])
+          // The store-activity snapshot moves with the child's own
+          // lifecycle: a turn starting means the child is live again
+          // (cold resume), a turn ending parks it. The footer's activity
+          // field follows, so an inactive child that cold-resumes shows
+          // running while it streams.
+          if (event.type === 'turn/start') viewing.activity = 'running'
+          else if (event.type === 'turn/end') viewing.activity = 'inactive'
           schedulePaint()
+          // The child's turn/step/stats counters move at step boundaries
+          // (the stats fold counts at step/end) — the footer follows then,
+          // never on every streaming delta. A turn START also refreshes so
+          // the activity flips to running the moment a cold resume begins.
+          if (event.type === 'turn/start' || event.type === 'step/end' || event.type === 'turn/end') refreshViewerFooter()
           if (event.type === 'turn/end') paintNow()
           return
         }

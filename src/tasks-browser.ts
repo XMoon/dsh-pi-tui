@@ -82,6 +82,11 @@ export type TaskBrowserRow =
       readonly value: string
       readonly childId: string
       readonly label: string
+      /** The catalog's classification — NEVER derived from activity: a
+       * running child is not necessarily continuable and an inactive one
+       * is not necessarily one-shot. The viewer's interactivity and the
+       * follow-up write path both key off this exact field. */
+      readonly mode: 'one-shot' | 'continuable'
       readonly activity: 'running' | 'inactive'
       readonly hasChildren: boolean
     }
@@ -101,17 +106,22 @@ export function buildTaskRows(
   // Child rows: every continuable child (resumable conversations stay
   // reachable) plus RUNNING one-shot children (the parent's pending
   // foreground tool call). Finished one-shot children and diagnostics
-  // stay out — their surface is /subagents.
+  // stay out — their surface is /subagents. The filter is a TYPE GUARD on
+  // mode: a catalog entry whose mode is missing is NOT treated as a
+  // healthy interactive child — it is dropped like a diagnostic (never
+  // silently defaulted to continuable).
   type AgentRow = Extract<TaskBrowserRow, { kind: 'subagent' }>
   const agentRows: AgentRow[] = agents
-    .filter(agent => agent.kind === 'child' && (
-      agent.mode === 'continuable' || (agent.mode === 'one-shot' && agent.activity === 'running')
-    ))
+    .filter((agent): agent is TaskBrowserAgentInput & { mode: 'one-shot' | 'continuable' } =>
+      agent.kind === 'child' && (
+        agent.mode === 'continuable' || (agent.mode === 'one-shot' && agent.activity === 'running')
+      ))
     .map(agent => ({
       kind: 'subagent' as const,
       value: `${AGENT_ROW_PREFIX}${agent.id}`,
       childId: agent.id,
       label: agent.label ?? agent.id,
+      mode: agent.mode,
       activity: agent.activity ?? 'inactive',
       hasChildren: agent.hasChildren ?? false,
     }))
@@ -139,10 +149,20 @@ export function buildTaskRows(
   return [...sortedAgents, ...sortedJobs]
 }
 
-/** The one-line picker label for a row. */
+/** The one-line picker label for a row. The subagent label CARRIES the
+ * mode as its final segment (never inferred from running/inactive): the
+ * user must know before entering a viewer whether it is interactive. A
+ * JOB row whose kind is `subagent` is the jobs registry's reliable
+ * contract for a background ONE-SHOT subagent job (continuable children
+ * never register jobs), so it carries `one-shot` too; any other job kind
+ * keeps its own semantics (no fabricated mode). */
 export function taskRowLabel(row: TaskBrowserRow): string {
-  if (row.kind === 'job') return `${row.jobKind} · ${row.label}`
-  return `subagent · ${row.label}`
+  if (row.kind === 'job') {
+    return row.jobKind === 'subagent'
+      ? `subagent job · ${row.label} · one-shot`
+      : `${row.jobKind} · ${row.label}`
+  }
+  return `subagent · ${row.label} · ${row.mode}`
 }
 
 /** The picker group a row belongs to. */

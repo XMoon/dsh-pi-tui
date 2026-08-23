@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Continuable subagent viewers are now interactive.** Entering a
+  `continuable` child from `/tasks` opens a live conversation surface: the
+  editor carries the child's own draft (isolated from your main-session
+  draft, retained across visits), and Enter delivers the text as the
+  child's NEXT turn through `ctx.subagents.followup` — FIFO, so a running
+  child is never interrupted or steered, and an inactive child cold-resumes
+  automatically. The viewer's editor never touches the parent session
+  (Ctrl+S/Ctrl+Enter/Alt+↑ are inert inside it), a failed delivery merges
+  the text back into the child's draft (never lost, never mis-sent), and
+  sends that outlive a viewer switch restore into the original child's
+  slot. One-shot children stay strictly read-only. While a viewer is open
+  the footer switches to the CHILD's own identity (`[subagent ·
+  continuable]` badge, label, activity, cwd, the child's own
+  turns/steps/stats) and returns to your session's on exit.
+- **The task browser shows the subagent mode.** Every subagent row is
+  labeled `subagent · <label> · continuable` / `· one-shot`, so you know
+  before Enter whether the viewer will be interactive; the mode is a
+  non-truncatable suffix (a long label clips, the mode never does) and is
+  never inferred from running/inactive state.
 - **Focus Mode folds a running turn's intermediate activity into one live
   Thought block.** `/focus` (or the `Focus mode` row in `/settings`)
   switches the transcript to a projection: while the agent works, each

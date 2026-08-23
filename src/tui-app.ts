@@ -584,6 +584,58 @@ export type OwnedRunner = <T>(
   options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>,
 ) => void
 
+/** The subagent viewer address: the exact direct parent + the child, the
+ * catalog mode and the store activity. The mode is the single authority
+ * for interactivity — the viewer is interactive ONLY for `continuable`
+ * children — and the parent session id pins the follow-up write path (the
+ * DSH continuation contract requires the EXACT live direct parent Agent;
+ * the UI never guesses the parent from the current live agent). */
+export interface SubagentViewerTarget {
+  /** The durable direct-parent session id authorizing the child. */
+  readonly parentSessionId: string
+  /** The durable child session id (stable across activations). */
+  readonly childSessionId: string
+  /** The child's durable creation label (display). */
+  readonly label: string
+  /** Catalog classification: `continuable` opens an interactive viewer,
+   * `one-shot` stays read-only. NEVER derived from activity. */
+  readonly mode: 'one-shot' | 'continuable'
+  /** Store snapshot activity (running = live record, inactive = persisted
+   * only). Display-only; it is NOT the success/failure of anything. */
+  readonly activity: 'running' | 'inactive'
+}
+
+/** A semantic follow-up submit from the interactive subagent viewer: the
+ * runner's write path is `ctx.subagents.followup(exactParent, …)`, NEVER
+ * the main-session submit/steer/queue path. */
+export interface SubagentViewerSubmit {
+  readonly parentSessionId: string
+  readonly childSessionId: string
+  readonly text: string
+}
+
+/** The footer override while the subagent viewer is open: the footer shows
+ * the VIEWED child's own identity instead of the parent session's (the
+ * parent's permission/model/plan/task badges describe a session the user
+ * is not looking at). The runner sets this on viewer open, refreshes it as
+ * the child's own events fold (turns/steps/stats), and clears it on exit. */
+export interface SubagentViewerFooter {
+  /** The child's durable creation label. */
+  readonly label: string
+  /** Catalog classification (the viewer's interactivity). */
+  readonly mode: 'one-shot' | 'continuable'
+  /** Store snapshot activity (running / inactive). */
+  readonly activity: 'running' | 'inactive'
+  /** The child session's workspace ('' when unknown, e.g. a cold child). */
+  readonly cwd: string
+  /** Completed child turns (from the child's OWN event log). */
+  readonly turns: number
+  /** Child model requests (steps). */
+  readonly steps: number
+  /** The child's own stats line (formatStats of its event log). */
+  readonly statsLine: string
+}
+
 /** Base callbacks every TuiApp host must provide; the external-editor
  * pair is bound on top of this (see {@link TuiAppEvents}). */
 export interface TuiAppEventsBase {
@@ -630,6 +682,15 @@ export interface TuiAppEventsBase {
    * Optional.
    */
   onQueueSubmit?: (text: string) => void
+  /**
+   * A follow-up submit from the INTERACTIVE subagent viewer (Enter while
+   * viewing a `continuable` child): the runner delivers the text through
+   * `ctx.subagents.followup(exactLiveParent, childId, …)` — never the
+   * main-session submit/steer/queue path. The draft has ALREADY been
+   * cleared by the app; the runner restores it (merged) when the delivery
+   * is rejected, through the app's viewer-draft API. Optional.
+   */
+  onSubagentSubmit?: (request: SubagentViewerSubmit) => void
   /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
   /** The transcript-search query changed (Ctrl+Shift+F opens the search). Optional. */
@@ -1467,13 +1528,28 @@ export class TuiApp {
   private externalEditorInFlight = false
   /** The live session's auto-generated title, shown in the header when set. */
   private sessionTitleText = ''
-  /** The read-only subagent viewer: while set, the editor bar shows a
-   * placeholder, the editor border switches to the accent color, and the
-   * header carries a persistent badge — the transient notify line is not
-   * the only signal. */
-  private viewerMode: { id: string; label: string } | undefined
-  /** The real draft preserved while the viewer covers the editor bar. */
-  private draftBeforeViewer: string | undefined
+  /** The mode-aware subagent viewer: while set, the editor bar shows the
+   * child's draft (continuable) or a read-only placeholder (one-shot),
+   * the editor border switches to the accent color, and the header
+   * carries a persistent badge — the transient notify line is not the
+   * only signal. */
+  private viewerMode: SubagentViewerTarget | undefined
+  /** The MAIN session's real draft, preserved while the viewer covers the
+   * editor bar (restored on exit). Never written by viewer editing. */
+  private mainDraftBeforeViewer: string | undefined
+  /** Per-child unsent drafts (`childSessionId → text`): isolated from the
+   * main draft, retained across viewer open/close cycles. */
+  private subagentDrafts = new Map<string, string>()
+  /** Bumped on every viewer open / close / child switch. Async viewer-
+   * bound work (follow-up sends) captures it at start and refuses to
+   * touch the surface once it changed. */
+  private viewerGeneration = 0
+  /** While the subagent viewer is up, the footer shows the viewed child's
+   * own identity (label/mode/activity/turns/stats) instead of the parent
+   * session's status — set/cleared by the runner on viewer open/close.
+   * Viewer mode is host-owned chrome: extension footer segments (main-
+   * session semantics) do not render while it is set. */
+  private viewerFooter: SubagentViewerFooter | undefined
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
     // The external-editor capability is a BOUND pair: the Ctrl+G flow
@@ -1546,6 +1622,24 @@ export class TuiApp {
     this.editor = new TuiEditor(this.tui, editorTheme)
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
+      // DEFENSE IN DEPTH: the app-level guard consumes Enter while a
+      // continuable viewer is up, so the host editor's own onSubmit never
+      // fires there — but a replacement editor's submit routes through
+      // submitDraft anyway, and this branch keeps a stray host submit from
+      // ever landing in the PARENT session while viewing. Viewer
+      // submissions are deliberately NOT remembered in the shared editor
+      // history: an ↑ recall in the MAIN editor would otherwise resend a
+      // child-scoped follow-up to the parent.
+      const target = this.viewerMode
+      if (target !== undefined && target.mode === 'continuable') {
+        this.clearNotify()
+        this.events.onSubagentSubmit?.({
+          parentSessionId: target.parentSessionId,
+          childSessionId: target.childSessionId,
+          text,
+        })
+        return
+      }
       this.rememberInput(text)
       // Fresh user input supersedes any transient notice (a stale error
       // from the previous submission must not outlive the next one).
@@ -1560,6 +1654,13 @@ export class TuiApp {
       // editor is empty; the editor mutates without going through
       // setStatus, so keep the badge truthful while tasks are active.
       if (this.tasksActive) this.renderFooter()
+      // The visible editor IS the child draft while a continuable viewer
+      // is up: mirror every change into the per-child slot (the runner's
+      // restore and stale guards read the slot, not the live component).
+      const viewer = this.viewerMode
+      if (viewer !== undefined && viewer.mode === 'continuable') {
+        this.subagentDrafts.set(viewer.childSessionId, this.seatEditor().getText())
+      }
       // P1-11: every HOST-driven editor mutation notifies the seat
       // holder's subscribers (the fork Editor's own typing/editing flows
       // through onChange — the plugin subscription protocol must observe
@@ -1998,13 +2099,28 @@ export class TuiApp {
     if (this.activeApproval !== undefined) {
       return this.handleApprovalKey(data)
     }
-    // The subagent viewer is READ-ONLY: while viewing, every key except
-    // Esc (exit) and Ctrl+O (fold toggle — the viewed transcript still
-    // folds) is inert — no typing into the placeholder bar, no Enter
-    // submit, no Ctrl+S steer, no ↓ browser. Overlays keep their keys.
-    if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries
-      && !matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
-      return { consume: true }
+    // The subagent viewer input policy is MODE-AWARE:
+    // - one-shot: read-only — every key except Esc (exit) and Ctrl+O (the
+    //   viewed transcript still folds) is inert — no typing into the
+    //   placeholder bar, no Enter submit, no Ctrl+S steer, no ↓ browser;
+    // - continuable: the editor is LIVE (typing falls through to it), but
+    //   Enter submits to the SUBAGENT (never the parent) and every
+    //   parent-owned lifecycle key is consumed here, BEFORE the host
+    //   ladder, so the viewer can never steer/queue/dequeue the parent
+    //   session or exit the TUI from inside the child view.
+    if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
+      const viewer = this.viewerMode
+      if (viewer.mode === 'one-shot') {
+        if (!matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
+          return { consume: true }
+        }
+      } else if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+        this.submitSubagentDraft()
+        return { consume: true }
+      } else if (this.viewerParentLockedKey(data)) {
+        return { consume: true }
+      }
+      // Esc (exit) and Ctrl+O (fold) fall through to the host ladder.
     }
     // Transcript search owns these keys while its overlay is up; everything
     // else falls through to the focused search input.
@@ -2280,10 +2396,10 @@ export class TuiApp {
       // editor has no host onSubmit, so its reserved fallback remains inert.
       return replacement === undefined ? undefined : { consume: true }
     }
-    if (replacement !== undefined && route.kind === 'editor') {
+    if (replacement !== undefined && (route.kind === 'editor' || route.kind === 'viewer-editor')) {
       return this.handleReplacementEditorInput(data, context, false)
     }
-    if (route.kind === 'editor' && replacement === undefined) {
+    if ((route.kind === 'editor' || route.kind === 'viewer-editor') && replacement === undefined) {
       // P2-R5: only the HOST seat may forward to the hidden host editor. A
       // display-only replacement editor (no handleInput hook) owns the seat
       // too: the public contract (public-types.ts) says ordinary typing is
@@ -2316,7 +2432,12 @@ export class TuiApp {
     return {
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
-      viewerLocked: this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries,
+      // The viewer's input mode: 'readonly' locks the editor (one-shot),
+      // 'continuable' keeps it live (the HOST guard already consumed the
+      // parent-owned chords before the router is consulted).
+      viewerInputMode: this.viewerMode === undefined || this.activeScreen.hasOverlayEntries
+        ? 'none'
+        : this.viewerMode.mode === 'one-shot' ? 'readonly' : 'continuable',
       hasOverlay: this.activeScreen.hasOverlayEntries,
       searchActive: this.searchOverlay !== undefined,
       editorReplacement: this.seatEditor().handleInput !== undefined,
@@ -2836,6 +2957,17 @@ export class TuiApp {
     this.focusExpandedTurns.clear()
     for (const turn of restored) this.focusExpandedTurns.add(turn)
     this.rebuildMessages()
+  }
+
+  /** Leave the subagent-viewer scope WITHOUT restoring: the parent session
+   * is gone (a session swap), so its parked disclosure snapshot must be
+   * DISCARDED — restoring it would leak the old session's turn expansions
+   * into the new one (plan §16.3). Usually a no-op: the swap's
+   * clearSessionOverrides already dropped the stack; this method makes the
+   * teardown's intent explicit and stays correct even if that ordering
+   * ever changes. */
+  discardFocusViewerScope(): void {
+    this.focusExpansionsStack.pop()
   }
 
   /**
@@ -3359,8 +3491,14 @@ export class TuiApp {
     this.expandedOverride.clear()
     // The Focus disclosures are session-scoped transient state too: a
     // switched-in session must never inherit the old session's turn
-    // numbers (plan §16.3). The persisted Focus preference survives.
+    // numbers (plan §16.3). The persisted Focus preference survives. The
+    // VIEWER-SCOPE STACK is equally session-scoped: it holds the old
+    // parent's disclosure snapshot while a subagent viewer is open, and a
+    // session swap must DISCARD it (never restore the old session's turns
+    // into the new one — the swap teardown's discardFocusViewerScope is
+    // then a no-op; see that method).
     this.focusExpandedTurns.clear()
+    this.focusExpansionsStack.length = 0
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
     this.collapsedOccurrences.clear()
@@ -3477,13 +3615,22 @@ export class TuiApp {
   /**
    * Replace the editor draft. The runner restores a submission that the
    * divergence guard blocked, so the user's text survives for a retry.
-   * While the subagent viewer covers the editor, the write goes to the
-   * preserved draft (the placeholder bar stays up; the draft is restored
-   * on exit).
+   * While a CONTINUABLE subagent viewer covers the editor, the write goes
+   * to the CHILD's draft slot + the visible editor (the main draft stays
+   * untouched); a ONE-SHOT viewer keeps the main draft write (the
+   * placeholder bar stays up; the main draft is restored on exit).
    */
   setEditorText(text: string): void {
-    if (this.viewerMode !== undefined) {
-      this.draftBeforeViewer = text
+    const target = this.viewerMode
+    if (target !== undefined && target.mode === 'continuable') {
+      this.subagentDrafts.set(target.childSessionId, text)
+      this.seatEditor().setText(text)
+      this.editorSeatHolder.notifyChanged()
+      this.requestRender()
+      return
+    }
+    if (target !== undefined) {
+      this.mainDraftBeforeViewer = text
       return
     }
     // M9: every public draft mutation targets the visible seat occupant, not
@@ -3497,11 +3644,25 @@ export class TuiApp {
    * Insert text at the editor cursor — the image-placeholder insertion
    * path (`/image`, Ctrl+V). A replacement editor without cursor insertion
    * falls back to appending at the end of the draft; the host editor
-   * inserts at the cursor (fork `Editor.insertTextAtCursor`).
+   * inserts at the cursor (fork `Editor.insertTextAtCursor`). In a
+   * continuable viewer the insert targets the CHILD draft (image support
+   * in the viewer is a later milestone — text-only follow-ups for now).
    */
   insertIntoEditor(text: string): void {
-    if (this.viewerMode !== undefined) {
-      this.draftBeforeViewer = (this.draftBeforeViewer ?? this.seatEditor().getText()) + text
+    const target = this.viewerMode
+    if (target !== undefined && target.mode === 'continuable') {
+      const editor = this.seatEditor()
+      if (editor.insertTextAtCursor !== undefined) {
+        editor.insertTextAtCursor(text)
+      } else {
+        editor.setText(editor.getText() + text)
+      }
+      this.editorSeatHolder.notifyChanged()
+      this.requestRender()
+      return
+    }
+    if (target !== undefined) {
+      this.mainDraftBeforeViewer = (this.mainDraftBeforeViewer ?? this.seatEditor().getText()) + text
       return
     }
     const editor = this.seatEditor()
@@ -3515,24 +3676,43 @@ export class TuiApp {
   }
 
   /**
-   * Enter or leave the read-only subagent viewer. While viewing, the
-   * editor bar is covered by a placeholder (the real draft is preserved
-   * and restored on exit), the editor border switches to the accent color,
-   * and the header shows a persistent `[viewing subagent]` badge — so the
-   * mode reads at a glance instead of relying on the transient notify.
-   * @param mode - the child identity + label; `undefined` leaves the viewer.
+   * Enter, switch or leave the MODE-AWARE subagent viewer. The target
+   * carries the exact direct parent + child + catalog mode + activity
+   * (never guessed later):
+   * - `continuable`: the editor shows the child's OWN draft (empty on the
+   *   first visit, restored on re-entry); typing edits it; Enter submits
+   *   a follow-up through {@link TuiAppEvents.onSubagentSubmit};
+   * - `one-shot`: the editor bar is covered by a read-only placeholder.
+   * The MAIN draft is preserved in {@link mainDraftBeforeViewer} on entry
+   * and restored on exit; the child drafts live in {@link subagentDrafts}
+   * and never mix with the main draft.
+   * @param mode - the viewer target; `undefined` leaves the viewer.
    */
-  setViewerMode(mode: { id: string; label: string } | undefined): void {
+  setViewerMode(mode: SubagentViewerTarget | undefined): void {
     if (mode === undefined) {
       if (this.viewerMode === undefined) return
+      const leaving = this.viewerMode
       this.viewerMode = undefined
+      this.viewerGeneration += 1
+      // Save the outgoing child's unsent draft. The MAP is the child
+      // slot's source of truth (onChange mirrors every edit; a map-only
+      // stale restore may hold MORE than the visible text), so the
+      // visible text is folded in ONLY when it carries something the map
+      // does not already know (a replacement editor whose text never
+      // mirrors through onChange). A visible text the map already
+      // contains (equal or a substring of the merge) never duplicates —
+      // a stale restore's merged text survives an exit exactly once.
+      if (leaving.mode === 'continuable') {
+        this.parkSubagentDraft(leaving.childSessionId)
+      }
       // M9 (round-2 finding 1): the viewer restore writes the preserved
-      // draft to the CURRENT seat occupant (a plugin editor's draft
+      // main draft to the CURRENT seat occupant (a plugin editor's draft
       // returns to the plugin, never to a hidden host editor).
       const seat = this.seatEditor()
       seat.borderColor = this.editorBorder
-      seat.setText(this.draftBeforeViewer ?? '')
-      this.draftBeforeViewer = undefined
+      this.clearViewerPlaceholder()
+      seat.setText(this.mainDraftBeforeViewer ?? '')
+      this.mainDraftBeforeViewer = undefined
       seat.invalidate()
       this.editorSeatHolder.notifyChanged()
       this.renderHeader()
@@ -3541,26 +3721,173 @@ export class TuiApp {
       return
     }
     if (this.viewerMode === undefined) {
-      this.draftBeforeViewer = this.seatEditor().getText()
+      this.mainDraftBeforeViewer = this.seatEditor().getText()
       // The viewer renders ONLY the child transcript: the main session's
       // local cards (`!` shell runs) must never leak into it. The runner
       // repaints the child folder right after, so the cleared list is
       // rebuilt from the child content.
       this.localMessages.length = 0
       this.rebuildMessages()
+    } else if (this.viewerMode.mode === 'continuable') {
+      // Switching child: park the outgoing child's draft first.
+      this.parkSubagentDraft(this.viewerMode.childSessionId)
     }
     this.viewerMode = mode
-    // M9: cover the CURRENT seat occupant with the placeholder (a plugin
-    // editor's component receives the placeholder; the preserved draft
-    // stays in draftBeforeViewer).
+    this.viewerGeneration += 1
+    // M9: cover the CURRENT seat occupant (a plugin editor's component
+    // receives the child draft / placeholder; the preserved drafts stay
+    // in their own slots).
     const seat = this.seatEditor()
     seat.borderColor = color.accent
-    seat.setText(`viewing subagent: ${mode.label} — read-only · Esc returns`)
+    if (mode.mode === 'continuable') {
+      // The empty-draft placeholder advertises the viewer's OWN verbs
+      // (Enter sends to the CHILD — never the parent — Esc returns).
+      this.setViewerPlaceholder(`Message ${mode.label}… — Enter send · Esc back`)
+      seat.setText(this.subagentDrafts.get(mode.childSessionId) ?? '')
+    } else {
+      this.clearViewerPlaceholder()
+      seat.setText(`viewing subagent: ${mode.label} — one-shot · read-only · Esc returns`)
+    }
     seat.invalidate()
     this.editorSeatHolder.notifyChanged()
     this.renderHeader()
     this.requestRender()
     this.syncExtensionState()
+  }
+
+  /** The viewer generation for stale-guards: async viewer-bound work
+   * captures this value at start and must not touch the surface once it
+   * changed (a viewer open/close/switch bumps it). */
+  getViewerGeneration(): number {
+    return this.viewerGeneration
+  }
+
+  /** Replace the footer while the subagent viewer is open: the footer
+   * shows the VIEWED child's own identity (label/mode/activity/turns/
+   * stats) instead of the parent session's status. Pass `undefined` to
+   * restore the parent footer. The runner sets it on viewer open,
+   * refreshes it as the child's own events fold, and clears it on exit. */
+  setViewerFooter(footer: SubagentViewerFooter | undefined): void {
+    this.viewerFooter = footer
+    this.renderFooter()
+  }
+
+  /** Park one child's unsent draft when its viewer session ends (exit or
+   * child switch). The MAP is the child slot's source of truth, so the
+   * visible text is folded in ONLY when it carries something the map does
+   * not already know:
+   * - the map is EMPTY/unset → the visible text becomes the slot;
+   * - the visible text is the map's merge PREFIX (`visible` followed by
+   *   `\n\n` — the exact shape a map-only restore produces: the older
+   *   visible text on top, the restored submission beneath) → the map
+   *   already contains the visible text, keep it (a stale restore's
+   *   merged text survives an exit exactly once, never duplicated);
+   * - otherwise (a replacement editor whose text never mirrors through
+   *   onChange edited beyond the map — including DELETIONS, which a
+   *   substring check would wrongly classify as "already known") → the
+   *   visible text is appended beneath the map, nothing is lost.
+   * Exact equality short-circuits as "already parked". */
+  private parkSubagentDraft(childSessionId: string): void {
+    const visible = this.seatEditor().getText()
+    const slotted = this.subagentDrafts.get(childSessionId)
+    if (visible === slotted) return
+    if (slotted === undefined || slotted === '') {
+      if (visible !== '') this.subagentDrafts.set(childSessionId, visible)
+      return
+    }
+    if (visible === '') return
+    this.subagentDrafts.set(childSessionId,
+      slotted.startsWith(`${visible}\n\n`)
+        ? slotted
+        : `${slotted}\n\n${visible}`)
+  }
+
+  /** The unsent draft of one child (the viewer's per-child slot), merged
+   * with `text` so a FAILED follow-up never loses input: whatever the
+   * child draft currently holds (possibly newer user input typed while
+   * the request was in flight) stays on top, the failed submission is
+   * preserved visibly beneath it. MAP-ONLY: a stale send (the viewer was
+   * closed/switched/reopened since the send started — its generation
+   * moved on) must NEVER touch the current surface, even when the user
+   * re-opened the SAME child: the visible editor belongs to the NEW
+   * viewer session, and the restored text surfaces through the map on
+   * the next entry instead. The runner's CURRENT-session restore (the
+   * viewer never moved) goes through setEditorText(mergeDraft(...)),
+   * which updates the visible editor; this API is only for stale
+   * restores. */
+  restoreSubagentDraft(childSessionId: string, text: string): void {
+    if (text === '') return
+    const current = this.subagentDrafts.get(childSessionId) ?? ''
+    this.subagentDrafts.set(childSessionId, current === '' ? text : `${current}\n\n${text}`)
+  }
+
+  /** Enter in a continuable viewer: snapshot the child draft, clear the
+   * visible editor, and hand the follow-up to the runner through
+   * {@link TuiAppEvents.onSubagentSubmit}. The draft is cleared BEFORE
+   * the async delivery; a rejection restores it (merged) — the user's
+   * input never silently disappears. */
+  private submitSubagentDraft(): void {
+    if (this.disposed) return
+    const target = this.viewerMode
+    if (target === undefined || target.mode !== 'continuable') return
+    if (this.events.onSubagentSubmit === undefined) return
+    const text = this.seatEditor().getText()
+    if (text.trim() === '') return
+    this.clearNotify()
+    // Issue #8: a successful submit is a fresh explicit action — the armed
+    // exit chord (and its footer hint) must not survive into the next
+    // interaction.
+    this.clearCtrlCExit()
+    // Snapshot + clear the visible child draft. The per-child SLOT is
+    // cleared EXPLICITLY — not via the onChange mirror — because a
+    // replacement editor in the seat does not guarantee onChange: an
+    // accepted submission must never resurrect in the child's slot (a
+    // reopened viewer would otherwise show already-delivered text).
+    this.subagentDrafts.set(target.childSessionId, '')
+    this.seatEditor().setText('')
+    this.editorSeatHolder.notifyChanged()
+    this.requestRender()
+    this.events.onSubagentSubmit({
+      parentSessionId: target.parentSessionId,
+      childSessionId: target.childSessionId,
+      text,
+    })
+  }
+
+  /** Keys the interactive (continuable) viewer consumes so they can never
+   * act on the PARENT session: the host ladder handles them for the main
+   * editor, and inside the viewer they must be inert (the child is the
+   * only input target). Esc/Ctrl+O/Enter are deliberately NOT listed —
+   * they fall through to the host's exit/fold/submit paths. */
+  private viewerParentLockedKey(data: string): boolean {
+    if (matchesKey(data, 'down') && this.tasksActive && this.seatEditor().getText().trim() === '') {
+      // The empty-editor ↓ task-browser trigger must not open the
+      // PARENT's browser from inside the viewer.
+      return true
+    }
+    return matchesKey(data, 'ctrl+s')        // steer all (parent)
+      || matchesKey(data, 'ctrl+enter')      // queue submit (parent)
+      || matchesKey(data, 'alt+up')          // dequeue (parent)
+      || matchesKey(data, 'shift+tab')       // permission cycle (parent)
+      || matchesKey(data, 'ctrl+f') || matchesKey(data, 'ctrl+shift+f') // main-transcript search
+      || matchesKey(data, 'ctrl+c')          // clear/exit chord (would exit the TUI)
+      || matchesKey(data, 'ctrl+d')          // exit
+      || matchesKey(data, 'ctrl+g')          // external editor (main draft)
+      || matchesKey(data, 'ctrl+t')          // todo panel
+      || matchesKey(data, 'alt+t')           // thinking fold
+      || matchesKey(data, 'ctrl+v')          // clipboard image intake (main draft store)
+  }
+
+  /** Show a render-time placeholder hint on the host editor (empty draft
+   * only — it is NEVER part of the draft text). A replacement editor in
+   * the seat has no placeholder surface; the hint is host-editor-only. */
+  private setViewerPlaceholder(text: string): void {
+    ;(this.editor as import('./tui-editor.ts').TuiEditor).setPlaceholder(text)
+  }
+
+  /** Clear the host editor's render-time placeholder. */
+  private clearViewerPlaceholder(): void {
+    ;(this.editor as import('./tui-editor.ts').TuiEditor).setPlaceholder('')
   }
 
   /**
@@ -5982,7 +6309,9 @@ export class TuiApp {
     // header wrap even though the badge run fits its own budget). Re-derived
     // on EVERY render so a resize or a title change re-bakes the budget.
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
-    const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent('[viewing subagent]')}`
+    const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent(this.viewerMode.mode === 'one-shot'
+      ? '[viewing subagent · one-shot · read-only]'
+      : '[viewing subagent · continuable]')}`
     const title = this.viewerMode !== undefined
       ? ` · ${color.textMuted(this.viewerMode.label)}`
       : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
@@ -6116,12 +6445,22 @@ export class TuiApp {
 
   /**
    * Replace the editor draft wholesale (the Alt+↑ dequeue path pulls every
-   * queued message back into the editor for editing). While the subagent
-   * viewer covers the editor, the write goes to the preserved draft.
+   * queued message back into the editor for editing). While a CONTINUABLE
+   * subagent viewer covers the editor, the write goes to the CHILD's
+   * draft slot + the visible editor; a ONE-SHOT viewer keeps the main
+   * draft write (restored on exit).
    */
   setDraft(text: string): void {
-    if (this.viewerMode !== undefined) {
-      this.draftBeforeViewer = text
+    const target = this.viewerMode
+    if (target !== undefined && target.mode === 'continuable') {
+      this.subagentDrafts.set(target.childSessionId, text)
+      this.seatEditor().setText(text)
+      this.editorSeatHolder.notifyChanged()
+      this.requestRender()
+      return
+    }
+    if (target !== undefined) {
+      this.mainDraftBeforeViewer = text
       return
     }
     // M9: write the CURRENT seat occupant (host default or plugin editor).
@@ -6130,12 +6469,22 @@ export class TuiApp {
     this.requestRender()
   }
 
-  /** The editor's current draft text (the Alt+↑ dequeue merge reads it);
-   * while the viewer covers the editor, the preserved draft is returned. */
+  /** The editor's current draft text (the Alt+↑ dequeue merge reads it).
+   * In a continuable viewer the VISIBLE editor is the authority — it is
+   * exactly what the user sees and submits: a replacement editor's edits
+   * (through its own handleInput) never mirror through the host's
+   * onChange, so the per-child slot may lag and must never be submitted
+   * in the visible text's place. The slot remains the CROSS-SESSION
+   * store (park on exit/switch, map-only stale restores, re-entry seed);
+   * the visible text is the CURRENT-session truth. A one-shot viewer
+   * returns the preserved main draft. */
   getDraft(): string {
-    return this.viewerMode !== undefined && this.draftBeforeViewer !== undefined
-      ? this.draftBeforeViewer
-      : this.seatEditor().getText()
+    const target = this.viewerMode
+    if (target === undefined) return this.seatEditor().getText()
+    if (target.mode === 'continuable') {
+      return this.seatEditor().getText()
+    }
+    return this.mainDraftBeforeViewer ?? ''
   }
 
   /**
@@ -6152,24 +6501,48 @@ export class TuiApp {
     // callback (or a stale host dispatch) must not produce a real
     // session-side effect after teardown.
     if (this.disposed) return
+    const target = this.viewerMode
     const text = this.getDraft()
     // An image-only draft is NOT empty: the placeholder expansion resolves
     // it to real content blocks at submission (plan §11.1).
     if (text.trim() === '' && this.events.isImageDraft?.() !== true) return
-    this.rememberInput(text)
     this.clearNotify()
     // Issue #8: a successful submit is a fresh explicit action — the armed
     // exit chord (and its footer hint) must not survive into the next
     // interaction.
     this.clearCtrlCExit()
-    // Clear the draft like a normal Enter submit (the runner's dispatch
-    // owns the session/guard path). M9: clear the CURRENT seat occupant.
-    if (this.viewerMode === undefined) {
+    if (target !== undefined && target.mode === 'continuable') {
+      // A plugin action inside an interactive viewer submits to the
+      // SUBAGENT (the semantic target of the visible editor), never the
+      // parent — and the queue verb is meaningless for the child (its
+      // inbox is the only queue). The draft restore on rejection is the
+      // runner's job (onSubagentSubmit), exactly like the Enter path.
+      // Viewer submissions never enter the shared editor history (an ↑
+      // recall in the MAIN editor must not resend child-scoped text to
+      // the parent). The per-child slot clears EXPLICITLY (a replacement
+      // editor does not guarantee the onChange mirror).
+      this.subagentDrafts.set(target.childSessionId, '')
       this.seatEditor().setText('')
       this.editorSeatHolder.notifyChanged()
-    } else {
-      this.draftBeforeViewer = ''
+      this.requestRender()
+      this.events.onSubagentSubmit?.({
+        parentSessionId: target.parentSessionId,
+        childSessionId: target.childSessionId,
+        text,
+      })
+      return
     }
+    if (target !== undefined) {
+      // One-shot viewer: submission is impossible (the input guard + the
+      // placeholder keep it read-only); a defensive call keeps the main
+      // draft intact and does NOT fire a parent submit.
+      return
+    }
+    this.rememberInput(text)
+    // Clear the draft like a normal Enter submit (the runner's dispatch
+    // owns the session/guard path). M9: clear the CURRENT seat occupant.
+    this.seatEditor().setText('')
+    this.editorSeatHolder.notifyChanged()
     if (forceQueue) {
       this.events.onQueueSubmit?.(text)
     } else {
@@ -6284,6 +6657,35 @@ export class TuiApp {
 
   /** Rebuild the two footer lines from the current status and plan badge. */
   private renderFooter(): void {
+    const width = Math.max(1, this.terminal.columns)
+    // The subagent viewer is host-owned chrome: the footer switches to the
+    // VIEWED child's own identity (the parent's permission/model/plan/task
+    // badges and the extension footer segments describe a session the user
+    // is not looking at — extension segments do not render while viewing).
+    if (this.viewerFooter !== undefined) {
+      const footer = this.viewerFooter
+      const modeBadge = color.accent(footer.mode === 'one-shot'
+        ? '[subagent · one-shot]'
+        : '[subagent · continuable]')
+      const activity = footer.activity === 'running'
+        ? color.primary('● running')
+        : color.textMuted('inactive')
+      const line1 = [
+        modeBadge,
+        footer.label === '' ? '' : footer.label,
+        activity,
+        footer.cwd === '' ? '' : footer.cwd,
+        `t${footer.turns}/s${footer.steps}`,
+      ].filter(part => part !== '')
+      // The parent's Ctrl+C exit hint is meaningless inside the viewer
+      // (Ctrl+C is inert there — the viewer guard consumes it), so it is
+      // never rendered: the child's stats line shows instead (compact
+      // preset keeps its usual behavior of dropping line 2).
+      const line2Final = this.footerPreset === 'compact' ? '' : footer.statsLine
+      this.footer.setText(this.footerRows(line1, line2Final, width))
+      this.requestRender()
+      return
+    }
     const context = this.status.contextTokens !== undefined && this.status.contextWindow !== undefined
       && this.status.contextWindow > 0
       ? contextBar(this.status.contextTokens, this.status.contextWindow)
@@ -6343,15 +6745,17 @@ export class TuiApp {
     const line2 = this.ctrlCExitArmed
       ? 'Press Ctrl+C again to exit'
       : this.footerPreset === 'compact' ? '' : this.status.statsLine
-    // Narrow-screen footer (plan §14): the host line-1 WRAPS instead of
-    // being hard-truncated (v0.1.x behavior — the multi-row footer returns,
-    // and the layout already budgets footer rows via
-    // footer.render(width).length). The caps are the overflow BACKSTOP,
-    // not the normal compression: host line-1 keeps ≤3 physical rows, the
-    // stats line ≤1, total ≤4 — a long extension segment folds from the
-    // tail first, matching the FooterSegmentOutlet's own priority folding
-    // (the 0710746 overflow concern stays covered by the outlet budget).
-    const width = Math.max(1, this.terminal.columns)
+    this.footer.setText(this.footerRows(line1, line2, width))
+    this.requestRender()
+  }
+
+  /** The shared footer layout (plan §14): line 1 wraps with the host row
+   * budget (≤3 physical rows), the stats line caps to one row; the caps
+   * are the overflow BACKSTOP, not the normal compression — a long
+   * extension segment folds from the tail first, matching the
+   * FooterSegmentOutlet's own priority folding (the 0710746 overflow
+   * concern stays covered by the outlet budget). */
+  private footerRows(line1: readonly string[], line2: string, width: number): string {
     const hostBudget = TuiApp.FOOTER_MAX_LINES - (line2 === '' ? 0 : 1)
     const line1Rows = wrapTextWithAnsi(line1.join('  '), width)
     const rows: string[] = []
@@ -6365,8 +6769,7 @@ export class TuiApp {
       const statsRows = wrapTextWithAnsi(line2, width)
       rows.push(statsRows.length > 1 ? TuiApp.capRowWithEllipsis(statsRows[0]!, width) : statsRows[0]!)
     }
-    this.footer.setText(rows.map(row => dim(row)).join('\n'))
-    this.requestRender()
+    return rows.map(row => dim(row)).join('\n')
   }
 
   /** Force a visible `…` on a wrapped row that still has hidden content

@@ -135,3 +135,57 @@ Resolution helpers: `src/provider-catalog.ts` (`providerOptionsFor`,
 `credentialOptionsFor`, `resolveCredentialArg`, `deriveKeyRef`,
 `ROUTE_PATTERN`), pinned by `test/provider-catalog.test.ts` and
 `test/login-credentials.test.ts`.
+
+## The subagent viewer is mode-aware: continuable = interactive, one-shot = read-only
+
+The child viewer's interactivity is keyed SOLELY to the catalog mode carried
+through the whole chain (`SubagentListEntry.mode` → `TaskBrowserRow.mode` →
+`SubagentViewerTarget.mode`), never guessed from running/inactive state, and
+never re-derived inside the viewer. A `continuable` viewer's editor is LIVE:
+Enter delivers the text as the child's NEXT turn through
+`ctx.subagents.followup(exactLiveParent, childId, …)` — FIFO, no interrupt,
+no steer. Decisions a future change must not silently reverse:
+
+- **The viewer editor is a PLAIN text editor.** Everything typed — including
+  lines that start with `/` — is delivered to the child as text; slash
+  commands are NOT executed against the parent, and the child gets no
+  command-execution wire. Parent-only actions (Ctrl+S steer, Ctrl+Enter
+  queue, Alt+↑ dequeue, Shift+Tab permission, Ctrl+F/Ctrl+Shift+F main
+  search, Ctrl+C/D exit chords, ↓ task browser, Ctrl+G external editor,
+  Ctrl+V image intake) are consumed by the host BEFORE the ladder reaches
+  the editor, so the viewer can never act on the parent session.
+- **The write path is exactly one**: the runner's `onSubagentSubmit` →
+  `submitSubagentFollowup` (src/subagent-viewer-submit.ts) → the exact live
+  direct parent check → `ctx.subagents.followup`. Never
+  `ctx.agents.get(childId).followup(...)` (bypasses the continuation
+  manager / cold resume / direct-parent authority), never the parent's
+  submit/steer/queue path.
+- **Viewer submissions never enter the shared editor history.** An ↑ recall
+  in the MAIN editor must not resend a child-scoped follow-up to the
+  parent. The fork editor's own per-editor recall is untouched.
+- **Failed deliveries restore into the child's OWN draft slot**, merged
+  below anything the user typed meanwhile (`mergeDraft` semantics), and a
+  send that outlives a viewer switch/close restores into the OLD child's
+  slot via `restoreSubagentDraft` — the current surface is never polluted
+  (the TuiApp viewer generation is the stale-guard anchor).
+- **Transcript rows come only from the child's real session events** — an
+  accepted follow-up never inserts a fake user row; the child's own
+  `user/message` event lands in the viewer folder through the normal
+  folding.
+- **Images are out of scope** for viewer follow-ups: the main-session image
+  draft store is deliberately never shared with the child (a per-child
+  image store is a later milestone).
+- **The footer switches to the VIEWED child while a subagent viewer is
+  open.** The parent session's status (permission/model/plan/task badges,
+  extension footer segments) describes a session the user is not looking
+  at, so the runner pushes a `SubagentViewerFooter` (label, mode badge
+  `[subagent · continuable]` / `[subagent · one-shot]`, activity, cwd,
+  the child's OWN turns/steps and stats line from a per-viewer StatsFolder
+  fed only the child's own events) and clears it on exit / session swap.
+  The footer is refreshed at step/end and turn/end (never on streaming
+  deltas). **Extension footer segments do not render while viewing**:
+  viewer mode is host-owned chrome, the extension surface already exposes
+  `viewerMode` in its session state, and the first-party builtin's
+  turn/step segment would otherwise duplicate the child counters with the
+  parent's. Header extension badges keep rendering (they do not conflict
+  with the child identity). No extension API changed (additive-only).

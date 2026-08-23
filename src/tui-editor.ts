@@ -17,7 +17,7 @@
  * @module @xmoon76/dsh-pi-tui/tui-editor
  */
 
-import { Editor, matchesKey, type EditorTheme, type TUI } from '@xmoon76/pi-tui'
+import { Editor, matchesKey, truncateToWidth, type EditorTheme, type TUI } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
 import { extractAtPrefix } from './mentions.ts'
 
@@ -77,7 +77,39 @@ function injectEditorPrompt(lines: string[]): string[] {
   return lines
 }
 
+/**
+ * Paint a render-time PLACEHOLDER hint over an EMPTY draft (the subagent
+ * viewer's `Message <label>…` affordance): `❯ <dim hint>` with the cursor
+ * block staying at its own position after the text. The placeholder is a
+ * presentation-only overlay — it never becomes part of the draft
+ * (`getText()` stays empty), so typing over it edits a clean buffer. Same
+ * structure as {@link injectEditorPrompt}: the first content row's leading
+ * padding is replaced by the prompt, the hint is inserted between the
+ * prompt and the (still positioned) cursor.
+ */
+function injectEditorPlaceholder(lines: string[], placeholder: string, width: number): string[] {
+  if (lines.length < 3) return lines
+  // Top row: a plain border when the editor is at the top of the draft, a
+  // `─── ↑ N more ───` scroll indicator when scrolled. The ↑ never appears
+  // in a plain border — an empty draft is never scrolled, but the guard
+  // keeps the invariant cheap.
+  if (lines[0]!.includes('↑')) return lines
+  const first = lines[1]!
+  if (first.length < PROMPT_WIDTH) return lines
+  for (let i = 0; i < PROMPT_WIDTH; i++) {
+    if (first[i] !== ' ') return lines
+  }
+  // The hint shares the row with the prompt + the cursor block: reserve
+  // the prompt and one trailing cell so the row never overflows.
+  const hint = truncateToWidth(placeholder, Math.max(1, width - PROMPT_WIDTH - 2), '…')
+  lines[1] = `${color.roleUser('❯')} ${color.textDim(hint)}${first.slice(PROMPT_WIDTH)}`
+  return lines
+}
+
 export class TuiEditor extends Editor {
+  /** The render-time placeholder hint (empty draft only). */
+  private placeholderText = ''
+
   constructor(tui: TUI, theme: EditorTheme) {
     // paddingX: 2 reserves the left two cells for the `❯ ` prompt painted
     // by render(). Content and wrapped continuations start at column 2,
@@ -86,8 +118,19 @@ export class TuiEditor extends Editor {
     super(tui, theme, { paddingX: PROMPT_WIDTH })
   }
 
+  /** Show a dim placeholder hint while the draft is EMPTY (e.g. the
+   * subagent viewer's "Message <label>…"). Presentation-only: the hint is
+   * never part of the draft text. Pass `''` to clear. */
+  setPlaceholder(text: string): void {
+    this.placeholderText = text
+  }
+
   override render(width: number): string[] {
-    return injectEditorPrompt(super.render(width))
+    const lines = super.render(width)
+    if (this.placeholderText !== '' && this.getText().trim() === '') {
+      return injectEditorPlaceholder(lines, this.placeholderText, width)
+    }
+    return injectEditorPrompt(lines)
   }
 
   override handleInput(data: string): void {
