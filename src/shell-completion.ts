@@ -28,10 +28,15 @@ import { parseShellWords } from './shell-words.ts'
  * slower at a `bash -lc` cold start (measured 260-310ms in CI vs ~60ms
  * locally — a login shell sources /etc/profile, which is heavy on the
  * runner image), so a single tight cap made the suite flaky there (three
- * CI failures, every one at the 300ms boundary). The cap is therefore
- * raised under GitHub Actions only; local runs keep the tight cap.
+ * CI failures, every one at the 300ms boundary). CI therefore runs with a
+ * generous 3000ms cap; local runs get 1000ms — a tight local cap (300ms)
+ * hit the SAME boundary under parallel test load (a cold login-shell
+ * spawn measured ~125ms standalone but exceeded 300ms while the node
+ * --test runner saturated the CPU; two pre-push gate failures, every one
+ * the first spawn of the file). Both caps are still hard bounds, never a
+ * hang.
  */
-const COMPGEN_TIMEOUT_MS = process.env.GITHUB_ACTIONS === 'true' ? 1500 : 300
+const COMPGEN_TIMEOUT_MS = process.env.GITHUB_ACTIONS === 'true' ? 3000 : 1000
 /** Command-name cache TTL (ms): command sets change rarely. */
 const COMMAND_CACHE_TTL_MS = 30_000
 /** Suggestion cap per request (the fork's own lists are capped too). */
