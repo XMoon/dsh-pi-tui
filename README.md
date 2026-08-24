@@ -151,6 +151,7 @@ TUI 使用 DSH 提供的模型和设置服务。
 /plan
 /goal
 /compact
+/footer
 ```
 
 模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。
@@ -160,6 +161,83 @@ TUI 使用 DSH 提供的模型和设置服务。
 保留状态/交互标记);切换立即生效并持久化。
 
 其他插件注册到 `ctx.commands` 的 Slash Command 也会被自动发现。
+
+### Footer 自定义
+
+状态行是一个**可组合表面**——常见场景无需插件或 shell。
+
+`/settings` → Status line(或 `dsh-pi-tui` 设置文档中的 `footer` 键)
+选择预设:
+
+| 值 | 含义 |
+|---|---|
+| `default`(旧名 `full`) | 经典两行 Footer(状态 + 统计) |
+| `compact` | 仅状态行(隐藏统计行) |
+| `custom` | 版本化 `footerLayout`(见下) |
+| `command` | 用户配置的命令渲染状态表面(见下) |
+
+`/footer` 是交互式配置器:开关条目、在左/右区域间移动、排序、
+切换行、循环 formatter,并实时预览由真实 Footer 引擎合成的效果。
+`Enter` 保存(持久化),`Esc` 取消且不影响当前生效布局。无会话时
+也可使用。
+
+`footerLayout` 是嵌套设置对象(schemaVersion 1,1–2 行,左/右区域,
+分隔符,有限 formatter,语义 tone,prefix/suffix,importance)。
+`/footer` 配置器可交互地构建它;YAML 形状如下:
+
+```yaml
+footer: custom
+footerLayout:
+  schemaVersion: 1
+  rows:
+    - left:
+        - id: agent-preset
+          format: compact
+        - id: model
+        - id: project
+        - id: context
+          format: full
+        - id: cache-hit
+        - id: token-usage
+          format: io
+        - id: performance
+          format: compact
+        - id: version
+          format: tui
+      right:
+        - id: focus-mode
+      separator:
+        text: " │ "
+        tone: textDim
+```
+
+内置条目 id:`agent-preset`、`model`、`reasoning`、
+`permission-preset`、`sandbox-mode`、`approval-policy`、`plan-state`、
+`focus-mode`、`focused-seat`、`view-scope`、`cwd`、`project`、
+`git-branch`、`run-state`、`queue`、`tasks`、`agents`、`todo`、
+`context`、`cache-hit`、`token-usage`、`performance`、`turns-steps`、
+`stats-line`、`version`、`ext:*`(旧扩展段)。非法的 `footerLayout`
+会警告一次并回退到默认布局——TUI 始终能启动。
+
+`footer: command` 把状态表面交给用户配置的命令(Claude/Kimi 风格):
+当前状态快照以 JSON 序列化到命令的 stdin(schemaVersion 1——不含
+secret、凭据、提示词),命令的 stdout(经过净化:仅保留 SGR 颜色与
+OSC 8 超链接)渲染状态表面。Host 的指令表面(如 Ctrl+C 退出提示)
+始终叠加在最上层。
+
+```yaml
+footer: command
+footerCommand:
+  schemaVersion: 1
+  command: "~/.config/dsh/statusline.sh"
+  timeoutMs: 300        # 默认 300,最大 1000
+  refreshIntervalMs: 1000  # 最小 1000
+  maxRows: 1            # 1..2
+```
+
+**安全:** 只有当命令位于你的设置文档的 USER 层时才会被执行。
+仓库/项目提供的 `footerCommand` 永远不会被执行——命令模式被禁用并
+回退到原生布局。失败(空输出、非零退出、超时)自动回退到原生布局。
 
 ## 常用按键
 

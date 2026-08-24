@@ -68,6 +68,7 @@ repository-private imports.
 | Header badge slot | `register('chrome.header.badge', ...)` | `slot.chrome.header.badge` | M2 |
 | Dock item slot | `register('input.dock.item', ...)` | `slot.input.dock.item` | M2 |
 | Footer segment slot | `register('chrome.footer.status', ...)` | `slot.chrome.footer.status` | M2 |
+| Configurable footer item | `register('chrome.footer.item', ...)` | `slot.chrome.footer.item` | M4 |
 | Widget slots | `register('input.widget.above'\|'input.widget.below', ...)` | `slot.input.widget` | M4 |
 | Component kit | `ExtensionView` tree values | (compiled by the host) | M4 |
 | Command ownership | `registerCommand(...)` | (always available) | M5 |
@@ -152,6 +153,48 @@ construction or restore failure leaves the old seat available.
 
 Always `service.api().capabilities.has(...)` before relying on a
 capability — never parse the package version.
+
+## Configurable footer items (M4)
+
+`chrome.footer.item` is the configurable footer item slot: a plugin
+contributes a **plain-data** item (`FooterItemContribution` — label,
+description, a `FooterSegment`, default zone, importance, minWidth) that
+becomes a first-class citizen of the footer configurator — users can
+show/hide, reorder and zone-place it like any builtin item. Dynamic
+updates use the standard `handle.replace(...)` / `handle.invalidate()`
+pattern (async producer → cache → replace plain data → host render).
+
+```ts
+const quota = service.register<FooterItemContribution>('chrome.footer.item', {
+  id: 'quota',
+  order: 200,
+  description: 'API quota footer item',
+}, {
+  label: 'API quota',
+  defaultZone: 'right',
+  importance: 50,
+  segment: { spans: [{ text: 'quota 82%', tone: 'success' }], minWidth: 8 },
+})
+
+// later
+quota.replace({
+  label: 'API quota',
+  defaultZone: 'right',
+  importance: 50,
+  segment: { spans: [{ text: 'quota 21%', tone: 'warning' }], minWidth: 8 },
+})
+```
+
+The item's config identity is the canonical key `ext:<owner>/<id>` (the
+fiber identity — stable across HMR). A layout referencing an unloaded
+plugin's item keeps the reference (the item is skipped at render) and
+recovers automatically when the plugin reloads. The legacy
+`chrome.footer.status` slot is unchanged: its segments aggregate into the
+single `ext:*` item (show/hide as a whole, no per-segment ordering).
+
+A Stable footer item can never control: row count, terminal writes, the
+cursor, the root layout, the Host instruction surface, arbitrary ANSI,
+shell, or keyboard focus — the host owns all of it.
 
 ## Lifecycle contract
 

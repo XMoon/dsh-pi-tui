@@ -63,6 +63,37 @@
   `tasks.*`)路由按键;行为与按键保持不变。
 
 
+- **Footer 现在是可组合、可用户配置的表面。** 状态行由统一状态快照
+  之上的语义条目构成(权限预设、沙箱模式、审批策略、plan 状态、
+  focus 模式、agent 预设、模型、工作区、运行状态、queue/tasks/agents/
+  todo 计数、上下文、缓存命中、token 用量、性能、回合/步骤、版本、
+  查看器范围,以及旧扩展段)——每个条目都有独立的 formatter、tone、
+  importance 与 min-width。default 与 compact 预设渲染与之前完全一致;
+  新的 `custom` 预设接受版本化 `footerLayout`(1–2 行、左/右区域、
+  分隔符、有限 formatter、语义 tone、prefix/suffix、importance),以
+  嵌套设置对象持久化。非法布局会警告一次并回退到默认——TUI 始终能
+  启动。
+- **`/footer` — 交互式 Footer 配置器。** 开关条目、在左/右区域间
+  移动、Shift+↑/↓ 排序、Tab 切换行、F 循环 formatter,并实时预览由
+  真实 Footer 引擎基于当前会话状态合成的效果。`Enter` 保存(持久化),
+  `Esc` 取消且不影响当前生效布局。无会话时也可使用。
+- **插件可以贡献可配置的 Footer 条目。** 新的 `chrome.footer.item`
+  槽位(`slot.chrome.footer.item` 能力)让插件注册纯数据 Footer 条目
+  (label、segment、默认区域、importance、min-width),用户可像内置
+  条目一样开关、排序、左右放置——标准的 `replace()`/`invalidate()`
+  模式保持其实时性。条目的配置身份是 `ext:<owner>/<id>`,跨 HMR
+  稳定;引用已卸载插件条目的布局保留引用,插件重载后自动恢复。旧的
+  `chrome.footer.status` 槽位不变。
+- **受信任的命令状态行(Claude/Kimi 风格)。** `footer: command` 把
+  状态表面交给用户配置的命令:当前状态快照(不含 secret、凭据、
+  提示词)以 JSON 序列化到命令的 stdin,其 stdout——仅保留 SGR 颜色
+  与 OSC 8 超链接——渲染状态表面。运行器是异步且带缓存的(两次启动
+  间隔 ≥1 秒、最新快照胜出、16 KiB 输出上限、硬超时并终止进程树、
+  过期结果永不提交),失败自动回退到原生布局,Host 指令表面(如
+  Ctrl+C 退出提示)始终叠加在最上层。**安全:** 只有当命令位于你的
+  设置文档的 USER 层时才会被执行——仓库/项目提供的 `footerCommand`
+  永远不会被执行。
+
 ## [0.3.4] - 2026-08-25
 
 ### 新增
