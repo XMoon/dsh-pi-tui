@@ -18,7 +18,7 @@ import test from 'node:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { persistAfterSession, persistHistoryRecord } from '../src/history-persist.ts'
+import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../src/history-persist.ts'
 import { historyFilePath, loadHistoryRecords } from '../src/history.ts'
 
 function tempHome(): string {
@@ -150,6 +150,87 @@ test('a steered draft persists with the LIVE session id (Ctrl+S / steer-draft)',
       file,
     }), false, 'an empty steered draft is skipped')
     assert.equal(loadHistoryRecords(file).length, 1)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('the call-site decision table: agent-facing rows carry the session id, sessionless rows never do', () => {
+  // The runner routes EVERY persist call through historySessionIdFor —
+  // this table is the single source of truth for which submission kind
+  // earns which session identity (a future change must update it here,
+  // not silently at a call site).
+  assert.equal(historySessionIdFor('agent-facing', 'ses_1'), 'ses_1')
+  assert.equal(historySessionIdFor('agent-facing', undefined), undefined)
+  assert.equal(historySessionIdFor('sessionless', 'ses_1'), undefined,
+    'a sessionless submission must never be attributed to a session')
+  assert.equal(historySessionIdFor('sessionless', undefined), undefined)
+})
+
+test('the runner\'s `!` block end to end: `!!`/bare `!` rows are sessionless, a contextual `!` row carries the FINAL session id', async () => {
+  // Simulates dispatchUserInput's `!` block with the ACTUAL functions the
+  // runner uses (historySessionIdFor + persistHistoryRecord + the
+  // ensureSession ordering via persistAfterSession), asserting the rows
+  // that land in the file.
+  const home = tempHome()
+  try {
+    const cwd = '/work/a'
+    const file = historyFilePath(home, cwd)
+    const write = (content: string, sessionId: string | undefined): void => {
+      persistHistoryRecord({ content, cwd, sessionId, ts: 1, lastContent: undefined, hasImages: false, file })
+    }
+    // `!!` branch: sessionless even while a session is live.
+    write('!!ls', historySessionIdFor('sessionless', 'ses_live'))
+    // bare `!` branch: sessionless.
+    write('!', historySessionIdFor('sessionless', 'ses_live'))
+    // contextual `!` branch: the FINAL id, resolved AFTER the session
+    // exists (the deferred-start gate).
+    await persistAfterSession(
+      async () => 'ses_new',
+      (sessionId) => write('!ls', historySessionIdFor('agent-facing', sessionId)),
+    )
+    const records = loadHistoryRecords(file)
+    assert.deepEqual(records.map(record => record.sessionId), [undefined, undefined, 'ses_new'],
+      'the `!` block rows carry exactly the session identities the decision table earns')
+    assert.deepEqual(records.map(record => record.content), ['!!ls', '!', '!ls'])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('the runner\'s steer path end to end: the draft persists with the LIVE session id before the steer', async () => {
+  // Simulates onSteer / steer-draft with the ACTUAL functions the runner
+  // uses: the snapshot happens at call time (before the steer consumes
+  // the staged images) and the row carries the live session id.
+  const home = tempHome()
+  try {
+    const cwd = '/work/a'
+    const file = historyFilePath(home, cwd)
+    const order: string[] = []
+    // The runner's persistSteeredHistory: snapshot ts + image check at
+    // call time, then persist with the live session id.
+    const persistSteered = (text: string): void => {
+      const hasImages = text.includes('[[image')
+      if (text.trim() === '' || hasImages) return
+      order.push('persist')
+      persistHistoryRecord({
+        content: text.trim(),
+        cwd,
+        sessionId: historySessionIdFor('agent-facing', 'ses_live'),
+        ts: 1,
+        lastContent: undefined,
+        hasImages,
+        file,
+      })
+    }
+    persistSteered('steer this draft')
+    persistSteered('') // Ctrl+S with only a queue
+    persistSteered('[[image:1]] placeholder') // image-bearing draft
+    assert.deepEqual(order, ['persist'], 'only the real draft persists')
+    const records = loadHistoryRecords(file)
+    assert.equal(records.length, 1)
+    assert.equal(records[0]?.content, 'steer this draft')
+    assert.equal(records[0]?.sessionId, 'ses_live', 'the steered draft carries the live session id')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

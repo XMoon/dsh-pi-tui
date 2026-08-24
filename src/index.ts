@@ -91,7 +91,7 @@ import { customThemeNames } from './theme.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
-import { persistAfterSession, persistHistoryRecord } from './history-persist.ts'
+import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from './history-persist.ts'
 import { FileHistorySearchSource } from './history-search.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { DraftImageStore } from './image/draft-store.ts'
@@ -3217,11 +3217,13 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
     /**
-     * Run a sessionless slash command locally — no session, no log, no
-     * persistence. The handler comes from the commands service's global
-     * layer (in-process lookup with no agent is safe: it reads the global
-     * layer only). A sessionless command that failed to register falls back
-     * to the session dispatch, which reports unknown commands as messages.
+     * Run a sessionless slash command locally — no session, no session
+     * log. The input-history row still persists, sessionless (Current
+     * directory / All directories, never Current session). The handler
+     * comes from the commands service's global layer (in-process lookup
+     * with no agent is safe: it reads the global layer only). A
+     * sessionless command that failed to register falls back to the
+     * session dispatch, which reports unknown commands as messages.
      */
     const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string, persistHistory: (sessionId: string | undefined) => void): void => {
       // M5: a plugin-declared local command with a bridge handler routes
@@ -3252,9 +3254,9 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       // A truly local command: no session is created — the row persists
-      // with `sessionId: undefined` (Current directory / All directories,
-      // never Current session).
-      persistHistory(undefined)
+      // sessionless (Current directory / All directories, never Current
+      // session).
+      persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id))
       // An owned workflow: the result decides the notify, the failure lands
       // in diagnostics — runOwned (AGENTS.md), never a bare void. The
       // handler may be a SYNC implementation, so the factory must run inside
@@ -3422,7 +3424,7 @@ export function apply(ctx: Context, config: Config): void {
         const written = persistHistoryRecord({
           content: trimmed,
           cwd: historyCwd,
-          sessionId: liveAgent?.session.id,
+          sessionId: historySessionIdFor('agent-facing', liveAgent?.session.id),
           ts: historyTs,
           lastContent: lastHistoryContent,
           hasImages,
@@ -3527,7 +3529,7 @@ export function apply(ctx: Context, config: Config): void {
           // `!!` runs purely locally with NO session write (pi's
           // excluded-from-context escape hatch) — the row is sessionless
           // (Current directory / All directories, never Current session).
-          persistHistory(undefined)
+          persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id))
           runLocalShell(text)
         } else if (shellCommandOf(text) !== '') {
           // An owned workflow: the session creation failure restores the
@@ -3536,7 +3538,7 @@ export function apply(ctx: Context, config: Config): void {
           // (the deferred-start gate), so a `!` line that creates the
           // session carries its id.
           runOwned('contextual shell', () => ensureSession().then(() => {
-            persistHistory(liveAgent?.session.id)
+            persistHistory(historySessionIdFor('agent-facing', liveAgent?.session.id))
             runLocalShell(text)
           }), {
             diag,
@@ -3545,7 +3547,7 @@ export function apply(ctx: Context, config: Config): void {
           })
         } else {
           // A bare `!` (no command) is a no-op — sessionless.
-          persistHistory(undefined)
+          persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id))
         }
         return
       }
@@ -3604,7 +3606,7 @@ export function apply(ctx: Context, config: Config): void {
         // skill's own slash name and injects its body; the raw `/skill
         // <name>` form would never match (review finding 2). Image
         // placeholders ride the normalized line untouched.
-        persistHistory(liveAgent?.session.id)
+        persistHistory(historySessionIdFor('agent-facing', liveAgent?.session.id))
         steerNow(normalizeSkillInvocation(text) ?? text, true)
         return
       }

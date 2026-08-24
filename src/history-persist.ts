@@ -77,3 +77,21 @@ export async function persistAfterSession(
   const sessionId = await resolveSession()
   persist(sessionId)
 }
+
+/**
+ * The session identity a submission kind's history row earns — the
+ * call-site decision table, pinned by tests so a future change cannot
+ * silently re-attribute rows:
+ * - `'agent-facing'` — the session id: the FINAL one after session
+ *   creation on a deferred start (the gate), the LIVE one otherwise
+ *   (steers into a running session);
+ * - `'sessionless'` — `undefined`: the submission never touches a session
+ *   (`!!` shells, bare `!`, local commands) and must stay out of the
+ *   `Current session` scope.
+ */
+export function historySessionIdFor(
+  kind: 'agent-facing' | 'sessionless',
+  sessionId: string | undefined,
+): string | undefined {
+  return kind === 'agent-facing' ? sessionId : undefined
+}
