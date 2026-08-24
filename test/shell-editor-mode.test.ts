@@ -13,7 +13,7 @@ import test from 'node:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A throwaway workspace (completion fixtures live under the cwd). */
@@ -23,19 +23,38 @@ function fixtureWorkspace(): string {
 
 function startApp(
   cwd: string,
-  options: { onSubmit?: (text: string) => void; commands?: { name: string; description: string }[] } = {},
-): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; cancels: number } {
+  options: {
+    onSubmit?: (text: string) => void
+    onQueueSubmit?: (text: string) => void
+    onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string }) => void
+    commands?: { name: string; description: string }[]
+  } = {},
+): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; queued: string[]; cancels: number } {
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
+  const queued: string[] = []
   let cancels = 0
   const app = new TuiApp(vt, {
     onSubmit: (text) => { submitted.push(text); options.onSubmit?.(text) },
+    onQueueSubmit: (text) => { queued.push(text); options.onQueueSubmit?.(text) },
+    onSubagentSubmit: options.onSubagentSubmit,
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   })
   app.setCommandCompletions(options.commands ?? [], cwd, null)
   app.start()
-  return { vt, app, submitted, get cancels() { return cancels } }
+  return { vt, app, submitted, queued, get cancels() { return cancels } }
+}
+
+/** A continuable subagent viewer target (the editor stays live). */
+function continuableViewer(): SubagentViewerTarget {
+  return {
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    label: 'research',
+    mode: 'continuable',
+    activity: 'inactive',
+  }
 }
 
 /** Poll the viewport until the dropdown row appears (asserts on failure). */
@@ -99,7 +118,8 @@ test('Backspace on an empty shell body steps the mode back: !! -> ! -> prompt', 
 })
 
 test('Esc on an empty shell body returns directly to the prompt (no cancel)', async () => {
-  const { vt, app, cancels } = startApp(fixtureWorkspace())
+  const surface = startApp(fixtureWorkspace())
+  const { vt, app } = surface
   await vt.waitForRender()
   vt.sendInput('!')
   await vt.waitForRender()
@@ -107,7 +127,7 @@ test('Esc on an empty shell body returns directly to the prompt (no cancel)', as
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'prompt')
   assert.equal(app.seatTextForTest(), '')
-  assert.equal(cancels, 0, 'exiting the shell mode must not fire the host cancel')
+  assert.equal(surface.cancels, 0, 'exiting the shell mode must not fire the host cancel')
   // Same from shell-local.
   vt.sendInput('!')
   vt.sendInput('!')
@@ -115,7 +135,7 @@ test('Esc on an empty shell body returns directly to the prompt (no cancel)', as
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'prompt')
-  assert.equal(cancels, 0)
+  assert.equal(surface.cancels, 0)
   app.stop()
 })
 
@@ -419,7 +439,8 @@ test('no duplicate prefix is ever rendered', async () => {
 // ── Esc / autocomplete priority (plan §4.4, §12.10) ───────────────────────
 
 test('Esc closes the autocomplete menu first and keeps the shell mode', async () => {
-  const { vt, app, cancels } = startApp(fixtureWorkspace())
+  const surface = startApp(fixtureWorkspace())
+  const { vt, app } = surface
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('gi')
@@ -430,6 +451,62 @@ test('Esc closes the autocomplete menu first and keeps the shell mode', async ()
   await waitForNoDropdownRow(vt, 'git', 'dropdown after Esc')
   assert.equal(app.inputModeForTest(), 'shell-context', 'Esc must not exit the shell mode while the menu was open')
   assert.equal(app.seatTextForTest(), 'gi', 'Esc must not alter the body')
-  assert.equal(cancels, 0, 'closing the dropdown must not fire the host cancel')
+  assert.equal(surface.cancels, 0, 'closing the dropdown must not fire the host cancel')
+  app.stop()
+})
+
+// ── review round 1 regressions ────────────────────────────────────────────
+
+test('a busy Esc keeps its Host-owned cancel priority over the shell-mode exit', async () => {
+  const surface = startApp(fixtureWorkspace())
+  const { vt, app } = surface
+  await vt.waitForRender()
+  vt.sendInput('!')
+  await vt.waitForRender()
+  app.setBusy(true)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(surface.cancels, 1, 'a busy Esc must cancel the running activity')
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the busy cancel must not exit the shell mode')
+  app.setBusy(false)
+  app.stop()
+})
+
+test('a bare ! reaches the queue protocol via Ctrl+Enter', async () => {
+  const { vt, app, queued } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter: queue submit
+  assert.deepEqual(queued, ['!'], 'a bare ! shell mode must queue its wire form')
+  assert.equal(app.inputModeForTest(), 'prompt', 'mode resets after the queue submit')
+  app.stop()
+})
+
+test('a bare ! reaches the submit protocol via submitDraft', async () => {
+  const { vt, app, submitted } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  await vt.waitForRender()
+  app.submitDraft(false)
+  assert.deepEqual(submitted, ['!'], 'a bare ! shell mode must submit its wire form')
+  assert.equal(app.inputModeForTest(), 'prompt')
+  app.stop()
+})
+
+test('a bare ! reaches the child via the subagent submit path', async () => {
+  const childSubmits: { parentSessionId: string; childSessionId: string; text: string }[] = []
+  const { vt, app } = startApp(fixtureWorkspace(), {
+    onSubagentSubmit: (request) => { childSubmits.push(request) },
+  })
+  await vt.waitForRender()
+  app.setViewerMode(continuableViewer())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.equal(childSubmits.length, 1, 'a bare ! in the viewer must submit to the child')
+  assert.equal(childSubmits[0]!.text, '!', 'the child receives the serialized wire form')
+  assert.equal(app.inputModeForTest(), 'prompt', 'mode resets after the child submit')
   app.stop()
 })
