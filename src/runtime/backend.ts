@@ -14,6 +14,7 @@ import { CAPABILITIES, type CapabilitySet } from './capability.ts'
 import type { SubagentPort } from './subagent-port.ts'
 import type { SessionReader } from './session-reader-port.ts'
 import type { SessionWriter } from './session-writer-port.ts'
+import type { SessionLifecycle } from './session-lifecycle-port.ts'
 
 /** The transport backends the TUI can run on. `direct` is the only one
  * today; the migration adds opt-in backends milestone by milestone. */
@@ -30,6 +31,8 @@ export interface Backend {
   readonly sessionReader: SessionReader
   /** The session WRITE domain port (M1.4). */
   readonly sessionWriter: SessionWriter
+  /** The session LIFECYCLE domain port (M1.5). */
+  readonly sessionLifecycle: SessionLifecycle
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -39,6 +42,7 @@ export function createDirectBackend(
   subagent: SubagentPort,
   sessionReader: SessionReader,
   sessionWriter: SessionWriter,
+  sessionLifecycle: SessionLifecycle,
 ): Backend {
   return {
     kind: 'direct',
@@ -46,5 +50,6 @@ export function createDirectBackend(
     subagent,
     sessionReader,
     sessionWriter,
+    sessionLifecycle,
   }
 }

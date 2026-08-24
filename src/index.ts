@@ -119,8 +119,10 @@ import { createDirectBackend } from './runtime/backend.ts'
 import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
 import { DirectSessionReader } from './runtime/direct/session-direct.ts'
 import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
+import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
+import type { CreateSessionOptions, ResumeSessionOptions } from './runtime/session-lifecycle-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -1312,6 +1314,7 @@ export function apply(ctx: Context, config: Config): void {
     new DirectSubagentPort(ctx),
     new DirectSessionReader(ctx),
     new DirectSessionWriter(ctx),
+    new DirectSessionLifecycle(ctx),
   )
   // Process diagnostics: stderr + a log file under $DSH_HOME/logs. The cordis
   // logger has no exporter in this process, so it is NOT the troubleshooting
@@ -1604,7 +1607,7 @@ export function apply(ctx: Context, config: Config): void {
         // clear the uncertainty — the session is PINNED immediately
         // (fail-closed; no publication-phase inference, no second fresh
         // fallback).
-        handle = await agents.resume({
+        handle = await backend.sessionLifecycle.resume({
           resumeSessionId: SessionId(sessionId),
           agentOptions,
           setup: composition.setup,
@@ -2076,7 +2079,7 @@ export function apply(ctx: Context, config: Config): void {
           // have left a hidden lifecycle, so the target is PINNED
           // immediately (fail-closed; the session stays locked for this
           // process's lifetime).
-          create: () => agents.resume(resumeOptions),
+          create: () => backend.sessionLifecycle.resume(resumeOptions),
         })
         if (!result.ok) {
           // The resume failed: the target is pinned (or refused before
@@ -4890,7 +4893,7 @@ export function apply(ctx: Context, config: Config): void {
           // uncertainty).
           leaseManager.markTouched(String(sessionId))
           try {
-            return await agents.create({
+            return await backend.sessionLifecycle.create({
               sessionId,
               meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
               agentOptions,
@@ -5085,7 +5088,10 @@ export function apply(ctx: Context, config: Config): void {
       const commitHost: RewindCommitHost = {
         sessionCwd: () => sessionCwd(),
         compose,
-        agents: agents as unknown as RewindCommitHost['agents'],
+        agents: {
+          create: (options: CreateSessionOptions) => backend.sessionLifecycle.create(options),
+          resume: (options: ResumeSessionOptions) => backend.sessionLifecycle.resume(options),
+        } as unknown as RewindCommitHost['agents'],
         liveIdentity: () => ({ sessionId: liveAgent?.session.id, generation: sessionGeneration }),
         // The unified transaction: the old session is flushed BEFORE the
         // child is created (a stale rewind is detected before anything is

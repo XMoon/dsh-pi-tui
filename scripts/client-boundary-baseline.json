@@ -51,11 +51,19 @@
   "sessionPersistence",
   "sessionQuery"
  ],
+ "runtime/direct/session-lifecycle-direct.ts": [
+  "agents",
+  "import:dsh-agent"
+ ],
  "runtime/direct/session-writer-direct.ts": [
   "sessionTitle"
  ],
  "runtime/direct/subagent-direct.ts": [
   "subagents"
+ ],
+ "runtime/session-lifecycle-port.ts": [
+  "import:dsh-agent",
+  "import:dsh-session"
  ],
  "session-fork.ts": [
   "import:dsh-agent",
