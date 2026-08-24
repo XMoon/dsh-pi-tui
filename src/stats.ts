@@ -125,10 +125,23 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   const perStep = new Map<string, StepTiming>()
   const throughput: Throughput = { outputMs: [], decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
   const usage = new StepUsageAccumulator()
+  const completedTurns = new Set<number>()
   let lastTurn: number | undefined
 
   for (const event of events) {
+    // The same lifecycle policy as the Focus fold: after turn/end a late
+    // step/usage/message event of that turn is a replay artifact and is
+    // ignored, so the footer and the Focus per-turn totals can never
+    // diverge (review finding).
+    if (event.type !== 'turn/end' && event.type !== 'request/context'
+      && completedTurns.has((event.data as { turn?: unknown }).turn as number)) {
+      continue
+    }
     switch (event.type) {
+      case 'turn/end': {
+        completedTurns.add(event.data.turn)
+        break
+      }
       case 'step/start':
         perStep.set(stepKey(event.data.turn, event.data.step), { start: event.time })
         usage.onStepStart(event.data.turn, event.data.step)
@@ -251,6 +264,10 @@ export class StatsFolder {
   private readonly throughput: Throughput = { outputMs: [], decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
   /** The shared per-step usage accounting (same class as the Focus fold). */
   private readonly usage = new StepUsageAccumulator()
+  /** Turns finalized by turn/end: late events of theirs are replay
+   * artifacts and are ignored (the same lifecycle policy as the Focus
+   * fold — the footer and the Focus per-turn totals never diverge). */
+  private readonly completedTurns = new Set<number>()
   private lastTurn: number | undefined
 
   /**
@@ -278,7 +295,15 @@ export class StatsFolder {
   }
 
   private applyEvent(event: SessionEvent): void {
+    if (event.type !== 'turn/end' && event.type !== 'request/context'
+      && this.completedTurns.has((event.data as { turn?: unknown }).turn as number)) {
+      return
+    }
     switch (event.type) {
+      case 'turn/end': {
+        this.completedTurns.add(event.data.turn)
+        break
+      }
       case 'step/start':
         this.perStep.set(stepKey(event.data.turn, event.data.step), { start: event.time })
         this.usage.onStepStart(event.data.turn, event.data.step)

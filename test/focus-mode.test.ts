@@ -636,6 +636,29 @@ test('a late message for an older step never regresses the final-answer dedup', 
   assert.equal(activity.message?.text, '第一步权威')
 })
 
+test('a replayed turn/start never resurrects a finalized turn', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '最终' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
+    // A replayed turn/start (replay artifact).
+    eventAt('turn/start', { turn: 0 }, 1004, 4),
+    // A late message that would mutate if the turn were resurrected.
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: '复活' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.completed, true, 'the replayed start must not resurrect the turn')
+  assert.equal(activity.message, undefined, 'the late message must not mutate the settled card')
+})
+
 test('a late usage chunk after turn/end never adds a token segment retroactively', () => {
   const folder = new TranscriptFolder()
   folder.apply([

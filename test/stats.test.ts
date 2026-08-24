@@ -10,6 +10,7 @@ import { MessageId, type CallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats, formatStats, StatsFolder } from '../src/stats.ts'
 import { StepUsageAccumulator } from '../src/token-usage.ts'
+import { TranscriptFolder } from '../src/transcript.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -252,6 +253,24 @@ test('tok/s samples only steps carrying both a decode window and usage', () => {
   // (6100→7000 window above proves it: last delta was at 6200).
 })
 
+test('late usage after turn/end is ignored by BOTH the stats fold and the Focus fold', () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 2, t + 2),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 3),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 4),
+    // A late usage chunk (replay artifact): both folds must ignore it.
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 0 } } }, 5, t + 5),
+  ]
+  const stats = computeStats(events)
+  const folder = new TranscriptFolder()
+  folder.apply(events)
+  assert.equal(stats.inputTokens, 100, 'the footer must ignore the late usage chunk')
+  assert.equal(folder.turnActivity(0)!.totalTokens, 100, 'the Focus per-turn total must agree with the footer')
+})
+
 test('a duplicate step/start never leaks the open step pending usage', () => {
   const acc = new StepUsageAccumulator()
   acc.onStepStart(0, 0)
@@ -272,6 +291,20 @@ test('a late fact for an OLDER turn is ignored after the turn advanced (no doubl
   acc.onAssistantMessage(0, 0, { inputTokens: 130, outputTokens: 0 })
   assert.equal(acc.sessionTotals().inputTokens, 100, 'the stale older-turn facts must be ignored')
   assert.equal(acc.turnUsageWithPending(0)?.inputTokens, 100, 'turn 0\'s committed total survives untouched')
+})
+
+test('advancing turns finalizes older open steps and drops their pending', () => {
+  const acc = new StepUsageAccumulator()
+  acc.onStepStart(0, 0)
+  acc.onUsageChunk(0, 0, { inputTokens: 100, outputTokens: 0 })
+  // Turn 1 starts while turn 0's step is still open (fragmented log).
+  acc.onStepStart(1, 0)
+  const perStep = (acc as unknown as { perStep: Map<string, unknown> }).perStep
+  const turnPending = (acc as unknown as { turnPending: Map<number, unknown> }).turnPending
+  assert.equal(perStep.size, 1, 'only turn 1\'s open step remains')
+  assert.equal(turnPending.has(0), false, 'turn 0\'s pending is dropped')
+  assert.equal(acc.turnUsageWithPending(0)?.inputTokens, 100, 'turn 0\'s usage is finalized into its committed totals')
+  assert.equal(acc.sessionTotals().inputTokens, 100, 'the session total keeps the finalized usage')
 })
 
 test('the accumulator drops settled records of older turns (bounded lifecycle)', () => {

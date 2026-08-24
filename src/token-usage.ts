@@ -58,6 +58,12 @@ function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
 }
 
+/** The turn number encoded in a step key. */
+function turnOfKey(key: string): number {
+  const slash = key.indexOf('/')
+  return slash === -1 ? -1 : Number(key.slice(0, slash))
+}
+
 /**
  * Per-step usage accounting shared by the session stats fold and the Focus
  * per-turn token projection. Feed it the same events in the same order and
@@ -104,17 +110,29 @@ export class StepUsageAccumulator {
    * step beyond that (corrupt log) commits as a new fact. */
   private currentTurn = -1
 
-  /** Track the turn boundary: drop older turns' settled records when the
-   * turn advances, and remember the current turn so a LATE fact for an
-   * older turn (corrupt log) is ignored — never re-counted (review
-   * finding). */
+  /** Track the turn boundary: when the turn advances, drop the settled
+   * records of older turns, FINALIZE their still-open steps (commit the
+   * pending usage — the facts were real) and drop their pending totals,
+   * so no open-step state leaks across turn boundaries (review finding).
+   * The current turn is remembered so a LATE fact for an older turn
+   * (corrupt log) is ignored — never re-counted. */
   private noteTurn(turn: number): void {
     if (turn <= this.currentTurn) return
-    if (this.currentTurn >= 0 && this.settledByStep.size > 0) {
+    if (this.currentTurn >= 0) {
       for (const key of this.settledByStep.keys()) {
-        const slash = key.indexOf('/')
-        const keyTurn = slash === -1 ? -1 : Number(key.slice(0, slash))
-        if (keyTurn < turn) this.settledByStep.delete(key)
+        if (turnOfKey(key) < turn) this.settledByStep.delete(key)
+      }
+      for (const [key, entry] of this.perStep) {
+        if (turnOfKey(key) < turn) {
+          if (entry.usage !== undefined) {
+            addTotals(this.turnTotalFor(turnOfKey(key)), entry.usage)
+            addTotals(this.session, entry.usage)
+          }
+          this.perStep.delete(key)
+        }
+      }
+      for (const pendingTurn of this.turnPending.keys()) {
+        if (pendingTurn < turn) this.turnPending.delete(pendingTurn)
       }
     }
     this.currentTurn = turn

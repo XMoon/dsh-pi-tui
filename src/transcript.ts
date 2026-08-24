@@ -935,8 +935,11 @@ export class TranscriptFolder {
       case 'turn/start': {
         this.currentTurn = event.data.turn
         // Focus aggregation: turn timing comes from `SessionEvent.time`
-        // (plan §10.1) — never a second clock.
+        // (plan §10.1) — never a second clock. Idempotent: a replayed
+        // turn/start for an already-finalized (or already-started) turn
+        // must not resurrect it (review finding).
         const activity = this.activityFor(event.data.turn)
+        if (activity.completed || activity.startedAt !== undefined) break
         activity.startedAt = event.time
         activity.completed = false
         activity.reason = undefined
