@@ -366,6 +366,44 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
   assert.equal(activity.tool?.status, 'ok')
 })
 
+test('an orphan tool/result attributes to its OWN turn, never the stale current turn', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
+    // A result for an UNKNOWN call, from turn 2 (replay fragment): the
+    // orphan card must carry turn 2, and turn 1's slot must stay running.
+    eventAt('tool/result', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('r'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('unknown'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('unknown') },
+      },
+    }, 1002, 2),
+  ])
+  const activity = folder.turnActivity(1)!
+  assert.equal(activity.tool?.status, 'running', 'an orphan result must not settle another turn\'s slot')
+  const cards = folder.messages().filter(m => m.kind === 'tool')
+  assert.ok(cards.some(c => c.turn === 2 && c.name === 'tool'), 'the orphan result card must carry its own turn')
+})
+
+test('step/end commits the open step usage and clears the pending state', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
+    eventAt('step/end', { turn: 0, step: 0 }, 1003, 3),
+    // A LATER usage chunk for the CLOSED step is a settled fact: it must
+    // commit (never be swallowed by the open-step first-chunk-wins rule).
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 50, outputTokens: 0 } } }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 150, 'the closed step commits once; the later chunk is a new fact')
+})
+
 test('a turn-start-less tool/call attributes to its OWN turn (replay fragment)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
