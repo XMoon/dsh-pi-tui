@@ -19,10 +19,13 @@ function tempHome(): string {
   return mkdtempSync(join(tmpdir(), 'pi-tui-ctrl-r-'))
 }
 
-function seedHistory(home: string, cwd: string, rows: Array<{ content: string; ts: number }>): void {
+function seedHistory(home: string, cwd: string, rows: Array<{ content: string; ts: number; sessionId?: string }>): void {
   const file = historyFilePath(home, cwd)
   mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true })
-  writeFileSync(file, rows.map(row => JSON.stringify({ v: 2, content: row.content, cwd, ts: row.ts })).join('\n') + '\n', { mode: 0o600 })
+  writeFileSync(file, rows.map(row => JSON.stringify({
+    v: 2, content: row.content, cwd, ts: row.ts,
+    ...(row.sessionId !== undefined ? { sessionId: row.sessionId } : {}),
+  })).join('\n') + '\n', { mode: 0o600 })
 }
 
 async function makeApp(home: string, cwd = '/work/a') {
@@ -46,9 +49,11 @@ async function makeApp(home: string, cwd = '/work/a') {
   return { vt, app, submitted }
 }
 
-/** Whether the panel frame is currently painted (the "History" header). */
+/** Whether the panel frame is currently painted (the "History" header).
+ * The scope tabs are responsive (short labels on narrow terminals), so the
+ * probe matches the title line by its stable parts only. */
 function panelVisible(viewport: string[]): boolean {
-  return viewport.some(line => line.includes('History') && line.includes('Current directory'))
+  return viewport.some(line => line.includes('History') && (line.includes('Directory') || line.includes('Session')))
 }
 
 /** Poll until a predicate holds (bounded): deterministic settling for
@@ -170,6 +175,51 @@ test('Ctrl+R resolves the Current directory at OPEN time (a session switch moves
     await waitFor(() => vt.getViewport().some(line => line.includes('prompt from b')))
     assert.ok(!vt.getViewport().some(line => line.includes('prompt from a')),
       'the current-directory scope must follow the LIVE cwd, not the construction snapshot')
+    app.stop()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('UI4: Ctrl+R captures the session identity at OPEN time (a session switch moves the scope)', async () => {
+  // The session scope's identity getter must be read at open time, never
+  // captured at construction: a switch between opens makes the next
+  // Ctrl+R search the NEW session.
+  const home = tempHome()
+  try {
+    const { VirtualTerminal } = await import('./virtual-terminal.ts')
+    const { TuiApp } = await import('../src/tui-app.ts')
+    seedHistory(home, '/work/a', [
+      { content: 'prompt from A', ts: 1, sessionId: 'ses_a' },
+      { content: 'prompt from B', ts: 2, sessionId: 'ses_b' },
+    ])
+    const vt = new VirtualTerminal(80, 24)
+    let liveSessionId: string | undefined = 'ses_a'
+    const app = new TuiApp(vt, {
+      onSubmit: () => {},
+      onExit: () => {},
+    }, {
+      historySearchSource: new FileHistorySearchSource({ dshHome: home }),
+      historySearchCwd: () => '/work/a',
+      // The runner wires the LIVE session identity getter.
+      historySearchSessionId: () => liveSessionId,
+    })
+    app.start()
+    await vt.waitForRender()
+    vt.sendInput('\x12') // Ctrl+R
+    await vt.waitForRender()
+    await waitFor(() => vt.getViewport().some(line => line.includes('prompt from A')))
+    assert.ok(!vt.getViewport().some(line => line.includes('prompt from B')),
+      'the session scope must filter by the LIVE session identity')
+    vt.sendInput('\x1b') // Esc closes the panel
+    await vt.waitForRender()
+    // "Session switch": the live identity moves before the next Ctrl+R.
+    liveSessionId = 'ses_b'
+    vt.sendInput('\x12')
+    await vt.waitForRender()
+    await waitFor(() => vt.getViewport().some(line => line.includes('prompt from B')))
+    assert.ok(!vt.getViewport().some(line => line.includes('prompt from A')),
+      'the reopened panel must search the NEW session, not the construction snapshot')
     app.stop()
   } finally {
     rmSync(home, { recursive: true, force: true })

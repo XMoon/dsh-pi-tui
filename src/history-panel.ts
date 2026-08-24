@@ -4,7 +4,8 @@
  *
  * Anatomy (one `render(width)` call decides the layout — plan §20):
  * - title line (` Input History `) + scope tabs
- *   (`[ Current directory ]` / ` All directories `);
+ *   (`[ Current session ]` / `[ Current directory ]` / ` All directories `;
+ *   the session tab exists only when a live session identity was injected);
  * - search row: the panel's OWN query `Input` (plan §19 — no SelectList
  *   internal search, so the query state is never duplicated);
  * - list + detail: wide (width >= 100) side-by-side (55/45 split);
@@ -17,7 +18,14 @@
  * is untouched — the panel never previews into it); Enter = accept (the
  * selected content goes to the editor through the app's `setEditorText`,
  * the panel closes, the editor regains focus — NEVER a submit, plan §33);
- * Tab = scope toggle with the query preserved; Ctrl+C = cancel (plan §35).
+ * Tab = scope cycle with the query preserved; Ctrl+C = cancel (plan §35).
+ *
+ * Scopes: `session` (default when a session identity was injected — only
+ * the live session's rows), `current` (the live cwd's file, every trusted
+ * row), `all` (every history file with the cwd-proof rules). Tab cycles
+ * session → current → all → session; without a session identity the panel
+ * starts at `current` and cycles current ⇄ all (a session tab with no
+ * identity would always be empty).
  *
  * Async safety (plan §14/§15): every refresh aborts the previous search,
  * bumps a generation counter, and only a result whose generation is STILL
@@ -52,6 +60,13 @@ export interface HistoryPanelOptions {
   source: HistorySearchSource
   /** The working directory for the `current` scope. */
   cwd: string
+  /**
+   * The live session identity, captured ONCE at open time. When defined,
+   * the panel defaults to the `session` scope and the Tab cycle includes
+   * it; when undefined (no session yet on a deferred start) the panel
+   * defaults to `current` and the session tab is hidden.
+   */
+  sessionId?: string
   /** Accept handler: receives the selected record's content. */
   onAccept: (content: string) => void
   /** Cancel handler (Esc/Ctrl+C). */
@@ -78,12 +93,6 @@ interface HistoryPanelState {
   loading: boolean
   error?: string
   generation: number
-}
-
-/** One list `SelectItem` for the history rows. */
-function historyToSelectItem(result: HistorySearchResult, scope: HistoryScope): { value: string; label: string } {
-  const prefix = scope === 'all' && result.cwd !== null ? `${shortCwd(result.cwd)}  ` : ''
-  return { value: result.id, label: `${prefix}${compactRow(result.content)}` }
 }
 
 /** The shortest distinctive cwd suffix (parent + name). */
@@ -127,17 +136,14 @@ export function formatRelativeAge(ts: number, now: number = Date.now()): string 
  * ↑/↓/PgUp/PgDn (list) and the query input.
  */
 export class HistoryPanel implements Component, Focusable {
-  private readonly state: HistoryPanelState = {
-    scope: 'current',
-    query: '',
-    results: [],
-    selectedIndex: 0,
-    loading: false,
-    generation: 0,
-  }
+  private readonly state: HistoryPanelState
   private readonly input: Input
   private readonly source: HistorySearchSource
   private readonly cwd: string
+  /** The live session identity captured at open time (undefined = no
+   * session yet — the session tab is hidden and the default scope is
+   * `current`). */
+  private readonly sessionId: string | undefined
   private readonly onAccept: (content: string) => void
   private readonly onClose: () => void
   private readonly onResultsChanged: (() => void) | undefined
@@ -150,6 +156,7 @@ export class HistoryPanel implements Component, Focusable {
   constructor(options: HistoryPanelOptions) {
     this.source = options.source
     this.cwd = options.cwd
+    this.sessionId = options.sessionId
     this.onAccept = options.onAccept
     this.onClose = options.onClose
     this.onResultsChanged = options.onResultsChanged
@@ -160,6 +167,18 @@ export class HistoryPanel implements Component, Focusable {
     // output past the overlay and clip the footer.
     this.maxRows = options.maxRows ?? 24
     this.input = new Input()
+    // The default scope: `session` when a live session identity exists
+    // (the agent-session model — the current session's inputs are the
+    // most relevant), `current` otherwise (a deferred start has no
+    // session yet; a session tab would always be empty).
+    this.state = {
+      scope: options.sessionId !== undefined ? 'session' : 'current',
+      query: '',
+      results: [],
+      selectedIndex: 0,
+      loading: false,
+      generation: 0,
+    }
     this.state.query = options.initialQuery ?? ''
     this.input.setValue(this.state.query)
   }
@@ -238,7 +257,14 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   private toggleScope(): void {
-    this.state.scope = this.state.scope === 'current' ? 'all' : 'current'
+    // The Tab cycle: session → current → all → session (the session tab
+    // exists only when a live session identity was injected; without one
+    // the cycle is current ⇄ all). The query SURVIVES (plan §31).
+    this.state.scope = this.sessionId !== undefined
+      ? this.state.scope === 'session' ? 'current'
+        : this.state.scope === 'current' ? 'all'
+          : 'session'
+      : this.state.scope === 'current' ? 'all' : 'current'
     this.state.selectedIndex = 0
     this.scheduleSearch()
   }
@@ -299,6 +325,7 @@ export class HistoryPanel implements Component, Focusable {
     const request = {
       scope: this.state.scope,
       cwd: this.cwd,
+      sessionId: this.sessionId,
       query: this.state.query,
       limit: HISTORY_SEARCH_RESULT_LIMIT,
       signal: controller.signal,
@@ -355,14 +382,33 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   private renderTitle(width: number): string {
-    const current = this.state.scope === 'current'
-    const currentTab = current ? '[ Current directory ]' : '  Current directory  '
-    const allTab = !current ? '[ All directories ]' : '  All directories  '
     const title = ` History Search `
     const titleWidth = visibleWidth(title)
-    const tabs = ` ${currentTab}   ${allTab} `
+    const tabs = this.renderTabs(width)
     const gap = ' '.repeat(Math.max(0, width - titleWidth - visibleWidth(tabs)))
     return `${title}${gap}${tabs}`.slice(0, width)
+  }
+
+  /**
+   * The scope tabs, responsive: wide terminals get the full labels
+   * (`[ Current session ]   Current directory   All directories`), narrow
+   * ones the short forms (`[ Session ]   Directory   All`) — three full
+   * labels must never be forced onto one line. The final `.slice(0,
+   * width)` in renderTitle truncates as the last resort. The session tab
+   * exists only when a live session identity was injected.
+   */
+  private renderTabs(width: number): string {
+    const wide = width >= 85
+    const sessionLabel = this.sessionId !== undefined ? (wide ? 'Current session' : 'Session') : null
+    const currentLabel = wide ? 'Current directory' : 'Directory'
+    const allLabel = wide ? 'All directories' : 'All'
+    const parts: string[] = []
+    if (sessionLabel !== null) {
+      parts.push(this.state.scope === 'session' ? `[ ${sessionLabel} ]` : `  ${sessionLabel}  `)
+    }
+    parts.push(this.state.scope === 'current' ? `[ ${currentLabel} ]` : `  ${currentLabel}  `)
+    parts.push(this.state.scope === 'all' ? `[ ${allLabel} ]` : `  ${allLabel}  `)
+    return ` ${parts.join('   ')} `
   }
 
   private renderSearchRow(width: number): string {

@@ -78,23 +78,45 @@ dedicated data file keyed by the working directory. We adopt that shape.
 `Ctrl+R` opens the input-history search panel (host-reserved key; plugins
 can never claim it). It is "find and EDIT", never "find and run":
 
-- **Scope**: `Tab` toggles `Current directory` (the default) ⇄
-  `All directories`; the query survives the switch.
+- **Scopes**: `Tab` cycles the scope; the query survives the switch.
+  - `Current session` (the default when a live session exists) — only the
+    CURRENT session's inputs: v2 rows whose `sessionId` matches the live
+    session id. v1 rows and v2 rows without a sessionId are excluded —
+    never guessed (legacy data has no reliable session proof).
+  - `Current directory` — the live cwd's file, every trusted row.
+  - `All directories` — every history file with the cwd-proof rules.
+  - Without a session identity (a deferred start before the first prompt)
+    the panel defaults to `Current directory` and the session tab is
+    hidden — a session tab with no identity would always be empty.
 - **Filtering**: case-insensitive substring over the content; an empty
   query browses the most recent history.
 - **Details**: the selected row's FULL multi-line content, plus its
   directory, timestamp and session — legacy rows honestly show
-  `Unknown (legacy history)` (never a fabricated time).
+  `Unknown (legacy history)` (never a fabricated time). The list shows
+  the prompt only; the directory prefix appears in `All directories` only.
 - **Enter** puts the selected text back into the editor (via
   `setEditorText`) and closes the panel — it never submits. **Esc** closes
   with the draft untouched (the panel never previews into the editor).
-- **Storage**: v2 rows carry `cwd` + `ts`; v1 rows inherit the cwd from a
-  v2 row that validates the file hash (Rule 1) or a known-cwd identity map
-  (Rule 2). Unresolved legacy files are excluded from `All directories`
-  (Rule 3 — never a guessed directory).
+- **Storage**: v2 rows carry `cwd` + `ts` + `sessionId`; v1 rows inherit
+  the cwd from a v2 row that validates the file hash (Rule 1) or a
+  known-cwd identity map (Rule 2). Unresolved legacy files are excluded
+  from `All directories` (Rule 3 — never a guessed directory).
 - **Search source**: `src/history-search.ts` (replaceable; a SQLite/FTS
   backend can swap in without touching the panel) and
   `src/history-panel.ts` (the overlay).
+
+### The session-scope persist gate (deferred start)
+
+The `session` scope is only as good as the `sessionId` on each row. The
+runner therefore writes an agent-facing submission's history row AFTER the
+session exists, with the FINAL session id — the first prompt of a deferred
+start (`dsh --profile …` without `--session`) creates the session, and a
+row written before creation would carry no sessionId and vanish from
+`Current session`. Sessionless submissions (`/help`, `/settings`,
+`/sessions`, `!!` shells) persist with `sessionId: undefined` and stay
+visible in `Current directory` / `All directories`. The ordering contract
+lives in `src/history-persist.ts` (`persistAfterSession`), pinned by
+`test/history-persist.test.ts` (the merge gate).
 
 ### Bounded recent-first scanning (the perf contract)
 
@@ -192,7 +214,12 @@ unwritten entries.
   tabs, list, details, responsive layout). Pinned by
   `test/history-panel.test.ts` and the `test/ctrl-r.test.ts` integration
   suite.
+- `src/history-persist.ts` — the session-scope persist gate: the pure
+  persist decision (`persistHistoryRecord`) and the deferred-start
+  ordering contract (`persistAfterSession`). Pinned by
+  `test/history-persist.test.ts`.
 - Runner wiring in `src/index.ts`: boot seed, per-session seed in
-  `initLiveSession`, append on submit in `dispatchUserInput` (v2 rows),
-  migration, and the injected `FileHistorySearchSource`.
+  `initLiveSession`, append on submit in `dispatchUserInput` (v2 rows,
+  after session creation for agent-facing submissions), migration, and the
+  injected `FileHistorySearchSource`.
 - `docs/README.md` — index.

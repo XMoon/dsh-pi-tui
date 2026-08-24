@@ -2,6 +2,14 @@
  * Ctrl+R history search — the replaceable search-source seam (plan §10).
  *
  * Scope semantics:
+ * - `'session'` — ONE file: `$DSH_HOME/user-history/<md5(cwd)>.jsonl`, like
+ *   `'current'`, but ONLY v2 rows whose `sessionId` equals `request.sessionId`
+ *   are eligible. v1 rows and v2 rows without (or with a different)
+ *   sessionId are EXCLUDED — never guessed: legacy data has no reliable
+ *   session proof. A matching row inherits `request.cwd` (the file is keyed
+ *   by that cwd — plan §6.1). With `request.sessionId === undefined` nothing
+ *   matches (defensive: the panel only defaults to this scope when a live
+ *   session identity exists).
  * - `'current'` — ONE file: `$DSH_HOME/user-history/<md5(cwd)>.jsonl`. Every
  *   row (v1 AND v2) is displayable: legacy rows inherit `request.cwd` (the
  *   file is keyed by that cwd, so the effective cwd is known — plan §6.1).
@@ -43,9 +51,9 @@
  * fabricated) and sort AFTER every timed row, then by file asc + newest row
  * first within the file (deterministic — plan §7/§12).
  *
- * Dedupe: current → by `content`; all → by `${cwd}\0${content}` (a prompt
- * in two directories stays two rows — plan §13). The NEWEST occurrence wins
- * (compareResults is the beats predicate, applied incrementally).
+ * Dedupe: session/current → by `content`; all → by `${cwd}\0${content}` (a
+ * prompt in two directories stays two rows — plan §13). The NEWEST occurrence
+ * wins (compareResults is the beats predicate, applied incrementally).
  *
  * Cancellation: the search observes the AbortSignal between files, per
  * batch and inside the reader; an abort returns an empty page. The panel
@@ -63,8 +71,8 @@ import { join } from 'node:path'
 import { historyFilePath, parseHistoryRecordLine, type ParsedHistoryRecord } from './history.ts'
 import { readJsonlReverseBatch, ReverseJsonlRevisionError, type ReverseJsonlCursor } from './history-reverse-reader.ts'
 
-/** The two scope categories (`/sessions` vocabulary). */
-export type HistoryScope = 'current' | 'all'
+/** The three scope categories (`/sessions` vocabulary). */
+export type HistoryScope = 'session' | 'current' | 'all'
 
 /** Search debounce (local filesystem — plan §15: 50–100ms). */
 export const HISTORY_SEARCH_DEBOUNCE_MS = 75
@@ -84,8 +92,12 @@ export const HISTORY_SEARCH_READ_CHUNK_BYTES = 64 * 1024
 /** One search invocation. */
 export interface HistorySearchRequest {
   scope: HistoryScope
-  /** The live working directory (the current-scope file key). */
+  /** The live working directory (the current/session-scope file key). */
   cwd: string
+  /** The session identity the `session` scope filters by (v2 rows whose
+   * `sessionId` matches). Ignored by the other scopes; `undefined` with
+   * the session scope matches nothing (defensive). */
+  sessionId?: string
   /** The filter; `''` matches every row (recent-history browse). */
   query: string
   /** Row cap. */
@@ -134,6 +146,10 @@ export interface HistorySearchContinuation {
    * continuation is a typed error, never silently reused). */
   readonly scope: HistoryScope
   readonly cwd: string
+  /** The session identity the continuation's `session` scope filters by
+   * (a session-A continuation reused under session B is a typed error —
+   * the dedupe state and scan position were built for session A). */
+  readonly sessionId?: string
   readonly query: string
   readonly limit: number
   /** The files not yet fully scanned, in scan order (the first one is the
@@ -193,7 +209,7 @@ export interface HistorySearchDebugStats {
  * the dedupe state and scan position would silently produce wrong results. */
 export class HistorySearchContinuationError extends Error {
   constructor() {
-    super('history search continuation does not match the request (scope/cwd/query/limit)')
+    super('history search continuation does not match the request (scope/cwd/sessionId/query/limit)')
     this.name = 'HistorySearchContinuationError'
   }
 }
@@ -265,9 +281,11 @@ export class FileHistorySearchSource implements HistorySearchSource {
     const scope = request.scope
     const files = continuation !== undefined
       ? [...continuation.files]
-      : scope === 'current'
-        // The current-scope file is known by path; its stat happens inside
-        // the reader (mtime/size are only used for all-scope ordering).
+      : scope === 'current' || scope === 'session'
+        // The current/session-scope file is known by path; its stat happens
+        // inside the reader (mtime/size are only used for all-scope
+        // ordering). The session scope NEVER scans other cwds — the file
+        // keyed by the live cwd holds every row of the live session.
         ? [{ path: historyFilePath(this.dshHome, request.cwd), mtimeMs: 0, size: 0 }]
         : await this.listAllFiles()
     const stats = this.stats
@@ -418,7 +436,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     const deduped: HistorySearchResult[] = []
     const combinedKeys = new Set<string>()
     for (const row of combined) {
-      const key = scope === 'current' ? row.content : `${row.cwd ?? ''}\0${row.content}`
+      const key = dedupeKey(scope, row)
       if (combinedKeys.has(key)) continue
       combinedKeys.add(key)
       deduped.push(row)
@@ -431,6 +449,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
       continuation: exhausted ? undefined : {
         scope: request.scope,
         cwd: request.cwd,
+        sessionId: request.sessionId,
         query: request.query,
         limit: request.limit,
         files: files.slice(fileIndex),
@@ -483,6 +502,12 @@ export class FileHistorySearchSource implements HistorySearchSource {
   /** Route ONE parsed row into the result state and return the (possibly
    * updated) file proof.
    *
+   * Session scope: ONLY v2 rows whose `sessionId` matches the request are
+   * eligible — v1 rows and v2 rows without (or with a different) sessionId
+   * are excluded, never guessed (legacy data has no reliable session
+   * proof). The file IS the current cwd's file, so a matching row inherits
+   * `request.cwd` exactly like the current scope.
+   *
    * A v2 row's cwd is trusted ONLY when it validates against the file it
    * lives in (`historyFilePath(home, cwd) === file` — plan §40: an invalid
    * v2 cwd/hash mismatch is never trusted; it could be a moved directory or
@@ -505,6 +530,13 @@ export class FileHistorySearchSource implements HistorySearchSource {
     map: Map<string, HistorySearchResult>,
     newKeys: Set<string>,
   ): string | null {
+    if (request.scope === 'session') {
+      if (request.sessionId === undefined) return fileProof
+      if (record.version !== 2 || record.sessionId !== request.sessionId) return fileProof
+      if (!matchesQuery(record.content, request.query)) return fileProof
+      this.mergeResult(map, newKeys, this.buildResult(file, record, request.cwd, byteStart), request.scope)
+      return fileProof
+    }
     if (record.version === 2 && record.cwd !== null && historyFilePath(this.dshHome, record.cwd) === file) {
       if (request.scope === 'all' && fileProof === null) {
         // The proof forms NOW: flush the pending rows with it.
@@ -558,7 +590,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     result: HistorySearchResult,
     scope: HistoryScope,
   ): void {
-    const key = scope === 'current' ? result.content : `${result.cwd ?? ''}\0${result.content}`
+    const key = dedupeKey(scope, result)
     const existing = map.get(key)
     if (existing === undefined) {
       map.set(key, result)
@@ -570,12 +602,13 @@ export class FileHistorySearchSource implements HistorySearchSource {
   }
 
   /** A continuation belongs to exactly one request context: reusing it
-   * with a different scope/cwd/query/limit would silently produce wrong
-   * results (the dedupe state and scan position were built for the old
-   * context). */
+   * with a different scope/cwd/sessionId/query/limit would silently produce
+   * wrong results (the dedupe state and scan position were built for the
+   * old context). */
   private validateContinuation(request: HistorySearchRequest, continuation: HistorySearchContinuation): void {
     if (continuation.scope !== request.scope
       || continuation.cwd !== request.cwd
+      || continuation.sessionId !== request.sessionId
       || continuation.query !== request.query
       || continuation.limit !== request.limit) {
       throw new HistorySearchContinuationError()
@@ -587,6 +620,13 @@ export class FileHistorySearchSource implements HistorySearchSource {
 function matchesQuery(content: string, query: string): boolean {
   if (query === '') return true
   return content.toLowerCase().includes(query.toLowerCase())
+}
+
+/** The dedupe key: the session/current scopes dedupe by content (one row
+ * per prompt — the newest wins); the all scope keys by (cwd, content) so a
+ * prompt in two directories stays two rows. */
+function dedupeKey(scope: HistoryScope, result: HistorySearchResult): string {
+  return scope === 'all' ? `${result.cwd ?? ''}\0${result.content}` : result.content
 }
 
 /** Newest-first by ts (legacy rows — ts NULL — sort after every timed row),

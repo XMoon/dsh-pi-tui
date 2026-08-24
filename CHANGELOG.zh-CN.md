@@ -256,6 +256,16 @@
 
 ### 变更
 
+- **Ctrl+R 默认改为当前会话，并新增第三档 scope。** `Tab` 现在循环
+  `Current session`(当前会话)→ `Current directory`(当前目录)→
+  `All directories`(全部目录)(查询词保留)。`Current session`——有
+  活跃会话时的新默认——只显示当前会话自己的输入(v2 行携带 session id,
+  legacy 行绝不猜测归属),所以 Ctrl+R 首先给出的是**本次对话**输入过
+  什么,而 `Current directory` 与 `All directories` 保留跨会话检索能力。
+  deferred start(尚无会话)时面板回退到 `Current directory` 并隐藏
+  会话 tab。session id 在面板打开时一次性捕获,因此切换会话后下一次
+  Ctrl+R 搜索的就是新会话。scope tab 是响应式的(宽终端完整标签,
+  窄终端短标签)。
 - **Ctrl+R 历史搜索改为有界、最近优先。** 不再每次按键都完整解析所有候选
   历史文件：搜索通过新的 reverse reader 从 JSONL 存储尾部倒序读取，消耗
   全局扫描预算（每次搜索在所有文件中最多 5000 条 physical lines，绝不是
