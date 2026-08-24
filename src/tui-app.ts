@@ -1898,13 +1898,17 @@ export class TuiApp {
         switch (action) {
           case 'submit': {
             const text = this.seatEditor().getText()
-            if (text.trim() === '') return false
+            // Emptiness is judged on the SERIALIZED wire form: a bare `!`
+            // / `!!` shell mode has an empty BODY but a non-empty wire
+            // form, and must reach the existing protocol like the literal
+            // prefix did before the mode feature.
+            if (this.serializeSeatDraft(text).trim() === '') return false
             this.submitDraft(false)
             return true
           }
           case 'queue-submit': {
             const text = this.seatEditor().getText()
-            if (text.trim() === '') return false
+            if (this.serializeSeatDraft(text).trim() === '') return false
             this.submitDraft(true)
             return true
           }
@@ -2433,8 +2437,12 @@ export class TuiApp {
       if (this.activeScreen.hasOverlayEntries) return undefined
       if (this.events.onQueueSubmit === undefined) return undefined
       const text = this.seatEditor().getText()
-      if (text.trim() === '') return undefined
       const serialized = this.serializeSeatDraft(text)
+      // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
+      // shell mode has an empty BODY but a non-empty wire form, and must
+      // reach the queue protocol like the literal prefix did before the
+      // mode feature.
+      if (serialized.trim() === '') return undefined
       this.rememberInput(serialized)
       this.clearNotify()
       this.seatEditor().setText('')
@@ -2470,22 +2478,25 @@ export class TuiApp {
       // The host may consume the first Esc (runner-owned modes like the
       // subagent viewer); otherwise it arms the double-Esc cancel.
       if (this.events.onSingleEscape?.() === true) return { consume: true }
+      // pi parity: a SINGLE Esc while the agent is busy stops the current
+      // activity (turn, tool run, compaction) — partial content stays on
+      // screen. Idle keeps the double-Esc cancel. The busy cancel is
+      // Host-owned and keeps its priority over the shell-mode exit below
+      // (a shell-mode Esc while busy stops the agent, exactly like any
+      // other Esc while busy).
+      if (this.busy) {
+        this.lastEscapeAt = undefined
+        this.events.onCancel?.()
+        return { consume: true }
+      }
       // Shell-mode exit: the host editor in a shell mode with an EMPTY
       // body owns Esc — it cancels the shell mode (the double-Esc cancel
       // must not fire while the user is composing a shell command). The
       // pass-through lets the focused editor handle the key, exactly like
       // the autocomplete branch above. Host-owned priorities (the viewer's
-      // onSingleEscape, overlays) keep their precedence.
+      // onSingleEscape, the busy cancel, overlays) keep their precedence.
       if (this.seatEditor().id === 'host' && this.editor.getInputMode() !== 'prompt' && this.seatEditor().getText() === '') {
         return undefined
-      }
-      // pi parity: a SINGLE Esc while the agent is busy stops the current
-      // activity (turn, tool run, compaction) — partial content stays on
-      // screen. Idle keeps the double-Esc cancel.
-      if (this.busy) {
-        this.lastEscapeAt = undefined
-        this.events.onCancel?.()
-        return { consume: true }
       }
       const now = Date.now()
       if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
@@ -2559,8 +2570,11 @@ export class TuiApp {
       // present the key keeps its editing meaning; overlays own it. (The
       // former Ctrl+J chord is gone: legacy terminals send Ctrl+J as LF,
       // which the editor treats as Enter — the key was unreliable, and ↓
-      // plus `/tasks` remain the two entries.)
-      if (this.tasksActive && !this.activeScreen.hasOverlayEntries && this.seatEditor().getText().trim() === '') {
+      // plus `/tasks` remain the two entries.) A shell-mode editor with an
+      // empty BODY is composing a command — ↓ keeps its editing meaning
+      // (a no-op on the empty line), never the browser.
+      if (this.tasksActive && !this.activeScreen.hasOverlayEntries
+        && this.seatEditor().getText().trim() === '' && this.editor.getInputMode() === 'prompt') {
         this.events.onOpenTasks?.()
         return { consume: true }
       }
@@ -4429,11 +4443,14 @@ export class TuiApp {
     if (target === undefined || target.mode !== 'continuable') return
     if (this.events.onSubagentSubmit === undefined) return
     const text = this.seatEditor().getText()
-    if (text.trim() === '') return
     // The shell-editor-mode boundary: the visible body is re-serialized
     // into the wire form before it leaves the app (a shell-mode draft
     // reaches the child exactly as the user would have typed it).
     const serialized = this.serializeSeatDraft(text)
+    // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
+    // shell mode has an empty BODY but a non-empty wire form, and must
+    // reach the child like the literal prefix did before the mode feature.
+    if (serialized.trim() === '') return
     this.clearNotify()
     // Issue #8: a successful submit is a fresh explicit action — the armed
     // exit chord (and its footer hint) must not survive into the next
@@ -4462,9 +4479,12 @@ export class TuiApp {
    * only input target). Esc/Ctrl+O/Enter are deliberately NOT listed —
    * they fall through to the host's exit/fold/submit paths. */
   private viewerParentLockedKey(data: string): boolean {
-    if (matchesKey(data, 'down') && this.tasksActive && this.seatEditor().getText().trim() === '') {
+    if (matchesKey(data, 'down') && this.tasksActive && this.seatEditor().getText().trim() === ''
+      && this.editor.getInputMode() === 'prompt') {
       // The empty-editor ↓ task-browser trigger must not open the
-      // PARENT's browser from inside the viewer.
+      // PARENT's browser from inside the viewer. A shell-mode editor with
+      // an empty body is composing a command — ↓ keeps its editing
+      // meaning, never the browser.
       return true
     }
     return matchesKey(data, 'ctrl+s')        // steer all (parent)
@@ -7321,12 +7341,16 @@ export class TuiApp {
     if (this.disposed) return
     const target = this.viewerMode
     const text = this.getDraft()
-    // An image-only draft is NOT empty: the placeholder expansion resolves
-    // it to real content blocks at submission (plan §11.1).
-    if (text.trim() === '' && this.events.isImageDraft?.() !== true) return
     // The shell-editor-mode boundary: the visible body is re-serialized
     // into the wire form (`!` / `!!` prefixes) before it leaves the app.
     const serialized = this.serializeSeatDraft(text)
+    // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
+    // shell mode has an empty BODY but a non-empty wire form, and must
+    // reach the existing protocol like the literal prefix did before the
+    // mode feature. An image-only draft is NOT empty either: the
+    // placeholder expansion resolves it to real content blocks at
+    // submission (plan §11.1).
+    if (serialized.trim() === '' && this.events.isImageDraft?.() !== true) return
     this.clearNotify()
     // Issue #8: a successful submit is a fresh explicit action — the armed
     // exit chord (and its footer hint) must not survive into the next
