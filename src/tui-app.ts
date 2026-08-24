@@ -376,6 +376,47 @@ class Spacer implements Component {
 }
 
 /**
+ * A paper-thin Component adapter over a picker's SelectList (review P2):
+ * the vendored SelectList only fires onSelectionChange for ↑↓/PageUp/
+ * PageDown — typing into the search box re-filters WITHOUT a selection
+ * change, so a long selected label would keep marqueeing mid-cycle inside
+ * the new filter instead of restarting from a fresh anchor. The adapter
+ * intercepts handleInput, detects a search-query change (the vendored
+ * getFilter() is the truth — a query edit is the ONLY input that moves
+ * it), and resets the marquee. Zero fork divergence: the SelectList
+ * itself is untouched, this wraps it on the consumer side.
+ */
+class MarqueeFilterAdapter implements Component {
+  private readonly list: SelectList
+  private readonly onFilterChange: () => void
+
+  constructor(list: SelectList, onFilterChange: () => void) {
+    this.list = list
+    this.onFilterChange = onFilterChange
+  }
+
+  invalidate(): void {
+    this.list.invalidate()
+  }
+
+  handleInput(data: string): void {
+    const before = this.list.getFilter()
+    this.list.handleInput(data)
+    // A search-query edit re-filters the list: the selected row (whatever
+    // it is now) must restart its marquee cycle from a fresh anchor. Keys
+    // that do not move the query (arrows, Enter, Esc, Tab) leave it
+    // untouched — their selection moves are handled by onSelectionChange.
+    if (this.list.getFilter() !== before) {
+      this.onFilterChange()
+    }
+  }
+
+  render(width: number): string[] {
+    return this.list.render(width)
+  }
+}
+
+/**
  * Bullet + continuation-indent wrapper that keeps its child LIVE, so a
  * terminal resize re-renders the child at the new width instead of
  * re-wrapping a frozen render (the 5a76526 regression: assistant/user
@@ -1576,6 +1617,12 @@ export class TuiApp {
     height: number
     /** The row span (block-relative) of every attachment's click region. */
     attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+    /** Set ONLY on process rows revealed by an EXPANDED Focus Thought
+     * (plan §8.8 / review P2): the fullscreen click handler collapses the
+     * owner turn when this is set. The user's own rows and the FINAL
+     * assistant never carry it — clicking them must not collapse the
+     * Thought. */
+    collapseFocusOwnerOnClick?: number
   }> = []
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
@@ -3268,6 +3315,9 @@ export class TuiApp {
         // never hits, see handleFullscreenClick).
         rows.push({
           ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+          ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
+            ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+            : {}),
           height: 0,
           attachments: [],
         })
@@ -3282,6 +3332,9 @@ export class TuiApp {
       const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
       rows.push({
         ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+        ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
+          ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+          : {}),
         height,
         attachments,
       })
@@ -3404,6 +3457,9 @@ export class TuiApp {
         // the click map must mirror the rendered layout exactly.
         rows.push({
           ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+          ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
+            ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+            : {}),
           height: 0,
           attachments: [],
         })
@@ -3412,6 +3468,9 @@ export class TuiApp {
       const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
       rows.push({
         ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+        ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
+          ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+          : {}),
         height,
         attachments,
       })
@@ -3507,14 +3566,22 @@ export class TuiApp {
   }
 
   /** M5 test hook: the fullscreen ScrollView's live geometry (plan §14.2 —
-   * tests assert `scrollTop` / `isFollowingEnd` / `viewportHeight` directly,
-   * never a terminal screenshot). Undefined while not fullscreen. */
-  fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number } | undefined {
+   * tests assert `scrollTop` / `isFollowingEnd` / `viewportHeight` /
+   * `maxScrollTop` directly, never a terminal screenshot). `contentHeight`
+   * is the rendered transcript height the layout engine feeds the scroll
+   * view (the same line count the frame paints); `maxScrollTop` is the
+   * clamp — tests can then assert an anchored view is NOT at the max.
+   * Undefined while not fullscreen. */
+  fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number; contentHeight: number; maxScrollTop: number } | undefined {
     if (this.fullscreenScroll === undefined) return undefined
+    const contentHeight = this.messagesView.render(this.terminal.columns).length
+    const viewportHeight = this.fullscreenScroll.viewportHeight
     return {
       scrollTop: this.fullscreenScroll.scrollTop,
       isFollowingEnd: this.fullscreenScroll.isFollowingEnd,
-      viewportHeight: this.fullscreenScroll.viewportHeight,
+      viewportHeight,
+      contentHeight,
+      maxScrollTop: Math.max(0, contentHeight - viewportHeight),
     }
   }
 
@@ -3638,13 +3705,15 @@ export class TuiApp {
             return
           }
         }
-        // A message that BELONGS to an expanded Focus turn (its thinking /
-        // tool / result rows are projected as ordinary messages, plan
-        // §15): clicking any of them collapses the OWNER turn — the
-        // Thought header stays anchored in view (plan §8.8). Only rows
-        // OUTSIDE every expanded turn reach the ordinary card toggle.
-        if (this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)) {
-          this.setFocusTurnExpanded(message.turn, false, { anchorFullscreen: true })
+        // A message row REVEALED BY an expanded Focus Thought (its
+        // thinking / tool / result / intermediate rows carry the owner
+        // mark from the projection, plan §8.8 / review P2): clicking it
+        // collapses the OWNER turn — the Thought header stays anchored in
+        // view. The user's OWN rows and the FINAL assistant never carry
+        // the mark, so clicking them keeps the old behavior (ordinary
+        // card toggle, no Thought collapse).
+        if (entry.collapseFocusOwnerOnClick !== undefined) {
+          this.setFocusTurnExpanded(entry.collapseFocusOwnerOnClick, false, { anchorFullscreen: true })
           return
         }
         this.toggleMessageExpanded(message)
@@ -3926,7 +3995,7 @@ export class TuiApp {
       seat.setText(this.subagentDrafts.get(mode.childSessionId) ?? '')
     } else {
       this.clearViewerPlaceholder()
-      seat.setText(`viewing subagent: ${mode.label} — ${viewerAccessHint(resolveViewerAccess(mode.mode, mode.access))} · Esc returns`)
+      seat.setText(`viewing subagent: ${mode.label} — ${viewerAccessHint(mode.mode, resolveViewerAccess(mode.mode, mode.access))} · Esc returns`)
     }
     seat.invalidate()
     this.editorSeatHolder.notifyChanged()
@@ -5768,7 +5837,7 @@ export class TuiApp {
       rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
     }
     if (preview.hidden > 0) {
-      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running)}`))
+      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running, preview.partial)}`))
     }
     card.addChild(new Text(rows.join('\n'), 0, 0))
   }
@@ -7137,7 +7206,11 @@ export class TuiApp {
       // A selection move re-anchors the marquee cycle (fresh pause).
       list.onSelectionChange = () => marquee.reset()
     }
-    const handle = this.showOverlayOnHost(new Frame(list, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    // The marquee wraps the list in the filter adapter (search edits must
+    // restart the cycle even without a selection move — review P2); with
+    // no marquee the list mounts directly, exactly as before.
+    const mounted = marquee === undefined ? list : new MarqueeFilterAdapter(list, () => marquee.reset())
+    const handle = this.showOverlayOnHost(new Frame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
     // is removed on a normal select/cancel AND on the handle's close
@@ -7285,7 +7358,10 @@ export class TuiApp {
       }
       overlay?.hide()
       list = next
-      overlay = this.showOverlayOnHost(new Frame(next, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+      // Search edits inside a category must restart the marquee too (the
+      // vendored SelectList fires no selection change for query edits).
+      const mounted = marquee === undefined ? next : new MarqueeFilterAdapter(next, () => marquee.reset())
+      overlay = this.showOverlayOnHost(new Frame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     }
     // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
     // onCancel. The listener lives once on the signal — category switches

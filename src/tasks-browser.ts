@@ -255,11 +255,28 @@ export function isViewerAccessInteractive(access: ViewerAccess): boolean {
 /** The viewer header hint for one access (plan §6.10: the UI shows the
  * REAL mode and states the surface authority explicitly — a nested
  * continuable child is never relabeled one-shot to borrow read-only
- * logic). */
-export function viewerAccessHint(access: ViewerAccess): string {
+ * logic, and a nested ONE-SHOT child keeps its own mode too). MODE is
+ * the durable semantic, ACCESS the surface authority — the hint must
+ * render BOTH truthfully, so it takes the mode alongside the access: a
+ * nested one-shot row reads `one-shot · nested · read-only from this
+ * parent`, never `continuable · …` (review P2). */
+export function viewerAccessHint(mode: 'one-shot' | 'continuable', access: ViewerAccess): string {
   switch (access) {
     case 'interactive-direct-child': return 'continuable · interactive'
     case 'readonly-one-shot': return 'one-shot · read-only'
-    case 'readonly-nested': return 'continuable · nested · read-only from this parent'
+    case 'readonly-nested': return `${mode} · nested · read-only from this parent`
   }
+}
+
+/** The interrupt authority for one subagent row (review P1): DSH's
+ * `{ kind: 'user', parentSessionId }` contract requires the child's
+ * DURABLE DIRECT parent — a deep descendant passed with the main session
+ * id is rejected as unauthorized. The row's own parentId is the durable
+ * address the tree already carries; a direct child (no parentId) falls
+ * back to the browser root (the live main session). */
+export function subagentInterruptParent(
+  row: Extract<TaskBrowserRow, { kind: 'subagent' }>,
+  rootSessionId: string,
+): string {
+  return row.parentId !== '' ? row.parentId : rootSessionId
 }

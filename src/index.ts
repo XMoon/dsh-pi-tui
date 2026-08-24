@@ -82,7 +82,7 @@ import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import {
-  buildTaskRows, isActiveJobStatus, rowGroup, taskRowLabel, taskTreePrefix, viewerAccessOf, isViewerAccessInteractive,
+  buildTaskRows, isActiveJobStatus, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessOf, isViewerAccessInteractive,
   type TaskBrowserRow, type ViewerAccess,
 } from './tasks-browser.ts'
 import type { TaskPanelItem } from './task-panel.ts'
@@ -4115,7 +4115,14 @@ export function apply(ctx: Context, config: Config): void {
           app.notify('subagent service unavailable', 'error')
           return
         }
-        service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: liveAgent.session.id })
+        // The interrupt authority must name the child's DURABLE DIRECT
+        // parent (DSH contract: `{ kind: 'user', parentSessionId }` is the
+        // exact parent; a deep descendant passed with the main session id
+        // is rejected as unauthorized). The row's OWN parentId is the
+        // durable address the tree already carries — a direct child falls
+        // back to the browser root (the live main session).
+        const interruptParent = subagentInterruptParent(row, liveAgent.session.id) as SessionId
+        service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
         app.notify(`interrupting ${row.label}`, 'info')
       }
       const taskPanelItems = (target: readonly TaskBrowserRow[]): TaskPanelItem[] =>

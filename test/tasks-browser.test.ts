@@ -20,8 +20,10 @@ import {
   isViewerAccessInteractive,
   resolveViewerAccess,
   rowGroup,
+  subagentInterruptParent,
   taskRowLabel,
   taskTreePrefix,
+  viewerAccessHint,
   viewerAccessOf,
   type TaskBrowserAgentInput,
   type TaskBrowserJobInput,
@@ -187,6 +189,16 @@ test('resolveViewerAccess derives the default from mode and honors explicit acce
   assert.equal(resolveViewerAccess('continuable', 'readonly-nested'), 'readonly-nested')
 })
 
+test('viewerAccessHint renders the REAL mode beside the nested authority (review P2)', () => {
+  // Mode is the durable semantic, access the surface authority — the hint
+  // must show BOTH: a nested one-shot child is NOT continuable just
+  // because it is nested.
+  assert.equal(viewerAccessHint('continuable', 'readonly-nested'), 'continuable · nested · read-only from this parent')
+  assert.equal(viewerAccessHint('one-shot', 'readonly-nested'), 'one-shot · nested · read-only from this parent')
+  assert.equal(viewerAccessHint('continuable', 'interactive-direct-child'), 'continuable · interactive')
+  assert.equal(viewerAccessHint('one-shot', 'readonly-one-shot'), 'one-shot · read-only')
+})
+
 test('a catalog entry with a MISSING mode is never treated as a healthy child', () => {
   // The catalog contract always classifies a child, but a structurally
   // mode-less entry must not silently degrade into an interactive row
@@ -274,4 +286,29 @@ test('subagent job rows stay status-only with their kind label and the one-shot 
   // Any other job kind keeps its own semantics — no fabricated mode.
   const bash = buildTaskRows([job({ id: 'bash-3', kind: 'bash', label: 'build' })], [])[0]!
   assert.equal(taskRowLabel(bash), 'bash · build')
+})
+
+test('interrupt authority names the DURABLE direct parent, never the root (review P1)', () => {
+  // main └─ A └─ B: interrupting B must carry parent=A (DSH contract:
+  // `{ kind: 'user', parentSessionId }` is the exact direct parent; the
+  // main session id would be rejected as unauthorized for a deep
+  // descendant).
+  const subagent = (overrides: Partial<Extract<TaskBrowserRow, { kind: 'subagent' }>> = {}): Extract<TaskBrowserRow, { kind: 'subagent' }> => ({
+    kind: 'subagent',
+    value: 'agent:child-abc',
+    childId: 'child-abc',
+    label: 'research',
+    mode: 'continuable',
+    activity: 'running',
+    hasChildren: false,
+    parentId: '',
+    depth: 1,
+    ...overrides,
+  })
+  // A nested descendant carries its durable parent.
+  assert.equal(subagentInterruptParent(subagent({ parentId: 'session-A', depth: 2 }), 'session-main'), 'session-A')
+  // A direct child falls back to the browser root (the live main session).
+  assert.equal(subagentInterruptParent(subagent({ parentId: '', depth: 1 }), 'session-main'), 'session-main')
+  // The root is NEVER used for a nested row, whatever the depth.
+  assert.equal(subagentInterruptParent(subagent({ parentId: 'session-A', depth: 3 }), 'session-main'), 'session-A')
 })

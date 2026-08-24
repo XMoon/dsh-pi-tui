@@ -15,6 +15,7 @@ import {
   localShellHiddenMarker,
   localShellPreview,
   RUNNING_PREVIEW_LINES,
+  RUNNING_PREVIEW_VISUAL_CEILING,
   SETTLED_PREVIEW_VISUAL_ROWS,
 } from '../src/local-shell-card.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -67,14 +68,19 @@ test('CJK/emoji/ZWJ content never splits mid-grapheme', () => {
 })
 
 test('empty text previews as empty', () => {
-  assert.deepEqual(localShellPreview('', 80, 5, 'lines'), { rows: [], hidden: 0 })
-  assert.deepEqual(localShellPreview('', 80, 20, 'visual'), { rows: [], hidden: 0 })
+  assert.deepEqual(localShellPreview('', 80, 5, 'lines'), { rows: [], hidden: 0, partial: false })
+  assert.deepEqual(localShellPreview('', 80, 20, 'visual'), { rows: [], hidden: 0, partial: false })
 })
 
 test('the hidden marker carries the expand hint and stays honest', () => {
   assert.equal(localShellHiddenMarker(0, false), '')
   assert.equal(localShellHiddenMarker(3, false), '3 more lines (ctrl+o to expand)')
   assert.equal(localShellHiddenMarker(3, true), '3 more lines (ctrl+o to expand)')
+  // A PARTIAL cut (the front of the same line hidden) must not claim
+  // "1 more line" — that would lie about what is hidden (review P1).
+  assert.equal(localShellHiddenMarker(1, true, true), 'earlier output hidden (ctrl+o to expand)')
+  assert.equal(localShellHiddenMarker(1, false, true), 'earlier output hidden (ctrl+o to expand)')
+  assert.equal(localShellHiddenMarker(0, true, true), '')
 })
 
 test('isLocalShellCard recognizes only the unbounded-turn shell card', () => {
@@ -151,4 +157,28 @@ test('Alt+K dismisses settled local shell cards but never running ones', async (
   const after = await viewport(vt)
   assert.ok(!after.includes('live'), 'newly settled card must dismiss on the next Alt+K:\n${after}')
   app.stop()
+})
+
+test('a RUNNING gigantic single line is bounded by the visual ceiling, not the line budget (review P1)', () => {
+  // The capture layer deliberately allows one unterminated logical line to
+  // grow to ~256 KiB (`print("x"*200000, end="")`). The running preview's
+  // 5-line budget would pass it through untouched, and wrapping it would
+  // produce thousands of visual rows — flooding the TUI. The hard visual
+  // ceiling must bound the rendered rows.
+  const giant = 'x'.repeat(256 * 1024)
+  const { rows, hidden, partial } = localShellPreview(giant, 80, RUNNING_PREVIEW_LINES, 'lines')
+  assert.ok(rows.length <= RUNNING_PREVIEW_VISUAL_CEILING,
+    `running preview must respect the visual ceiling (${rows.length} > ${RUNNING_PREVIEW_VISUAL_CEILING})`)
+  assert.equal(hidden, 1, 'the single line is counted hidden')
+  assert.equal(partial, true, 'the cut is mid-line: the hidden content is the EARLIER part of the same line')
+  // The marker must say so honestly — never "1 more lines".
+  assert.equal(localShellHiddenMarker(hidden, true, partial), 'earlier output hidden (ctrl+o to expand)')
+})
+
+test('a RUNNING preview with many SHORT lines keeps the 5-line budget and is not partial', () => {
+  const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`).join('\n')
+  const { rows, hidden, partial } = localShellPreview(lines, 80, RUNNING_PREVIEW_LINES, 'lines')
+  assert.equal(rows.length, 5, 'short lines keep the source-line budget')
+  assert.equal(hidden, 95)
+  assert.equal(partial, false, 'whole lines are hidden, not a partial cut')
 })

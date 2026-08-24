@@ -105,7 +105,11 @@ test('expanding a collapsed Thought in fullscreen ANCHORS the header, not the ta
   assert.ok(!joined.includes('result line 119'), `the result tail must NOT be the anchor:\n${joined}`)
   const after = app.fullscreenScrollForTest()
   assert.equal(after?.isFollowingEnd, false, 'anchor must exit follow-end (plan §8.7)')
-  assert.ok(after!.scrollTop < after!.scrollTop + 120, 'scrollTop must not be the max')
+  // The anchor must NOT be the content max: the 120-line result tail is
+  // far below the header, so a max-scrolled viewport would show the tail.
+  assert.ok(after !== undefined, 'scroll geometry must exist')
+  assert.ok(after.scrollTop < after.maxScrollTop,
+    `anchored viewport must not sit at the max (scrollTop ${after.scrollTop} >= max ${after.maxScrollTop})`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -240,6 +244,82 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   view = vt.getViewport()
   assert.equal(collapsedCount(), 0, `attachment must expand back:\n${view.join('\n')}`)
   assert.ok(view.join('\n').includes('▾ Thought'), `Thought must survive the second attachment click:\n${view.join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('clicking the USER message or the FINAL assistant inside an expanded Thought does NOT collapse it (review P2)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  // A SHORT settled turn: the user row, the Thought, the tool result and
+  // the final assistant all fit the 30-row viewport, so no scrolling is
+  // needed to reach any of them.
+  folder.apply([
+    eventAt('turn/start', { turn: 3 }, T0, 200),
+    eventAt('user/message', {
+      id: { id: 'u3' }, role: 'user',
+      content: [{ type: 'text', text: 'make it big' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 201),
+    eventAt('tool/call', { turn: 3, step: 0, callId: CallId('c3'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 3' }) }, T0 + 2, 202),
+    eventAt('tool/result', {
+      turn: 3, step: 0,
+      message: {
+        id: MessageId('r3'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c3'), content: [{ type: 'text', text: '1\n2\n3' }] }],
+        source: { kind: 'tool', callId: CallId('c3') },
+      },
+    }, T0 + 3, 203),
+    eventAt('assistant/message', {
+      turn: 3, step: 1,
+      message: {
+        id: MessageId('a3'), role: 'assistant',
+        content: [{ type: 'text', text: 'Done.' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 4, 204),
+    eventAt('turn/end', { turn: 3, reason: { kind: 'completed' } }, T0 + 5, 205),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand by clicking the header.
+  let view = vt.getViewport()
+  const headerY = findRow(view, '▸ Thought')
+  assert.ok(headerY >= 0, `Thought header missing:\n${view.join('\n')}`)
+  click(vt, 3, headerY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('▾ Thought'), 'must be expanded before the body clicks')
+  // The USER's own prompt is rendered before the Thought: clicking it must
+  // keep the Thought expanded (it is the user's row, not revealed process
+  // content).
+  const userY = findRow(view, 'make it big')
+  assert.ok(userY >= 0, `user row missing:\n${view.join('\n')}`)
+  click(vt, 10, userY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('▾ Thought'),
+    `clicking the user's own message must NOT collapse the Thought:\n${view.join('\n')}`)
+  // The FINAL assistant answer is rendered after the process rows:
+  // clicking it must also keep the Thought expanded.
+  const finalY = findRow(view, 'Done.')
+  assert.ok(finalY >= 0, `final assistant row missing:\n${view.join('\n')}`)
+  click(vt, 10, finalY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.ok(joined.includes('▾ Thought'),
+    `clicking the final assistant must NOT collapse the Thought:\n${joined}`)
+  // Sanity: clicking a real process row (a tool result line) STILL
+  // collapses the owner.
+  const bodyY = findRow(view, '1')
+  assert.ok(bodyY >= 0, `expanded body row missing:\n${joined}`)
+  click(vt, 10, bodyY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('▸ Thought'), 'a process-row click must still collapse the owner')
   app.setFullscreen(false)
   app.stop()
 })

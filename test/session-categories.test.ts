@@ -449,3 +449,43 @@ test('a category switch restarts the marquee even when the SAME row survives (re
   handle.close()
   app.stop()
 })
+
+test('typing a search query restarts the marquee even when the SAME row survives (review P2)', async () => {
+  // The vendored SelectList fires onSelectionChange only for arrow/page
+  // moves — typing into the search box re-filters without one. The thin
+  // filter adapter must restart the marquee on a query edit, or the long
+  // selected label would keep scrolling mid-cycle inside the new filter.
+  const { vt, app } = startApp()
+  const now = { value: 0 }
+  const longTitle = 'a-very-long-session-title-that-keeps-growing-and-never-fits'
+  const handle = app.openPicker(
+    [{ value: 'session-long', label: `  └─ ● ${longTitle}`, description: 'meta', group: 'w' }],
+    () => {},
+    () => {},
+    {
+      enableSearch: true,
+      width: 76,
+      maxHeight: 26,
+      marquee: { labelPartsOf: sessionLabelParts, now: () => now.value },
+    },
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  // Advance the fake clock well into the scroll cycle.
+  now.value = 800 + 6 * MARQUEE_STEP_MS
+  handle.setItems([{ value: 'session-long', label: `  └─ ● ${longTitle}`, description: 'meta', group: 'w' }])
+  await vt.waitForRender()
+  const mid = vt.getViewport().map(strip).join('\n')
+  assert.ok(!mid.includes('a-very-long-session-tit'),
+    `precondition — the label must have scrolled past its start:\n${mid}`)
+  // Type a query character that still matches the SAME row: the marquee
+  // must restart from the fresh anchor (the row identity is unchanged, so
+  // only the filter adapter can reset it).
+  vt.sendInput('a')
+  await vt.waitForRender()
+  const after = vt.getViewport().map(strip).join('\n')
+  assert.ok(after.includes('a-very-long-session-tit'),
+    `a search edit must restart the marquee from the fresh anchor:\n${after}`)
+  handle.close()
+  app.stop()
+})
