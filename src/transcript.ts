@@ -981,7 +981,11 @@ export class TranscriptFolder {
           // The settled full blocks (kept when the step carried images or
           // other non-text blocks — text-only steps stay on the text path).
           if (messageBlocks.some(block => block.type !== 'text')) entry.content = messageBlocks
-        } else if (text !== '' || messageBlocks.some(block => block.type !== 'text')) {
+        } else {
+          // ALWAYS preserve the entry — an empty settled message with no
+          // preceding chunk (replay edge) must still own the exact-last
+          // assistant slot, so the final selection never falls back to an
+          // earlier answer (review finding).
           const created: TranscriptMessage = { kind: 'assistant', turn: event.data.turn, text, ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}) }
           this.assistantEntries.set(key, created)
           this.appendItem(created)
@@ -1099,8 +1103,10 @@ export class TranscriptFolder {
           this.reflowGrouping(pending.index)
         } else {
           // Unknown call (e.g. post-compaction): fall back to the last
-          // running card with this name, or append a completed one.
-          const runningIndex = this.items.findLastIndex(message => message.kind === 'tool' && message.name === name && message.status === 'running')
+          // running card with this name IN THE RESULT'S OWN TURN — an
+          // orphan result must never settle a running card of another
+          // turn (review finding).
+          const runningIndex = this.items.findLastIndex(message => message.kind === 'tool' && message.name === name && message.status === 'running' && message.turn === turn)
           if (runningIndex !== -1) {
             const running = this.items[runningIndex]!
             if (running.kind === 'tool') {

@@ -366,6 +366,61 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
   assert.equal(activity.tool?.status, 'ok')
 })
 
+test('an empty assistant/message without a prior chunk still owns the final slot (no earlier fallback)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1: 'final answer text'
+    // The exact last assistant/message is EMPTY and has no preceding chunk.
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('empty'), role: 'assistant', content: [{ type: 'text', text: '' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1000 + 11, 21),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
+  ])
+  const messages = folder.messages()
+  const last = messages.findLast(m => m.kind === 'assistant')
+  assert.ok(last !== undefined && last.kind === 'assistant' && last.text === '',
+    'the empty message must be preserved as the exact last assistant')
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
+    'an empty last step must suppress the final — never fall back to the earlier text assistant')
+})
+
+test('later provisional usage chunks REPLACE the earlier one (latest wins, plan §13.2)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 150, outputTokens: 0 } } }, 1003, 3),
+    eventAt('step/end', { turn: 0, step: 0 }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 150, 'the LATEST provisional chunk wins (never the stale first)')
+})
+
+test('an orphan tool/result never settles a running card of ANOTHER turn', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
+    // An orphan result (unknown callId) for turn 2 with the same name.
+    eventAt('tool/result', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('r'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('unknown'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('unknown') },
+      },
+    }, 1002, 2),
+  ])
+  const cards = folder.messages().filter((m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool')
+  const turn1 = cards.find(c => c.turn === 1)
+  assert.ok(turn1 !== undefined && turn1.status === 'running', 'turn 1\'s running card must stay running')
+  assert.ok(cards.some(c => c.turn === 2 && c.status === 'ok'), 'the orphan result appends its own turn-2 card')
+})
+
 test('an orphan tool/result attributes to its OWN turn, never the stale current turn', () => {
   const folder = new TranscriptFolder()
   folder.apply([

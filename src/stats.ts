@@ -157,7 +157,9 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
           const key = stepKey(event.data.turn, event.data.step)
           const timing = perStep.get(key)
           if (timing !== undefined) {
-            if (timing.usage === undefined) timing.usage = chunk.usage
+            // The LATEST chunk wins (the assembler value is cumulative) —
+            // the same replace rule as the shared accumulator.
+            timing.usage = chunk.usage
           }
         } else if (isTokenDelta(chunk)) {
           // The FIRST token delta of the step stamps the decode-window start
@@ -301,7 +303,9 @@ export class StatsFolder {
           const key = stepKey(event.data.turn, event.data.step)
           const timing = this.perStep.get(key)
           if (timing !== undefined) {
-            if (timing.usage === undefined) timing.usage = chunk.usage
+            // The LATEST chunk wins (the assembler value is cumulative) —
+            // the same replace rule as the shared accumulator.
+            timing.usage = chunk.usage
           }
         } else if (isTokenDelta(chunk)) {
           const timing = this.perStep.get(stepKey(event.data.turn, event.data.step))
