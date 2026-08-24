@@ -25,7 +25,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { CallId, ContentBlock } from '@deepseek-ai/dsh-llm'
 // P7d: the subagent registry merge for ctx.subagents (listChildren/interrupt).
 import type {} from '@deepseek-ai/dsh-subagent'
-import type { SubagentListEntry } from '@deepseek-ai/dsh-subagent'
+import type { SubagentDescendantListEntry, SubagentListEntry } from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 // P6: the agent-preset roster — ctx.agentPresets, the session preset
@@ -81,7 +81,10 @@ import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } fr
 import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
-import { buildTaskRows, rowGroup, taskRowLabel, type TaskBrowserRow } from './tasks-browser.ts'
+import {
+  buildTaskRows, isActiveJobStatus, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessOf, isViewerAccessInteractive,
+  type TaskBrowserRow, type ViewerAccess,
+} from './tasks-browser.ts'
 import type { TaskPanelItem } from './task-panel.ts'
 import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
@@ -200,6 +203,10 @@ interface AppExit {
 const WINDOW_TURNS = 15
 /** Coalesced repaint interval for streaming events, in ms. */
 const REPAINT_FLUSH_MS = 50
+/** Throttle for re-chaining a RUNNING local shell card's result to the
+ * bounded tail (plan §5.1): the running preview refreshes at most this
+ * often, so a high-throughput log cannot rebuild the view per chunk. */
+const LOCAL_SHELL_TAIL_FLUSH_MS = 200
 
 /**
  * Slash commands that need no session: before the first user message
@@ -2296,8 +2303,10 @@ export function apply(ctx: Context, config: Config): void {
       const localSignal = localShellController.signal
       // The card reference this run owns: settling by identity keeps a
       // settled old run from overwriting a newer run's card (updateLastLocal
-      // Message would hit whatever card is newest at settle time).
-      const card = app.pushLocalMessage({
+      // Message would hit whatever card is newest at settle time). The
+      // reference is RE-CHAINED on every in-flight tail update (the array
+      // element is replaced, so the old reference would no longer index).
+      let card = app.pushLocalMessage({
         kind: 'tool',
         turn: Number.POSITIVE_INFINITY,
         name: 'shell',
@@ -2457,18 +2466,46 @@ export function apply(ctx: Context, config: Config): void {
       // sequences and decodes across that stream's chunk boundaries.
       const stdoutDecoder = new StringDecoder('utf8')
       const stderrDecoder = new StringDecoder('utf8')
+      // In-flight tail refresh (plan §5.1): the running card's result is
+      // re-chained to the bounded TAIL on a throttle, so a streaming log
+      // previews its newest rows instead of an empty body. The throttle
+      // keeps high-throughput output from rebuilding the whole view per
+      // chunk; settle/close clears the timer (dispose contract).
+      let tailTimer: NodeJS.Timeout | undefined
+      const clearTailTimer = (): void => {
+        if (tailTimer !== undefined) {
+          clearTimeout(tailTimer)
+          tailTimer = undefined
+        }
+      }
+      const scheduleTailFlush = (): void => {
+        if (tailTimer !== undefined) return
+        tailTimer = setTimeout(() => {
+          tailTimer = undefined
+          card = app.updateLocalMessage(card, {
+            kind: 'tool',
+            turn: Number.POSITIVE_INFINITY,
+            name: 'shell',
+            args: command,
+            result: bounded.tail,
+            status: 'running',
+          })
+        }, LOCAL_SHELL_TAIL_FLUSH_MS)
+      }
       const onData = (decoder: StringDecoder, chunk: Buffer): void => {
         // The wire byte count rides along: an incomplete multi-byte
         // sequence buffered by the decoder produces no text yet, but its
         // bytes are real and must count toward the totals.
         bounded.append(decoder.write(chunk), chunk.length)
         full.append(chunk)
+        scheduleTailFlush()
       }
       child.stdout.on('data', (chunk) => onData(stdoutDecoder, chunk))
       child.stderr.on('data', (chunk) => onData(stderrDecoder, chunk))
       localSignal.addEventListener('abort', () => child.kill(), { once: true })
       child.on('error', (error) => {
         releaseController()
+        clearTailTimer()
         // A spawn failure leaves nothing worth keeping: drop the capture.
         full.dispose()
         shellTempFiles.delete(fullPath)
@@ -2476,6 +2513,7 @@ export function apply(ctx: Context, config: Config): void {
       })
       child.on('close', (code, childSignal) => {
         releaseController()
+        clearTailTimer()
         // Flush each decoder's remaining partial sequence. An incomplete
         // trailing multi-byte character surfaces as U+FFFD from end() — it
         // is shown as-is (the bytes were real); its wire bytes were already
@@ -2544,6 +2582,10 @@ export function apply(ctx: Context, config: Config): void {
       label: string
       mode: 'one-shot' | 'continuable'
       activity: 'running' | 'inactive'
+      /** The viewer's surface authority (plan §6.10): mode is the durable
+       * semantic, access is what THIS surface may do — a nested descendant
+       * is read-only even when continuable. */
+      access: ViewerAccess
       /** The child session's workspace ('' when unknown, e.g. a cold child). */
       cwd: string
     } | undefined
@@ -2688,7 +2730,14 @@ export function apply(ctx: Context, config: Config): void {
       mode: 'one-shot' | 'continuable',
       parentSessionId: SessionId,
       activity: 'running' | 'inactive',
+      depth = 1,
     ): Promise<void> => {
+      // Surface authority (plan §6.10): mode is the durable semantic, the
+      // access is what THIS surface may do — only a direct (depth 1)
+      // continuable child is interactive from the root.
+      const access: ViewerAccess = depth > 1
+        ? 'readonly-nested'
+        : mode === 'one-shot' ? 'readonly-one-shot' : 'interactive-direct-child'
       const request = viewerOpen.open()
       const childFolder = new TranscriptFolder()
       const childStats = new StatsFolder()
@@ -2745,6 +2794,7 @@ export function apply(ctx: Context, config: Config): void {
         label: label ?? childId,
         mode,
         activity,
+        access,
         cwd: childCwd,
       }
       // The child's turn numbers are its OWN namespace: the parent's Focus
@@ -2756,7 +2806,7 @@ export function apply(ctx: Context, config: Config): void {
       // badges the mode — the transient notify is no longer the only "you
       // are elsewhere" signal. The FOOTER switches to the child's own
       // identity at the same time.
-      app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity })
+      app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity, access })
       refreshViewerFooter()
     }
     /** Leave the subagent viewer (single Esc). Returns whether it exited.
@@ -4031,13 +4081,19 @@ export function apply(ctx: Context, config: Config): void {
         const row = rows.find(candidate => candidate.value === value)
         if (row === undefined) return
         if (row.kind === 'subagent') {
-          const parentSessionId = liveAgent?.session.id
+          // The viewer target carries the row's OWN parent (plan §6.10:
+          // childId + parentId + depth + mode + activity — never just
+          // childId + mode). A nested row's durable parent is the exact
+          // direct parent recorded by DSH; only a direct child falls back
+          // to the browser root (the live main session).
+          const parentSessionId = row.parentId !== '' ? row.parentId as SessionId : liveAgent?.session.id
           if (parentSessionId === undefined) return
-          // The row carries the catalog MODE + activity: the viewer target
-          // is pinned to them (continuable → interactive editor, one-shot →
-          // read-only), and the follow-up write path to the exact parent.
+          // The row carries the catalog MODE + activity + DEPTH: the viewer
+          // target is pinned to them (continuable → interactive editor only
+          // at depth 1, one-shot → read-only, depth > 1 → nested read-only),
+          // and the follow-up write path to the exact parent.
           runOwned('subagent view from tasks', () => enterView(
-            row.childId as SessionId, row.label, row.mode, parentSessionId, row.activity,
+            row.childId as SessionId, row.label, row.mode, parentSessionId, row.activity, row.depth,
           ), {
             diag,
             sessionId: () => liveAgent?.session.id,
@@ -4059,7 +4115,14 @@ export function apply(ctx: Context, config: Config): void {
           app.notify('subagent service unavailable', 'error')
           return
         }
-        service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: liveAgent.session.id })
+        // The interrupt authority must name the child's DURABLE DIRECT
+        // parent (DSH contract: `{ kind: 'user', parentSessionId }` is the
+        // exact parent; a deep descendant passed with the main session id
+        // is rejected as unauthorized). The row's OWN parentId is the
+        // durable address the tree already carries — a direct child falls
+        // back to the browser root (the live main session).
+        const interruptParent = subagentInterruptParent(row, liveAgent.session.id) as SessionId
+        service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
         app.notify(`interrupting ${row.label}`, 'info')
       }
       const taskPanelItems = (target: readonly TaskBrowserRow[]): TaskPanelItem[] =>
@@ -4092,6 +4155,10 @@ export function apply(ctx: Context, config: Config): void {
               // Only continuable children are interruptible (one-shot ids
               // are accepted no-ops for the interrupt transport).
               interruptible: row.mode === 'continuable',
+              // The durable descendant tree connector: indentation + branch
+              // glyph from the catalog's `depth` (plan §6.7) — a fixed
+              // region that never scrolls with the selected label.
+              treePrefix: taskTreePrefix(row.depth),
             })
       const handle = app.openTaskBrowser(
         taskPanelItems(rows),
@@ -4102,7 +4169,7 @@ export function apply(ctx: Context, config: Config): void {
       if (subagents !== undefined) {
         const sessionId = liveAgent.session.id
         const generation = sessionGeneration
-        runOwned('task browser children', () => subagents.listChildren(sessionId), {
+        runOwned('task browser descendants', () => subagents.listDescendants(sessionId), {
           diag,
           sessionId: () => liveAgent?.session.id,
           onResult: (entries) => {
@@ -4110,7 +4177,13 @@ export function apply(ctx: Context, config: Config): void {
             // switch while the listing was in flight must not repaint it.
             if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
             rows = buildTaskRows(jobSnapshots, entries)
-            handle.setItems(taskPanelItems(rows))
+            // Preferred cursor (plan §6.6): the first RUNNING subagent in
+            // tree order, else the first active job — the tree itself never
+            // re-sorts for the cursor.
+            const preferred = rows.find(row =>
+              row.kind === 'subagent' && row.activity === 'running')?.value
+              ?? rows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
+            handle.setItems(taskPanelItems(rows), preferred)
           },
         })
       }
@@ -4363,9 +4436,12 @@ export function apply(ctx: Context, config: Config): void {
     // event-driven: subagent lifecycle events (start/end), subagent tool
     // calls in the live session (the scope-filtered lifecycle events may
     // not reach this context), and every jobs change (a one-shot settlement
-    // implies a child may have gone inactive). listChildren is async and
-    // may read persistence for cold children, so the commit is
-    // generation-guarded and never lands on a newer session.
+    // implies a child may have gone inactive). listDescendants is async
+    // and may read persistence for cold children, so the commit is
+    // generation-guarded and never lands on a newer session. The badge
+    // counts every RUNNING descendant (plan §6.13) — the user cares that a
+    // deep agent is still working — while durable inactive children never
+    // keep the badge permanently armed.
     const subagents = ctx.get('subagents')
     if (subagents !== undefined) {
       refreshAgents = (): void => {
@@ -4375,18 +4451,18 @@ export function apply(ctx: Context, config: Config): void {
         }
         const sessionId = liveAgent.session.id
         const generation = sessionGeneration
-        runOwned('task browser agents refresh', () => subagents.listChildren(sessionId), {
+        runOwned('task browser agents refresh', () => subagents.listDescendants(sessionId), {
           diag,
           sessionId: () => liveAgent?.session.id,
           onResult: (entries) => {
             if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
-            // Live child subagents arm the badge/trigger: every continuable
-            // child plus RUNNING one-shot children (a foreground delegation
-            // is the parent's pending tool call and registers no job row).
-            // Finished one-shot children drop off — their surface is
-            // /subagents.
+            // Running descendants arm the badge/trigger: continuable AND
+            // one-shot children at every depth while they work (a
+            // foreground delegation is the parent's pending tool call and
+            // registers no job row). Inactive children never arm it —
+            // activity is live-store presence, not an outcome.
             app.setAgents(entries
-              .filter((entry): entry is Extract<SubagentListEntry, { kind: 'child' }> =>
+              .filter((entry): entry is Extract<SubagentDescendantListEntry, { kind: 'child' }> =>
                 entry.kind === 'child' && entry.activity === 'running')
               .map(entry => ({ id: entry.id, label: entry.label ?? entry.id, activity: entry.activity })))
           },

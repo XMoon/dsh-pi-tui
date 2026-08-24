@@ -143,6 +143,22 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
 }
 
 /**
+ * Split a session picker label into its FIXED presentation prefix (tree
+ * connector + current-session marker) and the marqueeable title (plan
+ * §7.7): the selected-row marquee scrolls only the title — the lineage
+ * prefix and the `●` marker are layout regions that never move. The
+ * derivation mirrors {@link sessionPickerItem}'s construction (never
+ * guesses arbitrary prefixes).
+ */
+export function sessionLabelParts(label: string): { prefix: string; title: string } {
+  const treeMatch = /^((?:  )+└─ )/.exec(label)
+  const tree = treeMatch?.[1] ?? ''
+  const rest = label.slice(tree.length)
+  const marker = rest.startsWith('● ') ? '● ' : ''
+  return { prefix: tree + marker, title: rest.slice(marker.length) }
+}
+
+/**
  * Build the session tree for the picker's "All" category: rows WITHOUT a
  * parentSession are roots (depth 0), and every row WITH a parentSession —
  * fork children, rewind branches AND subagents alike (plan §20: `origin`

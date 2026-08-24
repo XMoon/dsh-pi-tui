@@ -14,6 +14,7 @@
 import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { color, taskStatusColor } from './theme.ts'
+import { SelectedMarquee } from './marquee.ts'
 
 /** One row of the task browser (the app layer's PickerItem equivalent). */
 export interface TaskPanelItem {
@@ -43,6 +44,14 @@ export interface TaskPanelItem {
    * accepted no-op, so a one-shot row must never advertise or fire it).
    * Absent = not interruptible. */
   interruptible?: boolean
+  /**
+   * The fixed TREE-CONNECTOR region of a subagent row (plan §6.7): the
+   * indentation + branch glyph derived from the descendant `depth`. This
+   * region is layout-FIXED — it never truncates, never wraps, and never
+   * scrolls with the selected label (the M4 marquee moves only the label
+   * text). Absent = no connector (job rows, flat rows).
+   */
+  treePrefix?: string
 }
 
 /** Options for {@link TaskBrowserPanel}. */
@@ -59,6 +68,10 @@ export interface TaskPanelOptions {
    * closed (a subagent interrupt; `i` stays a search letter when the box
    * is open, same rule as the `k`/`j` navigation aliases). */
   onAction?: (value: string, action: 'interrupt') => void
+  /** Test hook: the selected-row marquee's clock (a fake clock in tests
+   * so the label's scroll motion is deterministic; production defaults to
+   * Date.now). */
+  marqueeNow?: () => number
 }
 
 /**
@@ -112,6 +125,9 @@ export class TaskBrowserPanel implements Component, Focusable {
   /** Latched by dispose(): an in-flight tick callback must not render. */
   private disposed = false
   private readonly requestRender: () => void
+  /** The selected-row label marquee (plan §7): ONE per panel, armed only
+   * while a selected overflowing row is visible, disposed with the panel. */
+  private readonly marquee: SelectedMarquee
   private _focused = false
 
   constructor(
@@ -131,6 +147,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.onCancel = onCancel
     this.onAction = options.onAction
     this.requestRender = requestRender
+    this.marquee = new SelectedMarquee({
+      requestRender: () => this.requestRender(),
+      now: options.marqueeNow,
+    })
     this.searchEnabled = options.enableSearch ?? false
     this.searchInput.onEscape = () => this.onCancel()
     this.searchInput.onSubmit = (value) => {
@@ -146,14 +166,19 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   /** Replace the row list; the active search query + type filter re-apply.
-   * A selection the USER moved survives when its value is still present.
-   * An untouched selection follows the fresh list's head on the FIRST
-   * enrichment — the /tasks async-merge race: the browser opens on the
-   * jobs half, the subagent catalog lands later, and the cursor must land
-   * on the preferred row (the enriched list is already sorted running
-   * subagents first, so its head IS first-running-subagent ?? first
-   * running job), not stay stuck on the first pre-enrichment job. */
-  setItems(items: readonly TaskPanelItem[]): void {
+   * Selection policy (plan §6.6 — the TREE must never re-sort for the
+   * cursor):
+   * - the USER moved the selection → the original value survives when it
+   *   is still present (never stolen by an enrichment);
+   * - an UNTOUCHED selection honors the caller's `preferredValue` (the
+   *   first running subagent, else the first active job — computed by the
+   *   runner from the row facts) — the /tasks async-merge race: the
+   *   browser opens on the jobs half, the subagent catalog lands later,
+   *   and the cursor must land on the preferred row without ever moving
+   *   the row itself (tree order is immutable);
+   * - neither exists → the fresh list's head.
+   */
+  setItems(items: readonly TaskPanelItem[], preferredValue?: string): void {
     const previousValue = this.filtered[this.selected]?.value
     this.items = [...items]
     this.rebuildTypeCycle()
@@ -167,6 +192,12 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (previousValue !== undefined) {
         const index = this.filtered.findIndex(item => item.value === previousValue)
         if (index !== -1) this.selected = index
+      }
+    } else if (preferredValue !== undefined) {
+      const index = this.filtered.findIndex(item => item.value === preferredValue)
+      if (index !== -1) {
+        this.selected = index
+        this.ensureVisible()
       }
     }
   }
@@ -235,6 +266,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.disposed = true
     if (this.tickTimer !== undefined) clearInterval(this.tickTimer)
     this.tickTimer = undefined
+    this.marquee.dispose()
   }
 
   get focused(): boolean {
@@ -360,6 +392,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
     this.selected = 0
     this.scroll = 0
+    // A filter/type change is a NEW view: the selected row (whatever it
+    // is) must restart its marquee cycle from the fresh anchor, even when
+    // the SAME row survives the filter with an unchanged identity
+    // (review round 3 — the identity check alone would let the marquee
+    // continue mid-cycle across a search/type change).
+    this.marquee.reset()
   }
 
   render(width: number): string[] {
@@ -436,9 +474,15 @@ export class TaskBrowserPanel implements Component, Focusable {
   private renderRow(item: TaskPanelItem, selected: boolean, width: number): string[] {
     const dot = taskStatusColor(item.status)(DOT)
     const pointer = selected ? color.primary(POINTER) : ' '
-    // Left column: pointer + dot + label.
+    // Left column: pointer + dot + tree connector + label.
     const leftPrefix = `${pointer} ${dot} `
     const leftWidth = visibleWidth(leftPrefix)
+    // The tree connector is a FIXED layout region (plan §6.7): it never
+    // truncates, wraps, or scrolls with the label — the selected label's
+    // marquee window starts after it. Rows without a prefix (jobs, flat
+    // rows) keep the classic layout.
+    const tree = item.treePrefix ?? ''
+    const treeWidth = visibleWidth(tree)
 
     // Right column: status + elapsed, right-aligned. The tail reserves its
     // width on the right; the label wraps to the rest (2-cell gap minimum).
@@ -448,15 +492,23 @@ export class TaskBrowserPanel implements Component, Focusable {
     const tail = [statusText, elapsedText].filter(part => part !== '').join(' ')
     const tailWidth = visibleWidth(tail)
     const available = width - leftWidth
-    const labelBudget = Math.max(1, available - tailWidth - 2)
     const suffix = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
     const suffixWidth = visibleWidth(suffix)
     if (suffix === '') {
       // No mode suffix: the classic single-column layout (the tail reserves
-      // its width; the label truncates to the rest; the whole line is
-      // truncated as the final backstop).
-      const truncated = truncateToWidth(item.label, labelBudget, '…')
-      const leftFinal = leftPrefix + (selected ? color.textStrong(truncated) : color.text(truncated))
+      // its width; the tree connector + label truncate to the rest; the
+      // whole line is truncated as the final backstop).
+      const labelBudget = Math.max(0, available - tailWidth - 2 - treeWidth)
+      // The SELECTED label marquees inside its fixed budget (plan §7.5);
+      // unselected rows keep the ellipsis. The tree connector, suffix and
+      // tail are separate fixed regions — they never move.
+      const labelWindow = this.marquee.render({
+        key: item.value,
+        text: item.label,
+        maxWidth: labelBudget,
+        selected,
+      })
+      const leftFinal = leftPrefix + tree + (selected ? color.textStrong(labelWindow) : color.text(labelWindow))
       const pad = Math.max(1, available - visibleWidth(leftFinal) - tailWidth)
       const line = leftFinal + ' '.repeat(pad) + tail
       const out = [truncateToWidth(line, width, '…')]
@@ -476,18 +528,16 @@ export class TaskBrowserPanel implements Component, Focusable {
     // only the LABEL compresses (its truncation budget is whatever the
     // suffix and tail leave). The tail is dropped entirely only when the
     // label is already at zero and the mode would otherwise be cut.
-    // The mode suffix is a HARD layout contract (plan §4.0): the mode must
-    // stay readable on ANY width that physically fits it. The suffix is
-    // reserved FIRST; the status tail (the activity dimension — mode and
-    // activity are independent, never traded) keeps its full width next;
-    // only the LABEL compresses (its truncation budget is whatever the
-    // suffix and tail leave, minus one cell for the pad). The tail is
-    // dropped entirely only when the label is already at zero and the
-    // mode would otherwise be cut.
-    const labelLimit = Math.max(0, available - suffixWidth - tailWidth - 1)
-    const truncated = truncateToWidth(item.label, labelLimit, '…')
+    const labelLimit = Math.max(0, available - treeWidth - suffixWidth - tailWidth - 1)
+    const labelWindow = this.marquee.render({
+      key: item.value,
+      text: item.label,
+      maxWidth: labelLimit,
+      selected,
+    })
     const leftFinal = leftPrefix
-      + (selected ? color.textStrong(truncated) : color.text(truncated))
+      + tree
+      + (selected ? color.textStrong(labelWindow) : color.text(labelWindow))
       + (selected ? color.textStrong(suffix) : color.text(suffix))
     const leftFinalWidth = visibleWidth(leftFinal)
     const tailPart = tailWidth <= width - leftFinalWidth

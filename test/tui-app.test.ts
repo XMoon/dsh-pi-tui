@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; get exits(): number } {
@@ -790,6 +791,100 @@ test('overlay frame borders stay aligned when content is narrower than the panel
   assert.ok(box.length >= 4, `frame too small:\n${box.join('\n')}`)
   const widths = new Set(box.map(line => line.length))
   assert.equal(widths.size, 1, `frame rows must match the border width:\n${box.join('\n')}`)
+})
+
+test('fixed-width overlays fill the declared width: no border-external mask region', async () => {
+  // M1 (plan §4): a framed overlay that declares a fixed width must fill
+  // that width (Frame(child, true)), otherwise the compositor pads the
+  // remaining columns with spaces — the "black mask" beside the border.
+  const run = async (columns: number): Promise<void> => {
+    const vt = new VirtualTerminal(columns, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    app.openTaskBrowser(
+      [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
+      () => {},
+      () => {},
+      { header: 'tasks' },
+    )
+    await vt.waitForRender()
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+    const lines = vt.getViewport().map(strip)
+    const rowIndex = lines.findIndex(line => line.includes('bash · build'))
+    assert.ok(rowIndex >= 0, `task row missing at ${columns} cols:\n${lines.join('\n')}`)
+    let top = rowIndex
+    while (top > 0 && !lines[top]!.includes('╭')) top -= 1
+    let bottom = rowIndex
+    while (bottom < lines.length - 1 && !lines[bottom]!.includes('╰')) bottom += 1
+    const box = lines.slice(top, bottom + 1)
+    // The declared width is clamped to the terminal width by the
+    // compositor; the FRAME's border must span exactly that width on every
+    // row. Before M1 the frame hugged its content (e.g. 39 cols) while the
+    // overlay still occupied the declared 72 — the compositor padded the
+    // gap, and the border's right edge sat far short of the overlay edge
+    // (the black mask). The right-border position is the detector.
+    const declared = Math.min(72, columns)
+    const left = box[0]!.indexOf('╭')
+    assert.ok(left >= 0, `top border missing:\n${box.join('\n')}`)
+    for (const line of box) {
+      // The right border glyph must sit exactly at left + declared - 1.
+      assert.equal(line[left + declared - 1], line[left] === '╭' ? '╮' : line[left] === '╰' ? '╯' : '│',
+        `frame right edge must sit at column ${left + declared - 1} (declared ${declared}) at ${columns} cols:\n${box.join('\n')}`)
+    }
+    app.stop()
+  }
+  for (const cols of [40, 80, 120, 200]) await run(cols)
+})
+
+test('a fixed-width overlay keeps its frame geometry across fullscreen, resize and theme switches', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const openBrowser = (): void => {
+    app.openTaskBrowser(
+      [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
+      () => {},
+      () => {},
+      { header: 'tasks' },
+    )
+  }
+  const assertRightEdge = (label: string): void => {
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+    const lines = vt.getViewport().map(strip)
+    const rowIndex = lines.findIndex(line => line.includes('bash · build'))
+    assert.ok(rowIndex >= 0, `${label}: task row missing:\n${lines.join('\n')}`)
+    let top = rowIndex
+    while (top > 0 && !lines[top]!.includes('╭')) top -= 1
+    let bottom = rowIndex
+    while (bottom < lines.length - 1 && !lines[bottom]!.includes('╰')) bottom += 1
+    const box = lines.slice(top, bottom + 1)
+    const left = box[0]!.indexOf('╭')
+    for (const line of box) {
+      const expectedRight = line[left] === '╭' ? '╮' : line[left] === '╰' ? '╯' : '│'
+      assert.equal(line[left + 71], expectedRight,
+        `${label}: frame right edge must sit at column ${left + 71} (declared 72):\n${box.join('\n')}`)
+    }
+  }
+  openBrowser()
+  await vt.waitForRender()
+  assertRightEdge('regular')
+  // Fullscreen hides existing overlays (the surface migration clears the
+  // stack), so the browser is opened again under the alt screen — the same
+  // compositor contract applies there.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  openBrowser()
+  await vt.waitForRender()
+  assertRightEdge('fullscreen')
+  // Resize while the overlay is up: the frame re-renders at the new width.
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  assertRightEdge('post-resize')
+  // Palette switches do not disturb the geometry.
+  app.applyTheme('light')
+  await vt.waitForRender()
+  assertRightEdge('light theme')
+  app.stop()
 })
 
 test('an approval dialog stacked over the settings panel hides it modally and restores it', async () => {

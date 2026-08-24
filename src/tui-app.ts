@@ -38,6 +38,7 @@ import {
   type Focusable,
   type OverlayHandle,
   type OverlayOptions,
+  type SelectListTruncatePrimaryContext,
   type SettingItem,
   type SlashCommand,
   type Terminal,
@@ -57,6 +58,8 @@ import {
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
 import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
+import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
+import { SelectedMarquee } from './marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
   firstLine,
@@ -99,6 +102,13 @@ import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './input-router.ts'
+import {
+  isLocalShellCard,
+  localShellHiddenMarker,
+  localShellPreview,
+  RUNNING_PREVIEW_LINES,
+  SETTLED_PREVIEW_VISUAL_ROWS,
+} from './local-shell-card.ts'
 import { RESERVED_HOST_KEYS } from './keybinding-registry.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
@@ -113,6 +123,11 @@ import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapsh
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
+
+/** Fullscreen Focus anchoring (plan §8.6): the expanded Thought's header
+ * lands one row below the viewport top so the previous context row stays
+ * visible above it. */
+export const FOCUS_ANCHOR_TOP_PADDING = 1
 
 /** The compaction lifecycle phase the working row advertises: idle (no
  * compaction), summarizing (compaction/start seen, the summary is being
@@ -361,6 +376,47 @@ class Spacer implements Component {
 }
 
 /**
+ * A paper-thin Component adapter over a picker's SelectList (review P2):
+ * the vendored SelectList only fires onSelectionChange for ↑↓/PageUp/
+ * PageDown — typing into the search box re-filters WITHOUT a selection
+ * change, so a long selected label would keep marqueeing mid-cycle inside
+ * the new filter instead of restarting from a fresh anchor. The adapter
+ * intercepts handleInput, detects a search-query change (the vendored
+ * getFilter() is the truth — a query edit is the ONLY input that moves
+ * it), and resets the marquee. Zero fork divergence: the SelectList
+ * itself is untouched, this wraps it on the consumer side.
+ */
+class MarqueeFilterAdapter implements Component {
+  private readonly list: SelectList
+  private readonly onFilterChange: () => void
+
+  constructor(list: SelectList, onFilterChange: () => void) {
+    this.list = list
+    this.onFilterChange = onFilterChange
+  }
+
+  invalidate(): void {
+    this.list.invalidate()
+  }
+
+  handleInput(data: string): void {
+    const before = this.list.getFilter()
+    this.list.handleInput(data)
+    // A search-query edit re-filters the list: the selected row (whatever
+    // it is now) must restart its marquee cycle from a fresh anchor. Keys
+    // that do not move the query (arrows, Enter, Esc, Tab) leave it
+    // untouched — their selection moves are handled by onSelectionChange.
+    if (this.list.getFilter() !== before) {
+      this.onFilterChange()
+    }
+  }
+
+  render(width: number): string[] {
+    return this.list.render(width)
+  }
+}
+
+/**
  * Bullet + continuation-indent wrapper that keeps its child LIVE, so a
  * terminal resize re-renders the child at the new width instead of
  * re-wrapping a frozen render (the 5a76526 regression: assistant/user
@@ -585,11 +641,14 @@ export type OwnedRunner = <T>(
 ) => void
 
 /** The subagent viewer address: the exact direct parent + the child, the
- * catalog mode and the store activity. The mode is the single authority
- * for interactivity — the viewer is interactive ONLY for `continuable`
- * children — and the parent session id pins the follow-up write path (the
- * DSH continuation contract requires the EXACT live direct parent Agent;
- * the UI never guesses the parent from the current live agent). */
+ * catalog mode, the store activity, and the SURFACE authority. The mode
+ * is the child's DURABLE semantic; the access is the CURRENT viewer
+ * authority (plan §6.10) — a depth-1 continuable child is interactive,
+ * everything else is read-only from this surface (a nested descendant
+ * belongs to its exact parent, never to the root). The parent session id
+ * pins the follow-up write path (the DSH continuation contract requires
+ * the EXACT live direct parent Agent; the UI never guesses the parent
+ * from the current live agent). */
 export interface SubagentViewerTarget {
   /** The durable direct-parent session id authorizing the child. */
   readonly parentSessionId: string
@@ -603,6 +662,14 @@ export interface SubagentViewerTarget {
   /** Store snapshot activity (running = live record, inactive = persisted
    * only). Display-only; it is NOT the success/failure of anything. */
   readonly activity: 'running' | 'inactive'
+  /** The viewer's interaction authority (plan §6.10): mode is the durable
+   * semantic, access is what THIS surface may do. `interactive-direct-child`
+   * enables the follow-up editor; `readonly-one-shot` and `readonly-nested`
+   * lock it (the mode is still displayed truthfully — a nested continuable
+   * child is never relabeled one-shot). Absent = derived from the mode
+   * (continuable → interactive-direct-child, one-shot → readonly-one-shot);
+   * a nested row's caller must pass `readonly-nested` explicitly. */
+  readonly access?: ViewerAccess
 }
 
 /** A semantic follow-up submit from the interactive subagent viewer: the
@@ -909,6 +976,19 @@ export interface PickerOptions {
    * picker opens on `categories[0]`; the caller's `items` argument is only
    * the initial rows (the first category's factory wins on activation). */
   categories?: readonly PickerCategory[]
+  /**
+   * Marquee the SELECTED row's primary label when it overflows (plan §7):
+   * the label scrolls horizontally cell by cell while selected; every
+   * other region (tree connector, current marker, description) stays
+   * fixed. Only the selected row animates, at most one timer per picker,
+   * disposed on close. `labelPartsOf` splits the presentation prefix
+   * (tree connector + current marker) from the marqueeable title so the
+   * prefix never scrolls (plan §7.7); `now` injects the clock (tests).
+   */
+  marquee?: {
+    labelPartsOf?: (label: string) => { prefix: string; title: string }
+    now?: () => number
+  }
 }
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
@@ -959,8 +1039,12 @@ export interface PickerHandle {
 export interface TaskBrowserHandle {
   /** Close the browser without a selection. */
   close(): void
-  /** Replace the rows while the browser is open; the active query re-applies. */
-  setItems(items: readonly TaskPanelItem[]): void
+  /** Replace the rows while the browser is open; the active query
+   * re-applies. `preferredValue` is the row the cursor should land on when
+   * the user has NOT moved it yet (plan §6.6 — the first running subagent,
+   * else the first active job; the tree itself never re-sorts for the
+   * cursor). */
+  setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
 }
 
 /** Footer status data supplied by the runner. */
@@ -1533,6 +1617,12 @@ export class TuiApp {
     height: number
     /** The row span (block-relative) of every attachment's click region. */
     attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+    /** Set ONLY on process rows revealed by an EXPANDED Focus Thought
+     * (plan §8.8 / review P2): the fullscreen click handler collapses the
+     * owner turn when this is set. The user's own rows and the FINAL
+     * assistant never carry it — clicking them must not collapse the
+     * Thought. */
+    collapseFocusOwnerOnClick?: number
   }> = []
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
@@ -1642,7 +1732,7 @@ export class TuiApp {
       // history: an ↑ recall in the MAIN editor would otherwise resend a
       // child-scoped follow-up to the parent.
       const target = this.viewerMode
-      if (target !== undefined && target.mode === 'continuable') {
+      if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
         this.clearNotify()
         this.events.onSubagentSubmit?.({
           parentSessionId: target.parentSessionId,
@@ -1669,7 +1759,7 @@ export class TuiApp {
       // is up: mirror every change into the per-child slot (the runner's
       // restore and stale guards read the slot, not the live component).
       const viewer = this.viewerMode
-      if (viewer !== undefined && viewer.mode === 'continuable') {
+      if (viewer !== undefined && isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
         this.subagentDrafts.set(viewer.childSessionId, this.seatEditor().getText())
       }
       // P1-11: every HOST-driven editor mutation notifies the seat
@@ -2126,7 +2216,7 @@ export class TuiApp {
     //   session or exit the TUI from inside the child view.
     if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
       const viewer = this.viewerMode
-      if (viewer.mode === 'one-shot') {
+      if (!isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
         if (!matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
           return { consume: true }
         }
@@ -2197,6 +2287,16 @@ export class TuiApp {
       // keep the key for themselves.
       if (this.activeScreen.hasOverlayEntries) return undefined
       this.events.onDequeue?.()
+      return { consume: true }
+    }
+    if (matchesKey(data, 'alt+k')) {
+      // Dismiss settled local shell cards (Alt+K — plan §5.4 quick clear):
+      // completed `!`/`!!` runs leave the live view; running cards never
+      // do (the process is NOT cancelled — Esc owns that). Overlays keep
+      // the key for themselves like the other Alt chords.
+      if (this.activeScreen.hasOverlayEntries) return undefined
+      this.dismissSettledLocalShell()
+      this.requestRender()
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+enter')) {
@@ -2456,12 +2556,13 @@ export class TuiApp {
     return {
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
-      // The viewer's input mode: 'readonly' locks the editor (one-shot),
-      // 'continuable' keeps it live (the HOST guard already consumed the
-      // parent-owned chords before the router is consulted).
+      // The viewer's input mode: 'readonly' locks the editor (one-shot AND
+      // nested — only an interactive direct child edits), 'continuable'
+      // keeps it live (the HOST guard already consumed the parent-owned
+      // chords before the router is consulted).
       viewerInputMode: this.viewerMode === undefined || this.activeScreen.hasOverlayEntries
         ? 'none'
-        : this.viewerMode.mode === 'one-shot' ? 'readonly' : 'continuable',
+        : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
       hasOverlay: this.activeScreen.hasOverlayEntries,
       searchActive: this.searchOverlay !== undefined,
       editorReplacement: this.seatEditor().handleInput !== undefined,
@@ -2686,12 +2787,24 @@ export class TuiApp {
    * after a newer one was pushed must not overwrite the newer card.
    * @param message - the card reference {@link pushLocalMessage} returned.
    * @param next - the settled replacement.
+   * @returns the stored replacement (`next`), so a caller that keeps the
+   *   card reference (e.g. a streaming tail refresher) can chain updates —
+   *   the array element is replaced, so the OLD reference no longer indexes.
    */
-  updateLocalMessage(message: TranscriptMessage, next: TranscriptMessage): void {
+  updateLocalMessage(message: TranscriptMessage, next: TranscriptMessage): TranscriptMessage {
     const index = this.localMessages.indexOf(message)
-    if (index === -1) return
+    if (index === -1) return next
+    // A click-expanded local card keeps its override across the running →
+    // settled replacement: the message identity changes, the presentation
+    // state must not (plan §5.2 — never key expansion on the object alone).
+    const override = this.expandedOverride.get(message)
+    if (override !== undefined) {
+      this.expandedOverride.delete(message)
+      this.expandedOverride.set(next, override)
+    }
     this.localMessages[index] = next
     this.rebuildMessages()
+    return next
   }
 
   /** Replace the most recent local card (running → settled). */
@@ -2722,6 +2835,18 @@ export class TuiApp {
     this.localMessages.length = 0
     this.localMessages.push(...running)
     this.rebuildMessages()
+  }
+
+  /**
+   * The quick-dismiss semantic action for settled local shell cards (plan
+   * §5.4): removes completed `!`/`!!` runs from the live view. A RUNNING
+   * card is never dismissed (a live stream survives), the shell process is
+   * NOT cancelled (Esc owns that), no session event is deleted, and an
+   * already-submitted `!` context payload is untouched — the transcript's
+   * user row is the durable record either way. `!!` stays local-only.
+   */
+  dismissSettledLocalShell(): void {
+    this.clearSettledLocalMessages()
   }
 
   /**
@@ -2943,24 +3068,80 @@ export class TuiApp {
 
   /** Toggle one turn's Thought disclosure (click on the header — plan
    * §16.1). Running turns are toggleable; turn/end never reverts the
-   * choice. */
+   * choice. In fullscreen the viewport anchors to the Thought header on
+   * BOTH directions (plan §8): expanding shows the header near the top
+   * instead of the block's tail; collapsing keeps the Thought in view. */
   toggleFocusTurn(turn: number): void {
-    if (this.focusExpandedTurns.has(turn)) {
-      this.focusExpandedTurns.delete(turn)
-    } else {
-      this.focusExpandedTurns.add(turn)
-    }
-    this.rebuildMessages()
-    this.requestRender()
+    this.setFocusTurnExpanded(turn, !this.focusExpandedTurns.has(turn), { anchorFullscreen: true })
   }
 
   /** Force one turn's Thought open (transcript-search jumps — plan §23:
-   * the match must be visible without a second click). */
+   * the match must be visible without a second click). Deliberately NO
+   * anchor: the search caller owns the jump target, and an unconditional
+   * Thought-header anchor would fight the match's own position (plan
+   * §8.9). */
   expandFocusTurn(turn: number): void {
-    if (this.focusExpandedTurns.has(turn)) return
-    this.focusExpandedTurns.add(turn)
+    this.setFocusTurnExpanded(turn, true)
+  }
+
+  /**
+   * The unified Focus disclosure transition (plan §8.4): every entry
+   * point — header click, expanded-body click, search jumps — funnels
+   * through here. With `anchorFullscreen` (user clicks only, never the
+   * search path), the fullscreen viewport is anchored to the turn's
+   * Thought header AFTER the rebuild, with follow-end disabled so the
+   * growing content cannot drag the view back to the tail (plan §8.6/§8.7).
+   */
+  private setFocusTurnExpanded(
+    turn: number,
+    expanded: boolean,
+    options: { anchorFullscreen?: boolean } = {},
+  ): void {
+    if (this.focusExpandedTurns.has(turn) === expanded) return
+    if (expanded) this.focusExpandedTurns.add(turn)
+    else this.focusExpandedTurns.delete(turn)
+    // 1. flip the set → 2. rebuild the projection (rebuildMessages already
+    // requests a render) → 3. re-measure the row map at the current width
+    // (a thumbnail that just finished loading must not shift the anchor).
     this.rebuildMessages()
+    if (options.anchorFullscreen && this.fullscreenScroll !== undefined) {
+      this.refreshMessageRows()
+      // 4. locate the turn's header in the projected row map.
+      const transcriptRow = this.focusTurnTranscriptRow(turn)
+      if (transcriptRow !== undefined) {
+        const width = this.terminal.columns
+        const welcomeHeight = this.welcomeCard.render(width).length
+        // The ScrollView's content height must reflect the NEW projection
+        // BEFORE the anchor, or scrollTo would clamp against the stale
+        // collapsed height. The layout pass uses the same rendered line
+        // count the frame will paint (cached renders make this cheap).
+        const contentHeight = this.messagesView.render(width).length
+        const viewportHeight = this.fullscreenScroll.viewportHeight
+        this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+        // 5. anchor: the header lands `FOCUS_ANCHOR_TOP_PADDING` rows
+        // below the viewport top (one row of previous context stays
+        // visible); disableFollow breaks follow-end so the freshly
+        // expanded content cannot snap back to the tail (plan §8.7).
+        this.fullscreenScroll.scrollTo(
+          welcomeHeight + transcriptRow - FOCUS_ANCHOR_TOP_PADDING,
+          { disableFollow: true },
+        )
+      }
+    }
     this.requestRender()
+  }
+
+  /** The projected transcript row (in `messageRows` coordinates, welcome
+   * card excluded) where a turn's Thought header starts. Returns undefined
+   * when the turn is not currently projected (e.g. Focus off, or the turn
+   * was windowed away). */
+  private focusTurnTranscriptRow(turn: number): number | undefined {
+    let row = 0
+    for (const entry of this.messageRows) {
+      if (entry.activity?.turn === turn) return row
+      row += entry.height
+    }
+    return undefined
   }
 
   /** Enter the subagent-viewer scope: the child session's turn numbers are
@@ -3134,6 +3315,9 @@ export class TuiApp {
         // never hits, see handleFullscreenClick).
         rows.push({
           ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+          ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
+            ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+            : {}),
           height: 0,
           attachments: [],
         })
@@ -3148,6 +3332,9 @@ export class TuiApp {
       const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
       rows.push({
         ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+        ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
+          ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+          : {}),
         height,
         attachments,
       })
@@ -3270,6 +3457,9 @@ export class TuiApp {
         // the click map must mirror the rendered layout exactly.
         rows.push({
           ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+          ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
+            ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+            : {}),
           height: 0,
           attachments: [],
         })
@@ -3278,6 +3468,9 @@ export class TuiApp {
       const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
       rows.push({
         ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+        ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
+          ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+          : {}),
         height,
         attachments,
       })
@@ -3369,6 +3562,26 @@ export class TuiApp {
       this.fullscreenScroll.scrollToEnd()
     } else {
       this.tui.requestRender(true)
+    }
+  }
+
+  /** M5 test hook: the fullscreen ScrollView's live geometry (plan §14.2 —
+   * tests assert `scrollTop` / `isFollowingEnd` / `viewportHeight` /
+   * `maxScrollTop` directly, never a terminal screenshot). `contentHeight`
+   * is the rendered transcript height the layout engine feeds the scroll
+   * view (the same line count the frame paints); `maxScrollTop` is the
+   * clamp — tests can then assert an anchored view is NOT at the max.
+   * Undefined while not fullscreen. */
+  fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number; contentHeight: number; maxScrollTop: number } | undefined {
+    if (this.fullscreenScroll === undefined) return undefined
+    const contentHeight = this.messagesView.render(this.terminal.columns).length
+    const viewportHeight = this.fullscreenScroll.viewportHeight
+    return {
+      scrollTop: this.fullscreenScroll.scrollTop,
+      isFollowingEnd: this.fullscreenScroll.isFollowingEnd,
+      viewportHeight,
+      contentHeight,
+      maxScrollTop: Math.max(0, contentHeight - viewportHeight),
     }
   }
 
@@ -3480,16 +3693,28 @@ export class TuiApp {
         const message = entry.message
         if (message === undefined) return
         const inMessage = messageRow - row
-        // Attachment rows win: a click on an image's info bar or its image
-        // rows toggles THAT OCCURRENCE's display — the identity stays, the
-        // picture collapses/expands, and a repeated attachment elsewhere
-        // stays untouched. Rows outside every attachment span fall through
-        // to the message-level toggle (cards/thinking).
+        // Attachment rows win FIRST (plan §8.3): a click on an image's
+        // info bar or its image rows toggles THAT OCCURRENCE's display —
+        // the identity stays, the picture collapses/expands, and a
+        // repeated attachment elsewhere stays untouched. A click on an
+        // attachment inside an EXPANDED Thought must never collapse the
+        // whole turn (the attachment's own hit area is the intent).
         for (const attachment of entry.attachments) {
           if (inMessage >= attachment.start && inMessage < attachment.end) {
             this.toggleAttachmentCollapsed(message, attachment.imageIndex)
             return
           }
+        }
+        // A message row REVEALED BY an expanded Focus Thought (its
+        // thinking / tool / result / intermediate rows carry the owner
+        // mark from the projection, plan §8.8 / review P2): clicking it
+        // collapses the OWNER turn — the Thought header stays anchored in
+        // view. The user's OWN rows and the FINAL assistant never carry
+        // the mark, so clicking them keeps the old behavior (ordinary
+        // card toggle, no Thought collapse).
+        if (entry.collapseFocusOwnerOnClick !== undefined) {
+          this.setFocusTurnExpanded(entry.collapseFocusOwnerOnClick, false, { anchorFullscreen: true })
+          return
         }
         this.toggleMessageExpanded(message)
         return
@@ -3646,7 +3871,7 @@ export class TuiApp {
    */
   setEditorText(text: string): void {
     const target = this.viewerMode
-    if (target !== undefined && target.mode === 'continuable') {
+    if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
       this.seatEditor().setText(text)
       this.editorSeatHolder.notifyChanged()
@@ -3674,7 +3899,7 @@ export class TuiApp {
    */
   insertIntoEditor(text: string): void {
     const target = this.viewerMode
-    if (target !== undefined && target.mode === 'continuable') {
+    if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       const editor = this.seatEditor()
       if (editor.insertTextAtCursor !== undefined) {
         editor.insertTextAtCursor(text)
@@ -3726,7 +3951,7 @@ export class TuiApp {
       // mirrors through onChange). A visible text the map already
       // contains (equal or a substring of the merge) never duplicates —
       // a stale restore's merged text survives an exit exactly once.
-      if (leaving.mode === 'continuable') {
+      if (isViewerAccessInteractive(resolveViewerAccess(leaving.mode, leaving.access))) {
         this.parkSubagentDraft(leaving.childSessionId)
       }
       // M9 (round-2 finding 1): the viewer restore writes the preserved
@@ -3752,7 +3977,7 @@ export class TuiApp {
       // rebuilt from the child content.
       this.localMessages.length = 0
       this.rebuildMessages()
-    } else if (this.viewerMode.mode === 'continuable') {
+    } else if (isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))) {
       // Switching child: park the outgoing child's draft first.
       this.parkSubagentDraft(this.viewerMode.childSessionId)
     }
@@ -3763,14 +3988,14 @@ export class TuiApp {
     // in their own slots).
     const seat = this.seatEditor()
     seat.borderColor = color.accent
-    if (mode.mode === 'continuable') {
+    if (isViewerAccessInteractive(resolveViewerAccess(mode.mode, mode.access))) {
       // The empty-draft placeholder advertises the viewer's OWN verbs
       // (Enter sends to the CHILD — never the parent — Esc returns).
       this.setViewerPlaceholder(`Message ${mode.label}… — Enter send · Esc back`)
       seat.setText(this.subagentDrafts.get(mode.childSessionId) ?? '')
     } else {
       this.clearViewerPlaceholder()
-      seat.setText(`viewing subagent: ${mode.label} — one-shot · read-only · Esc returns`)
+      seat.setText(`viewing subagent: ${mode.label} — ${viewerAccessHint(mode.mode, resolveViewerAccess(mode.mode, mode.access))} · Esc returns`)
     }
     seat.invalidate()
     this.editorSeatHolder.notifyChanged()
@@ -4967,8 +5192,15 @@ export class TuiApp {
     // inside an open Thought). Collapsed Focus turns never reach this
     // method: their process rows are absent from the projection.
     const focusExpanded = this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)
-    const expanded = (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
-      && (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
+    // LOCAL `!`/`!!` shell cards (the 2026-08-24 plan §5.3) read the SAME
+    // master Ctrl+O switch as the recent-turn fold — never the unbounded
+    // turn marker (POSITIVE_INFINITY would keep them permanently expanded
+    // and a long log would fill the TUI). A per-card click override still
+    // wins, exactly like every other card.
+    const expanded = isLocalShellCard(message)
+      ? (this.toolOutputExpanded || this.expandedOverride.get(message) === true)
+      : (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
+        && (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
     // affected components (an HMR must never hit an old component).
@@ -5344,7 +5576,14 @@ export class TuiApp {
         ? color.error('[error]')
         : color.textDim('[running]')
     const head = `${color.textDim(`${emoji}  ${header.title}${summary}`)} ${pill}`
-    if (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true) {
+    // LOCAL `!`/`!!` shell cards read the master Ctrl+O switch (plan §5.3),
+    // never the unbounded turn marker: collapsed by default so a long log
+    // cannot fill the TUI, expanded only while Ctrl+O is on.
+    const localShell = isLocalShellCard(message)
+    const expanded = localShell
+      ? (this.toolOutputExpanded || this.expandedOverride.get(message) === true)
+      : (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
+    if (expanded) {
       card.addChild(new Text(head, 0, 0))
       // An explicitly expanded card (mouse click, or an open Focus Thought)
       // renders diff bodies in full; the default recent-turn view caps
@@ -5357,6 +5596,14 @@ export class TuiApp {
       // expanding), then the result preview. Read cards keep the envelope
       // summary (`— N lines`), never a dump of the raw XML. Every row
       // truncates to the terminal width, so a folded block never wraps.
+      // LOCAL `!`/`!!` shell cards get their OWN folded layout (plan §5.1):
+      // the command row plus the newest 5 (running) / 20 visual (settled)
+      // rows of output with a hidden-count marker — a long log previews
+      // instead of filling the TUI.
+      if (localShell) {
+        this.renderLocalShellFolded(card, message, head)
+        return card
+      }
       const rows: string[] = []
       const callPreview = parseCallPreview(message.name, message.args)
       // The header already carries friendly summaries (todo counts, web
@@ -5560,6 +5807,42 @@ export class TuiApp {
   }
 
   /**
+   * The folded (collapsed) layout of a LOCAL `!`/`!!` shell card (plan
+   * §5.1): the card head, the `$ command` row, the newest preview rows
+   * (5 source lines while running, up to 20 visual rows once settled),
+   * and the hidden-count marker when content was cut. The capture layer
+   * (bounded-output caps) is untouched — this is display policy only.
+   * @param card - the card container to fill.
+   * @param message - the local shell tool message (name 'shell', unbounded
+   *   turn — see {@link isLocalShellCard}).
+   * @param head - the already-rendered card head line.
+   */
+  private renderLocalShellFolded(
+    card: Container,
+    message: Extract<TranscriptMessage, { kind: 'tool' }>,
+    head: string,
+  ): void {
+    const running = message.status === 'running'
+    const indent = '  '
+    const contentWidth = Math.max(1, this.terminal.columns - visibleWidth(indent) - 2)
+    const budget = running ? RUNNING_PREVIEW_LINES : SETTLED_PREVIEW_VISUAL_ROWS
+    const mode = running ? 'lines' : 'visual'
+    const preview = localShellPreview(message.result, contentWidth, budget, mode)
+    const rows = [truncateToWidth(head, this.terminal.columns, '…')]
+    // The command row (kimi ShellExecution layout): the local shell card's
+    // `args` IS the raw command string (never JSON).
+    const prompt = color.shellMode('$ ')
+    rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(message.args), contentWidth, '…')}`)
+    for (const line of preview.rows) {
+      rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
+    }
+    if (preview.hidden > 0) {
+      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running, preview.partial)}`))
+    }
+    card.addChild(new Text(rows.join('\n'), 0, 0))
+  }
+
+  /**
    * Render one expanded tool card's body. When the runner wired a presenter,
    * the body follows the tool's own render intent (presentResult): a read
    * card shows numbered lines plus the relativized path and total line
@@ -5579,6 +5862,20 @@ export class TuiApp {
     message: Extract<TranscriptMessage, { kind: 'tool' }>,
     explicitlyExpanded: boolean,
   ): void {
+    // LOCAL `!`/`!!` shell cards render their own expanded body (plan
+    // §5.1): the `$ command` row (the card's `args` IS the raw command
+    // string, never JSON) plus the retained buffer — while running that is
+    // the live bounded tail, once settled the final output. No presenter,
+    // no diff, no image pipeline applies to a local run.
+    if (isLocalShellCard(message)) {
+      this.addTerminalCommandRow(card, message.args, '$ ')
+      if (message.result !== '') {
+        for (const line of message.result.split('\n')) {
+          card.addChild(new Text(color.textDim(line), 0, 0))
+        }
+      }
+      return
+    }
     // Workflow run cards: the body is the run's member tree, grouped by phase
     // in arrival order (Web WorkflowRunPanel parity). Rows render even while
     // the run is still streaming (members land incrementally).
@@ -6333,9 +6630,13 @@ export class TuiApp {
     // header wrap even though the badge run fits its own budget). Re-derived
     // on EVERY render so a resize or a title change re-bakes the budget.
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
-    const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent(this.viewerMode.mode === 'one-shot'
-      ? '[viewing subagent · one-shot · read-only]'
-      : '[viewing subagent · continuable]')}`
+    const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent(
+      isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))
+        ? '[viewing subagent · continuable]'
+        : this.viewerMode.access === 'readonly-nested'
+          ? '[viewing subagent · nested · read-only]'
+          : '[viewing subagent · one-shot · read-only]',
+    )}`
     const title = this.viewerMode !== undefined
       ? ` · ${color.textMuted(this.viewerMode.label)}`
       : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
@@ -6476,7 +6777,7 @@ export class TuiApp {
    */
   setDraft(text: string): void {
     const target = this.viewerMode
-    if (target !== undefined && target.mode === 'continuable') {
+    if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
       this.seatEditor().setText(text)
       this.editorSeatHolder.notifyChanged()
@@ -6505,7 +6806,7 @@ export class TuiApp {
   getDraft(): string {
     const target = this.viewerMode
     if (target === undefined) return this.seatEditor().getText()
-    if (target.mode === 'continuable') {
+    if (isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       return this.seatEditor().getText()
     }
     return this.mainDraftBeforeViewer ?? ''
@@ -6535,7 +6836,7 @@ export class TuiApp {
     // exit chord (and its footer hint) must not survive into the next
     // interaction.
     this.clearCtrlCExit()
-    if (target !== undefined && target.mode === 'continuable') {
+    if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       // A plugin action inside an interactive viewer submits to the
       // SUBAGENT (the semantic target of the visible editor), never the
       // parent — and the queue verb is meaningless for the child (its
@@ -6866,11 +7167,33 @@ export class TuiApp {
       return this.openCategorizedPicker(items, onSelect, onCancel,
         options as PickerOptions & { categories: readonly PickerCategory[] })
     }
+    // Selected-row label marquee (plan §7): ONE driver per picker, armed
+    // only while the SELECTED row overflows, disposed on close. The
+    // truncatePrimary seam keeps the tree connector / current marker as a
+    // fixed prefix — only the title scrolls (plan §7.7).
+    const marquee = options.marquee === undefined ? undefined : new SelectedMarquee({
+      requestRender: () => this.requestRender(),
+      now: options.marquee.now,
+    })
+    const layout = marquee === undefined ? {} : {
+      truncatePrimary: (ctx: SelectListTruncatePrimaryContext) => {
+        if (!ctx.isSelected) return truncateToWidth(ctx.text, ctx.maxWidth, '')
+        const parts = options.marquee!.labelPartsOf?.(ctx.text) ?? { prefix: '', title: ctx.text }
+        const prefixWidth = visibleWidth(parts.prefix)
+        const window = marquee.render({
+          key: ctx.item.value,
+          text: parts.title,
+          maxWidth: Math.max(1, ctx.maxWidth - prefixWidth),
+          selected: true,
+        })
+        return parts.prefix + window
+      },
+    }
     const list = new SelectList(
       items.map(item => ({ ...item })),
       10,
       selectListTheme,
-      {},
+      layout,
       {
         enableSearch: options.enableSearch,
         header: options.header,
@@ -6879,7 +7202,15 @@ export class TuiApp {
         initialQuery: options.initialQuery,
       },
     )
-    const handle = this.showOverlayOnHost(new Frame(list), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    if (marquee !== undefined) {
+      // A selection move re-anchors the marquee cycle (fresh pause).
+      list.onSelectionChange = () => marquee.reset()
+    }
+    // The marquee wraps the list in the filter adapter (search edits must
+    // restart the cycle even without a selection move — review P2); with
+    // no marquee the list mounts directly, exactly as before.
+    const mounted = marquee === undefined ? list : new MarqueeFilterAdapter(list, () => marquee.reset())
+    const handle = this.showOverlayOnHost(new Frame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
     // is removed on a normal select/cancel AND on the handle's close
@@ -6906,17 +7237,20 @@ export class TuiApp {
     }
     list.onSelect = (item) => {
       removeAbortListener()
+      marquee?.dispose()
       handle.hide()
       onSelect(item.value)
     }
     list.onCancel = () => {
       removeAbortListener()
+      marquee?.dispose()
       handle.hide()
       onCancel()
     }
     return {
       close: () => {
         removeAbortListener()
+        marquee?.dispose()
         handle.hide()
       },
       setItems: (next) => {
@@ -6946,6 +7280,27 @@ export class TuiApp {
     let currentIndex = 0
     let overlay: OverlayHandle | undefined
     let list: SelectList | undefined
+    // Selected-row label marquee (plan §7): ONE driver for the whole
+    // categorized picker (a category switch rebuilds the SelectList, the
+    // marquee survives — the fresh list re-anchors it), disposed on close.
+    const marquee = options.marquee === undefined ? undefined : new SelectedMarquee({
+      requestRender: () => this.requestRender(),
+      now: options.marquee.now,
+    })
+    const layout = marquee === undefined ? {} : {
+      truncatePrimary: (ctx: SelectListTruncatePrimaryContext) => {
+        if (!ctx.isSelected) return truncateToWidth(ctx.text, ctx.maxWidth, '')
+        const parts = options.marquee!.labelPartsOf?.(ctx.text) ?? { prefix: '', title: ctx.text }
+        const prefixWidth = visibleWidth(parts.prefix)
+        const window = marquee.render({
+          key: ctx.item.value,
+          text: parts.title,
+          maxWidth: Math.max(1, ctx.maxWidth - prefixWidth),
+          selected: true,
+        })
+        return parts.prefix + window
+      },
+    }
     // The live search query, carried across category switches (the rebuilt
     // SelectList re-applies it via initialQuery).
     let query = ''
@@ -6959,6 +7314,7 @@ export class TuiApp {
           options.signal.removeEventListener('abort', onAbort)
           onAbort = undefined
         }
+        marquee?.dispose()
         overlay?.hide()
       },
       cycle: () => {
@@ -6970,12 +7326,17 @@ export class TuiApp {
       },
     }
     const activate = (): void => {
+      // A category switch is a NEW view: the marquee must restart from the
+      // fresh anchor even when the same row (same value/label/width)
+      // survives the switch — the identity check alone would let it
+      // continue mid-cycle (review round 3).
+      marquee?.reset()
       const category = categories[currentIndex]!
       const next = new SelectList(
         category.items().map(item => ({ ...item })),
         10,
         selectListTheme,
-        {},
+        layout,
         {
           enableSearch: options.enableSearch,
           header: category.header,
@@ -6984,6 +7345,7 @@ export class TuiApp {
           initialQuery: query === '' ? options.initialQuery : query,
         },
       )
+      if (marquee !== undefined) next.onSelectionChange = () => marquee.reset()
       next.onSelect = (item) => {
         query = next.getFilter()
         state.close()
@@ -6996,7 +7358,10 @@ export class TuiApp {
       }
       overlay?.hide()
       list = next
-      overlay = this.showOverlayOnHost(new Frame(next), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+      // Search edits inside a category must restart the marquee too (the
+      // vendored SelectList fires no selection change for query edits).
+      const mounted = marquee === undefined ? next : new MarqueeFilterAdapter(next, () => marquee.reset())
+      overlay = this.showOverlayOnHost(new Frame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     }
     // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
     // onCancel. The listener lives once on the signal — category switches
@@ -7096,7 +7461,7 @@ export class TuiApp {
       },
       () => this.requestRender(),
     )
-    const handle = this.showOverlayOnHost(new Frame(panel), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
+    const handle = this.showOverlayOnHost(new Frame(panel, true), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
     // One close path: hide the overlay AND stop the panel's 1s elapsed tick
     // (an unref'd interval must still be cleared — the panel is gone).
     // `close` is a `let` declared before the panel callbacks above reference
@@ -7109,8 +7474,8 @@ export class TuiApp {
     }
     return {
       close,
-      setItems: (next: readonly TaskPanelItem[]) => {
-        panel.setItems(next.map(item => ({ ...item })))
+      setItems: (next: readonly TaskPanelItem[], preferredValue?: string) => {
+        panel.setItems(next.map(item => ({ ...item })), preferredValue)
         this.requestRender()
       },
     }
@@ -7154,7 +7519,7 @@ export class TuiApp {
       handle?.hide()
       onCancel()
     }, { enableSearch: true })
-    handle = this.showOverlayOnHost(new Frame(settings), { width: 72, maxHeight: 28 })
+    handle = this.showOverlayOnHost(new Frame(settings, true), { width: 72, maxHeight: 28 })
     return () => handle?.hide()
   }
 
@@ -7190,7 +7555,7 @@ export class TuiApp {
         options.onStop?.()
       }
     }
-    const handle = this.showOverlayOnHost(new Frame(panel), { width: 88, maxHeight: 24 })
+    const handle = this.showOverlayOnHost(new Frame(panel, true), { width: 88, maxHeight: 24 })
     timer = setInterval(() => {
       if (closed) return
       panel.setBody(options.refresh())

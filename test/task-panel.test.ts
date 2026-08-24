@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
 import { TaskBrowserPanel, formatElapsed, type TaskPanelItem } from '../src/task-panel.ts'
+import { MARQUEE_STEP_MS } from '../src/marquee.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 
@@ -197,6 +198,38 @@ test('an UNTOUCHED selection follows the enriched list head (the /tasks race)', 
   const enriched = rendered().map(strip).join('\n')
   assert.ok(enriched.includes('→ ● subagent · research'),
     `untouched selection must follow the preferred head (first running subagent):\n${enriched}`)
+})
+
+test('an UNTOUCHED selection honors an EXPLICIT preferredValue without moving the row (plan §6.6)', () => {
+  // The tree order is immutable — the cursor follows the caller's
+  // preferred row (first running subagent, else first active job), never
+  // a re-sort. Here the preferred value is the SECOND row: a running
+  // grandchild BELOW its inactive parent.
+  const { panel, rendered } = makePanel([
+    { value: 'agent:parent', label: 'subagent · planner', status: 'inactive', group: 'subagents', treePrefix: '├─ ' },
+    { value: 'agent:grand', label: 'subagent · deep', status: 'running', group: 'subagents', treePrefix: '  ├─ ' },
+  ])
+  panel.setItems([
+    { value: 'agent:parent', label: 'subagent · planner', status: 'inactive', group: 'subagents', treePrefix: '├─ ' },
+    { value: 'agent:grand', label: 'subagent · deep', status: 'running', group: 'subagents', treePrefix: '  ├─ ' },
+  ], 'agent:grand')
+  const view = rendered().map(strip).join('\n')
+  assert.ok(view.includes('→ ●   ├─ subagent · deep'), `preferred row must be selected:\n${view}`)
+  // The row ORDER must not have changed (the cursor moved, the tree did
+  // not) — the tree renderer never re-sorts for the cursor.
+  const parentIndex = view.indexOf('subagent · planner')
+  const grandIndex = view.indexOf('subagent · deep')
+  assert.ok(parentIndex >= 0 && grandIndex > parentIndex, `tree order must survive:\n${view}`)
+})
+
+test('treePrefix renders as a fixed connector region before the label', () => {
+  const { panel, rendered } = makePanel([
+    { value: 'agent:child-1', label: 'subagent · research', status: 'running', group: 'subagents', treePrefix: '├─ ' },
+    { value: 'agent:child-2', label: 'subagent · nested', status: 'inactive', group: 'subagents', treePrefix: '  ├─ ' },
+  ])
+  const view = rendered().map(strip).join('\n')
+  assert.ok(view.includes('├─ subagent · research'), `depth-1 connector missing:\n${view}`)
+  assert.ok(view.includes('  ├─ subagent · nested'), `depth-2 connector missing:\n${view}`)
 })
 
 test('a USER-touched selection survives a later enrichment (no focus stealing)', () => {
@@ -657,7 +690,9 @@ test('the subagent mode suffix renders after the label and survives truncation',
   )
   const narrow = narrowPanel.render(40).map(strip).join('\n')
   assert.ok(narrow.includes('· one-shot'), `the mode must survive the narrow frame:\n${narrow}`)
-  assert.ok(narrow.includes('…'), `the clipped label must show the ellipsis:\n${narrow}`)
+  // The SELECTED row marquees (plan §7): the label window shows the label
+  // start (the initial pause), never a static ellipsis; the mode suffix
+  // stays fixed. Unselected rows keep the ellipsis (covered elsewhere).
   assert.ok(!narrow.includes('keeps-growing'), `the label tail should be clipped on the narrow frame:\n${narrow}`)
 })
 
@@ -681,7 +716,10 @@ test('the mode suffix is a HARD layout right: extreme widths compress label and 
   // 30 cols: the label clips, the mode and the tail survive.
   const medium = render(30)
   assert.ok(medium.includes('· one-shot'), `mode must survive 30 cols:\n${medium}`)
-  assert.ok(medium.includes('…'), `clipped label must show the ellipsis:\n${medium}`)
+  // The selected row marquees: no static ellipsis (the label window shows
+  // the label start during the initial pause), and the mode suffix + the
+  // status tail stay fixed (plan §7.5).
+  assert.ok(!medium.includes('…'), `a selected overflow row must marquee, not ellipsis:\n${medium}`)
   assert.ok(medium.includes('inactive'), `tail must survive 30 cols:\n${medium}`)
   // 16 cols (physically fits `→ ● one-shot`): the label and tail yield
   // entirely, the MODE stays — the viewer's interactivity is a pre-Enter
@@ -710,4 +748,75 @@ test('search matches the mode suffix too', () => {
   const joined = lines.join('\n')
   assert.ok(joined.includes('subagent · audit · one-shot'), `the one-shot row must match:\n${joined}`)
   assert.ok(!joined.includes('subagent · research · continuable'), `the continuable row must not match:\n${joined}`)
+})
+
+test('the selected row marquees under a fake clock while unselected rows stay fixed (review F1)', () => {
+  // Panel-level regression for the marquee review finding: every row is
+  // rendered through the SAME marquee each frame; the selected row must
+  // keep scrolling while unselected rows render before/after it.
+  const now = { value: 0 }
+  const items: TaskPanelItem[] = [
+    { value: 'agent:other', label: 'subagent · a-short-label', suffix: 'one-shot', status: 'inactive', group: 'subagents', treePrefix: '├─ ' },
+    { value: 'agent:sel', label: 'subagent · a-very-long-selected-label-that-overflows-its-budget', suffix: 'continuable', status: 'running', group: 'subagents', treePrefix: '  ├─ ' },
+    { value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' },
+  ]
+  const panel = new TaskBrowserPanel(
+    items, 10,
+    { header: 'tasks', enableSearch: false, noMatchText: '', marqueeNow: () => now.value },
+    () => {}, () => {}, () => {},
+  )
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  // The second row is selected by default (index 0 is selected on open —
+  // move down to the long label).
+  panel.handleInput('\x1b[B')
+  // Initial render: the selected label shows its start (pause).
+  // A narrow frame forces the selected label to overflow its budget.
+  const initial = panel.render(46).map(strip).join('\n')
+  assert.ok(initial.includes('→ ●   ├─ subagent · a-ve'),
+    `selected label window (initial pause) must show:\n${initial}`)
+  assert.ok(initial.includes('├─ subagent · a-short…'), `unselected tree row must ellipsis:\n${initial}`)
+  // Repaint storm with interleaved unselected rows, then advance the clock
+  // past the pause: the selected label must MOVE (its cycle was not reset).
+  for (let t = 0; t < 800; t += 100) {
+    now.value = t
+    panel.render(46) // full repaint — unselected rows render through the marquee too
+  }
+  now.value = 800 + 3 * MARQUEE_STEP_MS
+  const moved = panel.render(46).map(strip).join('\n')
+  assert.ok(!moved.includes('→ ●   ├─ subagent · a-ve'),
+    `the selected label must have scrolled past its start:\n${moved}`)
+  assert.ok(moved.includes('├─ subagent · a-short…'), `unselected rows must stay put:\n${moved}`)
+  panel.dispose()
+})
+
+test('a search/type filter restarts the selected row marquee even when the SAME row survives (review round 3)', () => {
+  // The filter can retain the selected row's identity (same value/label/
+  // width) — the marquee must still restart from a fresh anchor, or it
+  // would continue mid-cycle inside the new filtered view.
+  const now = { value: 0 }
+  const item: TaskPanelItem = {
+    value: 'agent:sel',
+    label: 'subagent · a-very-long-selected-label-that-overflows-its-budget',
+    suffix: 'continuable',
+    status: 'inactive',
+    group: 'subagents',
+  }
+  const panel = new TaskBrowserPanel(
+    [item], 10,
+    { header: 'tasks', enableSearch: true, noMatchText: '', marqueeNow: () => now.value },
+    () => {}, () => {}, () => {},
+  )
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  // Advance the fake clock well into the scroll cycle.
+  now.value = 800 + 6 * MARQUEE_STEP_MS
+  const mid = panel.render(60).map(strip).join('\n')
+  assert.ok(!mid.includes('a-very-long-selected-label-that'),
+    `precondition — the label must have scrolled past its start:\n${mid}`)
+  // Type a query that MATCHES the same row (identity unchanged).
+  panel.handleInput('s')
+  now.value = 800 + 8 * MARQUEE_STEP_MS
+  const after = panel.render(60).map(strip).join('\n')
+  assert.ok(after.includes('a-very-long-selected-l'),
+    `the filter must restart the marquee from the fresh anchor:\n${after}`)
+  panel.dispose()
 })
