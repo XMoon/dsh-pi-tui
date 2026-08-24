@@ -68,6 +68,10 @@ export interface TaskPanelOptions {
    * closed (a subagent interrupt; `i` stays a search letter when the box
    * is open, same rule as the `k`/`j` navigation aliases). */
   onAction?: (value: string, action: 'interrupt') => void
+  /** Test hook: the selected-row marquee's clock (a fake clock in tests
+   * so the label's scroll motion is deterministic; production defaults to
+   * Date.now). */
+  marqueeNow?: () => number
 }
 
 /**
@@ -123,7 +127,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   private readonly requestRender: () => void
   /** The selected-row label marquee (plan §7): ONE per panel, armed only
    * while a selected overflowing row is visible, disposed with the panel. */
-  private readonly marquee = new SelectedMarquee({ requestRender: () => this.requestRender() })
+  private readonly marquee: SelectedMarquee
   private _focused = false
 
   constructor(
@@ -143,6 +147,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.onCancel = onCancel
     this.onAction = options.onAction
     this.requestRender = requestRender
+    this.marquee = new SelectedMarquee({
+      requestRender: () => this.requestRender(),
+      now: options.marqueeNow,
+    })
     this.searchEnabled = options.enableSearch ?? false
     this.searchInput.onEscape = () => this.onCancel()
     this.searchInput.onSubmit = (value) => {

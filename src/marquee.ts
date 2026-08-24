@@ -93,6 +93,11 @@ export class SelectedMarquee {
   private anchor = ''
   private anchorMs = 0
   private timer: NodeJS.Timeout | undefined
+  /** The ABSOLUTE deadline (ms) the armed timer targets. Render re-arms
+   * only when the deadline CHANGES — a high-frequency repaint (a 1s
+   * panel tick, streaming repaints) must not keep resetting the timer and
+   * pushing the transition ever later (review finding). */
+  private timerDeadline = -1
   private disposed = false
 
   constructor(options: {
@@ -121,14 +126,19 @@ export class SelectedMarquee {
    */
   render(input: { key: string; text: string; maxWidth: number; selected: boolean }): string {
     const width = Math.max(0, Math.floor(input.maxWidth))
+    // An UNSELECTED row (or a zero budget) must NOT touch the marquee
+    // state: a panel renders every row through this driver, and an
+    // unselected row resetting the anchor (or clearing the timer) would
+    // restart the selected row's cycle on EVERY repaint — it would never
+    // move (review finding). Unselected rows are plain ellipsis rows; only
+    // the selected row owns the anchor and the timer.
+    if (!input.selected || width <= 0) {
+      return truncateToWidth(input.text, Math.max(0, width), '…')
+    }
     const identity = `${input.key}\u0000${input.text}\u0000${width}`
     if (identity !== this.anchor) {
       this.anchor = identity
       this.anchorMs = this.now()
-    }
-    if (!input.selected || width <= 0) {
-      this.clearTimer()
-      return truncateToWidth(input.text, Math.max(0, width), '…')
     }
     const totalWidth = visibleWidth(input.text)
     if (totalWidth <= width) {
@@ -165,6 +175,7 @@ export class SelectedMarquee {
       clearTimeout(this.timer)
       this.timer = undefined
     }
+    this.timerDeadline = -1
   }
 
   private armTimer(msToNext: number): void {
@@ -175,13 +186,29 @@ export class SelectedMarquee {
       this.clearTimer()
       return
     }
+    // The deadline is ABSOLUTE (now + msToNext): while the selected row's
+    // cycle is unchanged, every render resolves to the SAME deadline, so
+    // the armed timer is kept instead of being cleared and re-set — a
+    // repaint storm (elapsed tick, streaming) can never push the next
+    // transition indefinitely into the future (review finding). Only an
+    // anchor/phase change moves the deadline and re-arms.
+    const deadline = this.now() + msToNext
+    if (this.timer !== undefined && this.timerDeadline === deadline) return
     this.clearTimer()
+    this.timerDeadline = deadline
     this.timer = setTimeout(() => {
       this.timer = undefined
+      this.timerDeadline = -1
       if (this.disposed) return
       this.requestRender()
     }, msToNext)
     this.timer.unref()
+  }
+
+  /** Test hook: the absolute deadline the armed timer targets (-1 when no
+   * timer is armed). Asserts the re-arm-on-deadline-change contract. */
+  pendingTimerDeadlineForTest(): number {
+    return this.timerDeadline
   }
 }
 

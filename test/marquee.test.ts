@@ -139,3 +139,53 @@ test('dispose clears the timer and no render fires after disposal', () => {
   marquee.dispose()
   assert.equal(renders, 0)
 })
+
+test('UNSELECTED rows never reset the selected row\'s cycle (review finding F1)', () => {
+  // A panel renders EVERY row through the same marquee; an unselected row
+  // must not re-anchor the cycle (or clear the timer) — otherwise the
+  // selected row would restart on every repaint and never move.
+  const { marquee, setNow } = fakeMarquee()
+  const selected = 'abcdefghijklmnop'
+  const unselected = 'other-row-label'
+  setNow(0)
+  // The selected row starts its cycle (pause).
+  assert.equal(marquee.render({ key: 'sel', text: selected, maxWidth: 8, selected: true }), 'abcdefgh')
+  // A repaint renders the OTHER (unselected) rows first, then the selected
+  // row again. The selected cycle must continue, not restart.
+  setNow(300)
+  marquee.render({ key: 'other', text: unselected, maxWidth: 8, selected: false })
+  marquee.render({ key: 'sel', text: selected, maxWidth: 8, selected: true })
+  // Still in the initial pause (800ms) — same window, NOT a fresh reset.
+  assert.equal(marquee.render({ key: 'sel', text: selected, maxWidth: 8, selected: true }), 'abcdefgh')
+  // Past the pause: the window moves — the unselected renders in between
+  // must not have restarted the anchor.
+  setNow(800 + 3 * MARQUEE_STEP_MS)
+  marquee.render({ key: 'other', text: unselected, maxWidth: 8, selected: false })
+  const moved = marquee.render({ key: 'sel', text: selected, maxWidth: 8, selected: true })
+  assert.notEqual(moved, 'abcdefgh', 'the selected cycle must survive interleaved unselected renders')
+  marquee.dispose()
+})
+
+test('high-frequency repaints never re-arm the timer (review finding F2)', () => {
+  const { marquee, setNow } = fakeMarquee()
+  const text = 'abcdefghijklmnop'
+  // First render arms the timer at the initial-pause deadline (t=800).
+  setNow(0)
+  marquee.render({ key: 'k', text, maxWidth: 8, selected: true })
+  const firstDeadline = marquee.pendingTimerDeadlineForTest()
+  assert.equal(firstDeadline, 800, 'timer targets the pause end')
+  // A repaint storm (streaming, panel tick): many renders at close times.
+  for (let t = 50; t < 800; t += 50) {
+    setNow(t)
+    marquee.render({ key: 'k', text, maxWidth: 8, selected: true })
+    assert.equal(marquee.pendingTimerDeadlineForTest(), firstDeadline,
+      `deadline must stay 800 across repaints (t=${t})`)
+  }
+  // Past the deadline the NEXT phase arms a NEW (later) deadline.
+  setNow(800 + MARQUEE_STEP_MS)
+  marquee.render({ key: 'k', text, maxWidth: 8, selected: true })
+  const nextDeadline = marquee.pendingTimerDeadlineForTest()
+  assert.notEqual(nextDeadline, firstDeadline, 'a phase change moves the deadline')
+  assert.equal(nextDeadline, 800 + 2 * MARQUEE_STEP_MS, 'one step later')
+  marquee.dispose()
+})

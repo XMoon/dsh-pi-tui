@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
 import { TaskBrowserPanel, formatElapsed, type TaskPanelItem } from '../src/task-panel.ts'
+import { MARQUEE_STEP_MS } from '../src/marquee.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 
@@ -747,4 +748,43 @@ test('search matches the mode suffix too', () => {
   const joined = lines.join('\n')
   assert.ok(joined.includes('subagent · audit · one-shot'), `the one-shot row must match:\n${joined}`)
   assert.ok(!joined.includes('subagent · research · continuable'), `the continuable row must not match:\n${joined}`)
+})
+
+test('the selected row marquees under a fake clock while unselected rows stay fixed (review F1)', () => {
+  // Panel-level regression for the marquee review finding: every row is
+  // rendered through the SAME marquee each frame; the selected row must
+  // keep scrolling while unselected rows render before/after it.
+  const now = { value: 0 }
+  const items: TaskPanelItem[] = [
+    { value: 'agent:other', label: 'subagent · a-short-label', suffix: 'one-shot', status: 'inactive', group: 'subagents', treePrefix: '├─ ' },
+    { value: 'agent:sel', label: 'subagent · a-very-long-selected-label-that-overflows-its-budget', suffix: 'continuable', status: 'running', group: 'subagents', treePrefix: '  ├─ ' },
+    { value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' },
+  ]
+  const panel = new TaskBrowserPanel(
+    items, 10,
+    { header: 'tasks', enableSearch: false, noMatchText: '', marqueeNow: () => now.value },
+    () => {}, () => {}, () => {},
+  )
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  // The second row is selected by default (index 0 is selected on open —
+  // move down to the long label).
+  panel.handleInput('\x1b[B')
+  // Initial render: the selected label shows its start (pause).
+  // A narrow frame forces the selected label to overflow its budget.
+  const initial = panel.render(46).map(strip).join('\n')
+  assert.ok(initial.includes('→ ●   ├─ subagent · a-ve'),
+    `selected label window (initial pause) must show:\n${initial}`)
+  assert.ok(initial.includes('├─ subagent · a-short…'), `unselected tree row must ellipsis:\n${initial}`)
+  // Repaint storm with interleaved unselected rows, then advance the clock
+  // past the pause: the selected label must MOVE (its cycle was not reset).
+  for (let t = 0; t < 800; t += 100) {
+    now.value = t
+    panel.render(46) // full repaint — unselected rows render through the marquee too
+  }
+  now.value = 800 + 3 * MARQUEE_STEP_MS
+  const moved = panel.render(46).map(strip).join('\n')
+  assert.ok(!moved.includes('→ ●   ├─ subagent · a-ve'),
+    `the selected label must have scrolled past its start:\n${moved}`)
+  assert.ok(moved.includes('├─ subagent · a-short…'), `unselected rows must stay put:\n${moved}`)
+  panel.dispose()
 })
