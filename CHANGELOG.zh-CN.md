@@ -5,7 +5,7 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.3.3] - 2026-08-24
 
 ### 新增
 
@@ -206,6 +206,8 @@
   以及 vendored pi-tui 类型——被内联进发布的 `.d.mts`,触发 tarball
   声明泄漏门禁失败。该函数现在只接收一个最小结构化表面(phase/busy/
   working 三个 setter),`dist/` 声明仅保留公开 runner 表面。
+
+## [Unreleased]
 
 ## [0.3.2] - 2026-08-22
 
@@ -835,7 +837,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...v0.3.0
