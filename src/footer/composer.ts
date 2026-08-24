@@ -120,15 +120,22 @@ export class FooterComposer {
     if (right.length === 0) return left.map(item => item.text).join(separator)
     if (left.length === 0) return right.map(item => item.text).join(separator)
     // Right zone first (plan §9.1): reserve it, then the left zone fits
-    // the remaining width by compact → drop → truncate.
+    // the remaining width by compact → drop → truncate. The right zone is
+    // NOT absolutely undeletable: when the left zone alone fills the
+    // width, the right zone truncates to the leftover room — and drops
+    // entirely when even one cell is left (plan §9.4: the right zone
+    // never crosses the terminal width, never a negative gap).
     const rightText = right.map(item => item.text).join(separator)
     const rightWidth = visibleWidth(rightText)
     const minGap = 1
     const leftBudget = Math.max(1, width - rightWidth - minGap)
     const leftText = this.fitZone(left, separator, leftBudget)
     const leftWidth = visibleWidth(leftText)
-    const gap = ' '.repeat(Math.max(1, width - leftWidth - rightWidth))
-    return `${leftText}${gap}${rightText}`
+    const rightRoom = Math.max(0, width - leftWidth - minGap)
+    if (rightRoom < 1) return leftText
+    const finalRight = rightWidth > rightRoom ? truncateToWidth(rightText, rightRoom, '…') : rightText
+    const gap = ' '.repeat(Math.max(0, width - leftWidth - visibleWidth(finalRight)))
+    return `${leftText}${gap}${finalRight}`
   }
 
   /** Resolve one zone's item refs into rendered items (unknown ids and
@@ -211,9 +218,11 @@ function renderInstruction(instruction: FooterInstructionLike): string {
 }
 
 /** Force a visible `…` on a wrapped row that still has hidden content
- * behind it (the legacy capRowWithEllipsis). */
+ * behind it (the legacy capRowWithEllipsis). At width 1 the ellipsis
+ * alone fills the row (the legacy `max(1, width-1)` produced a 2-cell
+ * row — the marker must never overflow). */
 function capRowWithEllipsis(row: string, width: number): string {
-  return `${truncateToWidth(row, Math.max(1, width - 1), '')}…`
+  return `${truncateToWidth(row, Math.max(0, width - 1), '')}…`
 }
 
 /** Render footer spans through the host's semantic color helpers. */
