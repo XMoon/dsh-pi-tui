@@ -176,6 +176,36 @@ test('Ctrl+R resolves the Current directory at OPEN time (a session switch moves
   }
 })
 
+test('Ctrl+R on a TINY terminal (8 rows) never clips the panel footer', async () => {
+  // Round-5 repro: maxHeight 6 on an 8-row terminal; the panel's old
+  // unconditional maxRows floor pushed the framed output past the overlay
+  // and clipped the footer. The panel must fit the available height.
+  const home = tempHome()
+  try {
+    const { VirtualTerminal } = await import('./virtual-terminal.ts')
+    const { TuiApp } = await import('../src/tui-app.ts')
+    seedHistory(home, '/work/a', [{ content: 'fix nginx reload', ts: 3 }])
+    const vt = new VirtualTerminal(80, 8)
+    const app = new TuiApp(vt, {
+      onSubmit: () => {},
+      onExit: () => {},
+    }, {
+      historySearchSource: new FileHistorySearchSource({ dshHome: home }),
+      historySearchCwd: () => '/work/a',
+    })
+    app.start()
+    await vt.waitForRender()
+    vt.sendInput('\x12') // Ctrl+R
+    await vt.waitForRender()
+    const viewport = vt.getViewport()
+    assert.ok(viewport.some(line => line.includes('History')), 'the panel must open')
+    assert.ok(viewport.some(line => line.includes('Esc cancel')), 'the footer hint must stay visible')
+    app.stop()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('plugin keybindings can never claim Ctrl+R (host-reserved)', async () => {
   const home = tempHome()
   try {

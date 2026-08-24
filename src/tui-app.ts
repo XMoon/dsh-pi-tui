@@ -2958,7 +2958,7 @@ export class TuiApp {
       // injected getter reflects the LIVE session, the status cwd is the
       // fallback when no getter is wired.
       cwd: this.historySearchCwd?.() ?? this.status.cwd,
-      maxRows: Math.max(6, maxHeight - 2),
+      maxRows: maxHeight - 2, // the Frame adds its two border rows
       onResultsChanged: () => this.requestRender(),
       onAccept: (content) => {
         this.closeHistorySearch()

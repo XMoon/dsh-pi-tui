@@ -347,6 +347,30 @@ test('panel: a TINY budget (8 rows) never overflows; a workable budget keeps the
   assert.ok(roomyLines.some(line => line.includes('Time:')), 'the Time row must stay visible')
 })
 
+test('panel: the detail pane is suppressed (never truncated) when the budget cannot hold its metadata', async () => {
+  // Round-5 repro: a split layout with a small body budget used to slice
+  // Time/Session off the detail. The pane must render ONLY when it can
+  // keep ALL metadata rows; otherwise it is suppressed entirely.
+  const source = new FakeSource()
+  // A row with the FULL metadata set (Directory + Time + Session = 3 rows).
+  source.rows = [{ id: 'p', content: 'prompt', cwd: '/work/a', ts: 1, sessionId: 'ses_1', sourceFile: '/a/h.jsonl', sourceIndex: 0 }]
+  const { panel } = makePanel(source, { maxRows: 8 })
+  panel.start()
+  await settle()
+  // maxRows 8 → bodyBudget 4 < 2 + 3 metadata → the detail must be
+  // suppressed, never truncated.
+  const lines = panel.render(HISTORY_PANEL_SPLIT_WIDTH + 20)
+  assert.ok(!lines.some(line => line.includes('Time:')), 'a truncated detail must not render at all')
+  // With a workable budget the FULL metadata set renders.
+  const { panel: roomy } = makePanel(source, { maxRows: 16 })
+  roomy.start()
+  await settle()
+  const roomyLines = roomy.render(HISTORY_PANEL_SPLIT_WIDTH + 20)
+  assert.ok(roomyLines.some(line => line.includes('Directory:')), 'Directory must render')
+  assert.ok(roomyLines.some(line => line.includes('Time:')), 'Time must render')
+  assert.ok(roomyLines.some(line => line.includes('Session:')), 'Session must render')
+})
+
 test('panel: a 500-line prompt is clamped in the detail pane (never fills the terminal)', () => {
   const source = new FakeSource()
   const huge = Array.from({ length: 500 }, (_, i) => `line ${i} of a giant prompt`).join('\n')

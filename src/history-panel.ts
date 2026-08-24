@@ -154,7 +154,11 @@ export class HistoryPanel implements Component, Focusable {
     this.onClose = options.onClose
     this.onResultsChanged = options.onResultsChanged
     this.debounceMs = options.debounceMs ?? HISTORY_SEARCH_DEBOUNCE_MS
-    this.maxRows = Math.max(8, options.maxRows ?? 24)
+    // NO unconditional floor: the host derives maxRows from the real
+    // overlay height (maxHeight minus the Frame border), so a tiny
+    // terminal gets a tiny panel — a floor here would push the framed
+    // output past the overlay and clip the footer.
+    this.maxRows = options.maxRows ?? 24
     this.input = new Input()
     this.state.query = options.initialQuery ?? ''
     this.input.setValue(this.state.query)
@@ -329,16 +333,18 @@ export class HistoryPanel implements Component, Focusable {
     lines.push(this.renderTitle(safeWidth))
     // Query row.
     lines.push(this.renderSearchRow(safeWidth))
-    lines.push('')
-    // Body: list (+ detail). The body budget is the TOTAL panel budget
-    // minus the fixed chrome (title, search, blank, footer) — the render
-    // NEVER exceeds maxRows (plan §51: a huge prompt can never fill the
-    // terminal).
-    const bodyBudget = Math.max(1, this.maxRows - HISTORY_PANEL_CHROME_ROWS)
+    // Chrome is adaptive on tiny budgets: the blank row yields first, the
+    // footer next — the render NEVER exceeds maxRows (plan §51), so a
+    // small overlay height cannot clip the panel.
+    let chrome = 2 // title + search
+    if (this.maxRows >= 5) {
+      lines.push('')
+      chrome = 3
+    }
+    const bodyBudget = Math.max(1, this.maxRows - chrome - 1) // -1 footer
     const split = safeWidth >= HISTORY_PANEL_SPLIT_WIDTH
     this.renderBody(lines, safeWidth, split, bodyBudget)
-    // Footer.
-    lines.push(this.renderFooter(safeWidth))
+    if (this.maxRows >= 4) lines.push(this.renderFooter(safeWidth))
     return lines
   }
 
@@ -433,7 +439,7 @@ export class HistoryPanel implements Component, Focusable {
   private renderList(width: number, budget: number): string[] {
     const out: string[] = []
     const count = this.state.results.length
-    if (count === 0) return out
+    if (count === 0 || budget <= 0) return out
     // The "(N results)" counter row (when it appears) occupies one row of
     // the budget too — the list NEVER exceeds `budget` rows, even at
     // budget 1 (the counter wins that row rather than overflowing).
@@ -494,13 +500,19 @@ export class HistoryPanel implements Component, Focusable {
     if (result.sessionId !== undefined) {
       meta.push(truncateToWidth(`  Session: ${result.sessionId}`, width, '…'))
     }
+    // The detail renders ONLY when the budget can hold its FULL metadata
+    // ('Details' + blank + every metadata row): content takes the
+    // remainder, metadata is never truncated. A budget too small for the
+    // metadata suppresses the pane entirely (the split layout then shows
+    // the list alone; the stacked layout skips the divider too).
+    if (budget < 2 + meta.length) return []
     const out: string[] = ['Details']
     let remaining = budget - 1
     if (remaining <= 0) return out
     out.push('')
     remaining -= 1
     // Reserve the metadata + one inter-blank first; content gets the rest.
-    const metadataRows = Math.min(meta.length, remaining)
+    const metadataRows = meta.length
     const blankRows = metadataRows > 0 && remaining > metadataRows ? 1 : 0
     const contentRows = Math.max(0, remaining - metadataRows - blankRows)
     const wrapped = wrapText(result.content, Math.max(4, width - 2))
@@ -511,7 +523,7 @@ export class HistoryPanel implements Component, Focusable {
     }
     out.push(...shown.map(line => truncateToWidth(`  ${line}`, width, '…')))
     if (blankRows > 0 && shown.length > 0) out.push('')
-    out.push(...meta.slice(0, metadataRows))
+    out.push(...meta)
     return out
   }
 
