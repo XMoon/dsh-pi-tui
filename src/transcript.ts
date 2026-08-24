@@ -982,11 +982,28 @@ export class TranscriptFolder {
         // never enters the Message slot (plan §22).
         const activity = this.activityFor(event.data.turn)
         activity.assistantMessages += 1
+        // A message of a DIFFERENT step than the open candidate proves the
+        // earlier step's output was intermediate: confirm it first (plan
+        // §5.3 C — a later step's output confirms the earlier candidate).
+        const prior = activity.messageCandidate
+        if (prior !== undefined && prior.step !== event.data.step) {
+          this.confirmMessageCandidate(activity)
+        }
         activity.lastAssistantStep = event.data.step
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step === event.data.step) {
           candidate.settledText = text
           candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+        } else if (text !== '') {
+          // A settled message without a prior candidate (replay edge): the
+          // authoritative text IS the step's output — it becomes the
+          // candidate so a later continuation still confirms it as an
+          // intermediate message (the LATEST intermediate wins, plan §5.6).
+          activity.messageCandidate = {
+            step: event.data.step,
+            tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
+            settledText: text,
+          }
         }
         this.syncMessage(activity)
         this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
@@ -997,9 +1014,13 @@ export class TranscriptFolder {
       case 'tool/call': {
         const key = event.data.callId
         this.callNames.set(key, event.data.name)
+        // The call's OWN turn (event.data.turn) — never this.currentTurn:
+        // a turn-start-less replay fragment must still attribute the call
+        // to the right turn (review finding).
+        const callTurn = event.data.turn
         const card: TranscriptMessage = {
           kind: 'tool',
-          turn: this.currentTurn,
+          turn: callTurn,
           name: event.data.name,
           args: event.data.arguments,
           result: '',
@@ -1009,7 +1030,7 @@ export class TranscriptFolder {
         this.pendingCalls.set(key, {
           name: event.data.name,
           args: event.data.arguments,
-          turn: this.currentTurn,
+          turn: callTurn,
           card,
           index: this.items.length - 1,
         })
@@ -1019,7 +1040,7 @@ export class TranscriptFolder {
         // §5.3 A), and set the Tool slot from the RAW call — ANY name,
         // known or custom, is a Tool (event-first classification, plan
         // §6.1 — never a name allowlist).
-        const activity = this.activityFor(this.currentTurn)
+        const activity = this.activityFor(callTurn)
         activity.toolCalls += 1
         activity.tools.set(event.data.name, (activity.tools.get(event.data.name) ?? 0) + 1)
         this.confirmMessageCandidate(activity)
