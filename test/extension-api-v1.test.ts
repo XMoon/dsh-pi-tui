@@ -28,6 +28,7 @@ test('API v1: capabilities are feature-detected, never version-parsed', () => {
     'slot.chrome.header.badge',
     'slot.input.dock.item',
     'slot.chrome.footer.status',
+    'slot.chrome.footer.item',
     'slot.input.widget',
     'surface.snapshot',
   ])

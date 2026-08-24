@@ -2068,6 +2068,13 @@ export class TuiApp {
     // through setStatus).
     this.statusStore = options.statusStore ?? new StatusStoreImpl(initialStatusSnapshot('0.0.0'))
     this.footerItemRegistry = createBuiltinFooterRegistry()
+    // M4: the extension host's configurable footer items join the catalog
+    // as a live external source (resolved on demand — replace()/dispose()
+    // show up on the next compose).
+    this.footerItemRegistry.setExternalSource(this.extensionHost === undefined ? undefined : {
+      ids: () => this.extensionHost!.footerItemIds(),
+      definition: (id) => this.extensionHost!.footerItemDefinition(id),
+    })
     this.footerComposer = new FooterComposer(this.footerItemRegistry)
     // F-17: an invalidation batch re-bakes the outlets; the host then
     // re-merges its chrome rows so the new content reaches the screen.
@@ -9425,6 +9432,7 @@ export class TuiApp {
       composer: this.footerComposer,
       editorEmpty: this.editor.getText().trim() === '',
       extensionFooterText: this.extensionHost?.footerText() ?? '',
+      maxVisible: Math.max(8, Math.min(30, this.terminal.rows - 2)),
       onSave: (layout) => {
         handle?.hide()
         options.onSave(layout)

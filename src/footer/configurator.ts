@@ -28,6 +28,8 @@ export interface FooterConfiguratorOptions {
   readonly composer: FooterComposer
   readonly editorEmpty: boolean
   readonly extensionFooterText: string
+  /** The overlay's row budget (the content windows around the cursor). */
+  readonly maxVisible: number
   readonly onSave: (layout: FooterLayoutV1) => void
   readonly onCancel: () => void
 }
@@ -40,6 +42,7 @@ export class FooterConfiguratorPanel implements Component {
   private readonly composer: FooterComposer
   private readonly editorEmpty: boolean
   private readonly extensionFooterText: string
+  private readonly maxVisible: number
   private readonly onSave: (layout: FooterLayoutV1) => void
   private readonly onCancel: () => void
   /** The fork dispatches input to the focused component's handleInput. */
@@ -52,6 +55,7 @@ export class FooterConfiguratorPanel implements Component {
     this.composer = options.composer
     this.editorEmpty = options.editorEmpty
     this.extensionFooterText = options.extensionFooterText
+    this.maxVisible = options.maxVisible
     this.onSave = options.onSave
     this.onCancel = options.onCancel
     this.handleInput = (data: string): void => {
@@ -116,12 +120,27 @@ export class FooterConfiguratorPanel implements Component {
     state.layout.rows.forEach((row, rowIndex) => {
       const active = rowIndex === state.activeRow
       const zoneLabel = (zone: 'left' | 'right'): string =>
-        `${active && state.activeZone === zone ? color.primary('›') : ' '} Row ${rowIndex + 1} · ${zone === 'left' ? 'Left' : 'Right'}`
+        `${active && state.activeZone === zone && !state.cursorInAvailable ? color.primary('›') : ' '} Row ${rowIndex + 1} · ${zone === 'left' ? 'Left' : 'Right'}`
       lines.push(zoneLabel('left'))
       this.renderZone(row.left, rowIndex, 'left', state, width, lines)
       lines.push(zoneLabel('right'))
       this.renderZone(row.right, rowIndex, 'right', state, width, lines)
     })
+    // The available section: every registry item not in the layout
+    // (builtin AND extension items) — Space adds it to the active zone.
+    const available = this.model.availableIds()
+    if (available.length > 0) {
+      lines.push(rule)
+      lines.push(color.textStrong('Available'))
+      available.forEach((id, index) => {
+        const active = state.cursorInAvailable && index === state.availableIndex
+        const def = this.registry.get(id)
+        const label = def?.label ?? id
+        const marker = active ? color.primary('›') : ' '
+        const line = `${marker} ${color.textMuted('[ ]')} ${active ? color.textStrong(label) : color.text(label)}`
+        lines.push(truncateToWidth(line, Math.max(1, width), '…'))
+      })
+    }
     lines.push(rule)
     lines.push(color.textStrong('Preview'))
     lines.push(rule)
@@ -134,7 +153,29 @@ export class FooterConfiguratorPanel implements Component {
     for (const row of preview.split('\n')) lines.push(row)
     lines.push(rule)
     lines.push(color.textMuted('↑/↓ select · Space toggle · ←/→ move zone · Shift+↑/↓ reorder · Tab row / Shift+Tab zone · F format · Enter save · Esc cancel'))
-    return lines
+    // The overlay clamps to its height budget: window the content around
+    // the cursor so the active row is always visible (the plan's unified
+    // scrollport discipline).
+    const cursorRow = this.cursorRow(state, lines)
+    const budget = Math.max(8, this.maxVisible)
+    if (lines.length <= budget) return lines
+    const top = Math.max(0, Math.min(cursorRow - Math.floor(budget / 2), lines.length - budget))
+    return lines.slice(top, top + budget)
+  }
+
+  /** The content row the cursor currently sits on. */
+  private cursorRow(
+    state: { activeRow: number; activeZone: 'left' | 'right'; activeIndex: number; cursorInAvailable: boolean; availableIndex: number },
+    lines: string[],
+  ): number {
+    if (state.cursorInAvailable) {
+      // The Available section: find its header, then the item offset.
+      const header = lines.findIndex(line => line.includes('Available'))
+      return header + 1 + state.availableIndex
+    }
+    // The active zone's section: the header row + the item offset.
+    const header = lines.findIndex(line => line.includes(`Row ${state.activeRow + 1} · ${state.activeZone === 'left' ? 'Left' : 'Right'}`))
+    return header + 1 + state.activeIndex
   }
 
   /** Render one zone's items: `[x] label  preview` rows, the active row
@@ -143,7 +184,7 @@ export class FooterConfiguratorPanel implements Component {
     refs: readonly { id: string; format?: string }[],
     rowIndex: number,
     zone: 'left' | 'right',
-    state: { activeRow: number; activeZone: 'left' | 'right'; activeIndex: number },
+    state: { activeRow: number; activeZone: 'left' | 'right'; activeIndex: number; cursorInAvailable: boolean },
     width: number,
     lines: string[],
   ): void {
@@ -152,7 +193,8 @@ export class FooterConfiguratorPanel implements Component {
       return
     }
     refs.forEach((ref, index) => {
-      const active = rowIndex === state.activeRow && zone === state.activeZone && index === state.activeIndex
+      const active = rowIndex === state.activeRow && zone === state.activeZone
+        && !state.cursorInAvailable && index === state.activeIndex
       const def = this.registry.get(ref.id)
       const label = def?.label ?? ref.id
       const preview = this.itemPreview(ref)

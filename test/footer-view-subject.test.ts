@@ -17,9 +17,12 @@ import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts
 const composer = new FooterComposer(createBuiltinFooterRegistry())
 const CONTEXT = { editorEmpty: true, extensionFooterText: '[EXT]' }
 
+/** Deep-mutable build shape (the snapshot is deeply readonly). */
+type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
+
 /** A parent snapshot with every main-only fact set. */
 function parentSnapshot(): StatusSnapshot {
-  const snap = emptyStatusSnapshot()
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
   snap.composition.model = { provider: 'deepseek', id: 'parent', displayName: 'parent' }
   snap.access.permissionPreset = { id: 'danger-full-access', label: 'danger-full-access', matched: true }
   snap.collaboration.plan.effective = true
@@ -37,9 +40,10 @@ function parentSnapshot(): StatusSnapshot {
 
 /** Switch the snapshot to the viewed child (the runner's projection). */
 function enterViewer(snap: StatusSnapshot, mode: 'one-shot' | 'continuable', activity: 'running' | 'inactive'): void {
-  snap.view.subject = { kind: 'subagent', id: 'child-1', label: 'research', mode, activity }
-  snap.workspace = { cwd: '/child/ws', project: 'ws' }
-  snap.usage = {
+  const mutable = snap as DeepMutable<StatusSnapshot>
+  mutable.view.subject = { kind: 'subagent', id: 'child-1', label: 'research', mode, activity }
+  mutable.workspace = { cwd: '/child/ws', project: 'ws' }
+  mutable.usage = {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
     turns: 3,

@@ -709,6 +709,7 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     ensureSession: async () => { options.ensureCalls.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     tuiSettings: undefined,
+    applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
       list: async () => [],

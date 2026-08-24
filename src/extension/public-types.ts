@@ -81,6 +81,7 @@ export type PiTuiCapability =
   | 'slot.chrome.header.badge'
   | 'slot.input.dock.item'
   | 'slot.chrome.footer.status'
+  | 'slot.chrome.footer.item'
   | 'slot.input.widget'
   | 'surface.snapshot'
   // Phase 2: the ADVANCED tier's capabilities (plan §13 — the shared
@@ -103,6 +104,7 @@ export type PiTuiSlotName =
   | 'chrome.header.badge'
   | 'input.dock.item'
   | 'chrome.footer.status'
+  | 'chrome.footer.item'
   | 'input.widget.above'
   | 'input.widget.below'
 
@@ -276,6 +278,28 @@ export interface FooterSegment {
   readonly spans: readonly StyledSpan[]
   readonly minWidth?: number
   readonly importance?: number
+}
+
+/**
+ * M4: one configurable footer item contribution (the `chrome.footer.item`
+ * slot). Plain data only — the host compiles and renders; a plugin never
+ * touches ANSI, width, layout or the terminal. The item becomes a
+ * first-class citizen of the footer configurator: users can show/hide,
+ * reorder and zone-place it like any builtin item. Dynamic updates use the
+ * standard `handle.replace(...)` / `handle.invalidate()` pattern.
+ */
+export interface FooterItemContribution {
+  /** The picker label (shown in /footer and /settings). */
+  readonly label: string
+  readonly description?: string
+  /** The rendered segment (the LIVE value — replace() swaps it). */
+  readonly segment: FooterSegment
+  /** Where the item lands by default in a fresh layout. */
+  readonly defaultZone?: 'left' | 'right'
+  /** Layout weight: lower importance items drop first under pressure. */
+  readonly importance?: number
+  /** The item's minimum renderable width (never truncated below it). */
+  readonly minWidth?: number
 }
 
 /** One styled run of text. The host owns ANSI compilation; plugins supply

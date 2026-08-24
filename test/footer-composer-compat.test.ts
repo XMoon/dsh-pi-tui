@@ -113,18 +113,20 @@ function legacyFooter(line1: string[], line2: string, width: number): string {
 
 /** A realistic main-subject snapshot. */
 function mainSnapshot(): StatusSnapshot {
-  const snap = emptyStatusSnapshot()
-  snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
-  snap.access.permissionPreset = { id: 'workspace-write', label: 'workspace-write', matched: true }
-  snap.workspace = { cwd: '/home/x/proj', branch: 'main' }
-  snap.usage = {
-    tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
-    performance: { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 },
-    turns: 2,
-    steps: 5,
+  const base = emptyStatusSnapshot()
+  return {
+    ...base,
+    composition: { model: { provider: 'deepseek', id: 'flash', displayName: 'flash' } },
+    access: { permissionPreset: { id: 'workspace-write', label: 'workspace-write', matched: true } },
+    workspace: { cwd: '/home/x/proj', branch: 'main' },
+    usage: {
+      tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 },
+      turns: 2,
+      steps: 5,
+      context: { usedTokens: 25000, windowTokens: 100000, percent: 25 },
+    },
   }
-  snap.usage.context = { usedTokens: 25000, windowTokens: 100000, percent: 25 }
-  return snap
 }
 
 const CONTEXT = { editorEmpty: true, extensionFooterText: '' }
@@ -166,12 +168,14 @@ test('the Ctrl+C instruction replaces the stats row exactly like the legacy hint
 test('permission/plan/task variants stay byte-equivalent', () => {
   for (const permission of ['danger-full-access', 'read-only', 'custom'] as const) {
     const snap = mainSnapshot()
-    snap.access.permissionPreset = { id: permission, label: permission, matched: permission !== 'custom' }
-    snap.collaboration.plan.effective = true
-    snap.activity.taskCount = 1
-    snap.activity.childAgentCount = 2
-    const expected = legacyFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 100)
-    const actual = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
+    const variant: StatusSnapshot = {
+      ...snap,
+      access: { permissionPreset: { id: permission, label: permission, matched: permission !== 'custom' } },
+      collaboration: { plan: { effective: true } },
+      activity: { ...snap.activity, taskCount: 1, childAgentCount: 2 },
+    }
+    const expected = legacyFooter(legacyLine1(variant, true, ''), legacyStatsLine(variant), 100)
+    const actual = composer.render({ snapshot: variant, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
     assert.equal(actual, expected, `permission ${permission}`)
   }
 })

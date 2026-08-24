@@ -63,6 +63,7 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     tuiSettings: undefined,
+    applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
       list: async () => [],

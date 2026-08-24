@@ -237,6 +237,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     tuiSettings: settings.value,
+    applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
       list: async () => [],

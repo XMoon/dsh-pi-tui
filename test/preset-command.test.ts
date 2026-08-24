@@ -106,6 +106,7 @@ function stubRunner(options: {
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   ensureCalls?: string[]
   tuiSettings?: TuiSettingsLike
+  applyFooterSettings?: () => void
   extensions?: TuiCommandRunner['extensions']
   recordExtensionError?: (slot: string, id: string, error: unknown) => void
   clearExtensionError?: (slot: string, id: string) => void
