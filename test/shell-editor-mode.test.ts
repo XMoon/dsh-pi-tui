@@ -890,3 +890,76 @@ test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', 
   app.reconcileEditorNow()
   app.stop()
 })
+
+// ── review round 8: a CONSUMED Esc disarms the pending double-Esc window ──
+
+test('a consumed plugin Esc disarms a window armed by a prior declined Esc', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  let cancels = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+  }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  // A plugin that DECLINES the first Esc (arming the host window) and
+  // CONSUMES every later one (vim entering normal mode).
+  let escCount = 0
+  const handle = registry.register({
+    id: 'esc-mixed-plugin',
+    priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: '' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      get focused() { return false },
+      borderColor: (text: string) => text,
+      handleInput: () => { escCount += 1; return escCount > 1 },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // declined → the host window arms
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // consumed → the window must disarm
+  await vt.waitForRender()
+  // The plugin is removed; a fresh host Esc must ARM, never cancel.
+  handle.dispose()
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancels, 0, 'a consumed Esc must disarm the stale window')
+  app.stop()
+})
+
+test('a consumed onSingleEscape disarms the pending double-Esc window', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let cancels = 0
+  let escCount = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+    // The runner-owned mode consumes ONLY the second Esc (e.g. a viewer
+    // that opened between the presses).
+    onSingleEscape: () => { escCount += 1; return escCount === 2 },
+  })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // not consumed → the host window arms
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // consumed by onSingleEscape → the window must disarm
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // not consumed again → must ARM, never cancel
+  await vt.waitForRender()
+  assert.equal(cancels, 0, 'a consumed onSingleEscape must disarm the stale window')
+  app.stop()
+})
