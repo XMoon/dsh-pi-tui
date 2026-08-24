@@ -73,12 +73,19 @@ function stepKey(turn: number, step: number): string {
  * (replay edge).
  */
 export class StepUsageAccumulator {
-  /** Open steps: their current usage (undefined = no usage fact yet). */
-  private readonly perStep = new Map<string, { usage?: UsageLike }>()
-  /** Orphan usage facts (no open step) per (turn, step): the authoritative
-   * assistant/message value REPLACES the provisional chunk exactly like the
-   * open-step path — never adds to it (review finding). */
+  /** Open steps: their current usage (undefined = no usage fact yet) and
+   * whether an authoritative message settled it. */
+  private readonly perStep = new Map<string, { usage?: UsageLike; authoritative?: boolean }>()
+  /** Orphan usage facts (no open step) per (turn, step): the latest fact
+   * REPLACES the previous one exactly like the open-step path — never
+   * adds to it (review finding). */
   private readonly orphanByStep = new Map<string, UsageLike>()
+  /** Closed steps whose committed usage was PROVISIONAL (no authoritative
+   * message before step/end): a LATER fact (chunk or message) replaces
+   * the committed value — never adds to it (review finding). Steps that
+   * settled authoritatively are not tracked: a late duplicate message
+   * carries the same value, so no replacement state is needed. */
+  private readonly closedByStep = new Map<string, UsageLike>()
   /** Committed per-turn totals (completed steps + orphan facts). */
   private readonly turnTotals = new Map<number, TokenUsageTotals>()
   /** Open steps' current usage per turn (the running display share). */
@@ -131,6 +138,7 @@ export class StepUsageAccumulator {
       if (usage !== undefined) {
         if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
         entry.usage = usage
+        entry.authoritative = true
         this.addPending(turn, usage)
       }
     } else if (usage !== undefined) {
@@ -138,7 +146,10 @@ export class StepUsageAccumulator {
     }
   }
 
-  /** Commit one step's usage (once) and drop its open state. */
+  /** Commit one step's usage (once) and drop its open state. A step that
+   * ends with a PROVISIONAL value (no authoritative message) is tracked
+   * in {@link closedByStep} so a late fact replaces it; a step that ends
+   * with an orphan fact (never opened) is tracked the same way. */
   onStepEnd(turn: number, step: number): void {
     const key = stepKey(turn, step)
     const entry = this.perStep.get(key)
@@ -147,12 +158,21 @@ export class StepUsageAccumulator {
         this.subtractPending(turn, entry.usage)
         addTotals(this.turnTotalFor(turn), entry.usage)
         addTotals(this.session, entry.usage)
+        if (entry.authoritative === true) {
+          this.closedByStep.delete(key)
+        } else {
+          this.closedByStep.set(key, entry.usage)
+        }
       }
       this.perStep.delete(key)
+    } else {
+      const orphan = this.orphanByStep.get(key)
+      if (orphan !== undefined) {
+        // The step closed without ever opening: the orphan fact is the
+        // step's committed value — a late fact replaces it.
+        this.closedByStep.set(key, orphan)
+      }
     }
-    // An orphan fact of the same step is settled by its step/end too: the
-    // step is closed, so a later fact for it is a NEW commit (never a
-    // replacement of the closed one).
     this.orphanByStep.delete(key)
   }
 
@@ -212,12 +232,19 @@ export class StepUsageAccumulator {
 
   /** A usage fact without an open step (replay edge) is a settled fact:
    * commit it to the turn's totals immediately, so
-   * sum(per-turn committed) == session total stays strict. The
-   * authoritative assistant/message value REPLACES the provisional chunk
-   * of the same (turn, step) — the same replace-never-add rule as the
-   * open-step path (review finding). */
+   * sum(per-turn committed) == session total stays strict. The latest
+   * fact REPLACES the previous one of the same (turn, step) — the same
+   * replace-never-add rule as the open-step path (review finding) — and a
+   * fact for a CLOSED step replaces the step's committed provisional
+   * value (a late authoritative message must never double-count). */
   private commitOrphan(turn: number, step: number, usage: UsageLike): void {
     const key = stepKey(turn, step)
+    const closed = this.closedByStep.get(key)
+    if (closed !== undefined) {
+      this.subtractTotals(this.turnTotalFor(turn), closed)
+      this.subtractTotals(this.session, closed)
+      this.closedByStep.delete(key)
+    }
     const prior = this.orphanByStep.get(key)
     if (prior !== undefined) {
       this.subtractTotals(this.turnTotalFor(turn), prior)

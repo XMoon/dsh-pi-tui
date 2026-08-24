@@ -450,13 +450,33 @@ test('step/end commits the open step usage and clears the pending state', () => 
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
     eventAt('step/end', { turn: 0, step: 0 }, 1003, 3),
-    // A LATER usage chunk for the CLOSED step is a settled fact: it must
-    // commit (never be swallowed by the open-step first-chunk-wins rule).
+    // A LATER usage chunk for the CLOSED step is the latest fact: it
+    // REPLACES the committed provisional value (never adds — the step's
+    // usage is one value, the latest fact wins).
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 50, outputTokens: 0 } } }, 1004, 4),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
   ])
   const activity = folder.turnActivity(0)!
-  assert.equal(activity.totalTokens, 150, 'the closed step commits once; the later chunk is a new fact')
+  assert.equal(activity.totalTokens, 50, 'the latest fact replaces the closed step\'s committed value')
+})
+
+test('a late authoritative message after step/end replaces the committed provisional value (no double count)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
+    eventAt('step/end', { turn: 0, step: 0 }, 1003, 3),
+    // The authoritative message arrives AFTER step/end (replay edge).
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 110, outputTokens: 0 },
+    }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 110, 'the late authoritative message must replace the committed provisional, never add')
 })
 
 test('a turn-start-less tool/call attributes to its OWN turn (replay fragment)', () => {
