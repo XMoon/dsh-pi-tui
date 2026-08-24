@@ -110,13 +110,14 @@ import { mergeDraft, refuseByTransitionFence, steerAll, sessionUnchanged, type S
 import { expandFileMentionsForSubmit } from './mentions.ts'
 import {
   resolveSubagentSettleTarget,
-  submitSubagentFollowup,
   type SubagentFollowupOutcome,
   type SubagentFollowupReject,
-  type SubagentFollowupService,
   type SubagentParentLike,
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
+import { createDirectBackend } from './runtime/backend.ts'
+import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
+import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -1300,6 +1301,11 @@ export function apply(ctx: Context, config: Config): void {
   }
   const startup = ctx.get(TUI_STARTUP_SERVICE)
   if (startup === undefined) return
+  // The semantic backend (server/client migration M1): the TUI consumes
+  // Host domains through narrow ports, never ctx.* directly. Direct is the
+  // only backend today; remote/wire adapters join in later milestones
+  // behind the SAME port interfaces.
+  const backend = createDirectBackend(new DirectSubagentPort(ctx))
   // Process diagnostics: stderr + a log file under $DSH_HOME/logs. The cordis
   // logger has no exporter in this process, so it is NOT the troubleshooting
   // channel — diag is (see diag.ts).
@@ -4072,12 +4078,11 @@ export function apply(ctx: Context, config: Config): void {
       // restores it (merged) into the child's own draft slot.
       onSubagentSubmit: (request) => {
         const viewerGeneration = app.getViewerGeneration()
-        runOwned('subagent followup', () => submitSubagentFollowup(request, {
+        runOwned('subagent followup', () => backend.subagent.followup(request, {
           // The exact live direct parent: read at SEND time so a session
           // switch / /new / /resume that landed while the user typed is a
           // hard reject (never route the text to a different main Agent).
           currentParent: () => liveAgent as SubagentParentLike | undefined,
-          subagents: () => ctx.get('subagents') as SubagentFollowupService | undefined,
           // The caller signal owns lookup/materialization/admission only
           // until inbox acceptance (the DSH continuation contract): a TUI
           // cleanup / exit, OR the viewer session ending (Esc / child

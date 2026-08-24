@@ -49,6 +49,9 @@
  "rewind.ts": [
   "import:dsh-session"
  ],
+ "runtime/direct/subagent-direct.ts": [
+  "subagents"
+ ],
  "session-fork.ts": [
   "import:dsh-agent",
   "import:dsh-session"

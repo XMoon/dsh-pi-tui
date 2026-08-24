@@ -9,8 +9,8 @@
 ## Status
 
 ```text
-M0  IN PROGRESS   (AGENTS.md guardrails landed; coupling inventory + gate landed)
-M1  NOT STARTED   (semantic ports, Direct adapters, no behavior change)
+M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
+M1  IN PROGRESS    (semantic ports, Direct adapters, no behavior change — M1.1 backend vocabulary + M1.2 SubagentPort landed)
 M2  NOT STARTED   (experimental Remote backend against an existing DSH Host)
 M3  NOT STARTED   (experimental in-process wire: InProcessApiClient + ApiProxy)
 M4  NOT STARTED   (experimental local Host process / IPC split)
