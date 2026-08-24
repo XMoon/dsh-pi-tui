@@ -39,7 +39,7 @@ interface BindingRecord {
  * host's `matchesKey` lifecycle checks in tui-app.ts (Ctrl+C/D exit,
  * Ctrl+S steer-all, Ctrl+F transcript search, Ctrl+Shift+F search, Ctrl+O
  * expand, Ctrl+T todo panel, Ctrl+G external editor, Ctrl+R input-history
- * search, Ctrl+Enter queue,
+ * search, Ctrl+V clipboard image intake, Ctrl+Enter queue,
  * Enter submit, Esc cancel, Shift+Tab permission cycle, Alt+Up dequeue,
  * Alt+T thinking toggle). Every
  * reserved binding here must match a host `matchesKey(data, ...)` call;
@@ -56,6 +56,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 't', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+T todo panel
   { key: 'g', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+G external editor
   { key: 'r', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+R input-history search
+  { key: 'v', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+V clipboard image intake
   // Ctrl+J is deliberately NOT reserved/bound: legacy terminals send it
   // as LF, which the editor treats as Enter, so the chord was unreliable
   // in practice — the task browser is reached via ↓ (empty editor) and

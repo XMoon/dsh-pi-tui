@@ -166,6 +166,26 @@ test('the real execFile runner pipes the input payload to the child stdin (issue
   assert.equal(result.stdout.toString('utf8'), 'hello stdin')
 })
 
+test('the real execFile runner preserves binary stdout byte-for-byte (clipboard image intake)', async () => {
+  // Regression (P0): without `encoding: 'buffer'`, execFile decodes stdout
+  // as UTF-8 and REPLACES invalid bytes — PNG magic (0x89 0x50 0x4E 0x47
+  // 0x0D 0x0A 0x1A 0x0A) becomes EF BF BD ... before parseImageMetadata
+  // ever sees it, so a Wayland/X11 image paste silently no-ops. The runner
+  // must hand the parser the EXACT bytes the child wrote.
+  const run = createClipboardRunner()
+  const expected = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG magic
+    0x00, 0xff, 0xfe, 0x80, // non-UTF-8 bytes
+  ])
+  const result = await run(process.execPath, [
+    '-e',
+    `process.stdout.write(Buffer.from(${JSON.stringify([...expected])}))`,
+  ])
+  assert.equal(result.code, 0)
+  assert.ok(Buffer.isBuffer(result.stdout), 'stdout must be a raw Buffer, never a decoded string')
+  assert.deepEqual(result.stdout, expected)
+})
+
 test('the real execFile runner survives an early-exiting child while piping a large payload (EPIPE, round-3 finding)', async () => {
   // A helper that exits immediately while a large payload is being piped
   // emits EPIPE on stdin; without an error listener the process crashes

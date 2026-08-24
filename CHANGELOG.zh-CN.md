@@ -266,6 +266,15 @@
   扫描窗口之外证明的 legacy 行可能从 `All directories` 中省略（有意的
   coverage trade-off；v2 cwd 验证规则本身不变）。
 
+### 修复
+
+- **Linux Wayland/X11 下 Ctrl+V 图片粘贴恢复可用。** 剪贴板 runner 执行
+  `wl-paste`/`xclip` 时未显式指定编码,二进制 stdout 被当作 UTF-8 解码,
+  非法字节被替换——PNG magic 变成 `EF BF BD …`,图片解析器无法识别
+  载荷,粘贴静默无反应。runner 现在强制 `encoding: 'buffer'`,stdout/
+  stderr 全程保持原始字节,并有逐字节回归测试守护该路径。Ctrl+V 也
+  补进了 host 保留键清单,与 host 自身的生命周期处理保持一致。
+
 ## [0.3.2] - 2026-08-22
 
 ### 新增

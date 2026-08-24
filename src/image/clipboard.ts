@@ -55,6 +55,12 @@ export function createClipboardRunner(): RunCommand {
     const child = execFile(command, args as string[], {
       timeout: options?.timeoutMs ?? 2000,
       maxBuffer: 64 * 1024 * 1024,
+      // Binary-safe (P0): without an explicit encoding, execFile decodes
+      // stdout as UTF-8 and REPLACES invalid bytes — PNG magic (0x89 0x50
+      // 0x4E 0x47 ...) arrives as EF BF BD ... and parseImageMetadata
+      // cannot recognize the payload, so an image paste silently no-ops.
+      // `encoding: 'buffer'` keeps stdout/stderr as raw Buffers end to end.
+      encoding: 'buffer',
     }, (error, stdout, stderr) => {
       const code = error === null
         ? 0
@@ -62,8 +68,8 @@ export function createClipboardRunner(): RunCommand {
           ? (error as { code: number }).code
           : 1
       resolve({
-        stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout),
-        stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ''),
+        stdout,
+        stderr,
         code,
       })
     })
