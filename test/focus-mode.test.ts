@@ -636,6 +636,44 @@ test('a late message for an older step never regresses the final-answer dedup', 
   assert.equal(activity.message?.text, '第一步权威')
 })
 
+test('a late usage chunk after turn/end never adds a token segment retroactively', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
+    eventAt('step/end', { turn: 0, step: 0 }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+    // A late usage chunk (replay artifact).
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 0 } } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 100, 'the late usage chunk must not change the settled token segment')
+})
+
+test('a late assistant/message after turn/end never mutates the settled Thought card', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '最终' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+    // A late message for the confirmed step (replay artifact).
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a0'), role: 'assistant', content: [{ type: 'text', text: '第一步权威' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1006, 6),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message?.text, '第一步', 'the late message must not overwrite the settled confirmed text')
+  assert.equal(activity.assistantMessages, 1, 'the late message must not increment the settled count')
+})
+
 test('late reasoning and tool events after turn/end never mutate the Focus state', () => {
   const folder = new TranscriptFolder()
   folder.apply([

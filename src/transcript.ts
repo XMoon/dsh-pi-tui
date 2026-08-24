@@ -998,9 +998,15 @@ export class TranscriptFolder {
           this.foldThinking(this.activityFor(event.data.turn), chunk.text)
         } else if (chunk.type === 'usage') {
           // Focus aggregation: per-turn token facts (the shared
-          // accumulator — the footer and Focus can never drift).
-          this.usage.onUsageChunk(event.data.turn, step, chunk.usage)
-          this.syncUsage(this.activityFor(event.data.turn))
+          // accumulator — the footer and Focus can never drift). After
+          // turn/end the token segment was settled: a late usage chunk
+          // (replay artifact) must not add one retroactively (review
+          // finding).
+          const activity = this.activityFor(event.data.turn)
+          if (!activity.completed) {
+            this.usage.onUsageChunk(event.data.turn, step, chunk.usage)
+            this.syncUsage(activity)
+          }
         }
         break
       }
@@ -1032,6 +1038,11 @@ export class TranscriptFolder {
         // identity and the turn/end resolution decides. The final answer
         // never enters the Message slot (plan §22).
         const activity = this.activityFor(event.data.turn)
+        // After turn/end the Thought card was settled: a late message
+        // (replay artifact) must not mutate the Focus state — the count,
+        // the confirmed text, the revision (review finding). The
+        // transcript entry still folds.
+        if (activity.completed) break
         activity.assistantMessages += 1
         // A message of a DIFFERENT step than the open candidate proves the
         // earlier step's output was intermediate: confirm it first (plan
