@@ -72,6 +72,7 @@ import type { JobId } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 // The sandbox/mode knob event merge (permission presets fold it too).
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
+import { effectiveSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 // P5e merges: shell capability for `!` mode and credentials for /login.
 import type {} from '@deepseek-ai/dsh-shell'
@@ -83,6 +84,12 @@ import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
 import { formatStats, StatsFolder } from './stats.ts'
+import { StatusStore } from './status/store.ts'
+import { initialStatusSnapshot } from './status/snapshot.ts'
+import { deriveAccessStatus } from './status/derive-access.ts'
+import { derivePlanStatus } from './status/derive-plan.ts'
+import { usageFromStats } from './status/derive-usage.ts'
+import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -2263,6 +2270,45 @@ export function apply(ctx: Context, config: Config): void {
       if (liveAgent === undefined) return 'no model'
       return `${liveAgent.options.provider}/${liveAgent.options.model}`
     }
+    /** M0: the composition section (how the agent is composed — NOT
+     * permission, NOT plan). */
+    const deriveCompositionStatus = (): CompositionStatus => {
+      const selection = selected.current
+      const model = selection !== undefined
+        ? {
+            provider: selection.provider,
+            id: selection.model,
+            displayName: selection.model,
+            ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
+          }
+        : liveAgent === undefined || liveAgent.options.provider === undefined || liveAgent.options.model === undefined
+          ? undefined
+          : {
+              provider: liveAgent.options.provider,
+              id: liveAgent.options.model,
+              displayName: liveAgent.options.model,
+            }
+      const preset = currentPreset()
+      return {
+        ...model === undefined ? {} : { model },
+        ...preset === undefined ? {} : { agentPreset: { id: preset, label: preset } },
+      }
+    }
+    /** M0: the workspace section (cwd/project/branch — project and cwd are
+     * deliberately separate facts). */
+    const deriveWorkspaceStatus = (cwd: string): WorkspaceStatus => {
+      const parts = cwd.split('/').filter(Boolean)
+      return {
+        cwd,
+        ...parts.length === 0 ? {} : { project: parts[parts.length - 1]! },
+        ...gitBranch(cwd) === '' ? {} : { branch: gitBranch(cwd) },
+      }
+    }
+    /** M0: the host section (dsh + bundle versions). */
+    const deriveHostStatus = (): HostStatus => ({
+      ...dshVersion() === undefined ? {} : { dshVersion: dshVersion() },
+      tuiVersion: packageVersion(),
+    })
     const refreshStatus = (): void => {
       const stats = statsFolder.snapshot()
       let contextTokens: number | undefined
@@ -2292,9 +2338,36 @@ export function apply(ctx: Context, config: Config): void {
           : { permission: permission.current(liveAgent.session.events) },
         ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
       })
+      // M0: project the DSH-derived facts into the unified status store.
+      // The DISPLAY SUBJECT's stats feed the usage section — while the
+      // subagent viewer is open that is the viewed child's own fold, so
+      // the footer layout never changes, only the data source.
+      const events = liveAgent?.session.events ?? []
+      statusStore.update({
+        composition: deriveCompositionStatus(),
+        access: deriveAccessStatus(
+          {
+            permissionPresets: permission,
+            sandboxPolicy: ctx.get('sandboxPolicy'),
+            approvalFold: effectiveApprovalPolicy,
+            sandboxFold: effectiveSandboxMode,
+          },
+          events,
+          liveAgent?.session,
+        ),
+        collaboration: { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, events, foldPlanMode) },
+        workspace: deriveWorkspaceStatus(liveCwd),
+        usage: usageFromStats(viewing?.stats.snapshot() ?? stats),
+        host: deriveHostStatus(),
+      })
     }
 
     let app: TuiApp
+    // M0: the unified status projection store — the footer's future single
+    // input. The runner derives the DSH-owned sections (composition/access/
+    // workspace/usage/host/plan); the app projects its own surface state
+    // (interaction/activity/surface/view) through its setters.
+    const statusStore = new StatusStore(initialStatusSnapshot(packageVersion()))
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
@@ -4295,6 +4368,9 @@ export function apply(ctx: Context, config: Config): void {
       // (the /settings write path) — never a deep settings read per render.
       iconStyle: iconStyleOf(tuiSettings?.get().iconStyle),
       extensionHost,
+      // M0: the unified status projection store (the app projects its own
+      // surface state into it; the runner derives the DSH-owned sections).
+      statusStore,
       // Issue #7: the fullscreen drag selection copies through the SAME
       // shared policy as /copy (tmux → platform helper → OSC 52) — a bare
       // OSC 52 write is a silent lie under tmux `set-clipboard external`.

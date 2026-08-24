@@ -64,6 +64,10 @@ import {
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
 import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
+import type { StatusStore } from './status/store.ts'
+import type { StatusPatch } from './status/types.ts'
+import { deriveActivityStatus } from './status/derive-activity.ts'
+import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
 import { SelectedMarquee } from './marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
@@ -1315,6 +1319,13 @@ export interface TuiAppOptions {
    */
   extensionHost?: SurfaceHost
   /**
+   * M0: the unified status projection store. When wired, the app's state
+   * setters project their facts into the store (interaction/activity/
+   * surface/plan); the runner derives the DSH-owned sections. Optional —
+   * the surface works identically without it.
+   */
+  statusStore?: StatusStore
+  /**
    * M6: the plugin keybinding resolver (wired by the runner from the M5
    * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
    * already decoded raw terminal input) → a plugin SEMANTIC action —
@@ -1535,6 +1546,8 @@ export class TuiApp {
   private readonly terminal: Terminal
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
+  /** The unified status projection store (M0), when the runner wired one. */
+  private readonly statusStore: StatusStore | undefined
   private readonly tui: TuiMainScreen
   private readonly editor: TuiEditor
   /**
@@ -2023,6 +2036,7 @@ export class TuiApp {
     this.events = events
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.extensionHost = options.extensionHost
+    this.statusStore = options.statusStore
     // F-17: an invalidation batch re-bakes the outlets; the host then
     // re-merges its chrome rows so the new content reaches the screen.
     this.extensionHost?.setChromeRefresher(() => this.refreshChrome())
@@ -3765,6 +3779,8 @@ export class TuiApp {
     }
     // The surface slice tracks the mode switch (plan §7.1).
     this.extensionHost?.updateSurface({ fullscreen: enabled })
+    // M0: the unified status surface section follows the mode switch.
+    this.projectSurface({ fullscreen: enabled })
     // The screen swap re-established focus (or re-mounted the approval
     // dialog): re-derive the seat from the live state (follow-up P1).
     this.setFocusSeat('editor')
@@ -3919,10 +3935,15 @@ export class TuiApp {
   setFocusMode(enabled: boolean): void {
     if (this.focusModeEnabled === enabled) return
     this.focusModeEnabled = enabled
+    // Entering Focus resets the Focus Thinking visibility to the default
+    // (hidden): the user opted into the Focus surface, not the ordinary
+    // hideThinking preference. Leaving Focus never touches hideThinking.
+    if (enabled) this.focusThinkingVisible = false
     // Focus is a transcript PROJECTION, never a Thinking preference
     // owner: switching Focus ON/OFF leaves the shared thinkingExpanded
     // bulk preference untouched (plan §17). The rebuild re-derives the
     // projection for the new mode.
+    this.projectStatus({ interaction: { focusMode: enabled } })
     this.rebuildMessages()
     this.requestRender()
   }
@@ -4560,6 +4581,7 @@ export class TuiApp {
    */
   setBusy(busy: boolean): void {
     this.busy = busy
+    this.projectActivity()
   }
 
   /**
@@ -4577,6 +4599,7 @@ export class TuiApp {
     if (this.compactionPhase === phase) return
     this.compactionPhase = phase
     this.reconcileWorkingRow()
+    this.projectActivity()
     this.requestRender()
   }
 
@@ -4724,6 +4747,7 @@ export class TuiApp {
   setWorking(active: boolean): void {
     this.workingActive = active
     this.reconcileWorkingRow()
+    this.projectActivity()
     this.requestRender()
     this.syncExtensionState()
   }
@@ -5111,6 +5135,7 @@ export class TuiApp {
   /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
   setPlanMode(active: boolean): void {
     this.planMode = active
+    this.projectStatus({ collaboration: { plan: { effective: active } } })
     this.renderHeader()
     this.renderFooter()
     const seat = this.seatEditor()
@@ -5309,6 +5334,8 @@ export class TuiApp {
       this.renderHeader()
       this.requestRender()
       this.syncExtensionState()
+      // M0: the display subject returns to main when the viewer closes.
+      this.projectStatus({ view: resolveDisplaySubject(undefined) })
       return
     }
     if (this.viewerMode === undefined) {
@@ -5327,6 +5354,9 @@ export class TuiApp {
     }
     this.viewerMode = mode
     this.viewerGeneration += 1
+    // M0: the display subject follows the viewer (the layout never changes
+    // — only the data source does).
+    this.projectStatus({ view: resolveDisplaySubject(mode) })
     // M9: cover the CURRENT seat occupant (a plugin editor's component
     // receives the child draft / placeholder; the preserved drafts stay
     // in their own slots).
@@ -8034,6 +8064,7 @@ export class TuiApp {
   private setFocusSeat(seat: 'editor' | 'overlay' | 'editor-panel' | 'none'): void {
     if (this.focusSeat === seat) return
     this.focusSeat = seat
+    this.projectSurface({ focusedSeat: seat })
     if (this.focusSeatPublishScheduled || this.disposed) return
     this.focusSeatPublishScheduled = true
     queueMicrotask(() => {
@@ -8053,6 +8084,7 @@ export class TuiApp {
     this.todoItems = todos
     this.renderDock()
     if (this.todoPanelVisible) this.renderTodoPanel()
+    this.projectActivity()
     this.syncExtensionState()
   }
 
@@ -8205,6 +8237,52 @@ export class TuiApp {
   }
 
   /**
+   * M0: project one section patch into the unified status store. No-op
+   * without a wired store; the store's section-identity discipline keeps
+   * same-value projections from notifying.
+   */
+  private projectStatus(patch: StatusPatch): void {
+    this.statusStore?.update(patch)
+  }
+
+  /** M0: project the activity section from the CURRENT machine facts
+   * (phase precedence lives in the pure derive — the app never re-derives
+   * it in the footer). */
+  private projectActivity(): void {
+    this.projectStatus({
+      activity: deriveActivityStatus(
+        {
+          working: this.workingActive,
+          compacting: this.compactionPhase === 'summarizing',
+          applyingCompaction: this.compactionPhase === 'applying',
+          approvalOpen: this.activeApproval !== undefined,
+          questionOpen: this.activeQuestions !== undefined,
+        },
+        this.busy,
+        {
+          queuedCount: this.queueItems.length,
+          taskCount: this.dockTasks.length,
+          childAgentCount: this.dockAgents.length,
+          todoCount: this.todoItems.length,
+        },
+      ),
+    })
+  }
+
+  /** M0: project the surface section (focusedSeat/fullscreen) from the
+   * current values plus a patch. */
+  private projectSurface(patch: { focusedSeat?: 'editor' | 'overlay' | 'editor-panel' | 'none'; fullscreen?: boolean }): void {
+    const current = this.statusStore?.snapshot().surface
+    this.projectStatus({
+      surface: {
+        focusedSeat: current?.focusedSeat ?? 'editor',
+        fullscreen: current?.fullscreen ?? false,
+        ...patch,
+      },
+    })
+  }
+
+  /**
    * Mirror the host's live state into the extension SurfaceStateStore (M2):
    * activity counts (working, queue, tasks, agents, todos) and session mode
    * (plan mode, viewer). Called from the setters so extension outlets and
@@ -8315,6 +8393,7 @@ export class TuiApp {
     this.dockTasks = tasks
     this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
     this.renderFooter()
+    this.projectActivity()
     this.syncExtensionState()
   }
 
@@ -8328,6 +8407,7 @@ export class TuiApp {
     this.dockAgents = agents
     this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
     this.renderFooter()
+    this.projectActivity()
     this.syncExtensionState()
   }
 
@@ -8345,6 +8425,7 @@ export class TuiApp {
   setQueueItems(items: readonly QueueItem[]): void {
     this.queueItems = items
     this.renderQueuePane()
+    this.projectActivity()
     this.syncExtensionState()
   }
 
@@ -9530,6 +9611,7 @@ export class TuiApp {
     // M6: a capturing surface owns the input now — any pending leader
     // sequence is cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
+    this.projectActivity()
   }
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
@@ -9617,6 +9699,7 @@ export class TuiApp {
       // The approval dialog is gone: the seat is the editor again (or the
       // next queued prompt's — showNextApproval re-derives it) (follow-up P1).
       this.setFocusSeat('editor')
+      this.projectActivity()
     } else {
       const queued = this.approvalQueue.indexOf(pending)
       if (queued !== -1) this.approvalQueue.splice(queued, 1)
@@ -9697,6 +9780,7 @@ export class TuiApp {
     // Set the active flow BEFORE touching overlays: showOverlayOnHost and
     // the suspension bookkeeping branch on it.
     this.activeQuestions = state
+    this.projectActivity()
     // A question is a logical capturing modal: every visible overlay is
     // suspended (hidden, state intact) until the flow settles — the same
     // stacking rule showOverlayOnHost applies to a new overlay.
@@ -9801,6 +9885,7 @@ export class TuiApp {
     // seat again) (follow-up P1).
     this.setFocusSeat('editor')
     this.publishFocusSeat()
+    this.projectActivity()
     screen.requestRender()
     this.settle(state, answers)
   }
