@@ -318,6 +318,35 @@ test('panel: every rendered line fits the width and the total never exceeds the 
   }
 })
 
+test('panel: a TINY budget (8 rows) never overflows; a workable budget keeps the metadata visible', async () => {
+  // Round-4 repro: maxRows 8 — the old stacked layout rendered 9 rows
+  // (clipping the footer) and the detail slice could drop Time/Session.
+  const source = new FakeSource()
+  source.rows = [
+    ...Array.from({ length: 30 }, (_, index) => row(`entry ${index}`, 30 - index)),
+    row('multiline prompt\nsecond line\nthird line', 1, '/work/a', 'multi'),
+  ]
+  const { panel } = makePanel(source, { maxRows: 8 })
+  panel.start()
+  await settle()
+  for (const width of [60, 80]) {
+    const lines = panel.render(width)
+    assert.ok(lines.length <= 8, `render(${width}) must stay within 8 rows (got ${lines.length})`)
+    for (const line of lines) {
+      assert.ok(visibleWidthOf(line) <= width, `line exceeds width ${width}`)
+    }
+  }
+  // With a workable budget the metadata survives: Directory/Time rows are
+  // never sliced away (content takes the remainder, metadata is reserved).
+  const { panel: roomy } = makePanel(source, { maxRows: 16 })
+  roomy.start()
+  await settle()
+  roomy.handleInput('\x1b[A') // select the metadata-rich row (last)
+  const roomyLines = roomy.render(80)
+  assert.ok(roomyLines.some(line => line.includes('Directory:')), 'the Directory row must stay visible')
+  assert.ok(roomyLines.some(line => line.includes('Time:')), 'the Time row must stay visible')
+})
+
 test('panel: a 500-line prompt is clamped in the detail pane (never fills the terminal)', () => {
   const source = new FakeSource()
   const huge = Array.from({ length: 500 }, (_, i) => `line ${i} of a giant prompt`).join('\n')

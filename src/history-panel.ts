@@ -396,12 +396,21 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   private renderStacked(lines: string[], width: number, bodyBudget: number): void {
-    // The stacked layout splits the body budget: a bounded detail (plan
-    // §20: 6–8 rows) plus a divider, everything else is the list. The
-    // total NEVER exceeds bodyBudget.
-    const detailBudget = Math.min(HISTORY_PANEL_STACKED_DETAIL_ROWS, Math.max(2, Math.floor(bodyBudget / 3)))
-    const dividerRows = detailBudget > 0 ? 2 : 0 // blank + ─ divider
-    const listBudget = Math.max(1, bodyBudget - detailBudget - dividerRows)
+    // The stacked layout splits the body budget with NO unconditional
+    // minimums: the detail is shown ONLY when it can keep its full
+    // metadata (header + blank + Directory/Time/Session — 5 rows); below
+    // that the space goes entirely to the list. list + divider + detail
+    // ALWAYS fits bodyBudget — on an 8-row terminal the detail disappears
+    // instead of clipping the footer or slicing its metadata.
+    const minDetailRows = 2 + 3 // 'Details' + blank + up to 3 metadata rows
+    const dividerRows = 2 // blank + ─ divider (only when the detail renders)
+    const reservedForList = 1
+    const availableForDetail = Math.max(0, bodyBudget - dividerRows - reservedForList)
+    const detailBudget = availableForDetail >= minDetailRows
+      ? Math.min(HISTORY_PANEL_STACKED_DETAIL_ROWS, availableForDetail)
+      : 0
+    const divider = detailBudget > 0 ? dividerRows : 0
+    const listBudget = Math.max(1, bodyBudget - divider - detailBudget)
     const listLines = this.renderList(width, listBudget)
     const detailLines = this.renderDetail(width, this.selected(), detailBudget)
     lines.push(...listLines)
@@ -426,9 +435,11 @@ export class HistoryPanel implements Component, Focusable {
     const count = this.state.results.length
     if (count === 0) return out
     // The "(N results)" counter row (when it appears) occupies one row of
-    // the budget too — the list NEVER exceeds `budget` rows.
-    const needsCounter = count > budget
-    const visible = Math.min(count, Math.max(1, budget - (needsCounter ? 1 : 0)))
+    // the budget too — the list NEVER exceeds `budget` rows, even at
+    // budget 1 (the counter wins that row rather than overflowing).
+    let visible = Math.min(count, budget)
+    const needsCounter = count > visible
+    if (needsCounter && visible + 1 > budget) visible = Math.max(0, visible - 1)
     // Viewport: center the selection, clamp to the ends (SelectList's
     // algorithm: start = clamp(selected - floor(visible/2), 0, count - visible)).
     const start = Math.max(0, Math.min(this.state.selectedIndex - Math.floor(visible / 2), count - visible))
@@ -462,13 +473,15 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   /**
-   * The detail pane, strictly bounded to `budget` rows: header + blank +
-   * wrapped content + blank + the metadata lines. The content budget is
-   * what remains after the fixed rows; the counter is never allowed to
-   * push the pane past its budget.
+   * The detail pane, strictly bounded to `budget` rows (may be 0 — the
+   * stacked layout then simply skips it). The METADATA rows (Directory/
+   * Time/Session) are reserved first; the wrapped content takes whatever
+   * remains, so a small budget truncates content — never the metadata —
+   * and the `… more` marker replaces the last content row instead of
+   * adding one. The assembly never exceeds `budget` at ANY size.
    */
   private renderDetail(width: number, result: HistorySearchResult | undefined, budget: number): string[] {
-    if (result === undefined) return []
+    if (result === undefined || budget <= 0) return []
     const meta: string[] = []
     if (result.cwd !== null) {
       meta.push(truncateToWidth(`  Directory: ${result.cwd}`, width, '…'))
@@ -481,20 +494,25 @@ export class HistoryPanel implements Component, Focusable {
     if (result.sessionId !== undefined) {
       meta.push(truncateToWidth(`  Session: ${result.sessionId}`, width, '…'))
     }
-    const coreRows = 3 // 'Details' + the blank after content + the blank after meta
-    const contentBudget = Math.max(0, budget - coreRows - meta.length)
-    const contentWidth = Math.max(4, width - 2)
-    const wrapped = wrapText(result.content, contentWidth)
-    const visible = wrapped.slice(0, contentBudget)
-    const out: string[] = ['Details', '']
-    if (visible.length > 0) {
-      out.push(...visible.map(line => truncateToWidth(`  ${line}`, width, '…')))
-      if (wrapped.length > visible.length) out.push(`  … more`)
-    }
+    const out: string[] = ['Details']
+    let remaining = budget - 1
+    if (remaining <= 0) return out
     out.push('')
-    out.push(...meta)
-    // Last-resort clamp: the pane never exceeds its budget.
-    return out.slice(0, budget)
+    remaining -= 1
+    // Reserve the metadata + one inter-blank first; content gets the rest.
+    const metadataRows = Math.min(meta.length, remaining)
+    const blankRows = metadataRows > 0 && remaining > metadataRows ? 1 : 0
+    const contentRows = Math.max(0, remaining - metadataRows - blankRows)
+    const wrapped = wrapText(result.content, Math.max(4, width - 2))
+    let shown = wrapped.slice(0, contentRows)
+    if (wrapped.length > shown.length && shown.length > 0) {
+      shown = shown.slice(0, -1)
+      shown.push('  … more')
+    }
+    out.push(...shown.map(line => truncateToWidth(`  ${line}`, width, '…')))
+    if (blankRows > 0 && shown.length > 0) out.push('')
+    out.push(...meta.slice(0, metadataRows))
+    return out
   }
 
   private renderFooter(width: number): string {
