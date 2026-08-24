@@ -115,6 +115,13 @@ context (a mismatched continuation is a typed error). Reaching the scan
 budget is NOT exhausted. The panel currently renders only `page.results`;
 "Search older" is a later UI phase on this contract.
 
+The history store is append-only, so a concurrent append between pages does
+not invalidate a continuation: the scan continues by its old snapshot
+boundary and the appended rows belong to the next fresh search. Only a
+file that SHRANK or was rewritten under a continuation cursor invalidates
+it — the source then throws `HistorySearchContinuationStaleError` (a typed
+error) instead of silently skipping the file and reporting exhausted.
+
 Two intentional trade-offs of the bounded window:
 
 - **Coverage**: histories outside the first scan window may not appear

@@ -11,7 +11,7 @@ import test from 'node:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileHistorySearchSource, HistorySearchContinuationError } from '../src/history-search.ts'
+import { FileHistorySearchSource, HistorySearchContinuationError, HistorySearchContinuationStaleError } from '../src/history-search.ts'
 import type { HistorySearchDebugStats, HistorySearchResult, HistoryScope } from '../src/history-search.ts'
 import { appendHistoryRecord, historyFilePath, historyFilePathFromHash } from '../src/history.ts'
 
@@ -675,6 +675,71 @@ test('S19: a fresh continuation file (exact budget boundary) still gets its know
     assert.equal(legacy.length, 50, 'the fresh continuation file is recovered via knownCwds')
     assert.ok(legacy.every(row => row.cwd === '/b'), 'the recovered rows carry the proven cwd')
     assert.equal(page2.exhausted, true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S20: a concurrent append between pages does not invalidate the continuation (snapshot semantics)', async () => {
+  const home = tempHome()
+  try {
+    // 300 rows, a needle every 100th: page 1 scans the newest 100 (one
+    // needle); an append lands; page 2 must continue the OLD snapshot —
+    // the remaining 200 rows (two needles) are scanned, the appended row
+    // is not, and exhausted is only true after the old range is done.
+    const rows = Array.from({ length: 300 }, (_, i) => ({
+      content: i % 100 === 0 ? `needle-${i}` : `filler-${i}`,
+      ts: i,
+    }))
+    writeV2(home, '/a', rows)
+    const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 100 })
+    const request = { scope: 'current' as const, cwd: '/a', query: 'needle', limit: 100 }
+    const page1 = await src.search(request)
+    assert.equal(page1.results.length, 1, 'page 1 scanned the newest 100 rows (needle-200)')
+    assert.equal(page1.exhausted, false)
+    assert.ok(page1.continuation !== undefined)
+    // A concurrent append between pages (another window submitted).
+    const file = historyFilePath(home, '/a')
+    const { appendFileSync } = await import('node:fs')
+    appendFileSync(file, JSON.stringify({ v: 2, content: 'appended', cwd: '/a', ts: 9999 }) + '\n')
+    // Walk the remaining pages (the budget is per call: 100 rows each).
+    const all: string[] = [...page1.results.map(row => row.content)]
+    let continuation: import('../src/history-search.ts').HistorySearchContinuation | undefined = page1.continuation
+    for (let i = 0; i < 5; i += 1) {
+      const page: import('../src/history-search.ts').HistorySearchPage | undefined = continuation === undefined
+        ? undefined
+        : await src.search(request, continuation)
+      if (page === undefined) break
+      all.push(...page.results.map(row => row.content))
+      continuation = page.exhausted ? undefined : page.continuation
+    }
+    assert.ok(all.includes('needle-100') && all.includes('needle-0'),
+      'the remaining old rows are scanned, not dropped')
+    assert.ok(!all.includes('appended'), 'the appended row belongs to the next fresh search')
+    assert.equal(continuation, undefined, 'exhausted only after the old snapshot is fully scanned')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S21: a file shrunk under a continuation cursor is a stale-continuation error, not a silent skip', async () => {
+  const home = tempHome()
+  try {
+    writeV2(home, '/a', Array.from({ length: 300 }, (_, i) => ({ content: `p-${i}`, ts: i })))
+    const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 100 })
+    const request = { scope: 'current' as const, cwd: '/a', query: 'zzz', limit: 100 }
+    const page1 = await src.search(request)
+    assert.equal(page1.exhausted, false)
+    assert.ok(page1.continuation !== undefined)
+    // Truncate the file: the cursor's byte positions are gone — the
+    // continuation must NOT silently report exhausted and drop the rest.
+    const file = historyFilePath(home, '/a')
+    const { truncateSync } = await import('node:fs')
+    truncateSync(file, 0)
+    await assert.rejects(
+      src.search(request, page1.continuation),
+      (error: unknown) => error instanceof HistorySearchContinuationStaleError,
+    )
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

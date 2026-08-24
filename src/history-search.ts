@@ -61,7 +61,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { historyFilePath, parseHistoryRecordLine, type ParsedHistoryRecord } from './history.ts'
-import { readJsonlReverseBatch, type ReverseJsonlCursor } from './history-reverse-reader.ts'
+import { readJsonlReverseBatch, ReverseJsonlRevisionError, type ReverseJsonlCursor } from './history-reverse-reader.ts'
 
 /** The two scope categories (`/sessions` vocabulary). */
 export type HistoryScope = 'current' | 'all'
@@ -195,6 +195,18 @@ export class HistorySearchContinuationError extends Error {
   constructor() {
     super('history search continuation does not match the request (scope/cwd/query/limit)')
     this.name = 'HistorySearchContinuationError'
+  }
+}
+
+/** Thrown when a file SHRANK or was rewritten under a continuation cursor —
+ * the byte positions can no longer be trusted. This is NOT a per-file skip:
+ * silently reporting exhausted would drop the remaining rows. The caller
+ * must start a fresh search. (Append-only growth is tolerated and never
+ * throws — the continuation continues by its old snapshot boundary.) */
+export class HistorySearchContinuationStaleError extends Error {
+  constructor() {
+    super('history search continuation is stale (a file changed under its cursor); start a fresh search')
+    this.name = 'HistorySearchContinuationStaleError'
   }
 }
 
@@ -369,10 +381,15 @@ export class FileHistorySearchSource implements HistorySearchSource {
         }
       } catch (error) {
         if (isAbortError(error)) return emptyPage()
-        // A per-file failure (vanished file, read error, or a
-        // ReverseJsonlRevisionError when the file changed under a
-        // continuation cursor) skips the rest of this file; rows already
-        // collected stay.
+        if (error instanceof ReverseJsonlRevisionError) {
+          // A file shrank or was rewritten under a continuation cursor:
+          // the byte positions are gone. This is NOT a per-file skip —
+          // treating it as fileDone would silently report exhausted and
+          // drop the remaining rows. The caller must start a fresh search.
+          throw new HistorySearchContinuationStaleError()
+        }
+        // Any other per-file failure (vanished file, read error) skips the
+        // rest of this file; rows already collected stay.
         cursor = undefined
         fileDone = true
       }

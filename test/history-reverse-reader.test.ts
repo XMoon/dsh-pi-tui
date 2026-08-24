@@ -252,15 +252,20 @@ test('abort stops the scan with an AbortError', async () => {
   }
 })
 
-test('a cursor is invalidated when the file size changes', async () => {
+test('a cursor tolerates append-only growth and is invalidated by a shrink', async () => {
   const { file, dir } = tempFile('a\nb\nc\n')
   try {
     const first = await readJsonlReverseBatch(file, { maxRows: 1, chunkBytes: 64 })
     assert.equal(first.eof, false)
-    // Append: the revision (size) changed — the old cursor must not be reused.
+    // Append-only growth: the old snapshot range is unchanged — the cursor
+    // continues by the old boundary (the appended row is not part of it).
     writeFileSync(file, 'a\nb\nc\nd\n')
+    const second = await readJsonlReverseBatch(file, { cursor: first.nextCursor, maxRows: 1, chunkBytes: 64 })
+    assert.equal(second.lines[0]?.text, 'b')
+    // A shrink invalidates the cursor: the byte positions are gone.
+    writeFileSync(file, 'a\n')
     await assert.rejects(
-      readJsonlReverseBatch(file, { cursor: first.nextCursor, maxRows: 1, chunkBytes: 64 }),
+      readJsonlReverseBatch(file, { cursor: second.nextCursor, maxRows: 1, chunkBytes: 64 }),
       (error: unknown) => error instanceof ReverseJsonlRevisionError,
     )
   } finally {

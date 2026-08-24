@@ -14,8 +14,11 @@
  *   (`nextByteEnd`) so the next batch continues without re-reading the
  *   already-covered suffix and without gaps or duplicates.
  * - The cursor is bound to the file revision (size + mtimeMs): a file that
- *   changed while a cursor was held throws {@link ReverseJsonlRevisionError}
- *   instead of blindly reusing a stale byte position.
+ *   SHRANK or was rewritten (same size, new mtime) while a cursor was held
+ *   throws {@link ReverseJsonlRevisionError} instead of blindly reusing a
+ *   stale byte position. Append-only GROWTH is tolerated — the old snapshot
+ *   range is untouched, so the scan continues by the old boundary and the
+ *   appended bytes belong to the next fresh search.
  * - The first batch snapshots the file size and never reads past it, so a
  *   concurrent append during the scan is naturally excluded.
  * - Abort: the signal is checked before the stat and before every chunk
@@ -63,8 +66,9 @@ export interface ReverseJsonlBatch {
   bytesRead: number
 }
 
-/** Thrown when a cursor is reused against a file whose revision (size or
- * mtime) changed — the byte position can no longer be trusted. */
+/** Thrown when a cursor is reused against a file that SHRANK or was
+ * rewritten (same size, new mtime) — the byte position can no longer be
+ * trusted. Append-only growth does NOT throw. */
 export class ReverseJsonlRevisionError extends Error {
   constructor(
     file: string,
@@ -114,7 +118,15 @@ export async function readJsonlReverseBatch(
   const fileStat = await stat(file)
   if (options.cursor !== undefined && options.verifyRevision !== false) {
     const cursor = options.cursor
-    if (cursor.revision.size !== fileStat.size || cursor.revision.mtimeMs !== fileStat.mtimeMs) {
+    // The history store is append-only: growth between pages leaves the
+    // old snapshot range untouched, so the cursor stays valid and the scan
+    // continues by the OLD boundary (the appended bytes belong to the next
+    // fresh search). Only a SHRINK (the byte positions are gone) or a
+    // same-size rewrite (the bytes shifted) invalidates the cursor.
+    const shrank = fileStat.size < cursor.revision.size
+    const sameSizeButTouched = fileStat.size === cursor.revision.size
+      && fileStat.mtimeMs !== cursor.revision.mtimeMs
+    if (shrank || sameSizeButTouched) {
       throw new ReverseJsonlRevisionError(
         file,
         cursor.revision,
