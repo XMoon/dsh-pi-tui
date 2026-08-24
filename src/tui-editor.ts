@@ -126,10 +126,13 @@ export class TuiEditor extends Editor {
   private placeholderText = ''
   /** The current input mode: `!` / `!!` are state, never document text. */
   private inputMode: EditorInputMode = 'prompt'
-  /** Whether the editor was empty when a bracketed paste began (the
-   * paste-normalization gate: a paste into a NON-empty editor is never
-   * reinterpreted as a shell line). */
-  private pasteStartEmpty: boolean | null = null
+  /** Whether a bracketed paste began in an EMPTY PROMPT (the
+   * paste-normalization gate): only a paste that lands in an empty
+   * PROMPT-mode editor is reinterpreted as a shell line. A paste into an
+   * already-shell-mode editor is BODY text — its leading `!` is literal
+   * (the serialization adds the mode's own prefix, so the wire form
+   * matches what the user would have typed before the mode feature). */
+  private pasteStartPromptEmpty: boolean | null = null
 
   constructor(tui: TUI, theme: EditorTheme) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -216,12 +219,13 @@ export class TuiEditor extends Editor {
       ;(this as unknown as AutocompleteInternals).cancelAutocomplete()
       return
     }
-    // Track whether the editor was empty when a bracketed paste began: a
-    // paste that lands in an EMPTY prompt and starts with `!` / `!!` is
-    // normalized into a shell-mode entry (kimi parity — typed-key
-    // interception does not cover bracketed paste). A paste into a
-    // non-empty editor is never reinterpreted.
-    if (data.includes('\x1b[200~')) this.pasteStartEmpty = this.getText() === ''
+    // Track whether a bracketed paste began in an EMPTY PROMPT: a paste
+    // that lands there and starts with `!` / `!!` is normalized into a
+    // shell-mode entry (kimi parity — typed-key interception does not
+    // cover bracketed paste). A paste into a non-empty editor, or into an
+    // already-shell-mode editor, is never reinterpreted — its `!` is
+    // ordinary body text.
+    if (data.includes('\x1b[200~')) this.pasteStartPromptEmpty = this.inputMode === 'prompt' && this.getText() === ''
     // Esc on an EMPTY shell body cancels the whole shell mode (the app
     // passes Esc through only in this state — see the app's escape
     // branch). The autocomplete branch above already won when the
@@ -274,9 +278,9 @@ export class TuiEditor extends Editor {
     // (the fork's handlePaste is private): one synchronous pass, so no
     // intermediate `❯ !!git status` frame is ever visible.
     if (data.includes('\x1b[201~')) {
-      const startedEmpty = this.pasteStartEmpty
-      this.pasteStartEmpty = null
-      if (startedEmpty === true) {
+      const startedPromptEmpty = this.pasteStartPromptEmpty
+      this.pasteStartPromptEmpty = null
+      if (startedPromptEmpty === true) {
         const { mode, text } = editorModeFromHistoryEntry(this.getText())
         if (mode !== 'prompt') {
           this.setInputMode(mode)
