@@ -165,6 +165,50 @@ test('safe mode ignores user overrides', async () => {
   app.stop()
 })
 
+test('a leader sequence cannot bypass the viewer parent-action guard', async () => {
+  // Review round 1: `<leader>t → app.input.steer` must be inert inside
+  // the continuable viewer, exactly like the direct key.
+  const steered: string[] = []
+  const { vt, app } = startApp({ onSteer: (text: string) => steered.push(text) }, managerWith({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.steer': '<leader>t' },
+  }))
+  app.setViewerMode({
+    parentSessionId: 'session-main',
+    childSessionId: 'session-child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'inactive',
+  })
+  await vt.waitForRender()
+  vt.sendInput('\x18') // leader
+  await vt.waitForRender()
+  vt.sendInput('t') // completing key → app.input.steer
+  await vt.waitForRender()
+  assert.deepEqual(steered, [], 'the parent must never be steered from inside the viewer')
+  app.stop()
+})
+
+test('safe mode disables the leader machine too', async () => {
+  // Review round 1: safe mode ignores the user configuration ENTIRELY —
+  // including the leader key and its sequences.
+  let tasksOpened = 0
+  const { vt, app } = startApp({ onOpenTasks: () => { tasksOpened += 1 } }, (manager) => {
+    managerWith({
+      leader: 'ctrl+x',
+      bindings: { 'app.tasks.open': '<leader>t' },
+    })(manager)
+    manager.setSafeMode(true)
+  })
+  vt.sendInput('\x18') // leader — must be inert in safe mode
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'safe mode must disable the leader sequences')
+  assert.equal(app.keybindingsManager().leaderMachine(), undefined, 'no leader machine in safe mode')
+  app.stop()
+})
+
 test('a disabled action no longer fires', async () => {
   const steered: string[] = []
   const { vt, app } = startApp({ onSteer: (text: string) => steered.push(text) }, managerWith({ 'app.input.steer': false }))

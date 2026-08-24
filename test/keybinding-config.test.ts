@@ -139,3 +139,30 @@ test('nested bindings map merges with top-level entries', () => {
     'app.todo.toggle': 'ctrl+shift+t',
   })
 })
+
+test('a duplicate action declaration is a diagnostic, never last-write-wins', () => {
+  // Review round 1: the same action at the top level AND in `bindings`
+  // must not silently overwrite — the FIRST declaration wins.
+  const parsed = parseUserKeybindings({
+    'app.input.steer': 'ctrl+s',
+    bindings: { 'app.input.steer': 'ctrl+y' },
+  })
+  assert.deepEqual(parsed.bindings, { 'app.input.steer': 'ctrl+s' })
+  assert.equal(parsed.diagnostics.length, 1)
+  assert.ok(parsed.diagnostics[0]!.includes('declared more than once'))
+})
+
+test('false disables a leader sequence for the same action', () => {
+  // Review round 1: `false` must win over a `<leader>X` binding of the
+  // same action (the manager filters disabled actions out of the leader
+  // machine).
+  const parsed = parseUserKeybindings({
+    leader: 'ctrl+x',
+    'app.tasks.open': false,
+    bindings: { 'app.tasks.open': '<leader>t' },
+  })
+  assert.deepEqual(parsed.bindings, { 'app.tasks.open': false })
+  assert.deepEqual(parsed.leaderBindings, [])
+  assert.equal(parsed.diagnostics.length, 1)
+  assert.ok(parsed.diagnostics[0]!.includes('declared more than once'))
+})

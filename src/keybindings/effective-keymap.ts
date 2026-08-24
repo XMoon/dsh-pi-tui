@@ -5,7 +5,7 @@
  *
  * The InputRouter (input-router.ts) keeps its protocol/capture/focus
  * precedence — the keymap is consulted ONLY when the ladder allows
- * keybinding resolution (plan §8: "不要把 InputRouter 删除").
+ * keybinding resolution (plan §8: the InputRouter must NOT be deleted).
  *
  * Priorities (plan §8 / §15):
  * - plugin: 10 (a plugin binding never beats a Host action);
@@ -104,6 +104,14 @@ export class EffectiveKeymap {
   rebuild(): void {
     const rules: EffectiveBindingRule[] = []
     const diagnostics: string[] = []
+    // The conditional predicate of one action (the composition rules):
+    // a USER override of a conditional action must keep the SAME
+    // predicate — e.g. a remap of app.tasks.open must not open the task
+    // browser with a non-empty editor or no active tasks (plan §5).
+    const predicateByAction = new Map<string, (context: KeybindingContext) => boolean>()
+    for (const composition of this.compositionRules) {
+      predicateByAction.set(composition.action, composition.predicate)
+    }
     // 1. Builtin defaults (skipped for actions the user disabled, for
     // actions outside the keymap's scope set, and for actions whose
     // default key belongs to a focused component — hostResolved: false).
@@ -116,10 +124,12 @@ export class EffectiveKeymap {
       }
       if (userValue !== undefined) {
         // 2. User overrides replace the builtin keys for this action.
-        // (`false` was handled above, so this is a key or key list.)
+        // (`false` was handled above, so this is a key or key list.) A
+        // conditional action's user rules inherit its predicate.
+        const predicate = predicateByAction.get(definition.id)
         const keys = Array.isArray(userValue) ? userValue : [userValue]
         for (const key of keys) {
-          rules.push(this.rule(definition, key, 'user', PRIORITY.user))
+          rules.push({ ...this.rule(definition, key, 'user', PRIORITY.user), ...predicate === undefined ? {} : { predicate } })
         }
         continue
       }
@@ -128,11 +138,13 @@ export class EffectiveKeymap {
         rules.push(this.rule(definition, key, 'builtin', PRIORITY.builtin))
       }
     }
-    // 3. Composition (conditional affordance) rules.
+    // 3. Composition (conditional affordance) rules. Skipped when the user
+    // DISABLED the action (`false` disables every source of its keys).
     for (const composition of this.compositionRules) {
       const definition = this.definitions[composition.action]
       if (definition === undefined) continue
       if (this.includeScopes !== undefined && !this.includeScopes.has(definition.scope)) continue
+      if (!this.safeMode && this.userBindings[composition.action] === false) continue
       rules.push({
         id: `${composition.action}@composition`,
         action: composition.action,

@@ -93,10 +93,18 @@ export class HostKeybindingManager {
   private rebuild(): void {
     if (this.disposed) return
     this.diagnostics = []
+    // Safe mode (plan §17) ignores the user configuration ENTIRELY —
+    // including the leader key and its sequences (a leader sequence is a
+    // user override; safe mode must restore the builtin surface).
+    const effectiveLeaderConfig = this.safeMode ? undefined : this.leaderConfig
+    const effectiveLeaderBindings = this.safeMode
+      ? []
+      : this.leaderBindings.filter(binding => this.userBindings[binding.action] !== false)
     // Leader bindings: a duplicate completing key is ambiguous — neither
-    // fires (plan §6 M6: ambiguous prefix is a diagnostic).
+    // fires (plan §6 M6: ambiguous prefix is a diagnostic). A binding
+    // whose action the user DISABLED (false) never fires either.
     const byKey = new Map<KeyId, LeaderBinding[]>()
-    for (const binding of this.leaderBindings) {
+    for (const binding of effectiveLeaderBindings) {
       const list = byKey.get(binding.key) ?? []
       list.push(binding)
       byKey.set(binding.key, list)
@@ -115,8 +123,8 @@ export class HostKeybindingManager {
     // Rebuild the leader machine (its bindings/config may have changed).
     this.leader?.dispose()
     this.leader = undefined
-    if (this.leaderConfig !== undefined) {
-      this.leader = new LeaderStateMachine(this.leaderConfig, leaderBindings, {
+    if (effectiveLeaderConfig !== undefined) {
+      this.leader = new LeaderStateMachine(effectiveLeaderConfig, leaderBindings, {
         onActivate: (action) => this.onLeaderActivate(action),
         onStateChange: () => this.onLeaderStateChange(),
       })
