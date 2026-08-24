@@ -559,10 +559,14 @@ test('fullscreen click on the todo panel toggles its compact/full expansion', as
   // double-click word selection, never a disclosure). The layout must have
   // repainted after the expansion (the expanded panel moves rows), or the
   // click still lands on the stale scroll pane rect. The three-state loop:
-  // full list → the panel closes back to the summary row.
+  // full list → the panel closes back to the summary row. Geometry on the
+  // 80x24 terminal: footer (2) + editor seat (3) at the bottom, so the
+  // expanded panel (11 rows) spans 0-based rows 8..19 — click row 17 (a
+  // different row from the first click, so the fork never reads a
+  // double-click).
   await vt.waitForRender()
-  vt.sendInput('\x1b[<0;30;20M')
-  vt.sendInput('\x1b[<0;30;20m')
+  vt.sendInput('\x1b[<0;30;18M')
+  vt.sendInput('\x1b[<0;30;18m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'second click must close the panel back to the summary')
   assert.ok(!app.isTodoPanelExpanded(), 'closing resets the expansion')
@@ -584,22 +588,22 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('☑'), `todo summary must render in the dock:\n${view}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 20 (editor seat 3 + footer 0
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
   // at the bottom on the 80x24 test terminal; the closed panel renders
-  // zero rows, so the todo region clamps to [20, 21) — exactly the dock
+  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
   // row).
-  vt.sendInput('\x1b[<0;20;21M')
-  vt.sendInput('\x1b[<0;20;21m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'click on the summary row must open the panel')
   assert.ok(!app.isTodoPanelExpanded(), 'opens compact')
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('todo item 0'), `compact panel must show after the click:\n${view}`)
   // With the panel open the summary is hidden and the panel owns rows
-  // 14..20 — the same cell is now a panel row, so the next click runs the
+  // 12..19 — the same cell is now a panel row, so the next click runs the
   // compact → full step of the loop.
-  vt.sendInput('\x1b[<0;20;21M')
-  vt.sendInput('\x1b[<0;20;21m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'panel must stay open (the cell is now a panel row)')
   assert.ok(app.isTodoPanelExpanded(), 'the click now expands the panel (compact → full)')
@@ -646,12 +650,14 @@ test('a tiny terminal clamps the todo click geometry to the visible screen', asy
   app.setFullscreen(true)
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelExpanded(), 'starts compact')
-  // Row 2 (SGR y=3) sits inside the clamped region [0, todoBottom): expand.
-  vt.sendInput('\x1b[<0;40;3M')
-  vt.sendInput('\x1b[<0;40;3m')
+  // Row 0 (SGR y=1) sits inside the clamped region [0, todoBottom): with
+  // the footer (2) + editor seat (3) on the 6-row terminal, todoBottom
+  // clamps to 1 — expand.
+  vt.sendInput('\x1b[<0;40;1M')
+  vt.sendInput('\x1b[<0;40;1m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelExpanded(), 'a click inside the clamped region must expand')
-  // Row 6 (SGR y=6) sits in the editor/footer rows below the region: ignored.
+  // Row 5 (SGR y=6) sits in the editor/footer rows below the region: ignored.
   vt.sendInput('\x1b[<0;40;6M')
   vt.sendInput('\x1b[<0;40;6m')
   await vt.waitForRender()

@@ -91,6 +91,8 @@ import { derivePlanStatus } from './status/derive-plan.ts'
 import { usageFromStats } from './status/derive-usage.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
+import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
+import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -1418,6 +1420,36 @@ export function apply(ctx: Context, config: Config): void {
       z.object({
         theme: z.string(),
         footer: z.string(),
+        // M2: the versioned custom footer layout (nested object — never a
+        // JSON string). The base is the builtin default layout, so an
+        // absent key always resolves to a valid layout. Schemastery object
+        // fields are optional by default; parseFooterLayout is the
+        // authority on the persisted value.
+        footerLayout: z.object({
+          schemaVersion: z.const(1),
+          rows: z.array(z.object({
+            left: z.array(z.object({
+              id: z.string(),
+              format: z.string(),
+              tone: z.string(),
+              prefix: z.string(),
+              suffix: z.string(),
+              importance: z.number(),
+            })),
+            right: z.array(z.object({
+              id: z.string(),
+              format: z.string(),
+              tone: z.string(),
+              prefix: z.string(),
+              suffix: z.string(),
+              importance: z.number(),
+            })),
+            separator: z.object({
+              text: z.string(),
+              tone: z.string(),
+            }),
+          })),
+        }),
         fullscreen: z.string(),
         // Busy-Enter delivery mode for plain Enter while the agent is
         // running (web busyEnter parity): 'queue' (default) or 'steer'.
@@ -1450,7 +1482,10 @@ export function apply(ctx: Context, config: Config): void {
       // document). It moved to $DSH_HOME/user-history/*.jsonl (see
       // history.ts); the schema deliberately no longer carries it, so the
       // stored section drops the key on the next settings write.
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
+      // The base layout is the builtin default; the schemastery output
+      // type is fully-populated, so the cast bridges the sparse literal
+      // (the runtime validation accepts missing optional fields).
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerLayout: DEFAULT_FOOTER_LAYOUT as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
@@ -4845,8 +4880,40 @@ export function apply(ctx: Context, config: Config): void {
       }
       app.trackTerminalTheme(false)
     }
+    // M2: apply the persisted footer mode + layout to the app. `full` and
+    // `default` map to the builtin default layout, `compact` to the
+    // compact layout, `custom` parses footerLayout (fail-soft: an invalid
+    // config warns ONCE and falls back to the default — the TUI always
+    // starts). Never writes the document back on a read-only migration.
+    let footerWarningShown = false
+    const applyFooterSettings = (doc: { footer: string; footerLayout?: unknown } | undefined): void => {
+      if (doc === undefined) return
+      if (doc.footer === 'compact') {
+        app.setFooterPreset('compact')
+        app.setFooterLayout(undefined)
+        return
+      }
+      if (doc.footer === 'custom') {
+        const parsed = parseFooterLayout(doc.footerLayout)
+        if (!isFooterLayout(parsed)) {
+          if (!footerWarningShown) {
+            footerWarningShown = true
+            app.notify(`footer layout invalid (${parsed.message}) — using the default layout`, 'error')
+          }
+          app.setFooterPreset('full')
+          app.setFooterLayout(undefined)
+          return
+        }
+        app.setFooterPreset('full')
+        app.setFooterLayout(parsed)
+        return
+      }
+      // 'full' | 'default' | unknown → the builtin default layout.
+      app.setFooterPreset('full')
+      app.setFooterLayout(undefined)
+    }
     const storedFooter = tuiSettings?.get().footer
-    if (storedFooter === 'compact') app.setFooterPreset('compact')
+    applyFooterSettings(tuiSettings?.get())
     // One-time migration: per-cwd input history used to live inside this
     // settings namespace. Move it to the JSONL history files (oldest-first
     // file order; the stored arrays are newest-first) and drop the stale
@@ -5527,6 +5594,10 @@ export function apply(ctx: Context, config: Config): void {
         create: (options) => backend.sessionLifecycle.create(options),
         resume: (options) => backend.sessionLifecycle.resume(options),
       },
+// M2: apply the persisted footer mode + layout (shared by /settings,
+      // /reload and the startup path).
+      applyFooterSettings,
+      sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       // The session READ port (migration M1.3): /sessions, /resume, /search,
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.

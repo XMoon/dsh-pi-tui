@@ -15,9 +15,13 @@
 
 import type { StatusSnapshot } from '../status/types.ts'
 import {
+  formatCacheHit,
   formatContextFull,
+  formatPerformanceFull,
   formatStatsLine,
+  formatTokenUsageIo,
   formatTurnsSteps,
+  formatVersion,
   shortCwd,
 } from './formatters.ts'
 import type { FooterItemDefinition } from './types.ts'
@@ -257,6 +261,265 @@ export function registerBuiltinFooterItems(registry: FooterItemRegistry): void {
   registry.register(statsLineItem)
   registry.register(viewScopeItem)
   registry.register(extensionItemsItem)
+  // M2: the remaining first-batch items (plan §7.1/§18) — available to
+  // custom layouts, never in the default preset.
+  registry.register(agentPresetItem)
+  registry.register(reasoningItem)
+  registry.register(sandboxModeItem)
+  registry.register(approvalPolicyItem)
+  registry.register(focusModeItem)
+  registry.register(focusedSeatItem)
+  registry.register(projectItem)
+  registry.register(runStateItem)
+  registry.register(queueItem)
+  registry.register(agentsItem)
+  registry.register(todoItem)
+  registry.register(cacheHitItem)
+  registry.register(tokenUsageItem)
+  registry.register(performanceItem)
+  registry.register(versionItem)
+}
+
+/** The agent-preset badge: `[CM]`-style from the composition preset
+ * (shortLabel when provided — the state layer never hardcodes it). */
+const agentPresetItem: FooterItemDefinition = {
+  id: 'agent-preset',
+  label: 'Agent preset',
+  description: 'The agent composition preset badge.',
+  defaultZone: 'left',
+  defaultImportance: 90,
+  formats: ['badge', 'compact'],
+  defaultFormat: 'badge',
+  render(snapshot: StatusSnapshot, ref) {
+    const preset = snapshot.composition.agentPreset
+    if (preset === undefined) return null
+    const text = ref.format === 'compact' && preset.shortLabel !== undefined
+      ? preset.shortLabel
+      : preset.label
+    return { spans: [{ text: `[${text}]`, tone: 'accent' }] }
+  },
+}
+
+/** The reasoning effort: `@high` (the model item already folds it in). */
+const reasoningItem: FooterItemDefinition = {
+  id: 'reasoning',
+  label: 'Reasoning effort',
+  description: 'The model reasoning effort.',
+  defaultZone: 'left',
+  defaultImportance: 50,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    const effort = snapshot.composition.model?.reasoningEffort
+    if (effort === undefined) return null
+    return { spans: [{ text: `@${effort}`, tone: 'textMuted' }] }
+  },
+}
+
+/** The sandbox mode (independent of the preset name). */
+const sandboxModeItem: FooterItemDefinition = {
+  id: 'sandbox-mode',
+  label: 'Sandbox mode',
+  description: 'The effective sandbox mode.',
+  defaultZone: 'left',
+  defaultImportance: 80,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    const mode = snapshot.access.sandbox?.mode
+    if (mode === undefined) return null
+    const tone = mode === 'danger-full-access' ? 'warning' : mode === 'read-only' ? 'textMuted' : 'text'
+    return { spans: [{ text: mode, tone }] }
+  },
+}
+
+/** The approval policy. */
+const approvalPolicyItem: FooterItemDefinition = {
+  id: 'approval-policy',
+  label: 'Approval policy',
+  description: 'The effective approval policy.',
+  defaultZone: 'left',
+  defaultImportance: 70,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    const policy = snapshot.access.approval?.policy
+    if (policy === undefined) return null
+    return { spans: [{ text: policy, tone: policy === 'never' ? 'warning' : 'text' }] }
+  },
+}
+
+/** Focus Mode (the TUI's own presentation policy — never the keyboard
+ * focus). */
+const focusModeItem: FooterItemDefinition = {
+  id: 'focus-mode',
+  label: 'Focus mode',
+  description: 'The Focus Mode indicator.',
+  defaultZone: 'right',
+  defaultImportance: 120,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    if (!snapshot.interaction.focusMode) return null
+    return { spans: [{ text: 'focus', tone: 'textMuted' }] }
+  },
+}
+
+/** The UI keyboard focus seat (distinct from Focus Mode). */
+const focusedSeatItem: FooterItemDefinition = {
+  id: 'focused-seat',
+  label: 'Focused seat',
+  description: 'The UI keyboard focus seat.',
+  defaultZone: 'right',
+  defaultImportance: 30,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    return { spans: [{ text: snapshot.surface.focusedSeat, tone: 'textMuted' }] }
+  },
+}
+
+/** The project directory name (distinct from the cwd item). */
+const projectItem: FooterItemDefinition = {
+  id: 'project',
+  label: 'Project',
+  description: 'The workspace project directory name.',
+  defaultZone: 'left',
+  defaultImportance: 80,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    const project = snapshot.workspace.project
+    if (project === undefined || project === '') return null
+    return { spans: [{ text: project, tone: 'primary' }] }
+  },
+}
+
+/** The run phase (the pure derive's output — never re-derived here). */
+const runStateItem: FooterItemDefinition = {
+  id: 'run-state',
+  label: 'Run state',
+  description: 'The machine run phase.',
+  defaultZone: 'right',
+  defaultImportance: 95,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    const phase = snapshot.activity.phase
+    if (phase === 'idle') return null
+    const tone = phase === 'working' ? 'primary' : 'warning'
+    return { spans: [{ text: phase, tone }] }
+  },
+}
+
+/** The queued-input count. */
+const queueItem: FooterItemDefinition = {
+  id: 'queue',
+  label: 'Queue',
+  description: 'The queued-input count.',
+  defaultZone: 'left',
+  defaultImportance: 85,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    const count = snapshot.activity.queuedCount
+    if (count <= 0) return null
+    return { spans: [{ text: `${count} queued`, tone: 'textDim' }] }
+  },
+}
+
+/** The live child-subagent count. */
+const agentsItem: FooterItemDefinition = {
+  id: 'agents',
+  label: 'Agents',
+  description: 'The live child-subagent count.',
+  defaultZone: 'left',
+  defaultImportance: 85,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    const count = snapshot.activity.childAgentCount
+    if (count <= 0) return null
+    return { spans: [{ text: `${count} agents`, tone: 'textDim' }] }
+  },
+}
+
+/** The todo count. */
+const todoItem: FooterItemDefinition = {
+  id: 'todo',
+  label: 'Todo',
+  description: 'The active todo count.',
+  defaultZone: 'left',
+  defaultImportance: 60,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    const count = snapshot.activity.todoCount
+    if (count <= 0) return null
+    return { spans: [{ text: `${count} todo`, tone: 'textDim' }] }
+  },
+}
+
+/** The cache-hit share: `C 91.9%`. */
+const cacheHitItem: FooterItemDefinition = {
+  id: 'cache-hit',
+  label: 'Cache hit',
+  description: 'The cache-hit share of billed input tokens.',
+  defaultZone: 'left',
+  defaultImportance: 55,
+  formats: ['full', 'compact'],
+  defaultFormat: 'full',
+  render(snapshot: StatusSnapshot) {
+    const pct = snapshot.usage.cacheHitPct
+    if (pct === undefined) return null
+    return { spans: [{ text: formatCacheHit(pct), tone: 'success' }] }
+  },
+}
+
+/** The token usage: `2579/5507` (io). */
+const tokenUsageItem: FooterItemDefinition = {
+  id: 'token-usage',
+  label: 'Token usage',
+  description: 'The input/output token totals.',
+  defaultZone: 'left',
+  defaultImportance: 50,
+  formats: ['io'],
+  defaultFormat: 'io',
+  render(snapshot: StatusSnapshot) {
+    const tokens = snapshot.usage.tokens
+    return { spans: [{ text: formatTokenUsageIo(tokens.input, tokens.output), tone: 'success' }] }
+  },
+}
+
+/** The performance: `2.0s 40 tok/s` (full). */
+const performanceItem: FooterItemDefinition = {
+  id: 'performance',
+  label: 'Performance',
+  description: 'LLM wall time and output throughput.',
+  defaultZone: 'left',
+  defaultImportance: 40,
+  formats: ['full', 'compact'],
+  defaultFormat: 'full',
+  render(snapshot: StatusSnapshot) {
+    const performance = snapshot.usage.performance
+    return { spans: [{ text: formatPerformanceFull(performance.llmMs, performance.tokensPerSec), tone: 'textMuted' }] }
+  },
+}
+
+/** The host version: `v0.3.3` (tui), `dsh-0.1.1-rc.1` (dsh), or both. */
+const versionItem: FooterItemDefinition = {
+  id: 'version',
+  label: 'Version',
+  description: 'The dsh/bundle versions.',
+  defaultZone: 'left',
+  defaultImportance: 10,
+  formats: ['tui', 'dsh', 'both'],
+  defaultFormat: 'tui',
+  render(snapshot: StatusSnapshot, ref) {
+    const text = formatVersion(snapshot.host.dshVersion, snapshot.host.tuiVersion, ref.format ?? 'tui')
+    if (text === '') return null
+    return { spans: [{ text, tone: 'textMuted' }] }
+  },
 }
 
 /** A fresh registry with every builtin item registered. */

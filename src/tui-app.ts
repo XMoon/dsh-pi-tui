@@ -74,6 +74,7 @@ import { FooterComposer } from './footer/composer.ts'
 import { createBuiltinFooterRegistry } from './footer/builtin-items.ts'
 import { resolveFooterInstruction } from './footer/instruction.ts'
 import { layoutForPreset } from './footer/presets.ts'
+import type { FooterLayoutV1 } from './footer/types.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
 import { SelectedMarquee } from './marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
@@ -3806,6 +3807,7 @@ export class TuiApp {
     this.extensionHost?.updateSurface({ fullscreen: enabled })
     // M0: the unified status surface section follows the mode switch.
     this.projectSurface({ fullscreen: enabled })
+    this.renderFooter()
     // The screen swap re-established focus (or re-mounted the approval
     // dialog): re-derive the seat from the live state (follow-up P1).
     this.setFocusSeat('editor')
@@ -3969,6 +3971,7 @@ export class TuiApp {
     // bulk preference untouched (plan §17). The rebuild re-derives the
     // projection for the new mode.
     this.projectStatus({ interaction: { focusMode: enabled } })
+    this.renderFooter()
     this.rebuildMessages()
     this.requestRender()
   }
@@ -4607,6 +4610,7 @@ export class TuiApp {
   setBusy(busy: boolean): void {
     this.busy = busy
     this.projectActivity()
+    this.renderFooter()
   }
 
   /**
@@ -4625,6 +4629,7 @@ export class TuiApp {
     this.compactionPhase = phase
     this.reconcileWorkingRow()
     this.projectActivity()
+    this.renderFooter()
     this.requestRender()
   }
 
@@ -4773,6 +4778,7 @@ export class TuiApp {
     this.workingActive = active
     this.reconcileWorkingRow()
     this.projectActivity()
+    this.renderFooter()
     this.requestRender()
     this.syncExtensionState()
   }
@@ -4882,6 +4888,7 @@ export class TuiApp {
    * decides, and the Ctrl+O keyboard fold does not pierce them.
    */
   private handleFullscreenClick(x: number, y: number): void {
+    console.log('CLICK', x, y, 'footerRows', this.footer.render(this.terminal.columns).length, 'todoVisible', this.todoPanelVisible, 'todoExpanded', this.todoExpanded, 'todoPanelRows', this.todoPanel.render(this.terminal.columns).length)
     // A question owns the modal front: clicks inside its frame (the editor
     // seat, pinned above the footer) route to the flow — option rows select,
     // the body scroll marker toggles the expanded region. The seat's screen
@@ -4929,11 +4936,6 @@ export class TuiApp {
     const queueHeight = this.queuePane.render(width).length
     const goalHeight = this.goalLine.render(width).length
     const todoHeight = this.todoPanel.render(width).length
-    // Bottom-up geometry, clamped to the terminal: a tiny terminal (or a
-    // tall editor/queue) can push the derived rows off-screen, in which
-    // case no click maps onto the panel — never a negative or inverted
-    // region. Fullscreen layout, bottom-up: footer, editor seat, working
-    // row, queue pane, goal line, todo panel, dock, scroll pane, header.
     const todoBottom = Math.max(0, Math.min(height, height - footerHeight - editorHeight - workingHeight - queueHeight - goalHeight))
     const todoTop = Math.max(0, todoBottom - todoHeight)
     // The dock strip (the todo summary row) sits directly above the panel:
@@ -8114,6 +8116,7 @@ export class TuiApp {
     if (this.focusSeat === seat) return
     this.focusSeat = seat
     this.projectSurface({ focusedSeat: seat })
+    this.renderFooter()
     if (this.focusSeatPublishScheduled || this.disposed) return
     this.focusSeatPublishScheduled = true
     queueMicrotask(() => {
@@ -8132,6 +8135,7 @@ export class TuiApp {
   setTodoSummary(todos: readonly TodoItem[]): void {
     this.todoItems = todos
     this.projectActivity()
+    this.renderFooter()
     this.renderDock()
     if (this.todoPanelVisible) this.renderTodoPanel()
     this.syncExtensionState()
@@ -8518,6 +8522,7 @@ export class TuiApp {
   setQueueItems(items: readonly QueueItem[]): void {
     this.queueItems = items
     this.projectActivity()
+    this.renderFooter()
     this.renderQueuePane()
     this.syncExtensionState()
   }
@@ -8801,6 +8806,9 @@ export class TuiApp {
 
   /** Footer density presets: full keeps the stats line, compact drops it. */
   private footerPreset: 'full' | 'compact' = 'full'
+  /** M2: the active custom layout (undefined = the builtin preset
+   * layouts). */
+  private customFooterLayout: FooterLayoutV1 | undefined
 
   /** Set the footer density preset and repaint. */
   setFooterPreset(preset: 'full' | 'compact'): void {
@@ -8814,6 +8822,25 @@ export class TuiApp {
   /** Whether the footer currently uses the compact preset. */
   getFooterPreset(): 'full' | 'compact' {
     return this.footerPreset
+  }
+
+  /** M2: set the active custom layout (undefined restores the builtin
+   * preset layouts). The layout is used as-is — the runner validates
+   * persisted configs before calling. */
+  setFooterLayout(layout: FooterLayoutV1 | undefined): void {
+    this.customFooterLayout = layout
+    this.renderFooter()
+  }
+
+  /** M2: the effective footer mode ('default'/'compact'/'custom'). */
+  getFooterMode(): 'default' | 'compact' | 'custom' {
+    return this.customFooterLayout !== undefined ? 'custom' : this.footerPreset === 'compact' ? 'compact' : 'default'
+  }
+
+  /** The layout the composer renders: the custom layout when set, else
+   * the builtin preset layout. */
+  private currentFooterLayout(): FooterLayoutV1 {
+    return this.customFooterLayout ?? layoutForPreset(this.footerPreset)
   }
 
   /** Rebuild the footer from the unified status snapshot (M1): the
@@ -8835,7 +8862,7 @@ export class TuiApp {
     })
     const text = this.footerComposer.render({
       snapshot,
-      layout: layoutForPreset(this.footerPreset),
+      layout: this.currentFooterLayout(),
       width,
       context: {
         editorEmpty: this.editor.getText().trim() === '',

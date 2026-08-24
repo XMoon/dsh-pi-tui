@@ -120,6 +120,7 @@ function stubRunner(options: {
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     tuiSettings: options.tuiSettings,
+    applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
       list: async () => [],
@@ -229,6 +230,7 @@ function setup(options: {
     refreshCatalog: options.refreshCatalog,
     ensureCalls,
     tuiSettings: options.tuiSettings,
+    applyFooterSettings: () => {},
     extensions: options.extensions,
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,

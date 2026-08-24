@@ -31,6 +31,8 @@ import { parseUserKeybindings } from './keybindings/config.ts'
 import { APP_KEYBINDINGS } from './keybindings/definitions.ts'
 import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
 import type { AppKeybindingId } from './keybindings/types.ts'
+import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
+import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
@@ -208,13 +210,14 @@ export function presetDisplayText(preset: {
   }
 }
 
-/** The TUI settings document surface (theme/footer/fullscreen/busyEnter/
- * localShellSandbox/homeEndKeys/focusMode). The old `history` field moved
- * to $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
- * document anymore. The type now lives on the config port (M1.9); the
- * re-export keeps the public commands-surface name stable for tests. The
- * user keybinding overrides (`keybindings`, an unknown-key pass-through
- * in the config port's document schema — see index.ts) ride along. */
+/** The TUI settings document surface (theme/footer/footerLayout/
+ * fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode). The old
+ * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
+ * deliberately NOT part of the document anymore. The type now lives on
+ * the config port (M1.9); the re-export keeps the public commands-surface
+ * name stable for tests. The user keybinding overrides (`keybindings`,
+ * an unknown-key pass-through in the config port's document schema — see
+ * index.ts) ride along. */
 export type { TuiSettingsLike, TuiSettingsDoc } from './runtime/config-port.ts'
 import type { TuiSettingsLike } from './runtime/config-port.ts'
 
@@ -254,6 +257,12 @@ export interface TuiCommandRunner {
     create(options: CreateSessionRequest): Promise<SessionHandle>
     resume(options: ResumeSessionRequest): Promise<SessionHandle>
   }
+  /** M2: apply the persisted footer mode + layout to the app (shared by
+   * /settings, /reload and the startup path; fail-soft on invalid custom
+   * configs). */
+  applyFooterSettings(doc: { footer: string; footerLayout?: unknown } | undefined): void
+  /** The sessions service, for the /exit flush. */
+  readonly sessions: { flush(session: Session): Promise<unknown> }
   /** The session READ port (migration M1.3): /sessions, /resume, /search,
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
@@ -1240,9 +1249,9 @@ export function registerTuiCommands(
           {
             id: 'footer',
             label: 'Status line',
-            description: 'Footer density: full keeps the stats line',
-            currentValue: app.getFooterPreset(),
-            values: ['full', 'compact'],
+            description: 'Footer layout: default (full), compact (stats line hidden), or custom (see /footer)',
+            currentValue: app.getFooterMode(),
+            values: ['default', 'compact', 'custom'],
           },
           {
             id: 'busy-enter',
@@ -1415,11 +1424,21 @@ export function registerTuiCommands(
             // `/settings` and Alt+T are the same state (plan §10.4).
             app.setThinkingExpanded(value === 'expanded')
           } else if (id === 'footer') {
-            if (value === 'full' || value === 'compact') {
-              app.setFooterPreset(value)
+            if (value === 'default' || value === 'compact' || value === 'custom') {
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings footer write', () => settings.replace({ ...settings.get(), footer: value }) as Promise<unknown>, { notify: true })
+                const doc = settings.get()
+                // Selecting custom with no (valid) layout initializes an
+                // editable copy of the default layout (plan §14.8).
+                const nextLayout = value === 'custom'
+                  ? !isFooterLayout(parseFooterLayout(doc.footerLayout))
+                    ? DEFAULT_FOOTER_LAYOUT
+                    : doc.footerLayout
+                  : doc.footerLayout
+                runner.applyFooterSettings({ footer: value, footerLayout: nextLayout })
+                detach('settings footer write', () => settings.replace({ ...doc, footer: value, footerLayout: nextLayout }) as Promise<unknown>, { notify: true })
+              } else {
+                runner.applyFooterSettings({ footer: value })
               }
             }
           } else if (id === 'busy-enter') {
@@ -2051,7 +2070,7 @@ export function registerTuiCommands(
           }
           app.trackTerminalTheme(false)
         }
-        app.setFooterPreset(doc.footer === 'compact' ? 'compact' : 'full')
+        runner.applyFooterSettings(doc)
         app.setFullscreen(doc.fullscreen === 'on')
       }
       app.notify(`reloaded — ${catalogText} \u00b7 settings reapplied`, 'info')
