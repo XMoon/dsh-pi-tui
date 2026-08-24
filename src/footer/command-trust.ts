@@ -1,0 +1,80 @@
+/**
+ * The footer command TRUST GATE (plan §17.4): a repository/project config
+ * must NEVER silently trigger arbitrary shell execution. The command is
+ * read ONLY from the settings descriptor's USER layer (the stored
+ * document's user section) — never from the merged/resolved value, which
+ * a project layer could influence. When the user layer cannot prove the
+ * command, command mode is disabled and the native layout applies.
+ * @module @xmoon76/dsh-pi-tui/footer/command-trust
+ */
+
+import {
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  MAX_COMMAND_TIMEOUT_MS,
+  MIN_COMMAND_REFRESH_MS,
+  type FooterCommandConfig,
+} from './command-runner.ts'
+
+/** The settings descriptor's shape the gate reads (structural). */
+export interface SettingsDescriptorLike {
+  /** The branded namespace (a string identity — compare directly). */
+  readonly ns: string
+  /** The raw USER section of the stored document (absent = not
+   * user-overridden — the gate refuses). */
+  readonly user?: unknown
+}
+
+/** The persisted footerCommand settings shape. */
+export interface FooterCommandSettings {
+  readonly schemaVersion: 1
+  readonly command: string
+  readonly timeoutMs?: number
+  readonly refreshIntervalMs?: number
+  readonly maxRows?: number
+}
+
+/** Validate the persisted footerCommand value (bounds per plan §17.3). */
+export function parseFooterCommandConfig(input: unknown): FooterCommandConfig | undefined {
+  if (typeof input !== 'object' || input === null) return undefined
+  const raw = input as Record<string, unknown>
+  if (raw.schemaVersion !== 1) return undefined
+  if (typeof raw.command !== 'string' || raw.command.trim() === '') return undefined
+  const timeoutMs = raw.timeoutMs === undefined
+    ? DEFAULT_COMMAND_TIMEOUT_MS
+    : typeof raw.timeoutMs === 'number' && Number.isFinite(raw.timeoutMs)
+      ? Math.min(Math.max(1, raw.timeoutMs), MAX_COMMAND_TIMEOUT_MS)
+      : DEFAULT_COMMAND_TIMEOUT_MS
+  const refreshIntervalMs = raw.refreshIntervalMs === undefined
+    ? MIN_COMMAND_REFRESH_MS
+    : typeof raw.refreshIntervalMs === 'number' && Number.isFinite(raw.refreshIntervalMs)
+      ? Math.max(MIN_COMMAND_REFRESH_MS, raw.refreshIntervalMs)
+      : MIN_COMMAND_REFRESH_MS
+  const maxRows = raw.maxRows === undefined
+    ? 1
+    : typeof raw.maxRows === 'number' && Number.isFinite(raw.maxRows)
+      ? Math.min(Math.max(1, Math.floor(raw.maxRows)), 2)
+      : 1
+  return { command: raw.command, timeoutMs, refreshIntervalMs, maxRows }
+}
+
+/**
+ * Resolve the TRUSTED command config: the footerCommand value must be
+ * present in the USER layer of the dsh-pi-tui settings descriptor. A
+ * merged/project-supplied value is refused (undefined = command mode
+ * disabled, native fallback, diagnostic warning).
+ * @param descriptors - the settings provider's describe() output.
+ * @param namespace - the dsh-pi-tui settings namespace value.
+ * @returns the validated config, or undefined when untrusted/invalid.
+ */
+export function resolveTrustedFooterCommand(
+  descriptors: readonly SettingsDescriptorLike[] | undefined,
+  namespace: string,
+): FooterCommandConfig | undefined {
+  if (descriptors === undefined) return undefined
+  const descriptor = descriptors.find(entry => entry.ns === namespace)
+  if (descriptor === undefined) return undefined
+  const user = descriptor.user
+  if (typeof user !== 'object' || user === null) return undefined
+  const raw = (user as Record<string, unknown>).footerCommand
+  return parseFooterCommandConfig(raw)
+}

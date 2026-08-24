@@ -70,7 +70,7 @@ import { deriveActivityStatus } from './status/derive-activity.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
 import { StatusStore as StatusStoreImpl } from './status/store.ts'
-import { FooterComposer } from './footer/composer.ts'
+import { FooterComposer, mergeCommandSurface } from './footer/composer.ts'
 import { createBuiltinFooterRegistry } from './footer/builtin-items.ts'
 import { resolveFooterInstruction } from './footer/instruction.ts'
 import { layoutForPreset } from './footer/presets.ts'
@@ -1349,6 +1349,10 @@ export interface TuiAppOptions {
    * the surface works identically without it.
    */
   statusStore?: StatusStore
+  /** M5: fired when the terminal WIDTH materially changed (the command
+   * surface refreshes on width changes — the runner coalesces to its
+   * interval). */
+  onTerminalResize?: () => void
   /**
    * M6: the plugin keybinding resolver (wired by the runner from the M5
    * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
@@ -1691,6 +1695,10 @@ export class TuiApp {
    * resize callback can fire while a width change is already being
    * applied; the nested call is dropped. */
   private syncingSurfaceGeometry = false
+  /** M5: the last width the command surface was refreshed for. */
+  private lastCommandWidth = 0
+  /** M5: the terminal-resize callback (the command surface refresh). */
+  private readonly onTerminalResize: (() => void) | undefined
 
   /** Whether the Ctrl+O expansion master switch is on. */
   isToolOutputExpanded(): boolean {
@@ -2062,6 +2070,7 @@ export class TuiApp {
     this.events = events
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.extensionHost = options.extensionHost
+    this.onTerminalResize = options.onTerminalResize
     // M0: the unified status projection store. The runner passes its own
     // store; without one the app keeps an internal projection so the
     // footer always composes from a snapshot (headless tests drive it
@@ -8059,6 +8068,12 @@ export class TuiApp {
         this.lastTranscriptWidth = width
         if (this.messageRows.length > 0) this.rebuildMessages()
       }
+      // M5: a material WIDTH change refreshes the command surface (the
+      // runner coalesces to its interval).
+      if (width !== this.lastCommandWidth) {
+        this.lastCommandWidth = width
+        this.onTerminalResize?.()
+      }
       // Phase 2: a terminal resize recompiles every live ADVANCED overlay
       // wrapper — the plugin's render(ctx) must see the new geometry (the
       // compiled view itself re-wraps at the current width per frame, but
@@ -8822,6 +8837,10 @@ export class TuiApp {
   /** M2: the active custom layout (undefined = the builtin preset
    * layouts). */
   private customFooterLayout: FooterLayoutV1 | undefined
+  /** M5: the command surface's sanitized rows (undefined = the native
+   * composer surface). The command owns the Status Surface; the Host
+   * instruction surface still merges on top. */
+  private commandRows: string[] | undefined
 
   /** Set the footer density preset and repaint. */
   setFooterPreset(preset: 'full' | 'compact'): void {
@@ -8861,6 +8880,24 @@ export class TuiApp {
     return this.footerItemRegistry
   }
 
+  /** M5: set the command surface's sanitized rows (undefined restores the
+   * native composer surface). The rows are already sanitized + capped by
+   * the runner; the Host instruction still merges on top. */
+  setFooterCommandRows(rows: string[] | undefined): void {
+    this.commandRows = rows
+    this.renderFooter()
+  }
+
+  /** M5: the live terminal width (the command runner's geometry input). */
+  getTerminalWidth(): number {
+    return Math.max(1, this.terminal.columns)
+  }
+
+  /** M5: the live terminal height (the command runner's geometry input). */
+  getTerminalHeight(): number {
+    return Math.max(1, this.terminal.rows)
+  }
+
   /** The layout the composer renders: the custom layout when set, else
    * the builtin preset layout. */
   private currentFooterLayout(): FooterLayoutV1 {
@@ -8874,7 +8911,6 @@ export class TuiApp {
    * do, from the snapshot. */
   private renderFooter(): void {
     const width = Math.max(1, this.terminal.columns)
-    const snapshot = this.statusStore.snapshot()
     // M6 keybindings: a pending leader sequence shows the which-key hint in
     // the SAME line-2 slot as the Ctrl+C exit hint — both are Host-owned
     // instructions (exit outranks the leader; the stats line comes last).
@@ -8884,16 +8920,24 @@ export class TuiApp {
       viewing: this.viewerFooter !== undefined,
       leaderHint: leader !== undefined && leader.pending ? this.leaderHint(leader) : undefined,
     })
-    const text = this.footerComposer.render({
-      snapshot,
-      layout: this.currentFooterLayout(),
-      width,
-      context: {
-        editorEmpty: this.editor.getText().trim() === '',
-        extensionFooterText: this.extensionHost?.footerText() ?? '',
-      },
-      instruction,
-    })
+    let text: string
+    if (this.commandRows !== undefined) {
+      // M5: the command surface owns the Status Surface; the Host
+      // instruction still merges on top (never user-hideable).
+      text = mergeCommandSurface(this.commandRows, instruction, width)
+    } else {
+      const snapshot = this.statusStore.snapshot()
+      text = this.footerComposer.render({
+        snapshot,
+        layout: this.currentFooterLayout(),
+        width,
+        context: {
+          editorEmpty: this.editor.getText().trim() === '',
+          extensionFooterText: this.extensionHost?.footerText() ?? '',
+        },
+        instruction,
+      })
+    }
     this.footer.setText(text)
     this.requestRender()
   }
