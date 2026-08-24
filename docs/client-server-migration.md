@@ -10,7 +10,7 @@
 
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
-M1  IN PROGRESS    (semantic ports, Direct adapters, no behavior change — M1.1–M1.6 landed: vocabulary, SubagentPort, SessionReader, SessionWriter, SessionLifecycle, InteractionPort)
+M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1 vocabulary, M1.2 SubagentPort, M1.3 SessionReader, M1.4 SessionWriter, M1.5 SessionLifecycle, M1.6 InteractionPort, M1.7 CommandHostCapabilities narrowing)
 M2  NOT STARTED   (experimental Remote backend against an existing DSH Host)
 M3  NOT STARTED   (experimental in-process wire: InProcessApiClient + ApiProxy)
 M4  NOT STARTED   (experimental local Host process / IPC split)
