@@ -23,6 +23,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { rewindSeed, type RewindCandidate } from './rewind.ts'
+import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 
 /** The narrow host surface child creation needs (plan §23) — the runner
@@ -35,23 +36,12 @@ export interface ForkAgentHost {
     agentPreset?: string
     setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void
   }>
-  /** The agents service `/new` and `/fork` create sessions through. */
+  /** The session lifecycle port `/new` and `/fork` create sessions
+   * through: semantic requests only (no callbacks — the Direct adapter
+   * resolves the preset composition internally). */
   agents: {
-    create(options: {
-      sessionId: SessionId
-      meta: Record<string, unknown>
-      agentOptions: { provider?: string; model?: string }
-      setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void
-      seed?: readonly SessionEvent[]
-      signal?: AbortSignal
-    }): Promise<AgentHandle>
-    /** Resume a session (the ordinary open path; a rejection is never
-     * retried — the runner pins immediately). */
-    resume(options: {
-      resumeSessionId: SessionId
-      agentOptions: { provider?: string; model?: string }
-      setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void
-    }): Promise<AgentHandle>
+    create(options: CreateSessionRequest): Promise<SessionHandle>
+    resume(options: ResumeSessionRequest): Promise<SessionHandle>
   }
 }
 
@@ -75,7 +65,7 @@ export async function createForkedAgent(
   seed: readonly SessionEvent[],
   sessionId: SessionId,
   composition?: { agentPreset?: string; setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void },
-): Promise<AgentHandle> {
+): Promise<SessionHandle> {
   // Source-deterministic cwd, captured BEFORE the first await: a concurrent
   // surface switch between the compose await and the create must never mix
   // parent=A with cwd=B (review P2). The SOURCE's own workspace wins (the
@@ -85,21 +75,24 @@ export async function createForkedAgent(
   const cwd = source.session.header.cwd || host.sessionCwd()
   // The child inherits the parent's recorded preset (official fork
   // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
-  // A caller may supply a PRE-RESOLVED composition (review round 23: the
-  // create must run under the identical setup the caller resolved — never
-  // a second, potentially drifting composition).
+  // A caller may supply a PRE-RESOLVED composition; the preset ID rides the
+  // semantic create request (review round 23: the Direct adapter resolves
+  // the composition from that id — composeAgent is deterministic within a
+  // process run, so the create runs under the identical setup the caller
+  // resolved).
   const resolved = composition ?? await host.compose(resolveSessionPreset(source.session))
   const presetId = resolved.agentPreset
   return host.agents.create({
-    sessionId,
+    sessionId: String(sessionId),
     meta: {
       cwd,
       ...(presetId === undefined ? {} : { agentPreset: presetId }),
       parentSession: source.session.id,
       seedLength: seed.length,
     },
-    agentOptions: { provider: source.options.provider, model: source.options.model },
-    setup: resolved.setup,
+    provider: source.options.provider,
+    model: source.options.model,
+    agentPreset: presetId,
     seed,
   })
 }
@@ -133,7 +126,7 @@ export interface RewindCommitHost extends ForkAgentHost {
    * create: `prepare` throws (the caller's own gates — e.g. the stale
    * identity check) or `create` throws.
    */
-  transitionTo<T extends AgentHandle>(steps: {
+  transitionTo<T>(steps: {
     /** The child's PRE-GENERATED session identity (MANDATORY): the
      * transaction reserves its lease BEFORE the DSH call (while the old
      * lock is still held), so a refusal aborts with zero child side
@@ -233,7 +226,7 @@ export async function commitRewind(
   host.replaceDraft(candidate.editorText)
   return {
     kind: 'rewound',
-    sessionId: result.next.agent.session.id,
+    sessionId: result.next.session.id,
     turn: candidate.turn,
     hasNonTextContent: candidate.hasNonTextContent,
   }

@@ -20,6 +20,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { SessionHandle } from '../src/runtime/session-lifecycle-port.ts'
 import {
   collectRewindCandidates,
   isHumanTurnMessage,
@@ -269,15 +270,17 @@ test('rewindSeed refuses a vanished point and an open-turn boundary', () => {
 interface CreatedCall {
   sessionId: string
   meta: Record<string, unknown>
-  agentOptions: { provider?: string; model?: string }
-  seed?: readonly SessionEvent[]
+  provider?: string
+  model?: string
+  agentPreset?: string
+  seed?: readonly unknown[]
 }
 
 interface ForkRig {
   host: RewindCommitHost
   created: CreatedCall[]
   resolved: string[]
-  committed: AgentHandle[]
+  committed: SessionHandle[]
   drafts: string[]
   state: { sessionId: string; generation: number }
 }
@@ -294,12 +297,12 @@ function makeRig(options: {
   composePreset?: string
   createError?: string
   /** Full transitionTo override (wins over the default implementation). */
-  transitionTo?: <T extends AgentHandle>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  transitionTo?: <T>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
   createHook?: (call: CreatedCall) => void
 } = {}): ForkRig {
   const created: CreatedCall[] = []
   const resolved: string[] = []
-  const committed: AgentHandle[] = []
+  const committed: SessionHandle[] = []
   const drafts: string[] = []
   const state = { sessionId: 'session-source', generation: 1 }
   const host: RewindCommitHost = {
@@ -316,24 +319,26 @@ function makeRig(options: {
         const record: CreatedCall = {
           sessionId: String(call.sessionId),
           meta: call.meta,
-          agentOptions: call.agentOptions,
+          provider: call.provider,
+          model: call.model,
+          agentPreset: call.agentPreset,
           seed: call.seed,
         }
         created.push(record)
         options.createHook?.(record)
-        return { agent: { session: { id: record.sessionId } } } as unknown as AgentHandle
+        return { session: { id: record.sessionId }, directAgent: { session: { id: record.sessionId } } }
       },
-      resume: async (call) => ({ agent: { session: { id: String(call.resumeSessionId) } } }) as unknown as AgentHandle,
+      resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
     },
     liveIdentity: () => ({ sessionId: state.sessionId, generation: state.generation }),
-    transitionTo: async (steps) => {
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       if (options.transitionTo !== undefined) return options.transitionTo(steps)
       await steps.prepare?.()
       try {
         const next = await steps.create()
         // The runner's transaction COMMITS synchronously after the create —
         // a published child is never rolled back.
-        committed.push(next)
+        committed.push(next as SessionHandle)
         return { ok: true, next }
       } catch (error) {
         // The runner's transaction maps any create failure to an outcome —
@@ -371,9 +376,10 @@ test('C04: createForkedAgent records preset, source cwd, parent, seedLength, pro
   assert.equal(call.meta.agentPreset, 'minimal')
   assert.equal(call.meta.parentSession, 'session-parent')
   assert.equal(call.meta.seedLength, 4)
-  assert.deepEqual(call.agentOptions, { provider: 'deepseek', model: 'deepseek-chat' })
+  assert.equal(call.provider, 'deepseek')
+  assert.equal(call.model, 'deepseek-chat')
   assert.equal(call.seed, seed)
-  assert.equal(next.agent.session.id, call.sessionId)
+  assert.equal(next.session.id, call.sessionId)
   assert.ok(call.sessionId.startsWith('session-'))
 })
 
@@ -392,10 +398,10 @@ test('review P2: the cwd is captured BEFORE the compose await (no parent=A cwd=B
     },
     agents: {
       create: async (call) => {
-        created.push({ sessionId: String(call.sessionId), meta: call.meta, agentOptions: call.agentOptions, seed: call.seed })
-        return { agent: { session: { id: String(call.sessionId) } } } as unknown as AgentHandle
+        created.push({ sessionId: String(call.sessionId), meta: call.meta, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
+        return { session: { id: String(call.sessionId) }, directAgent: { session: { id: String(call.sessionId) } } }
       },
-      resume: async (call) => ({ agent: { session: { id: String(call.resumeSessionId) } } }) as unknown as AgentHandle,
+      resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
     },
   }
   // The source header has NO cwd: the fallback is the live cwd captured at
@@ -436,7 +442,7 @@ test('I01: commitRewind creates, swaps and restores the selected prompt', async 
   assert.equal(rig.created[0]!.meta.parentSession, 'session-source')
   assert.equal(rig.created[0]!.meta.seedLength, 4, 'seed = everything before turn 2/start')
   assert.equal(rig.committed.length, 1, 'the transaction commits the created child')
-  assert.equal(rig.committed[0]!.agent.session.id, rig.created[0]!.sessionId)
+  assert.equal(rig.committed[0]!.session.id, rig.created[0]!.sessionId)
   assert.deepEqual(rig.drafts, ['B'], 'the selected prompt restores into the editor')
 })
 
@@ -758,7 +764,7 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
   const ensureCalls: string[] = []
   const base = stubRunner({ ctx, app, rewinds, ensureCalls })
   let composes = 0
-  let createSetup: unknown
+  let createPreset: string | undefined
   let sawRecover = false
   const runner: TuiCommandRunner = {
     ...base,
@@ -767,9 +773,9 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
       return { agentPreset: 'standard', setup: () => {} }
     },
     agents: {
-      create: async (opts: { setup: unknown }) => {
-        createSetup = opts.setup
-        return { agent: { session: { id: 'session-new' } } } as unknown as AgentHandle
+      create: async (opts: { agentPreset?: string }) => {
+        createPreset = opts.agentPreset
+        return { session: { id: 'session-new' } } as SessionHandle
       },
     } as never,
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => {
@@ -783,7 +789,7 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
   await (def!.handler as () => Promise<unknown>)()
   assert.equal(composes, 1, 'the composition is resolved exactly once (for the create)')
   assert.equal(sawRecover, false, 'a rejected create is NEVER retried — no recovery step is passed')
-  assert.ok(createSetup !== undefined, 'the create received the resolved setup')
+  assert.equal(createPreset, 'standard', 'the semantic create request carries the resolved preset id')
   app.stop()
 })
 
@@ -798,7 +804,7 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   const ensureCalls: string[] = []
   const base = stubRunner({ ctx, app, rewinds, ensureCalls })
   let composes = 0
-  let createSetup: unknown
+  let createPreset: string | undefined
   let sawRecover = false
   const runner: TuiCommandRunner = {
     ...base,
@@ -808,9 +814,9 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
       return { agentPreset: 'minimal', setup: () => {} }
     },
     agents: {
-      create: async (opts: { setup: unknown }) => {
-        createSetup = opts.setup
-        return { agent: { session: { id: 'session-fork' } } } as unknown as AgentHandle
+      create: async (opts: { agentPreset?: string }) => {
+        createPreset = opts.agentPreset
+        return { session: { id: 'session-fork' } } as SessionHandle
       },
     } as never,
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => {
@@ -824,7 +830,7 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   await (def!.handler as () => Promise<unknown>)()
   assert.equal(composes, 1, 'the composition is resolved exactly once (for the create)')
   assert.equal(sawRecover, false, 'a rejected create is NEVER retried — no recovery step is passed')
-  assert.ok(createSetup !== undefined, 'the create received the resolved setup')
+  assert.equal(createPreset, 'minimal', 'the semantic create request carries the resolved preset id')
   app.stop()
 })
 
