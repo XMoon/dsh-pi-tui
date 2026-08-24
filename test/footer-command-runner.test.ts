@@ -231,3 +231,50 @@ test('a byte-budget slice never emits U+FFFD replacement characters', async () =
   assert.ok(!rows[0]!.includes('\uFFFD'), 'a split multibyte sequence must never emit U+FFFD')
   assert.ok(Buffer.byteLength(rows[0]!, 'utf8') <= 16 * 1024, 'the byte cap must hold')
 })
+
+test('a multibyte sequence split ACROSS stdout chunks never emits U+FFFD and the input budget holds', async () => {
+  // The child writes the first byte of a CJK char, pauses, then the rest —
+  // two separate stdout chunks. The width is huge so the width truncation
+  // cannot hide the byte-cap behavior.
+  const rows = await new Promise<string[] | undefined>((resolve) => {
+    const runner = new FooterCommandRunner({
+      config: { ...CONFIG, command: 'node -e "process.stdout.write(Buffer.from([0xe4])); setTimeout(() => { process.stdout.write(Buffer.from([0xbd, 0xa0])); process.stdout.write(\'\\n\') }, 50)"' },
+      snapshot: () => emptyStatusSnapshot(),
+      width: () => 20000,
+      height: () => 30,
+      onOutput: (out) => {
+        runner.dispose()
+        resolve(out)
+      },
+      signal: new AbortController().signal,
+    })
+    runner.requestRefresh()
+  })
+  assert.ok(rows !== undefined)
+  assert.ok(!rows[0]!.includes('\uFFFD'), 'a split multibyte sequence must never emit U+FFFD')
+  // The consumed INPUT bytes are bounded; the completed tail may add a few
+  // bytes over the raw budget.
+  assert.ok(Buffer.byteLength(rows[0]!, 'utf8') <= 16 * 1024 + 4, 'the input budget must hold')
+})
+
+test('setConfig invalidates the in-flight child (its result never commits under the new config)', async () => {
+  const outputs: Array<string[] | undefined> = []
+  const runner = new FooterCommandRunner({
+    config: { ...CONFIG, command: 'node -e "setTimeout(() => process.stdout.write(\'old\\n\'), 300)"' },
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: (rows) => outputs.push(rows),
+    signal: new AbortController().signal,
+  })
+  runner.requestRefresh()
+  await new Promise(resolve => setTimeout(resolve, 50))
+  runner.setConfig({ ...CONFIG, command: 'node -e "process.stdout.write(\'new\\n\')"' })
+  const deadline = Date.now() + 5000
+  while (!outputs.some(rows => rows?.includes('new')) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.ok(outputs.some(rows => rows?.includes('new')), 'the new config must commit')
+  assert.ok(!outputs.some(rows => rows?.includes('old')), 'the old child must never commit')
+  runner.dispose()
+})

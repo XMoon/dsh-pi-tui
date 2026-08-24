@@ -79,9 +79,14 @@ export class FooterCommandRunner {
     }, this.options.config.refreshIntervalMs - elapsed)
   }
 
-  /** Replace the config (a settings change) and refresh. */
+  /** Replace the config (a settings change): the in-flight child is
+   * invalidated and terminated immediately (its result must never commit
+   * under the new config), then a refresh starts with the new config. */
   setConfig(config: FooterCommandConfig): void {
+    this.generation += 1
+    this.killChild()
     this.options.config = config
+    this.errorGeneration = 0
     this.requestRefresh()
   }
 
@@ -115,13 +120,14 @@ export class FooterCommandRunner {
     }, Math.min(config.timeoutMs, MAX_COMMAND_TIMEOUT_MS))
     child.stdout?.on('data', (chunk: Buffer) => {
       if (outputBytes >= MAX_COMMAND_OUTPUT_BYTES) return
-      // The cap is a UTF-8 BYTE cap (the plan's 16 KiB): decode only the
-      // bytes that fit — the decoder keeps a split multibyte tail for the
-      // next chunk (never a replacement char).
+      // The cap is a UTF-8 BYTE cap (the plan's 16 KiB): the CONSUMED
+      // INPUT bytes are the budget — the decoder may complete a buffered
+      // multibyte tail (a few bytes over the raw budget, never a U+FFFD),
+      // but no further input is fed once the budget is exhausted.
       const room = MAX_COMMAND_OUTPUT_BYTES - outputBytes
-      const text = decoder.write(chunk.subarray(0, room))
-      output += text
-      outputBytes += Buffer.byteLength(text, 'utf8')
+      const slice = chunk.subarray(0, room)
+      output += decoder.write(slice)
+      outputBytes += slice.length
     })
     child.on('error', () => {
       clearTimeout(timeout)
