@@ -33,6 +33,7 @@ import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
 import type { AppKeybindingId } from './keybindings/types.ts'
 import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
+import { FooterConfiguratorModel } from './footer/configurator-model.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
@@ -1494,6 +1495,53 @@ export function registerTuiCommands(
         },
         () => {},
       )
+      return { kind: 'success' }
+    },
+  })
+
+  // `/footer` — the interactive footer configurator (plan M3): LOCAL +
+  // SESSIONLESS (usable before any session exists — the preview shows
+  // placeholders/unavailable items and the config stays editable). Enter
+  // validates + persists + applies; Esc cancels without touching the
+  // active layout.
+  commands.register({
+    name: 'footer',
+    description: 'Configure the footer layout interactively',
+    handler: () => {
+      const settings = runner.tuiSettings
+      const doc = settings?.get()
+      // The configurator starts from the CURRENT effective layout: the
+      // persisted custom layout when active, else the builtin default.
+      const persisted = doc !== undefined && doc.footer === 'custom' ? parseFooterLayout(doc.footerLayout) : undefined
+      const initial = persisted !== undefined && isFooterLayout(persisted)
+        ? persisted
+        : app.getFooterLayout() ?? DEFAULT_FOOTER_LAYOUT
+      const registry = app.getFooterItemRegistry()
+      const model = new FooterConfiguratorModel(initial, registry)
+      app.openFooterConfigurator({
+        model,
+        registry,
+        onSave: (layout) => {
+          // Validate the draft (the model's operations keep it well-formed,
+          // but the persisted value is never trusted).
+          const parsed = parseFooterLayout(layout)
+          if (!isFooterLayout(parsed)) {
+            app.notify(`footer layout invalid: ${parsed.message}`, 'error')
+            return
+          }
+          // Memory commit only after the settings write succeeds (plan
+          // §15.7): apply first, persist best-effort.
+          runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed })
+          if (settings !== undefined) {
+            detach('footer configurator write', () => settings.replace({ ...settings.get(), footer: 'custom', footerLayout: parsed }) as Promise<unknown>, { notify: true })
+          }
+          app.notify('footer layout saved', 'info')
+        },
+        onCancel: () => {
+          // Esc: close without writing (the configurator's live preview
+          // never touched the active layout).
+        },
+      })
       return { kind: 'success' }
     },
   })
