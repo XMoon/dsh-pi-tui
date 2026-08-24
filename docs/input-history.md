@@ -96,6 +96,41 @@ can never claim it). It is "find and EDIT", never "find and run":
   backend can swap in without touching the panel) and
   `src/history-panel.ts` (the overlay).
 
+### Bounded recent-first scanning (the perf contract)
+
+The search never parses a whole history file. Every call reads the JSONL
+store from the tail backwards through `src/history-reverse-reader.ts`
+(fixed-size chunks, lines reassembled across chunk boundaries, UTF-8 safe)
+and consumes a GLOBAL scan budget — `HISTORY_SEARCH_SCAN_LIMIT` (5000)
+physical lines across ALL files per call, never per file. The `All
+directories` scope stats the candidates with bounded concurrency and scans
+them serially in mtime-DESC order (most recently active workspace first);
+mtime only schedules files, the final order is always row.ts.
+
+The result is a `HistorySearchPage`: the matches NEW to the call's window,
+plus a `HistorySearchContinuation` when older history remains. A
+continuation resumes exactly where the call stopped (no re-scan of the
+covered suffix, no duplicate rows across pages) and is bound to the request
+context (a mismatched continuation is a typed error). Reaching the scan
+budget is NOT exhausted. The panel currently renders only `page.results`;
+"Search older" is a later UI phase on this contract.
+
+The history store is append-only, so a concurrent append between pages does
+not invalidate a continuation: the scan continues by its old snapshot
+boundary and the appended rows belong to the next fresh search. Only a
+file that SHRANK or was rewritten under a continuation cursor invalidates
+it — the source then throws `HistorySearchContinuationStaleError` (a typed
+error) instead of silently skipping the file and reporting exhausted.
+
+Two intentional trade-offs of the bounded window:
+
+- **Coverage**: histories outside the first scan window may not appear
+  initially — the default search is recent-first, not exhaustive.
+- **Legacy cwd coverage**: the file proof comes from `knownCwds` (upfront)
+  or a validating v2 row observed INSIDE the scanned window. Rows whose
+  proof lies outside the window are omitted from `All directories` — v2
+  cwd hash validation itself stays strict and unchanged.
+
 ### Recall-order contract (trap: get this backwards and ↑ shows the OLDEST entry)
 
 The file is oldest-first; `TuiApp.resetInputHistory` takes **newest-first**
@@ -145,8 +180,14 @@ unwritten entries.
   rules (`appendHistoryLine` v1 / `appendHistoryRecord` v2). Pinned by
   `test/history.test.ts`.
 - `src/history-search.ts` — the Ctrl+R search source (`HistorySearchSource`
-  seam + `FileHistorySearchSource`): scope, legacy cwd recovery, matching,
-  ordering, dedupe, cancellation. Pinned by `test/history-search.test.ts`.
+  seam + `FileHistorySearchSource`): scope, bounded recent-first reverse
+  scanning, the global scan budget, the page/continuation contract, legacy
+  cwd recovery, matching, ordering, dedupe, cancellation. Pinned by
+  `test/history-search.test.ts`.
+- `src/history-reverse-reader.ts` — the reverse JSONL batch reader
+  (EOF-backwards chunks, cross-chunk/UTF-8-safe line assembly, revision-
+  bound continuation cursors, abort). Pinned by
+  `test/history-reverse-reader.test.ts`.
 - `src/history-panel.ts` — the Ctrl+R modal panel (query input, scope
   tabs, list, details, responsive layout). Pinned by
   `test/history-panel.test.ts` and the `test/ctrl-r.test.ts` integration

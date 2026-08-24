@@ -104,6 +104,39 @@ export function parseHistoryLines(text: string): string[] {
 }
 
 /**
+ * Parse ONE history line into a normalized record, or NULL when the line
+ * carries no record (blank, unparsable JSON, non-string/empty content,
+ * unsupported version). Shared by the forward whole-file parser
+ * ({@link parseHistoryRecords}) and the reverse bounded search reader
+ * (history-search.ts) so v1/v2 parsing semantics can never drift between
+ * the two read paths.
+ * @param line - one physical JSONL line (may be blank).
+ */
+export function parseHistoryRecordLine(line: string): ParsedHistoryRecord | null {
+  const trimmed = line.trim()
+  if (trimmed === '') return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    // Corrupt line: skip, keep loading.
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const row = parsed as Record<string, unknown>
+  if (typeof row.content !== 'string' || row.content === '') return null
+  if (row.v === 2) {
+    const cwd = typeof row.cwd === 'string' && row.cwd !== '' ? row.cwd : null
+    const ts = typeof row.ts === 'number' && Number.isFinite(row.ts) ? row.ts : null
+    const record: ParsedHistoryRecord = { content: row.content, cwd, ts, version: 2 }
+    if (typeof row.sessionId === 'string' && row.sessionId !== '') record.sessionId = row.sessionId
+    return record
+  }
+  // v1 (or unknown): legacy `{}`-only rows keep working.
+  return { content: row.content, cwd: null, ts: null, version: 1 }
+}
+
+/**
  * Parse one history file's text into normalized records, in file order
  * (oldest first). v1 rows are `{"content"}`; v2 rows keep their
  * metadata. Corrupt lines (unparsable JSON, non-string content, unsupported
@@ -116,28 +149,8 @@ export function parseHistoryLines(text: string): string[] {
 export function parseHistoryRecords(text: string): ParsedHistoryRecord[] {
   const records: ParsedHistoryRecord[] = []
   for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed === '') continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(trimmed)
-    } catch {
-      // Corrupt line: skip, keep loading.
-      continue
-    }
-    if (typeof parsed !== 'object' || parsed === null) continue
-    const row = parsed as Record<string, unknown>
-    if (typeof row.content !== 'string' || row.content === '') continue
-    if (row.v === 2) {
-      const cwd = typeof row.cwd === 'string' && row.cwd !== '' ? row.cwd : null
-      const ts = typeof row.ts === 'number' && Number.isFinite(row.ts) ? row.ts : null
-      const record: ParsedHistoryRecord = { content: row.content, cwd, ts, version: 2 }
-      if (typeof row.sessionId === 'string' && row.sessionId !== '') record.sessionId = row.sessionId
-      records.push(record)
-    } else {
-      // v1 (or unknown): legacy `{}`-only rows keep working.
-      records.push({ content: row.content, cwd: null, ts: null, version: 1 })
-    }
+    const record = parseHistoryRecordLine(line)
+    if (record !== null) records.push(record)
   }
   return records
 }

@@ -28,21 +28,21 @@ class FakeSource implements HistorySearchSource {
   fail = false
   /** Manually-settled pending searches (deterministic race control — the
    * test resolves them in the exact order it wants; no wall-clock timing). */
-  pending: Array<{ resolve: (rows: HistorySearchResult[]) => void; reject: (error: unknown) => void }> = []
+  pending: Array<{ resolve: (page: import('../src/history-search.ts').HistorySearchPage) => void; reject: (error: unknown) => void }> = []
   /** When true, `search()` returns a deferred the test resolves via
    * {@link resolveNext}. Otherwise it resolves after the delay. */
   manual = false
-  search(request: import('../src/history-search.ts').HistorySearchRequest): Promise<HistorySearchResult[]> {
+  search(request: import('../src/history-search.ts').HistorySearchRequest): Promise<import('../src/history-search.ts').HistorySearchPage> {
     this.requests.push({ scope: request.scope, query: request.query, cwd: request.cwd, limit: request.limit })
     if (this.fail) return Promise.reject(new Error('boom'))
     if (this.manual) {
-      return new Promise<HistorySearchResult[]>((resolve, reject) => {
+      return new Promise<import('../src/history-search.ts').HistorySearchPage>((resolve, reject) => {
         this.pending.push({ resolve, reject })
       })
     }
     const delay = this.delayByQuery[request.query] ?? this.delayMs
     return new Promise(resolve => {
-      setTimeout(() => resolve([...this.rows]), delay)
+      setTimeout(() => resolve({ results: [...this.rows], exhausted: true }), delay)
     })
   }
   /** Resolve the OLDEST pending search with rows (FIFO — the order the
@@ -50,7 +50,7 @@ class FakeSource implements HistorySearchSource {
   resolveNext(rows: HistorySearchResult[]): void {
     const pending = this.pending.shift()
     if (pending === undefined) throw new Error('resolveNext: no pending search')
-    pending.resolve([...rows])
+    pending.resolve({ results: [...rows], exhausted: true })
   }
   /** Reject the OLDEST pending search (FIFO). */
   rejectNext(error: unknown): void {
@@ -61,7 +61,7 @@ class FakeSource implements HistorySearchSource {
 }
 
 function row(content: string, ts: number, cwd = '/a', id = content): HistorySearchResult {
-  return { id, content, cwd, ts, sourceFile: '/a/h.jsonl', sourceIndex: 0 }
+  return { id, content, cwd, ts, sourceFile: '/a/h.jsonl', sourceByteOffset: 0 }
 }
 
 function makePanel(source: FakeSource, opts: Partial<import('../src/history-panel.ts').HistoryPanelOptions> = {}) {
@@ -353,7 +353,7 @@ test('panel: the detail pane is suppressed (never truncated) when the budget can
   // keep ALL metadata rows; otherwise it is suppressed entirely.
   const source = new FakeSource()
   // A row with the FULL metadata set (Directory + Time + Session = 3 rows).
-  source.rows = [{ id: 'p', content: 'prompt', cwd: '/work/a', ts: 1, sessionId: 'ses_1', sourceFile: '/a/h.jsonl', sourceIndex: 0 }]
+  source.rows = [{ id: 'p', content: 'prompt', cwd: '/work/a', ts: 1, sessionId: 'ses_1', sourceFile: '/a/h.jsonl', sourceByteOffset: 0 }]
   const { panel } = makePanel(source, { maxRows: 8 })
   panel.start()
   await settle()
@@ -387,7 +387,7 @@ test('panel: a suppressed detail in the split layout leaves NO stray separator',
   // Round-6 repro: when the detail cannot fit its metadata, renderSplit
   // used to emit a lone `│` after the list.
   const source = new FakeSource()
-  source.rows = [{ id: 'p', content: 'prompt', cwd: '/work/a', ts: 1, sessionId: 'ses_1', sourceFile: '/a/h.jsonl', sourceIndex: 0 }]
+  source.rows = [{ id: 'p', content: 'prompt', cwd: '/work/a', ts: 1, sessionId: 'ses_1', sourceFile: '/a/h.jsonl', sourceByteOffset: 0 }]
   const { panel } = makePanel(source, { maxRows: 8 })
   panel.start()
   await settle()

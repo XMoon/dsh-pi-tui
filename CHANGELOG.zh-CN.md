@@ -254,6 +254,18 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **Ctrl+R 历史搜索改为有界、最近优先。** 不再每次按键都完整解析所有候选
+  历史文件：搜索通过新的 reverse reader 从 JSONL 存储尾部倒序读取，消耗
+  全局扫描预算（每次搜索在所有文件中最多 5000 条 physical lines，绝不是
+  每文件 5000），并优先访问最近活跃的 workspace。大历史不再每次查询都付出
+  全量解析成本，canonical 文件永远不会被整体读取。搜索结果现在是分页的：
+  当还有更老的历史时，source 返回 continuation，可精确从上次停止处继续
+  （不重扫、不重复行）——这是未来 "Search older" UI 的基础。目录只能在
+  扫描窗口之外证明的 legacy 行可能从 `All directories` 中省略（有意的
+  coverage trade-off；v2 cwd 验证规则本身不变）。
+
 ### 修复
 
 - **Linux Wayland/X11 下 Ctrl+V 图片粘贴恢复可用。** 剪贴板 runner 执行
