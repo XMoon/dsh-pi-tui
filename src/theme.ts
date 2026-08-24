@@ -260,13 +260,17 @@ export function themeOptOut(): boolean {
 const chalk = new Chalk({ level: 3 })
 const hex = (token: string): InstanceType<typeof Chalk> => chalk.hex(currentPalette[token as keyof ColorPalette] ?? currentPalette.text)
 
-/** Style helpers by token name. */
+/** Style helpers by token name. The strong/dim/italic helpers accept an
+ * optional TONE OVERRIDE (the footer layout's semantic tone override):
+ * the override replaces the token, the style stays. */
 export const color = {
   primary: (text: string) => hex('primary')(text),
   accent: (text: string) => hex('accent')(text),
   text: (text: string) => hex('text')(text),
-  textStrong: (text: string) => chalk.bold.hex(currentPalette.textStrong)(text),
-  textDim: (text: string) => hex('textDim')(text),
+  textStrong: (text: string, tone?: string) => chalk.bold.hex(
+    currentPalette[(tone ?? 'textStrong') as keyof ColorPalette] ?? currentPalette.textStrong,
+  )(text),
+  textDim: (text: string, tone?: string) => hex((tone ?? 'textDim') as keyof ColorPalette)(text),
   textMuted: (text: string) => hex('textMuted')(text),
   border: (text: string) => hex('border')(text),
   borderFocus: (text: string) => hex('borderFocus')(text),
@@ -287,8 +291,11 @@ export const color = {
     ? text
     : chalk.bgHex(currentPalette.roleUserBg)(text),
   shellMode: (text: string) => hex('shellMode')(text),
-  /** Plain italics (kimi thinking parity). */
-  italic: (text: string) => chalk.italic(text),
+  /** Plain italics (kimi thinking parity); an optional tone override
+   * colors the italic run. */
+  italic: (text: string, tone?: string) => tone === undefined
+    ? chalk.italic(text)
+    : chalk.italic.hex(currentPalette[tone as keyof ColorPalette] ?? currentPalette.text)(text),
   /** Dim + italic for reasoning: intermediate thinking never reads like output. */
   textDimItalic: (text: string) => chalk.italic.hex(currentPalette.textDim)(text),
 }

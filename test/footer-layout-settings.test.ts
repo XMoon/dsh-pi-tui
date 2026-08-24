@@ -160,3 +160,59 @@ test('layout overrides apply: prefix/suffix wrap the item, tone overrides the se
   // uncolored by default — the warning override must color it).
   assert.ok(text.includes('\x1b[38;2;232;168;56m'), `the tone override must apply: ${JSON.stringify(text)}`)
 })
+
+test('a tone override applies to EMPHASIZED spans too (strong/dim/italic keep the override color)', () => {
+  const composer = new FooterComposer(createBuiltinFooterRegistry())
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [{
+        left: [{ id: 'model', tone: 'warning' }],
+        right: [],
+      }],
+    },
+    width: 100,
+    context: { editorEmpty: true, extensionFooterText: '' },
+  })
+  // The model item's span is uncolored; the warning override must color
+  // it (the emphasis path is not involved here, but the override must
+  // reach the span render).
+  assert.ok(text.includes('\x1b[38;2;232;168;56m'), `the tone override must apply: ${JSON.stringify(text)}`)
+})
+
+test('the compact phase re-renders items at the compact density before dropping', () => {
+  const composer = new FooterComposer(createBuiltinFooterRegistry())
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.usage.context = { usedTokens: 25000, windowTokens: 100000, percent: 25 }
+  snap.usage.cacheHitPct = 91.9
+  snap.usage.tokens = { input: 2579, output: 5507, cacheRead: 20000, cacheWrite: 0 }
+  snap.usage.performance = { llmMs: 2000, firstTokenMs: 2000, tokensPerSec: 40 }
+  // A right zone pins 'focus'; the left zone must fit the remaining width.
+  // The context item's compact form ('25%') is much shorter than its
+  // preferred bar — the compact phase must keep it instead of dropping it.
+  snap.interaction.focusMode = true
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [{
+        left: [
+          { id: 'context', format: 'bar' },
+          { id: 'cache-hit' },
+          { id: 'token-usage', format: 'io' },
+          { id: 'performance', format: 'full' },
+        ],
+        right: [{ id: 'focus-mode' }],
+        separator: { text: '  ' },
+      }],
+    },
+    width: 40,
+    context: { editorEmpty: true, extensionFooterText: '' },
+  })
+  const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(plain.includes('25%'), `the compact context form must survive:\n${plain}`)
+  assert.ok(plain.includes('focus'), `the right zone must survive:\n${plain}`)
+})

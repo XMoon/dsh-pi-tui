@@ -9,6 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import { buildCommandInput } from './command-protocol.ts'
@@ -97,6 +98,10 @@ export class FooterCommandRunner {
     const child = spawn(config.command, { shell: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.child = child
     let output = ''
+    let outputBytes = 0
+    // The decoder buffers a PARTIAL multibyte sequence across chunks, so a
+    // byte-budget slice never emits U+FFFD replacement characters.
+    const decoder = new StringDecoder('utf8')
     let settled = false
     const finish = (rows: string[] | undefined): void => {
       if (settled || this.disposed || generation !== this.generation) return
@@ -109,12 +114,14 @@ export class FooterCommandRunner {
       finish(undefined)
     }, Math.min(config.timeoutMs, MAX_COMMAND_TIMEOUT_MS))
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (Buffer.byteLength(output, 'utf8') < MAX_COMMAND_OUTPUT_BYTES) {
-        // The cap is a UTF-8 BYTE cap (the plan's 16 KiB): a multibyte
-        // chunk is sliced by bytes, never by JS string length.
-        const room = MAX_COMMAND_OUTPUT_BYTES - Buffer.byteLength(output, 'utf8')
-        output += chunk.toString('utf8', 0, Math.min(chunk.length, room))
-      }
+      if (outputBytes >= MAX_COMMAND_OUTPUT_BYTES) return
+      // The cap is a UTF-8 BYTE cap (the plan's 16 KiB): decode only the
+      // bytes that fit — the decoder keeps a split multibyte tail for the
+      // next chunk (never a replacement char).
+      const room = MAX_COMMAND_OUTPUT_BYTES - outputBytes
+      const text = decoder.write(chunk.subarray(0, room))
+      output += text
+      outputBytes += Buffer.byteLength(text, 'utf8')
     })
     child.on('error', () => {
       clearTimeout(timeout)

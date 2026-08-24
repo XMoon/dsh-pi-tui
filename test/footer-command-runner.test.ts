@@ -208,3 +208,26 @@ test('command rows are width-truncated ANSI-safely before the sink', async () =>
   assert.ok(visibleWidth(rows[0]!) <= 100, `the row must be width-truncated: ${visibleWidth(rows[0]!)}`)
   assert.ok(rows[0]!.includes('…'), 'the truncation must carry the ellipsis')
 })
+
+test('a byte-budget slice never emits U+FFFD replacement characters', async () => {
+  // A huge width so the width truncation cannot hide the byte-cap issue:
+  // 6000 CJK chars = 18000 UTF-8 bytes; the cap cuts mid-stream. The
+  // StringDecoder must never emit a replacement char.
+  const rows = await new Promise<string[] | undefined>((resolve) => {
+    const runner = new FooterCommandRunner({
+      config: { ...CONFIG, command: 'node -e "process.stdout.write(\'\\u4f60\'.repeat(6000) + \'\\n\')"' },
+      snapshot: () => emptyStatusSnapshot(),
+      width: () => 20000,
+      height: () => 30,
+      onOutput: (out) => {
+        runner.dispose()
+        resolve(out)
+      },
+      signal: new AbortController().signal,
+    })
+    runner.requestRefresh()
+  })
+  assert.ok(rows !== undefined)
+  assert.ok(!rows[0]!.includes('\uFFFD'), 'a split multibyte sequence must never emit U+FFFD')
+  assert.ok(Buffer.byteLength(rows[0]!, 'utf8') <= 16 * 1024, 'the byte cap must hold')
+})

@@ -59,6 +59,8 @@ interface ZoneItem {
   readonly importance: number
   readonly minWidth: number | undefined
   readonly index: number
+  /** Re-render at a density (the compact phase re-renders in place). */
+  renderAt(density: FooterDensity): string
 }
 
 /** The footer composer. */
@@ -156,17 +158,26 @@ export class FooterComposer {
     for (const ref of refs) {
       const def = this.registry.get(ref.id)
       if (def === undefined) continue
-      let segment: FooterSegment | null
+      const renderAt = (density: FooterDensity): string => {
+        let segment: FooterSegment | null
+        try {
+          segment = def.render(snapshot, ref, density, context)
+        } catch {
+          segment = null
+        }
+        if (segment === null) return ''
+        const override = ref.tone === undefined || ref.tone === 'auto' ? undefined : ref.tone
+        const rendered = renderSpans(segment.spans, override)
+        return `${ref.prefix ?? ''}${rendered}${ref.suffix ?? ''}`
+      }
+      let segment: FooterSegment | null = null
       try {
         segment = def.render(snapshot, ref, 'preferred', context)
       } catch {
         segment = null
       }
       if (segment === null) continue
-      const override = ref.tone === undefined || ref.tone === 'auto' ? undefined : ref.tone
-      const rendered = renderSpans(segment.spans, override)
-      if (rendered === '') continue
-      const text = `${ref.prefix ?? ''}${rendered}${ref.suffix ?? ''}`
+      const text = renderAt('preferred')
       if (text === '') continue
       items.push({
         ref,
@@ -175,6 +186,7 @@ export class FooterComposer {
         importance: ref.importance ?? def.defaultImportance,
         minWidth: segment.minWidth ?? def.minWidth,
         index: items.length,
+        renderAt,
       })
     }
     return items
@@ -188,11 +200,20 @@ export class FooterComposer {
       list.reduce((sum, item, index) => sum + visibleWidth(item.text) + (index === 0 ? 0 : visibleWidth(separator)), 0)
     if (totalOf(items) <= budget) return items.map(item => item.text).join(separator)
     let kept = items
-    // 1. compact: re-render the lowest-importance items at the compact
-    // density (M1 items define no compact form — the step is a no-op until
-    // M2 adds compact formatters).
+    // 1. compact: re-render the LOWEST-importance items at the compact
+    // density first (an item whose compact form is shorter helps the
+    // budget; a compact form that is not shorter is discarded).
     const byImportance = [...kept].sort((a, b) =>
       a.importance - b.importance || b.index - a.index)
+    for (const victim of byImportance) {
+      if (totalOf(kept) <= budget) break
+      const compact = victim.renderAt('compact')
+      if (compact !== '' && compact !== victim.text && visibleWidth(compact) < visibleWidth(victim.text)) {
+        victim.text = compact
+      }
+    }
+    if (totalOf(kept) <= budget) return kept.map(item => item.text).join(separator)
+    // 2. drop: remove the lowest-importance items (order preserved)...
     for (const victim of byImportance) {
       if (kept.length === 1) break
       const without = kept.filter(item => item !== victim)
@@ -202,9 +223,9 @@ export class FooterComposer {
       }
       if (totalOf(without) < totalOf(kept)) kept = without
     }
-    // 2. drop the tail (order preserved)...
+    // 3. drop the tail (order preserved)...
     while (totalOf(kept) > budget && kept.length > 1) kept = kept.slice(0, -1)
-    // 3. ...then truncate the last kept item ANSI-safely; an item with a
+    // 4. ...then truncate the last kept item ANSI-safely; an item with a
     // declared minWidth is never truncated below it — it is dropped
     // instead (the FooterSegmentOutlet contract).
     if (totalOf(kept) > budget && kept.length > 0) {
@@ -253,16 +274,18 @@ function capRowWithEllipsis(row: string, width: number): string {
 
 /** Render footer spans through the host's semantic color helpers. An
  * optional tone override replaces every span's own tone (the layout's
- * semantic tone override — emphasis still applies). */
+ * semantic tone override); emphasis still applies ON TOP of the override
+ * (strong = bold + the effective color, dim = the effective color,
+ * italic = italic + the effective color). */
 export function renderSpans(spans: readonly FooterSpan[], toneOverride?: FooterTone): string {
   return spans.map(span => {
     const text = span.text
-    const base = styleTone(text, toneOverride ?? span.tone)
+    const effective = toneOverride ?? span.tone
     switch (span.emphasis) {
-      case 'strong': return color.textStrong(text)
-      case 'dim': return color.textDim(text)
-      case 'italic': return color.italic(text)
-      default: return base
+      case 'strong': return color.textStrong(text, effective)
+      case 'dim': return color.textDim(text, effective)
+      case 'italic': return color.italic(text, effective)
+      default: return styleTone(text, effective)
     }
   }).join('')
 }
