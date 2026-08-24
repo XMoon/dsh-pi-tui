@@ -238,7 +238,7 @@ const LOCAL_SHELL_TAIL_FLUSH_MS = 200
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'exit', 'focus', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
+  'exit', 'focus', 'footer', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset',
 ])
 
@@ -255,7 +255,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  * body — there is no command-execution wire for skills.
  */
 export const LOCAL_COMMANDS = new Set([
-  'copy', 'exit', 'export', 'focus', 'fork', 'help', 'image', 'keybindings', 'kill', 'login', 'logout',
+  'copy', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'image', 'keybindings', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',

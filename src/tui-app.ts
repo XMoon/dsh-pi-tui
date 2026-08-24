@@ -74,6 +74,9 @@ import { FooterComposer } from './footer/composer.ts'
 import { createBuiltinFooterRegistry } from './footer/builtin-items.ts'
 import { resolveFooterInstruction } from './footer/instruction.ts'
 import { layoutForPreset } from './footer/presets.ts'
+import { FooterConfiguratorModel } from './footer/configurator-model.ts'
+import { FooterConfiguratorPanel } from './footer/configurator.ts'
+import type { FooterItemRegistry } from './footer/item-registry.ts'
 import type { FooterLayoutV1 } from './footer/types.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
 import { SelectedMarquee } from './marquee.ts'
@@ -1570,6 +1573,8 @@ export class TuiApp {
   /** The unified status projection store (M0): the footer's single input.
    * The runner's store when wired; an internal projection otherwise. */
   private readonly statusStore: StatusStore
+  /** The builtin footer item registry (M1): the composer's catalog. */
+  private readonly footerItemRegistry: FooterItemRegistry
   /** The footer composer (M1): renders the active layout against the
    * snapshot. */
   private readonly footerComposer: FooterComposer
@@ -2062,7 +2067,8 @@ export class TuiApp {
     // footer always composes from a snapshot (headless tests drive it
     // through setStatus).
     this.statusStore = options.statusStore ?? new StatusStoreImpl(initialStatusSnapshot('0.0.0'))
-    this.footerComposer = new FooterComposer(createBuiltinFooterRegistry())
+    this.footerItemRegistry = createBuiltinFooterRegistry()
+    this.footerComposer = new FooterComposer(this.footerItemRegistry)
     // F-17: an invalidation batch re-bakes the outlets; the host then
     // re-merges its chrome rows so the new content reaches the screen.
     this.extensionHost?.setChromeRefresher(() => this.refreshChrome())
@@ -8837,6 +8843,17 @@ export class TuiApp {
     return this.customFooterLayout !== undefined ? 'custom' : this.footerPreset === 'compact' ? 'compact' : 'default'
   }
 
+  /** M2: the active custom layout, when one is set. */
+  getFooterLayout(): FooterLayoutV1 | undefined {
+    return this.customFooterLayout
+  }
+
+  /** M3: the composer's item registry (the configurator lists the same
+   * catalog the preview composes). */
+  getFooterItemRegistry(): FooterItemRegistry {
+    return this.footerItemRegistry
+  }
+
   /** The layout the composer renders: the custom layout when set, else
    * the builtin preset layout. */
   private currentFooterLayout(): FooterLayoutV1 {
@@ -9385,6 +9402,39 @@ export class TuiApp {
       onCancel()
     }, { enableSearch: true })
     handle = this.showOverlayOnHost(new Frame(settings, true), { width: 72, maxHeight: 28 })
+    return () => handle?.hide()
+  }
+
+  /**
+   * M3: open the interactive footer configurator overlay. The panel
+   * renders the model's draft layout + a live preview composed by the REAL
+   * composer against the current snapshot; Enter saves through onSave, Esc
+   * cancels without touching the active layout. Returns a closer.
+   */
+  openFooterConfigurator(options: {
+    model: FooterConfiguratorModel
+    registry: FooterItemRegistry
+    onSave: (layout: FooterLayoutV1) => void
+    onCancel: () => void
+  }): () => void {
+    let handle: OverlayHandle | undefined
+    const panel = new FooterConfiguratorPanel({
+      model: options.model,
+      registry: options.registry,
+      snapshot: () => this.statusStore.snapshot(),
+      composer: this.footerComposer,
+      editorEmpty: this.editor.getText().trim() === '',
+      extensionFooterText: this.extensionHost?.footerText() ?? '',
+      onSave: (layout) => {
+        handle?.hide()
+        options.onSave(layout)
+      },
+      onCancel: () => {
+        handle?.hide()
+        options.onCancel()
+      },
+    })
+    handle = this.showOverlayOnHost(new Frame(panel, true), { width: 88, maxHeight: 30 })
     return () => handle?.hide()
   }
 
