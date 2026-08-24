@@ -4,16 +4,23 @@
  * expansion state lives in TuiApp, session data in the TranscriptFolder,
  * and the system-prompt policy in focus.ts (plan §14).
  *
- * The collapsed card shows: a status header (symbol + duration + responsive
- * tool stats), the latest narrative line, and the latest operation line —
- * all muted, never competing with the final assistant. The expanded card
- * renders ONLY the header: the hidden process rows render below as ordinary
- * transcript messages (plan §15 — no second renderer family).
+ * The collapsed card shows: a status header (whale disclosure icon +
+ * duration + per-turn token + responsive tool stats) and the three compact
+ * process slots — Think / Message / Tool — plus the Error line, all muted,
+ * never competing with the final assistant. The expanded card renders ONLY
+ * the header: the hidden process rows render below as ordinary transcript
+ * messages (plan §15 — no second renderer family).
+ *
+ * The whale icon encodes ONLY the disclosure state (🐋 collapsed / 🐳
+ * expanded); the execution outcome is carried by the header label
+ * (Thought / Failed after / Interrupted / Blocked / Max tokens) — two
+ * orthogonal dimensions, never merged into one symbol (plan §2.2).
  * @module @xmoon76/dsh-pi-tui/focus-activity
  */
 
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
+import { formatTokens } from './token-usage.ts'
 import type { TurnActivity } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
@@ -21,22 +28,10 @@ import type { TranscriptMessage } from './transcript.ts'
  * (plan §10.4). */
 export const FOCUS_TOOL_SUMMARY_MAX_TYPES = 3
 
-/** The header symbol per turn state (plan §2.7): expanded always reads ▾;
- * a collapsed failure carries its semantic mark, never a fake arrow. */
-export function focusStatusSymbol(activity: TurnActivity, expanded: boolean): string {
-  if (expanded) return '▾'
-  if (!activity.completed) return '◐'
-  switch (activity.reason?.kind) {
-    case 'error':
-    case 'blocked':
-    case 'max-tokens':
-      return '⚠'
-    case 'aborted':
-    case 'interrupted':
-      return '⨯'
-    default:
-      return '▸'
-  }
+/** The disclosure icon: 🐋 collapsed, 🐳 expanded — disclosure state ONLY
+ * (plan §2.1/§2.2). The execution outcome lives in the header label. */
+export function focusDisclosureIcon(expanded: boolean): '🐋' | '🐳' {
+  return expanded ? '🐳' : '🐋'
 }
 
 /** The header's base label WITHOUT the stats tail (plan §14.1): a failure
@@ -98,8 +93,10 @@ export function focusDurationText(activity: TurnActivity, now: () => number): st
 }
 
 /** Assemble the one-line header, dropping the stat tail progressively so
- * the header NEVER breaks the terminal: full tail → no `+N` → fewer types
- * → bare label (then a hard truncate as the last resort — plan §14.3). */
+ * the header NEVER breaks the terminal (plan §14/§46): full tail → token +
+ * tool count → token → bare label (then a hard truncate as the last
+ * resort). The per-turn token segment is hidden entirely when the turn has
+ * no usage fact (never a fake `0 tok` — plan §13.3). */
 export function formatFocusHeaderLine(
   activity: TurnActivity,
   expanded: boolean,
@@ -107,15 +104,17 @@ export function formatFocusHeaderLine(
   width: number,
 ): string {
   const label = focusStatusLabel(activity, focusDurationText(activity, now))
-  const head = `${focusStatusSymbol(activity, expanded)} ${label}`
+  const head = `${focusDisclosureIcon(expanded)} ${label}`
+  const token = activity.totalTokens === undefined ? undefined : `${formatTokens(activity.totalTokens)} tok`
   const tail = focusToolStatParts(activity.tools, activity.toolCalls)
-  if (tail.length === 0) return truncateToWidth(head, width, '…')
   const candidates: string[] = []
-  candidates.push(`${head} · ${tail.join(' · ')}`)
-  // Drop the remainder marker first, then the type parts from the end.
-  const typeCount = Math.min(tail.length - 1, FOCUS_TOOL_SUMMARY_MAX_TYPES)
-  for (let count = typeCount; count >= 1; count -= 1) {
-    candidates.push(`${head} · ${tail.slice(0, count).join(' · ')}`)
+  if (token !== undefined) {
+    candidates.push(`${head} · ${token}${tail.length > 0 ? ` · ${tail.join(' · ')}` : ''}`)
+    candidates.push(`${head} · ${token}${tail.length > 0 ? ` · ${tail[0]}` : ''}`)
+    candidates.push(`${head} · ${token}`)
+  } else if (tail.length > 0) {
+    candidates.push(`${head} · ${tail.join(' · ')}`)
+    candidates.push(`${head} · ${tail[0]}`)
   }
   candidates.push(head)
   for (const candidate of candidates) {
@@ -124,42 +123,46 @@ export function formatFocusHeaderLine(
   return truncateToWidth(head, width, '…')
 }
 
-/** The collapsed card's operation line: `Tool: bash pnpm test` while the
- * turn runs; once it settles the line reads `Last: …` with the transient
- * ✓/✗ settle marker stripped (plan §2.5/§10.7 — the ✓ is a running-state
- * hint, the settled card says what the turn ended on). */
-export function focusOperationLine(operation: string, running: boolean): string {
-  if (running) return operation
-  const settled = operation.replace(/^(Tool: |✓ |✗ )/, '')
-  return settled === operation ? operation : `Last: ${settled}`
-}
+/** The fixed label column width of the collapsed body slots: the widest
+ * label (`Message: `) — every slot's text starts at the same column
+ * (plan §25, aligned by visible width). */
+const FOCUS_SLOT_LABEL_WIDTH = 9
 
-/** One collapsed body line, truncated to the content width: the body
- * budget is the width MINUS the lead ('Thinking: ' / 'Error: '), and a
+/** One collapsed body slot line, truncated to the content width: the body
+ * budget is the width MINUS the lead ('Think:   ' / 'Error:   '), and a
  * lead that alone exceeds the width truncates too — a preview line can
  * never wrap (the fullscreen row hit-map depends on that). */
-function previewLine(prefix: string | undefined, text: string, width: number): string {
-  const lead = prefix ?? ''
+function previewLine(label: string, text: string, width: number): string {
+  const lead = `${label}${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth(label)))}`
   const bodyBudget = width - visibleWidth(lead)
   const body = bodyBudget > 0 ? truncateToWidth(text, bodyBudget, '…') : ''
   return truncateToWidth(`${lead}${body}`, Math.max(1, width), '…')
 }
 
-/** The collapsed card body: narrative (Thinking: … when reasoning), the
- * latest operation, and the error reason (plan §13.6). */
-export function focusCollapsedBody(activity: TurnActivity, width: number): string[] {
+/** The collapsed card body: the three process slots in FIXED order —
+ * Think, Message, Tool — then the error reason (plan §24). Each slot is
+ * at most ONE visual row; only existing slots render. The Tool line's
+ * status prefix follows plan §10: none while running, ✓ settled ok,
+ * ✗ settled error. */
+export function focusCollapsedBody(
+  activity: TurnActivity,
+  width: number,
+  toolDisplay?: string,
+): string[] {
   const lines: string[] = []
-  const narrative = activity.narrative
-  if (narrative !== undefined) {
-    const lead = narrative.kind === 'thinking' ? 'Thinking: ' : ''
-    lines.push(previewLine(lead, narrative.text, width))
+  if (activity.think !== undefined) {
+    lines.push(previewLine('Think:', activity.think.text, width))
   }
-  if (activity.latestOperation !== undefined) {
-    lines.push(previewLine('', focusOperationLine(activity.latestOperation, !activity.completed), width))
+  if (activity.message !== undefined) {
+    lines.push(previewLine('Message:', activity.message.text, width))
+  }
+  if (activity.tool !== undefined && toolDisplay !== undefined) {
+    const prefix = activity.tool.status === 'ok' ? '✓ ' : activity.tool.status === 'error' ? '✗ ' : ''
+    lines.push(previewLine('Tool:', `${prefix}${toolDisplay}`, width))
   }
   const reason = activity.reason
   if (reason?.kind === 'error' && reason.error !== undefined) {
-    lines.push(previewLine('Error: ', `${reason.error.code}: ${reason.error.message}`, width))
+    lines.push(previewLine('Error:', `${reason.error.code}: ${reason.error.message}`, width))
   }
   return lines
 }
@@ -168,23 +171,28 @@ export function focusCollapsedBody(activity: TurnActivity, width: number): strin
  * The live Thought disclosure. render() re-reads `now()` on EVERY frame, so
  * the WorkingIndicator's 500ms repaint heartbeat refreshes the running
  * duration without a second timer (plan §3.2); the TuiApp component cache
- * (keyed on the activity revision + expansion + theme) keeps that cheap.
- * The component never mutates Focus state — clicks route through the
- * app's hit map to toggleFocusTurn (plan §17).
+ * (keyed on the activity revision + expansion + theme + tool display) keeps
+ * that cheap. The component never mutates Focus state — clicks route through
+ * the app's hit map to toggleFocusTurn (plan §17). The Tool line's display
+ * text is PRECOMPUTED by the app (presenter-first, plan §38) — the
+ * component stays a pure renderer.
  */
 export class FocusActivityComponent {
   private readonly activity: TurnActivity
   private readonly expanded: boolean
   private readonly now: () => number
+  private readonly toolDisplay: string | undefined
 
   constructor(options: {
     activity: TurnActivity
     expanded: boolean
     now?: () => number
+    toolDisplay?: string
   }) {
     this.activity = options.activity
     this.expanded = options.expanded
     this.now = options.now ?? (() => Date.now())
+    this.toolDisplay = options.toolDisplay
   }
 
   /** The Component interface requires invalidate(); the component keeps no
@@ -200,7 +208,7 @@ export class FocusActivityComponent {
     // fullscreen row hit-map depends on that (review fix).
     lines.push(`${indent}${color.textDim(formatFocusHeaderLine(this.activity, this.expanded, this.now, contentWidth))}`)
     if (!this.expanded) {
-      for (const line of focusCollapsedBody(this.activity, contentWidth)) {
+      for (const line of focusCollapsedBody(this.activity, contentWidth, this.toolDisplay)) {
         lines.push(`${indent}${color.textDim(line)}`)
       }
     }

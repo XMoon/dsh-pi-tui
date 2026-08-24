@@ -87,7 +87,7 @@ test('expanding a collapsed Thought in fullscreen ANCHORS the header, not the ta
   app.scrollToBottom()
   await vt.waitForRender()
   let view = vt.getViewport()
-  const headerY = findRow(view, '▸ Thought')
+  const headerY = findRow(view, '🐋 Thought')
   assert.ok(headerY >= 0, `collapsed Thought header missing:\n${view.join('\n')}`)
   const scroll = app.fullscreenScrollForTest()
   assert.ok(scroll !== undefined, 'fullscreen scroll must exist')
@@ -97,10 +97,10 @@ test('expanding a collapsed Thought in fullscreen ANCHORS the header, not the ta
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('▾ Thought'), `expanded symbol missing:\n${joined}`)
+  assert.ok(joined.includes('🐳 Thought'), `expanded symbol missing:\n${joined}`)
   // The header must be VISIBLE near the top of the viewport, and the
   // viewport must NOT be pinned to the 120-line result tail.
-  const newHeaderY = findRow(view, '▾ Thought')
+  const newHeaderY = findRow(view, '🐳 Thought')
   assert.ok(newHeaderY >= 0 && newHeaderY < 6, `header must be near the top, at ${newHeaderY}:\n${joined}`)
   assert.ok(!joined.includes('result line 119'), `the result tail must NOT be the anchor:\n${joined}`)
   const after = app.fullscreenScrollForTest()
@@ -124,11 +124,11 @@ test('clicking the expanded turn BODY collapses the owner Thought and keeps it v
   await vt.waitForRender()
   // Expand by clicking the header.
   let view = vt.getViewport()
-  const headerY = findRow(view, '▸ Thought')
+  const headerY = findRow(view, '🐋 Thought')
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('▾ Thought'), 'must be expanded before the body click')
+  assert.ok(view.join('\n').includes('🐳 Thought'), 'must be expanded before the body click')
   // Click an ordinary process row of the expanded turn (a tool result
   // line, NOT an attachment).
   const bodyY = findRow(view, 'result line 2')
@@ -137,7 +137,7 @@ test('clicking the expanded turn BODY collapses the owner Thought and keeps it v
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('▸ Thought'), 'body click must collapse the owner turn')
+  assert.ok(joined.includes('🐋 Thought'), 'body click must collapse the owner turn')
   assert.ok(!joined.includes('result line 2'), `the expanded body must be gone:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
@@ -218,13 +218,13 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   await vt.waitForRender()
   // Expand the turn.
   let view = vt.getViewport()
-  const headerY = findRow(view, '◐ Thought')
+  const headerY = findRow(view, '🐋 Thought')
   assert.ok(headerY >= 0, `Thought header missing:\n${view.join('\n')}`)
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('▾ Thought'), 'turn must be expanded')
+  assert.ok(joined.includes('🐳 Thought'), 'turn must be expanded')
   // The image INFO BAR row (the attachment's own hit area) is inside the
   // expanded content: clicking it must toggle the attachment collapse,
   // NOT the whole Thought. Match the info bar (dimensions + bytes), never
@@ -236,14 +236,14 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   await settleClick()
   view = vt.getViewport()
   const after = view.join('\n')
-  assert.ok(after.includes('▾ Thought'), `the Thought must stay expanded after an attachment click:\n${after}`)
+  assert.ok(after.includes('🐳 Thought'), `the Thought must stay expanded after an attachment click:\n${after}`)
   assert.equal(collapsedCount(), 1, `the attachment must collapse (its own toggle):\n${after}`)
   // Click again: the attachment expands back, the Thought still expanded.
   click(vt, 10, imageY + 1)
   await settleClick()
   view = vt.getViewport()
   assert.equal(collapsedCount(), 0, `attachment must expand back:\n${view.join('\n')}`)
-  assert.ok(view.join('\n').includes('▾ Thought'), `Thought must survive the second attachment click:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes('🐳 Thought'), `Thought must survive the second attachment click:\n${view.join('\n')}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -286,12 +286,12 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   await vt.waitForRender()
   // Expand by clicking the header.
   let view = vt.getViewport()
-  const headerY = findRow(view, '▸ Thought')
+  const headerY = findRow(view, '🐋 Thought')
   assert.ok(headerY >= 0, `Thought header missing:\n${view.join('\n')}`)
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('▾ Thought'), 'must be expanded before the body clicks')
+  assert.ok(view.join('\n').includes('🐳 Thought'), 'must be expanded before the body clicks')
   // The USER's own prompt is rendered before the Thought: clicking it must
   // keep the Thought expanded (it is the user's row, not revealed process
   // content).
@@ -300,7 +300,7 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   click(vt, 10, userY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('▾ Thought'),
+  assert.ok(view.join('\n').includes('🐳 Thought'),
     `clicking the user's own message must NOT collapse the Thought:\n${view.join('\n')}`)
   // The FINAL assistant answer is rendered after the process rows:
   // clicking it must also keep the Thought expanded.
@@ -310,7 +310,7 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('▾ Thought'),
+  assert.ok(joined.includes('🐳 Thought'),
     `clicking the final assistant must NOT collapse the Thought:\n${joined}`)
   // Sanity: clicking a real process row (a tool result line) STILL
   // collapses the owner.
@@ -319,7 +319,7 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   click(vt, 10, bodyY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('▸ Thought'), 'a process-row click must still collapse the owner')
+  assert.ok(view.join('\n').includes('🐋 Thought'), 'a process-row click must still collapse the owner')
   app.setFullscreen(false)
   app.stop()
 })

@@ -44,6 +44,10 @@ const TOOL_VARIANTS: Record<string, ToolVariant> = {
   write: 'write',
   edit: 'edit',
   run_code: 'code',
+  // The model-facing skill loader is a read-class tool (its presentCall
+  // reports kind: 'read'); the static fallback must agree so a replay
+  // without the live registry renders the same row family (plan §7.3).
+  skill: 'read',
   cordis_package_inspect: 'read',
   cordis_runtime_inspect: 'read',
   cordis_run: 'others',
@@ -59,6 +63,9 @@ const TOOL_TITLES: Record<string, string> = {
   cordis_stop: 'Stop Cordis Plugin',
   cordis_undefine: 'Remove Cordis Plugin',
   pwsh: 'Pwsh',
+  // The skill loader's human title (its presentCall says `Load skill
+  // <name>`; the fallback must say the same — plan §7.3/§9.2).
+  skill: 'Load skill',
 }
 
 /**
@@ -314,6 +321,12 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
     // Empty args: an empty summary keeps the header to the title alone
     // instead of leaking the raw `{}`.
     return ''
+  }
+  if (name === 'skill') {
+    // The skill name is the call's one-line identity (the fallback header
+    // reads `Load skill · <name>` — plan §7.3).
+    const skillName = args.name
+    return typeof skillName === 'string' && skillName !== '' ? firstLine(skillName) : undefined
   }
   if (name !== 'todo_write') return undefined
   const todos = args.todos
@@ -1064,38 +1077,58 @@ export function foldedCallPreview(name: string, argsRaw: string): string {
   return ''
 }
 
-/** The summary key preference per tool variant (args-derived), shared by
- * the Focus latest-operation preview (deriveSummary is variant-private). */
-const FOCUS_SUMMARY_KEYS: Record<string, string[]> = {
-  bash: ['description', 'command'],
-  read: ['path', 'file_path', 'url'],
-  search: ['query', 'pattern', 'url'],
-  write: ['path', 'file_path'],
-  edit: ['path', 'file_path'],
-  code: ['description'],
+/**
+ * The Focus compact Tool line for one raw tool call: presenter-first,
+ * static fallback second (plan §9.1/§9.4). The tool-owned presentCall
+ * view wins when the live registry has one; otherwise the Web row-model
+ * header (toolCardHeader) renders the same semantic. The fold stores the
+ * RAW call facts — this helper is the ONLY place the compact line is
+ * formatted, so the TranscriptFolder never bakes presentation strings.
+ * @param tool - the raw call facts (name + raw arguments JSON).
+ * @param options - the live presenter bridge and the workspace root for
+ *   path relativization (both optional — replay degrades to the fallback).
+ * @returns the one-line display, e.g. `Load skill session-review`,
+ *   `Read src/index.ts`, `vendor_probe cache-01`.
+ */
+export function focusToolDisplay(
+  tool: { name: string; args: string },
+  options: { presenter?: ToolPresenter; cwd?: string } = {},
+): string {
+  const owned = options.presenter?.call(tool.name, tool.args)
+  if (owned !== undefined) return formatOwnedCallForCompactFocus(owned)
+  return focusToolFallbackDisplay(tool.name, tool.args, options.cwd)
 }
 
-/**
- * The Focus latest-operation one-liner for a tool call: `read
- * src/transcript.ts`, `bash pnpm test`, `search "systemPrompt.section"`.
- * The preview prefers the tool's natural summary key (path/command/query),
- * falling back to the first string arg, then to the raw args' first line.
- * A tool with no derivable preview keeps the bare name. Never throws on a
- * malformed arguments payload (the parse is guarded — plan §40).
- * @param name - the tool name.
- * @param argsRaw - the raw arguments JSON (may be malformed).
- * @returns the preview text, e.g. `read src/transcript.ts`.
- */
-export function focusToolPreview(name: string, argsRaw: string): string {
-  const parsed = parseArgs(argsRaw)
-  if (typeof parsed !== 'object' || parsed === null) return name
-  const args = parsed as Record<string, unknown>
-  const picked = pickString(args, FOCUS_SUMMARY_KEYS[name] ?? [])
-  if (picked !== undefined) return `${name} ${firstLine(picked)}`
-  for (const value of Object.values(args)) {
-    if (typeof value === 'string' && value !== '') return `${name} ${firstLine(value)}`
+/** The compact line from a tool-owned presentCall view: the title, plus
+ * the rawInput when it is a string the title does not already carry (the
+ * skill tool's title is `Load skill <name>` — appending its rawInput
+ * again would duplicate). */
+function formatOwnedCallForCompactFocus(view: ToolCallView): string {
+  if (view.card === 'terminal') return view.title
+  if (view.card === 'diff') {
+    const path = view.diffs[0]?.path
+    return path === undefined ? view.title : `${view.title} ${path}`
   }
-  return name
+  const raw = typeof view.rawInput === 'string' ? view.rawInput.trim() : undefined
+  if (raw === undefined || raw === '') return view.title
+  return view.title.endsWith(raw) ? view.title : `${view.title} ${firstLine(raw)}`
+}
+
+/** The compact line from the static Web row-model header (replay /
+ * registry-unavailable fallback). An unknown tool's header title is the
+ * generic "Tool call" — the compact line names the actual tool instead
+ * (plan §9.3: an unknown custom tool is still a Tool). */
+function focusToolFallbackDisplay(name: string, argsRaw: string, cwd?: string): string {
+  const header = toolCardHeader(name, argsRaw, cwd)
+  const known = classifyTool(name) !== 'others'
+    || TOOL_TITLES[name] !== undefined
+    || TUI_TOOL_TITLES[name] !== undefined
+  if (!known) {
+    // The others-summary already leads with the raw name (`vendor_probe ·
+    // cache-01`); drop the generic title and the separator.
+    return header.summary === '' ? name : header.summary.replace(' · ', ' ')
+  }
+  return header.summary === '' ? header.title : `${header.title} ${header.summary}`
 }
 
 /**

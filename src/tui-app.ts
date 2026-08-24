@@ -85,6 +85,7 @@ import {
   GOAL_TOOL_NAMES,
   foldedResultSummaryFor,
   FOLDED_JSON_RESULT_TOOLS,
+  focusToolDisplay,
   systemContextBody,
   toolCardHeader,
   toolEmoji,
@@ -1620,9 +1621,10 @@ export class TuiApp {
   /** The folder's per-turn activities (same fold state as `messages`). */
   private turnActivities: ReadonlyMap<number, TurnActivity> = new Map()
   /** The FocusActivityComponent cache, keyed by turn: rebuilds on the
-   * activity revision, the expansion state, or the theme revision (plan
-   * §39). render() still re-reads Date.now() per frame, so the running
-   * duration refreshes on the WorkingIndicator's repaint heartbeat. */
+   * activity revision, the expansion state, the theme revision, or the
+   * precomputed Tool display (plan §39). render() still re-reads
+   * Date.now() per frame, so the running duration refreshes on the
+   * WorkingIndicator's repaint heartbeat. */
   private readonly focusActivityComponents = new Map<number, {
     /** The activity object the component was built from (identity key). */
     activity: TurnActivity
@@ -1630,6 +1632,7 @@ export class TuiApp {
     revision: number
     expanded: boolean
     themeRev: number
+    toolDisplay?: string
   }>()
   /** The parent session's expansion set while the subagent viewer covers
    * the surface (turn numbers are per-session — plan §26). */
@@ -3355,26 +3358,38 @@ export class TuiApp {
     return this.hideThinking
   }
 
+  /** The precomputed Focus Tool-line display for one activity: presenter-
+   * first, static fallback second (plan §38/§9.4). The FocusActivityComponent
+   * stays a pure renderer — the presentation bridge lives here. */
+  private focusToolDisplayFor(activity: TurnActivity): string | undefined {
+    const tool = activity.tool
+    if (tool === undefined) return undefined
+    return focusToolDisplay(tool, { presenter: this.present, cwd: this.workspaceRoot })
+  }
+
   /** Get (or rebuild) the FocusActivityComponent for one turn: rebuilds
    * when the activity OBJECT changed (session/viewer switches mint fresh
    * folder objects, so the same turn number from another session can
    * never reuse this one's component), the activity revision moved, the
-   * disclosure flipped, or the theme switched (plan §39). render() re-
-   * reads Date.now() every frame, so the running duration is always live. */
-  private focusActivityComponentFor(activity: TurnActivity, expanded: boolean): FocusActivityComponent {
+   * disclosure flipped, the theme switched, or the precomputed Tool
+   * display changed (plan §39). render() re-reads Date.now() every frame,
+   * so the running duration is always live. */
+  private focusActivityComponentFor(activity: TurnActivity, expanded: boolean, toolDisplay: string | undefined): FocusActivityComponent {
     const entry = this.focusActivityComponents.get(activity.turn)
     if (entry !== undefined && entry.activity === activity
       && entry.revision === activity.revision
-      && entry.expanded === expanded && entry.themeRev === this.themeRevision) {
+      && entry.expanded === expanded && entry.themeRev === this.themeRevision
+      && entry.toolDisplay === toolDisplay) {
       return entry.component
     }
-    const component = new FocusActivityComponent({ activity, expanded })
+    const component = new FocusActivityComponent({ activity, expanded, toolDisplay })
     this.focusActivityComponents.set(activity.turn, {
       activity,
       component,
       revision: activity.revision,
       expanded,
       themeRev: this.themeRevision,
+      toolDisplay,
     })
     return component
   }
@@ -3412,7 +3427,11 @@ export class TuiApp {
       if (block.kind === 'activity') {
         // The live Thought disclosure; the hidden process rows (if any)
         // render as ordinary message blocks below it (plan §15).
-        component = this.focusActivityComponentFor(block.activity, this.focusExpandedTurns.has(block.activity.turn))
+        component = this.focusActivityComponentFor(
+          block.activity,
+          this.focusExpandedTurns.has(block.activity.turn),
+          this.focusToolDisplayFor(block.activity),
+        )
         rendered = component.render(width)
       } else {
         // Persistent per-message components (stage J): unchanged messages
@@ -3564,7 +3583,11 @@ export class TuiApp {
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       if (block.kind === 'activity') {
-        component = this.focusActivityComponentFor(block.activity, this.focusExpandedTurns.has(block.activity.turn))
+        component = this.focusActivityComponentFor(
+          block.activity,
+          this.focusExpandedTurns.has(block.activity.turn),
+          this.focusToolDisplayFor(block.activity),
+        )
         rendered = component.render(width)
       } else {
         component = this.componentForMessage(block.message, boundary)

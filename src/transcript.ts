@@ -19,7 +19,8 @@
 import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextEmoji, contextProvenance, contextSummary } from './context.ts'
-import { firstLine, focusToolPreview, latestLine } from './present.ts'
+import { firstLine, latestLine } from './present.ts'
+import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
 // The command/run + command/done event merge (SessionEventMap extension).
 import type {} from '@deepseek-ai/dsh-commands'
 // The subagent/descriptor event merge (SessionEventMap extension).
@@ -123,9 +124,14 @@ export const TURN_END_REASON_KINDS = [
  * One turn's aggregated activity for the Focus projection (plan §10):
  * timing from `SessionEvent.time` (never a second clock), tool statistics
  * counted on `tool/call` ONLY (a call/result pair is one call), and the
- * latest narrative/operation previews. Maintained incrementally by
- * {@link TranscriptFolder.apply} alongside the message fold — never a
- * rescan of the session log.
+ * three compact process slots — Think / Message / Tool — plus the per-turn
+ * token usage. Maintained incrementally by {@link TranscriptFolder.apply}
+ * alongside the message fold — never a rescan of the session log.
+ *
+ * The slots are SEMANTIC, decided by the event stream (plan §57):
+ * `reasoning-delta` → Think, assistant text → Message, `tool/call` → Tool.
+ * Presentation (whale icons, titles, truncation) lives in the Focus
+ * presentation layer, never here.
  */
 export interface TurnActivity {
   /** The owning turn number. */
@@ -139,25 +145,34 @@ export interface TurnActivity {
   /** The OFFICIAL harness reason kind (completed/aborted/blocked/error/
    * max-tokens/interrupted) — never an invented name. */
   readonly reason?: TurnEndReason
+  /** The Think slot: the latest meaningful line of the bounded reasoning
+   * tail (compact preview only — never the raw reasoning stream). */
+  readonly think?: { readonly text: string }
+  /** The Message slot: the latest meaningful line of the current
+   * candidate / confirmed intermediate assistant text. The FINAL answer
+   * never enters this slot (it renders outside the Thought). */
+  readonly message?: { readonly text: string }
+  /** The Tool slot: the LATEST real `tool/call` (any name — event-first
+   * classification), settled by its own `tool/result` only. */
+  readonly tool?: {
+    readonly callId: string
+    readonly name: string
+    readonly args: string
+    readonly status: 'running' | 'ok' | 'error'
+  }
+  /** The per-turn token totals (committed steps + open steps' current
+   * usage); absent when the turn has no usage fact at all. */
+  readonly usage?: TokenUsageTotals
+  /** The display total (input + cache read + cache write + output). */
+  readonly totalTokens?: number
   /** Settled assistant/message count for the turn. */
   readonly assistantMessages: number
   /** tool/call count (never double-counted on tool/result). */
   readonly toolCalls: number
   /** Per-tool call counts, for the `read ×4 · search ×3` header stats. */
   readonly tools: ReadonlyMap<string, number>
-  /**
-   * The newest narrative by the plan's priority (thinking > intermediate
-   * assistant > system/status), each the latest of its kind. The collapsed
-   * card's second line renders it (a `thinking` narrative leads with
-   * `Thinking: …`). Compact previews only — never the raw reasoning
-   * stream (plan §10.6/§42).
-   */
-  readonly narrative?: { readonly kind: 'thinking' | 'assistant' | 'system'; readonly text: string }
-  /** The latest operation line: tool calls (with a ✓/✗ settle), workflow
-   * runs, subagent launches, LLM retries (plan §10.7). */
-  readonly latestOperation?: string
-  /** Monotonic revision, bumped on every change — the Focus render-cache
-   * key (plan §39). */
+  /** Monotonic revision, bumped on every visible change — the Focus
+   * render-cache key (plan §39). */
   readonly revision: number
 }
 
@@ -168,20 +183,40 @@ interface MutableTurnActivity {
   endedAt?: number
   completed: boolean
   reason?: TurnEndReason
+  /** The rolling reasoning tail (preview only, bounded). */
+  thinkingTail: string
+  /** The materialized Think slot (latest meaningful line). */
+  think?: { text: string }
+  /** The streaming assistant text of the CURRENT step (bounded tail),
+   * with the authoritative settled text once assistant/message lands. */
+  messageCandidate?: {
+    step: number
+    tail: string
+    settledText?: string
+  }
+  /** An earlier candidate confirmed as an intermediate message (by a
+   * later tool/call, a later step, or later output). */
+  messageConfirmed?: string
+  /** The step of the turn's LAST assistant output (streaming or settled)
+   * — the turn/end final-answer check compares the candidate's step
+   * against this. */
+  lastAssistantStep?: number
+  /** The materialized Message slot (candidate ?? confirmed, latest line). */
+  message?: { text: string }
+  /** The Tool slot: the latest real tool/call, settled by its own result. */
+  tool?: {
+    callId: string
+    name: string
+    args: string
+    status: 'running' | 'ok' | 'error'
+  }
+  /** The per-turn token totals (committed + open steps' current usage). */
+  usage?: TokenUsageTotals
+  /** The display total (input + cache read + cache write + output). */
+  totalTokens?: number
   assistantMessages: number
   toolCalls: number
   tools: Map<string, number>
-  /** The rolling reasoning tail (preview only, bounded). */
-  thinkingTail: string
-  thinking?: string
-  assistant?: string
-  system?: string
-  /** The materialized narrative slot (priority thinking > assistant >
-   * system), maintained eagerly so `turnActivities()` returns the map by
-   * reference — a repaint never copies the whole history (review fix:
-   * O(1) per repaint regardless of session length). */
-  narrative?: { kind: 'thinking' | 'assistant' | 'system'; text: string }
-  latestOperation?: string
   revision: number
 }
 
@@ -410,9 +445,15 @@ export class TranscriptFolder {
   /** Per-turn Focus activity, maintained incrementally in {@link applyEvent}
    * (plan §20.1) — a plain map is enough for the ≤ WINDOW_TURNS view. */
   private readonly activityByTurn = new Map<number, MutableTurnActivity>()
+  /** The shared per-step usage accounting (the same class the session
+   * stats fold uses — the footer and the Focus per-turn token can never
+   * drift). */
+  private readonly usage = new StepUsageAccumulator()
   /** The bounded reasoning tail cap: previews never buffer the full stream. */
   private static readonly THINKING_TAIL_CAP = 400
-  /** The bounded narrative preview cap (the card truncates to width too). */
+  /** The bounded message candidate tail cap (streaming assistant text). */
+  private static readonly MESSAGE_TAIL_CAP = 400
+  /** The bounded preview cap (the card truncates to width too). */
   private static readonly NARRATIVE_PREVIEW_CAP = 200
 
   /** One turn's Focus activity, created on its first event (defensive:
@@ -448,29 +489,86 @@ export class TranscriptFolder {
     return this.activityByTurn as ReadonlyMap<number, TurnActivity>
   }
 
-  /** Fold one reasoning delta into the activity's thinking preview: the
-   * rolling tail keeps the LAST fragment (bounded), and the preview is the
-   * tail's latest non-empty line — never the whole stream (plan §10.6). */
+  /** Fold one reasoning delta into the activity's Think slot: the rolling
+   * tail keeps the LAST fragment (bounded), and the preview is the tail's
+   * latest non-empty line — never the whole stream (plan §10.6). */
   private foldThinking(activity: MutableTurnActivity, delta: string): void {
     activity.thinkingTail = (activity.thinkingTail + delta).slice(-TranscriptFolder.THINKING_TAIL_CAP)
-    activity.thinking = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
-    this.syncNarrative(activity)
+    const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
+    activity.think = line === '' ? undefined : { text: line }
     activity.revision += 1
   }
 
-  /** Recompute the materialized narrative slot after any narrative-source
-   * mutation: priority thinking > assistant > system, each the LATEST of
-   * its kind (plan §10.5 — tool noise never lands here). */
-  private syncNarrative(activity: MutableTurnActivity): void {
-    if (activity.thinking !== undefined) {
-      activity.narrative = { kind: 'thinking', text: activity.thinking }
-    } else if (activity.assistant !== undefined) {
-      activity.narrative = { kind: 'assistant', text: activity.assistant }
-    } else if (activity.system !== undefined) {
-      activity.narrative = { kind: 'system', text: activity.system }
-    } else {
-      activity.narrative = undefined
+  /** Fold one text delta into the activity's Message candidate: the
+   * candidate belongs to ONE step (a later step's output confirms the
+   * earlier candidate first — plan §5.3 C), and its tail is bounded. */
+  private foldMessageCandidate(activity: MutableTurnActivity, step: number, delta: string): void {
+    if (delta === '') return
+    const candidate = activity.messageCandidate
+    if (candidate !== undefined && candidate.step !== step) {
+      this.confirmMessageCandidate(activity)
     }
+    if (candidate === undefined || candidate.step !== step) {
+      activity.messageCandidate = { step, tail: delta.slice(-TranscriptFolder.MESSAGE_TAIL_CAP) }
+    } else {
+      candidate.tail = (candidate.tail + delta).slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+    }
+    activity.lastAssistantStep = step
+    this.syncMessage(activity)
+    activity.revision += 1
+  }
+
+  /** Confirm the current message candidate as an intermediate message
+   * (a later tool/call, a later step, or later output proves the turn
+   * continues — plan §5.3). The confirmed text is bounded; the full
+   * message stays in the transcript entry. */
+  private confirmMessageCandidate(activity: MutableTurnActivity): void {
+    const candidate = activity.messageCandidate
+    if (candidate === undefined) return
+    const text = candidate.settledText ?? candidate.tail
+    if (text !== '') {
+      activity.messageConfirmed = text.slice(0, TranscriptFolder.MESSAGE_TAIL_CAP)
+    }
+    activity.messageCandidate = undefined
+  }
+
+  /** Materialize the Message slot from the candidate (running) or the
+   * resolved candidate/confirmed pair (settled): the latest meaningful
+   * line, bounded. */
+  private syncMessage(activity: MutableTurnActivity): void {
+    const candidate = activity.messageCandidate
+    const candidateText = candidate === undefined ? undefined : (candidate.settledText ?? candidate.tail)
+    const text = candidateText ?? activity.messageConfirmed
+    const line = text === undefined ? undefined : latestLine(text).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
+    activity.message = line === undefined || line === '' ? undefined : { text: line }
+  }
+
+  /** Resolve the Message slot at turn/end (plan §5.5): for a completed /
+   * max-tokens turn whose candidate IS the exact final assistant, the
+   * candidate is the final answer — it stays OUTSIDE the Thought and the
+   * slot falls back to the confirmed intermediate message (or disappears).
+   * For every other end reason the unfinished candidate is still process
+   * information and survives. */
+  private resolveMessageAtTurnEnd(activity: MutableTurnActivity): void {
+    const reason = activity.reason?.kind
+    const candidate = activity.messageCandidate
+    if ((reason === 'completed' || reason === 'max-tokens')
+      && candidate !== undefined && candidate.step === activity.lastAssistantStep) {
+      activity.messageCandidate = undefined
+    }
+    this.syncMessage(activity)
+  }
+
+  /** Sync the activity's per-turn token facts from the shared usage
+   * accumulator; the revision moves only when the VISIBLE total changed
+   * (plan §33 — usage facts are far rarer than text deltas). */
+  private syncUsage(activity: MutableTurnActivity): void {
+    const usage = this.usage.turnUsageWithPending(activity.turn)
+    const before = activity.usage === undefined ? undefined : totalTokens(activity.usage)
+    const after = usage === undefined ? undefined : totalTokens(usage)
+    activity.usage = usage
+    activity.totalTokens = after
+    if (before !== after) activity.revision += 1
   }
 
   /** Append one folded message, maintaining the window projections. */
@@ -773,6 +871,20 @@ export class TranscriptFolder {
       return
     }
     switch (event.type) {
+      case 'step/start': {
+        // Focus aggregation: a new step opens usage accounting, and a
+        // still-open candidate of an EARLIER step is confirmed (the turn
+        // continues — plan §5.3 B).
+        this.usage.onStepStart(event.data.turn, event.data.step)
+        const activity = this.activityFor(event.data.turn)
+        const candidate = activity.messageCandidate
+        if (candidate !== undefined && candidate.step < event.data.step) {
+          this.confirmMessageCandidate(activity)
+          this.syncMessage(activity)
+          activity.revision += 1
+        }
+        break
+      }
       case 'turn/start': {
         this.currentTurn = event.data.turn
         // Focus aggregation: turn timing comes from `SessionEvent.time`
@@ -812,13 +924,10 @@ export class TranscriptFolder {
             ...summary === null ? {} : { summary },
             emoji,
           })
-          // Focus aggregation: the system/status narrative slot (the
-          // LOWEST narrative priority — thinking and assistant previews
-          // always win it at display time, plan §10.5).
-          const activity = this.activityFor(this.currentTurn)
-          activity.system = firstLine(text).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
-          this.syncNarrative(activity)
-          activity.revision += 1
+          // Focus aggregation: injected context (skill-invocation,
+          // skill-catalog, system reminders) is orchestration, NOT one of
+          // the three process slots — it never enters Think/Message/Tool
+          // (plan §16).
         }
         break
       }
@@ -830,11 +939,21 @@ export class TranscriptFolder {
         // once, not twice.
         if (chunk.type === 'text-delta') {
           this.assistantEntry(event.data.turn, step).text += chunk.text
+          // Focus aggregation: the streaming assistant text feeds the
+          // Message candidate IMMEDIATELY (no assistant/message wait —
+          // plan §5.2), so the running card previews the intermediate
+          // message in real time.
+          this.foldMessageCandidate(this.activityFor(event.data.turn), step, chunk.text)
         } else if (chunk.type === 'reasoning-delta') {
           this.thinkingEntry(event.data.turn, step).text += chunk.text
           // Focus aggregation: keep a compact reasoning preview (the
           // rolling tail — never the full stream, plan §10.6/§42).
           this.foldThinking(this.activityFor(event.data.turn), chunk.text)
+        } else if (chunk.type === 'usage') {
+          // Focus aggregation: per-turn token facts (the shared
+          // accumulator — the footer and Focus can never drift).
+          this.usage.onUsageChunk(event.data.turn, step, chunk.usage)
+          this.syncUsage(this.activityFor(event.data.turn))
         }
         break
       }
@@ -856,15 +975,22 @@ export class TranscriptFolder {
         // The step is complete: its thinking entry stops streaming.
         const thinking = this.thinkingEntries.get(key)
         if (thinking !== undefined) thinking.running = false
-        // Focus aggregation: the settled assistant text is the turn's
-        // newest narrative (the FINAL message wins at turn end, so the
-        // collapsed card's second line previews the answer — plan §2.5).
+        // Focus aggregation: the settled assistant text OVERWRITES the
+        // candidate's text (authoritative — plan §5.4) but does NOT decide
+        // whether it is the final answer; the candidate keeps its step
+        // identity and the turn/end resolution decides. The final answer
+        // never enters the Message slot (plan §22).
         const activity = this.activityFor(event.data.turn)
         activity.assistantMessages += 1
-        if (text !== '') {
-          activity.assistant = firstLine(text).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
+        activity.lastAssistantStep = event.data.step
+        const candidate = activity.messageCandidate
+        if (candidate !== undefined && candidate.step === event.data.step) {
+          candidate.settledText = text
+          candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
         }
-        this.syncNarrative(activity)
+        this.syncMessage(activity)
+        this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
+        this.syncUsage(activity)
         activity.revision += 1
         break
       }
@@ -888,11 +1014,22 @@ export class TranscriptFolder {
           index: this.items.length - 1,
         })
         // Focus aggregation: count calls ONLY here (a call/result pair is
-        // ONE call — plan §10.4) and advertise the running operation.
+        // ONE call — plan §10.4), confirm the current message candidate
+        // (a tool call after text proves the text was intermediate — plan
+        // §5.3 A), and set the Tool slot from the RAW call — ANY name,
+        // known or custom, is a Tool (event-first classification, plan
+        // §6.1 — never a name allowlist).
         const activity = this.activityFor(this.currentTurn)
         activity.toolCalls += 1
         activity.tools.set(event.data.name, (activity.tools.get(event.data.name) ?? 0) + 1)
-        activity.latestOperation = `Tool: ${focusToolPreview(event.data.name, event.data.arguments)}`
+        this.confirmMessageCandidate(activity)
+        this.syncMessage(activity)
+        activity.tool = {
+          callId: event.data.callId,
+          name: event.data.name,
+          args: event.data.arguments,
+          status: 'running',
+        }
         activity.revision += 1
         break
       }
@@ -942,12 +1079,14 @@ export class TranscriptFolder {
             this.reflowGrouping(this.items.length - 1)
           }
         }
-        // Focus aggregation: the settle flips the operation to a ✓/✗ line
-        // (the next operation replaces it — plan §10.7).
+        // Focus aggregation: settle the Tool slot ONLY when the result
+        // belongs to the LATEST call (plan §10/§44) — an older parallel
+        // call's result must never yank the slot back from the newer call.
         const activity = this.activityFor(turn)
-        const preview = focusToolPreview(name, pending?.args ?? '')
-        activity.latestOperation = status === 'ok' ? `✓ ${preview}` : `✗ ${preview}`
-        activity.revision += 1
+        if (activity.tool?.callId === key) {
+          activity.tool.status = status
+          activity.revision += 1
+        }
         break
       }
       case 'turn/end': {
@@ -984,6 +1123,10 @@ export class TranscriptFolder {
             },
           }),
         }
+        // Focus aggregation: turn/end resolves the Message slot (final
+        // answer dedup — plan §5.5/§22) and the token display.
+        this.resolveMessageAtTurnEnd(activity)
+        this.syncUsage(activity)
         activity.revision += 1
         break
       }
@@ -999,10 +1142,9 @@ export class TranscriptFolder {
         }
         this.workflowRuns.set(event.data.runId, card)
         this.appendItem(card)
-        // Focus aggregation: a workflow run is operation activity.
-        const activity = this.activityFor(this.currentTurn)
-        activity.latestOperation = `Workflow: ${event.data.name}`
-        activity.revision += 1
+        // Focus aggregation: a workflow run is a durable lifecycle event,
+        // NOT a model tool/call — it never touches the Tool slot or the
+        // tool count (plan §17).
         break
       }
       case 'tool-workflow/agent-start': {
@@ -1048,10 +1190,9 @@ export class TranscriptFolder {
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`
           : `llm retry ${retry + 1}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
         this.appendItem({ kind: 'system', turn: this.currentTurn, text: `${label} — ${failure.code}: ${failure.message}` })
-        // Focus aggregation: retries are operation activity (plan §10.7).
-        const activity = this.activityFor(this.currentTurn)
-        activity.latestOperation = `Retry: ${label}`
-        activity.revision += 1
+        // Focus aggregation: retries are orchestration, not a Tool — they
+        // stay in the expanded process and never touch the Tool slot
+        // (plan §16.2).
         break
       }
       case 'command/run': {
@@ -1088,10 +1229,9 @@ export class TranscriptFolder {
           result,
           status: 'ok',
         })
-        // Focus aggregation: a delegation is operation activity.
-        const activity = this.activityFor(this.currentTurn)
-        activity.latestOperation = `Subagent: ${label ?? 'subagent'}`
-        activity.revision += 1
+        // Focus aggregation: a delegation record is a durable lifecycle
+        // event, NOT a model tool/call — it never touches the Tool slot or
+        // the tool count (plan §17).
         break
       }
       default:
