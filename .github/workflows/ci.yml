@@ -354,4 +354,4 @@ jobs:
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
       - name: Publish to npm
-        run: npm publish "${{ steps.package.outputs.tarball }}" --access public
+        run: npm publish "./${{ steps.package.outputs.tarball }}" --access public
