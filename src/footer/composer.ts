@@ -115,7 +115,11 @@ export class FooterComposer {
   ): string {
     const left = this.renderZone(row.left, snapshot, context)
     const right = this.renderZone(row.right, snapshot, context)
-    const separator = row.separator?.text ?? '  '
+    // The separator's semantic tone applies to its text (the plan §8
+    // separator tone — the outer dim pass still colors untoned parts).
+    const separator = row.separator === undefined
+      ? '  '
+      : styleTone(row.separator.text, row.separator.tone)
     if (left.length === 0 && right.length === 0) return ''
     if (right.length === 0) return left.map(item => item.text).join(separator)
     if (left.length === 0) return right.map(item => item.text).join(separator)
@@ -139,7 +143,10 @@ export class FooterComposer {
   }
 
   /** Resolve one zone's item refs into rendered items (unknown ids and
-   * throwing items are skipped — error isolation). */
+   * throwing items are skipped — error isolation). The ref's layout
+   * overrides apply: a semantic tone replaces the item's own tones, and
+   * prefix/suffix wrap the rendered text (plain — the outer dim pass
+   * colors them). */
   private renderZone(
     refs: readonly FooterItemRef[],
     snapshot: StatusSnapshot,
@@ -156,7 +163,10 @@ export class FooterComposer {
         segment = null
       }
       if (segment === null) continue
-      const text = renderSpans(segment.spans)
+      const override = ref.tone === undefined || ref.tone === 'auto' ? undefined : ref.tone
+      const rendered = renderSpans(segment.spans, override)
+      if (rendered === '') continue
+      const text = `${ref.prefix ?? ''}${rendered}${ref.suffix ?? ''}`
       if (text === '') continue
       items.push({
         ref,
@@ -241,11 +251,13 @@ function capRowWithEllipsis(row: string, width: number): string {
   return `${truncateToWidth(row, Math.max(0, width - 1), '')}…`
 }
 
-/** Render footer spans through the host's semantic color helpers. */
-export function renderSpans(spans: readonly FooterSpan[]): string {
+/** Render footer spans through the host's semantic color helpers. An
+ * optional tone override replaces every span's own tone (the layout's
+ * semantic tone override — emphasis still applies). */
+export function renderSpans(spans: readonly FooterSpan[], toneOverride?: FooterTone): string {
   return spans.map(span => {
     const text = span.text
-    const base = styleTone(text, span.tone)
+    const base = styleTone(text, toneOverride ?? span.tone)
     switch (span.emphasis) {
       case 'strong': return color.textStrong(text)
       case 'dim': return color.textDim(text)
