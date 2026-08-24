@@ -636,6 +636,45 @@ test('a late message for an older step never regresses the final-answer dedup', 
   assert.equal(activity.message?.text, '第一步权威')
 })
 
+test('a text-delta after the step\'s authoritative message is ignored', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '流式' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '权威文本' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    // A late delta for the settled step (replay artifact).
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '迟到的内容' } }, 1003, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1004, 4),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1005, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: '最终' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1006, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1007, 7),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message?.text, '权威文本', 'the late delta must not corrupt the settled preview')
+})
+
+test('a late step/start after turn/end never reopens accumulator state', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
+    // A late step/start (replay artifact).
+    eventAt('step/start', { turn: 0, step: 1 }, 1004, 4),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 100, 'the finalized total stays')
+  const usage = (folder as unknown as { usage: { perStep: Map<string, unknown> } }).usage
+  assert.equal(usage.perStep.size, 0, 'the late step/start must not reopen accumulator state')
+})
+
 test('a replayed OLDER turn/start never regresses the current turn', () => {
   const folder = new TranscriptFolder()
   folder.apply([

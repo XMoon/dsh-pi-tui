@@ -206,6 +206,11 @@ interface MutableTurnActivity {
    * OLDER confirmed step is ignored (the slot shows the latest
    * intermediate) and never resurrects a candidate (review finding). */
   confirmedSteps: Set<number>
+  /** Every step whose output was AUTHORITATIVELY settled by an
+   * assistant/message: a later text-delta for it is a replay artifact and
+   * is ignored — it must never corrupt the settled preview (review
+   * finding). */
+  settledSteps: Set<number>
   /** The step of the turn's LAST assistant output (streaming or settled)
    * — the turn/end final-answer check compares the candidate's step
    * against this. */
@@ -478,6 +483,7 @@ export class TranscriptFolder {
         tools: new Map(),
         thinkingTail: '',
         confirmedSteps: new Set(),
+        settledSteps: new Set(),
         revision: 0,
       }
       this.activityByTurn.set(turn, activity)
@@ -528,6 +534,10 @@ export class TranscriptFolder {
     // it must never resurrect a candidate (nor confirm a newer one that
     // is still streaming) — review finding.
     if (activity.confirmedSteps.has(step)) return
+    // A delta for a step whose output was already authoritatively settled
+    // by a message is a replay artifact: it must never corrupt the settled
+    // preview (review finding).
+    if (activity.settledSteps.has(step)) return
     // A delta for a step OLDER than the latest seen is stale: it must
     // never roll back the candidate or the final-answer dedup (review
     // finding).
@@ -911,9 +921,12 @@ export class TranscriptFolder {
       case 'step/start': {
         // Focus aggregation: a new step opens usage accounting, and a
         // still-open candidate of an EARLIER step is confirmed (the turn
-        // continues — plan §5.3 B).
-        this.usage.onStepStart(event.data.turn, event.data.step)
+        // continues — plan §5.3 B). After turn/end the turn's steps were
+        // finalized: a late step/start (replay artifact) must not reopen
+        // accumulator state (review finding).
         const activity = this.activityFor(event.data.turn)
+        if (activity.completed) break
+        this.usage.onStepStart(event.data.turn, event.data.step)
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step < event.data.step) {
           this.confirmMessageCandidate(activity)
@@ -1075,6 +1088,9 @@ export class TranscriptFolder {
           // to the tail cap, never a second full copy of the assistant
           // output (plan §34 — the transcript entry owns the full text).
           candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+          // The step's output is now authoritatively settled: later
+          // text-deltas for it are replay artifacts (review finding).
+          activity.settledSteps.add(event.data.step)
         } else if (activity.messageConfirmedStep === event.data.step) {
           // The step's candidate was already confirmed (a tool/call
           // followed the text) and it is still the LATEST confirmed: the
@@ -1103,6 +1119,7 @@ export class TranscriptFolder {
             step: event.data.step,
             tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
           }
+          activity.settledSteps.add(event.data.step)
         }
         this.syncMessage(activity)
         this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
