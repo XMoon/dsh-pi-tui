@@ -117,6 +117,7 @@ import {
 } from './subagent-viewer-submit.ts'
 import { createDirectBackend } from './runtime/backend.ts'
 import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
+import { DirectSessionReader } from './runtime/direct/session-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
@@ -1305,7 +1306,7 @@ export function apply(ctx: Context, config: Config): void {
   // Host domains through narrow ports, never ctx.* directly. Direct is the
   // only backend today; remote/wire adapters join in later milestones
   // behind the SAME port interfaces.
-  const backend = createDirectBackend(new DirectSubagentPort(ctx))
+  const backend = createDirectBackend(new DirectSubagentPort(ctx), new DirectSessionReader(ctx))
   // Process diagnostics: stderr + a log file under $DSH_HOME/logs. The cordis
   // logger has no exporter in this process, so it is NOT the troubleshooting
   // channel — diag is (see diag.ts).
@@ -5158,6 +5159,9 @@ export function apply(ctx: Context, config: Config): void {
       get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
       agents: agents as unknown as TuiCommandRunner['agents'],
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
+      // The session READ port (migration M1.3): /sessions, /resume, /search
+      // and the title batches go through the port, never ctx directly.
+      sessionReader: backend.sessionReader,
       cwd,
       imageStore: draftImages,
       // Issue #7: /copy shares the fullscreen selection's clipboard policy.

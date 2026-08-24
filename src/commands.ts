@@ -48,15 +48,13 @@ import {
   TITLE_FIRST_BATCH,
   buildSessionTree,
   findSessionMatch,
-  headerToPickerRow,
-  loadSessionTitleBatch,
   sameWorkspace,
   sessionLabelParts,
   sessionPickerItem,
   type SessionPickerItem,
   type SessionPickerRow,
-  type SessionQueryLike,
 } from './sessions.ts'
+import type { SessionReader } from './runtime/session-reader-port.ts'
 import {
   credentialOptionsFor,
   deriveKeyRef,
@@ -262,6 +260,9 @@ export interface TuiCommandRunner {
   readonly agents: AgentsLike
   /** The sessions service, for the /exit flush. */
   readonly sessions: { flush(session: Session): Promise<unknown> }
+  /** The session READ port (migration M1.3): /sessions, /resume, /search
+   * and the title batches go through the port, never ctx directly. */
+  readonly sessionReader: SessionReader
   /** The ONE exit orchestration (flush with a hard timeout, cleanup, warn,
    * resume hint, process exit) — shared by Ctrl+C/Ctrl+D, /exit and /quit.
    * Command handlers must NEVER stop the app, flush or exit themselves. */
@@ -1516,21 +1517,10 @@ export function registerTuiCommands(
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
     const currentId = runner.liveAgent?.session.id
-    const persistence = ctx.get('sessionPersistence')
-    if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
-    // Live-preferred listing (sessionQuery) marks sessions currently
-    // loaded in the store; the persistence fallback is the plain list.
-    // The engine is read structurally off the context (no package
-    // import): `dsh-base` mounts it in every profile.
-    const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-    let rows: SessionPickerRow[]
-    if (query !== undefined) {
-      rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
-    } else {
-      rows = (await persistence.list()).map(header =>
-        headerToPickerRow(header, header.id === currentId))
-    }
-    rows.sort((a, b) => b.createdAt - a.createdAt)
+    // The session READ port (migration M1.3): live-preferred listing with
+    // the persistence fallback lives in the Direct adapter, never here.
+    const rows = await runner.sessionReader.list(currentId)
+    if (rows === undefined) return { kind: 'error', text: 'session persistence unavailable' }
     if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
     // The picker opens instantly on the headers; titles land in the
     // background below. The cap keeps the TITLE read bounded — the category
@@ -1582,7 +1572,7 @@ export function registerTuiCommands(
     // instead of being swallowed.
     detach('session titles', async () => {
       const loadBatch = async (batch: SessionPickerRow[]): Promise<void> => {
-        const titles = await loadSessionTitleBatch(query, persistence, dshHome(process.env), batch, signal)
+        const titles = await runner.sessionReader.titles(batch, signal)
         if (titles.size === 0) return
         for (const [id, title] of titles) titlesById.set(id, title)
         picker.refresh?.()
@@ -1610,17 +1600,8 @@ export function registerTuiCommands(
           // Direct resume: exact id, a session- prefixed prefix, or the short
           // id prefix. Falls back to the picker when nothing matches.
           const currentId = runner.liveAgent?.session.id
-          const persistence = ctx.get('sessionPersistence')
-          if (persistence !== undefined) {
-            const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-            let rows: SessionPickerRow[]
-            if (query !== undefined) {
-              rows = (await query.listSessions()).map(record => headerToPickerRow(record.header, record.live))
-            } else {
-              rows = (await persistence.list()).map(header =>
-                headerToPickerRow(header, header.id === currentId))
-            }
-            rows.sort((a, b) => b.createdAt - a.createdAt)
+          const rows = await runner.sessionReader.list(currentId)
+          if (rows !== undefined) {
             const match = findSessionMatch(rows, raw)
             if (match !== undefined) {
               if (match.id === currentId) return { kind: 'error', text: 'already on this session' }
@@ -2409,30 +2390,12 @@ export function registerTuiCommands(
     input: { hint: '<query>' },
     handler: async (invocation) => {
       const currentId = runner.liveAgent?.session.id
-      const persistence = ctx.get('sessionPersistence')
-      if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
       const query = invocation.rawInput.trim()
       if (query === '') return { kind: 'error', text: 'search needs a query' }
-      const needle = query.toLowerCase()
-      const headers = (await persistence.list())
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .slice(0, 100)
-      const hits: { id: string; createdAt: number; snippet: string }[] = []
-      for (const header of headers) {
-        let raw: { content: string } | undefined
-        try {
-          raw = await persistence.readRaw(header.id)
-        } catch {
-          continue
-        }
-        if (raw === undefined) continue
-        const index = raw.content.toLowerCase().indexOf(needle)
-        if (index === -1) continue
-        const start = Math.max(0, index - 40)
-        const snippet = raw.content.slice(start, index + query.length + 40).replace(/\s+/g, ' ').trim()
-        hits.push({ id: header.id, createdAt: header.createdAt, snippet })
-        if (hits.length >= 20) break
-      }
+      // The session READ port (migration M1.3): the bounded content scan
+      // lives in the Direct adapter, never here.
+      const hits = await runner.sessionReader.search(query)
+      if (hits === undefined) return { kind: 'error', text: 'session persistence unavailable' }
       if (hits.length === 0) return { kind: 'success', text: `no persisted session contains "${query}"` }
       const now = Date.now()
       app.openPicker(

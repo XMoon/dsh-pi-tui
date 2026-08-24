@@ -128,6 +128,11 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     tuiSettings: settings.value,
     agents: {} as never,
     sessions: { flush: async () => {} },
+    sessionReader: {
+      list: async () => [],
+      search: async () => [],
+      titles: async () => new Map(),
+    },
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: new DraftImageStore(),

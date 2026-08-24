@@ -30,9 +30,15 @@ test('the Direct backend is the current production surface and serves every capa
   const subagent: SubagentPort = {
     followup: async () => ({ kind: 'rejected', reason: { kind: 'unavailable' } }),
   }
-  const backend = createDirectBackend(subagent)
+  const sessionReader = {
+    list: async () => [],
+    search: async () => [],
+    titles: async () => new Map(),
+  }
+  const backend = createDirectBackend(subagent, sessionReader)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
+  assert.equal(backend.sessionReader, sessionReader)
   for (const capability of CAPABILITIES) {
     assert.ok(backend.capabilities.has(capability), `direct serves ${capability}`)
   }

@@ -12,6 +12,7 @@
 
 import { CAPABILITIES, type CapabilitySet } from './capability.ts'
 import type { SubagentPort } from './subagent-port.ts'
+import type { SessionReader } from './session-reader-port.ts'
 
 /** The transport backends the TUI can run on. `direct` is the only one
  * today; the migration adds opt-in backends milestone by milestone. */
@@ -24,15 +25,18 @@ export interface Backend {
   readonly capabilities: CapabilitySet
   /** The subagent domain port (M1.2; more ports join in later cuts). */
   readonly subagent: SubagentPort
+  /** The session READ domain port (M1.3). */
+  readonly sessionReader: SessionReader
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
  * The runner depends on the returned `Backend`, never on `ctx.*` directly
  * for the ported domains. */
-export function createDirectBackend(subagent: SubagentPort): Backend {
+export function createDirectBackend(subagent: SubagentPort, sessionReader: SessionReader): Backend {
   return {
     kind: 'direct',
     capabilities: new Set(CAPABILITIES),
     subagent,
+    sessionReader,
   }
 }

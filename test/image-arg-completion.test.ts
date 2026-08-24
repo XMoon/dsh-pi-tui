@@ -62,6 +62,11 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     tuiSettings: undefined,
     agents: {} as never,
     sessions: { flush: async () => {} },
+    sessionReader: {
+      list: async () => [],
+      search: async () => [],
+      titles: async () => new Map(),
+    },
     cwd: root,
     sessionCwd: () => root,
     imageStore: store,

@@ -613,6 +613,11 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     tuiSettings: undefined,
     agents: {} as never,
     sessions: { flush: async () => {} },
+    sessionReader: {
+      list: async () => [],
+      search: async () => [],
+      titles: async () => new Map(),
+    },
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: new DraftImageStore(),
