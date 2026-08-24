@@ -613,3 +613,59 @@ test('S17: a knownCwds resolver update between pages recovers pending rows', asy
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('S18: a newer occurrence found on a later page is re-reported (cross-page replacement)', async () => {
+  const home = tempHome()
+  try {
+    // File A (newest mtime) holds 'shared' at ts=1; file B (older mtime)
+    // holds the same content at ts=100. Page 1 reports A's occurrence;
+    // page 2 finds the NEWER one — the replacement must be re-reported so
+    // the merged pages, re-deduped, equal the full-scan (newest-wins) set.
+    writeV2(home, '/a', [{ content: 'shared', ts: 1 }])
+    writeV2(home, '/b', [{ content: 'shared', ts: 100 }])
+    const bFile = historyFilePath(home, '/b')
+    const { utimesSync } = await import('node:fs')
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(bFile, old, old) // /b is the OLDER mtime — scanned second
+    const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 1 })
+    const request = { scope: 'all' as const, cwd: '/nowhere', query: '', limit: 100 }
+    const page1 = await src.search(request)
+    assert.equal(page1.results.length, 1)
+    assert.equal(page1.results[0]?.ts, 1, 'page 1 reports file A\'s occurrence')
+    assert.ok(page1.continuation !== undefined)
+    const page2 = await src.search(request, page1.continuation)
+    const merged = [...page1.results, ...page2.results]
+    const winner = merged
+      .filter(row => row.content === 'shared')
+      .sort((a, b) => (b.ts ?? -1) - (a.ts ?? -1))[0]
+    assert.equal(winner?.ts, 100, 'the newest occurrence wins in the merged set')
+    assert.equal(page2.exhausted, true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S19: a fresh continuation file (exact budget boundary) still gets its knownCwds proof', async () => {
+  const home = tempHome()
+  try {
+    // File A (100 v2 rows) is fully scanned exactly at the budget; the
+    // continuation's first file is the unscanned legacy-only file B, whose
+    // cwd is known via the resolver — its rows must NOT be discarded.
+    writeV2(home, '/a', Array.from({ length: 100 }, (_, i) => ({ content: `a-${i}`, ts: i })))
+    writeV1(home, '/b', Array.from({ length: 50 }, (_, i) => `legacy-${i}`))
+    const known = new Map<string, string>()
+    known.set(historyFilePath(home, '/b').split('/').pop()!.replace(/\.jsonl$/, ''), '/b')
+    const src = new FileHistorySearchSource({ dshHome: home, knownCwds: known, scanLimit: 100 })
+    const request = { scope: 'all' as const, cwd: '/nowhere', query: '', limit: 1000 }
+    const page1 = await src.search(request)
+    assert.equal(page1.exhausted, false)
+    assert.ok(page1.continuation !== undefined)
+    const page2 = await src.search(request, page1.continuation)
+    const legacy = page2.results.filter(row => row.content.startsWith('legacy-'))
+    assert.equal(legacy.length, 50, 'the fresh continuation file is recovered via knownCwds')
+    assert.ok(legacy.every(row => row.cwd === '/b'), 'the recovered rows carry the proven cwd')
+    assert.equal(page2.exhausted, true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})

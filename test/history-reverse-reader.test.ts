@@ -170,6 +170,61 @@ test('an empty file is exhausted immediately', async () => {
   }
 })
 
+test('blank lines survive chunk boundaries (the scan===0 empty-line case)', async () => {
+  // 'a\n\nb': the empty line between the two newlines spans the chunk
+  // boundary at byte 2 — it must not be lost.
+  const { file, dir } = tempFile('a\n\nb')
+  try {
+    const lines = await readAll(file, { chunkBytes: 2 })
+    assert.deepEqual(lines.map(line => line.text), ['b', '', 'a'])
+    const blank = lines[1]!
+    assert.equal(blank.byteStart, 2)
+    assert.equal(blank.byteEnd, 2)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a newlines-only file yields its blank lines', async () => {
+  const { file, dir } = tempFile('\n\n')
+  try {
+    const lines = await readAll(file)
+    assert.deepEqual(lines.map(line => line.text), ['', ''])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('intra-search batches tolerate a concurrent append (snapshot semantics)', async () => {
+  const { file, dir } = tempFile('a\nb\nc\n')
+  try {
+    const first = await readJsonlReverseBatch(file, { maxRows: 1, chunkBytes: 64 })
+    assert.equal(first.eof, false)
+    // A concurrent append between batches of the SAME search: the scan
+    // continues from the snapshot boundary and the appended row is simply
+    // not part of this generation (verifyRevision is false intra-search).
+    writeFileSync(file, 'a\nb\nc\nd\n')
+    const second = await readJsonlReverseBatch(file, {
+      cursor: first.nextCursor,
+      maxRows: 1,
+      chunkBytes: 64,
+      verifyRevision: false,
+    })
+    assert.equal(second.lines.length, 1)
+    assert.equal(second.lines[0]?.text, 'b')
+    const third = await readJsonlReverseBatch(file, {
+      cursor: second.nextCursor,
+      maxRows: 1,
+      chunkBytes: 64,
+      verifyRevision: false,
+    })
+    assert.equal(third.lines[0]?.text, 'a')
+    assert.equal(third.eof, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('abort stops the scan with an AbortError', async () => {
   const rows = Array.from({ length: 2000 }, (_, i) => `row-${i}`)
   const { file, dir } = tempFile(rows.join('\n') + '\n')

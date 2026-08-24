@@ -272,9 +272,17 @@ export class FileHistorySearchSource implements HistorySearchSource {
     const map = continuation !== undefined
       ? new Map(continuation.seen)
       : new Map<string, HistorySearchResult>()
-    const newKeys: string[] = []
+    // Keys added OR replaced by this call (a Set: a key replaced several
+    // times within one call is reported once, with its current value).
+    const newKeys = new Set<string>()
     const carriedOverflow = continuation?.overflow ?? []
     let cursor: ReverseJsonlCursor | undefined = continuation?.cursor
+    // The revision check applies only when the cursor crosses a SEARCH
+    // boundary (a continuation from an earlier call). Intra-search batches
+    // share the first batch's snapshot: a concurrent append between them
+    // must not abort the scan (the plan's snapshot contract — the scan
+    // only moves backwards from the snapshot size).
+    let verifyRevision = continuation !== undefined
     let scanned = 0
     let fileIndex = 0
     // Per-file cwd state, restored from the continuation for the partially
@@ -284,20 +292,25 @@ export class FileHistorySearchSource implements HistorySearchSource {
     let fileProof: string | null = continuation !== undefined
       ? continuation.fileProof
       : scope === 'all' ? this.knownCwdFor(files[0]?.path ?? '') : null
-    if (continuation !== undefined && scope === 'all' && fileProof === null && pending.length > 0) {
+    if (continuation !== undefined && scope === 'all' && fileProof === null) {
       // The knownCwds resolver is read on EVERY search (never a startup
-      // snapshot): a cwd learned between pages must recover the pending
-      // rows immediately, before the scan resumes.
+      // snapshot): a cwd learned between pages must apply to the first
+      // continuation file immediately — whether it holds pending rows from
+      // an earlier page (flush them with the fresh proof) or is a fresh
+      // file the previous page finished at the budget boundary (its rows
+      // need the proof from the very first line).
       const first = files[0]
       if (first !== undefined) {
         const known = this.knownCwdFor(first.path)
         if (known !== null) {
           fileProof = known
-          for (const held of pending) {
-            if (!matchesQuery(held.record.content, request.query)) continue
-            this.mergeResult(map, newKeys, this.buildResult(first.path, held.record, fileProof, held.byteStart), scope)
+          if (pending.length > 0) {
+            for (const held of pending) {
+              if (!matchesQuery(held.record.content, request.query)) continue
+              this.mergeResult(map, newKeys, this.buildResult(first.path, held.record, fileProof, held.byteStart), scope)
+            }
+            pending = []
           }
-          pending = []
         }
       }
     }
@@ -307,7 +320,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
       // Empty-query early exit: this call already has enough reportable
       // results (carried overflow + new keys — per call, so a continuation
       // page never stalls on the already-full dedupe state).
-      if (request.query === '' && carriedOverflow.length + newKeys.length >= request.limit) break
+      if (request.query === '' && carriedOverflow.length + newKeys.size >= request.limit) break
       const file = files[fileIndex]!
       if (fileIndex > 0) {
         // A fresh file: reset the per-file cwd state.
@@ -329,7 +342,9 @@ export class FileHistorySearchSource implements HistorySearchSource {
             maxRows: Math.min(128, remaining),
             chunkBytes: this.readChunkBytes,
             signal: request.signal,
+            verifyRevision,
           })
+          verifyRevision = false
           if (stats !== undefined) {
             stats.bytesRead += batch.bytesRead
             stats.physicalLinesScanned += batch.lines.length
@@ -350,7 +365,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
             break
           }
           cursor = batch.nextCursor
-          if (request.query === '' && carriedOverflow.length + newKeys.length >= request.limit) break outer
+          if (request.query === '' && carriedOverflow.length + newKeys.size >= request.limit) break outer
         }
       } catch (error) {
         if (isAbortError(error)) return emptyPage()
@@ -377,10 +392,22 @@ export class FileHistorySearchSource implements HistorySearchSource {
     // The page reports the carried overflow plus this call's new matches,
     // sorted and sliced to the limit; the tail becomes the next page's
     // overflow (drained by ts, so "Search older" never skips a match).
-    const combined = [...carriedOverflow, ...newKeys.map(key => map.get(key)!)]
+    // The combined set is deduped by key (newest wins): a key replaced by
+    // a newer occurrence found on this page is reported with the NEW
+    // value, and a superseded occurrence carried in the overflow is
+    // dropped — the merged pages, re-deduped, equal the full-scan result.
+    const combined = [...carriedOverflow, ...[...newKeys].map(key => map.get(key)!)]
       .sort(compareResults)
-    const results = combined.slice(0, request.limit)
-    const overflow = combined.slice(request.limit)
+    const deduped: HistorySearchResult[] = []
+    const combinedKeys = new Set<string>()
+    for (const row of combined) {
+      const key = scope === 'current' ? row.content : `${row.cwd ?? ''}\0${row.content}`
+      if (combinedKeys.has(key)) continue
+      combinedKeys.add(key)
+      deduped.push(row)
+    }
+    const results = deduped.slice(0, request.limit)
+    const overflow = deduped.slice(request.limit)
     const exhausted = fileIndex >= files.length && overflow.length === 0
     return {
       results,
@@ -459,7 +486,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     fileProof: string | null,
     pending: HistorySearchPendingRow[],
     map: Map<string, HistorySearchResult>,
-    newKeys: string[],
+    newKeys: Set<string>,
   ): string | null {
     if (record.version === 2 && record.cwd !== null && historyFilePath(this.dshHome, record.cwd) === file) {
       if (request.scope === 'all' && fileProof === null) {
@@ -505,12 +532,12 @@ export class FileHistorySearchSource implements HistorySearchSource {
 
   /** Incremental dedupe: keep the NEWEST occurrence per key (compareResults
    * is the beats predicate — the same winner the final sort would pick).
-   * A key is reported as new only the first time it enters the map, so a
-   * continuation page never re-reports rows a previous page already
-   * returned. */
+   * A key is reported when it first enters the map AND when a later page
+   * finds a newer occurrence (the replacement is re-reported with its new
+   * value, so the merged pages, re-deduped, equal the full-scan result). */
   private mergeResult(
     map: Map<string, HistorySearchResult>,
-    newKeys: string[],
+    newKeys: Set<string>,
     result: HistorySearchResult,
     scope: HistoryScope,
   ): void {
@@ -518,9 +545,10 @@ export class FileHistorySearchSource implements HistorySearchSource {
     const existing = map.get(key)
     if (existing === undefined) {
       map.set(key, result)
-      newKeys.push(key)
+      newKeys.add(key)
     } else if (compareResults(result, existing) < 0) {
       map.set(key, result)
+      newKeys.add(key)
     }
   }
 
