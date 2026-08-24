@@ -187,12 +187,13 @@ interface MutableTurnActivity {
   thinkingTail: string
   /** The materialized Think slot (latest meaningful line). */
   think?: { text: string }
-  /** The streaming assistant text of the CURRENT step (bounded tail),
-   * with the authoritative settled text once assistant/message lands. */
+  /** The streaming assistant text of the CURRENT step (bounded tail —
+   * the authoritative settled text replaces the tail once
+   * assistant/message lands; never a second full copy of the output,
+   * plan §34). */
   messageCandidate?: {
     step: number
     tail: string
-    settledText?: string
   }
   /** An earlier candidate confirmed as an intermediate message (by a
    * later tool/call, a later step, or later output). */
@@ -525,7 +526,7 @@ export class TranscriptFolder {
   private confirmMessageCandidate(activity: MutableTurnActivity): void {
     const candidate = activity.messageCandidate
     if (candidate === undefined) return
-    const text = candidate.settledText ?? candidate.tail
+    const text = candidate.tail
     if (text !== '') {
       // The bounded TAIL (never the head): the preview shows the message's
       // LATEST content, so a long intermediate message confirmed by a
@@ -541,7 +542,7 @@ export class TranscriptFolder {
    * line, bounded. */
   private syncMessage(activity: MutableTurnActivity): void {
     const candidate = activity.messageCandidate
-    const candidateText = candidate === undefined ? undefined : (candidate.settledText ?? candidate.tail)
+    const candidateText = candidate?.tail
     const text = candidateText ?? activity.messageConfirmed
     const line = text === undefined ? undefined : latestLine(text).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
     activity.message = line === undefined || line === '' ? undefined : { text: line }
@@ -1010,7 +1011,9 @@ export class TranscriptFolder {
         activity.lastAssistantStep = event.data.step
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step === event.data.step) {
-          candidate.settledText = text
+          // The authoritative text replaces the streaming tail — bounded
+          // to the tail cap, never a second full copy of the assistant
+          // output (plan §34 — the transcript entry owns the full text).
           candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
         } else if (text !== '') {
           // A settled message without a prior candidate (replay edge): the
@@ -1020,7 +1023,6 @@ export class TranscriptFolder {
           activity.messageCandidate = {
             step: event.data.step,
             tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
-            settledText: text,
           }
         }
         this.syncMessage(activity)
