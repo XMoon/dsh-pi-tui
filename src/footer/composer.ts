@@ -217,6 +217,22 @@ function renderInstruction(instruction: FooterInstructionLike): string {
   return renderSpans(instruction.text)
 }
 
+/** M5: merge the Host instruction onto a COMMAND surface (the command owns
+ * the Status Surface; the instruction still occupies the last row slot —
+ * it replaces the second command row when present, appends otherwise, and
+ * is never user-hideable). */
+export function mergeCommandSurface(
+  rows: readonly string[],
+  instruction: FooterInstructionLike | undefined,
+  width: number,
+): string {
+  if (instruction === undefined) return rows.join('\n')
+  const wrapped = wrapTextWithAnsi(renderInstruction(instruction), width)
+  const instructionRow = wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, width) : wrapped[0]!
+  const merged = rows.length > 1 ? [...rows.slice(0, -1), instructionRow] : [...rows, instructionRow]
+  return merged.join('\n')
+}
+
 /** Force a visible `…` on a wrapped row that still has hidden content
  * behind it (the legacy capRowWithEllipsis). At width 1 the ellipsis
  * alone fills the row (the legacy `max(1, width-1)` produced a 2-cell

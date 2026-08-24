@@ -93,6 +93,8 @@ import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
+import { FooterCommandRunner } from './footer/command-runner.ts'
+import { resolveTrustedFooterCommand, type SettingsDescriptorLike } from './footer/command-trust.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -1450,6 +1452,16 @@ export function apply(ctx: Context, config: Config): void {
             }),
           })),
         }),
+        // M5: the trusted command status-line config (the command is
+        // executed ONLY when it lives in the USER layer — see
+        // resolveTrustedFooterCommand).
+        footerCommand: z.object({
+          schemaVersion: z.const(1),
+          command: z.string(),
+          timeoutMs: z.number(),
+          refreshIntervalMs: z.number(),
+          maxRows: z.number(),
+        }),
         fullscreen: z.string(),
         // Busy-Enter delivery mode for plain Enter while the agent is
         // running (web busyEnter parity): 'queue' (default) or 'steer'.
@@ -1485,7 +1497,7 @@ export function apply(ctx: Context, config: Config): void {
       // The base layout is the builtin default; the schemastery output
       // type is fully-populated, so the cast bridges the sparse literal
       // (the runtime validation accepts missing optional fields).
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerLayout: DEFAULT_FOOTER_LAYOUT as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
@@ -4426,6 +4438,9 @@ export function apply(ctx: Context, config: Config): void {
       // M0: the unified status projection store (the app projects its own
       // surface state into it; the runner derives the DSH-owned sections).
       statusStore,
+      // M5: a material width change refreshes the command surface (the
+      // runner coalesces to its interval).
+      onTerminalResize: () => footerCommandRunner?.requestRefresh(),
       // Issue #7: the fullscreen drag selection copies through the SAME
       // shared policy as /copy (tmux → platform helper → OSC 52) — a bare
       // OSC 52 write is a silent lie under tmux `set-clipboard external`.
@@ -4885,9 +4900,57 @@ export function apply(ctx: Context, config: Config): void {
     // compact layout, `custom` parses footerLayout (fail-soft: an invalid
     // config warns ONCE and falls back to the default — the TUI always
     // starts). Never writes the document back on a read-only migration.
+    // M5: `command` arms the trusted command surface (the trust gate reads
+    // the USER layer only — a project-supplied config is refused).
     let footerWarningShown = false
+    let footerCommandRunner: FooterCommandRunner | undefined
+    let footerCommandUnsubscribe: (() => void) | undefined
+    const disableFooterCommand = (): void => {
+      footerCommandUnsubscribe?.()
+      footerCommandUnsubscribe = undefined
+      footerCommandRunner?.dispose()
+      footerCommandRunner = undefined
+      app.setFooterCommandRows(undefined)
+    }
     const applyFooterSettings = (doc: { footer: string; footerLayout?: unknown } | undefined): void => {
       if (doc === undefined) return
+      if (doc.footer === 'command') {
+        // The trust gate: the command must live in the USER layer of the
+        // settings descriptor (never the merged/project value).
+        const settingsService = ctx.get('settings')
+        const descriptors = settingsService?.describe?.() as readonly SettingsDescriptorLike[] | undefined
+        const config = resolveTrustedFooterCommand(descriptors, settingsNamespace('dsh-pi-tui') as unknown as string)
+        if (config === undefined) {
+          disableFooterCommand()
+          if (!footerWarningShown) {
+            footerWarningShown = true
+            app.notify('footer command is not user-configured — using the native layout', 'error')
+          }
+          app.setFooterPreset('full')
+          app.setFooterLayout(undefined)
+          return
+        }
+        if (footerCommandRunner === undefined) {
+          footerCommandRunner = new FooterCommandRunner({
+            config,
+            snapshot: () => statusStore.snapshot(),
+            width: () => app.getTerminalWidth(),
+            height: () => app.getTerminalHeight(),
+            onOutput: (rows) => app.setFooterCommandRows(rows),
+            onNotifyOnce: (message) => app.notify(message, 'error'),
+            signal,
+          })
+          // Status changes refresh the command (coalesced to its interval).
+          footerCommandUnsubscribe = statusStore.subscribe(() => footerCommandRunner?.requestRefresh())
+        } else {
+          footerCommandRunner.setConfig(config)
+        }
+        app.setFooterPreset('full')
+        app.setFooterLayout(undefined)
+        footerCommandRunner.requestRefresh()
+        return
+      }
+      disableFooterCommand()
       if (doc.footer === 'compact') {
         app.setFooterPreset('compact')
         app.setFooterLayout(undefined)
