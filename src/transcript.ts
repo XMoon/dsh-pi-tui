@@ -1031,18 +1031,22 @@ export class TranscriptFolder {
           // followed the text) and it is still the LATEST confirmed: the
           // authoritative message updates the confirmed text IN PLACE —
           // never a stale streamed fragment, never a resurrected
-          // candidate (review finding).
-          if (text !== '') {
-            activity.messageConfirmed = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
-          }
+          // candidate (review finding). An EMPTY authoritative text
+          // clears the confirmed text (the slot shows nothing — the stale
+          // streamed fragment must not survive).
+          activity.messageConfirmed = text === ''
+            ? undefined
+            : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
         } else if (activity.confirmedSteps.has(event.data.step)) {
           // A late message for an OLDER confirmed step: the slot already
           // shows a newer intermediate — ignore it entirely.
-        } else if (text !== '') {
+        } else if (text !== '' && !activity.completed) {
           // A settled message without a prior candidate (replay edge): the
           // authoritative text IS the step's output — it becomes the
           // candidate so a later continuation still confirms it as an
           // intermediate message (the LATEST intermediate wins, plan §5.6).
+          // After turn/end the final was already resolved: a late message
+          // must never resurrect a candidate (review finding).
           activity.messageCandidate = {
             step: event.data.step,
             tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
