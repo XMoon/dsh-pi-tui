@@ -28,6 +28,7 @@
  */
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { formatTokens, StepUsageAccumulator, type UsageLike } from './token-usage.ts'
 
 /** Aggregated session statistics. */
 export interface SessionStats {
@@ -73,15 +74,10 @@ function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
 }
 
-/** Usage shape the fold accepts (the dsh TokenUsage's accounting fields). */
-interface UsageLike {
-  inputTokens: number
-  outputTokens: number
-  cacheReadTokens?: number
-  cacheWriteTokens?: number
-}
-
-/** One step's timing/usage accumulation, resolved at its boundaries. */
+/** One step's timing accumulation, resolved at its boundaries. The usage
+ * field feeds the decode-throughput sampling (settleStep); the token
+ * ACCOUNTING itself lives in the shared {@link StepUsageAccumulator}, so
+ * the footer and the Focus per-turn projection can never drift. */
 interface StepTiming {
   start?: number
   firstDelta?: number
@@ -128,12 +124,14 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   const stats: SessionStats = { ...EMPTY }
   const perStep = new Map<string, StepTiming>()
   const throughput: Throughput = { outputMs: [], decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
+  const usage = new StepUsageAccumulator()
   let lastTurn: number | undefined
 
   for (const event of events) {
     switch (event.type) {
       case 'step/start':
         perStep.set(stepKey(event.data.turn, event.data.step), { start: event.time })
+        usage.onStepStart(event.data.turn, event.data.step)
         break
       case 'step/end': {
         // The projection counts turns/steps here (unique turns) and discards
@@ -144,12 +142,7 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
           lastTurn = event.data.turn
         }
         stats.steps += 1
-        const key = stepKey(event.data.turn, event.data.step)
-        const timing = perStep.get(key)
-        if (timing !== undefined) {
-          if (timing.usage !== undefined) addUsage(stats, timing.usage)
-          perStep.delete(key)
-        }
+        usage.onStepEnd(event.data.turn, event.data.step)
         break
       }
       case 'assistant/chunk': {
@@ -157,13 +150,11 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         if (chunk.type === 'usage') {
           // Streaming usage is provisional: assistant/message carries the same
           // value and replaces it at settle, so it is counted exactly once.
+          usage.onUsageChunk(event.data.turn, event.data.step, chunk.usage)
           const key = stepKey(event.data.turn, event.data.step)
           const timing = perStep.get(key)
           if (timing !== undefined) {
             if (timing.usage === undefined) timing.usage = chunk.usage
-          } else {
-            // A usage chunk without a step boundary (replay edge): count once.
-            addUsage(stats, chunk.usage)
           }
         } else if (isTokenDelta(chunk)) {
           // The FIRST token delta of the step stamps the decode-window start
@@ -185,10 +176,8 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
           timing.completed = event.time
           if (event.data.usage !== undefined) timing.usage = event.data.usage
           settleStep(stats, timing, throughput)
-        } else if (event.data.usage !== undefined) {
-          // A message without a step boundary (replay edge): count once.
-          addUsage(stats, event.data.usage)
         }
+        usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
         break
       }
       case 'request/context': {
@@ -203,6 +192,11 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   if (throughput.firstTokenCount > 0) stats.firstTokenMsAvg = throughput.firstTokenTotal / throughput.firstTokenCount
   const streamMs = throughput.outputMs.reduce((sum, ms) => sum + ms, 0)
   if (streamMs > 0) stats.tokensPerSec = Math.round((throughput.decodeTokens * 1000) / streamMs)
+  const totals = usage.sessionTotals()
+  stats.inputTokens = totals.inputTokens
+  stats.outputTokens = totals.outputTokens
+  stats.cacheReadTokens = totals.cacheReadTokens
+  stats.cacheWriteTokens = totals.cacheWriteTokens
   const billedInput = stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens
   if (billedInput > 0) stats.cacheHitPct = (stats.cacheReadTokens * 100) / billedInput
   return stats
@@ -250,6 +244,8 @@ export class StatsFolder {
   private readonly stats: SessionStats = { ...EMPTY }
   private readonly perStep = new Map<string, StepTiming>()
   private readonly throughput: Throughput = { outputMs: [], decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
+  /** The shared per-step usage accounting (same class as the Focus fold). */
+  private readonly usage = new StepUsageAccumulator()
   private lastTurn: number | undefined
 
   /**
@@ -266,6 +262,11 @@ export class StatsFolder {
     if (this.throughput.firstTokenCount > 0) derived.firstTokenMsAvg = this.throughput.firstTokenTotal / this.throughput.firstTokenCount
     const streamMs = this.throughput.outputMs.reduce((sum, ms) => sum + ms, 0)
     if (streamMs > 0) derived.tokensPerSec = Math.round((this.throughput.decodeTokens * 1000) / streamMs)
+    const totals = this.usage.sessionTotals()
+    derived.inputTokens = totals.inputTokens
+    derived.outputTokens = totals.outputTokens
+    derived.cacheReadTokens = totals.cacheReadTokens
+    derived.cacheWriteTokens = totals.cacheWriteTokens
     const billedInput = derived.inputTokens + derived.cacheReadTokens + derived.cacheWriteTokens
     if (billedInput > 0) derived.cacheHitPct = (derived.cacheReadTokens * 100) / billedInput
     return derived
@@ -275,6 +276,7 @@ export class StatsFolder {
     switch (event.type) {
       case 'step/start':
         this.perStep.set(stepKey(event.data.turn, event.data.step), { start: event.time })
+        this.usage.onStepStart(event.data.turn, event.data.step)
         break
       case 'step/end': {
         if (this.lastTurn !== event.data.turn) {
@@ -282,23 +284,17 @@ export class StatsFolder {
           this.lastTurn = event.data.turn
         }
         this.stats.steps += 1
-        const key = stepKey(event.data.turn, event.data.step)
-        const timing = this.perStep.get(key)
-        if (timing !== undefined) {
-          if (timing.usage !== undefined) addUsage(this.stats, timing.usage)
-          this.perStep.delete(key)
-        }
+        this.usage.onStepEnd(event.data.turn, event.data.step)
         break
       }
       case 'assistant/chunk': {
         const { chunk } = event.data
         if (chunk.type === 'usage') {
+          this.usage.onUsageChunk(event.data.turn, event.data.step, chunk.usage)
           const key = stepKey(event.data.turn, event.data.step)
           const timing = this.perStep.get(key)
           if (timing !== undefined) {
             if (timing.usage === undefined) timing.usage = chunk.usage
-          } else {
-            addUsage(this.stats, chunk.usage)
           }
         } else if (isTokenDelta(chunk)) {
           const timing = this.perStep.get(stepKey(event.data.turn, event.data.step))
@@ -315,9 +311,8 @@ export class StatsFolder {
           timing.completed = event.time
           if (event.data.usage !== undefined) timing.usage = event.data.usage
           settleStep(this.stats, timing, this.throughput)
-        } else if (event.data.usage !== undefined) {
-          addUsage(this.stats, event.data.usage)
         }
+        this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
         break
       }
       case 'request/context': {
@@ -334,15 +329,6 @@ export class StatsFolder {
 function trimDecimal(value: number): string {
   const text = value.toFixed(1)
   return text.endsWith('.0') ? text.slice(0, -2) : text
-}
-
-/** Format a token count with pi.s footer rules: 1.5k, 190k, 1.0M, 86M. */
-export function formatTokens(count: number): string {
-  if (count < 1000) return String(count)
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`
-  if (count < 1_000_000) return `${Math.round(count / 1000)}k`
-  if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`
-  return `${Math.round(count / 1_000_000)}M`
 }
 
 /** Format seconds with one decimal ("8.1s"). */
