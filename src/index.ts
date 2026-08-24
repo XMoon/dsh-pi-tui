@@ -3602,13 +3602,20 @@ export function apply(ctx: Context, config: Config): void {
         SESSIONLESS_COMMANDS.has(parsed.name)
         || (extensionService?.commands.isSessionless(parsed.name, SESSIONLESS_COMMANDS) ?? false)
       )
-      if (parsed !== undefined && liveAgent === undefined && isSessionless) {
-        // A truly sessionless command: no session exists (and none is
-        // created) — the row persists with `sessionId: undefined` inside
-        // runLocalCommand (its fallback path goes through the
-        // deferred-start gate instead, so an unknown "sessionless" command
-        // that creates a session still carries the final session id).
-        runLocalCommand(parsed, text, persistHistory)
+      if (parsed !== undefined && isSessionless) {
+        // A recognized sessionless command: its history row is sessionless
+        // — it must NEVER appear in Current session, whether or not a
+        // session exists. Without a live agent it runs locally (and
+        // creates none; its fallback path goes through the deferred-start
+        // gate instead, so an unknown "sessionless" command that creates a
+        // session still carries the final session id). With a live agent
+        // it dispatches through the session's command service, but the
+        // persist closure still supplies undefined.
+        if (liveAgent === undefined) {
+          runLocalCommand(parsed, text, persistHistory)
+        } else {
+          dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id)))
+        }
         return
       }
       // Busy-Enter preference (web busyEnter parity): while the agent is

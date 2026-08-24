@@ -155,6 +155,40 @@ test('a steered draft persists with the LIVE session id (Ctrl+S / steer-draft)',
   }
 })
 
+test('a sessionless command with a LIVE session still persists sessionless (/help while a session exists)', async () => {
+  // Review finding: recognized sessionless commands must never appear in
+  // Current session — even when a live session exists (they dispatch
+  // through the session's command service, but their rows stay
+  // sessionless).
+  const home = tempHome()
+  try {
+    const cwd = '/work/a'
+    const file = historyFilePath(home, cwd)
+    // The runner's sessionless branch with a live agent: the persist
+    // closure always supplies undefined via the decision table, even
+    // though the dispatch gate resolves the live session id.
+    const persist = (sessionId: string | undefined): void => {
+      persistHistoryRecord({
+        content: '/help',
+        cwd,
+        sessionId: historySessionIdFor('sessionless', sessionId),
+        ts: 1,
+        lastContent: undefined,
+        hasImages: false,
+        file,
+      })
+    }
+    await persistAfterSession(async () => 'ses_live', persist)
+    const records = loadHistoryRecords(file)
+    assert.equal(records.length, 1)
+    assert.equal(records[0]?.sessionId, undefined,
+      'a sessionless command must not appear in Current session even with a live session')
+    assert.equal(records[0]?.content, '/help')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('the call-site decision table: agent-facing rows carry the session id, sessionless rows never do', () => {
   // The runner routes EVERY persist call through historySessionIdFor —
   // this table is the single source of truth for which submission kind
