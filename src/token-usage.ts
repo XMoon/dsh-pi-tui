@@ -1,0 +1,201 @@
+/**
+ * Shared per-step token usage accounting, used by BOTH the session stats
+ * fold (footer) and the Focus per-turn token projection. One accounting
+ * implementation, so the two surfaces can never drift:
+ *
+ * - usage is counted ONCE per step at step/end — the assistant/message
+ *   usage replaces the streaming `usage` chunk (both carry the same
+ *   assembler value; adding both would double the totals), and a step with
+ *   only a usage chunk still counts (the projection's tokenUsage is
+ *   step-keyed, not message-gated);
+ * - a usage fact without a step boundary (replay edge) counts immediately;
+ * - the per-turn DISPLAY total is committed completed steps PLUS the open
+ *   steps' current usage (provisional or authoritative) — provisional
+ *   values are never committed early, so an authoritative replacement
+ *   cannot double-count.
+ * @module @xmoon76/dsh-pi-tui/token-usage
+ */
+
+/** Usage shape the fold accepts (the dsh TokenUsage's accounting fields). */
+export interface UsageLike {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+}
+
+/** The four token totals of one turn or session. */
+export interface TokenUsageTotals {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+}
+
+/** The billed total: uncached input + cache read + cache write + output. */
+export function totalTokens(usage: TokenUsageTotals): number {
+  return usage.inputTokens
+    + usage.outputTokens
+    + usage.cacheReadTokens
+    + usage.cacheWriteTokens
+}
+
+/** A zeroed totals record (the accumulation base). */
+function emptyTotals(): TokenUsageTotals {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+}
+
+/** Add one usage record into a totals accumulator. */
+function addTotals(target: TokenUsageTotals, usage: UsageLike): void {
+  target.inputTokens += usage.inputTokens
+  target.outputTokens += usage.outputTokens
+  target.cacheReadTokens += usage.cacheReadTokens ?? 0
+  target.cacheWriteTokens += usage.cacheWriteTokens ?? 0
+}
+
+/** Key identifying one step's model output (turn + step). */
+function stepKey(turn: number, step: number): string {
+  return `${turn}/${step}`
+}
+
+/**
+ * Per-step usage accounting shared by the session stats fold and the Focus
+ * per-turn token projection. Feed it the same events in the same order and
+ * both surfaces read identical totals (the footer's session total is the
+ * sum of the per-turn committed totals plus orphan usage — the invariant
+ * that keeps `sum(per-turn) ≈ session` strict).
+ *
+ * Lifecycle: `onStepStart` opens a step; `onUsageChunk` records the first
+ * streaming usage (later chunks of the same step are ignored — the first
+ * assembler value wins); `onAssistantMessage` replaces it with the
+ * authoritative usage; `onStepEnd` commits the step's usage once and drops
+ * the open state. A usage fact with no open step counts immediately
+ * (replay edge).
+ */
+export class StepUsageAccumulator {
+  /** Open steps: their current usage (undefined = no usage fact yet). */
+  private readonly perStep = new Map<string, { usage?: UsageLike }>()
+  /** Committed per-turn totals (completed steps only). */
+  private readonly turnTotals = new Map<number, TokenUsageTotals>()
+  /** Open steps' current usage per turn (the running display share). */
+  private readonly turnPending = new Map<number, TokenUsageTotals>()
+  /** Usage facts without a step boundary (replay edge), counted once. */
+  private readonly orphan: TokenUsageTotals = emptyTotals()
+  /** The session-wide total (committed steps + orphan), kept O(1). */
+  private readonly session: TokenUsageTotals = emptyTotals()
+
+  /** Open one step's accounting. */
+  onStepStart(turn: number, step: number): void {
+    this.perStep.set(stepKey(turn, step), {})
+  }
+
+  /** Record a streaming usage chunk: the FIRST chunk of a step wins (the
+   * assembler value); a chunk without an open step counts immediately. */
+  onUsageChunk(turn: number, step: number, usage: UsageLike): void {
+    const entry = this.perStep.get(stepKey(turn, step))
+    if (entry !== undefined) {
+      if (entry.usage === undefined) {
+        entry.usage = usage
+        this.addPending(turn, usage)
+      }
+    } else {
+      this.addOrphan(usage)
+    }
+  }
+
+  /** The authoritative usage of a settled step replaces the provisional
+   * one (never adds to it). A message without an open step counts
+   * immediately. */
+  onAssistantMessage(turn: number, step: number, usage?: UsageLike): void {
+    const entry = this.perStep.get(stepKey(turn, step))
+    if (entry !== undefined) {
+      if (usage !== undefined) {
+        if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
+        entry.usage = usage
+        this.addPending(turn, usage)
+      }
+    } else if (usage !== undefined) {
+      this.addOrphan(usage)
+    }
+  }
+
+  /** Commit one step's usage (once) and drop its open state. */
+  onStepEnd(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const entry = this.perStep.get(key)
+    if (entry !== undefined) {
+      if (entry.usage !== undefined) {
+        this.subtractPending(turn, entry.usage)
+        addTotals(this.turnTotalFor(turn), entry.usage)
+        addTotals(this.session, entry.usage)
+      }
+      this.perStep.delete(key)
+    }
+  }
+
+  /** The committed per-turn totals (completed steps only); undefined when
+   * the turn has no committed usage fact. */
+  turnUsage(turn: number): TokenUsageTotals | undefined {
+    return this.turnTotals.get(turn)
+  }
+
+  /** The per-turn DISPLAY totals: committed steps plus the open steps'
+   * current usage (provisional or authoritative) — never double-counted.
+   * Undefined when the turn has no usage fact at all (the header then
+   * hides the token segment instead of showing `0 tok`). */
+  turnUsageWithPending(turn: number): TokenUsageTotals | undefined {
+    const committed = this.turnTotals.get(turn)
+    const pending = this.turnPending.get(turn)
+    if (committed === undefined && pending === undefined) return undefined
+    const totals = emptyTotals()
+    if (committed !== undefined) addTotals(totals, committed)
+    if (pending !== undefined) addTotals(totals, pending)
+    return totals
+  }
+
+  /** The session-wide totals (all committed steps + orphan usage). */
+  sessionTotals(): TokenUsageTotals {
+    return { ...this.session }
+  }
+
+  private turnTotalFor(turn: number): TokenUsageTotals {
+    let totals = this.turnTotals.get(turn)
+    if (totals === undefined) {
+      totals = emptyTotals()
+      this.turnTotals.set(turn, totals)
+    }
+    return totals
+  }
+
+  private addPending(turn: number, usage: UsageLike): void {
+    let pending = this.turnPending.get(turn)
+    if (pending === undefined) {
+      pending = emptyTotals()
+      this.turnPending.set(turn, pending)
+    }
+    addTotals(pending, usage)
+  }
+
+  private subtractPending(turn: number, usage: UsageLike): void {
+    const pending = this.turnPending.get(turn)
+    if (pending === undefined) return
+    pending.inputTokens -= usage.inputTokens
+    pending.outputTokens -= usage.outputTokens
+    pending.cacheReadTokens -= usage.cacheReadTokens ?? 0
+    pending.cacheWriteTokens -= usage.cacheWriteTokens ?? 0
+  }
+
+  private addOrphan(usage: UsageLike): void {
+    addTotals(this.orphan, usage)
+    addTotals(this.session, usage)
+  }
+}
+
+/** Format a token count with pi.s footer rules: 1.5k, 190k, 1.0M, 86M. */
+export function formatTokens(count: number): string {
+  if (count < 1000) return String(count)
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`
+  if (count < 1_000_000) return `${Math.round(count / 1000)}k`
+  if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`
+  return `${Math.round(count / 1_000_000)}M`
+}
