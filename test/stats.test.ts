@@ -252,6 +252,19 @@ test('tok/s samples only steps carrying both a decode window and usage', () => {
   // (6100→7000 window above proves it: last delta was at 6200).
 })
 
+test('a late fact for an OLDER turn is ignored after the turn advanced (no double count)', () => {
+  const acc = new StepUsageAccumulator()
+  acc.onStepStart(0, 0)
+  acc.onUsageChunk(0, 0, { inputTokens: 100, outputTokens: 0 })
+  acc.onStepEnd(0, 0)
+  acc.onStepStart(1, 0) // the turn advances; turn 0's records are dropped
+  // A late fact for turn 0's closed step must be ignored, never re-counted.
+  acc.onUsageChunk(0, 0, { inputTokens: 120, outputTokens: 0 })
+  acc.onAssistantMessage(0, 0, { inputTokens: 130, outputTokens: 0 })
+  assert.equal(acc.sessionTotals().inputTokens, 100, 'the stale older-turn facts must be ignored')
+  assert.equal(acc.turnUsageWithPending(0)?.inputTokens, 100, 'turn 0\'s committed total survives untouched')
+})
+
 test('the accumulator drops settled records of older turns (bounded lifecycle)', () => {
   const acc = new StepUsageAccumulator()
   acc.onStepStart(0, 0)
