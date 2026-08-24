@@ -3293,8 +3293,14 @@ export function apply(ctx: Context, config: Config): void {
      * already-steered input cannot be pulled back.
      * @param text - the submitted draft ('' allowed for Ctrl+S).
      * @param onlyDraft - busy-Enter mode: never read or remove the queue.
+     * @param persistHistory - the call site's persist closure (with its
+     * submission-time snapshot). Invoked AFTER the session exists with the
+     * FINAL session id — the deferred-start gate: Ctrl+S on a deferred
+     * start creates the session inside this flow, and a row written
+     * before creation would carry no sessionId and vanish from the Ctrl+R
+     * `Current session` scope. Absent, the steer persists nothing.
      */
-    const steerNow = (text: string, onlyDraft = false): void => {
+    const steerNow = (text: string, onlyDraft = false, persistHistory?: (sessionId: string | undefined) => void): void => {
       // The guard action is deliberately the Ctrl+S 'save' action (not
       // 'submit'): the busy-Enter steer writes the session like Ctrl+S,
       // and the one-time force token embeds the payload identity, so an
@@ -3335,7 +3341,20 @@ export function apply(ctx: Context, config: Config): void {
       runOwned('steer', () => runReservedSubmit({
         reserve: (t) => draftImages.pinReferenced(t),
         run: async () => {
-        await ensureSession()
+        // The deferred-start gate (history-persist.ts): the steered
+        // draft's history row is written AFTER the session exists, with
+        // the FINAL session id — Ctrl+S on a deferred start creates the
+        // session here, and a row written before creation would carry no
+        // sessionId and vanish from the Ctrl+R `Current session` scope.
+        // A rejected creation persists nothing (the steer never reached
+        // a session).
+        await persistAfterSession(
+          async () => {
+            await ensureSession()
+            return liveAgent?.session.id
+          },
+          (sessionId) => persistHistory?.(sessionId),
+        )
         if (liveAgent === undefined) return
         // The draft message is prepared BEFORE the guard: admission is
         // async I/O, and the guard's identity is the draft text (which
@@ -3404,38 +3423,43 @@ export function apply(ctx: Context, config: Config): void {
      */
     let lastHistoryContent: string | undefined
     /**
-     * Persist a STEERED submission (Ctrl+S, the steer-draft extension
-     * action, busy-Enter steer): the text goes to the RUNNING session, so
-     * the row carries the live session id. The ts and the image check are
-     * snapshotted at CALL time — the editor is cleared right after and the
-     * steer flow consumes the staged images on success, so a late check
-     * would wrongly persist the placeholder text. An empty draft (Ctrl+S
-     * with only a queue) persists nothing — the queued messages were
-     * already persisted when originally submitted.
+     * Build the steer-persist closure for a draft (Ctrl+S, the
+     * steer-draft extension action, busy-Enter steer): the submission-time
+     * facts — the ts (the row must record the USER's steer time, not the
+     * post-creation write time) and the image check (the editor is
+     * cleared right after and the steer flow consumes the staged images
+     * on success, so a late check would wrongly persist the placeholder
+     * text) — are snapshotted NOW. The returned closure writes the row
+     * under the session id the steer gate resolved (the FINAL id after
+     * session creation on a deferred start). An empty draft (Ctrl+S with
+     * only a queue) persists nothing — the queued messages were already
+     * persisted when originally submitted.
      */
-    const persistSteeredHistory = (text: string): void => {
+    const makeSteerPersist = (text: string): ((sessionId: string | undefined) => void) => {
       const trimmed = text.trim()
-      const hasImages = draftHasImages(text, draftImages)
-      if (trimmed === '' || trimmed === lastHistoryContent || hasImages) return
-      const historyCwd = sessionCwd()
       const historyTs = Date.now()
-      const file = historyFilePath(dshHome(process.env), historyCwd)
-      runDetached('input history write', () => {
-        const written = persistHistoryRecord({
-          content: trimmed,
-          cwd: historyCwd,
-          sessionId: historySessionIdFor('agent-facing', liveAgent?.session.id),
-          ts: historyTs,
-          lastContent: lastHistoryContent,
-          hasImages,
-          file,
+      const historyHasImages = draftHasImages(text, draftImages)
+      return (sessionId: string | undefined): void => {
+        if (trimmed === '' || trimmed === lastHistoryContent || historyHasImages) return
+        const historyCwd = sessionCwd()
+        const file = historyFilePath(dshHome(process.env), historyCwd)
+        runDetached('input history write', () => {
+          const written = persistHistoryRecord({
+            content: trimmed,
+            cwd: historyCwd,
+            sessionId: historySessionIdFor('agent-facing', sessionId),
+            ts: historyTs,
+            lastContent: lastHistoryContent,
+            hasImages: historyHasImages,
+            file,
+          })
+          if (written) lastHistoryContent = trimmed
+        }, {
+          diag,
+          notify: (message) => app.notify(message, 'error'),
+          recoverable: () => true,
         })
-        if (written) lastHistoryContent = trimmed
-      }, {
-        diag,
-        notify: (message) => app.notify(message, 'error'),
-        recoverable: () => true,
-      })
+      }
     }
     /**
      * Dispatch one user submission end to end: the viewer guard, the input-
@@ -3605,9 +3629,10 @@ export function apply(ctx: Context, config: Config): void {
         // `/<name> <args>` line — the harness gesture recognizes the
         // skill's own slash name and injects its body; the raw `/skill
         // <name>` form would never match (review finding 2). Image
-        // placeholders ride the normalized line untouched.
-        persistHistory(historySessionIdFor('agent-facing', liveAgent?.session.id))
-        steerNow(normalizeSkillInvocation(text) ?? text, true)
+        // placeholders ride the normalized line untouched. The history
+        // row is written inside steerNow AFTER the session exists (the
+        // deferred-start gate), with the FINAL session id.
+        steerNow(normalizeSkillInvocation(text) ?? text, true, persistHistory)
         return
       }
       dispatchViaSession(text, persistHistory)
@@ -3770,13 +3795,14 @@ export function apply(ctx: Context, config: Config): void {
           }
           case 'steer-draft': {
             const text = app.getDraft()
-            // The steered draft is an agent-facing submission: it must
-            // land in history with the live session id (the snapshot
-            // happens BEFORE the draft is cleared and the steer consumes
-            // the staged images).
-            persistSteeredHistory(text)
+            // The steered draft is an agent-facing submission: the
+            // snapshot (ts + image check) happens BEFORE the draft is
+            // cleared, and the row is written inside steerNow AFTER the
+            // session exists (the deferred-start gate) with the FINAL
+            // session id.
+            const persist = makeSteerPersist(text)
             app.setDraft('')
-            steerNow(text)
+            steerNow(text, false, persist)
             break
           }
           case 'cancel-activity': {
@@ -3814,11 +3840,11 @@ export function apply(ctx: Context, config: Config): void {
         }
       },
       onSteer: (text) => {
-        // Ctrl+S: the steered draft is an agent-facing submission — it
-        // must land in history with the live session id (the snapshot
-        // happens BEFORE the steer consumes the staged images).
-        persistSteeredHistory(text)
-        steerNow(text)
+        // Ctrl+S: the steered draft is an agent-facing submission — the
+        // snapshot happens now, and the row is written inside steerNow
+        // AFTER the session exists (the deferred-start gate) with the
+        // FINAL session id.
+        steerNow(text, false, makeSteerPersist(text))
       },
       onExtensionError: ({ slot, id, error }) => {
         try { extensionService?._recordRegistryError(slot, id, error) } catch {}

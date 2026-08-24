@@ -198,39 +198,94 @@ test('the runner\'s `!` block end to end: `!!`/bare `!` rows are sessionless, a 
   }
 })
 
-test('the runner\'s steer path end to end: the draft persists with the LIVE session id before the steer', async () => {
+test('the runner\'s steer path end to end: the draft persists with the LIVE session id after the session exists', async () => {
   // Simulates onSteer / steer-draft with the ACTUAL functions the runner
   // uses: the snapshot happens at call time (before the steer consumes
-  // the staged images) and the row carries the live session id.
+  // the staged images) and the row is written AFTER the session exists,
+  // with the session id the gate resolved.
   const home = tempHome()
   try {
     const cwd = '/work/a'
     const file = historyFilePath(home, cwd)
     const order: string[] = []
-    // The runner's persistSteeredHistory: snapshot ts + image check at
-    // call time, then persist with the live session id.
-    const persistSteered = (text: string): void => {
-      const hasImages = text.includes('[[image')
-      if (text.trim() === '' || hasImages) return
+    // The runner's makeSteerPersist: snapshot ts + image check at call
+    // time, then write under the resolved session id.
+    const persist = (sessionId: string | undefined): void => {
       order.push('persist')
       persistHistoryRecord({
-        content: text.trim(),
+        content: 'steer this draft',
         cwd,
-        sessionId: historySessionIdFor('agent-facing', 'ses_live'),
+        sessionId: historySessionIdFor('agent-facing', sessionId),
         ts: 1,
         lastContent: undefined,
-        hasImages,
+        hasImages: false,
         file,
       })
     }
-    persistSteered('steer this draft')
-    persistSteered('') // Ctrl+S with only a queue
-    persistSteered('[[image:1]] placeholder') // image-bearing draft
-    assert.deepEqual(order, ['persist'], 'only the real draft persists')
+    // The runner's steerNow gate: resolve the session FIRST, then persist.
+    await persistAfterSession(
+      async () => {
+        order.push('resolve')
+        return 'ses_live'
+      },
+      persist,
+    )
+    assert.deepEqual(order, ['resolve', 'persist'], 'the row is written AFTER the session exists')
     const records = loadHistoryRecords(file)
     assert.equal(records.length, 1)
     assert.equal(records[0]?.content, 'steer this draft')
     assert.equal(records[0]?.sessionId, 'ses_live', 'the steered draft carries the live session id')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a deferred-start steer persists with the FINAL session id (Ctrl+S / steer-draft with no live session)', async () => {
+  // Review repro: steerNow creates the session on a deferred start — a
+  // row written BEFORE the creation would carry no sessionId and vanish
+  // from Current session. The row must be written AFTER the session
+  // exists, with the FINAL id; a rejected creation writes nothing.
+  const home = tempHome()
+  try {
+    const cwd = '/work/a'
+    const file = historyFilePath(home, cwd)
+    const order: string[] = []
+    const persist = (sessionId: string | undefined): void => {
+      order.push('persist')
+      persistHistoryRecord({
+        content: 'steer me',
+        cwd,
+        sessionId: historySessionIdFor('agent-facing', sessionId),
+        ts: 1,
+        lastContent: undefined,
+        hasImages: false,
+        file,
+      })
+    }
+    await persistAfterSession(
+      async () => {
+        order.push('resolve')
+        return 'ses_new' // the session Ctrl+S just created
+      },
+      persist,
+    )
+    assert.deepEqual(order, ['resolve', 'persist'], 'the row is written AFTER the session creation')
+    const records = loadHistoryRecords(file)
+    assert.equal(records.length, 1)
+    assert.equal(records[0]?.sessionId, 'ses_new',
+      'a deferred-start steer carries the FINAL session id, never undefined')
+    // A REJECTED creation persists nothing (the steer never reached a
+    // session).
+    await assert.rejects(
+      persistAfterSession(
+        async () => {
+          throw new Error('creation failed')
+        },
+        persist,
+      ),
+      /creation failed/,
+    )
+    assert.equal(loadHistoryRecords(file).length, 1, 'a rejected creation must not write a row')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
