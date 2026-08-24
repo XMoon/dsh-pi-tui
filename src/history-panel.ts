@@ -31,7 +31,7 @@ import { Input } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { HistorySearchResult, HistorySearchSource, HistoryScope } from './history-search.ts'
-import { HISTORY_SEARCH_LIMIT } from './history-search.ts'
+import { HISTORY_SEARCH_RESULT_LIMIT } from './history-search.ts'
 import { HISTORY_SEARCH_DEBOUNCE_MS } from './history-search.ts'
 
 /** Split threshold: at or above this panel width the list and details
@@ -300,12 +300,16 @@ export class HistoryPanel implements Component, Focusable {
       scope: this.state.scope,
       cwd: this.cwd,
       query: this.state.query,
-      limit: HISTORY_SEARCH_LIMIT,
+      limit: HISTORY_SEARCH_RESULT_LIMIT,
       signal: controller.signal,
     }
     let results: HistorySearchResult[]
     try {
-      results = await this.source.search(request)
+      // The source returns a bounded page (results + an optional
+      // continuation for older history). The panel renders only the page's
+      // results today; "Search older" is a later UI phase on that contract.
+      const page = await this.source.search(request)
+      results = page.results
     } catch (error) {
       // Second fence for a late failure: the generation was invalidated by
       // scheduleSearch/dispose, and the abort was requested — an

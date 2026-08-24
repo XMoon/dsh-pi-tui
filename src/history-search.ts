@@ -7,7 +7,8 @@
  *   file is keyed by that cwd, so the effective cwd is known — plan §6.1).
  * - `'all'` — every `*.jsonl` under `$DSH_HOME/user-history/` (`.tmp`/`.lock`
  *   and non-JSONL names ignored; corrupt or vanished files degrade to empty —
- *   plan §11.2/§40). cwd is resolved per file:
+ *   plan §11.2/§40). Files are scanned in mtime-DESC order (the most recently
+ *   active workspace first — plan §7/§8); cwd is resolved per file:
  *   1. a v2 row whose cwd VALIDATES against the file (`historyFilePath(home,
  *      cwd) === file`) proves the hash, and its cwd inherits to the file's v1
  *      rows (Rule 1);
@@ -16,29 +17,51 @@
  *   3. rows whose cwd stays unknown are EXCLUDED (Rule 3) — never a
  *      fabricated cwd, and the detail pane would otherwise lie.
  *
+ * Bounded recent-first scanning (the perf contract):
+ * - Every call scans at most `scanLimit` PHYSICAL lines across all files
+ *   (a GLOBAL budget, never per-file), reading each file from EOF backwards
+ *   through the reverse JSONL reader (history-reverse-reader.ts) — the
+ *   canonical file is never read whole.
+ * - The result is a {@link HistorySearchPage}: the matches NEW to this call's
+ *   window, plus a {@link HistorySearchContinuation} when older history
+ *   remains. A continuation resumes exactly where the call stopped (no
+ *   re-scan of the covered suffix) and carries the dedupe state, so pages
+ *   never duplicate rows. Reaching `scanLimit` does NOT mean exhausted.
+ *   The panel currently renders only `page.results`; "Search older" is a
+ *   later UI phase on this contract.
+ * - Legacy cwd coverage may degrade with the window: the file proof comes
+ *   from `knownCwds` (upfront) or a validating v2 row observed INSIDE the
+ *   scanned window. Rows whose proof lies outside the window are omitted
+ *   from `All directories` — an intentional coverage trade-off; v2 cwd hash
+ *   validation itself stays strict and unchanged.
+ *
  * Matching: case-insensitive literal substring over content; `''` matches
- * everything (an empty-query Ctrl+R is a recent-history browser).
+ * everything (an empty-query Ctrl+R is a recent-history browser, and may
+ * stop early once this call has collected `limit` new unique results).
  *
  * Ordering: newest-first by ts; legacy (v1) rows have NO timestamp (never
  * fabricated) and sort AFTER every timed row, then by file asc + newest row
  * first within the file (deterministic — plan §7/§12).
  *
  * Dedupe: current → by `content`; all → by `${cwd}\0${content}` (a prompt
- * in two directories stays two rows — plan §13). The NEWEST occurrence wins.
+ * in two directories stays two rows — plan §13). The NEWEST occurrence wins
+ * (compareResults is the beats predicate, applied incrementally).
  *
- * Cancellation: the search observes the AbortSignal between files; the panel
+ * Cancellation: the search observes the AbortSignal between files, per
+ * batch and inside the reader; an abort returns an empty page. The panel
  * ALSO guards by generation, so a stale response can never overwrite a
  * fresher query (plan §14).
  *
  * Future-proof: the panel consumes ONLY {@link HistorySearchSource} — a
- * SQLite/FTS backend may replace the file implementation without touching the
- * UI (plan §54).
+ * SQLite/FTS backend may replace the file implementation without touching
+ * the UI (plan §54).
  * @module @xmoon76/dsh-pi-tui/history-search
  */
 
-import { readdir, readFile } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { historyFilePath, parseHistoryRecords, type ParsedHistoryRecord } from './history.ts'
+import { historyFilePath, parseHistoryRecordLine, type ParsedHistoryRecord } from './history.ts'
+import { readJsonlReverseBatch, type ReverseJsonlCursor } from './history-reverse-reader.ts'
 
 /** The two scope categories (`/sessions` vocabulary). */
 export type HistoryScope = 'current' | 'all'
@@ -47,7 +70,16 @@ export type HistoryScope = 'current' | 'all'
 export const HISTORY_SEARCH_DEBOUNCE_MS = 75
 
 /** Row cap handed to the source (plan §52: 100–200 results, never 5000). */
-export const HISTORY_SEARCH_LIMIT = 200
+export const HISTORY_SEARCH_RESULT_LIMIT = 200
+
+/** Global per-call scan budget in physical JSONL lines (plan §4.2: 5000).
+ * A call stops scanning once this many lines were materialized across ALL
+ * files — the default window, not a permanent search boundary (a
+ * continuation can keep going). */
+export const HISTORY_SEARCH_SCAN_LIMIT = 5000
+
+/** Reverse-reader chunk size in bytes (plan §5: 64KiB). */
+export const HISTORY_SEARCH_READ_CHUNK_BYTES = 64 * 1024
 
 /** One search invocation. */
 export interface HistorySearchRequest {
@@ -63,7 +95,9 @@ export interface HistorySearchRequest {
 
 /** One matched row the panel renders. */
 export interface HistorySearchResult {
-  /** Stable identity (`${sourceFile}:${sourceIndex}`). */
+  /** Stable identity (`${sourceFile}:${sourceByteOffset}` — the byte
+   * offset of the row's first content byte, stable for append-only files
+   * without any forward scan). */
   id: string
   content: string
   /** NULL only for rows excluded in the `all` scope — the panel never
@@ -73,14 +107,79 @@ export interface HistorySearchResult {
   ts: number | null
   sessionId?: string
   sourceFile: string
-  /** Row position within the parsed file (corrupt lines simply do not
-   * appear, so positions are stable for a given file content). */
-  sourceIndex: number
+  /** The row's first content byte in the file (the reverse reader's
+   * identity — no forward scan is ever needed for it). */
+  sourceByteOffset: number
+}
+
+/** One bounded search page: the matches NEW to this call's window, plus the
+ * resume state when older history remains. */
+export interface HistorySearchPage {
+  /** The matches found in this call's window that were not already in the
+   * dedupe state, sorted by {@link compareResults} and sliced to the
+   * request limit. */
+  results: HistorySearchResult[]
+  /** Present iff `exhausted` is false: pass it back to `search()` to
+   * continue into older history without re-scanning the covered suffix. */
+  continuation?: HistorySearchContinuation
+  /** True when every candidate file was scanned to EOF — no older history
+   * remains. Reaching the scan budget is NOT exhausted. */
+  exhausted: boolean
+}
+
+/** The opaque resume state of a bounded search. Owned by the source: the
+ * caller stores it and hands it back verbatim. */
+export interface HistorySearchContinuation {
+  /** The request context this continuation belongs to (a mismatched
+   * continuation is a typed error, never silently reused). */
+  readonly scope: HistoryScope
+  readonly cwd: string
+  readonly query: string
+  readonly limit: number
+  /** The files not yet fully scanned, in scan order (the first one is the
+   * partially-scanned current file). */
+  readonly files: readonly HistoryFileCandidate[]
+  /** The reverse-reader cursor for the first file, when it was partially
+   * scanned (undefined when the next file starts fresh). */
+  readonly cursor: ReverseJsonlCursor | undefined
+  /** The dedupe state accumulated so far (key → newest occurrence). */
+  readonly seen: ReadonlyMap<string, HistorySearchResult>
 }
 
 /** The search seam the panel consumes. */
 export interface HistorySearchSource {
-  search(request: HistorySearchRequest): Promise<HistorySearchResult[]>
+  search(
+    request: HistorySearchRequest,
+    continuation?: HistorySearchContinuation,
+  ): Promise<HistorySearchPage>
+}
+
+/** One candidate history file with its stat metadata (mtime drives the
+ * scan order; the final result order never uses it). */
+export interface HistoryFileCandidate {
+  path: string
+  mtimeMs: number
+  size: number
+}
+
+/** Per-call work accounting (test-only instrumentation — proves the scan
+ * is bounded without wall-clock benchmarks). */
+export interface HistorySearchDebugStats {
+  /** Files whose content scan was entered. */
+  filesVisited: number
+  /** Physical JSONL lines materialized (blank/corrupt/valid alike). */
+  physicalLinesScanned: number
+  /** Bytes actually read from disk. */
+  bytesRead: number
+}
+
+/** Thrown when a continuation is reused with a different request context —
+ * the dedupe state and scan position would silently produce wrong results. */
+export class HistorySearchContinuationError extends Error {
+  constructor() {
+    super('history search continuation does not match the request (scope/cwd/query/limit)')
+    this.name = 'HistorySearchContinuationError'
+  }
 }
 
 /** Constructor options for the file-backed source. */
@@ -94,8 +193,19 @@ export interface FileHistorySearchSourceOptions {
    * immediately recoverable, never a startup snapshot.
    */
   knownCwds?: ReadonlyMap<string, string> | (() => ReadonlyMap<string, string>)
-  /** Concurrent file reads in the `all` scope (plan §16; default 8). */
+  /** Bounded concurrency for the all-scope STAT phase (plan §12: 8/16;
+   * default 8). The content scan itself is SERIAL — recent-first with one
+   * global budget, so concurrency can never overscan it. */
   concurrency?: number
+  /** Global per-call scan budget in physical lines (default
+   * {@link HISTORY_SEARCH_SCAN_LIMIT}). */
+  scanLimit?: number
+  /** Reverse-reader chunk size in bytes (default
+   * {@link HISTORY_SEARCH_READ_CHUNK_BYTES}). */
+  readChunkBytes?: number
+  /** Optional mutable stats sink, reset and filled on every search call
+   * (test-only instrumentation). */
+  stats?: HistorySearchDebugStats
 }
 
 /**
@@ -106,93 +216,153 @@ export class FileHistorySearchSource implements HistorySearchSource {
   private readonly dshHome: string
   private readonly knownCwds: ReadonlyMap<string, string> | (() => ReadonlyMap<string, string>)
   private readonly concurrency: number
+  private readonly scanLimit: number
+  private readonly readChunkBytes: number
+  private readonly stats: HistorySearchDebugStats | undefined
 
   constructor(options: FileHistorySearchSourceOptions) {
     this.dshHome = options.dshHome
     this.knownCwds = options.knownCwds ?? new Map<string, string>()
     this.concurrency = Math.max(1, options.concurrency ?? 8)
+    this.scanLimit = Math.max(1, options.scanLimit ?? HISTORY_SEARCH_SCAN_LIMIT)
+    this.readChunkBytes = Math.max(1, options.readChunkBytes ?? HISTORY_SEARCH_READ_CHUNK_BYTES)
+    this.stats = options.stats
   }
 
-  async search(request: HistorySearchRequest): Promise<HistorySearchResult[]> {
+  async search(
+    request: HistorySearchRequest,
+    continuation?: HistorySearchContinuation,
+  ): Promise<HistorySearchPage> {
+    if (continuation !== undefined) this.validateContinuation(request, continuation)
     const scope = request.scope
-    const files = scope === 'current'
-      ? [historyFilePath(this.dshHome, request.cwd)]
-      : await this.listAllFiles()
-    const results: HistorySearchResult[] = []
-    // A REAL bounded worker pool over the file set: each worker awaits its
-    // own async read and the pool keeps at most `concurrency` reads in
-    // flight, so the event loop stays free between files (an all-scope
-    // scan never blocks typing/rendering; plan §16). The abort signal is
-    // checked by every worker between files. A per-file failure only drops
-    // that file's rows (plan §40).
-    const queue = [...files]
-    const workers = Array.from({ length: Math.min(this.concurrency, Math.max(1, queue.length)) }, async () => {
-      for (;;) {
-        if (request.signal?.aborted) return
-        const file = queue.shift()
-        if (file === undefined) return
-        const records = await this.readRows(file)
-        // The file-level cwd proof, computed ONCE per file (Rules 1+2).
-        const fileCwd = scope === 'all' ? this.resolveFileCwd(file, records) : null
-        for (let rowIndex = 0; rowIndex < records.length; rowIndex += 1) {
-          const row = records[rowIndex]!
-          const cwd = this.effectiveCwd(request, file, row, fileCwd)
-          if (cwd === null) continue
-          if (!matchesQuery(row.content, request.query)) continue
-          const result: HistorySearchResult = {
-            id: `${file}:${rowIndex}`,
-            content: row.content,
-            cwd,
-            ts: row.ts,
-            sourceFile: file,
-            sourceIndex: rowIndex,
+    const files = continuation !== undefined
+      ? [...continuation.files]
+      : scope === 'current'
+        // The current-scope file is known by path; its stat happens inside
+        // the reader (mtime/size are only used for all-scope ordering).
+        ? [{ path: historyFilePath(this.dshHome, request.cwd), mtimeMs: 0, size: 0 }]
+        : await this.listAllFiles()
+    const stats = this.stats
+    if (stats !== undefined) {
+      stats.filesVisited = 0
+      stats.physicalLinesScanned = 0
+      stats.bytesRead = 0
+    }
+    // The dedupe state: restored from the continuation (so pages never
+    // duplicate rows) or fresh. `newKeys` tracks the keys added by THIS
+    // call — the page reports only those (their current map values).
+    const map = continuation !== undefined
+      ? new Map(continuation.seen)
+      : new Map<string, HistorySearchResult>()
+    const newKeys: string[] = []
+    let cursor: ReverseJsonlCursor | undefined = continuation?.cursor
+    let scanned = 0
+    let fileIndex = 0
+    outer:
+    for (; fileIndex < files.length; fileIndex += 1) {
+      if (request.signal?.aborted) return emptyPage()
+      // Empty-query early exit: this call already collected enough NEW
+      // unique results (per call, so a continuation page never stalls on
+      // the already-full dedupe state).
+      if (request.query === '' && newKeys.length >= request.limit) break
+      const file = files[fileIndex]!
+      if (stats !== undefined) stats.filesVisited += 1
+      // All-scope rows whose cwd is not yet provable are held pending:
+      // the proof may form later in the window (Rule 1), and only rows
+      // still unresolved at the file's end are excluded (Rule 3).
+      const pending: Array<{ record: ParsedHistoryRecord; byteStart: number }> = []
+      let fileProof: string | null = scope === 'all' ? this.knownCwdFor(file.path) : null
+      try {
+        for (;;) {
+          if (request.signal?.aborted) return emptyPage()
+          const remaining = this.scanLimit - scanned
+          if (remaining <= 0) break
+          const batch = await readJsonlReverseBatch(file.path, {
+            cursor,
+            maxRows: Math.min(128, remaining),
+            chunkBytes: this.readChunkBytes,
+            signal: request.signal,
+          })
+          if (stats !== undefined) {
+            stats.bytesRead += batch.bytesRead
+            stats.physicalLinesScanned += batch.lines.length
           }
-          if (row.sessionId !== undefined) result.sessionId = row.sessionId
-          results.push(result)
+          for (const line of batch.lines) {
+            // A physical line consumes the budget BEFORE parsing — blank
+            // and corrupt lines can never cause unbounded scanning.
+            scanned += 1
+            const record = parseHistoryRecordLine(line.text)
+            if (record === null) continue
+            fileProof = this.consumeRecord(
+              request, file.path, record, line.byteStart, fileProof, pending, map, newKeys,
+            )
+          }
+          if (batch.eof) {
+            cursor = undefined
+            break
+          }
+          cursor = batch.nextCursor
+          if (request.query === '' && newKeys.length >= request.limit) break outer
         }
+      } catch (error) {
+        if (isAbortError(error)) return emptyPage()
+        // A per-file failure (vanished file, read error, or a
+        // ReverseJsonlRevisionError when the file changed under a
+        // continuation cursor) skips the rest of this file; rows already
+        // collected stay.
+        cursor = undefined
       }
-    })
-    await Promise.all(workers)
-    if (request.signal?.aborted) return []
-    return dedupeKeepNewest(results, scope).sort(compareResults).slice(0, request.limit)
-  }
-
-  /** Parse one file's live rows asynchronously; unreadable/corrupt files
-   * (including a vanished file) degrade to `[]`. */
-  private async readRows(file: string): Promise<ParsedHistoryRecord[]> {
-    try {
-      return parseHistoryRecords(await readFile(file, 'utf8'))
-    } catch {
-      return []
+      if (scanned >= this.scanLimit) break
+    }
+    if (request.signal?.aborted) return emptyPage()
+    const exhausted = fileIndex >= files.length
+    return {
+      results: newKeys
+        .map(key => map.get(key)!)
+        .sort(compareResults)
+        .slice(0, request.limit),
+      continuation: exhausted ? undefined : {
+        scope: request.scope,
+        cwd: request.cwd,
+        query: request.query,
+        limit: request.limit,
+        files: files.slice(fileIndex),
+        cursor,
+        seen: map,
+      },
+      exhausted,
     }
   }
 
-  /** Every candidate file in the `all` scope (sorted for determinism). */
-  private async listAllFiles(): Promise<string[]> {
+  /** Every candidate file in the `all` scope, stat'd with bounded
+   * concurrency and ordered mtime DESC (most recently active first), then
+   * path ASC as the deterministic tie-breaker. A file that fails to stat
+   * (vanished) is dropped. */
+  private async listAllFiles(): Promise<HistoryFileCandidate[]> {
     try {
       const names = await readdir(join(this.dshHome, 'user-history'))
-      return names
+      const candidates = names
         .filter(name => name.endsWith('.jsonl') && !name.endsWith('.tmp') && !name.endsWith('.lock'))
         .map(name => join(this.dshHome, 'user-history', name))
-        .sort()
+      const stats = await mapBounded(candidates, this.concurrency, async (path) => {
+        try {
+          const info = await stat(path)
+          return { path, mtimeMs: info.mtimeMs, size: info.size }
+        } catch {
+          return null
+        }
+      })
+      return stats
+        .filter((candidate): candidate is HistoryFileCandidate => candidate !== null)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))
     } catch {
       return []
     }
   }
 
-  /**
-   * Rule 1 + Rule 2 cwd proof for ONE file in the `all` scope:
-   * - a v2 row whose cwd validates against the file itself
-   *   (`historyFilePath(home, cwd) === file`) identifies the hash — that
-   *   cwd inherits to the file's legacy rows;
-   * - else the known-cwd map (`md5(cwd) → cwd`) proves it;
-   * - else NULL (Rule 3: legacy rows of this file are excluded).
-   */
-  private resolveFileCwd(file: string, records: readonly ParsedHistoryRecord[]): string | null {
-    for (const row of records) {
-      if (row.version !== 2 || row.cwd === null) continue
-      if (historyFilePath(this.dshHome, row.cwd) === file) return row.cwd
-    }
+  /** Rule 2 cwd proof from the known-cwd map, validated against the file
+   * (a stale map entry never fabricates a cwd). */
+  private knownCwdFor(file: string): string | null {
     const hash = file.slice(file.lastIndexOf('/') + 1).replace(/\.jsonl$/, '')
     const known = typeof this.knownCwds === 'function' ? this.knownCwds() : this.knownCwds
     const fromKnown = known.get(hash)
@@ -200,23 +370,105 @@ export class FileHistorySearchSource implements HistorySearchSource {
     return null
   }
 
-  /** The display cwd of ONE row, or NULL when the row must be excluded.
+  /** Route ONE parsed row into the result state and return the (possibly
+   * updated) file proof.
    *
    * A v2 row's cwd is trusted ONLY when it validates against the file it
    * lives in (`historyFilePath(home, cwd) === file` — plan §40: an invalid
    * v2 cwd/hash mismatch is never trusted; it could be a moved directory or
-   * a hand-edited row). Untrusted metadata degrades to the file-level proof:
+   * a hand-edited row). In the all scope, the FIRST validating v2 row also
+   * forms the file proof (Rule 1) and flushes the rows held pending so far.
+   * Untrusted metadata degrades to the file-level proof:
    * - current scope: the file IS the current cwd's file, so every row
    *   (v1, valid v2, invalid v2) ends up at `request.cwd` — inherited, not
    *   fabricated (plan §6.1);
    * - all scope: the row falls back to the file proof (Rule 1/2), and a
-   *   row whose file is still unresolved is EXCLUDED (Rule 3). */
-  private effectiveCwd(request: HistorySearchRequest, file: string, row: ParsedHistoryRecord, fileCwd: string | null): string | null {
-    if (row.version === 2 && row.cwd !== null && historyFilePath(this.dshHome, row.cwd) === file) {
-      return row.cwd
+   *   row whose file is still unresolved is held pending — excluded only
+   *   when the file ends without a proof (Rule 3). */
+  private consumeRecord(
+    request: HistorySearchRequest,
+    file: string,
+    record: ParsedHistoryRecord,
+    byteStart: number,
+    fileProof: string | null,
+    pending: Array<{ record: ParsedHistoryRecord; byteStart: number }>,
+    map: Map<string, HistorySearchResult>,
+    newKeys: string[],
+  ): string | null {
+    if (record.version === 2 && record.cwd !== null && historyFilePath(this.dshHome, record.cwd) === file) {
+      if (request.scope === 'all' && fileProof === null) {
+        // The proof forms NOW: flush the pending rows with it.
+        fileProof = record.cwd
+        for (const held of pending) {
+          if (!matchesQuery(held.record.content, request.query)) continue
+          this.mergeResult(map, newKeys, this.buildResult(file, held.record, fileProof, held.byteStart), request.scope)
+        }
+        pending.length = 0
+      }
+      if (!matchesQuery(record.content, request.query)) return fileProof
+      this.mergeResult(map, newKeys, this.buildResult(file, record, record.cwd, byteStart), request.scope)
+      return fileProof
     }
-    if (request.scope === 'current') return request.cwd
-    return fileCwd // v1 or untrusted v2: inherit the file proof; NULL → Rule 3 exclusion
+    if (request.scope === 'current') {
+      if (!matchesQuery(record.content, request.query)) return fileProof
+      this.mergeResult(map, newKeys, this.buildResult(file, record, request.cwd, byteStart), request.scope)
+      return fileProof
+    }
+    // All scope: v1 or an untrusted v2 cwd.
+    if (fileProof !== null) {
+      if (!matchesQuery(record.content, request.query)) return fileProof
+      this.mergeResult(map, newKeys, this.buildResult(file, record, fileProof, byteStart), request.scope)
+      return fileProof
+    }
+    pending.push({ record, byteStart })
+    return fileProof
+  }
+
+  private buildResult(file: string, record: ParsedHistoryRecord, cwd: string, byteStart: number): HistorySearchResult {
+    const result: HistorySearchResult = {
+      id: `${file}:${byteStart}`,
+      content: record.content,
+      cwd,
+      ts: record.ts,
+      sourceFile: file,
+      sourceByteOffset: byteStart,
+    }
+    if (record.sessionId !== undefined) result.sessionId = record.sessionId
+    return result
+  }
+
+  /** Incremental dedupe: keep the NEWEST occurrence per key (compareResults
+   * is the beats predicate — the same winner the final sort would pick).
+   * A key is reported as new only the first time it enters the map, so a
+   * continuation page never re-reports rows a previous page already
+   * returned. */
+  private mergeResult(
+    map: Map<string, HistorySearchResult>,
+    newKeys: string[],
+    result: HistorySearchResult,
+    scope: HistoryScope,
+  ): void {
+    const key = scope === 'current' ? result.content : `${result.cwd ?? ''}\0${result.content}`
+    const existing = map.get(key)
+    if (existing === undefined) {
+      map.set(key, result)
+      newKeys.push(key)
+    } else if (compareResults(result, existing) < 0) {
+      map.set(key, result)
+    }
+  }
+
+  /** A continuation belongs to exactly one request context: reusing it
+   * with a different scope/cwd/query/limit would silently produce wrong
+   * results (the dedupe state and scan position were built for the old
+   * context). */
+  private validateContinuation(request: HistorySearchRequest, continuation: HistorySearchContinuation): void {
+    if (continuation.scope !== request.scope
+      || continuation.cwd !== request.cwd
+      || continuation.query !== request.query
+      || continuation.limit !== request.limit) {
+      throw new HistorySearchContinuationError()
+    }
   }
 }
 
@@ -224,24 +476,6 @@ export class FileHistorySearchSource implements HistorySearchSource {
 function matchesQuery(content: string, query: string): boolean {
   if (query === '') return true
   return content.toLowerCase().includes(query.toLowerCase())
-}
-
-/** Keep the NEWEST occurrence of each key (results are pre-sorted newest
- * first by ts — but legacy rows sort later, so dedupe must run on the
- * FINAL total order, which slice does after sorting: see search()). */
-function dedupeKeepNewest(results: HistorySearchResult[], scope: HistoryScope): HistorySearchResult[] {
-  // The caller sorts AFTER dedupe, so dedupe first by ts-DESC order to keep
-  // the newest winner (v2 rows vs legacy duplicates of the same content).
-  const ordered = [...results].sort(compareResults)
-  const seen = new Set<string>()
-  const kept: HistorySearchResult[] = []
-  for (const row of ordered) {
-    const key = scope === 'current' ? row.content : `${row.cwd ?? ''}\0${row.content}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    kept.push(row)
-  }
-  return kept
 }
 
 /** Newest-first by ts (legacy rows — ts NULL — sort after every timed row),
@@ -252,5 +486,36 @@ function compareResults(left: HistorySearchResult, right: HistorySearchResult): 
   if (rt !== lt) return rt - lt
   const byFile = left.sourceFile.localeCompare(right.sourceFile)
   if (byFile !== 0) return byFile
-  return right.sourceIndex - left.sourceIndex
+  return right.sourceByteOffset - left.sourceByteOffset
+}
+
+/** The abort contract: an aborted search resolves an empty page (the panel
+ * drops it by generation anyway). */
+function emptyPage(): HistorySearchPage {
+  return { results: [], exhausted: false }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
+
+/** Run `fn` over `items` with at most `concurrency` calls in flight,
+ * preserving the input order of the results. */
+async function mapBounded<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(concurrency, Math.max(1, items.length)) }, async () => {
+    for (;;) {
+      const index = next
+      next += 1
+      if (index >= items.length) return
+      results[index] = await fn(items[index]!)
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
