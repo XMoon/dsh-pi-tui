@@ -91,16 +91,17 @@ export class StepUsageAccumulator {
     this.perStep.set(stepKey(turn, step), {})
   }
 
-  /** Record a streaming usage chunk: the FIRST chunk of a step wins (the
-   * assembler value); a chunk without an open step (replay edge) is a
-   * settled fact and commits to the turn's totals immediately. */
+  /** Record a streaming usage chunk: the LATEST chunk of an open step
+   * replaces the previous one (the assembler value is cumulative — the
+   * running display must show the latest provisional usage, plan §13.2);
+   * a chunk without an open step (replay edge) is a settled fact and
+   * commits to the turn's totals immediately. */
   onUsageChunk(turn: number, step: number, usage: UsageLike): void {
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
-      if (entry.usage === undefined) {
-        entry.usage = usage
-        this.addPending(turn, usage)
-      }
+      if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
+      entry.usage = usage
+      this.addPending(turn, usage)
     } else {
       this.commitOrphan(turn, step, usage)
     }
