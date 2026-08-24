@@ -7253,6 +7253,11 @@ export class TuiApp {
       },
     }
     const activate = (): void => {
+      // A category switch is a NEW view: the marquee must restart from the
+      // fresh anchor even when the same row (same value/label/width)
+      // survives the switch — the identity check alone would let it
+      // continue mid-cycle (review round 3).
+      marquee?.reset()
       const category = categories[currentIndex]!
       const next = new SelectList(
         category.items().map(item => ({ ...item })),

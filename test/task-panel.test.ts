@@ -788,3 +788,35 @@ test('the selected row marquees under a fake clock while unselected rows stay fi
   assert.ok(moved.includes('├─ subagent · a-short…'), `unselected rows must stay put:\n${moved}`)
   panel.dispose()
 })
+
+test('a search/type filter restarts the selected row marquee even when the SAME row survives (review round 3)', () => {
+  // The filter can retain the selected row's identity (same value/label/
+  // width) — the marquee must still restart from a fresh anchor, or it
+  // would continue mid-cycle inside the new filtered view.
+  const now = { value: 0 }
+  const item: TaskPanelItem = {
+    value: 'agent:sel',
+    label: 'subagent · a-very-long-selected-label-that-overflows-its-budget',
+    suffix: 'continuable',
+    status: 'inactive',
+    group: 'subagents',
+  }
+  const panel = new TaskBrowserPanel(
+    [item], 10,
+    { header: 'tasks', enableSearch: true, noMatchText: '', marqueeNow: () => now.value },
+    () => {}, () => {}, () => {},
+  )
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  // Advance the fake clock well into the scroll cycle.
+  now.value = 800 + 6 * MARQUEE_STEP_MS
+  const mid = panel.render(60).map(strip).join('\n')
+  assert.ok(!mid.includes('a-very-long-selected-label-that'),
+    `precondition — the label must have scrolled past its start:\n${mid}`)
+  // Type a query that MATCHES the same row (identity unchanged).
+  panel.handleInput('s')
+  now.value = 800 + 8 * MARQUEE_STEP_MS
+  const after = panel.render(60).map(strip).join('\n')
+  assert.ok(after.includes('a-very-long-selected-l'),
+    `the filter must restart the marquee from the fresh anchor:\n${after}`)
+  panel.dispose()
+})

@@ -20,6 +20,7 @@ import {
   type SessionPickerRow,
 } from '../src/sessions.ts'
 import { sessionPickerCategories } from '../src/commands.ts'
+import { MARQUEE_STEP_MS } from '../src/marquee.ts'
 import type { PickerCategory } from '../src/tui-app.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -406,5 +407,45 @@ test('the session picker marquees a long SELECTED title while the marker and lin
   // At least one cell of motion: the window differs from the start.
   const row = view.split('\n').find(line => line.includes('└─ ●')) ?? ''
   assert.ok(!row.includes('a-very-long-session-title-that-keeps-'), 'the window must have moved')
+  app.stop()
+})
+
+test('a category switch restarts the marquee even when the SAME row survives (review round 3)', async () => {
+  const { vt, app } = startApp()
+  const now = { value: 0 }
+  const longTitle = 'a-very-long-session-title-that-keeps-growing-and-never-fits'
+  const categories: PickerCategory[] = [
+    { id: 'main', label: 'Main', header: 'sessions · Main', items: () => [
+      { value: 'session-long', label: `  └─ ● ${longTitle}`, description: 'meta', group: 'w' },
+    ] },
+    { id: 'all', label: 'All', header: 'sessions · All', items: () => [
+      { value: 'session-long', label: `  └─ ● ${longTitle}`, description: 'meta', group: 'w' },
+    ] },
+  ]
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: false,
+    width: 76,
+    maxHeight: 26,
+    categories,
+    marquee: { labelPartsOf: sessionLabelParts, now: () => now.value },
+  })
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  // Advance the fake clock well into the scroll cycle: the window has
+  // moved past the label start.
+  now.value = 800 + 6 * MARQUEE_STEP_MS
+  handle.refresh?.()
+  await vt.waitForRender()
+  const mid = vt.getViewport().map(strip).join('\n')
+  assert.ok(!mid.includes('a-very-long-session-title-that-keeps-'),
+    `precondition — the label must have scrolled past its start:\n${mid}`)
+  // Switch category: the SAME row (identical value/label) survives, but
+  // the marquee must restart from the fresh anchor.
+  handle.setCategory?.('all')
+  await vt.waitForRender()
+  const after = vt.getViewport().map(strip).join('\n')
+  assert.ok(after.includes('a-very-long-session-tit'),
+    `a category switch must restart the marquee from the fresh anchor:\n${after}`)
+  handle.close()
   app.stop()
 })

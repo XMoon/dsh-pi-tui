@@ -392,6 +392,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
     this.selected = 0
     this.scroll = 0
+    // A filter/type change is a NEW view: the selected row (whatever it
+    // is) must restart its marquee cycle from the fresh anchor, even when
+    // the SAME row survives the filter with an unchanged identity
+    // (review round 3 — the identity check alone would let the marquee
+    // continue mid-cycle across a search/type change).
+    this.marquee.reset()
   }
 
   render(width: number): string[] {
