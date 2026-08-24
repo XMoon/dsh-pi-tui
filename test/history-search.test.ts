@@ -653,6 +653,16 @@ test('S19: a fresh continuation file (exact budget boundary) still gets its know
     // cwd is known via the resolver — its rows must NOT be discarded.
     writeV2(home, '/a', Array.from({ length: 100 }, (_, i) => ({ content: `a-${i}`, ts: i })))
     writeV1(home, '/b', Array.from({ length: 50 }, (_, i) => `legacy-${i}`))
+    // Pin the scan order: /a must be the newest mtime (scanned first and
+    // fully consumed at the exact budget boundary) — without this the two
+    // writes can land in different milliseconds and flip the order.
+    const aFile = historyFilePath(home, '/a')
+    const bFile = historyFilePath(home, '/b')
+    const { utimesSync } = await import('node:fs')
+    const old = new Date(Date.now() - 60_000)
+    const newer = new Date(Date.now())
+    utimesSync(bFile, old, old)
+    utimesSync(aFile, newer, newer)
     const known = new Map<string, string>()
     known.set(historyFilePath(home, '/b').split('/').pop()!.replace(/\.jsonl$/, ''), '/b')
     const src = new FileHistorySearchSource({ dshHome: home, knownCwds: known, scanLimit: 100 })
