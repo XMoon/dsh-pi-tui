@@ -150,6 +150,50 @@ test('all scope: unresolved legacy rows are EXCLUDED (Rule 3 — no fabricated c
   }
 })
 
+test('all scope: a v2 row whose cwd does NOT validate the file hash is not trusted (plan §40)', async () => {
+  const home = tempHome()
+  try {
+    // The FILE is md5('/a'); the v2 row claims '/b' (a moved directory or
+    // a hand-edited row) — that cwd must never be trusted.
+    const file = historyFilePath(home, '/a')
+    mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true })
+    writeFileSync(file, JSON.stringify({ v: 2, content: 'suspect', cwd: '/b', ts: 9 }) + '\n', { mode: 0o600 })
+    // All scope: no v2 row validates the hash, no known-cwd map entry →
+    // the file is unresolved, its rows are EXCLUDED (Rule 3), never shown
+    // under a fabricated directory.
+    const all = await search(home, 'all', '/nowhere', '')
+    assert.equal(all.length, 0, 'an unvalidated v2 cwd must not surface in the all scope')
+    // Current scope: the row still lives in THE current-directory file, so
+    // it is displayable under the inherited effective cwd — not the
+    // untrusted /b.
+    const current = await search(home, 'current', '/a', '')
+    assert.equal(current.length, 1)
+    assert.equal(current[0]?.cwd, '/a', 'the inherited effective cwd replaces the unvalidated one')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('all scope: an unvalidated v2 row inherits the file proof when one exists', async () => {
+  const home = tempHome()
+  try {
+    // The file is proven by row 1 (validating cwd '/a'); row 2's cwd
+    // '/b' does not validate — it must NOT surface as /b.
+    const file = historyFilePath(home, '/a')
+    mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true })
+    writeFileSync(file, [
+      JSON.stringify({ v: 2, content: 'proven', cwd: '/a', ts: 5 }),
+      JSON.stringify({ v: 2, content: 'suspect', cwd: '/b', ts: 6 }),
+    ].join('\n') + '\n', { mode: 0o600 })
+    const results = await search(home, 'all', '/nowhere', '')
+    const suspect = results.find(row => row.content === 'suspect')
+    assert.ok(suspect !== undefined, 'the row stays searchable')
+    assert.equal(suspect.cwd, '/a', 'the unvalidated cwd degrades to the file proof, never /b')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('current scope dedupes by content (newest wins)', async () => {
   const home = tempHome()
   try {

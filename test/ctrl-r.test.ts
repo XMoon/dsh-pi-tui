@@ -51,6 +51,22 @@ function panelVisible(viewport: string[]): boolean {
   return viewport.some(line => line.includes('History') && line.includes('Current directory'))
 }
 
+/** Poll until a predicate holds (bounded): deterministic settling for
+ * async panel searches — no fixed wall-clock sleeps (AGENTS.md timing
+ * rule: assert on the STATE, not on a delay). */
+async function waitFor(
+  probe: () => boolean,
+  maxMs = 2000,
+): Promise<void> {
+  const start = Date.now()
+  while (!probe()) {
+    if (Date.now() - start > maxMs) {
+      throw new Error('waitFor: predicate never became true')
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
 test('Ctrl+R opens the history panel; Enter fills the editor and does NOT submit', async () => {
   const home = tempHome()
   try {
@@ -61,8 +77,9 @@ test('Ctrl+R opens the history panel; Enter fills the editor and does NOT submit
     await vt.waitForRender()
     assert.ok(panelVisible(vt.getViewport()), 'the history panel must be visible')
     vt.sendInput('nginx')
-    await new Promise(resolve => setTimeout(resolve, 120)) // debounce + search
-    await vt.waitForRender()
+    // Settle on the RESULT state (the filtered row painted), never on a
+    // fixed delay: the debounce + file read must complete before Enter.
+    await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
     vt.sendInput('\r') // Enter = accept
     await vt.waitForRender()
     assert.equal(app.getDraft(), 'fix nginx reload', 'the selected history text replaces the draft')

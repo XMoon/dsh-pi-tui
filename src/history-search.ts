@@ -129,7 +129,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
         const fileCwd = scope === 'all' ? this.resolveFileCwd(file, records) : null
         for (let rowIndex = 0; rowIndex < records.length; rowIndex += 1) {
           const row = records[rowIndex]!
-          const cwd = this.effectiveCwd(request, row, fileCwd)
+          const cwd = this.effectiveCwd(request, file, row, fileCwd)
           if (cwd === null) continue
           if (!matchesQuery(row.content, request.query)) continue
           const result: HistorySearchResult = {
@@ -190,17 +190,23 @@ export class FileHistorySearchSource implements HistorySearchSource {
     return null
   }
 
-  /** The display cwd of ONE row, or NULL when the row must be excluded. */
-  private effectiveCwd(request: HistorySearchRequest, row: ParsedHistoryRecord, fileCwd: string | null): string | null {
-    if (request.scope === 'current') {
-      // The file IS the current cwd's file: v1 rows inherit it, v2 rows
-      // carry it (a v2 row with a DIFFERENT cwd in the current file is
-      // suspicious — the cwd field still describes where it was really
-      // written, so it is used for display/dedupe).
-      return row.version === 2 && row.cwd !== null ? row.cwd : request.cwd
+  /** The display cwd of ONE row, or NULL when the row must be excluded.
+   *
+   * A v2 row's cwd is trusted ONLY when it validates against the file it
+   * lives in (`historyFilePath(home, cwd) === file` — plan §40: an invalid
+   * v2 cwd/hash mismatch is never trusted; it could be a moved directory or
+   * a hand-edited row). Untrusted metadata degrades to the file-level proof:
+   * - current scope: the file IS the current cwd's file, so every row
+   *   (v1, valid v2, invalid v2) ends up at `request.cwd` — inherited, not
+   *   fabricated (plan §6.1);
+   * - all scope: the row falls back to the file proof (Rule 1/2), and a
+   *   row whose file is still unresolved is EXCLUDED (Rule 3). */
+  private effectiveCwd(request: HistorySearchRequest, file: string, row: ParsedHistoryRecord, fileCwd: string | null): string | null {
+    if (row.version === 2 && row.cwd !== null && historyFilePath(this.dshHome, row.cwd) === file) {
+      return row.cwd
     }
-    if (row.version === 2 && row.cwd !== null) return row.cwd
-    return fileCwd // v1 rows inherit the file proof; NULL → Rule 3 exclusion
+    if (request.scope === 'current') return request.cwd
+    return fileCwd // v1 or untrusted v2: inherit the file proof; NULL → Rule 3 exclusion
   }
 }
 

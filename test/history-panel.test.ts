@@ -23,13 +23,31 @@ class FakeSource implements HistorySearchSource {
   /** Per-query delay override: the SLOW query's response arrives last. */
   delayByQuery: Record<string, number> = {}
   fail = false
+  /** Manually-settled pending searches (deterministic race control — the
+   * test resolves them in the exact order it wants; no wall-clock timing). */
+  pending: Array<{ resolve: (rows: HistorySearchResult[]) => void }> = []
+  /** When true, `search()` returns a deferred the test resolves via
+   * {@link resolveNext}. Otherwise it resolves after the delay. */
+  manual = false
   search(request: import('../src/history-search.ts').HistorySearchRequest): Promise<HistorySearchResult[]> {
     this.requests.push({ scope: request.scope, query: request.query, cwd: request.cwd, limit: request.limit })
     if (this.fail) return Promise.reject(new Error('boom'))
+    if (this.manual) {
+      return new Promise<HistorySearchResult[]>(resolve => {
+        this.pending.push({ resolve })
+      })
+    }
     const delay = this.delayByQuery[request.query] ?? this.delayMs
     return new Promise(resolve => {
       setTimeout(() => resolve([...this.rows]), delay)
     })
+  }
+  /** Resolve the OLDEST pending search with rows (FIFO — the order the
+   *  panel issued them). */
+  resolveNext(rows: HistorySearchResult[]): void {
+    const pending = this.pending.shift()
+    if (pending === undefined) throw new Error('resolveNext: no pending search')
+    pending.resolve([...rows])
   }
 }
 
@@ -51,7 +69,13 @@ function makePanel(source: FakeSource, opts: Partial<import('../src/history-pane
   return { panel, accepted: () => accepted, closed: () => closed }
 }
 
-const settle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 5))
+/** Flush microtasks only (no timers — the debounce must NOT fire). */
+const flushMicrotasks = async (): Promise<void> => {
+  for (let index = 0; index < 10; index += 1) await Promise.resolve()
+}
+
+/** Flush microtasks + one timer turn (the panel's 1ms test debounce fires). */
+const settle = (ms = 5): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
 test('panel: opens in current scope with an empty query and immediately searches', async () => {
   const source = new FakeSource()
@@ -151,21 +175,44 @@ test('panel: Down/Up move the selection; the detail follows', async () => {
 })
 
 test('panel: a stale async result never overwrites a fresher query', async () => {
-  // The FIRST search (query '') is SLOW; the second (query 'a') is FAST —
-  // the slow response must NOT clobber the fresh rows when it finally lands.
+  // Deterministic race: search #1 (query '') is still pending when the
+  // query changes. Resolving the STALE #1 first must drop it; the FRESH
+  // #2 (issued after the change) is the only result that can land.
   const source = new FakeSource()
-  source.delayByQuery = { '': 30, a: 2 }
+  source.manual = true
   const { panel } = makePanel(source)
   panel.start()
-  await new Promise(resolve => setTimeout(resolve, 10))
+  // Search #1 is pending; the user types, which bumps the generation.
   panel.handleInput('a')
-  source.rows = [row('fresh', 9)]
-  // The fast 'a' search lands; then the slow '' search resolves with the
-  // SAME rows — wait past BOTH, and the selection must still be the fresh
-  // row from the LATEST query (generation guard, plan §14).
-  await new Promise(resolve => setTimeout(resolve, 60))
-  assert.equal(panel.selected()?.content, 'fresh', 'the fresher query owns the selection')
+  await settle() // debounce fires → search #2 pending
   assert.equal(source.requests.length, 2)
+  source.resolveNext([row('stale', 1)]) // #1 (stale) lands FIRST
+  await settle()
+  assert.equal(panel.selected(), undefined, 'the stale response must be dropped')
+  source.resolveNext([row('fresh', 9)]) // #2 (freshest) lands
+  await settle()
+  assert.equal(panel.selected()?.content, 'fresh')
+})
+
+test('panel: a response landing DURING the debounce window is dropped (generation invalidated on change, not on fire)', async () => {
+  // The review repro: search #1 is in flight; the user types again, and #1
+  // resolves BEFORE the debounce timer fires (the timer must not be the
+  // only fence — the generation must be invalidated at change time).
+  const source = new FakeSource()
+  source.manual = true
+  const { panel } = makePanel(source)
+  panel.start() // search #1 pending
+  panel.handleInput('a') // scheduleSearch: generation bumped NOW, timer set
+  // #1 resolves BEFORE the debounce fires (we never awaited settle):
+  source.resolveNext([row('old query result', 1)])
+  await flushMicrotasks() // microtasks only — the debounce timer has NOT fired yet
+  assert.equal(source.requests.length, 1, 'the debounced search has not fired yet')
+  assert.equal(panel.selected(), undefined, 'the pre-change response must not commit')
+  await settle(2) // now the debounce fires -> search #2
+  assert.equal(source.requests.length, 2)
+  source.resolveNext([row('new query result', 2)])
+  await settle()
+  assert.equal(panel.selected()?.content, 'new query result')
 })
 
 test('panel: zero results renders the no-match state and the footer', async () => {

@@ -1,7 +1,9 @@
 /**
  * Headless tests for the per-cwd input-history store (history.ts): the
- * md5(cwd) JSONL file layout, corrupt-line tolerance, the HISTORY_LIMIT
- * trim, and the append rules (empty/duplicate skip, multi-line escaping).
+ * md5(cwd) JSONL file layout, v1+v2 row parsing, corrupt-line tolerance,
+ * the READ-ONLY recall split (a load never trims or rewrites the canonical
+ * file), and the append rules (empty/duplicate skip, multi-line escaping,
+ * metadata preservation).
  * The runner wiring (file load on session init, append on submit, legacy
  * settings migration) lives in index.ts and is exercised end-to-end by the
  * tmux suite; these tests pin the pure storage contract.

@@ -11,7 +11,8 @@
  * - Empty submissions and consecutive repeats are skipped (shell-history
  *   behavior); non-consecutive repeats are legal history and survive.
  * - Corrupt lines are skipped on load, never fatal.
- * - The file is capped at HISTORY_LIMIT entries; the cap trims on load.
+ * - The canonical file is NEVER truncated or rewritten on read — recall
+ *   caps at HISTORY_RECALL_LIMIT in memory, the file keeps every row.
  * - `!` shell commands are stored verbatim (with the leading `!`), so ↑
  *   recall restores them as text and Enter re-runs the shell branch.
  *

@@ -256,6 +256,13 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   private scheduleSearch(): void {
+    // The query/scope changed NOW: invalidate the in-flight generation and
+    // abort its request IMMEDIATELY — a response that lands during the
+    // debounce window must never commit results for the PREVIOUS query
+    // (plan §14; the refresh's generation check is the second fence).
+    this.state.generation += 1
+    this.controller?.abort()
+    this.controller = undefined
     if (this.timer !== undefined) clearTimeout(this.timer)
     this.timer = setTimeout(() => {
       this.timer = undefined
