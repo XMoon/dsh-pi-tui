@@ -14,6 +14,8 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
+import { EditorRegistry } from '../src/editor-registry.ts'
+import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A throwaway workspace (completion fixtures live under the cwd). */
@@ -530,5 +532,100 @@ test('a bare ! reaches the child via the subagent submit path', async () => {
   assert.equal(childSubmits.length, 1, 'a bare ! in the viewer must submit to the child')
   assert.equal(childSubmits[0]!.text, '!', 'the child receives the serialized wire form')
   assert.equal(app.inputModeForTest(), 'prompt', 'mode resets after the child submit')
+  app.stop()
+})
+
+// ── review round 3: plugin handoff (the wire form round-trips) ────────────
+
+/** A minimal plugin editor (the editor-registry test shape). */
+function pluginEditor(initial = ''): ExtensionEditor & { text: string; disposed: boolean } {
+  const state = { text: initial, disposed: false }
+  return {
+    get component() { return { kind: 'text' as const, spans: [{ text: state.text }] } },
+    getText: () => state.text,
+    setText: (text) => { state.text = text },
+    getCursor: () => 0,
+    setCursor: () => {},
+    get focused() { return false },
+    borderColor: (text) => text,
+    dispose: () => { state.disposed = true },
+    get text() { return state.text },
+    get disposed() { return state.disposed },
+  }
+}
+
+test('a shell-mode draft round-trips through a plugin editor handoff with its mode', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('pwd')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  // The plugin editor wins the seat: the handoff transfers the WIRE form.
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'handoff-plugin',
+    priority: 0,
+    create: (_host: EditorHost) => {
+      const editor = pluginEditor()
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.equal(created.length, 1)
+  assert.equal(created[0]!.getText(), '!pwd', 'the plugin document is the wire form')
+  // Unload: the host restores and DECODES the wire form back into mode + body.
+  handle.dispose()
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the shell mode survives the handoff round-trip')
+  assert.equal(app.seatTextForTest(), 'pwd')
+  vt.sendInput('\r')
+  assert.deepEqual(submitted, ['!pwd'], 'the restored shell draft submits its wire form')
+  app.stop()
+})
+
+test('a plugin draft without a shell prefix restores in PROMPT mode (no stale !)', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  // Enter shell mode, then let the plugin take over and REPLACE the draft
+  // with plain prose.
+  vt.sendInput('!')
+  vt.sendInput('pwd')
+  await vt.waitForRender()
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'handoff-plugin-2',
+    priority: 0,
+    create: (_host: EditorHost) => {
+      const editor = pluginEditor()
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  created[0]!.setText('echo')
+  // Unload: the host restores the plugin's text — WITHOUT the stale shell
+  // mode, so `echo` submits as plain prose, never `!echo`.
+  handle.dispose()
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'prompt', 'a prefix-free plugin draft must not inherit the shell mode')
+  assert.equal(app.seatTextForTest(), 'echo')
+  vt.sendInput('\r')
+  assert.deepEqual(submitted, ['echo'], 'the plugin draft submits as plain text')
   app.stop()
 })

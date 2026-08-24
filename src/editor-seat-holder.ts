@@ -25,6 +25,7 @@
 import type { Component } from '@xmoon76/pi-tui'
 import type { EditorHost, EditorSnapshot, ExtensionEditor } from './extension/public-types.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
+import { serializeEditorInput, shellPrefixForMode } from './editor-input-mode.ts'
 
 function safeEditorErrorMessage(error: unknown): string {
   try {
@@ -71,6 +72,10 @@ export interface SeatEditor {
   /** The occupant's editor input mode (the host editor always answers; a
    * plugin editor has no mode — absent means prompt semantics). */
   getInputMode?(): import('./editor-input-mode.ts').EditorInputMode
+  /** Replace the occupant's draft from a SERIALIZED user input (the host
+   * editor decodes mode + body; a plugin editor has no mode and receives
+   * the raw text). */
+  setSerializedInput?(text: string): void
   /** P1-5: the occupant's input channel — a PLUGIN editor with a
    * handleInput hook receives routed SEMANTIC events here (the host has
    * already decoded the terminal protocol — legacy/CSI-u/modifyOtherKeys
@@ -89,6 +94,9 @@ export interface HostEditorAdapter {
   isShowingAutocomplete?(): boolean
   /** The host editor's current input mode (shell-mode serialization). */
   getInputMode?(): import('./editor-input-mode.ts').EditorInputMode
+  /** Replace the host draft from a SERIALIZED user input (`!x` / `!!x`
+   * decode into mode + body — the handoff restore path). */
+  setSerializedInput?(text: string): void
   getCursor?(): number
   /** Best-effort cursor setter for the host editor. */
   setCursor?(offset: number): void
@@ -236,6 +244,7 @@ export class EditorSeatHolder {
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getInputMode: () => editor.getInputMode?.() ?? 'prompt',
+      setSerializedInput: (text) => editor.setSerializedInput?.(text),
       getCursor: () => editor.getCursor?.() ?? 0,
       setCursor: (offset) => editor.setCursor?.(offset),
       insertTextAtCursor: (text) => editor.insertTextAtCursor?.(text),
@@ -253,6 +262,23 @@ export class EditorSeatHolder {
   /** The current occupant. */
   currentEditor(): SeatEditor {
     return this.current
+  }
+
+  /**
+   * The WIRE form of one occupant's draft: mode + body serialized (the
+   * host editor's shell mode prefixes the body; a plugin editor has no
+   * mode — its text IS the wire form). Handoffs transfer this form so a
+   * shell-mode draft round-trips through a plugin editor with its mode,
+   * and a plugin draft that starts with `!` decodes back into the shell
+   * mode the user intended. The prefix length lets the caller shift the
+   * flat cursor offset between the two representations.
+   */
+  private wireDraftOf(seat: SeatEditor): { text: string; prefixLength: number } {
+    const mode = seat.getInputMode?.() ?? 'prompt'
+    return {
+      text: serializeEditorInput(mode, seat.getText()),
+      prefixLength: shellPrefixForMode(mode).length,
+    }
   }
 
   /** The current seat snapshot (Phase 2: the ADVANCED editor controls
@@ -301,14 +327,24 @@ export class EditorSeatHolder {
       // remains available and the handoff stays atomic.
       let host: SeatEditor
       try {
-        const draft = previous.getText()
+        // The handoff transfers the WIRE form (mode + body serialized):
+        // a plugin editor's document IS the wire form (its submissions
+        // are raw), so a shell-mode host draft round-trips through the
+        // plugin with its mode, and a plugin draft that happens to start
+        // with `!` decodes back into the shell mode the user intended.
+        // The cursor offset shifts by the synthetic prefix length.
+        const wire = this.wireDraftOf(previous)
         const cursor = previous.getCursor()
         host = this.adaptHost()
-        host.setText(draft)
+        if (host.setSerializedInput !== undefined) {
+          host.setSerializedInput(wire.text)
+        } else {
+          host.setText(wire.text)
+        }
         // Restore both draft and cursor through the host adapter. Older
         // structural adapters may still implement setCursor as a no-op, but
         // the vendored fork's adapter preserves the active cursor as well.
-        host.setCursor(cursor)
+        host.setCursor(Math.max(0, cursor - wire.prefixLength))
       } catch (error) {
         this.reportHostError(error)
         return
@@ -365,10 +401,14 @@ export class EditorSeatHolder {
     // extends to EVERY post-create step, never a leak).
     try {
       if (this.disposed || !lease.active) throw new Error('editor seat disposed during handoff')
-      const draft = previous.getText()
+      // The handoff transfers the WIRE form (see the host-restore branch):
+      // the plugin's document is the wire form, so a shell-mode host draft
+      // keeps its mode across the round-trip. The cursor offset shifts by
+      // the synthetic prefix length.
+      const wire = this.wireDraftOf(previous)
       const cursor = previous.getCursor()
-      created.setText(draft)
-      created.setCursor?.(cursor)
+      created.setText(wire.text)
+      created.setCursor?.(cursor + wire.prefixLength)
     } catch (error) {
       try {
         created.dispose()
