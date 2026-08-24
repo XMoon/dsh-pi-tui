@@ -494,6 +494,7 @@ test('KeybindingRegistry: reserved host keys are rejected (full lifecycle invent
     { key: 'o', ctrl: true, shift: false },
     { key: 't', ctrl: true, shift: false },
     { key: 'g', ctrl: true, shift: false },
+    { key: 'r', ctrl: true, shift: false },   // Ctrl+R input-history search
     // Ctrl+J is deliberately NOT reserved anymore: legacy terminals send
     // it as LF (the editor's Enter), so the host dropped the binding and a
     // plugin may claim the chord itself.
