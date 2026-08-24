@@ -213,11 +213,12 @@ read the DURABLE descendant catalog, not the live-child list:
 - **Viewer authority is a separate `access` dimension** (`ViewerAccess`):
   mode stays the durable semantic; only a depth-1 continuable child is
   interactive from the root. Nested (depth > 1) rows open read-only even
-  when continuable, advertised as `continuable · nested · read-only from
-  this parent` — never relabeled one-shot. The read-only gate sits in the
-  INPUT ROUTING layer (Enter and the plugin submit path hard-reject), not
-  only at send time; there is no fallback to the main session as a nested
-  direct parent, and no `ctx.agents.get(childId).followup(...)` bypass.
+  when continuable, advertised as `<mode> · nested · read-only from this
+  parent` (the real mode — continuable or one-shot — is always shown,
+  never relabeled). The read-only gate sits in the INPUT ROUTING layer
+  (Enter and the plugin submit path hard-reject), not only at send time;
+  there is no fallback to the main session as a nested direct parent, and
+  no `ctx.agents.get(childId).followup(...)` bypass.
 - **The footer badge counts RUNNING descendants at every depth** (the user
   cares that a deep agent is still working); durable inactive children
   never keep the badge armed.

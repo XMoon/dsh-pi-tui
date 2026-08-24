@@ -69,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tree. Viewing a NESTED (depth > 1) descendant is read-only — mode is
   the durable semantic, access is the surface authority, and only a
   direct continuable child is interactive from the root; the header
-  advertises `continuable · nested · read-only from this parent`.
+  advertises `<mode> · nested · read-only from this parent` (the real
+  mode — continuable or one-shot — is always shown).
 - **The selected row's long label marquees.** A selected task or session
   row whose label overflows its column scrolls the label horizontally
   (pause → one cell per 250ms → tail pause → loop) instead of sitting

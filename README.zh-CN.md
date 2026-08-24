@@ -352,8 +352,8 @@ SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属
     `ctx.subagents.followup` 投递(FIFO——运行中的子代理不会被中断或
     steer;非活跃的子代理会自动冷恢复),`Esc` 返回主会话。**one-shot**
     子代理的查看器保持**只读**,任何**嵌套(深度 > 1)**后代也一样
-    ——即使它是 continuable(`continuable · nested · read-only from this
-    parent`):根会话只能继续自己的直接子代理。已结束的 one-shot
+    ——即使它是 continuable(`<mode> · nested · read-only from this
+    parent`,始终显示真实 mode):根会话只能继续自己的直接子代理。已结束的 one-shot
     子代理仍留在浏览器里——`inactive` 只是 live-store 的存在状态,
     不是结果——Enter 依然能打开其持久化 transcript。查看器打开期间,
     页脚切换为**子代理自己的身份**(`[subagent · continuable]` 徽章、

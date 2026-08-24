@@ -78,7 +78,8 @@
   第一个 RUNNING 子代理上(或第一个活跃 job),但绝不为光标重排树。
   查看嵌套(深度 > 1)后代时只读——mode 是持久语义,access 是当前表面
   的权限,只有直接(深度 1)continuable 子代理可从根交互;头部会标注
-  `continuable · nested · read-only from this parent`。
+  `<mode> · nested · read-only from this parent`(始终显示真实 mode——
+  continuable 或 one-shot)。
 - **选中行的超长标签现在会横向滚动(marquee)。** 选中的 task 或 session
   行标签超出列宽时,标签会水平滚动(停顿 → 每 250ms 一列 → 尾部停顿 →
   循环),而不是静止截断——只有**主标签**在动;树连接符、当前会话标记、

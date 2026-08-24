@@ -397,9 +397,9 @@ the Advanced/Unstable roadmap).
     child is never interrupted or steered; an inactive child cold-resumes
     automatically), while `Esc` returns to your session. A **one-shot**
     child's viewer stays **read-only**, and so does any **nested
-    (depth > 1)** descendant — even a continuable one (`continuable ·
-    nested · read-only from this parent`): the root may only continue
-    its own direct children. A FINISHED one-shot child stays in the
+    (depth > 1)** descendant — even a continuable one (`<mode> · nested ·
+    read-only from this parent`, the real mode always shown): the root
+    may only continue its own direct children. A FINISHED one-shot child stays in the
     browser — `inactive` is live-store presence, not an outcome — and
     Enter opens its persisted transcript. While a viewer is open the
     footer switches to the CHILD's own identity (`[subagent ·
