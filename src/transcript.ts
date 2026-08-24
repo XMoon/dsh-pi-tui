@@ -520,6 +520,10 @@ export class TranscriptFolder {
     // Message preview (review finding). The transcript entry still
     // accumulates the delta; only the Focus projection ignores it.
     if (activity.completed) return
+    // A delta for a step whose candidate was ALREADY confirmed is stale:
+    // it must never resurrect a candidate (nor confirm a newer one that
+    // is still streaming) — review finding.
+    if (activity.confirmedSteps.has(step)) return
     const candidate = activity.messageCandidate
     if (candidate !== undefined && candidate.step !== step) {
       this.confirmMessageCandidate(activity)
@@ -542,13 +546,14 @@ export class TranscriptFolder {
     const candidate = activity.messageCandidate
     if (candidate === undefined) return
     const text = candidate.tail
-    if (text !== '') {
-      // The bounded TAIL (never the head): the preview shows the message's
-      // LATEST content, so a long intermediate message confirmed by a
-      // later tool/step must not freeze its stale leading text (review
-      // finding).
-      activity.messageConfirmed = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
-    }
+    // The bounded TAIL (never the head): the preview shows the message's
+    // LATEST content, so a long intermediate message confirmed by a
+    // later tool/step must not freeze its stale leading text (review
+    // finding). An EMPTY candidate clears the confirmed text — the stale
+    // earlier preview must not survive (review finding).
+    activity.messageConfirmed = text === ''
+      ? undefined
+      : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
     activity.messageConfirmedStep = candidate.step
     activity.confirmedSteps.add(candidate.step)
     activity.messageCandidate = undefined

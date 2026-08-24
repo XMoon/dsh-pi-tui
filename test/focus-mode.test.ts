@@ -568,6 +568,49 @@ test('an empty authoritative message for the latest confirmed step clears the co
   assert.equal(activity.message, undefined, 'the empty authoritative text must clear the stale confirmed fragment')
 })
 
+test('a late text-delta for an already-confirmed step never resurrects a candidate', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
+    // A late delta for the confirmed step (replay).
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '更多' } }, 1003, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1004, 4),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '最终' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 5),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message?.text, '第一步', 'the confirmed intermediate stays; the late delta is ignored')
+})
+
+test('an empty candidate confirmed after a prior intermediate clears the slot', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '第二步' } }, 1003, 3),
+    // The step-1 authoritative text is EMPTY: the candidate tail clears.
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    eventAt('tool/call', { turn: 0, step: 1, callId: CallId('c2'), name: 'bash', arguments: '{}' }, 1005, 5),
+    eventAt('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1006, 6),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: '最终' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1007, 7),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1008, 8),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message, undefined, 'the empty intermediate must clear the slot, never leave the stale earlier preview')
+})
+
 test('a late text-delta after turn/end never resurrects the Message candidate', () => {
   const folder = new TranscriptFolder()
   folder.apply([
