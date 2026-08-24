@@ -105,7 +105,9 @@ export class StepUsageAccumulator {
   private currentTurn = -1
 
   /** Track the turn boundary: drop older turns' settled records when the
-   * turn advances. */
+   * turn advances, and remember the current turn so a LATE fact for an
+   * older turn (corrupt log) is ignored — never re-counted (review
+   * finding). */
   private noteTurn(turn: number): void {
     if (turn <= this.currentTurn) return
     if (this.currentTurn >= 0 && this.settledByStep.size > 0) {
@@ -118,6 +120,13 @@ export class StepUsageAccumulator {
     this.currentTurn = turn
   }
 
+  /** Whether a fact for this turn is stale: the turn already advanced past
+   * it (a well-formed log is monotonic; a late older-turn fact is a
+   * corrupt-log artifact and is ignored entirely). */
+  private staleTurn(turn: number): boolean {
+    return turn < this.currentTurn
+  }
+
   /** Open one step's accounting. A step that opens AFTER a settled fact of
    * the same (turn, step) (out-of-order replay) reconciles the fact: the
    * premature commit is reversed and the fact becomes the step's pending
@@ -125,6 +134,7 @@ export class StepUsageAccumulator {
    * step/end, never twice (review findings). */
   onStepStart(turn: number, step: number): void {
     this.noteTurn(turn)
+    if (this.staleTurn(turn)) return
     const key = stepKey(turn, step)
     const settled = this.settledByStep.get(key)
     if (settled !== undefined) {
@@ -146,6 +156,7 @@ export class StepUsageAccumulator {
    * commits to the turn's totals immediately. */
   onUsageChunk(turn: number, step: number, usage: UsageLike): void {
     this.noteTurn(turn)
+    if (this.staleTurn(turn)) return
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
       if (entry.authoritative === true) return
@@ -163,6 +174,7 @@ export class StepUsageAccumulator {
    * totals immediately. */
   onAssistantMessage(turn: number, step: number, usage?: UsageLike): void {
     this.noteTurn(turn)
+    if (this.staleTurn(turn)) return
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
       if (usage !== undefined) {
@@ -182,6 +194,7 @@ export class StepUsageAccumulator {
    * keeps its settled fact unchanged. */
   onStepEnd(turn: number, step: number): void {
     this.noteTurn(turn)
+    if (this.staleTurn(turn)) return
     const key = stepKey(turn, step)
     const entry = this.perStep.get(key)
     if (entry !== undefined) {
