@@ -97,6 +97,26 @@ export class StepUsageAccumulator {
   private readonly turnPending = new Map<number, TokenUsageTotals>()
   /** The session-wide total (every committed fact), kept O(1). */
   private readonly session: TokenUsageTotals = emptyTotals()
+  /** The highest turn seen so far: when a NEW turn appears, the settled
+   * records of all OLDER turns are dropped — their steps are closed and a
+   * well-formed log never revisits them, so the map stays bounded by the
+   * current turn's steps (review finding). A fact for an older turn's
+   * step beyond that (corrupt log) commits as a new fact. */
+  private currentTurn = -1
+
+  /** Track the turn boundary: drop older turns' settled records when the
+   * turn advances. */
+  private noteTurn(turn: number): void {
+    if (turn <= this.currentTurn) return
+    if (this.currentTurn >= 0 && this.settledByStep.size > 0) {
+      for (const key of this.settledByStep.keys()) {
+        const slash = key.indexOf('/')
+        const keyTurn = slash === -1 ? -1 : Number(key.slice(0, slash))
+        if (keyTurn < turn) this.settledByStep.delete(key)
+      }
+    }
+    this.currentTurn = turn
+  }
 
   /** Open one step's accounting. A step that opens AFTER a settled fact of
    * the same (turn, step) (out-of-order replay) reconciles the fact: the
@@ -104,6 +124,7 @@ export class StepUsageAccumulator {
    * usage — with its provenance preserved — to be committed once at
    * step/end, never twice (review findings). */
   onStepStart(turn: number, step: number): void {
+    this.noteTurn(turn)
     const key = stepKey(turn, step)
     const settled = this.settledByStep.get(key)
     if (settled !== undefined) {
@@ -124,6 +145,7 @@ export class StepUsageAccumulator {
    * chunk without an open step (replay edge) is a settled fact and
    * commits to the turn's totals immediately. */
   onUsageChunk(turn: number, step: number, usage: UsageLike): void {
+    this.noteTurn(turn)
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
       if (entry.authoritative === true) return
@@ -140,6 +162,7 @@ export class StepUsageAccumulator {
    * A message without an open step (replay edge) commits to the turn's
    * totals immediately. */
   onAssistantMessage(turn: number, step: number, usage?: UsageLike): void {
+    this.noteTurn(turn)
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
       if (usage !== undefined) {
@@ -158,6 +181,7 @@ export class StepUsageAccumulator {
    * late fact replaces or is ignored correctly; a step that never opened
    * keeps its settled fact unchanged. */
   onStepEnd(turn: number, step: number): void {
+    this.noteTurn(turn)
     const key = stepKey(turn, step)
     const entry = this.perStep.get(key)
     if (entry !== undefined) {
