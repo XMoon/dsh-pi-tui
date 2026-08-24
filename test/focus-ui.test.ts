@@ -706,3 +706,37 @@ test('revealSearchMatch opens the owner Thought and full-reveals the matched sec
   app.setFullscreen(false)
   app.stop()
 })
+
+test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Thought (review finding)', async () => {
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerToolRenderer({
+    id: 'probe', toolName: 'read',
+    render: (snapshot) => ({ kind: 'text', spans: [{ text: `probe ${snapshot.expanded}` }] }),
+  }, 'plugin')
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root: the tool secondary stays COMPACT — the plugin
+  // renderer must see expanded=false (the host's effective rule), never
+  // the old boundary-driven full state.
+  const y = findRow(vt.getViewport(), '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('probe false'), `the plugin renderer must see the compact state:\n${view}`)
+  // The per-card override full-reveals it: expanded=true.
+  const ty = findRow(vt.getViewport(), 'probe false')
+  click(vt, 10, ty + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('probe true'), `the plugin renderer must see the full state:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
