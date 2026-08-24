@@ -1,6 +1,6 @@
-# Input and card polish: bash completion, local-shell sandbox, question answers, goal cards, todo dock click, JSON folded previews
+# Input and card polish: bash completion, local-shell sandbox, question answers, goal cards, todo dock click, JSON folded previews, shell editor mode
 
-Six small, independent surface improvements, designed together because they
+Seven small, independent surface improvements, designed together because they
 land in the same release cycle. Each section records the decision, the
 rationale, the exact touch points, and the guarding tests. Workflow card
 rendering (`tool-workflow/*`) is deliberately **out of scope** — reviewed and
@@ -14,6 +14,7 @@ kept as-is.
 | 4 | Goal cards (`get_goal`/`create_goal`/`update_goal`) | Folded: goal summary; expanded: field lines; named headers |
 | 5 | Todo dock click (fullscreen) | Map the dock summary row to `toggleTodoPanel()` |
 | 6 | JSON-result folded previews | Web parity audit: expanded stays verbatim, folded never leaks JSON |
+| 7 | `!` / `!!` shell editor mode | The prefix is EDITOR STATE, never document text; serialized back into the textual protocol only at host boundaries |
 
 ---
 
@@ -416,6 +417,115 @@ result text verbatim — **no JSON beautification on the web either**.
 - `present` unit tests: every tool's summary phrase, the ralph friendly
   prefix, bare-JSON ralph, error shapes, undeducible results → `undefined`.
 - Headless: folded cards show the summaries and never the raw JSON keys.
+
+---
+
+## 7. `!` / `!!` shell editor mode: the prefix is state, never document text
+
+### Why
+
+The editor used to keep the literal shell prefix in the draft (`!git status`).
+The prefix is presentation + state, not text: it must never be part of the
+document (no cursor-offset/render hacks, no debounce to distinguish `!` from
+`!!`), and the shell business layer (`src/shell-context.ts`) must keep
+receiving the exact same wire text as before. kimi's `CustomEditor` stores
+`inputMode: 'prompt' | 'bash'` and never puts the `!` in the buffer; this
+extends that two-state model to dsh-pi-tui's two-shell-semantics (`!` =
+context, `!!` = local).
+
+### Design
+
+Three explicit modes — `prompt`, `shell-context`, `shell-local` — owned by
+`TuiEditor` (`src/tui-editor.ts`), with a pure codec in
+`src/editor-input-mode.ts` (`shellPrefixForMode` / `serializeEditorInput` /
+`editorModeFromHistoryEntry`). The buffer holds the bare command body; the
+mode is serialized back into the textual `!`/`!!` protocol ONLY at host
+boundaries.
+
+**Transitions** (empty body only): `!` → shell-context, `!` → shell-local,
+Backspace steps back (`!!` → `!` → prompt), Esc cancels the whole shell mode
+(autocomplete Esc closes the dropdown first). A `!` after body text is an
+ordinary character; in shell-local an empty-body `!` is a literal body
+character (no fourth mode). Bracketed paste into an EMPTY PROMPT that starts
+with `!`/`!!` normalizes into the matching mode in one synchronous pass; a
+paste into a non-empty editor or an already-shell-mode editor is never
+reinterpreted (its `!` is body text, so the serialized wire form matches the
+pre-mode behavior).
+
+**Boundaries** (the compatibility contract):
+
+- **Submission** — Enter, Ctrl+Enter (queue), Ctrl+S (steer), the plugin
+  action sink and the subagent submit path all serialize the mode into the
+  wire form before the text leaves the app; the mode resets to `prompt`
+  BEFORE the dispatch (a synchronous rejection restores the serialized text
+  through `setEditorText`, which decodes the mode back). Emptiness checks
+  judge the SERIALIZED form, so a bare `!`/`!!` still reaches the protocol.
+- **Restores** — `setEditorText` / `setDraft` decode serialized input
+  (`setSerializedInput`); `insertIntoEditor` stays raw. The subagent viewer
+  draft slots and `mainDraftBeforeViewer` store the SERIALIZED form and
+  decode on restore.
+- **History** — entries stay serialized (no migration); recall decodes
+  (`!!` before `!`); `onHistoryDraftSave`/`onHistoryDraftRestore` keep the
+  mode across ↑/↓ browsing.
+- **Completion** — `MentionProvider` synthesizes a VIRTUAL `!`/`!!` line for
+  the shell grammar (`src/shell-completion.ts` untouched); the applied
+  completion never writes the synthetic prefix into the buffer. In a shell
+  mode a leading `/` is a PATH, never a slash command: natural triggers stay
+  quiet and Tab forces path completion (the fork's `handleTabCompletion`
+  routes a space-free leading-`/` line to slash completion, so `TuiEditor`
+  intercepts Tab in shell modes).
+- **Handoffs** — plugin editor handoffs transfer the WIRE form (a plugin's
+  document IS the wire form) and the host restore decodes it back, with the
+  flat cursor offset shifted by the prefix length (mode-derived for the
+  host, text-derived for a plugin seat). `adaptHost` exposes
+  `setSerializedInput` only when the underlying adapter implements it, so
+  older structural adapters fall back to `setText` — never a dropped draft.
+- **Esc ladder** — the busy cancel is Host-owned and runs before both the
+  shell-mode exit and a replacement editor's Esc; a DECLINED plugin Esc
+  falls through to the host cancel ladder; a CONSUMED Esc (plugin or
+  `onSingleEscape`) disarms the pending double-Esc window.
+- **Chrome** — the ↓ task-browser gate and the footer `↓ view` hint read the
+  VISIBLE seat mode (`seatInputMode()`), never the hidden host editor's
+  stale mode.
+
+**Rendering** — the mode prompt is painted over the reserved 2-cell padding:
+`❯ ` (roleUser), `! ` and `!!` (both `shellMode`) — all exactly two cells, so
+the body/cursor never jump on a mode switch. The editor border uses
+`shellMode` in shell modes via a dynamic function that reads the live palette
+(theme-switch safe). The placeholder hint renders only in prompt mode.
+
+**Touch points**
+
+- `src/editor-input-mode.ts` (new) — the pure codec.
+- `src/tui-editor.ts` — mode state, transitions, render, paste
+  normalization, history hooks, Tab routing.
+- `src/tui-app.ts` — boundary serialization/decoding, Esc ladder, seat-mode
+  routing, footer hint.
+- `src/mentions.ts` — the virtual completion prefix.
+- `src/editor-seat-holder.ts` — `getInputMode`/`setSerializedInput` on the
+  seat surface, wire-form handoff.
+
+**Tests**
+
+- `test/editor-input-mode.test.ts` — the pure codec (serialize/decode,
+  `!!` before `!`, literal `!` in the body).
+- `test/shell-editor-mode.test.ts` — transitions, paste normalization,
+  submission serialization + rejection restore, history recall/draft
+  restore, completion (virtual prefix, path-vs-slash), rendering (prompt
+  symbols, border colors, no duplicate prefix), Esc priority (busy,
+  autocomplete, plugin consume/decline, window disarm), handoff round-trips
+  (mode, cursor, bare adapters), task-browser/footer seat-mode routing.
+- `test/shell-completion.test.ts` — provider-level virtual-prefix coverage.
+
+**Review record** — nine review rounds (codex / gpt-5.6-luna, read-only,
+fresh context per round) over the feature commits: rounds 1–8 `needs-fixes`
+(busy-Esc priority, bare-`!` emptiness checks, paste normalization scope,
+handoff wire-form transfer, seat-mode routing, sink steer serialization,
+adapter capability gating, declined/consumed plugin Esc handling, cursor
+restoration), round 9 **accepted, no open findings**. 1964/1964 full-suite
+tests, typecheck, `git diff --check`, and the pre-push gate (pack + all
+smokes) clean; the vendored fork and the public extension surface are
+unchanged.
 
 ---
 
