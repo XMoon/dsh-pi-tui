@@ -371,6 +371,30 @@ test('panel: the detail pane is suppressed (never truncated) when the budget can
   assert.ok(roomyLines.some(line => line.includes('Session:')), 'Session must render')
 })
 
+test('panel: maxRows 1–2 never overflows (the chrome yields, not the budget)', () => {
+  // Round-6 repro: render() always emitted title + search + one body row
+  // (3 rows), overflowing maxRows 1 and 2.
+  const source = new FakeSource()
+  source.rows = [row('prompt', 1)]
+  for (const maxRows of [1, 2, 3, 4]) {
+    const { panel } = makePanel(source, { maxRows })
+    const lines = panel.render(80)
+    assert.ok(lines.length <= maxRows, `maxRows ${maxRows} must not overflow (got ${lines.length})`)
+  }
+})
+
+test('panel: a suppressed detail in the split layout leaves NO stray separator', async () => {
+  // Round-6 repro: when the detail cannot fit its metadata, renderSplit
+  // used to emit a lone `│` after the list.
+  const source = new FakeSource()
+  source.rows = [{ id: 'p', content: 'prompt', cwd: '/work/a', ts: 1, sessionId: 'ses_1', sourceFile: '/a/h.jsonl', sourceIndex: 0 }]
+  const { panel } = makePanel(source, { maxRows: 8 })
+  panel.start()
+  await settle()
+  const lines = panel.render(HISTORY_PANEL_SPLIT_WIDTH + 20)
+  assert.ok(!lines.some(line => line.includes('│')), 'no stray separator when the detail is suppressed')
+})
+
 test('panel: a 500-line prompt is clamped in the detail pane (never fills the terminal)', () => {
   const source = new FakeSource()
   const huge = Array.from({ length: 500 }, (_, i) => `line ${i} of a giant prompt`).join('\n')

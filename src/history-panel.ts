@@ -331,8 +331,10 @@ export class HistoryPanel implements Component, Focusable {
     const lines: string[] = []
     // Title + scope tabs.
     lines.push(this.renderTitle(safeWidth))
+    if (this.maxRows <= 1) return lines
     // Query row.
     lines.push(this.renderSearchRow(safeWidth))
+    if (this.maxRows <= 2) return lines
     // Chrome is adaptive on tiny budgets: the blank row yields first, the
     // footer next — the render NEVER exceeds maxRows (plan §51), so a
     // small overlay height cannot clip the panel.
@@ -393,6 +395,12 @@ export class HistoryPanel implements Component, Focusable {
   private renderSplit(lines: string[], listWidth: number, detailWidth: number, bodyBudget: number): void {
     const listLines = this.renderList(listWidth, bodyBudget)
     const detailLines = this.renderDetail(detailWidth, this.selected(), bodyBudget)
+    if (detailLines.length === 0) {
+      // The detail was suppressed (its metadata cannot fit the budget):
+      // render the list alone — a stray `│` separator must not appear.
+      lines.push(...listLines)
+      return
+    }
     const rowCount = Math.max(listLines.length, detailLines.length)
     for (let row = 0; row < rowCount; row += 1) {
       const left = listLines[row] ?? ''
