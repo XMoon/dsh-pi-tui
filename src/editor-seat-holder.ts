@@ -244,7 +244,13 @@ export class EditorSeatHolder {
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getInputMode: () => editor.getInputMode?.() ?? 'prompt',
-      setSerializedInput: (text) => editor.setSerializedInput?.(text),
+      // Only expose the serialized-input setter when the underlying
+      // adapter implements it: a wrapper that silently no-ops would make
+      // the handoff's capability check pass and DROP the transferred
+      // draft on older structural adapters.
+      setSerializedInput: editor.setSerializedInput === undefined
+        ? undefined
+        : (text) => editor.setSerializedInput!(text),
       getCursor: () => editor.getCursor?.() ?? 0,
       setCursor: (offset) => editor.setCursor?.(offset),
       insertTextAtCursor: (text) => editor.insertTextAtCursor?.(text),
