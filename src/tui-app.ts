@@ -2473,8 +2473,14 @@ export class TuiApp {
         return undefined
       }
       // The host may consume the first Esc (runner-owned modes like the
-      // subagent viewer); otherwise it arms the double-Esc cancel.
-      if (this.events.onSingleEscape?.() === true) return { consume: true }
+      // subagent viewer); otherwise it arms the double-Esc cancel. A
+      // CONSUMED Esc is a fresh action: it disarms any pending window (a
+      // prior declined Esc may have armed it — the consumed Esc must not
+      // leave a stale cancel armed for an unrelated later press).
+      if (this.events.onSingleEscape?.() === true) {
+        this.lastEscapeAt = undefined
+        return { consume: true }
+      }
       // pi parity: a SINGLE Esc while the agent is busy stops the current
       // activity (turn, tool run, compaction) — partial content stays on
       // screen. Idle keeps the double-Esc cancel. The busy cancel is
@@ -2494,7 +2500,12 @@ export class TuiApp {
       // fallback (which includes this cancel path on re-entry).
       if (this.seatEditor().handleInput !== undefined) {
         const routed = this.handleReplacementEditorInput(data, this.inputRouterContext(), true)
-        if (routed !== undefined) return routed
+        if (routed !== undefined) {
+          // A CONSUMED plugin Esc is a fresh action: disarm any pending
+          // double-Esc window (a prior declined Esc may have armed it).
+          this.lastEscapeAt = undefined
+          return routed
+        }
         // The plugin DECLINED Esc: continue through the host Esc fallback
         // (shell-mode exit, double-Esc cancel) instead of dropping the
         // key — a dropped Esc would never arm the cancel.
