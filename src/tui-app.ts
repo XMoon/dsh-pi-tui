@@ -2022,6 +2022,16 @@ export class TuiApp {
       onInvalidate: () => this.requestRender(),
       onLeaderStateChange: () => this.renderFooter(),
       onLeaderActivate: (action) => {
+        // M6: a leader sequence must never bypass the viewer's
+        // parent-action guard — a `<leader>X` binding of a parent action
+        // (e.g. app.input.steer) is inert inside the continuable viewer,
+        // exactly like the direct key (plan §1.2/M1).
+        const target = this.viewerMode
+        if (target !== undefined
+          && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))
+          && VIEWER_BLOCKED_PARENT_ACTIONS.has(action as AppKeybindingId)) {
+          return
+        }
         this.dispatchResolvedAction(action as AppKeybindingId, '')
       },
     })
@@ -2665,6 +2675,16 @@ export class TuiApp {
     // the host methods. A resolution that DECLINES (e.g. pasteMedia
     // without a clipboard handler) falls through to the editor/plugin
     // stages below.
+    //
+    // ORDERING (by design, review round 1): this resolution runs BEFORE
+    // the advanced captures below. The pre-migration phase contract
+    // (AGENTS.md decision 13) placed the host ladder — the reserved
+    // lifecycle keys, which the host semantic actions ARE — before the
+    // advanced stage, and an advanced plugin may preempt ordinary
+    // editor/panel input but never a Host question/approval/overlay or a
+    // session-safety path (steer/queue/exit/interrupt). The migration
+    // preserves that ordering exactly; do not move the keymap after the
+    // advanced captures without re-reviewing the tradeoff.
     const resolution = this.keybindings.resolve(data, this.keybindingContext())
     if (resolution !== undefined) {
       const consumed = this.dispatchResolvedAction(resolution.action as AppKeybindingId, data, resolution.key)

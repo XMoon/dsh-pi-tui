@@ -115,21 +115,33 @@ export function parseUserKeybindings(
     }
   }
 
-  // The nested `bindings` map merges with the top-level action entries.
+  // The nested `bindings` map merges with the top-level action entries. A
+  // duplicate action declaration (top level AND nested, or twice) is a
+  // diagnostic — never a silent last-write-wins (plan §15/§16): the FIRST
+  // declaration wins, the later one is ignored.
   const entries: [string, unknown][] = []
+  const seen = new Set<string>()
+  const pushEntry = (actionId: string, value: unknown): void => {
+    if (seen.has(actionId)) {
+      diagnostics.push(`keybindings: action "${actionId}" declared more than once — the later entry is ignored`)
+      return
+    }
+    seen.add(actionId)
+    entries.push([actionId, value])
+  }
   for (const [key, value] of Object.entries(doc)) {
     if (key === LEADER_KEY) continue
     if (key === BINDINGS_KEY) {
       if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
         for (const [nestedKey, nestedValue] of Object.entries(value as Record<string, unknown>)) {
-          entries.push([nestedKey, nestedValue])
+          pushEntry(nestedKey, nestedValue)
         }
       } else {
         diagnostics.push('keybindings: "bindings" must be an object — ignored')
       }
       continue
     }
-    entries.push([key, value])
+    pushEntry(key, value)
   }
 
   for (const [actionId, value] of entries) {

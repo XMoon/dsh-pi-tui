@@ -144,6 +144,32 @@ test('keysFor / primaryKeyFor / keyHint reflect the effective map', () => {
   assert.equal(km.keyHint('app.transcript.toggleFullscreen'), '')
 })
 
+test('a user remap of a conditional action keeps its predicate', () => {
+  // Review round 1: a remap of app.tasks.open must NOT open the task
+  // browser with a non-empty editor or no active tasks — the user rule
+  // inherits the conditional predicate (the ↓ affordance stays too: it is
+  // a builtin conditional binding, and only `false` disables it).
+  const km = keymap({ userBindings: { 'app.tasks.open': 'ctrl+x' } })
+  const idle = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: true, tasksActive: true })
+  const busy = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: false, tasksActive: true })
+  const noTasks = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: true, tasksActive: false })
+  assert.equal(km.resolve('\x18', idle)?.action, 'app.tasks.open') // ctrl+x
+  assert.equal(km.resolve('\x18', busy), undefined, 'a non-empty editor must not open the browser')
+  assert.equal(km.resolve('\x18', noTasks), undefined, 'no active tasks must not open the browser')
+  // The ↓ affordance remains conditional.
+  assert.equal(km.resolve('\x1b[B', idle)?.action, 'app.tasks.open')
+  assert.equal(km.resolve('\x1b[B', busy), undefined)
+})
+
+test('false disables the conditional composition rule too', () => {
+  // Review round 1: `false` disables every source of the action's keys —
+  // including the empty-editor ↓ affordance.
+  const km = keymap({ userBindings: { 'app.tasks.open': false } })
+  const idle = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: true, tasksActive: true })
+  assert.equal(km.resolve('\x1b[B', idle), undefined, 'the ↓ affordance must be disabled too')
+  assert.deepEqual(km.keysFor('app.tasks.open'), [])
+})
+
 test('snapshot lists every action with its effective keys and sources', () => {
   const km = keymap({ userBindings: { 'app.input.steer': 'ctrl+x' } })
   const snapshot = km.snapshot()

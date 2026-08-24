@@ -3,8 +3,8 @@
  * resolved action and the Host's business methods.
  *
  * ```text
- * resolver 决定“是什么意思”
- * dispatcher 决定“怎么执行”
+ * the resolver decides what the input MEANS
+ * the dispatcher decides how it EXECUTES
  * ```
  *
  * The dispatcher NEVER re-implements business state — it calls the Host
