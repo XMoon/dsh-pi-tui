@@ -236,6 +236,11 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     tuiSettings: settings.value,
     agents: {} as never,
     sessions: { flush: async () => {} },
+    sessionReader: {
+      list: async () => [],
+      search: async () => [],
+      titles: async () => new Map(),
+    },
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: new DraftImageStore(),

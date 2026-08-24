@@ -65,6 +65,11 @@ function setup(): {
     tuiSettings: undefined,
     agents: {} as never,
     sessions: { flush: async () => {} },
+    sessionReader: {
+      list: async () => [],
+      search: async () => [],
+      titles: async () => new Map(),
+    },
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: store,
