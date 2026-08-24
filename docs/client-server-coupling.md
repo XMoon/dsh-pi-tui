@@ -60,7 +60,7 @@
 
 | File | Coupling | Notes |
 |---|---|---|
-| `src/commands.ts` | `settings`, `llm`, `authorization`, `credentials`, `commands`, `approval`, `permissionPresets`, `sessionPersistence`, `tokenMeter`, `agentDefaultModel`, `agentPresets`, `tools`; `import:dsh-agent`, `import:dsh-session` | The command runner — the second god interface (plan §M1.3). M1 narrows it to `TuiCommandContext` capabilities; `sessionQuery` moved to the session reader port (M1.3), `sessionTitle` to the session writer port (M1.4). |
+| `src/commands.ts` | `import:dsh-agent`, `import:dsh-session` | The command runner — M1.7 narrowed it: every Host service a command may read goes through the `CommandHostCapabilities` facade (`runner.host`, implemented over ctx in the runner); zero `ctx.get` remains in commands.ts. Type-only imports stay. |
 | `src/skill-catalog.ts` | `agentPresets`, `skills` | Already isolated: structural types + capability detection (decision 11). Model for the catalog port. |
 | `src/surface-catalog.ts` | `commands`, `import:dsh-agent` | Isolated catalog module; standing-scope reads. |
 | `src/skill-catalog-refresh.ts` | `import:dsh-agent` | Coordinator; agent-scoped refresh. |

@@ -241,8 +241,31 @@ export interface AgentsLike {
   }): Promise<AgentHandle>
 }
 
+
+/** The narrow Host-access surface commands consume (migration M1.7): every
+ * Host service a command may read goes through this facade, never `ctx`
+ * directly. The runner implements it over the dsh services; the return
+ * types stay structural (the catalog/config ports tighten them later). */
+export interface CommandHostCapabilities {
+  settings(): Context['settings'] | undefined
+  llm(): Context['llm'] | undefined
+  credentials(): Context['credentials'] | undefined
+  authorization(): Context['authorization'] | undefined
+  defaultModel(): Context['agentDefaultModel'] | undefined
+  presets(): Context['agentPresets'] | undefined
+  tools(): Context['tools'] | undefined
+  permission(): Context['permissionPresets'] | undefined
+  tokenMeter(): Context['tokenMeter'] | undefined
+  commands(): Context['commands'] | undefined
+  persistence(): Context['sessionPersistence'] | undefined
+}
+
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
+  /** The narrow Host-access facade (migration M1.7): commands read Host
+   * services through `host`, never `ctx` directly. `ctx` remains for the
+   * logger and the commands/change subscription only. */
+  readonly host: CommandHostCapabilities
   ctx: Context
   app: TuiApp
   /** The runner's diagnostics channel (stderr + $DSH_HOME/logs). */
@@ -547,8 +570,8 @@ interface ProviderCatalogSettingsWrite {
 
 /** Read the llm-pi-ai adapter's `providers` dict from its settings section,
  * or undefined when the settings service or the section is absent. */
-function readLlmpiAiProviders(ctx: Context): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
-  const settings = ctx.get('settings')
+function readLlmpiAiProviders(host: CommandHostCapabilities): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
+  const settings = host.settings()
   if (settings === undefined) return undefined
   try {
     const section = settings.get(settingsNamespace('llm-pi-ai')) as
@@ -563,9 +586,9 @@ function readLlmpiAiProviders(ctx: Context): Record<string, { apiKeyEnv?: string
 /** Read the merged /login option list: the llm configurable-provider
  * directory when the llm service is present, the settings-only fallback
  * otherwise. */
-function readProviderOptions(ctx: Context): ProviderOption[] {
-  const llm = ctx.get('llm') as ProviderCatalogLlm | undefined
-  const settings = ctx.get('settings') as ProviderCatalogSettings | undefined
+function readProviderOptions(host: CommandHostCapabilities): ProviderOption[] {
+  const llm = host.llm() as ProviderCatalogLlm | undefined
+  const settings = host.settings() as ProviderCatalogSettings | undefined
   const readSection = (ns: string): unknown => {
     if (settings === undefined) return undefined
     try {
@@ -585,7 +608,7 @@ function readProviderOptions(ctx: Context): ProviderOption[] {
   // llm-pi-ai route the section declares. The settings-only reader only
   // sees routes that NAME a credential (credentialOptionsFor skips keyless
   // profiles), so every fallback option names its reference.
-  const settingsOnly = credentialOptionsFor(readLlmpiAiProviders(ctx))
+  const settingsOnly = credentialOptionsFor(readLlmpiAiProviders(host))
   return settingsOnly.map((option, index) => index === 0 ? {
     ...option,
     route: 'deepseek-official',
@@ -676,7 +699,7 @@ async function runAuthorizationLogin(
   target: AuthorizationTarget,
   options: readonly ProviderOption[],
 ): Promise<CommandResult> {
-  const authorization = ctx.get('authorization') as AuthorizationServiceLike | undefined
+  const authorization = runner.host.authorization() as AuthorizationServiceLike | undefined
   if (authorization === undefined) return { kind: 'error', text: 'authorization service unavailable' }
   if (target.inFlight) return { kind: 'error', text: `sign-in already in progress for ${target.label}` }
   let method = target.methods[0]?.id
@@ -731,7 +754,7 @@ async function provisionKeylessProfile(
   if (target.route === undefined) return ''
   const option = options.find(candidate => candidate.route === target.route)
   if (option === undefined || option.configured || option.declared || option.settingsNs === '') return ''
-  const settings = ctx.get('settings') as ProviderCatalogSettingsWrite | undefined
+  const settings = runner.host.settings() as ProviderCatalogSettingsWrite | undefined
   if (settings === undefined) return ''
   try {
     await settings.mutate(option.settingsNs, [
@@ -809,13 +832,13 @@ type AddProviderOutcome =
  *   (a validation or persistence failure with a user-facing message).
  */
 async function askAddProvider(
-  ctx: Context,
+  runner: TuiCommandRunner,
   app: TuiApp,
   signal: AbortSignal,
   prefilledRoute?: string,
 ): Promise<AddProviderOutcome> {
-  const credentials = ctx.get('credentials')
-  const settings = ctx.get('settings') as ProviderCatalogSettingsWrite | undefined
+  const credentials = runner.host.credentials()
+  const settings = runner.host.settings() as ProviderCatalogSettingsWrite | undefined
   if (credentials === undefined || settings === undefined) {
     // The settings service and the llm-pi-ai namespace must exist to persist a
     // hand-declared profile; without them the add cannot complete. This is a
@@ -847,7 +870,7 @@ async function askAddProvider(
   // hint and falls back to hand entry.
   let discovered: readonly { id: string }[] = []
   let discoveryNote: string | undefined
-  const llm = ctx.get('llm') as ProviderCatalogDiscovery | undefined
+  const llm = runner.host.llm() as ProviderCatalogDiscovery | undefined
   if (llm !== undefined) {
     try {
       discovered = await llm.discoverModels('llm-pi-ai', {
@@ -965,7 +988,7 @@ export function registerTuiCommands(
   // `@`-file mentions use fd when it is on PATH (whole-tree fuzzy search);
   // without it the MentionProvider falls back to a bounded recursive scan.
   const fdPath = resolveFdPath()
-  const commands = ctx.get('commands')
+  const commands = runner.host.commands()
   const recordExtensionError = runner.recordExtensionError
   const clearExtensionError = runner.clearExtensionError
   // The commands service is part of the base layer; its absence means the
@@ -1193,8 +1216,8 @@ export function registerTuiCommands(
       // The permission-presets service owns the composed preset table and the
       // persisted default for new sessions (settings namespace 'permission').
       // Both panel rows degrade gracefully when the service is absent.
-      const settings = ctx.get('settings')
-      const permission = ctx.get('permissionPresets')
+      const settings = runner.host.settings()
+      const permission = runner.host.permission()
       const permissionNames: string[] = [...(permission?.names ?? [])]
       let defaultPermission: string | undefined
       if (settings !== undefined) {
@@ -1342,7 +1365,7 @@ export function registerTuiCommands(
               runner.refreshStatus()
             }
           } else if (id === 'default-permission') {
-            const settings = ctx.get('settings')
+            const settings = runner.host.settings()
             if (settings !== undefined && permissionNames.includes(value)) {
               detach('permission default write', () => settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }]) as Promise<unknown>, { notify: true })
             }
@@ -1769,7 +1792,7 @@ export function registerTuiCommands(
     // definition always does). A scoped shadow merely named `skill` without
     // a loader shape is treated as absent — the host's gesture listener
     // would not inject for it either, so the TUI's fallback must cover it.
-    const tools = ctx.get('tools') as { get?(name: string, agent: Agent): { execute?: unknown; parameters?: unknown } | undefined } | undefined
+    const tools = runner.host.tools() as { get?(name: string, agent: Agent): { execute?: unknown; parameters?: unknown } | undefined } | undefined
     const hostSkillLoader = tools?.get?.('skill', agent)
     const hostLoadsSkillBody = hostSkillLoader !== undefined && typeof hostSkillLoader.execute === 'function'
     // Deliver the batch through the steer path (and unlike
@@ -2065,8 +2088,8 @@ export function registerTuiCommands(
     description: 'Switch the model (and reasoning effort) for this session',
     handler: async () => {
       const selected = runner.selected
-      const llm = ctx.get('llm')
-      const defaultModel = ctx.get('agentDefaultModel')
+      const llm = runner.host.llm()
+      const defaultModel = runner.host.defaultModel()
       if (llm === undefined || defaultModel === undefined) return { kind: 'error', text: 'model service unavailable' }
       const providers = llm.listProviders()
       const current = defaultModel.currentSelection()
@@ -2199,7 +2222,7 @@ export function registerTuiCommands(
     description: 'Switch to danger-full-access (alias of /permission danger-full-access)',
     handler: async () => {
       const liveAgent = await requireAgent()
-      const commands = ctx.get('commands')
+      const commands = runner.host.commands()
       if (commands === undefined) return { kind: 'error', text: 'commands service unavailable' }
       const execution = await commands.execute(liveAgent, '/permission danger-full-access', [], signal)
       if (execution === undefined) {
@@ -2224,7 +2247,7 @@ export function registerTuiCommands(
     description: 'Show or switch the session agent preset',
     input: { hint: '[status|<id>|default [<id>]]' },
     handler: async (invocation) => {
-      const presets = ctx.get('agentPresets')
+      const presets = runner.host.presets()
       if (presets === undefined) {
         return { kind: 'error', text: 'agent presets unavailable in this deployment' }
       }
@@ -2239,7 +2262,7 @@ export function registerTuiCommands(
         return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${presets.defaultId}` }
       }
       if (verb === 'default') {
-        const settings = ctx.get('settings')
+        const settings = runner.host.settings()
         if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
         const ns = settingsNamespace('agent-presets')
         if (rest === '') {
@@ -2573,7 +2596,7 @@ export function registerTuiCommands(
     input: { hint: '[md|<path>]' },
     handler: async (invocation) => {
       const liveAgent = await requireAgent()
-      const persistence = ctx.get('sessionPersistence')
+      const persistence = runner.host.persistence()
       if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
       const arg = invocation.rawInput.trim()
       const shortId = liveAgent.session.id.replace(/^session-/, '').slice(0, 8)
@@ -2654,7 +2677,7 @@ export function registerTuiCommands(
       const liveAgent = await requireAgent()
       const stats = computeStats(liveAgent.session.events)
       let contextTokens: number | undefined
-      const meter = ctx.get('tokenMeter')
+      const meter = runner.host.tokenMeter()
       if (meter !== undefined) {
         try {
           contextTokens = meter.measure(liveAgent.session).totalTokens
@@ -2692,13 +2715,13 @@ export function registerTuiCommands(
     description: 'Sign in with a provider or set an API key — deepseek official or an llm-pi-ai provider route',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
-      const credentials = ctx.get('credentials')
+      const credentials = runner.host.credentials()
       if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
       // The two credential planes (dsh 0.1.1-rc.1): reference targets from
       // the provider catalog, authorization flows from the seam. An absent
       // authorization service degrades to the reference-only surface.
-      const authorization = ctx.get('authorization') as AuthorizationServiceLike | undefined
-      const options = readProviderOptions(ctx)
+      const authorization = runner.host.authorization() as AuthorizationServiceLike | undefined
+      const options = readProviderOptions(runner.host)
       const targets = authorizationTargets(authorization?.list() ?? [])
       const merged = mergeLoginTargets(options, targets)
       const arg = invocation.rawInput.trim()
@@ -2735,7 +2758,7 @@ export function registerTuiCommands(
           if (flow !== undefined) {
             target = flow
           } else {
-            const outcome = await askAddProvider(ctx, app, runner.signal, arg)
+            const outcome = await askAddProvider(runner, app, runner.signal, arg)
             if (outcome.kind === 'cancelled') return { kind: 'error', text: 'add provider cancelled' }
             if (outcome.kind === 'error') return { kind: 'error', text: outcome.text }
             return { kind: 'success', text: outcome.text }
@@ -2764,7 +2787,7 @@ export function registerTuiCommands(
         })
         if (picked === undefined) return { kind: 'error', text: 'login cancelled' }
         if (picked === ADD_PROVIDER_VALUE) {
-          const outcome = await askAddProvider(ctx, app, runner.signal)
+          const outcome = await askAddProvider(runner, app, runner.signal)
           if (outcome.kind === 'cancelled') return { kind: 'error', text: 'add provider cancelled' }
           if (outcome.kind === 'error') return { kind: 'error', text: outcome.text }
           return { kind: 'success', text: outcome.text }
@@ -2811,10 +2834,10 @@ export function registerTuiCommands(
     description: 'Clear a stored credential — deepseek official or an llm-pi-ai provider route (API key or stored record)',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
-      const credentials = ctx.get('credentials')
+      const credentials = runner.host.credentials()
       if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
-      const authorization = ctx.get('authorization') as AuthorizationServiceLike | undefined
-      const options = readProviderOptions(ctx)
+      const authorization = runner.host.authorization() as AuthorizationServiceLike | undefined
+      const options = readProviderOptions(runner.host)
       const targets = authorizationTargets(authorization?.list() ?? [])
       const arg = invocation.rawInput.trim()
       if (arg !== '') {

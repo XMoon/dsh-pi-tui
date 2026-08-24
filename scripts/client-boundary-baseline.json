@@ -1,25 +1,16 @@
 {
  "commands.ts": [
-  "agentDefaultModel",
-  "agentPresets",
-  "authorization",
-  "commands",
-  "credentials",
   "import:dsh-agent",
-  "import:dsh-session",
-  "llm",
-  "permissionPresets",
-  "sessionPersistence",
-  "settings",
-  "tokenMeter",
-  "tools"
+  "import:dsh-session"
  ],
  "index.ts": [
   "agentDefaultModel",
   "agentPresets",
   "agents",
   "attachments",
+  "authorization",
   "commands",
+  "credentials",
   "import:dsh-agent",
   "import:dsh-session",
   "jobs",

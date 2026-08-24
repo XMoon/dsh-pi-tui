@@ -5173,6 +5173,21 @@ export function apply(ctx: Context, config: Config): void {
       get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
       agents: agents as unknown as TuiCommandRunner['agents'],
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
+      // The narrow Host-access facade (migration M1.7): commands read Host
+      // services through `host`, never ctx directly.
+      host: {
+        settings: () => ctx.get('settings'),
+        llm: () => ctx.get('llm'),
+        credentials: () => ctx.get('credentials'),
+        authorization: () => ctx.get('authorization'),
+        defaultModel: () => ctx.get('agentDefaultModel'),
+        presets: () => ctx.get('agentPresets'),
+        tools: () => ctx.get('tools'),
+        permission: () => ctx.get('permissionPresets'),
+        tokenMeter: () => ctx.get('tokenMeter'),
+        commands: () => ctx.get('commands'),
+        persistence: () => ctx.get('sessionPersistence'),
+      },
       // The session READ port (migration M1.3): /sessions, /resume, /search
       // and the title batches go through the port, never ctx directly.
       sessionReader: backend.sessionReader,
