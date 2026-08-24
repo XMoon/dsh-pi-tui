@@ -1348,8 +1348,11 @@ export class TuiApp {
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
-  /** The working directory for the panel's `current` scope. */
-  private readonly historySearchCwd: string | undefined
+  /** The live working directory for the panel's `current` scope — a GETTER
+   * (the runner's `sessionCwd()`), never a snapshot: a session switch moves
+   * the whole surface's cwd with the new session header, so the panel must
+   * resolve the cwd at OPEN time, not at construction time. */
+  private readonly historySearchCwd: (() => string) | undefined
   /** The open CATEGORIZED picker (e.g. /sessions): Tab cycles its
    * categories while it is open. Cleared when the picker closes. */
   private activeCategorizedPicker: CategorizedPickerState | undefined
@@ -1708,7 +1711,9 @@ export class TuiApp {
     this.imageLoader = options.imageLoader
     this.imageTheme = options.imageTheme
     this.historySearchSource = options.historySearchSource
-    this.historySearchCwd = options.historySearchCwd?.() ?? options.workspaceRoot
+    // Keep the GETTER: the cwd must be resolved at panel-open time (a
+    // session switch changes `sessionCwd()` — see the field doc).
+    this.historySearchCwd = options.historySearchCwd
     this.editorSeatHolder = new EditorSeatHolder({
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
@@ -2939,9 +2944,22 @@ export class TuiApp {
     if (this.historyPanel !== undefined) return
     if (this.historySearchSource === undefined) return
     if (this.disposed) return
+    const columns = this.terminal.columns
+    const rows = this.terminal.rows
+    // The overlay must NEVER exceed the terminal (plan §51): width/height
+    // are clamped to the real columns/rows (a 50×10 terminal must not
+    // request a 60×14 panel). The panel's row budget is the overlay's
+    // maxHeight minus the Frame's two border rows.
+    const width = Math.min(columns - 2, Math.max(20, Math.min(100, columns - 6)))
+    const maxHeight = Math.min(rows - 2, Math.max(8, Math.min(30, rows - 4)))
     const panel = new HistoryPanel({
       source: this.historySearchSource,
-      cwd: this.historySearchCwd ?? this.status.cwd,
+      // Resolve the cwd at OPEN time (session switches move it): the
+      // injected getter reflects the LIVE session, the status cwd is the
+      // fallback when no getter is wired.
+      cwd: this.historySearchCwd?.() ?? this.status.cwd,
+      maxRows: Math.max(6, maxHeight - 2),
+      onResultsChanged: () => this.requestRender(),
       onAccept: (content) => {
         this.closeHistorySearch()
         // Accept = "bring back and EDIT", never submit (plan §33): the
@@ -2953,10 +2971,6 @@ export class TuiApp {
     })
     panel.start()
     this.historyPanel = panel
-    const columns = this.terminal.columns
-    const rows = this.terminal.rows
-    const width = Math.max(60, Math.min(100, columns - 6))
-    const maxHeight = Math.max(14, Math.min(30, rows - 4))
     this.historyOverlay = this.showOverlayOnHost(new Frame(panel), { width, maxHeight })
   }
 

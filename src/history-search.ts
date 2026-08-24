@@ -36,7 +36,7 @@
  * @module @xmoon76/dsh-pi-tui/history-search
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { historyFilePath, parseHistoryRecords, type ParsedHistoryRecord } from './history.ts'
 
@@ -87,9 +87,13 @@ export interface HistorySearchSource {
 export interface FileHistorySearchSourceOptions {
   /** `$DSH_HOME`. */
   dshHome: string
-  /** Rule 2 legacy recovery: `md5(cwd) → cwd` for cwds seen elsewhere
-   * (session browser / current launch paths). */
-  knownCwds?: ReadonlyMap<string, string>
+  /**
+   * Rule 2 legacy recovery: `md5(cwd) → cwd` for cwds known elsewhere.
+   * May be a RESOLVER — the all-scope search calls it on EVERY search, so
+   * cwds learned after construction (a session created/switched later) are
+   * immediately recoverable, never a startup snapshot.
+   */
+  knownCwds?: ReadonlyMap<string, string> | (() => ReadonlyMap<string, string>)
   /** Concurrent file reads in the `all` scope (plan §16; default 8). */
   concurrency?: number
 }
@@ -100,7 +104,7 @@ export interface FileHistorySearchSourceOptions {
  */
 export class FileHistorySearchSource implements HistorySearchSource {
   private readonly dshHome: string
-  private readonly knownCwds: ReadonlyMap<string, string>
+  private readonly knownCwds: ReadonlyMap<string, string> | (() => ReadonlyMap<string, string>)
   private readonly concurrency: number
 
   constructor(options: FileHistorySearchSourceOptions) {
@@ -113,18 +117,21 @@ export class FileHistorySearchSource implements HistorySearchSource {
     const scope = request.scope
     const files = scope === 'current'
       ? [historyFilePath(this.dshHome, request.cwd)]
-      : this.listAllFiles()
+      : await this.listAllFiles()
     const results: HistorySearchResult[] = []
-    // Bounded concurrency over the file set (no FD bursts; abort observed
-    // between batches — plan §16/§14); a per-file failure only drops that
-    // file's rows (plan §40).
-    for (let offset = 0; offset < files.length; offset += this.concurrency) {
-      if (request.signal?.aborted) return []
-      const batch = files.slice(offset, offset + this.concurrency)
-      const loaded = await Promise.all(batch.map(async file => this.readRows(file)))
-      for (let index = 0; index < batch.length; index += 1) {
-        const file = batch[index]!
-        const records = loaded[index] ?? []
+    // A REAL bounded worker pool over the file set: each worker awaits its
+    // own async read and the pool keeps at most `concurrency` reads in
+    // flight, so the event loop stays free between files (an all-scope
+    // scan never blocks typing/rendering; plan §16). The abort signal is
+    // checked by every worker between files. A per-file failure only drops
+    // that file's rows (plan §40).
+    const queue = [...files]
+    const workers = Array.from({ length: Math.min(this.concurrency, Math.max(1, queue.length)) }, async () => {
+      for (;;) {
+        if (request.signal?.aborted) return
+        const file = queue.shift()
+        if (file === undefined) return
+        const records = await this.readRows(file)
         // The file-level cwd proof, computed ONCE per file (Rules 1+2).
         const fileCwd = scope === 'all' ? this.resolveFileCwd(file, records) : null
         for (let rowIndex = 0; rowIndex < records.length; rowIndex += 1) {
@@ -144,25 +151,27 @@ export class FileHistorySearchSource implements HistorySearchSource {
           results.push(result)
         }
       }
-    }
+    })
+    await Promise.all(workers)
     if (request.signal?.aborted) return []
     return dedupeKeepNewest(results, scope).sort(compareResults).slice(0, request.limit)
   }
 
-  /** Parse one file's live rows; unreadable/corrupt files degrade to `[]`. */
-  private readRows(file: string): ParsedHistoryRecord[] {
+  /** Parse one file's live rows asynchronously; unreadable/corrupt files
+   * (including a vanished file) degrade to `[]`. */
+  private async readRows(file: string): Promise<ParsedHistoryRecord[]> {
     try {
-      if (!existsSync(file)) return []
-      return parseHistoryRecords(readFileSync(file, 'utf8'))
+      return parseHistoryRecords(await readFile(file, 'utf8'))
     } catch {
       return []
     }
   }
 
   /** Every candidate file in the `all` scope (sorted for determinism). */
-  private listAllFiles(): string[] {
+  private async listAllFiles(): Promise<string[]> {
     try {
-      return readdirSync(join(this.dshHome, 'user-history'))
+      const names = await readdir(join(this.dshHome, 'user-history'))
+      return names
         .filter(name => name.endsWith('.jsonl') && !name.endsWith('.tmp') && !name.endsWith('.lock'))
         .map(name => join(this.dshHome, 'user-history', name))
         .sort()
@@ -185,7 +194,8 @@ export class FileHistorySearchSource implements HistorySearchSource {
       if (historyFilePath(this.dshHome, row.cwd) === file) return row.cwd
     }
     const hash = file.slice(file.lastIndexOf('/') + 1).replace(/\.jsonl$/, '')
-    const fromKnown = this.knownCwds.get(hash)
+    const known = typeof this.knownCwds === 'function' ? this.knownCwds() : this.knownCwds
+    const fromKnown = known.get(hash)
     if (fromKnown !== undefined && historyFilePath(this.dshHome, fromKnown) === file) return fromKnown
     return null
   }

@@ -150,6 +150,28 @@ test('all scope: unresolved legacy rows are EXCLUDED (Rule 3 — no fabricated c
   }
 })
 
+test('all scope: knownCwds may be a RESOLVER — cwds learned after construction are immediately recoverable', async () => {
+  const home = tempHome()
+  try {
+    writeV1(home, '/later-dir', ['legacy in a later session'])
+    // The resolver starts empty; the "session switch" adds the cwd AFTER
+    // the source was constructed — the next search must see it (Rule 2 is
+    // never a startup snapshot).
+    const known = new Map<string, string>()
+    const resolver = (): ReadonlyMap<string, string> => known
+    const source = new FileHistorySearchSource({ dshHome: home, knownCwds: resolver })
+    const before = await source.search({ scope: 'all', cwd: '/nowhere', query: '', limit: 100 })
+    assert.equal(before.length, 0, 'unresolved before the cwd is known (Rule 3)')
+    // The cwd joins the set later (a session created/switched).
+    known.set(historyFilePath(home, '/later-dir').split('/').pop()!.replace(/\.jsonl$/, ''), '/later-dir')
+    const after = await source.search({ scope: 'all', cwd: '/nowhere', query: '', limit: 100 })
+    assert.equal(after.length, 1)
+    assert.equal(after[0]?.cwd, '/later-dir', 'the resolver is read per search')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('all scope: a v2 row whose cwd does NOT validate the file hash is not trusted (plan §40)', async () => {
   const home = tempHome()
   try {

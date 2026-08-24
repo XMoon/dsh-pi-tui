@@ -138,6 +138,44 @@ test('an active transcript-search overlay keeps its keys (Ctrl+R never opens a s
   }
 })
 
+test('Ctrl+R resolves the Current directory at OPEN time (a session switch moves the scope)', async () => {
+  // Review repro: the app is constructed while the cwd is /work/a; a
+  // session switch moves the live cwd to /work/b; Ctrl+R must search
+  // /work/b, never the construction-time snapshot.
+  const home = tempHome()
+  try {
+    const { VirtualTerminal } = await import('./virtual-terminal.ts')
+    const { TuiApp } = await import('../src/tui-app.ts')
+    seedHistory(home, '/work/a', [{ content: 'prompt from a', ts: 1 }])
+    seedHistory(home, '/work/b', [{ content: 'prompt from b', ts: 2 }])
+    const vt = new VirtualTerminal(80, 24)
+    let liveCwd = '/work/a'
+    const app = new TuiApp(vt, {
+      onSubmit: () => {},
+      onExit: () => {},
+    }, {
+      historySearchSource: new FileHistorySearchSource({ dshHome: home }),
+      // The runner wires the LIVE session cwd getter — it must be read at
+      // open time, not captured at construction.
+      historySearchCwd: () => liveCwd,
+    })
+    app.start()
+    await vt.waitForRender()
+    // "Session switch": the live cwd moves before Ctrl+R is pressed.
+    liveCwd = '/work/b'
+    vt.sendInput('\x12') // Ctrl+R
+    await vt.waitForRender()
+    // Empty-query browse shows the /work/b history (newest first) — the
+    // /work/a row must be absent from the current scope.
+    await waitFor(() => vt.getViewport().some(line => line.includes('prompt from b')))
+    assert.ok(!vt.getViewport().some(line => line.includes('prompt from a')),
+      'the current-directory scope must follow the LIVE cwd, not the construction snapshot')
+    app.stop()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('plugin keybindings can never claim Ctrl+R (host-reserved)', async () => {
   const home = tempHome()
   try {

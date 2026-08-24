@@ -10,9 +10,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { HistoryPanel, HISTORY_PANEL_FOOTER, HISTORY_PANEL_SPLIT_WIDTH } from '../src/history-panel.ts'
 import type { HistorySearchResult, HistorySearchSource } from '../src/history-search.ts'
 import type { HistoryScope } from '../src/history-search.ts'
+
+const visibleWidthOf = visibleWidth
 
 /** A controllable fake source: records calls and resolves with the rows of
  * the CURRENT query (or a preset per-call response). */
@@ -277,11 +280,52 @@ test('panel: wide render splits list and details; narrow stacks them', async () 
   assert.ok(narrow.some(line => line.includes('Directory')), 'the detail rows are present')
 })
 
-test('panel: huge content is clamped in the detail pane (never fills the terminal)', () => {
+test('panel: the selection viewport FOLLOWS the cursor (a long list scrolls, the › marker never hides)', async () => {
+  // Review repro: 30 results, a ~16-row window — ↓ to row 20 must scroll
+  // the window, not vanish the selected row from the rendered list.
+  const source = new FakeSource()
+  source.rows = Array.from({ length: 30 }, (_, index) => row(`entry ${index}`, 30 - index))
+  const { panel } = makePanel(source, { maxRows: 20 })
+  panel.start()
+  await settle()
+  // Walk down to entry 20.
+  for (let step = 0; step < 20; step += 1) panel.handleInput('\x1b[B')
+  assert.equal(panel.selected()?.content, 'entry 20')
+  const lines = panel.render(80)
+  const selectedLine = lines.find(line => line.includes('entry 20'))
+  assert.ok(selectedLine !== undefined, 'the selected row must be inside the viewport')
+  assert.ok(selectedLine!.includes('›'), 'the selected row must carry the › marker')
+  // And the viewport does not show rows far above the window (it scrolled).
+  assert.ok(!lines.some(line => line.includes('entry 0')), 'the viewport scrolled past the head')
+})
+
+test('panel: every rendered line fits the width and the total never exceeds the budget (real data)', async () => {
+  const source = new FakeSource()
+  const huge = Array.from({ length: 500 }, (_, i) => `line ${i} of a giant prompt`).join('\n')
+  source.rows = [
+    ...Array.from({ length: 25 }, (_, index) => row(`entry ${index}`, 25 - index)),
+    row(huge, 1),
+  ]
+  const { panel } = makePanel(source, { maxRows: 16 })
+  panel.start()
+  await settle()
+  for (const width of [70, HISTORY_PANEL_SPLIT_WIDTH - 20, HISTORY_PANEL_SPLIT_WIDTH + 20]) {
+    const lines = panel.render(width)
+    assert.ok(lines.length <= 16, `render(${width}) must stay within the 16-row budget (got ${lines.length})`)
+    for (const line of lines) {
+      assert.ok(visibleWidthOf(line) <= width, `line exceeds width ${width}: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
+test('panel: a 500-line prompt is clamped in the detail pane (never fills the terminal)', () => {
   const source = new FakeSource()
   const huge = Array.from({ length: 500 }, (_, i) => `line ${i} of a giant prompt`).join('\n')
   source.rows = [row(huge, 1)]
   const { panel } = makePanel(source, { maxRows: 16 })
+  // The detail clamps regardless of load state: the wrapped render is
+  // bounded by the budget even before results arrive (empty state) — and
+  // the loaded render is covered by the budget test above.
   const lines = panel.render(70)
   assert.ok(lines.length <= 16, 'the panel render is bounded by its budget')
 })

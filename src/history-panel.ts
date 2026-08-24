@@ -41,6 +41,8 @@ export const HISTORY_PANEL_SPLIT_WIDTH = 100
 export const HISTORY_PANEL_LIST_RATIO = 0.55
 /** Detail budget (rows) in the STACKED layout (plan §20: 6–8). */
 export const HISTORY_PANEL_STACKED_DETAIL_ROWS = 7
+/** Fixed chrome rows of the panel render: title, search, blank, footer. */
+export const HISTORY_PANEL_CHROME_ROWS = 4
 /** The footer hint (plan §59 — `Enter use`, not `Enter select`). */
 export const HISTORY_PANEL_FOOTER = 'type filter · ↑↓ select · Enter use · Tab scope · Esc cancel'
 
@@ -54,6 +56,12 @@ export interface HistoryPanelOptions {
   onAccept: (content: string) => void
   /** Cancel handler (Esc/Ctrl+C). */
   onClose: () => void
+  /**
+   * Fired whenever the panel commits new results (or an error/empty
+   * state): the HOST repaints the overlay — an async search completing
+   * without any further keypress must still paint its rows.
+   */
+  onResultsChanged?: () => void
   /** Optional debounce override (defaults to {@link HISTORY_SEARCH_DEBOUNCE_MS}). */
   debounceMs?: number
   /** Pre-fill the query when the panel opens. */
@@ -70,13 +78,6 @@ interface HistoryPanelState {
   loading: boolean
   error?: string
   generation: number
-}
-
-function sameRow(left: HistorySearchResult, right: HistorySearchResult): boolean {
-  return left.id === right.id
-    && left.content === right.content
-    && left.sourceFile === right.sourceFile
-    && left.sourceIndex === right.sourceIndex
 }
 
 /** One list `SelectItem` for the history rows. */
@@ -139,6 +140,7 @@ export class HistoryPanel implements Component, Focusable {
   private readonly cwd: string
   private readonly onAccept: (content: string) => void
   private readonly onClose: () => void
+  private readonly onResultsChanged: (() => void) | undefined
   private readonly debounceMs: number
   private readonly maxRows: number
   private _focused = false
@@ -150,6 +152,7 @@ export class HistoryPanel implements Component, Focusable {
     this.cwd = options.cwd
     this.onAccept = options.onAccept
     this.onClose = options.onClose
+    this.onResultsChanged = options.onResultsChanged
     this.debounceMs = options.debounceMs ?? HISTORY_SEARCH_DEBOUNCE_MS
     this.maxRows = Math.max(8, options.maxRows ?? 24)
     this.input = new Input()
@@ -276,6 +279,7 @@ export class HistoryPanel implements Component, Focusable {
     // delays the file reads, not the state flip).
     if (!this.state.loading) {
       this.state.loading = true
+      this.onResultsChanged?.()
     }
   }
 
@@ -308,12 +312,14 @@ export class HistoryPanel implements Component, Focusable {
       this.state.error = 'History unavailable'
       this.state.results = []
       this.state.selectedIndex = 0
+      this.onResultsChanged?.()
       return
     }
     if (generation !== this.state.generation || controller.signal.aborted) return
     this.state.results = results
     this.state.loading = false
     this.state.selectedIndex = Math.min(this.state.selectedIndex, Math.max(0, results.length - 1))
+    this.onResultsChanged?.()
   }
 
   render(width: number): string[] {
@@ -324,9 +330,13 @@ export class HistoryPanel implements Component, Focusable {
     // Query row.
     lines.push(this.renderSearchRow(safeWidth))
     lines.push('')
-    // Body: list (+ detail).
+    // Body: list (+ detail). The body budget is the TOTAL panel budget
+    // minus the fixed chrome (title, search, blank, footer) — the render
+    // NEVER exceeds maxRows (plan §51: a huge prompt can never fill the
+    // terminal).
+    const bodyBudget = Math.max(1, this.maxRows - HISTORY_PANEL_CHROME_ROWS)
     const split = safeWidth >= HISTORY_PANEL_SPLIT_WIDTH
-    this.renderBody(lines, safeWidth, split)
+    this.renderBody(lines, safeWidth, split, bodyBudget)
     // Footer.
     lines.push(this.renderFooter(safeWidth))
     return lines
@@ -352,7 +362,7 @@ export class HistoryPanel implements Component, Focusable {
     return `${label}${first}${' '.repeat(Math.max(0, width - labelWidth - visibleWidth(first)))}`
   }
 
-  private renderBody(lines: string[], width: number, split: boolean): void {
+  private renderBody(lines: string[], width: number, split: boolean, bodyBudget: number): void {
     if (this.state.error !== undefined) {
       lines.push(`  ${this.state.error}`)
       return
@@ -368,15 +378,15 @@ export class HistoryPanel implements Component, Focusable {
     if (split) {
       const listWidth = Math.max(20, Math.floor(width * HISTORY_PANEL_LIST_RATIO))
       const detailWidth = Math.max(10, width - listWidth - 3)
-      this.renderSplit(lines, listWidth, detailWidth)
+      this.renderSplit(lines, listWidth, detailWidth, bodyBudget)
     } else {
-      this.renderStacked(lines, width)
+      this.renderStacked(lines, width, bodyBudget)
     }
   }
 
-  private renderSplit(lines: string[], listWidth: number, detailWidth: number): void {
-    const listLines = this.renderList(listWidth)
-    const detailLines = this.renderDetail(detailWidth, this.selected())
+  private renderSplit(lines: string[], listWidth: number, detailWidth: number, bodyBudget: number): void {
+    const listLines = this.renderList(listWidth, bodyBudget)
+    const detailLines = this.renderDetail(detailWidth, this.selected(), bodyBudget)
     const rowCount = Math.max(listLines.length, detailLines.length)
     for (let row = 0; row < rowCount; row += 1) {
       const left = listLines[row] ?? ''
@@ -385,9 +395,15 @@ export class HistoryPanel implements Component, Focusable {
     }
   }
 
-  private renderStacked(lines: string[], width: number): void {
-    const listLines = this.renderList(width)
-    const detailLines = this.renderDetail(width, this.selected())
+  private renderStacked(lines: string[], width: number, bodyBudget: number): void {
+    // The stacked layout splits the body budget: a bounded detail (plan
+    // §20: 6–8 rows) plus a divider, everything else is the list. The
+    // total NEVER exceeds bodyBudget.
+    const detailBudget = Math.min(HISTORY_PANEL_STACKED_DETAIL_ROWS, Math.max(2, Math.floor(bodyBudget / 3)))
+    const dividerRows = detailBudget > 0 ? 2 : 0 // blank + ─ divider
+    const listBudget = Math.max(1, bodyBudget - detailBudget - dividerRows)
+    const listLines = this.renderList(width, listBudget)
+    const detailLines = this.renderDetail(width, this.selected(), detailBudget)
     lines.push(...listLines)
     if (detailLines.length > 0) {
       lines.push('')
@@ -396,57 +412,89 @@ export class HistoryPanel implements Component, Focusable {
     }
   }
 
-  private renderList(width: number): string[] {
+  /**
+   * Render the list rows within a budget. The visible window FOLLOWS the
+   * selection (plan §21: SelectList's viewport algorithm — the selected
+   * row stays on screen while the cursor walks past the window), instead
+   * of always slicing the head: with 100 results and a 16-row window,
+   * ↓ to row 17 must scroll the window, never hide the › marker.
+   * Every rendered line is truncated to `width` INCLUDING the row prefix
+   * (`› age dir label`), so a split layout never overflows the column.
+   */
+  private renderList(width: number, budget: number): string[] {
     const out: string[] = []
-    const selected = this.selected()
-    for (const result of this.state.results.slice(0, this.maxListRows())) {
-      const isSelected = selected !== undefined && sameRow(selected, result)
+    const count = this.state.results.length
+    if (count === 0) return out
+    // The "(N results)" counter row (when it appears) occupies one row of
+    // the budget too — the list NEVER exceeds `budget` rows.
+    const needsCounter = count > budget
+    const visible = Math.min(count, Math.max(1, budget - (needsCounter ? 1 : 0)))
+    // Viewport: center the selection, clamp to the ends (SelectList's
+    // algorithm: start = clamp(selected - floor(visible/2), 0, count - visible)).
+    const start = Math.max(0, Math.min(this.state.selectedIndex - Math.floor(visible / 2), count - visible))
+    const end = start + visible
+    for (let index = start; index < end; index += 1) {
+      const result = this.state.results[index]
+      if (result === undefined) continue
+      const isSelected = index === this.state.selectedIndex
       const marker = isSelected ? '› ' : '  '
       const age = result.ts === null ? '   ' : formatRelativeAge(result.ts).padStart(3)
       const prefix = `${marker}${age} `
+      const prefixWidth = visibleWidth(prefix)
       const label = compactRow(result.content)
+      const labelWidth = Math.max(1, width - prefixWidth)
+      let line: string
       if (this.state.scope === 'all' && result.cwd !== null) {
         const dir = shortCwd(result.cwd).padEnd(14)
-        out.push(`${prefix}${truncateToWidth(`${dir} ${label}`, width, '…')}`)
+        const dirWidth = visibleWidth(dir)
+        const rest = truncateToWidth(label, Math.max(1, labelWidth - dirWidth), '…')
+        line = `${prefix}${truncateToWidth(`${dir} ${rest}`, labelWidth, '…')}`
       } else {
-        out.push(`${prefix}${truncateToWidth(label, width, '…')}`)
+        line = `${prefix}${truncateToWidth(label, labelWidth, '…')}`
       }
+      // The full row (prefix + content) must never exceed the column.
+      out.push(truncateToWidth(line, width, '…'))
     }
-    if (this.state.results.length > this.maxListRows()) {
-      out.push(`  (${this.state.results.length} results)`)
+    if (needsCounter) {
+      out.push(`  (${count} results)`)
     }
     return out
   }
 
-  private maxListRows(): number {
-    return Math.max(4, this.maxRows - 8)
-  }
-
-  private renderDetail(width: number, result: HistorySearchResult | undefined): string[] {
+  /**
+   * The detail pane, strictly bounded to `budget` rows: header + blank +
+   * wrapped content + blank + the metadata lines. The content budget is
+   * what remains after the fixed rows; the counter is never allowed to
+   * push the pane past its budget.
+   */
+  private renderDetail(width: number, result: HistorySearchResult | undefined, budget: number): string[] {
     if (result === undefined) return []
-    const out: string[] = []
-    const budget = this.maxRows >= HISTORY_PANEL_SPLIT_WIDTH ? Math.max(6, this.maxRows - 9) : HISTORY_PANEL_STACKED_DETAIL_ROWS
-    out.push(truncateToWidth('Details', width, '…'))
-    out.push('')
-    const contentWidth = Math.max(4, width - 2)
-    const wrapped = wrapText(result.content, contentWidth)
-    const contentBudget = budget - 4
-    const visible = wrapped.slice(0, contentBudget)
-    out.push(...visible.map(line => `  ${line}`))
-    if (wrapped.length > visible.length) out.push(`  … more`)
-    out.push('')
+    const meta: string[] = []
     if (result.cwd !== null) {
-      out.push(truncateToWidth(`  Directory: ${result.cwd}`, width, '…'))
+      meta.push(truncateToWidth(`  Directory: ${result.cwd}`, width, '…'))
     }
     if (result.ts !== null) {
-      out.push(`  Time: ${formatHistoryTime(result.ts)}`)
+      meta.push(`  Time: ${formatHistoryTime(result.ts)}`)
     } else {
-      out.push(`  Time: Unknown (legacy history)`)
+      meta.push(`  Time: Unknown (legacy history)`)
     }
     if (result.sessionId !== undefined) {
-      out.push(truncateToWidth(`  Session: ${result.sessionId}`, width, '…'))
+      meta.push(truncateToWidth(`  Session: ${result.sessionId}`, width, '…'))
     }
-    return out
+    const coreRows = 3 // 'Details' + the blank after content + the blank after meta
+    const contentBudget = Math.max(0, budget - coreRows - meta.length)
+    const contentWidth = Math.max(4, width - 2)
+    const wrapped = wrapText(result.content, contentWidth)
+    const visible = wrapped.slice(0, contentBudget)
+    const out: string[] = ['Details', '']
+    if (visible.length > 0) {
+      out.push(...visible.map(line => truncateToWidth(`  ${line}`, width, '…')))
+      if (wrapped.length > visible.length) out.push(`  … more`)
+    }
+    out.push('')
+    out.push(...meta)
+    // Last-resort clamp: the pane never exceeds its budget.
+    return out.slice(0, budget)
   }
 
   private renderFooter(width: number): string {

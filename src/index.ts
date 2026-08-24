@@ -2094,11 +2094,26 @@ export function apply(ctx: Context, config: Config): void {
      */
     const sessionCwd = (): string => liveAgent?.session.header.cwd ?? cwd
     /**
+     * Every cwd this process has EVER known (launch cwd + every live
+     * session's header cwd, accumulated across creates/resumes/swaps).
+     * The Ctrl+R all-directory search resolves legacy files through this
+     * set (plan §6.2 Rule 2 — an IDENTITY match, never a hash break).
+     * A Set, not a Map, so the resolver below is rebuilt on every call:
+     * the all-scope search must see the NEWEST known cwds, not a snapshot
+     * from source construction.
+     */
+    const knownHistoryCwdSet = new Set<string>([cwd])
+    const rememberHistoryCwd = (dir: string): void => {
+      if (dir === '' || dir === undefined) return
+      knownHistoryCwdSet.add(dir)
+    }
+    /**
      * The known-cwd identity map for Ctrl+R all-directory history recovery
      * (plan §6.2 Rule 2): `md5(cwd) → cwd` for every workspace this process
-     * knows — the launch cwd and the live session's header cwd. This is an
-     * IDENTITY match, never a hash break: an unknown hash simply stays
-     * unresolved (Rule 3 excludes its legacy rows from the all-scope view).
+     * knows. Resolved fresh on EVERY call — the search source keeps the
+     * RESOLVER, so a session created/switched after startup is immediately
+     * recoverable (a legacy-only file in that cwd shows up on the next
+     * search, no restart needed).
      */
     const knownHistoryCwds = (): Map<string, string> => {
       const map = new Map<string, string>()
@@ -2107,7 +2122,7 @@ export function apply(ctx: Context, config: Config): void {
         const hash = historyFilePath(dshHome(process.env), dir).split('/').pop()!.replace(/\.jsonl$/, '')
         map.set(hash, dir)
       }
-      seed(cwd)
+      for (const dir of knownHistoryCwdSet) seed(dir)
       seed(sessionCwd())
       return map
     }
@@ -3356,18 +3371,23 @@ export function apply(ctx: Context, config: Config): void {
       // from the model input (review finding 3). Structured attachment
       // history (text + refs, recalled on recall) is a post-v1 extension.
       if (trimmed !== '' && trimmed !== lastHistoryContent && !draftHasImages(text, draftImages)) {
-        // The cwd is captured ONCE per submission: the file path and the row
-        // metadata must agree even if the working directory changes between
-        // the submission and the detatched write.
+        // All submission-time facts are snapshotted BEFORE the detached
+        // write: the cwd (file path + row must agree), the timestamp (the
+        // row must record the USER's submission time, not the disk-write
+        // time) and the session id (a session switch must never label a
+        // session A row with session B — it would corrupt all-directory
+        // ordering/provenance). The callback only performs I/O.
         const historyCwd = sessionCwd()
+        const historyTs = Date.now()
+        const historySessionId = liveAgent?.session.id
         const file = historyFilePath(dshHome(process.env), historyCwd)
         runDetached('input history write', () => {
           const written = appendHistoryRecord(file, {
             v: 2,
             content: trimmed,
             cwd: historyCwd,
-            ts: Date.now(),
-            sessionId: liveAgent?.session.id,
+            ts: historyTs,
+            sessionId: historySessionId,
           }, lastHistoryContent)
           if (written) lastHistoryContent = trimmed
         }, {
@@ -3904,7 +3924,9 @@ export function apply(ctx: Context, config: Config): void {
       // lifecycle (plan §27 — TuiApp never touches the filesystem).
       historySearchSource: new FileHistorySearchSource({
         dshHome: dshHome(process.env),
-        knownCwds: knownHistoryCwds(),
+        // A RESOLVER, not a snapshot: the all-scope search must see the
+        // newest known cwds (sessions created/switched after startup).
+        knownCwds: () => knownHistoryCwds(),
       }),
       historySearchCwd: () => sessionCwd(),
       // The transcript image surface (plan M8/M9): the durable loader plus
@@ -4565,6 +4587,10 @@ export function apply(ctx: Context, config: Config): void {
      * plus every switch await the coordinator refresh themselves.
      */
     const initLiveSession = async (agent: Agent): Promise<void> => {
+      // The session's own workspace joins the known-cwd set (Rule 2 for
+      // the all-directory search): a legacy-only history file in this cwd
+      // becomes recoverable immediately, even if it predates this process.
+      rememberHistoryCwd(agent.session.header.cwd ?? '')
       folder = new TranscriptFolder()
       folder.apply(agent.session.events)
       statsFolder = new StatsFolder()
