@@ -72,20 +72,25 @@ function stepKey(turn: number, step: number): string {
  * the open state. A usage fact with no open step counts immediately
  * (replay edge).
  */
+/** One usage fact with its provenance: authoritative (assistant/message)
+ * or provisional (streaming chunk). */
+interface StepFact {
+  usage: UsageLike
+  authoritative: boolean
+}
+
 export class StepUsageAccumulator {
   /** Open steps: their current usage (undefined = no usage fact yet) and
    * whether an authoritative message settled it. */
   private readonly perStep = new Map<string, { usage?: UsageLike; authoritative?: boolean }>()
-  /** Orphan usage facts (no open step) per (turn, step): the latest fact
-   * REPLACES the previous one exactly like the open-step path — never
-   * adds to it (review finding). */
-  private readonly orphanByStep = new Map<string, UsageLike>()
-  /** Closed steps whose committed usage was PROVISIONAL (no authoritative
-   * message before step/end): a LATER fact (chunk or message) replaces
-   * the committed value — never adds to it (review finding). Steps that
-   * settled authoritatively are not tracked: a late duplicate message
-   * carries the same value, so no replacement state is needed. */
-  private readonly closedByStep = new Map<string, UsageLike>()
+  /** Facts WITHOUT an open step per (turn, step) — orphan facts (the step
+   * never opened) and closed steps' committed values alike. Each fact
+   * carries its provenance: a PROVISIONAL chunk never replaces an
+   * AUTHORITATIVE value (the message is the step's final usage; a later
+   * chunk is stale), while a message replaces anything and a chunk
+   * replaces a provisional value (the latest fact wins — review
+   * findings). */
+  private readonly settledByStep = new Map<string, StepFact>()
   /** Committed per-turn totals (completed steps + orphan facts). */
   private readonly turnTotals = new Map<number, TokenUsageTotals>()
   /** Open steps' current usage per turn (the running display share). */
@@ -93,20 +98,20 @@ export class StepUsageAccumulator {
   /** The session-wide total (every committed fact), kept O(1). */
   private readonly session: TokenUsageTotals = emptyTotals()
 
-  /** Open one step's accounting. */
+  /** Open one step's accounting. A step that opens AFTER a settled fact of
+   * the same (turn, step) (out-of-order replay) reconciles the fact: the
+   * premature commit is reversed and the fact becomes the step's pending
+   * usage — with its provenance preserved — to be committed once at
+   * step/end, never twice (review findings). */
   onStepStart(turn: number, step: number): void {
     const key = stepKey(turn, step)
-    const orphan = this.orphanByStep.get(key)
-    if (orphan !== undefined) {
-      // The step opened AFTER an orphan usage fact of the same (turn,
-      // step) (out-of-order replay): reverse the premature commit and make
-      // the fact the step's pending usage — it commits once at step/end,
-      // never twice (review finding).
-      this.orphanByStep.delete(key)
-      this.subtractTotals(this.turnTotalFor(turn), orphan)
-      this.subtractTotals(this.session, orphan)
-      this.perStep.set(key, { usage: orphan })
-      this.addPending(turn, orphan)
+    const settled = this.settledByStep.get(key)
+    if (settled !== undefined) {
+      this.settledByStep.delete(key)
+      this.subtractTotals(this.turnTotalFor(turn), settled.usage)
+      this.subtractTotals(this.session, settled.usage)
+      this.perStep.set(key, { usage: settled.usage, authoritative: settled.authoritative })
+      this.addPending(turn, settled.usage)
     } else {
       this.perStep.set(key, {})
     }
@@ -114,22 +119,24 @@ export class StepUsageAccumulator {
 
   /** Record a streaming usage chunk: the LATEST chunk of an open step
    * replaces the previous one (the assembler value is cumulative — the
-   * running display must show the latest provisional usage, plan §13.2);
-   * a chunk without an open step (replay edge) is a settled fact and
+   * running display must show the latest provisional usage, plan §13.2),
+   * but a provisional chunk NEVER replaces an authoritative value. A
+   * chunk without an open step (replay edge) is a settled fact and
    * commits to the turn's totals immediately. */
   onUsageChunk(turn: number, step: number, usage: UsageLike): void {
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
+      if (entry.authoritative === true) return
       if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
       entry.usage = usage
       this.addPending(turn, usage)
     } else {
-      this.commitOrphan(turn, step, usage)
+      this.commitSettled(turn, step, { usage, authoritative: false })
     }
   }
 
   /** The authoritative usage of a settled step replaces the provisional
-   * one (never adds to it) — on the open-step path AND the orphan path.
+   * one (never adds to it) — on the open-step path AND the settled path.
    * A message without an open step (replay edge) commits to the turn's
    * totals immediately. */
   onAssistantMessage(turn: number, step: number, usage?: UsageLike): void {
@@ -142,14 +149,14 @@ export class StepUsageAccumulator {
         this.addPending(turn, usage)
       }
     } else if (usage !== undefined) {
-      this.commitOrphan(turn, step, usage)
+      this.commitSettled(turn, step, { usage, authoritative: true })
     }
   }
 
-  /** Commit one step's usage (once) and drop its open state. A step that
-   * ends with a PROVISIONAL value (no authoritative message) is tracked
-   * in {@link closedByStep} so a late fact replaces it; a step that ends
-   * with an orphan fact (never opened) is tracked the same way. */
+  /** Commit one step's usage (once) and drop its open state. The step's
+   * final fact stays in {@link settledByStep} (with its provenance) so a
+   * late fact replaces or is ignored correctly; a step that never opened
+   * keeps its settled fact unchanged. */
   onStepEnd(turn: number, step: number): void {
     const key = stepKey(turn, step)
     const entry = this.perStep.get(key)
@@ -158,22 +165,10 @@ export class StepUsageAccumulator {
         this.subtractPending(turn, entry.usage)
         addTotals(this.turnTotalFor(turn), entry.usage)
         addTotals(this.session, entry.usage)
-        if (entry.authoritative === true) {
-          this.closedByStep.delete(key)
-        } else {
-          this.closedByStep.set(key, entry.usage)
-        }
+        this.settledByStep.set(key, { usage: entry.usage, authoritative: entry.authoritative === true })
       }
       this.perStep.delete(key)
-    } else {
-      const orphan = this.orphanByStep.get(key)
-      if (orphan !== undefined) {
-        // The step closed without ever opening: the orphan fact is the
-        // step's committed value — a late fact replaces it.
-        this.closedByStep.set(key, orphan)
-      }
     }
-    this.orphanByStep.delete(key)
   }
 
   /** The committed per-turn totals (completed steps + orphan facts);
@@ -234,25 +229,21 @@ export class StepUsageAccumulator {
    * commit it to the turn's totals immediately, so
    * sum(per-turn committed) == session total stays strict. The latest
    * fact REPLACES the previous one of the same (turn, step) — the same
-   * replace-never-add rule as the open-step path (review finding) — and a
-   * fact for a CLOSED step replaces the step's committed provisional
-   * value (a late authoritative message must never double-count). */
-  private commitOrphan(turn: number, step: number, usage: UsageLike): void {
+   * replace-never-add rule as the open-step path — EXCEPT a provisional
+   * chunk never replaces an authoritative value (the message is the
+   * step's final usage; the chunk is stale and is ignored entirely, so
+   * the step is never double-counted). */
+  private commitSettled(turn: number, step: number, fact: StepFact): void {
     const key = stepKey(turn, step)
-    const closed = this.closedByStep.get(key)
-    if (closed !== undefined) {
-      this.subtractTotals(this.turnTotalFor(turn), closed)
-      this.subtractTotals(this.session, closed)
-      this.closedByStep.delete(key)
+    const existing = this.settledByStep.get(key)
+    if (existing !== undefined) {
+      if (existing.authoritative && !fact.authoritative) return
+      this.subtractTotals(this.turnTotalFor(turn), existing.usage)
+      this.subtractTotals(this.session, existing.usage)
     }
-    const prior = this.orphanByStep.get(key)
-    if (prior !== undefined) {
-      this.subtractTotals(this.turnTotalFor(turn), prior)
-      this.subtractTotals(this.session, prior)
-    }
-    this.orphanByStep.set(key, usage)
-    addTotals(this.turnTotalFor(turn), usage)
-    addTotals(this.session, usage)
+    this.settledByStep.set(key, fact)
+    addTotals(this.turnTotalFor(turn), fact.usage)
+    addTotals(this.session, fact.usage)
   }
 
   /** Subtract one usage record from a totals accumulator. */

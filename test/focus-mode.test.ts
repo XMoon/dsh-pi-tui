@@ -460,6 +460,62 @@ test('step/end commits the open step usage and clears the pending state', () => 
   assert.equal(activity.totalTokens, 50, 'the latest fact replaces the closed step\'s committed value')
 })
 
+test('an authoritative message BEFORE step/start keeps its provenance (a late chunk never replaces it)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    // The authoritative message arrives BEFORE the step/start (replay).
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 110, outputTokens: 0 },
+    }, 1001, 1),
+    eventAt('step/start', { turn: 0, step: 0 }, 1002, 2),
+    eventAt('step/end', { turn: 0, step: 0 }, 1003, 3),
+    // A late PROVISIONAL chunk is stale: it must NOT replace the
+    // authoritative committed value (and never double-count it).
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 50, outputTokens: 0 } } }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 110, 'the authoritative value stands; the stale chunk is ignored')
+})
+
+test('usage ordering matrix: every chunk/message/start/end permutation counts the step once', () => {
+  const chunk = (seq: number): SessionEvent => eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1000 + seq, seq)
+  const message = (seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 0, step: 0,
+    message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    usage: { inputTokens: 110, outputTokens: 0 },
+  }, 1000 + seq, seq)
+  const start = (seq: number): SessionEvent => eventAt('step/start', { turn: 0, step: 0 }, 1000 + seq, seq)
+  const end = (seq: number): SessionEvent => eventAt('step/end', { turn: 0, step: 0 }, 1000 + seq, seq)
+  const permutations: SessionEvent[][] = [
+    [start(1), chunk(2), message(3), end(4)], // normal
+    [start(1), message(2), chunk(3), end(4)], // message before a late chunk
+    [chunk(1), start(2), message(3), end(4)], // chunk before start
+    [message(1), start(2), chunk(3), end(4)], // message before start, late chunk
+    [chunk(1), message(2), start(3), end(4)], // both before start
+    [start(1), chunk(2), end(3), message(4)], // message after end
+    [chunk(1), end(2), message(3)],           // no start, message after end
+    [message(1), end(2), chunk(3)],           // no start, late chunk
+    [chunk(1), end(2)],                       // no start, no message
+    [message(1), end(2)],                     // no start, message only
+  ]
+  for (const events of permutations) {
+    const folder = new TranscriptFolder()
+    folder.apply([eventAt('turn/start', { turn: 0 }, 1000, 0), ...events])
+    const activity = folder.turnActivity(0)!
+    // The authoritative 110 wins whenever a message exists; a lone
+    // provisional chunk commits its own value; a stale chunk after an
+    // authoritative value is ignored.
+    const hasMessage = events.some(e => e.type === 'assistant/message')
+    const expected = hasMessage ? 110 : 100
+    assert.equal(activity.totalTokens, expected,
+      `permutation ${events.map(e => e.type).join(' -> ')} must total ${expected}, got ${activity.totalTokens}`)
+  }
+})
+
 test('a late authoritative message after step/end replaces the committed provisional value (no double count)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
