@@ -327,6 +327,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ctrl+V image paste works again on Linux Wayland/X11.** The clipboard
+  runner executed `wl-paste`/`xclip` without an explicit encoding, so
+  binary stdout was decoded as UTF-8 and invalid bytes were replaced —
+  PNG magic arrived as `EF BF BD …`, the image parser could not recognize
+  the payload, and the paste silently did nothing. The runner now forces
+  `encoding: 'buffer'`, keeping stdout/stderr as raw bytes end to end, and
+  a byte-for-byte regression test guards the path. Ctrl+V is also recorded
+  in the host-reserved key inventory, matching the host's own lifecycle
+  handling.
+
 ## [0.3.2] - 2026-08-22
 
 ### Added
