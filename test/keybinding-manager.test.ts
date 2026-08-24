@@ -51,3 +51,21 @@ test('safe mode restores the advertised defaults for a disabled action', () => {
   const snapshot = manager.snapshot()
   assert.ok(snapshot.bindings.some(binding => binding.action === 'app.input.steer'))
 })
+
+test('an ambiguous leader sequence is never advertised (review round 3)', () => {
+  // Two actions bound to the SAME completing key: neither fires, so
+  // neither may be advertised by keyHint. (app.session.* have no default
+  // keys, so the leader sequence is their ONLY key — a clean probe.)
+  const manager = managerWith({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.session.new': '<leader>n',
+      'app.session.resume': '<leader>n',
+    },
+  })
+  assert.equal(manager.keyHint('app.session.new'), '')
+  assert.equal(manager.keyHint('app.session.resume'), '')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('ambiguous leader sequence')))
+  // The leader machine itself carries no bindings.
+  assert.deepEqual(manager.leaderMachine()?.leaderBindings ?? [], [])
+})

@@ -58,6 +58,9 @@ export class HostKeybindingManager {
   private userBindings: UserKeybindingsConfig = {}
   private leaderConfig: LeaderConfig | undefined
   private leaderBindings: readonly LeaderBinding[] = []
+  /** The ambiguity-filtered, safe-mode-aware leader bindings (what the
+   * leader machine actually fires — hints must match, review round 3). */
+  private effectiveLeaderBindings: readonly LeaderBinding[] = []
   private pluginRules: readonly PluginKeybindingRule[] = []
   private safeMode = false
   private diagnostics: string[] = []
@@ -120,6 +123,7 @@ export class HostKeybindingManager {
       leaderBindings.push(list[0]!)
     }
     this.keymap = this.buildKeymap()
+    this.effectiveLeaderBindings = leaderBindings
     // Rebuild the leader machine (its bindings/config may have changed).
     this.leader?.dispose()
     this.leader = undefined
@@ -216,12 +220,14 @@ export class HostKeybindingManager {
   /** The human hint for one action (plan §18): the primary key, the
    * leader sequence when the action is only leader-bound, or the default
    * key for non-configurable overlay/component actions. A DISABLED action
-   * (user `false`) advertises nothing (review round 2). */
+   * (user `false`) advertises nothing (review round 2), and the hint uses
+   * the EFFECTIVE leader bindings — an ambiguous sequence that never
+   * fires is never advertised (review round 3). */
   keyHint(action: AppKeybindingId): string {
     if (this.isDisabled(action)) return ''
     const direct = this.keymap.keyHint(action)
     if (direct !== '') return direct
-    const leaderBinding = this.leaderBindings.find(binding => binding.action === action)
+    const leaderBinding = this.effectiveLeaderBindings.find(binding => binding.action === action)
     if (leaderBinding !== undefined) return formatLeaderSequence(leaderBinding.key)
     const definition = APP_KEYBINDINGS[action]
     if (definition !== undefined && definition.defaultKeys.length > 0) {
