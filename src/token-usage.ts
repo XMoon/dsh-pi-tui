@@ -136,6 +136,9 @@ export class StepUsageAccumulator {
     this.noteTurn(turn)
     if (this.staleTurn(turn)) return
     const key = stepKey(turn, step)
+    // Idempotent: a duplicate step/start keeps the open entry — replacing
+    // it would leak the pending usage (review finding).
+    if (this.perStep.has(key)) return
     const settled = this.settledByStep.get(key)
     if (settled !== undefined) {
       this.settledByStep.delete(key)
