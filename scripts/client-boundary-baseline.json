@@ -1,0 +1,76 @@
+{
+ "commands.ts": [
+  "agentDefaultModel",
+  "agentPresets",
+  "approval",
+  "authorization",
+  "commands",
+  "credentials",
+  "import:dsh-agent",
+  "import:dsh-session",
+  "llm",
+  "permissionPresets",
+  "sessionPersistence",
+  "sessionQuery",
+  "sessionTitle",
+  "settings",
+  "tokenMeter",
+  "tools"
+ ],
+ "index.ts": [
+  "agentDefaultModel",
+  "agentPresets",
+  "agents",
+  "attachments",
+  "commands",
+  "import:dsh-agent",
+  "import:dsh-session",
+  "jobs",
+  "llm",
+  "permissionPresets",
+  "sessionPersistence",
+  "sessions",
+  "settings",
+  "shell",
+  "subagents",
+  "tokenMeter",
+  "tools",
+  "userQuestions"
+ ],
+ "model-menu.ts": [
+  "import:dsh-agent"
+ ],
+ "present.ts": [
+  "import:dsh-session"
+ ],
+ "preset-events.ts": [
+  "import:dsh-session"
+ ],
+ "rewind.ts": [
+  "import:dsh-session"
+ ],
+ "session-fork.ts": [
+  "import:dsh-agent",
+  "import:dsh-session"
+ ],
+ "sessions.ts": [
+  "import:dsh-session"
+ ],
+ "skill-catalog-refresh.ts": [
+  "import:dsh-agent"
+ ],
+ "skill-catalog.ts": [
+  "agentPresets",
+  "skills"
+ ],
+ "stats.ts": [
+  "import:dsh-session"
+ ],
+ "surface-catalog.ts": [
+  "commands",
+  "import:dsh-agent"
+ ],
+ "transcript.ts": [
+  "import:dsh-session"
+ ]
+}
