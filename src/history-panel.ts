@@ -220,6 +220,10 @@ export class HistoryPanel implements Component, Focusable {
 
   /** Cancel and forget (called by the host on close). */
   dispose(): void {
+    // Invalidate the generation: a source that ignores the abort and
+    // settles LATE (resolve OR reject) must never commit into the closed
+    // panel — the refresh's generation check is the fence for both paths.
+    this.state.generation += 1
     if (this.timer !== undefined) clearTimeout(this.timer)
     this.timer = undefined
     this.controller?.abort()
@@ -295,7 +299,11 @@ export class HistoryPanel implements Component, Focusable {
     try {
       results = await this.source.search(request)
     } catch (error) {
-      if (generation !== this.state.generation) return
+      // Second fence for a late failure: the generation was invalidated by
+      // scheduleSearch/dispose, and the abort was requested — an
+      // abort-ignoring source must not paint "History unavailable" into a
+      // panel that no longer owns this query.
+      if (generation !== this.state.generation || controller.signal.aborted) return
       this.state.loading = false
       this.state.error = 'History unavailable'
       this.state.results = []

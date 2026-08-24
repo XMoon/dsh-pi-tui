@@ -25,7 +25,7 @@ class FakeSource implements HistorySearchSource {
   fail = false
   /** Manually-settled pending searches (deterministic race control — the
    * test resolves them in the exact order it wants; no wall-clock timing). */
-  pending: Array<{ resolve: (rows: HistorySearchResult[]) => void }> = []
+  pending: Array<{ resolve: (rows: HistorySearchResult[]) => void; reject: (error: unknown) => void }> = []
   /** When true, `search()` returns a deferred the test resolves via
    * {@link resolveNext}. Otherwise it resolves after the delay. */
   manual = false
@@ -33,8 +33,8 @@ class FakeSource implements HistorySearchSource {
     this.requests.push({ scope: request.scope, query: request.query, cwd: request.cwd, limit: request.limit })
     if (this.fail) return Promise.reject(new Error('boom'))
     if (this.manual) {
-      return new Promise<HistorySearchResult[]>(resolve => {
-        this.pending.push({ resolve })
+      return new Promise<HistorySearchResult[]>((resolve, reject) => {
+        this.pending.push({ resolve, reject })
       })
     }
     const delay = this.delayByQuery[request.query] ?? this.delayMs
@@ -48,6 +48,12 @@ class FakeSource implements HistorySearchSource {
     const pending = this.pending.shift()
     if (pending === undefined) throw new Error('resolveNext: no pending search')
     pending.resolve([...rows])
+  }
+  /** Reject the OLDEST pending search (FIFO). */
+  rejectNext(error: unknown): void {
+    const pending = this.pending.shift()
+    if (pending === undefined) throw new Error('rejectNext: no pending search')
+    pending.reject(error)
   }
 }
 
@@ -213,6 +219,35 @@ test('panel: a response landing DURING the debounce window is dropped (generatio
   source.resolveNext([row('new query result', 2)])
   await settle()
   assert.equal(panel.selected()?.content, 'new query result')
+})
+
+test('panel: a LATE rejection after dispose never commits "History unavailable"', async () => {
+  // The review repro: the panel is disposed (host close) while a search is
+  // in flight; an abort-ignoring source rejects LATE — the closed panel
+  // must not paint an error state (the generation fence covers the reject
+  // path too).
+  const source = new FakeSource()
+  source.manual = true
+  const { panel } = makePanel(source)
+  panel.start()
+  assert.equal(source.requests.length, 1)
+  panel.dispose() // host closes the panel (Esc/accept/stop)
+  source.rejectNext(new Error('late failure')) // ignores the abort
+  await flushMicrotasks()
+  const lines = panel.render(80)
+  assert.ok(!lines.some(line => line.includes('History unavailable')),
+    'a disposed panel must not commit the error state')
+})
+
+test('panel: a LATE resolve after dispose is dropped too', async () => {
+  const source = new FakeSource()
+  source.manual = true
+  const { panel } = makePanel(source)
+  panel.start()
+  panel.dispose()
+  source.resolveNext([row('too late', 1)])
+  await flushMicrotasks()
+  assert.equal(panel.selected(), undefined, 'a late resolve must not touch the closed panel')
 })
 
 test('panel: zero results renders the no-match state and the footer', async () => {
