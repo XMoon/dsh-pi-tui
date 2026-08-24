@@ -2987,9 +2987,10 @@ export function apply(ctx: Context, config: Config): void {
           // id — the first prompt of a deferred start creates the session
           // inside resolveSession, and a row written before creation would
           // carry no sessionId and vanish from the Ctrl+R `Current
-          // session` scope. A failed creation persists sessionless (the
-          // input was still typed; it stays reachable in Current
-          // directory / All directories).
+          // session` scope. A resolution that REJECTS (session creation
+          // failed) persists nothing — the submission never reached a
+          // session; a resolution that resolves undefined (sessionless)
+          // persists a row without a sessionId.
           await persistAfterSession(
             async () => {
               await ensureSession()
@@ -3401,6 +3402,40 @@ export function apply(ctx: Context, config: Config): void {
      */
     let lastHistoryContent: string | undefined
     /**
+     * Persist a STEERED submission (Ctrl+S, the steer-draft extension
+     * action, busy-Enter steer): the text goes to the RUNNING session, so
+     * the row carries the live session id. The ts and the image check are
+     * snapshotted at CALL time — the editor is cleared right after and the
+     * steer flow consumes the staged images on success, so a late check
+     * would wrongly persist the placeholder text. An empty draft (Ctrl+S
+     * with only a queue) persists nothing — the queued messages were
+     * already persisted when originally submitted.
+     */
+    const persistSteeredHistory = (text: string): void => {
+      const trimmed = text.trim()
+      const hasImages = draftHasImages(text, draftImages)
+      if (trimmed === '' || trimmed === lastHistoryContent || hasImages) return
+      const historyCwd = sessionCwd()
+      const historyTs = Date.now()
+      const file = historyFilePath(dshHome(process.env), historyCwd)
+      runDetached('input history write', () => {
+        const written = persistHistoryRecord({
+          content: trimmed,
+          cwd: historyCwd,
+          sessionId: liveAgent?.session.id,
+          ts: historyTs,
+          lastContent: lastHistoryContent,
+          hasImages,
+          file,
+        })
+        if (written) lastHistoryContent = trimmed
+      }, {
+        diag,
+        notify: (message) => app.notify(message, 'error'),
+        recoverable: () => true,
+      })
+    }
+    /**
      * Dispatch one user submission end to end: the viewer guard, the input-
      * history persistence, `!` local shells, sessionless commands, the
      * busy-Enter preference, and the session dispatch. The Ctrl+Enter
@@ -3489,7 +3524,10 @@ export function apply(ctx: Context, config: Config): void {
       // (the FIRST user message is the deferred trigger).
       if (text.startsWith('!')) {
         if (text.startsWith('!!')) {
-          persistHistory(liveAgent?.session.id)
+          // `!!` runs purely locally with NO session write (pi's
+          // excluded-from-context escape hatch) — the row is sessionless
+          // (Current directory / All directories, never Current session).
+          persistHistory(undefined)
           runLocalShell(text)
         } else if (shellCommandOf(text) !== '') {
           // An owned workflow: the session creation failure restores the
@@ -3506,7 +3544,8 @@ export function apply(ctx: Context, config: Config): void {
             onError: failSubmission(text),
           })
         } else {
-          persistHistory(liveAgent?.session.id)
+          // A bare `!` (no command) is a no-op — sessionless.
+          persistHistory(undefined)
         }
         return
       }
@@ -3729,6 +3768,11 @@ export function apply(ctx: Context, config: Config): void {
           }
           case 'steer-draft': {
             const text = app.getDraft()
+            // The steered draft is an agent-facing submission: it must
+            // land in history with the live session id (the snapshot
+            // happens BEFORE the draft is cleared and the steer consumes
+            // the staged images).
+            persistSteeredHistory(text)
             app.setDraft('')
             steerNow(text)
             break
@@ -3767,7 +3811,13 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       },
-      onSteer: (text) => steerNow(text),
+      onSteer: (text) => {
+        // Ctrl+S: the steered draft is an agent-facing submission — it
+        // must land in history with the live session id (the snapshot
+        // happens BEFORE the steer consumes the staged images).
+        persistSteeredHistory(text)
+        steerNow(text)
+      },
       onExtensionError: ({ slot, id, error }) => {
         try { extensionService?._recordRegistryError(slot, id, error) } catch {}
       },

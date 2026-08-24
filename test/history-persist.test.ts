@@ -87,6 +87,74 @@ test('a sessionless submission persists with NO sessionId field', async () => {
   }
 })
 
+test('a sessionless `!!`/bare-`!` shell row persists with NO sessionId even while a session is live', async () => {
+  // Review finding: `!!` runs purely locally (no session write) and a
+  // bare `!` is a no-op — their rows must never be attributed to the live
+  // session (they would otherwise leak into the Current session scope).
+  const home = tempHome()
+  try {
+    const cwd = '/work/a'
+    const file = historyFilePath(home, cwd)
+    // The runner passes `undefined` for these branches even though a live
+    // session exists (the row must stay out of Current session).
+    for (const content of ['!!ls', '!']) {
+      persistHistoryRecord({
+        content,
+        cwd,
+        sessionId: undefined,
+        ts: 1,
+        lastContent: undefined,
+        hasImages: false,
+        file,
+      })
+    }
+    const records = loadHistoryRecords(file)
+    assert.equal(records.length, 2)
+    assert.ok(records.every(record => record.sessionId === undefined),
+      'sessionless shell rows must not carry a sessionId')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a steered draft persists with the LIVE session id (Ctrl+S / steer-draft)', async () => {
+  // Review finding: direct steer paths (Ctrl+S, the steer-draft extension
+  // action) send the draft into the RUNNING session — the row must carry
+  // the live session id, exactly like a normal submission.
+  const home = tempHome()
+  try {
+    const cwd = '/work/a'
+    const file = historyFilePath(home, cwd)
+    const written = persistHistoryRecord({
+      content: 'steer me',
+      cwd,
+      sessionId: 'ses_live',
+      ts: 1,
+      lastContent: undefined,
+      hasImages: false,
+      file,
+    })
+    assert.equal(written, true)
+    const records = loadHistoryRecords(file)
+    assert.equal(records.length, 1)
+    assert.equal(records[0]?.sessionId, 'ses_live', 'a steered draft carries the live session id')
+    // An EMPTY draft (Ctrl+S with only a queue) persists nothing — the
+    // queued messages were already persisted when originally submitted.
+    assert.equal(persistHistoryRecord({
+      content: '',
+      cwd,
+      sessionId: 'ses_live',
+      ts: 1,
+      lastContent: undefined,
+      hasImages: false,
+      file,
+    }), false, 'an empty steered draft is skipped')
+    assert.equal(loadHistoryRecords(file).length, 1)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('persistHistoryRecord skips empty, consecutive repeats and image-bearing submissions', async () => {
   const home = tempHome()
   try {
