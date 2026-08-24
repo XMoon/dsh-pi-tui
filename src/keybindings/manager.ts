@@ -215,8 +215,10 @@ export class HostKeybindingManager {
 
   /** The human hint for one action (plan §18): the primary key, the
    * leader sequence when the action is only leader-bound, or the default
-   * key for non-configurable overlay/component actions. */
+   * key for non-configurable overlay/component actions. A DISABLED action
+   * (user `false`) advertises nothing (review round 2). */
   keyHint(action: AppKeybindingId): string {
+    if (this.isDisabled(action)) return ''
     const direct = this.keymap.keyHint(action)
     if (direct !== '') return direct
     const leaderBinding = this.leaderBindings.find(binding => binding.action === action)
@@ -228,15 +230,22 @@ export class HostKeybindingManager {
     return ''
   }
 
+  /** Whether the user disabled one action (`false`). */
+  private isDisabled(action: AppKeybindingId): boolean {
+    return !this.safeMode && this.userBindings[action] === false
+  }
+
   /** The immutable read model (diagnostics + /keybindings). The
    * capturing-scope actions (search overlay, question/tasks flows) are not
-   * in the host keymap; their defaults are merged in for display. */
+   * in the host keymap; their defaults are merged in for display. A
+   * DISABLED action is never advertised (review round 2). */
   snapshot(): KeymapSnapshot {
     const snapshot = this.keymap.snapshot()
     const present = new Set(snapshot.bindings.map(binding => binding.action))
     const merged = [...snapshot.bindings]
     for (const [id, definition] of Object.entries(APP_KEYBINDINGS)) {
       if (present.has(id)) continue
+      if (this.isDisabled(id as AppKeybindingId)) continue
       if (definition.defaultKeys.length === 0) continue
       merged.push({
         action: id,
