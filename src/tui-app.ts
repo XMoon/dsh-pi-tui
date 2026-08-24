@@ -5357,6 +5357,7 @@ export class TuiApp {
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete(),
       getInputMode: () => editor.getInputMode(),
+      setSerializedInput: (text) => editor.setSerializedInput(text),
       getCursor: () => {
         const cursor = editor.getCursor()
         const lines = editor.getText().split('\n')
@@ -7563,7 +7564,10 @@ export class TuiApp {
     }
     const taskBadge = badgeParts.length === 0
       ? ''
-      : color.primary(`[${badgeParts.join(' · ')}${this.editor.getText().trim() === '' ? ' · ↓ view' : ''}]`)
+      // The ↓ hint matches the ↓ routing gate: only a PROMPT-mode empty
+      // editor opens the task browser — a shell-mode empty body is
+      // composing a command, so no hint is advertised.
+      : color.primary(`[${badgeParts.join(' · ')}${this.editor.getInputMode() === 'prompt' && this.editor.getText().trim() === '' ? ' · ↓ view' : ''}]`)
     const line1 = [
       permissionBadge,
       this.planMode ? color.warning('[plan]') : '',
