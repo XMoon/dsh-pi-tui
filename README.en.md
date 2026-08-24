@@ -151,6 +151,7 @@ Common entry points:
 /plan
 /goal
 /compact
+/footer
 ```
 
 Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics.
@@ -161,6 +162,90 @@ symbols), or `Minimal` (decorative icons hidden; only status/interaction
 markers remain). Switching applies immediately and persists.
 
 Slash Commands registered by other plugins through `ctx.commands` are discovered automatically.
+
+### Footer customization
+
+The status line is a **composable surface** — no plugin or shell needed
+for the common cases.
+
+`/settings` → Status line (or the `footer` key in the `dsh-pi-tui`
+settings document) selects the preset:
+
+| Value | Meaning |
+|---|---|
+| `default` (legacy `full`) | the classic two-row footer (status + stats) |
+| `compact` | the status row only (stats line hidden) |
+| `custom` | a versioned `footerLayout` (see below) |
+| `command` | a user-configured command renders the status surface (see below) |
+
+`/footer` is the interactive configurator: toggle items, move them
+between the left/right zones, reorder, switch rows, cycle formatters,
+and watch a live preview composed by the real footer engine. `Enter`
+saves (persisted), `Esc` cancels without touching the active layout.
+Usable before any session exists.
+
+`footerLayout` is a nested settings object (schemaVersion 1, 1–2 rows,
+left/right zones, a separator, finite formatters, semantic tones,
+prefix/suffix, importance). The `/footer` configurator builds it
+interactively; the YAML shape is:
+
+```yaml
+footer: custom
+footerLayout:
+  schemaVersion: 1
+  rows:
+    - left:
+        - id: agent-preset
+          format: compact
+        - id: model
+        - id: project
+        - id: context
+          format: full
+        - id: cache-hit
+        - id: token-usage
+          format: io
+        - id: performance
+          format: compact
+        - id: version
+          format: tui
+      right:
+        - id: focus-mode
+      separator:
+        text: " │ "
+        tone: textDim
+```
+
+Builtin item ids: `agent-preset`, `model`, `reasoning`,
+`permission-preset`, `sandbox-mode`, `approval-policy`, `plan-state`,
+`focus-mode`, `focused-seat`, `view-scope`, `cwd`, `project`,
+`git-branch`, `run-state`, `queue`, `tasks`, `agents`, `todo`,
+`context`, `cache-hit`, `token-usage`, `performance`, `turns-steps`,
+`stats-line`, `version`, `ext:*` (the legacy extension segments).
+An invalid `footerLayout` warns once and falls back to the default — the
+TUI always starts.
+
+`footer: command` hands the Status Surface to a user-configured command
+(Claude/Kimi style): the current status snapshot is serialized to JSON on
+the command's stdin (schemaVersion 1 — no secrets, no credentials, no
+prompts), and the command's stdout (sanitized: SGR colors and OSC 8
+hyperlinks only) renders the status surface. The Host's instruction
+surface (e.g. the Ctrl+C exit hint) always survives on top.
+
+```yaml
+footer: command
+footerCommand:
+  schemaVersion: 1
+  command: "~/.config/dsh/statusline.sh"
+  timeoutMs: 300        # default 300, max 1000
+  refreshIntervalMs: 1000  # min 1000
+  maxRows: 1            # 1..2
+```
+
+**Security:** the command is executed ONLY when it lives in the USER
+layer of your settings document. A repository/project-supplied
+`footerCommand` is never executed — command mode is disabled and the
+native layout applies. Failures (empty output, non-zero exit, timeout)
+fall back to the native layout automatically.
 
 ## Common keys
 

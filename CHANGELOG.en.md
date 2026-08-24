@@ -76,6 +76,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and keys are unchanged.
 
 
+- **The footer is now a composable, user-configurable surface.** The
+  status line is built from semantic items over a unified status snapshot
+  (permission preset, sandbox mode, approval policy, plan state, focus
+  mode, agent preset, model, workspace, run state, queue/tasks/agents/
+  todo counts, context, cache hit, token usage, performance, turns/steps,
+  versions, the viewer scope, and the legacy extension segments) — each
+  with its own formatter, tone, importance and min-width. The default and
+  compact presets render exactly as before; a new `custom` preset accepts
+  a versioned `footerLayout` (1–2 rows, left/right zones, a separator,
+  finite formatters, semantic tones, prefix/suffix, importance) persisted
+  as a nested settings object. An invalid layout warns once and falls
+  back to the default — the TUI always starts.
+- **`/footer` — the interactive footer configurator.** Toggle items,
+  move them between the left/right zones, reorder with Shift+↑/↓, switch
+  rows with Tab, cycle formatters with F, and watch a live preview
+  composed by the real footer engine against the current session state.
+  `Enter` saves (persisted), `Esc` cancels without touching the active
+  layout. Usable before any session exists.
+- **Plugins can contribute configurable footer items.** The new
+  `chrome.footer.item` slot (`slot.chrome.footer.item` capability) lets a
+  plugin register a plain-data footer item (label, segment, default zone,
+  importance, min-width) that users show/hide, reorder and zone-place like
+  any builtin item — the standard `replace()`/`invalidate()` pattern
+  keeps it live. The item's config identity is `ext:<owner>/<id>`, stable
+  across HMR; a layout referencing an unloaded plugin's item keeps the
+  reference and recovers when the plugin reloads. The legacy
+  `chrome.footer.status` slot is unchanged.
+- **A trusted command status line (Claude/Kimi style).** `footer:
+  command` hands the status surface to a user-configured command: the
+  current status snapshot (no secrets, no credentials, no prompts) is
+  serialized to JSON on the command's stdin, and its stdout — sanitized
+  to SGR colors and OSC 8 hyperlinks only — renders the status surface.
+  The runner is async and cached (≥1 s between starts, the latest snapshot
+  wins, 16 KiB output cap, hard timeout with process-tree kill, stale
+  results never commit), failures fall back to the native layout, and the
+  Host's instruction surface (e.g. the Ctrl+C exit hint) always survives
+  on top. **Security:** the command is executed only when it lives in the
+  USER layer of your settings document — a repository/project-supplied
+  `footerCommand` is never executed.
+
 ## [0.3.4] - 2026-08-25
 
 ### Added

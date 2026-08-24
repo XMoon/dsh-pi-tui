@@ -15,6 +15,7 @@ Pi API copy.
 | `notify` | `advanced.ui.notify` (notification broker) | Advanced | Phase 4 |
 | `custom()` | `advanced.ui.custom` (custom interactive UI) | Advanced | Phase 4 |
 | `setHeader` / `setFooter` | chrome slots (`register('chrome.header.badge' / 'chrome.footer.status')`) | Stable | M2 |
+| configurable footer items | `register('chrome.footer.item')` (configurable, user-orderable footer items) | Stable | M4 |
 | `setWidget` | widget slots (`register('input.widget.above' / 'input.widget.below')`) | Stable | M4 |
 | `pasteToEditor` | `advanced.editor.pasteToEditor` | Advanced | Phase 2 |
 | `setEditorText` | `advanced.editor.setEditorText` | Advanced | Phase 2 |
