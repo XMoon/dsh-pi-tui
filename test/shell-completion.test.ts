@@ -131,6 +131,74 @@ test('MentionProvider applies a shell item as a plain word replacement', async (
   assert.deepEqual(appliedVar, { lines: ['!echo $HOME '], cursorLine: 0, cursorCol: 12 })
 })
 
+// --- shell-editor-mode virtual prefix (the editor buffer no longer holds
+// the `!` / `!!` prefix; the provider synthesizes it at the boundary) ---
+
+/** A mutable mode source (the app wires it to the live editor mode). */
+function modeSource(initial: 'prompt' | 'shell-context' | 'shell-local'): {
+  source: () => 'prompt' | 'shell-context' | 'shell-local'
+  set: (mode: 'prompt' | 'shell-context' | 'shell-local') => void
+} {
+  let mode = initial
+  return { source: () => mode, set: (next) => { mode = next } }
+}
+
+test('MentionProvider completes shell words on the bare body via the virtual prefix', async () => {
+  const root = fixtureWorkspace()
+  const { source } = modeSource('shell-context')
+  const provider = new MentionProvider([], root, null, source)
+  // The buffer holds `gi` (no `!`); the provider synthesizes `!gi`.
+  const suggestions = await provider.getSuggestions(['gi'], 0, 2, { signal: abort })
+  assert.ok(suggestions !== null, 'command completion must run through the virtual prefix')
+  assert.ok(suggestions.items.some(item => item.value === 'git'), 'git must be suggested')
+  assert.equal(suggestions.prefix, 'gi', 'the suggestion prefix must be the REAL word (no synthetic !)')
+})
+
+test('MentionProvider applies a shell item without ever writing the synthetic prefix', async () => {
+  const root = fixtureWorkspace()
+  const { source } = modeSource('shell-local')
+  const provider = new MentionProvider([], root, null, source)
+  const applied = provider.applyCompletion(['git che'], 0, 7, { value: 'checkout', label: 'checkout' }, 'che')
+  assert.deepEqual(applied, { lines: ['git checkout '], cursorLine: 0, cursorCol: 13 },
+    'the applied line must be the bare body — the !! prefix never enters the buffer')
+})
+
+test('MentionProvider still completes paths on a shell-mode body (path positions reach the fork)', async () => {
+  const root = fixtureWorkspace()
+  const { source } = modeSource('shell-context')
+  const provider = new MentionProvider([], root, null, source)
+  const suggestions = await provider.getSuggestions(['cat src/de'], 0, 10, { signal: abort })
+  assert.ok(suggestions !== null, 'a path position on a shell-mode body must reach the fork provider')
+  assert.ok(suggestions.items.some(item => item.value.includes('deep-nested.ts')), `deep-nested.ts missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
+})
+
+test('a natural trigger on a leading / in a shell mode stays quiet (never slash commands)', async () => {
+  const root = fixtureWorkspace()
+  const { source } = modeSource('shell-context')
+  const provider = new MentionProvider([{ name: 'image', description: 'Attach an image file' }], root, null, source)
+  // The fork's slash-command branch would list `image` for a natural
+  // trigger on `/`; the shell-mode routing must suppress it (a path, not
+  // a command). Tab (force) still completes the path.
+  const natural = await provider.getSuggestions(['/usr/lo'], 0, 7, { signal: abort, force: false })
+  assert.equal(natural, null, 'a natural trigger on a shell-mode path must stay quiet')
+  const forced = await provider.getSuggestions(['/usr/lo'], 0, 7, { signal: abort, force: true })
+  assert.ok(forced !== null && forced.items.length > 0, 'Tab on a shell-mode path must complete the path')
+})
+
+test('shouldTriggerFileCompletion allows Tab on a leading / in a shell mode', async () => {
+  const root = fixtureWorkspace()
+  const { source } = modeSource('shell-context')
+  const provider = new MentionProvider([], root, null, source)
+  // The fork's bare-slash-command block would return false for `/usr/lo`
+  // (no space); the virtual prefix keeps the fork's judgment on the
+  // serialized line, where `/usr/lo` is a path.
+  assert.equal(provider.shouldTriggerFileCompletion(['/usr/lo'], 0, 7), true)
+  // Prompt mode keeps the fork's judgment (a bare slash command blocks Tab).
+  const { source: promptSource } = modeSource('prompt')
+  const promptProvider = new MentionProvider([], root, null, promptSource)
+  assert.equal(promptProvider.shouldTriggerFileCompletion(['/usr/lo'], 0, 7), false)
+})
+
 // --- injected-runner determinism (review finding 4/5: failed runs must not
 // be cached, and the spawn/cache must be testable without real bash) ---
 

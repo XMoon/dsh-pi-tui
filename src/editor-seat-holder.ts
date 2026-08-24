@@ -68,6 +68,9 @@ export interface SeatEditor {
    * escape branch passes Esc through while it is open so the editor can
    * close it (kimi parity). */
   isShowingAutocomplete?(): boolean
+  /** The occupant's editor input mode (the host editor always answers; a
+   * plugin editor has no mode — absent means prompt semantics). */
+  getInputMode?(): import('./editor-input-mode.ts').EditorInputMode
   /** P1-5: the occupant's input channel — a PLUGIN editor with a
    * handleInput hook receives routed SEMANTIC events here (the host has
    * already decoded the terminal protocol — legacy/CSI-u/modifyOtherKeys
@@ -84,6 +87,8 @@ export interface HostEditorAdapter {
   setText(text: string): void
   /** Whether the host editor's autocomplete dropdown is open. */
   isShowingAutocomplete?(): boolean
+  /** The host editor's current input mode (shell-mode serialization). */
+  getInputMode?(): import('./editor-input-mode.ts').EditorInputMode
   getCursor?(): number
   /** Best-effort cursor setter for the host editor. */
   setCursor?(offset: number): void
@@ -230,6 +235,7 @@ export class EditorSeatHolder {
       getText: () => editor.getText(),
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
+      getInputMode: () => editor.getInputMode?.() ?? 'prompt',
       getCursor: () => editor.getCursor?.() ?? 0,
       setCursor: (offset) => editor.setCursor?.(offset),
       insertTextAtCursor: (text) => editor.insertTextAtCursor?.(text),
