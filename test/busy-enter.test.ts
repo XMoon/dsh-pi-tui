@@ -133,6 +133,11 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
       search: async () => [],
       titles: async () => new Map(),
     },
+    interaction: {
+      registerQuestionProvider: () => true,
+      onApprovalRequest: () => {},
+      setApprovalPolicy: () => true,
+    },
     sessionWriter: {
       followup: () => {},
       steer: async () => 'ok' as const,

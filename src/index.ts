@@ -120,6 +120,7 @@ import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
 import { DirectSessionReader } from './runtime/direct/session-direct.ts'
 import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
 import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
+import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { CreateSessionOptions, ResumeSessionOptions } from './runtime/session-lifecycle-port.ts'
@@ -1315,6 +1316,7 @@ export function apply(ctx: Context, config: Config): void {
     new DirectSessionReader(ctx),
     new DirectSessionWriter(ctx),
     new DirectSessionLifecycle(ctx),
+    new DirectInteractionPort(ctx),
   )
   // Process diagnostics: stderr + a log file under $DSH_HOME/logs. The cordis
   // logger has no exporter in this process, so it is NOT the troubleshooting
@@ -5177,6 +5179,8 @@ export function apply(ctx: Context, config: Config): void {
       // The session WRITE port (migration M1.4): follow-up delivery, steer,
       // queue pull-back, cancel and title ops go through the port.
       sessionWriter: backend.sessionWriter,
+      // The interaction port (migration M1.6): approval/question authority.
+      interaction: backend.interaction,
       cwd,
       imageStore: draftImages,
       // Issue #7: /copy shares the fullscreen selection's clipboard policy.
@@ -5579,7 +5583,7 @@ export function apply(ctx: Context, config: Config): void {
     // already-aborted request settles cancelled synchronously; otherwise the
     // prompt's own abort signal withdraws it (turn cancel). P7c: the dialog
     // previews the paired tool call's arguments and flags dangerous commands.
-    ctx.on('approval/request', (req, next) => {
+    backend.interaction.onApprovalRequest((req, next) => {
       if (req.signal?.aborted === true) return Promise.resolve<ApprovalOutcome>('cancelled')
       const args = req.callId === undefined ? undefined : callArgs.get(req.callId)
       return app.showApprovalPrompt({
@@ -5592,9 +5596,7 @@ export function apply(ctx: Context, config: Config): void {
     })
     // The interactive question answerer: ask_user_question tool calls become
     // dialog flows; the tool receives the structured answers.
-    const userQuestions = ctx.get('userQuestions')
-    if (userQuestions !== undefined) {
-      userQuestions.registerProvider({
+    backend.interaction.registerQuestionProvider({
         ask: async (request) => {
           const answers = await app.askQuestions(request.questions.map(question => ({
             id: question.id,
@@ -5614,7 +5616,6 @@ export function apply(ctx: Context, config: Config): void {
           }
         },
       })
-    }
   })().catch((error: unknown) => {
     // Terminal-total final catch of the startup lifecycle root: error
     // observation, logging, abort, dispose and exit are each individually

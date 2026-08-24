@@ -56,6 +56,7 @@ import {
 } from './sessions.ts'
 import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
+import type { InteractionPort } from './runtime/interaction-port.ts'
 import {
   credentialOptionsFor,
   deriveKeyRef,
@@ -267,6 +268,8 @@ export interface TuiCommandRunner {
   /** The session WRITE port (migration M1.4): follow-up delivery, steer,
    * queue pull-back, cancel and title ops go through the port. */
   readonly sessionWriter: SessionWriter
+  /** The interaction port (migration M1.6): approval/question authority. */
+  readonly interaction: InteractionPort
   /** The ONE exit orchestration (flush with a hard timeout, cleanup, warn,
    * resume hint, process exit) — shared by Ctrl+C/Ctrl+D, /exit and /quit.
    * Command handlers must NEVER stop the app, flush or exit themselves. */
@@ -1333,7 +1336,7 @@ export function registerTuiCommands(
         (id, value, revert) => {
           if (id === 'approval') {
             if ((value === 'ask' || value === 'never') && liveAgent !== undefined) {
-              ctx.get('approval')?.setPolicy(liveAgent, value)
+              runner.interaction.setApprovalPolicy(liveAgent, value)
               // The footer's permission badge derives from the knob folds;
               // reflect the change immediately.
               runner.refreshStatus()
