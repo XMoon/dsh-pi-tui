@@ -514,6 +514,12 @@ export class TranscriptFolder {
    * earlier candidate first — plan §5.3 C), and its tail is bounded. */
   private foldMessageCandidate(activity: MutableTurnActivity, step: number, delta: string): void {
     if (delta === '') return
+    // After turn/end the final was already resolved: a late text delta
+    // (replay artifact) must never resurrect a Message candidate — the
+    // final would render both as the transcript final AND the Thought
+    // Message preview (review finding). The transcript entry still
+    // accumulates the delta; only the Focus projection ignores it.
+    if (activity.completed) return
     const candidate = activity.messageCandidate
     if (candidate !== undefined && candidate.step !== step) {
       this.confirmMessageCandidate(activity)
