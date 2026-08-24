@@ -586,3 +586,30 @@ test('S16: all-scope pending rows survive across pages — a proof found on a la
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('S17: a knownCwds resolver update between pages recovers pending rows', async () => {
+  const home = tempHome()
+  try {
+    // 100 legacy v1 rows, no v2 proof anywhere: page 1 leaves them pending
+    // (no proof in its window); the cwd becomes known BEFORE page 2 — the
+    // resolver is read per search, so the pending rows must be recovered.
+    writeV1(home, '/a', Array.from({ length: 100 }, (_, i) => `legacy-${i}`))
+    const known = new Map<string, string>()
+    const resolver = (): ReadonlyMap<string, string> => known
+    const src = new FileHistorySearchSource({ dshHome: home, knownCwds: resolver, scanLimit: 50 })
+    const request = { scope: 'all' as const, cwd: '/nowhere', query: '', limit: 1000 }
+    const page1 = await src.search(request)
+    assert.equal(page1.results.length, 0, 'page 1: no proof yet, all rows pending')
+    assert.equal(page1.exhausted, false)
+    assert.ok(page1.continuation !== undefined)
+    // The cwd joins the set between pages (a session created/switched).
+    known.set(historyFilePath(home, '/a').split('/').pop()!.replace(/\.jsonl$/, ''), '/a')
+    const page2 = await src.search(request, page1.continuation)
+    const legacy = page2.results.filter(row => row.content.startsWith('legacy-'))
+    assert.equal(legacy.length, 100, 'the resolver update recovers the pending rows')
+    assert.ok(legacy.every(row => row.cwd === '/a'), 'the recovered rows carry the proven cwd')
+    assert.equal(page2.exhausted, true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})

@@ -284,6 +284,23 @@ export class FileHistorySearchSource implements HistorySearchSource {
     let fileProof: string | null = continuation !== undefined
       ? continuation.fileProof
       : scope === 'all' ? this.knownCwdFor(files[0]?.path ?? '') : null
+    if (continuation !== undefined && scope === 'all' && fileProof === null && pending.length > 0) {
+      // The knownCwds resolver is read on EVERY search (never a startup
+      // snapshot): a cwd learned between pages must recover the pending
+      // rows immediately, before the scan resumes.
+      const first = files[0]
+      if (first !== undefined) {
+        const known = this.knownCwdFor(first.path)
+        if (known !== null) {
+          fileProof = known
+          for (const held of pending) {
+            if (!matchesQuery(held.record.content, request.query)) continue
+            this.mergeResult(map, newKeys, this.buildResult(first.path, held.record, fileProof, held.byteStart), scope)
+          }
+          pending = []
+        }
+      }
+    }
     outer:
     while (fileIndex < files.length) {
       if (request.signal?.aborted) return emptyPage()
