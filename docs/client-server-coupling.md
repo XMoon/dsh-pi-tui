@@ -26,6 +26,10 @@
   services with no Host business state (`loader`, `appExit`), and
   `src/startup.ts` (the zero-dependency compatibility island — see
   `docs/client-server-migration.md` §Startup).
+- The gate also covers `goal`, `planMode` and `sandboxPolicy` (dsh Host
+  services with **zero baseline entries today** — no current `src/` usage).
+  Any future feature that reads them is new Host coupling and must route
+  through the runner/allowlist, never a UI module.
 
 ## Categories
 

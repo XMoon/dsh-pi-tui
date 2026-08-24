@@ -58,6 +58,9 @@ export const HOST_SERVICES = [
   'agentDefaultModel',
   'workspaceRegistry',
   'directoryPicker',
+  'goal',
+  'planMode',
+  'sandboxPolicy',
   'shell',
 ]
 
