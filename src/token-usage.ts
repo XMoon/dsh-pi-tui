@@ -209,6 +209,22 @@ export class StepUsageAccumulator {
     }
   }
 
+  /** Finalize a turn: commit its still-open steps' pending usage (the
+   * facts were real) and drop the pending totals, so the Focus per-turn
+   * total and the session total agree even when turn/end arrives with
+   * open steps (review finding). Idempotent — a second call finds no open
+   * steps. */
+  onTurnEnd(turn: number): void {
+    for (const [key, entry] of this.perStep) {
+      if (turnOfKey(key) === turn && entry.usage !== undefined) {
+        addTotals(this.turnTotalFor(turn), entry.usage)
+        addTotals(this.session, entry.usage)
+        this.perStep.delete(key)
+      }
+    }
+    this.turnPending.delete(turn)
+  }
+
   /** Commit one step's usage (once) and drop its open state. The step's
    * final fact stays in {@link settledByStep} (with its provenance) so a
    * late fact replaces or is ignored correctly; a step that never opened

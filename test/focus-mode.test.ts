@@ -636,6 +636,24 @@ test('a late message for an older step never regresses the final-answer dedup', 
   assert.equal(activity.message?.text, '第一步权威')
 })
 
+test('a replayed OLDER turn/start never regresses the current turn', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    // A replayed turn/start for an older turn (replay artifact).
+    eventAt('turn/start', { turn: 0 }, 1001, 1),
+    // A turn-less event must land in the CURRENT turn (1), not 0.
+    eventAt('user/message', {
+      id: MessageId('u'), role: 'user',
+      content: [{ type: 'text', text: 'hi' }],
+      source: { kind: 'user' },
+    }, 1002, 2),
+  ])
+  const messages = folder.messages()
+  const user = messages.find(m => m.kind === 'user')
+  assert.ok(user !== undefined && user.turn === 1, 'the user message must land in the current turn')
+})
+
 test('a replayed turn/start never resurrects a finalized turn', () => {
   const folder = new TranscriptFolder()
   folder.apply([

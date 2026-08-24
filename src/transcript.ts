@@ -928,12 +928,19 @@ export class TranscriptFolder {
         // closed step is a settled fact, never swallowed by
         // first-chunk-wins). The visible total is unchanged, so the
         // revision only moves when the display value actually changed.
+        // After turn/end the turn's open steps were already finalized:
+        // a late step/end (replay artifact) is a no-op (review finding).
+        const activity = this.activityFor(event.data.turn)
+        if (activity.completed) break
         this.usage.onStepEnd(event.data.turn, event.data.step)
-        this.syncUsage(this.activityFor(event.data.turn))
+        this.syncUsage(activity)
         break
       }
       case 'turn/start': {
-        this.currentTurn = event.data.turn
+        // Monotonic: a replayed turn/start for an OLDER turn must never
+        // regress the current turn (turn-less events would land in the
+        // wrong turn — review finding).
+        this.currentTurn = Math.max(this.currentTurn, event.data.turn)
         // Focus aggregation: turn timing comes from `SessionEvent.time`
         // (plan §10.1) — never a second clock. Idempotent: a replayed
         // turn/start for an already-finalized (or already-started) turn
@@ -1217,6 +1224,10 @@ export class TranscriptFolder {
         break
       }
       case 'turn/end': {
+        // Idempotent: a replayed turn/end must not re-append the
+        // synthetic cards or re-settle the activity (review finding).
+        const endActivity = this.activityFor(event.data.turn)
+        if (endActivity.completed) break
         // Every thinking entry stops streaming when the turn closes
         // (interrupted steps never see their assistant/message).
         for (const entry of this.thinkingEntries.values()) entry.running = false
@@ -1255,8 +1266,12 @@ export class TranscriptFolder {
           }),
         }
         // Focus aggregation: turn/end resolves the Message slot (final
-        // answer dedup — plan §5.5/§22) and the token display.
+        // answer dedup — plan §5.5/§22), finalizes any still-open steps'
+        // usage (so the per-turn total and the session total agree even
+        // when turn/end arrives with open steps — review finding), and
+        // settles the token display.
         this.resolveMessageAtTurnEnd(activity)
+        this.usage.onTurnEnd(event.data.turn)
         this.syncUsage(activity)
         activity.revision += 1
         break

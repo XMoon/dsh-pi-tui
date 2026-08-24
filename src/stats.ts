@@ -140,6 +140,9 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
     switch (event.type) {
       case 'turn/end': {
         completedTurns.add(event.data.turn)
+        // Finalize any still-open steps so the session total agrees with
+        // the Focus per-turn total (review finding).
+        usage.onTurnEnd(event.data.turn)
         break
       }
       case 'step/start':
@@ -302,6 +305,9 @@ export class StatsFolder {
     switch (event.type) {
       case 'turn/end': {
         this.completedTurns.add(event.data.turn)
+        // Finalize any still-open steps so the session total agrees with
+        // the Focus per-turn total (review finding).
+        this.usage.onTurnEnd(event.data.turn)
         break
       }
       case 'step/start':
