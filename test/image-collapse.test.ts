@@ -232,8 +232,8 @@ test('a tool-card image row still toggles the CARD — never swallowed by an att
   // card's own click surface, so a click on the image folds the card.
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
-    { type: 'tool/result', seq: 2, time: 2, data: { callId: 'call-1', message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: [
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
+    { type: 'tool/result', seq: 2, time: 2, data: { turn: 0, step: 0, callId: 'call-1', message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: [
       { type: 'text', text: 'caption' },
       { type: 'image', attachment: IMAGE_REF },
     ] }] } } } as never,
