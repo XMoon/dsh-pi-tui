@@ -327,6 +327,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Ctrl+R history search is now bounded and recent-first.** Instead of
+  parsing every candidate history file in full on each keystroke, the
+  search reads the JSONL store from the tail backwards through a new
+  reverse reader, consuming a global scan budget (5000 physical lines per
+  search across all files, never per file) and visiting the most recently
+  active workspaces first. Large histories no longer cost a full parse per
+  query; the canonical files are never read whole. The search result is
+  now a page: when older history remains, the source returns a
+  continuation that can resume exactly where the search stopped (no
+  re-scanning, no duplicate rows) — the foundation for a future
+  "Search older" UI. Legacy rows whose directory can only be proven
+  outside the scanned window may be omitted from `All directories` (an
+  intentional coverage trade-off; v2 cwd validation itself is unchanged).
+
 ## [0.3.2] - 2026-08-22
 
 ### Added
