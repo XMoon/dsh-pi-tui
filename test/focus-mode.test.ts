@@ -400,6 +400,28 @@ test('a later assistant/message confirms the earlier candidate and becomes the n
   assert.equal(activity.message?.text, '第二步说明')
 })
 
+test('a long confirmed intermediate message previews its TAIL, never the stale head', () => {
+  const folder = new TranscriptFolder()
+  const long = 'line one\n' + 'x'.repeat(600) + '\nTHE END MARKER'
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: long } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: long }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1004, 4),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: '最终答案' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 5),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message?.text, 'THE END MARKER', 'the preview must come from the message TAIL')
+})
+
 test('a settled message without any prior candidate is still the final when the turn ends (no phantom slot)', () => {
   const folder = new TranscriptFolder()
   folder.apply([

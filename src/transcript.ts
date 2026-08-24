@@ -527,7 +527,11 @@ export class TranscriptFolder {
     if (candidate === undefined) return
     const text = candidate.settledText ?? candidate.tail
     if (text !== '') {
-      activity.messageConfirmed = text.slice(0, TranscriptFolder.MESSAGE_TAIL_CAP)
+      // The bounded TAIL (never the head): the preview shows the message's
+      // LATEST content, so a long intermediate message confirmed by a
+      // later tool/step must not freeze its stale leading text (review
+      // finding).
+      activity.messageConfirmed = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
     }
     activity.messageCandidate = undefined
   }
