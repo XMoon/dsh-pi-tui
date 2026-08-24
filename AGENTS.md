@@ -87,7 +87,17 @@ packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork. The vendored version
 
 ## Key decisions (do not silently reverse)
 
-1. **In-process bundle, not BFF client.** Like `dsh-headless`, the TUI runs inside the Cordis context and consumes `ctx.*` services directly. The web surface's remote RPC exists only because a browser cannot be in-process; a TUI has no such constraint. Remote attach via the apiproxy is **explicitly not planned** (removed from the roadmap).
+1. **Direct today, DSH-native client incrementally.** The production
+   `dsh --profile pi-tui` path currently runs in-process and consumes Host
+   services directly through the Direct backend. That remains the default and
+   rollback path while the TUI is migrated, capability by capability, toward
+   a DSH-native Client over the official API/Remote/event contracts. The
+   migration is explicitly dual-stack: first isolate semantic ports without
+   behavior change, then add opt-in wire backends, then prove local
+   in-process/IPC transport parity, and only in a dedicated later milestone
+   consider flipping the default. Remote attach is a planned capability, but
+   it must not bypass DSH's security model or make ordinary local use depend on
+   a TCP listener.
 2. **Vendored fork, not npm dependency.** `@moonshot-ai/pi-tui` is not published (npm 404). Vendored from the kimi-code fork (not upstream pi-mono) to keep its local fixes; the earlier "five" (CJK wrap recursion guard, container width clamp, overwide-line truncation instead of throw, negative-width guards, per-frame processed-line reuse) are no longer divergences — the vendored snapshot (kimi-code `44a6c70e`) already contains the first four, and the last never existed in this fork. `packages/pi-tui/AGENTS.md` is the source of record for every divergence and its guarding tests — re-verify each entry on every re-vendor.
 3. **`TuiMainScreen`, not `TUI`.** In this fork the constructible entry is `TuiMainScreen` (main screen + scrollback, `mode: "regular"`); the README's `new TUI(...)` is stale upstream docs. `TuiAltScreen` is the alternative.
 4. **Source exports, built artifacts.** The root bundle and the fork both build with tsdown (`dist/`); the root package bundles the vendored pi-tui fork (`deps.onlyBundle: ['@xmoon76/pi-tui']`, the kimi-code pattern) so the published tarball is self-contained. `exports` point at built files; neither `dist/` is committed — build before installing into a profile. Node 26 refuses type-stripping inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `.ts`-exporting package cannot load from a profile's node_modules.
@@ -106,6 +116,118 @@ packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork. The vendored version
 17. **Phase 5 examples prove the tiers; the vim editor uses the GETTER pattern (Phase 5 contract).** The real-plugin validation lives in `examples/plugins/` (vim — Advanced editor SDK; questionnaire — Advanced imperative UI broker; interactive-shell — Unstable raw seam), gated by `scripts/examples-plugin-smoke.mjs` against the packed tarball. The vim example's live repaint uses `get component()` on the ExtensionEditor (the seat recompiles `editor.component` on every `host.invalidate()` — the getter returns the CURRENT buffer view; `ExtensionEditor.component` is readonly, so the getter is the clean live-repaint path, never a mutation of a readonly-typed object). The API gap process and the Stable promotion review are recorded in `examples/README.md`; the authoring decision tree lives in `docs/plugin-authoring.md`. Do not expand Stable to make a Phase-5 example work — the tier selection is the point.
 18. **User input = brand-blue bubble; the editor carries a matching `❯ ` prompt (dsh-web parity, consumer-side).** The user's own words render as a floating BLOCK — `UserBubbleComponent` paints the whole row with the `roleUserBg` bubble background (dsh-web `--dsw-specific-bubble` parity: `#2C2C2F` dark / `#E4EDFD` light, DeepSeek brand-blue family) and leads it with a `roleUser`-coloured `❯` (`#679EFE` dark / `#4177E6` light) — NOT kimi's amber text colour, so the user role never collides with kimi or with the assistant's brand-blue whale. The queue pane's `❯` and the editor prompt use the same `roleUser` marker: one brand-blue ❯ for the user's own input everywhere. The host editor is constructed with `paddingX: 2` and `TuiEditor.render` paints the prompt over the first content row's leading padding (kimi's injectPromptSymbol pattern — no fork change; the fork stays pristine per decision 8); the prompt is skipped while the draft is scrolled (the `↑ N more` indicator makes the first visible row a continuation). `roleUserBg` is an OPTIONAL palette token: absent (custom themes) → the bubble collapses to plain rows, and the component is REFERENCE-STABLE like BulletedComponent — same child instance + same width → identical rendered strings, so the differential renderer paints a zero-change frame (no per-frame line cache exists in the fork; do not rely on one). Theme switches stay correct because the per-message component rebuilds on `themeRevision` (the baked ANSI is not frozen). `scripts/preview-role-styles.mts` (scheme comparison) and `scripts/preview-prompt.mts` (live surface) show the effect in a real TTY. Guarded by the bubble and role-colour tests in `test/rendering.test.ts` and the editor-prompt tests in `test/tui-app.test.ts`.
  19. **Injected context rows render their envelopes parsed, never the raw XML (consumer-side, dsh-web row-model parity).** Loading a skill — the TUI fallback OR the host's dsh-tool-skill listener — injects the model-facing `<skill_content>` body as a context row; the skill catalog and workspace instructions similarly bake complete `<system-reminder>` frames into their content (harness caller-owned framing). The expanded labeled system row used to dump those envelopes verbatim (`message.text` — the one leak 56d017c's tool-card fix did not cover, since system rows render `text`, not `result`). `systemContextBody` in present.ts derives the presentation body: a well-formed skill envelope renders its instructions body; a `<system-reminder>`-wrapped producer renders its content with the wrapper tag lines (and the `<available_skills>` markers, only when the pair is present) stripped; a malformed skill envelope renders NO body (never the raw tags); any other text is unchanged (plain context rows keep their raw-body behavior). The model-facing bytes are untouched — presentation only, and the header already names the producer, so the divergence from the web's deliberate framing-verbatim instruction rows is documented here. Folded skill rows gain the tool-card `— N lines of instructions` suffix (reusing `skillFoldedPreview`) so the fold still says what the model received. Subagent viewers and search jumps share the same component path, so the fix covers them transitively. Guarded by the `systemContextBody` and injected-row tests in `test/rendering.test.ts`.
+
+## Server/client migration guardrails (hard rules)
+
+The production TUI is currently an in-process DSH surface. We are migrating it
+incrementally toward a DSH-native client architecture, but the migration must
+not disrupt ordinary `dsh --profile pi-tui` usage or ongoing feature work. The
+migration source of truth is `docs/client-server-migration.md` (phase status,
+backend default, rollback state) and the coupling allowlist lives in
+`docs/client-server-coupling.md` — read both before touching Host-coupled code
+and update them in the same PR.
+
+- **Direct remains the production default until an explicit migration
+  milestone changes it.** Experimental client/wire backends are opt-in. Do not
+  silently change the execution model of `dsh --profile pi-tui`, `--session`,
+  or `--preset` while implementing migration groundwork.
+
+- **No new Host coupling outside an approved boundary.** New feature code must
+  not directly add reads/writes through `ctx.agents`, `ctx.sessions`,
+  `ctx.subagents`, `ctx.jobs`, `ctx.credentials`, `ctx.userQuestions`,
+  persistence services, or concrete `Agent` / `AgentHandle` / `Session`
+  objects in UI, command, controller, or presentation modules. Use an existing
+  semantic port/adapter. If none exists, add the smallest domain-specific seam
+  first. Existing coupling may remain on the migration allowlist until its
+  owning phase moves it. Enforced by `scripts/client-boundary-gate.mjs`
+  (baseline allowlist + no-new-debt; see M0 in the migration doc).
+
+- **Do not replace Context with another god object.** There is no universal
+  `TuiBackend` carrying every capability. Keep interfaces narrow and
+  domain-owned (session read/write, subagent, interactions, catalog/config,
+  Host files, etc.). Consumers depend only on the capability they use.
+
+- **Every new feature declares locality.** Classify it as client-local,
+  Host-owned, or explicitly split. Terminal rendering, key handling,
+  clipboard, draft state and local UI history are client-local. Agent,
+  Session, subagent, jobs, persistence, model/provider state, skills,
+  credentials and Host workspace files are Host-owned. Ambiguous features
+  such as shell execution, external editing, file references and export must
+  define which machine owns each operation.
+
+- **Never assume Client cwd/filesystem == Host cwd/filesystem.** A path valid
+  in a local Direct run may refer to a different machine under remote attach.
+  Host workspace paths and `@file` discovery must have a Host-side capability
+  path. A remote-mode feature must fail closed rather than silently operate on
+  the Client filesystem with Host semantics.
+
+- **Host-owned behavior needs a wire story.** Prefer the official DSH
+  `IApiClient`, Client Runtime, generated Remote namespace, mux/host stream or
+  another upstream contract. Do not create a TUI-specific RPC/event/DTO when
+  DSH already owns the concept. When upstream has no suitable Remote yet,
+  capability-gate the feature and record the gap instead of baking an
+  in-process assumption into new UI code.
+
+- **Direct and wire implementations share semantic contracts.** The current
+  Direct path becomes an adapter behind the same domain interface the future
+  wire path implements. A migrated capability gets contract tests that can run
+  against both implementations. Do not maintain two independent feature
+  semantics.
+
+- **Transport correctness does not belong in TUI rendering code.** Reconnect
+  generations, history/live races, event gaps, queue baselines, pending
+  approval/question replay and Host stream reconciliation belong to the DSH
+  Client Runtime/connection layer (or a narrow transport adapter), not
+  `TuiApp` or card renderers.
+
+- **Remote async work must be stale-safe.** Any result that can settle after a
+  session/view/backend transition must re-check the relevant generation or
+  identity before mutating visible state. Preserve the repository's existing
+  stale-result discipline; a process boundary increases, not reduces, this
+  requirement.
+
+- **Do not move callbacks across the process boundary.** Client extension
+  callbacks, renderers, key handlers and editor objects stay in the Client/TUI
+  runtime. Cross-boundary integration uses serializable data, stable
+  identities, Remote calls and events. Never invent callback serialization.
+
+- **Stable extension compatibility survives the migration.**
+  `@xmoon76/dsh-pi-tui/extensions` remains an additive-first compatibility
+  boundary. Do not make Stable plugins import DSH Host internals or rewrite
+  against a new transport merely to enable server/client migration.
+  Advanced/Unstable keep their documented compatibility policies.
+
+- **Session ownership safety is not migration cleanup.** The Direct backend's
+  owner lock, lease/cooling state machine, PINNED quarantine, divergence guard,
+  transition gate and operation barrier remain authoritative until a dedicated
+  later milestone proves that every TUI session write is Host-owned and
+  cross-client concurrency is safe. Do not remove or weaken them as
+  preparatory refactoring.
+
+- **Startup stays a zero-dependency compatibility island.** Experimental
+  client/runtime imports must not enter `src/startup.ts`'s static dependency
+  graph and break the friendly Harness compatibility gate. Load optional
+  backend code only after startup selection.
+
+- **Keep the existing DeepSeek package ownership rule.** New
+  `@deepseek-ai/*` imports remain peer dependencies and resolve from the
+  installed Harness. Prefer capability detection/structural typing where a
+  feature can degrade; raise the global minimum Harness version only when a
+  production-default path truly requires it.
+
+- **Migration work is off by default until its phase acceptance gates pass.**
+  Every migration PR must leave the current Direct path green. A later default
+  flip is its own milestone and must retain an explicit Direct rollback path
+  for at least one release cycle.
+
+Before adding a feature that touches Host state, answer these four questions in
+the implementation/review:
+
+1. Is this state Client-local, Host-owned, or split?
+2. Which semantic port owns it?
+3. What official DSH wire capability maps to it, or what documented gap blocks
+   remote mode?
+4. Which Direct + wire contract test prevents the two backends from drifting?
 
 ### Extension API tiers
 
@@ -377,5 +499,7 @@ The rules below must never be broken; the full contracts live in `docs/`.
 - CHANGELOG.zh-CN.md — 简体中文 release history, kept in sync with
   CHANGELOG.md on every release (see Working rules).
 - docs/README.md — index of the docs and how they evolve.
+- docs/client-server-migration.md — the server/client migration source of truth (phase status, backend default, rollback state).
+- docs/client-server-coupling.md — the migration coupling allowlist (baseline + no-new-debt).
 - packages/pi-tui/AGENTS.md — the fork's divergence ledger (guarding tests per fix).
 - When you change behavior, record the decision or trap in its owning doc at the same time — a fix without a recorded reason is a trap waiting to be re-introduced.
