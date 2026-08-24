@@ -619,6 +619,25 @@ test('a usage chunk without assistant/message still counts (plan §45)', () => {
   assert.equal(activity.totalTokens, 100)
 })
 
+test('an orphan fact is reconciled when its step opens late (no double count)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    // The usage chunk arrives BEFORE the step/start (out-of-order replay).
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1001, 1),
+    eventAt('step/start', { turn: 0, step: 0 }, 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 110, outputTokens: 0 },
+    }, 1003, 3),
+    eventAt('step/end', { turn: 0, step: 0 }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 110, 'the orphan fact must reconcile into the open step, never double-counted')
+})
+
 test('orphan usage: the authoritative message REPLACES the provisional chunk (never adds)', () => {
   const folder = new TranscriptFolder()
   folder.apply([

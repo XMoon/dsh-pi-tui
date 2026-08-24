@@ -65,9 +65,9 @@ function stepKey(turn: number, step: number): string {
  * sum of the per-turn committed totals plus orphan usage — the invariant
  * that keeps `sum(per-turn) ≈ session` strict).
  *
- * Lifecycle: `onStepStart` opens a step; `onUsageChunk` records the first
- * streaming usage (later chunks of the same step are ignored — the first
- * assembler value wins); `onAssistantMessage` replaces it with the
+ * Lifecycle: `onStepStart` opens a step; `onUsageChunk` records the LATEST
+ * streaming usage (the assembler value is cumulative — later chunks
+ * replace earlier ones); `onAssistantMessage` replaces it with the
  * authoritative usage; `onStepEnd` commits the step's usage once and drops
  * the open state. A usage fact with no open step counts immediately
  * (replay edge).
@@ -88,7 +88,21 @@ export class StepUsageAccumulator {
 
   /** Open one step's accounting. */
   onStepStart(turn: number, step: number): void {
-    this.perStep.set(stepKey(turn, step), {})
+    const key = stepKey(turn, step)
+    const orphan = this.orphanByStep.get(key)
+    if (orphan !== undefined) {
+      // The step opened AFTER an orphan usage fact of the same (turn,
+      // step) (out-of-order replay): reverse the premature commit and make
+      // the fact the step's pending usage — it commits once at step/end,
+      // never twice (review finding).
+      this.orphanByStep.delete(key)
+      this.subtractTotals(this.turnTotalFor(turn), orphan)
+      this.subtractTotals(this.session, orphan)
+      this.perStep.set(key, { usage: orphan })
+      this.addPending(turn, orphan)
+    } else {
+      this.perStep.set(key, {})
+    }
   }
 
   /** Record a streaming usage chunk: the LATEST chunk of an open step
