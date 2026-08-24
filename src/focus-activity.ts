@@ -9,7 +9,9 @@
  * process slots — Think / Message / Tool — plus the Error line, all muted,
  * never competing with the final assistant. The expanded card renders ONLY
  * the header: the hidden process rows render below as ordinary transcript
- * messages (plan §15 — no second renderer family).
+ * messages (plan §15 — no second renderer family), and inside an open
+ * Thought the foldable process cards default COMPACT with their own
+ * per-card disclosure (the secondary-disclosure supplement).
  *
  * The whale icon encodes ONLY the disclosure state (🐋 collapsed / 🐳
  * expanded); the execution outcome is carried by the header label

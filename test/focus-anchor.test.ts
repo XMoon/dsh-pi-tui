@@ -1,9 +1,11 @@
 /**
- * Focus Mode fullscreen ANCHORED disclosure tests (plan §8): clicking a
- * collapsed Thought expands it and anchors the viewport at the Thought
- * header (never the tail), with follow-end disabled; clicking the
- * expanded turn's ordinary rows collapses the OWNER turn (attachment
- * hit areas win first); and resize keeps the click map aligned.
+ * Focus Mode fullscreen disclosure tests (plan §8 + the secondary-
+ * disclosure supplement): expanding a collapsed Thought in fullscreen
+ * FOLLOWS THE END (the default view after expansion is the latest
+ * content), the process timeline defaults to COMPACT secondaries with
+ * nearest-owner click semantics (attachment > secondary > outer Thought),
+ * root Collapse All resets the descendants, and resize keeps the click
+ * map aligned.
  * @module @xmoon76/dsh-pi-tui/focus-anchor.test
  */
 
@@ -28,8 +30,10 @@ function eventAt(type: string, data: Record<string, unknown>, time: number, seq:
   return { type, seq, time, data } as SessionEvent
 }
 
-/** A settled turn whose tool result is LONG (100+ rendered rows), so the
- * expanded Thought's content far exceeds the viewport. */
+/** A settled turn whose tool result is LONG (100+ rendered rows), with an
+ * intermediate assistant between the tool and the final — the tool card is
+ * a SECONDARY disclosure, the intermediate assistant is a NON-secondary
+ * process row. */
 function longThoughtTurn(seqBase: number): SessionEvent[] {
   const lines = Array.from({ length: 120 }, (_, i) => `result line ${i}`).join('\n')
   return [
@@ -39,7 +43,8 @@ function longThoughtTurn(seqBase: number): SessionEvent[] {
       content: [{ type: 'text', text: 'make it big' }],
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 120' }) }, T0 + 2, seqBase + 2),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the projection…' } }, T0 + 2, seqBase + 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 120' }) }, T0 + 3, seqBase + 3),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
@@ -47,16 +52,24 @@ function longThoughtTurn(seqBase: number): SessionEvent[] {
         content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: lines }] }],
         source: { kind: 'tool', callId: CallId('c1') },
       },
-    }, T0 + 3, seqBase + 3),
+    }, T0 + 4, seqBase + 4),
     eventAt('assistant/message', {
       turn: 1, step: 1,
       message: {
         id: MessageId('a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'intermediate step' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 5, seqBase + 5),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: {
+        id: MessageId('a2'), role: 'assistant',
         content: [{ type: 'text', text: 'Done.' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
-    }, T0 + 4, seqBase + 4),
-    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 5, seqBase + 5),
+    }, T0 + 6, seqBase + 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 7, seqBase + 7),
   ]
 }
 
@@ -73,7 +86,7 @@ function click(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x};${y}m`)
 }
 
-test('expanding a collapsed Thought in fullscreen ANCHORS the header, not the tail (plan §8.6)', async () => {
+test('expanding a collapsed Thought in fullscreen FOLLOWS THE END (plan supplement)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
@@ -82,39 +95,87 @@ test('expanding a collapsed Thought in fullscreen ANCHORS the header, not the ta
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // Scroll to the very end first: the collapsed Thought + the final answer
-  // are the only rows, so the header is near the bottom.
+  // The collapsed turn is short: the header is visible at the bottom.
   app.scrollToBottom()
   await vt.waitForRender()
   let view = vt.getViewport()
   const headerY = findRow(view, '🐋 Thought')
   assert.ok(headerY >= 0, `collapsed Thought header missing:\n${view.join('\n')}`)
-  const scroll = app.fullscreenScrollForTest()
-  assert.ok(scroll !== undefined, 'fullscreen scroll must exist')
-  assert.equal(scroll.isFollowingEnd, true, 'precondition: following the end')
-  // Click the collapsed header.
+  const before = app.fullscreenScrollForTest()
+  assert.equal(before?.isFollowingEnd, true, 'precondition: following the end')
+  // Click the collapsed header: the root expands and the viewport follows
+  // the END (the default view after expansion is the latest content).
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
   assert.ok(joined.includes('🐳 Thought'), `expanded symbol missing:\n${joined}`)
-  // The header must be VISIBLE near the top of the viewport, and the
-  // viewport must NOT be pinned to the 120-line result tail.
-  const newHeaderY = findRow(view, '🐳 Thought')
-  assert.ok(newHeaderY >= 0 && newHeaderY < 6, `header must be near the top, at ${newHeaderY}:\n${joined}`)
-  assert.ok(!joined.includes('result line 119'), `the result tail must NOT be the anchor:\n${joined}`)
   const after = app.fullscreenScrollForTest()
-  assert.equal(after?.isFollowingEnd, false, 'anchor must exit follow-end (plan §8.7)')
-  // The anchor must NOT be the content max: the 120-line result tail is
-  // far below the header, so a max-scrolled viewport would show the tail.
-  assert.ok(after !== undefined, 'scroll geometry must exist')
-  assert.ok(after.scrollTop < after.maxScrollTop,
-    `anchored viewport must not sit at the max (scrollTop ${after.scrollTop} >= max ${after.maxScrollTop})`)
+  assert.equal(after?.isFollowingEnd, true, 'expansion must keep following the end')
+  assert.ok(after !== undefined && after.scrollTop === after.maxScrollTop,
+    `the viewport must sit at the end (scrollTop ${after?.scrollTop} vs max ${after?.maxScrollTop})`)
+  // The process timeline is COMPACT: the 120-line result stays hidden.
+  assert.ok(!joined.includes('result line 50'), `the long result must stay hidden (compact secondary):\n${joined}`)
+  // Full-reveal the Bash secondary: the follow-end keeps the viewport at
+  // the bottom, so the result TAIL is what the user sees.
+  const bashY = findRow(view, 'Bash seq 1 120')
+  assert.ok(bashY >= 0, `compact Bash card missing:\n${view.join('\n')}`)
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const expanded = view.join('\n')
+  assert.ok(expanded.includes('result line 119'), `the result tail must be visible (follow-end):\n${expanded}`)
+  const final = app.fullscreenScrollForTest()
+  assert.equal(final?.isFollowingEnd, true, 'the viewport keeps following the end')
   app.setFullscreen(false)
   app.stop()
 })
 
-test('clicking the expanded turn BODY collapses the owner Thought and keeps it visible (plan §8.8)', async () => {
+test('clicking an expanded SECONDARY body collapses only the secondary (plan §36)', async () => {
+  const vt = new VirtualTerminal(100, 60)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(longThoughtTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root.
+  let view = vt.getViewport()
+  let y = findRow(view, '🐋 Thought')
+  assert.ok(y >= 0, `Thought header missing:\n${view.join('\n')}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  // The process timeline is COMPACT: the 120-line result is NOT visible.
+  assert.ok(!view.join('\n').includes('result line 50'), 'the long result must stay hidden (compact secondary)')
+  // Click the compact Bash card: full reveal.
+  const bashY = findRow(view, 'Bash seq 1 120')
+  assert.ok(bashY >= 0, `compact Bash card missing:\n${view.join('\n')}`)
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const joined = view.join('\n')
+  // The follow-end viewport shows the result TAIL (the default view after
+  // expansion is the end) — the Thought header is scrolled out of view,
+  // which is the intended default.
+  assert.ok(joined.includes('result line 99'), `the full result must appear (tail visible):\n${joined}`)
+  // Click a result line: ONLY the secondary collapses.
+  const bodyY = findRow(view, 'result line 99')
+  assert.ok(bodyY >= 0, `result line 99 missing:\n${view.join('\n')}`)
+  click(vt, 10, bodyY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const after = view.join('\n')
+  assert.ok(after.includes('🐳 Thought'), 'the root must stay open after a secondary body click')
+  assert.ok(!after.includes('result line 99'), `the secondary must collapse:\n${after}`)
+  assert.ok(after.includes('Bash seq 1 120'), 'the compact Bash card must remain visible')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('clicking a NON-secondary process row collapses the owner Thought (plan §38)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
@@ -122,28 +183,86 @@ test('clicking the expanded turn BODY collapses the owner Thought and keeps it v
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // Expand by clicking the header.
+  // Expand the root.
   let view = vt.getViewport()
-  const headerY = findRow(view, '🐋 Thought')
-  click(vt, 3, headerY + 1)
+  let y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   assert.ok(view.join('\n').includes('🐳 Thought'), 'must be expanded before the body click')
-  // Click an ordinary process row of the expanded turn (a tool result
-  // line, NOT an attachment).
-  const bodyY = findRow(view, 'result line 2')
-  assert.ok(bodyY >= 0, `expanded body row missing:\n${view.join('\n')}`)
+  // The intermediate assistant is a NON-secondary process row: clicking it
+  // collapses the OWNER Thought (the old body-click-collapse capability).
+  const bodyY = findRow(view, 'intermediate step')
+  assert.ok(bodyY >= 0, `intermediate assistant row missing:\n${view.join('\n')}`)
   click(vt, 10, bodyY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('🐋 Thought'), 'body click must collapse the owner turn')
-  assert.ok(!joined.includes('result line 2'), `the expanded body must be gone:\n${joined}`)
+  assert.ok(joined.includes('🐋 Thought'), 'a non-secondary process row must collapse the owner Thought')
+  // The process rows are gone (the collapsed card's previews are not the
+  // process timeline — the thinking card's expand hint only exists there).
+  assert.ok(!joined.includes('ctrl+o to expand'), `the expanded body must be gone:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
 
-// --- attachment precedence (plan §8.3): an attachment's OWN hit area wins
+test('root Collapse All clears the secondary expansions (plan §6/§37)', async () => {
+  const vt = new VirtualTerminal(100, 60)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(longThoughtTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root.
+  let view = vt.getViewport()
+  let y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  // Expand BOTH secondaries (Thinking + Bash).
+  view = vt.getViewport()
+  const thinkingY = findRow(view, 'checking the projection')
+  assert.ok(thinkingY >= 0, `compact Thinking card missing:\n${view.join('\n')}`)
+  click(vt, 10, thinkingY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const bashY = findRow(view, 'Bash seq 1 120')
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('result line 99'), 'precondition: the Bash secondary is full (tail visible)')
+  // The follow-end viewport sits at the bottom: scroll back to the header
+  // before the Collapse All click.
+  app.scrollToTop()
+  await vt.waitForRender()
+  view = vt.getViewport()
+  // Click the Thought header: Collapse All.
+  y = findRow(view, '🐳 Thought')
+  assert.ok(y >= 0, `Thought header missing after scroll-to-top:\n${view.join('\n')}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('🐋 Thought'), 'the root must collapse')
+  // The alt screen treats a fast repeat at the same cell as a double-click
+  // (word selection) — pause before the reopen click on the same cell.
+  await new Promise(resolve => setTimeout(resolve, 600))
+  await vt.waitForRender()
+  // Reopen: the secondaries must be COMPACT again (no restored long output).
+  y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'the root must reopen')
+  assert.ok(!joined.includes('result line 99'), `the Bash secondary must be compact again:\n${joined}`)
+  assert.ok(joined.includes('Bash seq 1 120'), 'the compact Bash card must be visible')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+// --- attachment precedence (plan §8.3/R5): an attachment's OWN hit area wins
 // over the expanded-turn collapse ---
 
 const IMAGE_REF = {
@@ -274,11 +393,19 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
       turn: 3, step: 1,
       message: {
         id: MessageId('a3'), role: 'assistant',
-        content: [{ type: 'text', text: 'Done.' }],
+        content: [{ type: 'text', text: 'intermediate step' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
     }, T0 + 4, 204),
-    eventAt('turn/end', { turn: 3, reason: { kind: 'completed' } }, T0 + 5, 205),
+    eventAt('assistant/message', {
+      turn: 3, step: 2,
+      message: {
+        id: MessageId('a4'), role: 'assistant',
+        content: [{ type: 'text', text: 'Done.' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 5, 205),
+    eventAt('turn/end', { turn: 3, reason: { kind: 'completed' } }, T0 + 6, 206),
   ])
   app.setFocusMode(true)
   show(app, folder)
@@ -312,14 +439,58 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   const joined = view.join('\n')
   assert.ok(joined.includes('🐳 Thought'),
     `clicking the final assistant must NOT collapse the Thought:\n${joined}`)
-  // Sanity: clicking a real process row (a tool result line) STILL
-  // collapses the owner.
-  const bodyY = findRow(view, '1')
-  assert.ok(bodyY >= 0, `expanded body row missing:\n${joined}`)
+  // Sanity: clicking a NON-secondary process row (the intermediate
+  // assistant) STILL collapses the owner.
+  const bodyY = findRow(view, 'intermediate step')
+  assert.ok(bodyY >= 0, `intermediate assistant row missing:\n${joined}`)
   click(vt, 10, bodyY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('🐋 Thought'), 'a process-row click must still collapse the owner')
+  assert.ok(view.join('\n').includes('🐋 Thought'), 'a non-secondary process-row click must still collapse the owner')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('resize keeps the click map aligned: secondary closes first, then the root (plan §43)', async () => {
+  const vt = new VirtualTerminal(100, 60)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(longThoughtTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root, then the Bash secondary.
+  let view = vt.getViewport()
+  let y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const bashY = findRow(view, 'Bash seq 1 120')
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('result line 99'), 'precondition: the Bash secondary is full (tail visible)')
+  // Resize narrower: the rows re-wrap and the hit map must stay aligned.
+  vt.resize(60, 40)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const bodyY = findRow(view, 'result line 99')
+  assert.ok(bodyY >= 0, `result line 99 missing after resize:\n${view.join('\n')}`)
+  click(vt, 10, bodyY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const after = view.join('\n')
+  assert.ok(after.includes('🐳 Thought'), 'the secondary body click must close only the secondary after resize')
+  assert.ok(!after.includes('result line 99'), `the secondary must collapse:\n${after}`)
+  // A non-secondary process row still closes the root.
+  const midY = findRow(view, 'intermediate step')
+  assert.ok(midY >= 0, `intermediate assistant row missing:\n${after}`)
+  click(vt, 10, midY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('🐋 Thought'), 'the non-secondary row must close the root after resize')
   app.setFullscreen(false)
   app.stop()
 })

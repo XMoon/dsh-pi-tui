@@ -2719,10 +2719,12 @@ export function apply(ctx: Context, config: Config): void {
       }), folder.turnActivities())
       // Focus Mode: the search hits the FULL transcript (hidden process
       // rows included — plan §23), so a jump into a collapsed turn must
-      // open its Thought for the hit to be visible. The disclosure is not
-      // reverted when search closes.
+      // open its Thought for the hit to be visible — and a hit inside a
+      // SECONDARY card (the process timeline defaults to compact) must
+      // full-reveal that card (plan §28). The disclosure is not reverted
+      // when search closes.
       if (turn !== undefined && app.isFocusModeEnabled()) {
-        app.expandFocusTurn(turn)
+        app.revealSearchMatch(match)
       }
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
