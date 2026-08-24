@@ -218,6 +218,28 @@ test('a paste beginning with ! into a NON-empty editor is never reinterpreted', 
   app.stop()
 })
 
+test('a paste beginning with ! into an EMPTY shell mode is literal body text', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('!') // shell-context, empty body
+  await vt.waitForRender()
+  vt.sendInput('\x1b[200~!echo\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the shell mode is unchanged')
+  assert.equal(app.seatTextForTest(), '!echo', 'the pasted ! is body text, never re-parsed as a prefix')
+  // shell-local: same rule.
+  app.setEditorText('')
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('!')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[200~!!echo\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-local')
+  assert.equal(app.seatTextForTest(), '!!echo', 'the pasted !! is body text in shell-local')
+  app.stop()
+})
+
 // ── submission serialization (plan §8.1, §8.3, §12.5) ─────────────────────
 
 test('submission serializes the mode back into the exact wire form', async () => {
@@ -353,12 +375,12 @@ test('a leading / in a shell mode is a PATH, never a slash command', async () =>
   })
   await vt.waitForRender()
   vt.sendInput('!')
-  // Natural typing of a path: the slash-command list must NOT appear.
+  // Natural typing of a path: the slash-command list must NOT appear
+  // (polled — the natural trigger's async work settles within the
+  // deadline, and the row must never show).
   vt.sendInput('/usr/lo')
   await vt.waitForRender()
-  await new Promise(resolve => setTimeout(resolve, 80))
-  const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('image'), `a shell-mode path must not open the slash-command list:\n${view}`)
+  await waitForNoDropdownRow(vt, 'image', 'a shell-mode path must not open the slash-command list')
   // Tab completes the path instead.
   vt.sendInput('\t')
   await waitForDropdownRow(vt, 'local', 'path completion for /usr/lo in shell mode')
