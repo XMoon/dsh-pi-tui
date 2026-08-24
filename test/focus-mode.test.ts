@@ -1,7 +1,8 @@
 /**
- * Focus Mode unit tests: TurnActivity aggregation (plan §56), the Focus
- * presentation projection (plan §57), the header/formatters (plan §14), and
- * the dynamic system-prompt section (plan §55). Pure — no dsh tree needed.
+ * Focus Mode unit tests: TurnActivity V2 aggregation (think / message
+ * candidate+confirmed / tool semantic slot / per-turn usage), the Focus
+ * presentation projection, the whale header + three-slot body formatters,
+ * and the dynamic system-prompt section. Pure — no dsh tree needed.
  * @module @xmoon76/dsh-pi-tui/focus-mode.test
  */
 
@@ -22,16 +23,17 @@ import {
   FOCUS_TOOL_SUMMARY_MAX_TYPES,
   FocusActivityComponent,
   focusCollapsedBody,
+  focusDisclosureIcon,
   focusDurationText,
-  focusOperationLine,
   focusStatusLabel,
-  focusStatusSymbol,
   focusToolStatParts,
   formatFocusDuration,
   formatFocusHeaderLine,
   projectFocus,
   type FocusProjectedBlock,
 } from '../src/focus-activity.ts'
+import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/present.ts'
+import { formatTokens, totalTokens } from '../src/token-usage.ts'
 
 /** Build an event with an EXPLICIT time (Focus timing tests need control). */
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
@@ -93,6 +95,34 @@ function completedTurn(turn: number, baseSeq: number, startTime: number): Sessio
   ]
 }
 
+/** A turn with an intermediate message confirmed by a tool call, then a
+ * final answer: text → tool/call → tool/result → text → turn/end. */
+function intermediateTurn(turn: number, baseSeq: number, startTime: number): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn }, startTime, baseSeq),
+    eventAt('assistant/chunk', { turn, step: 0, chunk: { type: 'text-delta', index: 0, text: '我先检查文件' } }, startTime + 1, baseSeq + 1),
+    eventAt('tool/call', { turn, step: 0, callId: CallId('c-i1'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, startTime + 2, baseSeq + 2),
+    eventAt('tool/result', {
+      turn, step: 0,
+      message: {
+        id: MessageId('r-i1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c-i1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('c-i1') },
+      },
+    }, startTime + 3, baseSeq + 3),
+    eventAt('assistant/chunk', { turn, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终答案是…' } }, startTime + 4, baseSeq + 4),
+    eventAt('assistant/message', {
+      turn, step: 1,
+      message: {
+        id: MessageId('a-i1'), role: 'assistant',
+        content: [{ type: 'text', text: '最终答案是…' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, startTime + 5, baseSeq + 5),
+    eventAt('turn/end', { turn, reason: { kind: 'completed' } }, startTime + 6000, baseSeq + 6),
+  ]
+}
+
 /** The kinds of the projected blocks, in order ('activity' for Thought). */
 function blockKinds(blocks: readonly FocusProjectedBlock[]): string[] {
   return blocks.map(block => block.kind === 'activity' ? 'activity' : block.message.kind)
@@ -109,9 +139,9 @@ test('focusModeOf normalizes persisted values defensively', () => {
   assert.equal(focusModeOf('ON'), 'off')
 })
 
-// ── TurnActivity aggregation (plan §56) ─────────────────────────────────
+// ── TurnActivity V2 aggregation ─────────────────────────────────────────
 
-test('aggregates turn timing, tool stats and narratives from events', () => {
+test('aggregates turn timing, tool stats and the Think slot from events', () => {
   const folder = new TranscriptFolder()
   folder.apply(completedTurn(1, 0, 1000))
   const activity = folder.turnActivity(1)
@@ -123,11 +153,12 @@ test('aggregates turn timing, tool stats and narratives from events', () => {
   assert.equal(activity.toolCalls, 1)
   assert.equal(activity.tools.get('read'), 1)
   assert.equal(activity.assistantMessages, 1)
-  // The narrative preview: latest thinking beats the assistant text (plan
-  // §10.5 priority), and the thinking preview is the LATEST line.
-  assert.equal(activity.narrative?.kind, 'thinking')
-  assert.equal(activity.narrative?.text, 'checking the transcript path…')
-  assert.equal(activity.latestOperation, '✓ read src/transcript.ts')
+  // The Think slot: the latest meaningful line of the reasoning tail.
+  assert.equal(activity.think?.text, 'checking the transcript path…')
+  // The Tool slot: the latest raw call, settled by its own result.
+  assert.equal(activity.tool?.name, 'read')
+  assert.equal(activity.tool?.status, 'ok')
+  assert.equal(activity.tool?.args, JSON.stringify({ path: 'src/transcript.ts' }))
   // The activity revision moved with every event.
   assert.ok(activity.revision > 0)
 })
@@ -161,86 +192,306 @@ test('tool/result never double-counts a call; same-name calls accumulate', () =>
   assert.equal(activity.toolCalls, 3, 'tool/result must not double-count')
   assert.equal(activity.tools.get('bash'), 3)
   assert.equal(activity.tools.get('read'), undefined)
-  // The last operation is the still-running bash call.
-  assert.equal(activity.latestOperation, 'Tool: bash pnpm lint')
+  // The Tool slot is the still-running latest call.
+  assert.equal(activity.tool?.name, 'bash')
+  assert.equal(activity.tool?.status, 'running')
 })
 
-test('tool previews use the natural summary key (path/command/query)', () => {
+// ── Message candidate / confirmed state machine (plan §5) ──────────────
+
+test('running text-delta feeds the Message slot immediately (no assistant/message wait)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/index.ts' }) }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c2'), name: 'search', arguments: JSON.stringify({ query: 'systemPrompt.section' }) }, 1002, 2),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c3'), name: 'weird', arguments: 'not-json' }, 1003, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '我先检查 provider registry。' } }, 1001, 1),
   ])
   const activity = folder.turnActivity(0)!
-  assert.equal(activity.latestOperation, 'Tool: weird')
+  assert.equal(activity.message?.text, '我先检查 provider registry。')
+  assert.equal(activity.think, undefined, 'no reasoning → no Think slot')
 })
 
-test('latest thinking previews and system narratives follow the priority', () => {
+test('an intermediate message is confirmed by a later tool/call and survives settle', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(intermediateTurn(0, 0, 1000))
+  const activity = folder.turnActivity(0)!
+  // The final answer is NOT duplicated into the Message slot: the
+  // confirmed intermediate message wins (plan §5.6).
+  assert.equal(activity.message?.text, '我先检查文件')
+  assert.notEqual(activity.message?.text, '最终答案是…')
+})
+
+test('only-final turns show NO Message slot (the final stays outside)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
-    eventAt('turn/start', { turn: 2 }, 1000, 0),
-    // A system/context row first (lowest priority).
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '答案是…' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '答案是…' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message, undefined, 'the final answer must never enter the Message slot')
+})
+
+test('an interrupted streaming candidate survives turn/end (process information)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '正在分析配置…' } }, 1001, 1),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 2000, 2),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message?.text, '正在分析配置…', 'an interrupted candidate is still process information')
+})
+
+test('a later step start confirms the earlier candidate (plan §5.3 B)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步说明' } }, 1001, 1),
+    eventAt('step/start', { turn: 0, step: 1 }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '第二步说明' } }, 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '第二步说明' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  // Step 0's candidate was confirmed by step/start; step 1's candidate is
+  // the final answer and must NOT enter the slot.
+  assert.equal(activity.message?.text, '第一步说明')
+})
+
+test('assistant/message settles the candidate text authoritatively (plan §5.4)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'partial stream' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'authoritative text' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message?.text, 'authoritative text', 'the settled text must replace the streaming tail')
+})
+
+// ── Tool semantic classification (plan §6/§7/§8) ────────────────────────
+
+test('ANY tool/call is a Tool — skill included (event-first classification)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'skill', arguments: JSON.stringify({ name: 'session-review' }) }, 1001, 1),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.toolCalls, 1)
+  assert.equal(activity.tools.get('skill'), 1)
+  assert.equal(activity.tool?.name, 'skill')
+  assert.equal(activity.tool?.status, 'running')
+  // The compact display: presenter-first, fallback-second — both say the
+  // same semantic (plan §9.2/§28).
+  assert.equal(focusToolDisplay(activity.tool!, {}), 'Load skill session-review')
+})
+
+test('an unknown custom tool is still a Tool (never a Message/System/nothing)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'vendor_probe', arguments: JSON.stringify({ host: 'cache-01' }) }, 1001, 1),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.toolCalls, 1)
+  assert.equal(activity.tool?.name, 'vendor_probe')
+  assert.equal(activity.tool?.status, 'running')
+  assert.equal(focusToolDisplay(activity.tool!, {}), 'vendor_probe cache-01')
+})
+
+test('user-explicit /skill invocation and skill-catalog injection are NOT Tools', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('user/message', {
       id: MessageId('s1'), role: 'user',
-      content: [{ type: 'text', text: 'injected instructions line\nmore' }],
-      source: { kind: 'plugin', name: 'skill' },
+      content: [{ type: 'text', text: '<skill_content>…</skill_content>' }],
+      source: { kind: 'skill-invocation', name: 'session-review' },
     }, 1001, 1),
-    eventAt('assistant/chunk', { turn: 2, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first line\nchecking turn boundaries…' } }, 1002, 2),
+    eventAt('user/message', {
+      id: MessageId('s2'), role: 'user',
+      content: [{ type: 'text', text: '<system-reminder>…</system-reminder>' }],
+      source: { kind: 'skill-catalog' },
+    }, 1002, 2),
   ])
-  const activity = folder.turnActivity(2)!
-  // Thinking beats the system narrative; the preview is the LATEST line.
-  assert.equal(activity.narrative?.kind, 'thinking')
-  assert.equal(activity.narrative?.text, 'checking turn boundaries…')
-  // The full thinking stream is NOT buffered (bounded preview only).
-  assert.ok(activity.narrative!.text.length < 60)
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.toolCalls, 0, 'injections must never count as tool calls')
+  assert.equal(activity.tool, undefined, 'injections must never occupy the Tool slot')
+  assert.equal(activity.message, undefined, 'injections must never occupy the Message slot')
+  // The context rows still fold into the transcript (expanded view).
+  const kinds = folder.messages().map(message => message.kind)
+  assert.equal(kinds.filter(kind => kind === 'system').length, 2)
 })
 
-test('missing turn/start omits the duration (no fake 0s)', () => {
+test('parallel tool results never yank the Tool slot back to an older call (plan §10/§44)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
-    eventAt('tool/call', { turn: 9, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1000, 0),
-    eventAt('turn/end', { turn: 9, reason: { kind: 'completed' } }, 2000, 1),
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('A'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('B'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1002, 2),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('rA'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('A'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('A') },
+      },
+    }, 1003, 3),
   ])
-  const activity = folder.turnActivity(9)!
-  assert.equal(activity.startedAt, undefined)
-  assert.equal(activity.endedAt, 2000)
-  assert.equal(focusDurationText(activity, () => 3000), undefined, 'no start → no duration')
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.tool?.name, 'bash', 'the LATEST call owns the slot')
+  assert.equal(activity.tool?.status, 'running', 'an older result must not settle the latest slot')
+  // The matching result settles it.
+  folder.apply([eventAt('tool/result', {
+    turn: 0, step: 0,
+    message: {
+      id: MessageId('rB'), role: 'user',
+      content: [{ type: 'tool-result', toolCallId: CallId('B'), content: [{ type: 'text', text: 'ok' }] }],
+      source: { kind: 'tool', callId: CallId('B') },
+    },
+  }, 1004, 4)])
+  assert.equal(activity.tool?.status, 'ok')
 })
 
-test('an open turn has no endedAt and stays incomplete', () => {
+test('workflow/subagent lifecycle events never touch the Tool slot or the count (plan §17)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
-    eventAt('turn/start', { turn: 1 }, 1000, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool-workflow/run-start', { runId: 'r1', name: 'audit' }, 1001, 1),
+    eventAt('subagent/descriptor', { label: 'reviewer', mode: 'subagent' }, 1002, 2),
+    eventAt('llm/retry', { retry: 0, delayMs: 1000, failure: { code: 'E', message: 'boom' } }, 1003, 3),
   ])
-  const activity = folder.turnActivity(1)!
-  assert.equal(activity.completed, false)
-  assert.equal(activity.endedAt, undefined)
-  assert.equal(activity.reason, undefined)
-  assert.equal(activity.latestOperation, 'Tool: bash')
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.toolCalls, 0)
+  assert.equal(activity.tool, undefined)
 })
 
-test('turn/end records the OFFICIAL reason kinds verbatim', () => {
-  for (const kind of ['aborted', 'blocked', 'error', 'max-tokens', 'interrupted']) {
-    const folder = new TranscriptFolder()
-    folder.apply([
-      eventAt('turn/start', { turn: 0 }, 1000, 0),
-      eventAt('turn/end', { turn: 0, reason: kind === 'error'
-        ? { kind: 'error', error: { code: 'E1', message: 'boom' } }
-        : { kind } }, 2000, 1),
-    ])
-    const activity = folder.turnActivity(0)!
-    assert.equal(activity.reason?.kind, kind, `reason ${kind} must be stored verbatim`)
-    if (kind === 'error') {
-      assert.equal(activity.reason?.error?.code, 'boom'.length > 0 ? 'E1' : '')
-      assert.equal(activity.reason?.error?.message, 'boom')
-    }
-  }
+// ── Per-turn token usage (plan §12/§13/§45) ────────────────────────────
+
+/** One step with a usage chunk + assistant/message + step/end. */
+function usageStep(turn: number, step: number, usage: Record<string, number>, baseSeq: number, startTime: number): SessionEvent[] {
+  return [
+    eventAt('step/start', { turn, step }, startTime, baseSeq),
+    eventAt('assistant/chunk', { turn, step, chunk: { type: 'usage', usage } }, startTime + 1, baseSeq + 1),
+    eventAt('assistant/message', {
+      turn, step,
+      message: { id: MessageId(`u-${turn}-${step}`), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage,
+    }, startTime + 2, baseSeq + 2),
+    eventAt('step/end', { turn, step }, startTime + 3, baseSeq + 3),
+  ]
+}
+
+test('per-turn token totals include cache read/write and output (plan §12.2)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...usageStep(0, 0, { inputTokens: 100, outputTokens: 40, cacheReadTokens: 50, cacheWriteTokens: 10 }, 1, 1001),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2000, 10),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 200)
+  assert.equal(activity.usage?.inputTokens, 100)
+  assert.equal(activity.usage?.cacheReadTokens, 50)
+  assert.equal(activity.usage?.cacheWriteTokens, 10)
+  assert.equal(activity.usage?.outputTokens, 40)
 })
 
-// ── formatters (plan §14) ───────────────────────────────────────────────
+test('multi-step turns sum their committed steps', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...usageStep(0, 0, { inputTokens: 200, outputTokens: 0 }, 1, 1001),
+    ...usageStep(0, 1, { inputTokens: 300, outputTokens: 0 }, 10, 2001),
+    ...usageStep(0, 2, { inputTokens: 150, outputTokens: 0 }, 20, 3001),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4000, 30),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 650)
+})
+
+test('provisional usage is replaced, never added (plan §13.2/§45)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    // Streaming provisional: 100.
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
+    // Authoritative: 110 — replaces, never adds.
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 110, outputTokens: 0 },
+    }, 1003, 3),
+    eventAt('step/end', { turn: 0, step: 0 }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 110, 'the authoritative usage must replace the provisional, never add')
+})
+
+test('a usage chunk without assistant/message still counts (plan §45)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 80, outputTokens: 20 } } }, 1002, 2),
+    eventAt('step/end', { turn: 0, step: 0 }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 100)
+})
+
+test('no usage fact → no token segment (never a fake 0 tok)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(completedTurn(0, 0, 1000))
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.usage, undefined)
+  assert.equal(activity.totalTokens, undefined)
+  const header = formatFocusHeaderLine(activity, false, () => 35000, 120)
+  assert.ok(!header.includes('tok'), `no usage → no token segment:\n${header}`)
+})
+
+test('replay determinism: per-turn tokens match a fresh fold of the same events', () => {
+  const events = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...usageStep(0, 0, { inputTokens: 100, outputTokens: 40, cacheReadTokens: 50, cacheWriteTokens: 10 }, 1, 1001),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2000, 10),
+  ]
+  const live = new TranscriptFolder()
+  live.apply(events)
+  const replay = new TranscriptFolder()
+  replay.apply(events)
+  assert.equal(live.turnActivity(0)!.totalTokens, replay.turnActivity(0)!.totalTokens)
+  assert.deepEqual(live.turnActivity(0)!.usage, replay.turnActivity(0)!.usage)
+})
+
+test('the running display includes the open step provisional usage', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 100, 'the running header shows the provisional total')
+})
+
+// ── formatters (plan §14/§25/§46) ──────────────────────────────────────
 
 function activityOf(turn: number, events: SessionEvent[]): ReturnType<TranscriptFolder['turnActivity']> {
   const folder = new TranscriptFolder()
@@ -285,24 +536,29 @@ test('the header label names failures; durations only when known', () => {
   assert.equal(focusStatusLabel(tokens!, '41s'), 'Max tokens 41s')
 })
 
-test('status symbols follow the disclosure + reason state', () => {
+test('the whale icon encodes ONLY the disclosure state (plan §2/§39)', () => {
+  assert.equal(focusDisclosureIcon(false), '🐋')
+  assert.equal(focusDisclosureIcon(true), '🐳')
+  // Every collapsed state — running, settled, failed, interrupted — reads
+  // the SAME collapsed whale; the outcome lives in the label.
   const running = activityOf(0, [eventAt('turn/start', { turn: 0 }, 1000, 0)])
-  assert.equal(focusStatusSymbol(running!, false), '◐')
-  assert.equal(focusStatusSymbol(running!, true), '▾')
   const done = activityOf(0, completedTurn(0, 0, 1000))
-  assert.equal(focusStatusSymbol(done!, false), '▸')
-  assert.equal(focusStatusSymbol(done!, true), '▾')
   const failed = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('turn/end', { turn: 0, reason: { kind: 'error' } }, 2000, 1),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, 2000, 1),
   ])
-  assert.equal(focusStatusSymbol(failed!, false), '⚠')
-  assert.equal(focusStatusSymbol(failed!, true), '▾')
-  const aborted = activityOf(0, [
+  const interrupted = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 2000, 1),
   ])
-  assert.equal(focusStatusSymbol(aborted!, false), '⨯')
+  for (const activity of [running!, done!, failed!, interrupted!]) {
+    assert.equal(focusDisclosureIcon(false), '🐋', 'collapsed is ALWAYS 🐋')
+    assert.equal(focusDisclosureIcon(true), '🐳', 'expanded is ALWAYS 🐳')
+  }
+  // The old mixed symbols are gone from the header line.
+  const header = formatFocusHeaderLine(failed!, false, () => 3000, 120)
+  assert.ok(header.includes('🐋 Failed after 1s'), header)
+  assert.ok(!header.includes('◐') && !header.includes('▸') && !header.includes('▾') && !header.includes('⚠'), header)
 })
 
 test('tool stats sort count-desc/name-asc, cap at 3 types, +N counts TYPES', () => {
@@ -314,40 +570,104 @@ test('tool stats sort count-desc/name-asc, cap at 3 types, +N counts TYPES', () 
   assert.equal(focusToolStatParts(new Map(), 0).length, 0, 'zero tools → no stats tail')
 })
 
-test('the header line drops the stats tail progressively on narrow widths', () => {
+test('the header drops the token/tool tail progressively on narrow widths (plan §46)', () => {
   const done = activityOf(0, completedTurn(0, 0, 1000))
   const tools = new Map<string, number>([['read', 7], ['search', 4], ['bash', 3], ['z', 2]])
-  const rich = { ...done!, tools, toolCalls: 16 }
+  const rich = { ...done!, tools, toolCalls: 16, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
   const wide = formatFocusHeaderLine(rich, false, () => 35000, 120)
-  assert.ok(wide.includes('Thought 6s · 16 tools · read ×7 · search ×4 · bash ×3 · +1'), wide)
+  assert.ok(wide.includes('🐋 Thought 6s · 63k tok · 16 tools · read ×7 · search ×4 · bash ×3 · +1'), wide)
   const medium = formatFocusHeaderLine(rich, false, () => 35000, 50)
-  assert.ok(medium.includes('· 16 tools') && !medium.includes('+1'), `medium drops the remainder:\n${medium}`)
-  const narrow = formatFocusHeaderLine(rich, false, () => 35000, 20)
-  assert.equal(visibleWidth(narrow) <= 20, true, `narrow must fit:\n${narrow}`)
-  assert.ok(narrow.includes('Thought') && !narrow.includes('·'), `narrow keeps the bare label:\n${narrow}`)
+  assert.ok(medium.includes('· 63k tok · 16 tools') && !medium.includes('read ×7'), `medium drops the types:\n${medium}`)
+  const narrow = formatFocusHeaderLine(rich, false, () => 35000, 30)
+  assert.equal(narrow, '🐋 Thought 6s · 63k tok', `narrow keeps token + label:\n${narrow}`)
+  const tiny = formatFocusHeaderLine(rich, false, () => 35000, 16)
+  assert.equal(tiny, '🐋 Thought 6s', `tiny keeps the bare label:\n${tiny}`)
+  const minuscule = formatFocusHeaderLine(rich, false, () => 35000, 4)
+  assert.ok(visibleWidth(minuscule) <= 4, `hard truncate as the last resort:\n${minuscule}`)
 })
 
-test('operation line: Tool: while running, Last: once settled', () => {
-  assert.equal(focusOperationLine('Tool: bash pnpm test', true), 'Tool: bash pnpm test')
-  assert.equal(focusOperationLine('Tool: bash pnpm test', false), 'Last: bash pnpm test')
-  assert.equal(focusOperationLine('✓ read src/index.ts', false), 'Last: read src/index.ts')
-  assert.equal(focusOperationLine('Subagent: reviewing', false), 'Subagent: reviewing')
+test('the header never wraps: every candidate fits its width', () => {
+  const done = activityOf(0, completedTurn(0, 0, 1000))
+  const rich = { ...done!, tools: new Map([['read', 3], ['bash', 2], ['skill', 1]]), toolCalls: 6, usage: { inputTokens: 34_000, outputTokens: 700, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 34_700 }
+  for (const width of [8, 12, 20, 30, 40, 60, 80, 120]) {
+    const line = formatFocusHeaderLine(rich, false, () => 35000, width)
+    assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
+  }
 })
 
-test('the collapsed card body shows narrative + operation + error line', () => {
+test('the collapsed body renders the three slots in fixed order, one line each (plan §24/§25/§47)', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: '这应该是 presenter fallback。' } }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '我已经找到 skill 的特殊处理。' } }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/present.ts' }) }, 1003, 3),
+  ])
   const activity = folder.turnActivity(0)!
-  const body = focusCollapsedBody({ ...activity, narrative: { kind: 'thinking', text: 'checking…' } }, 60)
-  assert.ok(body[0]!.startsWith('Thinking: checking…'), body.join('|'))
-  assert.ok(body[1]!.startsWith('Last: read src/transcript.ts'), body.join('|'))
-  // An error reason adds its compact message.
+  const body = focusCollapsedBody(activity, 60, focusToolDisplay(activity.tool!, {}))
+  assert.equal(body.length, 3, `exactly the three slots:\n${body.join('\n')}`)
+  assert.ok(body[0]!.startsWith('Think:   '), body[0])
+  assert.ok(body[1]!.startsWith('Message: '), body[1])
+  assert.ok(body[2]!.startsWith('Tool:    '), body[2])
+  assert.ok(body[2]!.includes('Read src/present.ts'), body[2])
+  // The labels align at the same column (visible width 9).
+  for (const line of body) {
+    const lead = line.slice(0, 9)
+    assert.equal(visibleWidth(lead), 9, `label column must align: ${JSON.stringify(line)}`)
+  }
+  // Every line fits the width (CJK included).
+  for (const line of body) {
+    assert.ok(visibleWidth(line) <= 60, `line exceeds width: ${JSON.stringify(line)}`)
+  }
+})
+
+test('the Tool slot line carries the status prefix: none running, ✓ ok, ✗ error (plan §10)', () => {
+  const running = activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
+  ])!
+  const body = focusCollapsedBody(running, 60, focusToolDisplay(running.tool!, {}))
+  assert.ok(body.some(line => line.includes('Tool:    Bash pnpm test')), body.join('|'))
+  // Settled ok.
+  const ok = activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('c') },
+      },
+    }, 1002, 2),
+  ])!
+  const okBody = focusCollapsedBody(ok, 60, focusToolDisplay(ok.tool!, {}))
+  assert.ok(okBody.some(line => line.includes('✓ Bash pnpm test')), okBody.join('|'))
+  // Settled error.
+  const err = activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c'), content: [{ type: 'text', text: 'boom' }] }],
+        source: { kind: 'tool', callId: CallId('c') },
+      },
+      error: { code: 'E', message: 'boom' },
+    }, 1002, 2),
+  ])!
+  const errBody = focusCollapsedBody(err, 60, focusToolDisplay(err.tool!, {}))
+  assert.ok(errBody.some(line => line.includes('✗ Bash pnpm test')), errBody.join('|'))
+})
+
+test('the error line follows the three slots (plan §24)', () => {
   const failed = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, 2000, 1),
   ])!
-  const errorBody = focusCollapsedBody(failed, 60)
-  assert.ok(errorBody.some(line => line.startsWith('Error: E: boom')), errorBody.join('|'))
+  const body = focusCollapsedBody(failed, 60)
+  assert.ok(body.some(line => line.startsWith('Error:   E: boom')), body.join('|'))
 })
 
 test('the component renders an indented muted card and refreshes duration live', () => {
@@ -356,15 +676,54 @@ test('the component renders an indented muted card and refreshes duration live',
   const activity = folder.turnActivity(0)!
   const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
   const lines = component.render(80)
-  assert.ok(lines[0]!.includes('▸ Thought 6s · 1 tools · read ×1'), lines[0])
+  assert.ok(lines[0]!.includes('🐋 Thought 6s · 1 tools · read ×1'), lines[0])
   assert.ok(lines[0]!.startsWith('  '), 'the card is indented')
   // Running turns re-read `now` per render: a later frame shows the new
   // duration (the WorkingIndicator heartbeat drives the repaint).
   const running = activityOf(0, [eventAt('turn/start', { turn: 0 }, 1000, 0)])!
   const live = new FocusActivityComponent({ activity: running, expanded: false, now: () => 12000 })
-  assert.ok(live.render(80)[0]!.includes('◐ Thought 11s'))
+  assert.ok(live.render(80)[0]!.includes('🐋 Thought 11s'))
   const later = new FocusActivityComponent({ activity: running, expanded: false, now: () => 14000 })
-  assert.ok(later.render(80)[0]!.includes('◐ Thought 13s'))
+  assert.ok(later.render(80)[0]!.includes('🐋 Thought 13s'))
+})
+
+test('the Tool display is presenter-first with a static fallback (plan §9/§43)', () => {
+  const presenter: ToolPresenter = {
+    call(name, argsRaw) {
+      if (name === 'skill') {
+        return { card: 'generic', title: 'Load skill session-review', kind: 'read', rawInput: 'session-review' }
+      }
+      if (name === 'vendor_probe') {
+        return { card: 'generic', title: 'Probe Redis', kind: 'read', rawInput: 'cache-01' }
+      }
+      if (name === 'bash') {
+        return { card: 'terminal', title: 'pnpm test --filter provider' }
+      }
+      return undefined
+    },
+    result() { return undefined },
+  }
+  // Live presenter: the tool-owned title wins.
+  assert.equal(focusToolDisplay({ name: 'skill', args: JSON.stringify({ name: 'session-review' }) }, { presenter }), 'Load skill session-review')
+  assert.equal(focusToolDisplay({ name: 'vendor_probe', args: JSON.stringify({ host: 'cache-01' }) }, { presenter }), 'Probe Redis cache-01')
+  assert.equal(focusToolDisplay({ name: 'bash', args: JSON.stringify({ command: 'pnpm test --filter provider' }) }, { presenter }), 'pnpm test --filter provider')
+  // Fallback (replay / registry unavailable): the same semantic.
+  assert.equal(focusToolDisplay({ name: 'skill', args: JSON.stringify({ name: 'session-review' }) }, {}), 'Load skill session-review')
+  assert.equal(focusToolDisplay({ name: 'bash', args: JSON.stringify({ command: 'pnpm test --filter provider' }) }, {}), 'Bash pnpm test --filter provider')
+  // A throwing presenter degrades to the fallback (toolPresenterFrom guards).
+  const guarded = toolPresenterFrom(() => ({ presentCall() { throw new Error('boom') } }))
+  assert.equal(focusToolDisplay({ name: 'read', args: JSON.stringify({ path: 'a.ts' }) }, { presenter: guarded }), 'Read a.ts')
+})
+
+test('formatTokens renders the pi abbreviation vocabulary', () => {
+  assert.equal(formatTokens(847), '847')
+  assert.equal(formatTokens(3200), '3.2k')
+  assert.equal(formatTokens(38_000), '38k')
+  assert.equal(formatTokens(1_400_000), '1.4M')
+})
+
+test('totalTokens sums all four accounting fields', () => {
+  assert.equal(totalTokens({ inputTokens: 100, outputTokens: 40, cacheReadTokens: 50, cacheWriteTokens: 10 }), 200)
 })
 
 // ── projection (plan §57) ───────────────────────────────────────────────
@@ -507,8 +866,8 @@ test('turnActivities returns the SAME objects by reference (no per-repaint copy)
   assert.equal(first, second, 'the map itself must not be rebuilt per repaint')
   assert.equal(first.get(0), second.get(0), 'activity objects must not be copied per repaint')
   assert.equal(folder.turnActivity(0), first.get(0), 'turnActivity returns the same object')
-  // The narrative slot is materialized eagerly on the shared object.
-  assert.equal(first.get(0)?.narrative?.kind, 'thinking')
+  // The Think slot is materialized eagerly on the shared object.
+  assert.equal(first.get(0)?.think?.text, 'checking the transcript path…')
 })
 
 test('the final is the EXACT last assistant: an empty last step yields NO final (no earlier fallback)', () => {

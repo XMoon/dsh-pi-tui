@@ -1986,7 +1986,7 @@ test('skill and read_image cards fold their envelope summaries, never the raw XM
     status: 'ok',
   }])
   let view = await viewport(vt)
-  assert.ok(view.includes('skill · review-fix-loop'), `skill header missing:\n${view}`)
+  assert.ok(view.includes('Load skill review-fix-loop'), `skill header missing:\n${view}`)
   assert.ok(view.includes('— 3 lines of instructions'), `skill instruction count missing:\n${view}`)
   assert.ok(!view.includes('<skill_content'), `raw skill envelope leaked:\n${view}`)
   assert.ok(!view.includes('<skill_instructions'), `raw skill envelope leaked:\n${view}`)
