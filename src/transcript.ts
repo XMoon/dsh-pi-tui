@@ -198,6 +198,14 @@ interface MutableTurnActivity {
   /** An earlier candidate confirmed as an intermediate message (by a
    * later tool/call, a later step, or later output). */
   messageConfirmed?: string
+  /** The step of the LATEST confirmed intermediate message: a late
+   * authoritative message for THAT step updates the confirmed text in
+   * place (never a stale streamed fragment). */
+  messageConfirmedStep?: number
+  /** Every step whose candidate was confirmed: a late message for an
+   * OLDER confirmed step is ignored (the slot shows the latest
+   * intermediate) and never resurrects a candidate (review finding). */
+  confirmedSteps: Set<number>
   /** The step of the turn's LAST assistant output (streaming or settled)
    * — the turn/end final-answer check compares the candidate's step
    * against this. */
@@ -469,6 +477,7 @@ export class TranscriptFolder {
         toolCalls: 0,
         tools: new Map(),
         thinkingTail: '',
+        confirmedSteps: new Set(),
         revision: 0,
       }
       this.activityByTurn.set(turn, activity)
@@ -534,6 +543,8 @@ export class TranscriptFolder {
       // finding).
       activity.messageConfirmed = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
     }
+    activity.messageConfirmedStep = candidate.step
+    activity.confirmedSteps.add(candidate.step)
     activity.messageCandidate = undefined
   }
 
@@ -1015,6 +1026,18 @@ export class TranscriptFolder {
           // to the tail cap, never a second full copy of the assistant
           // output (plan §34 — the transcript entry owns the full text).
           candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+        } else if (activity.messageConfirmedStep === event.data.step) {
+          // The step's candidate was already confirmed (a tool/call
+          // followed the text) and it is still the LATEST confirmed: the
+          // authoritative message updates the confirmed text IN PLACE —
+          // never a stale streamed fragment, never a resurrected
+          // candidate (review finding).
+          if (text !== '') {
+            activity.messageConfirmed = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+          }
+        } else if (activity.confirmedSteps.has(event.data.step)) {
+          // A late message for an OLDER confirmed step: the slot already
+          // shows a newer intermediate — ignore it entirely.
         } else if (text !== '') {
           // A settled message without a prior candidate (replay edge): the
           // authoritative text IS the step's output — it becomes the
