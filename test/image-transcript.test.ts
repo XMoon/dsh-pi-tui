@@ -36,6 +36,8 @@ function toolResultEvent(blocks: unknown[]): never {
     seq: 1,
     time: 1,
     data: {
+      turn: 0,
+      step: 0,
       callId: 'call-1',
       message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: blocks }] },
     },
@@ -103,7 +105,7 @@ test('an assistant image block folds without crashing and keeps its blocks', () 
 test('a tool result with an image keeps resultBlocks and folds [text, image]', () => {
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'call-1', name: 'read_image', arguments: '{}' } } as never,
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'read_image', arguments: '{}' } } as never,
     toolResultEvent([
       { type: 'text', text: 'caption' },
       { type: 'image', attachment: IMAGE_REF },
@@ -163,7 +165,7 @@ test('a tool-result image renders inside the tool card (generic tool)', async ()
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
     toolResultEvent([
       { type: 'text', text: 'caption' },
       { type: 'image', attachment: IMAGE_REF },
@@ -182,7 +184,7 @@ test('a read_image tool card renders its image blocks as thumbnails', async () =
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'call-1', name: 'read_image', arguments: [] } } as never,
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'read_image', arguments: [] } } as never,
     toolResultEvent([
       { type: 'image', attachment: IMAGE_REF },
     ]),
