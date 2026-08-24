@@ -74,7 +74,7 @@ export function formatFocusDuration(ms: number | undefined): string | undefined 
  * OTHER tool TYPES (not calls). Empty when the turn called no tools. */
 export function focusToolStatParts(tools: ReadonlyMap<string, number>, toolCalls: number): string[] {
   if (toolCalls <= 0) return []
-  const parts = [`${toolCalls} tools`]
+  const parts = [`${toolCalls} tool${toolCalls === 1 ? '' : 's'}`]
   const types = [...tools.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
   for (const [name, count] of types.slice(0, FOCUS_TOOL_SUMMARY_MAX_TYPES)) {
     parts.push(`${name} ×${count}`)

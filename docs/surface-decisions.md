@@ -243,6 +243,33 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   caller owns the jump target; `expandFocusTurn` never forces a
   Thought-header anchor.
 
+## Focus V2 compact model (2026-08-24 plan)
+
+- **The whale icon encodes ONLY the disclosure state**: 🐋 collapsed, 🐳
+  expanded — every collapsed outcome (running / settled / failed /
+  interrupted / blocked / max-tokens) reads the same 🐋, and the header
+  label carries the outcome (`Thought`, `Failed after …`, `Interrupted …`,
+  `Blocked …`, `Max tokens …`). The old mixed set (◐/▸/▾/⚠/⨯) is gone.
+- **Three semantic process slots, decided by the event stream**: Think
+  (reasoning-delta), Message (assistant text), Tool (tool/call — ANY
+  name, known or custom). Injected context (skill-invocation,
+  skill-catalog, system reminders) and lifecycle events (workflow,
+  subagent/descriptor, llm/retry) never occupy a slot or count as tools.
+- **Message candidate/confirmed**: streaming text-delta feeds the
+  candidate immediately; a later tool/call, step/start or output confirms
+  it as an intermediate message; at turn/end the candidate that IS the
+  exact final assistant is dropped from the slot (the final renders
+  outside the Thought) — an interrupted candidate survives as process
+  information.
+- **Per-turn token segment** in the header (input + cache read + cache
+  write + output, shared StepUsageAccumulator with the footer stats);
+  hidden entirely when the provider reports no usage (never `0 tok`).
+- **Tool display is presenter-first**: the live tool registry's
+  presentCall wins; the static Web row-model header is the replay
+  fallback (`skill` maps to the read variant with the `Load skill` title
+  on both paths). The fold stores raw call facts only — presentation
+  strings never enter the TranscriptFolder.
+
 ## Selected-row marquee
 
 - Only the SELECTED row's main label scrolls (pause → one cell per 250ms →

@@ -456,6 +456,22 @@ test('a usage chunk without assistant/message still counts (plan §45)', () => {
   assert.equal(activity.totalTokens, 100)
 })
 
+test('usage without a step boundary still attributes to the turn (replay edge)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    // No step/start: the usage fact is a settled replay edge.
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 500, outputTokens: 50 },
+    }, 1001, 1),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1002, 2),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 550, 'orphan usage must attribute to its turn (sum(per-turn) == session)')
+})
+
 test('no usage fact → no token segment (never a fake 0 tok)', () => {
   const folder = new TranscriptFolder()
   folder.apply(completedTurn(0, 0, 1000))
@@ -676,7 +692,7 @@ test('the component renders an indented muted card and refreshes duration live',
   const activity = folder.turnActivity(0)!
   const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
   const lines = component.render(80)
-  assert.ok(lines[0]!.includes('🐋 Thought 6s · 1 tools · read ×1'), lines[0])
+  assert.ok(lines[0]!.includes('🐋 Thought 6s · 1 tool · read ×1'), lines[0])
   assert.ok(lines[0]!.startsWith('  '), 'the card is indented')
   // Running turns re-read `now` per render: a later frame shows the new
   // duration (the WorkingIndicator heartbeat drives the repaint).
