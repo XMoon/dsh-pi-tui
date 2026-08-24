@@ -2638,7 +2638,7 @@ export class TuiApp {
       // empty BODY is composing a command — ↓ keeps its editing meaning
       // (a no-op on the empty line), never the browser.
       if (this.tasksActive && !this.activeScreen.hasOverlayEntries
-        && this.seatEditor().getText().trim() === '' && this.editor.getInputMode() === 'prompt') {
+        && this.seatEditor().getText().trim() === '' && this.seatInputMode() === 'prompt') {
         this.events.onOpenTasks?.()
         return { consume: true }
       }
@@ -4553,7 +4553,7 @@ export class TuiApp {
    * they fall through to the host's exit/fold/submit paths. */
   private viewerParentLockedKey(data: string): boolean {
     if (matchesKey(data, 'down') && this.tasksActive && this.seatEditor().getText().trim() === ''
-      && this.editor.getInputMode() === 'prompt') {
+      && this.seatInputMode() === 'prompt') {
       // The empty-editor ↓ task-browser trigger must not open the
       // PARENT's browser from inside the viewer. A shell-mode editor with
       // an empty body is composing a command — ↓ keeps its editing
@@ -5565,6 +5565,17 @@ export class TuiApp {
     const seat = this.seatEditor()
     const mode = seat.id === 'host' ? this.editor.getInputMode() : 'prompt'
     return serializeEditorInput(mode, text)
+  }
+
+  /**
+   * The effective input mode of the VISIBLE seat editor: the host
+   * editor's mode, or prompt semantics for a plugin editor (which has no
+   * mode). Routing and chrome (the ↓ task-browser gate, the footer hint)
+   * must read THIS — never the hidden host editor's mode, which can be
+   * stale while a plugin occupies the seat after a shell-mode handoff.
+   */
+  private seatInputMode(): EditorInputMode {
+    return this.seatEditor().getInputMode?.() ?? 'prompt'
   }
 
   /**
@@ -7685,8 +7696,9 @@ export class TuiApp {
       ? ''
       // The ↓ hint matches the ↓ routing gate: only a PROMPT-mode empty
       // editor opens the task browser — a shell-mode empty body is
-      // composing a command, so no hint is advertised.
-      : color.primary(`[${badgeParts.join(' · ')}${this.editor.getInputMode() === 'prompt' && this.editor.getText().trim() === '' ? ' · ↓ view' : ''}]`)
+      // composing a command, so no hint is advertised. The VISIBLE seat
+      // editor decides (a plugin editor is prompt semantics).
+      : color.primary(`[${badgeParts.join(' · ')}${this.seatInputMode() === 'prompt' && this.seatEditor().getText().trim() === '' ? ' · ↓ view' : ''}]`)
     const line1 = [
       permissionBadge,
       this.planMode ? color.warning('[plan]') : '',

@@ -629,3 +629,48 @@ test('a plugin draft without a shell prefix restores in PROMPT mode (no stale !)
   assert.deepEqual(submitted, ['echo'], 'the plugin draft submits as plain text')
   app.stop()
 })
+
+test('task-browser routing and the footer hint follow the VISIBLE seat editor, not the hidden host mode', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  let opened = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenTasks: () => { opened += 1; app.requestRender() },
+  }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  // Enter shell mode, then hand the seat to a plugin editor (the hidden
+  // host keeps its shell mode).
+  vt.sendInput('!')
+  await vt.waitForRender()
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'hint-plugin',
+    priority: 0,
+    create: (_host: EditorHost) => {
+      const editor = pluginEditor()
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // The plugin's document is the wire form; the user clears it — the
+  // VISIBLE editor is now an empty prompt-mode editor.
+  created[0]!.setText('')
+  app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
+  // The footer advertises the ↓ trigger (the visible editor is prompt).
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('↓ view'), `the footer must advertise ↓ for the visible prompt editor:\n${view}`)
+  // ↓ opens the browser despite the hidden host's stale shell mode.
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened, 1, 'the visible prompt-mode editor must open the task browser')
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
