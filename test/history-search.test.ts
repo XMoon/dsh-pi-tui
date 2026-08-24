@@ -394,7 +394,8 @@ test('S5: resultLimit and scanLimit are separate — a query never stops at 20 m
     const page = await src.search({ scope: 'current', cwd: '/a', query: 'prompt', limit: 20 })
     assert.equal(page.results.length, 20)
     assert.equal(stats.physicalLinesScanned, 500, 'the scan ran to EOF, not to 20 matches')
-    assert.equal(page.exhausted, true)
+    assert.equal(page.exhausted, false, 'the overflow still holds the unreported matches')
+    assert.ok(page.continuation !== undefined)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -509,6 +510,78 @@ test('S13: a continuation with a mismatched request context is a typed error', a
       src.search({ ...request, scope: 'all' }, page.continuation),
       (error: unknown) => error instanceof HistorySearchContinuationError,
     )
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S14: page overflow is carried — no match is ever lost across pages', async () => {
+  const home = tempHome()
+  try {
+    // 100 rows, limit 10: a single batch collects far more than the page
+    // can report — the overflow must drain on the following pages.
+    writeV2(home, '/a', Array.from({ length: 100 }, (_, i) => ({ content: `prompt-${i}`, ts: i })))
+    const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 5000 })
+    const request = { scope: 'current' as const, cwd: '/a', query: '', limit: 10 }
+    const pages: HistorySearchResult[][] = []
+    let continuation: import('../src/history-search.ts').HistorySearchContinuation | undefined
+    for (let i = 0; i < 20; i += 1) {
+      const page = await src.search(request, continuation)
+      pages.push(page.results)
+      if (page.exhausted) break
+      continuation = page.continuation
+    }
+    const merged = pages.flat()
+    assert.equal(merged.length, 100, 'every match is reported across pages')
+    assert.equal(new Set(merged.map(row => row.content)).size, 100, 'no duplicates across pages')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S15: a file fully scanned at the exact budget boundary is not re-scanned by the next page', async () => {
+  const home = tempHome()
+  try {
+    writeV2(home, '/a', Array.from({ length: 100 }, (_, i) => ({ content: `a-${i}`, ts: i })))
+    writeV2(home, '/b', Array.from({ length: 100 }, (_, i) => ({ content: `b-${i}`, ts: 100 + i })))
+    const stats: HistorySearchDebugStats = { filesVisited: 0, physicalLinesScanned: 0, bytesRead: 0 }
+    const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 100, stats })
+    const request = { scope: 'all' as const, cwd: '/nowhere', query: 'zzz', limit: 100 }
+    const page1 = await src.search(request)
+    assert.equal(page1.exhausted, false)
+    assert.ok(page1.continuation !== undefined)
+    const page2 = await src.search(request, page1.continuation)
+    assert.equal(stats.physicalLinesScanned, 100, 'page 2 scanned only file B — file A was not re-scanned')
+    assert.equal(page2.exhausted, true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S16: all-scope pending rows survive across pages — a proof found on a later page recovers them', async () => {
+  const home = tempHome()
+  try {
+    // One validating v2 row (OLDEST) + 100 legacy v1 rows (newer): page 1
+    // scans the v1 rows with no proof yet (all pending), page 2 finds the
+    // proof — the pending rows from page 1 must still be recovered.
+    const file = historyFilePath(home, '/a')
+    mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true })
+    const lines = [
+      JSON.stringify({ v: 2, content: 'modern', cwd: '/a', ts: 5 }),
+      ...Array.from({ length: 100 }, (_, i) => JSON.stringify({ content: `legacy-${i}` })),
+    ]
+    writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 })
+    const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 100 })
+    const request = { scope: 'all' as const, cwd: '/nowhere', query: '', limit: 1000 }
+    const page1 = await src.search(request)
+    assert.equal(page1.results.length, 0, 'page 1 scanned only unresolved v1 rows')
+    assert.equal(page1.exhausted, false)
+    assert.ok(page1.continuation !== undefined)
+    const page2 = await src.search(request, page1.continuation)
+    const legacy = page2.results.filter(row => row.content.startsWith('legacy-'))
+    assert.equal(legacy.length, 100, 'every pending legacy row is recovered by the later proof')
+    assert.ok(legacy.every(row => row.cwd === '/a'), 'the recovered rows carry the proven cwd')
+    assert.equal(page2.exhausted, true)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

@@ -137,13 +137,29 @@ export interface HistorySearchContinuation {
   readonly query: string
   readonly limit: number
   /** The files not yet fully scanned, in scan order (the first one is the
-   * partially-scanned current file). */
+   * partially-scanned current file; fully-scanned files are never kept). */
   readonly files: readonly HistoryFileCandidate[]
   /** The reverse-reader cursor for the first file, when it was partially
    * scanned (undefined when the next file starts fresh). */
   readonly cursor: ReverseJsonlCursor | undefined
   /** The dedupe state accumulated so far (key → newest occurrence). */
   readonly seen: ReadonlyMap<string, HistorySearchResult>
+  /** The current file's cwd proof (Rule 1/2), carried so a proof formed in
+   * an earlier page still applies to older rows of the same file. */
+  readonly fileProof: string | null
+  /** The current file's rows held pending (all scope, unresolved cwd),
+   * carried so a proof found on a LATER page still recovers them. */
+  readonly pending: readonly HistorySearchPendingRow[]
+  /** Matches found in the covered window beyond the page's result limit —
+   * the next page reports them before scanning further, so no match is
+   * ever lost across pages. */
+  readonly overflow: readonly HistorySearchResult[]
+}
+
+/** One all-scope row held pending while its file's cwd proof is unknown. */
+export interface HistorySearchPendingRow {
+  record: ParsedHistoryRecord
+  byteStart: number
 }
 
 /** The search seam the panel consumes. */
@@ -250,28 +266,42 @@ export class FileHistorySearchSource implements HistorySearchSource {
     }
     // The dedupe state: restored from the continuation (so pages never
     // duplicate rows) or fresh. `newKeys` tracks the keys added by THIS
-    // call — the page reports only those (their current map values).
+    // call; `carriedOverflow` are the matches a previous page sliced away
+    // — this page reports them before its own new matches, so no match is
+    // ever lost across pages.
     const map = continuation !== undefined
       ? new Map(continuation.seen)
       : new Map<string, HistorySearchResult>()
     const newKeys: string[] = []
+    const carriedOverflow = continuation?.overflow ?? []
     let cursor: ReverseJsonlCursor | undefined = continuation?.cursor
     let scanned = 0
     let fileIndex = 0
+    // Per-file cwd state, restored from the continuation for the partially
+    // scanned file: the proof may have formed in an earlier page, and rows
+    // held pending must survive until the proof forms or the file ends.
+    let pending: HistorySearchPendingRow[] = continuation !== undefined ? [...continuation.pending] : []
+    let fileProof: string | null = continuation !== undefined
+      ? continuation.fileProof
+      : scope === 'all' ? this.knownCwdFor(files[0]?.path ?? '') : null
     outer:
-    for (; fileIndex < files.length; fileIndex += 1) {
+    while (fileIndex < files.length) {
       if (request.signal?.aborted) return emptyPage()
-      // Empty-query early exit: this call already collected enough NEW
-      // unique results (per call, so a continuation page never stalls on
-      // the already-full dedupe state).
-      if (request.query === '' && newKeys.length >= request.limit) break
+      // Empty-query early exit: this call already has enough reportable
+      // results (carried overflow + new keys — per call, so a continuation
+      // page never stalls on the already-full dedupe state).
+      if (request.query === '' && carriedOverflow.length + newKeys.length >= request.limit) break
       const file = files[fileIndex]!
+      if (fileIndex > 0) {
+        // A fresh file: reset the per-file cwd state.
+        pending = []
+        fileProof = scope === 'all' ? this.knownCwdFor(file.path) : null
+      }
       if (stats !== undefined) stats.filesVisited += 1
       // All-scope rows whose cwd is not yet provable are held pending:
       // the proof may form later in the window (Rule 1), and only rows
       // still unresolved at the file's end are excluded (Rule 3).
-      const pending: Array<{ record: ParsedHistoryRecord; byteStart: number }> = []
-      let fileProof: string | null = scope === 'all' ? this.knownCwdFor(file.path) : null
+      let fileDone = false
       try {
         for (;;) {
           if (request.signal?.aborted) return emptyPage()
@@ -299,10 +329,11 @@ export class FileHistorySearchSource implements HistorySearchSource {
           }
           if (batch.eof) {
             cursor = undefined
+            fileDone = true
             break
           }
           cursor = batch.nextCursor
-          if (request.query === '' && newKeys.length >= request.limit) break outer
+          if (request.query === '' && carriedOverflow.length + newKeys.length >= request.limit) break outer
         }
       } catch (error) {
         if (isAbortError(error)) return emptyPage()
@@ -311,16 +342,31 @@ export class FileHistorySearchSource implements HistorySearchSource {
         // continuation cursor) skips the rest of this file; rows already
         // collected stay.
         cursor = undefined
+        fileDone = true
+      }
+      if (fileDone) {
+        // The file is fully scanned (or skipped): the continuation must
+        // not include it — a fresh scan would re-read it from EOF.
+        fileIndex += 1
+        pending = []
+        fileProof = null
+        if (scanned >= this.scanLimit) break
+        continue
       }
       if (scanned >= this.scanLimit) break
+      fileIndex += 1
     }
     if (request.signal?.aborted) return emptyPage()
-    const exhausted = fileIndex >= files.length
+    // The page reports the carried overflow plus this call's new matches,
+    // sorted and sliced to the limit; the tail becomes the next page's
+    // overflow (drained by ts, so "Search older" never skips a match).
+    const combined = [...carriedOverflow, ...newKeys.map(key => map.get(key)!)]
+      .sort(compareResults)
+    const results = combined.slice(0, request.limit)
+    const overflow = combined.slice(request.limit)
+    const exhausted = fileIndex >= files.length && overflow.length === 0
     return {
-      results: newKeys
-        .map(key => map.get(key)!)
-        .sort(compareResults)
-        .slice(0, request.limit),
+      results,
       continuation: exhausted ? undefined : {
         scope: request.scope,
         cwd: request.cwd,
@@ -329,6 +375,9 @@ export class FileHistorySearchSource implements HistorySearchSource {
         files: files.slice(fileIndex),
         cursor,
         seen: map,
+        fileProof,
+        pending,
+        overflow,
       },
       exhausted,
     }
@@ -391,7 +440,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     record: ParsedHistoryRecord,
     byteStart: number,
     fileProof: string | null,
-    pending: Array<{ record: ParsedHistoryRecord; byteStart: number }>,
+    pending: HistorySearchPendingRow[],
     map: Map<string, HistorySearchResult>,
     newKeys: string[],
   ): string | null {
