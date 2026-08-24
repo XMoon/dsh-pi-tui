@@ -145,3 +145,27 @@ direct settings.yaml write). `/help` and the footer hints render through
 - The model-menu / history-panel / output-viewer focused components keep
   their component-local keys (the plan's M5 covers QuestionFlow and
   TaskBrowserPanel; the others follow the same pattern later).
+
+## Review chain (2026-08-25, openai-codex / gpt-5.6-luna)
+
+Four review rounds on `feat/keybinding-customization`; the reviewer
+accepted at round 4 with no open findings.
+
+- Round 1 (needs-fixes, 7 findings): advanced-capture ordering
+  (documented by-design — the pre-migration phase contract placed the
+  host ladder before the advanced stage; AGENTS.md decision 13 keeps
+  session-safety paths Host-owned), safe mode now disables the leader
+  config, conditional-action remaps inherit their predicate and `false`
+  disables the composition rule, `false` wins over `<leader>X` bindings,
+  leader sequences cannot bypass the viewer parent-action guard, duplicate
+  action declarations are a diagnostic (never last-write-wins), CJK
+  comments translated.
+- Round 2 (needs-fixes, 1 P2): disabled actions are never advertised by
+  `keyHint()`/`snapshot()`.
+- Round 3 (accepted-with-followups, 1 P2): hints read the EFFECTIVE
+  (ambiguity-filtered) leader bindings.
+- Round 4 (accepted, none).
+
+Final gates: 1996 bundle tests, 985 fork tests, 11 docs tests,
+typecheck (fork + bundle), `check-host-keybindings` gate, `git diff
+--check` — all green.
