@@ -366,6 +366,54 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
   assert.equal(activity.tool?.status, 'ok')
 })
 
+test('a turn-start-less tool/call attributes to its OWN turn (replay fragment)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('tool/call', { turn: 7, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1000, 0),
+  ])
+  const activity = folder.turnActivity(7)!
+  assert.equal(activity.toolCalls, 1)
+  assert.equal(activity.tool?.name, 'bash')
+  assert.equal(folder.turnActivity(0), undefined, 'the call must not leak into the stale current turn')
+})
+
+test('a later assistant/message confirms the earlier candidate and becomes the new candidate (plan §5.3 C)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步说明' } }, 1001, 1),
+    // Step 1's message arrives WITHOUT a step-1 text delta (replay edge).
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: '第二步说明' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: '最终答案' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const activity = folder.turnActivity(0)!
+  // The LATEST intermediate message wins (step 1's settled text), never
+  // the earliest (step 0's streamed text); the step-2 final stays out.
+  assert.equal(activity.message?.text, '第二步说明')
+})
+
+test('a settled message without any prior candidate is still the final when the turn ends (no phantom slot)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '直接答案' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1001, 1),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1002, 2),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message, undefined, 'a lone final answer must never enter the Message slot')
+})
+
 test('workflow/subagent lifecycle events never touch the Tool slot or the count (plan §17)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
