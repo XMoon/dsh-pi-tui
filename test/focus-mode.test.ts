@@ -568,6 +568,23 @@ test('an empty authoritative message for the latest confirmed step clears the co
   assert.equal(activity.message, undefined, 'the empty authoritative text must clear the stale confirmed fragment')
 })
 
+test('a late text-delta after turn/end never resurrects the Message candidate', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '最终答案' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
+    // A late text delta (replay) must not resurrect the candidate.
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '更多内容' } }, 1004, 4),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message, undefined, 'the final must not be duplicated into the Message slot after turn/end')
+})
+
 test('a late message after turn/end never resurrects the final candidate', () => {
   const folder = new TranscriptFolder()
   folder.apply([
