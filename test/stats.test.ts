@@ -253,6 +253,24 @@ test('tok/s samples only steps carrying both a decode window and usage', () => {
   // (6100→7000 window above proves it: last delta was at 6200).
 })
 
+test('turn/end with an open step finalizes its usage in BOTH folds', () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 2, t + 2),
+    // turn/end arrives while the step is still open.
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3, t + 3),
+    // A late step/end (replay artifact) must not change anything.
+    event('step/end', { turn: 0, step: 0 }, 4, t + 4),
+  ]
+  const stats = computeStats(events)
+  const folder = new TranscriptFolder()
+  folder.apply(events)
+  assert.equal(stats.inputTokens, 100, 'the footer must finalize the open step at turn/end')
+  assert.equal(folder.turnActivity(0)!.totalTokens, 100, 'the Focus per-turn total must agree with the footer')
+})
+
 test('late usage after turn/end is ignored by BOTH the stats fold and the Focus fold', () => {
   const t = 1_700_000_000_000
   const events = [
