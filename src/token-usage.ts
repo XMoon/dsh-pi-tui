@@ -209,6 +209,15 @@ export class StepUsageAccumulator {
     }
   }
 
+  /** Advance the turn boundary: finalize the prior turn's still-open
+   * steps and make its delayed facts stale. Called by the folds at
+   * turn/start — a delayed usage event for the prior turn must not
+   * replace its pending usage after the next turn started (review
+   * finding). */
+  onTurnStart(turn: number): void {
+    this.noteTurn(turn)
+  }
+
   /** Finalize a turn: commit its still-open steps' pending usage (the
    * facts were real) and drop the pending totals, so the Focus per-turn
    * total and the session total agree even when turn/end arrives with
