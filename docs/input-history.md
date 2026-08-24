@@ -44,13 +44,27 @@ dedicated data file keyed by the working directory. We adopt that shape.
 - File: `$DSH_HOME/user-history/<md5(cwd)>.jsonl` (`$DSH_HOME` defaults to
   `~/.dsh`, same root as the existing `$DSH_HOME/logs` diagnostics; the
   `dshHome` helper in `src/diag.ts` is the single source of the path).
-- Format: one JSON object per line (`{"content": "..."}`), submission
-  order (oldest first). Multi-line submissions are one JSON line (newlines
-  escaped by `JSON.stringify`), so pastes cannot corrupt the layout.
+- Format: one JSON object per line, submission order (oldest first).
+  Multi-line submissions are one JSON line (newlines escaped by
+  `JSON.stringify`), so pastes cannot corrupt the layout.
+  - **v1** (legacy, kimi layout): `{"content": "..."}` — still read forever.
+  - **v2** (canonical since the Ctrl+R milestone): `{"v":2,"content":"...",
+    "cwd":"...","ts":<epoch-ms>,"sessionId":"ses_..."}`. New rows carry the
+    working directory and a submission timestamp so the all-directory
+    history search can merge files and order globally by time. Unknown
+    future fields are tolerated; a v2 row with invalid metadata degrades
+    the field to null (content stays searchable) instead of dropping the
+    row.
 - Writes: append-only (`O_APPEND`), 0600 file, 0700 directory, created on
   demand. Consecutive repeats and empty lines are skipped (shell-history
   behavior); non-consecutive repeats are legal history and survive.
-- Cap: `HISTORY_LIMIT` (100) entries per directory, trimmed on load.
+- Recall vs. persistence (decoupled):
+  - **Recall**: `HISTORY_RECALL_LIMIT` (100) entries seed the editor's
+    ↑/↓ history. The canonical JSONL is NEVER truncated or rewritten on
+    read — a concurrent append from another window must never land in an
+    orphaned inode. Auto-compaction is a planned maintenance milestone
+    (`HISTORY_FILE_MAX_ENTRIES`, 5000), not part of the read/append
+    contract.
 - Corrupt lines are skipped on load, never fatal.
 - `!` shell commands are stored verbatim (with the `!`), so ↑ recall
   restores them as text and Enter re-runs the shell branch (kimi does the
@@ -58,6 +72,29 @@ dedicated data file keyed by the working directory. We adopt that shape.
 - The runner loads the file per session (and once at boot for the launch
   cwd, so a fresh window recalls immediately — see below) and appends on
   every submitted line.
+
+## Ctrl+R history search
+
+`Ctrl+R` opens the input-history search panel (host-reserved key; plugins
+can never claim it). It is "find and EDIT", never "find and run":
+
+- **Scope**: `Tab` toggles `Current directory` (the default) ⇄
+  `All directories`; the query survives the switch.
+- **Filtering**: case-insensitive substring over the content; an empty
+  query browses the most recent history.
+- **Details**: the selected row's FULL multi-line content, plus its
+  directory, timestamp and session — legacy rows honestly show
+  `Unknown (legacy history)` (never a fabricated time).
+- **Enter** puts the selected text back into the editor (via
+  `setEditorText`) and closes the panel — it never submits. **Esc** closes
+  with the draft untouched (the panel never previews into the editor).
+- **Storage**: v2 rows carry `cwd` + `ts`; v1 rows inherit the cwd from a
+  v2 row that validates the file hash (Rule 1) or a known-cwd identity map
+  (Rule 2). Unresolved legacy files are excluded from `All directories`
+  (Rule 3 — never a guessed directory).
+- **Search source**: `src/history-search.ts` (replaceable; a SQLite/FTS
+  backend can swap in without touching the panel) and
+  `src/history-panel.ts` (the overlay).
 
 ### Recall-order contract (trap: get this backwards and ↑ shows the OLDEST entry)
 
@@ -103,8 +140,18 @@ unwritten entries.
 ## Where the code lives
 
 - `src/history.ts` — the pure store: pathing (`historyFilePath`), parsing
-  (`parseHistoryLines`), load+trim (`loadHistoryFile`), append rules
-  (`appendHistoryLine`). Pinned by `test/history.test.ts`.
+  (`parseHistoryLines` / `parseHistoryRecords`), read-only load
+  (`loadHistoryFile` / `loadHistoryRecords` / `loadRecallHistory`), append
+  rules (`appendHistoryLine` v1 / `appendHistoryRecord` v2). Pinned by
+  `test/history.test.ts`.
+- `src/history-search.ts` — the Ctrl+R search source (`HistorySearchSource`
+  seam + `FileHistorySearchSource`): scope, legacy cwd recovery, matching,
+  ordering, dedupe, cancellation. Pinned by `test/history-search.test.ts`.
+- `src/history-panel.ts` — the Ctrl+R modal panel (query input, scope
+  tabs, list, details, responsive layout). Pinned by
+  `test/history-panel.test.ts` and the `test/ctrl-r.test.ts` integration
+  suite.
 - Runner wiring in `src/index.ts`: boot seed, per-session seed in
-  `initLiveSession`, append on submit in `dispatchUserInput`, migration.
+  `initLiveSession`, append on submit in `dispatchUserInput` (v2 rows),
+  migration, and the injected `FileHistorySearchSource`.
 - `docs/README.md` — index.

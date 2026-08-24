@@ -92,6 +92,8 @@ import {
   type ToolPresenter,
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
+import { HistoryPanel } from './history-panel.ts'
+import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
 import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
@@ -1199,6 +1201,19 @@ export interface TuiAppOptions {
    * cannot be rewritten or consumed by a capture. Optional.
    */
   unstableFailSafeRelease?: () => void
+  /**
+   * Ctrl+R input-history search (plan §27): the injected search source. The
+   * runner wires the file-backed implementation; the host owns the open/
+   * close/refresh/scope/accept lifecycle and never reads the filesystem
+   * itself. Optional — absent, Ctrl+R falls through unbound.
+   */
+  historySearchSource?: import('./history-search.ts').HistorySearchSource
+  /**
+   * The live working directory the `current` scope resolves against (the
+   * runner forwards the session cwd). Fallback: `workspaceRoot`; absent
+   * cwd keeps the search scoped to the session root.
+   */
+  historySearchCwd?: () => string
 }
 
 /**
@@ -1410,6 +1425,18 @@ export class TuiApp {
   private searchOverlay: OverlayHandle | undefined
   /** The search input component, while one is open (for match counts). */
   private searchComponent: TranscriptSearchComponent | undefined
+  /** The Ctrl+R input-history panel, while one is open. */
+  private historyPanel: HistoryPanel | undefined
+  /** The overlay handle of the history panel (hide() closes it). */
+  private historyOverlay: OverlayHandle | undefined
+  /** The injected Ctrl+R search source (the runner wires the file-backed
+   * implementation; the host never touches the filesystem). */
+  private readonly historySearchSource: HistorySearchSource | undefined
+  /** The live working directory for the panel's `current` scope — a GETTER
+   * (the runner's `sessionCwd()`), never a snapshot: a session switch moves
+   * the whole surface's cwd with the new session header, so the panel must
+   * resolve the cwd at OPEN time, not at construction time. */
+  private readonly historySearchCwd: (() => string) | undefined
   /** The open CATEGORIZED picker (e.g. /sessions): Tab cycles its
    * categories while it is open. Cleared when the picker closes. */
   private activeCategorizedPicker: CategorizedPickerState | undefined
@@ -1773,6 +1800,10 @@ export class TuiApp {
     // (single-winner from the editor registry) can replace it.
     this.imageLoader = options.imageLoader
     this.imageTheme = options.imageTheme
+    this.historySearchSource = options.historySearchSource
+    // Keep the GETTER: the cwd must be resolved at panel-open time (a
+    // session switch changes `sessionCwd()` — see the field doc).
+    this.historySearchCwd = options.historySearchCwd
     this.editorSeatHolder = new EditorSeatHolder({
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
@@ -1987,6 +2018,11 @@ export class TuiApp {
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
     this.searchComponent = undefined
+    // The Ctrl+R history panel dies with the surface: its in-flight search
+    // is aborted (a late result must never touch a dead component).
+    this.historyPanel?.dispose()
+    this.historyPanel = undefined
+    this.historyOverlay = undefined
     this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
     // Detach the extension surface host: its subscriptions and capability
     // set die with the surface (M2 stale-generation contract).
@@ -2261,6 +2297,19 @@ export class TuiApp {
     // lifecycle handlers must not consume its keys before pi-tui dispatches
     // them to that component.
     if (this.activeScreen.hasOverlayEntries) return undefined
+    // Ctrl+R input-history search (host-reserved lifecycle key, §29): the
+    // overlay guard above keeps the key with any active overlay/question/
+    // approval/viewer (plan §28/§30); with nothing up, the host opens the
+    // history panel. Unbound (no historySearchSource): falls through to the
+    // editor like any un-reserved key. The continuable subagent viewer keeps
+    // its OWN live editor — plan §30 M1 restricts Ctrl+R to the MAIN editor,
+    // so the chord is a no-op there (never the child draft, never the parent
+    // draft): the viewer's parent-owned chords already consume Enter etc.
+    if (matchesKey(data, 'ctrl+r') && this.historySearchSource !== undefined
+      && this.viewerMode === undefined) {
+      this.openHistorySearch()
+      return { consume: true }
+    }
     if (matchesKey(data, 'ctrl+shift+f') || matchesKey(data, 'ctrl+f')) {
       this.startTranscriptSearch()
       return { consume: true }
@@ -3007,6 +3056,56 @@ export class TuiApp {
     this.searchOverlay = undefined
     this.searchComponent = undefined
     this.events.onSearchClose?.()
+  }
+
+  /**
+   * Ctrl+R input-history search: open the modal panel (plan §18/§27). The
+   * host owns the lifecycle; the panel owns the query/scope/list/detail
+   * state; the injected search source owns the filesystem. A second
+   * Ctrl+R while the panel is up is a no-op (the panel already owns the
+   * keys through the overlay guard).
+   */
+  openHistorySearch(): void {
+    if (this.historyPanel !== undefined) return
+    if (this.historySearchSource === undefined) return
+    if (this.disposed) return
+    const columns = this.terminal.columns
+    const rows = this.terminal.rows
+    // The overlay must NEVER exceed the terminal (plan §51): width/height
+    // are clamped to the real columns/rows (a 50×10 terminal must not
+    // request a 60×14 panel). The panel's row budget is the overlay's
+    // maxHeight minus the Frame's two border rows.
+    const width = Math.min(columns - 2, Math.max(20, Math.min(100, columns - 6)))
+    const maxHeight = Math.min(rows - 2, Math.max(8, Math.min(30, rows - 4)))
+    const panel = new HistoryPanel({
+      source: this.historySearchSource,
+      // Resolve the cwd at OPEN time (session switches move it): the
+      // injected getter reflects the LIVE session, the status cwd is the
+      // fallback when no getter is wired.
+      cwd: this.historySearchCwd?.() ?? this.status.cwd,
+      maxRows: maxHeight - 2, // the Frame adds its two border rows
+      onResultsChanged: () => this.requestRender(),
+      onAccept: (content) => {
+        this.closeHistorySearch()
+        // Accept = "bring back and EDIT", never submit (plan §33): the
+        // text replaces the editor draft through the seat setter; the
+        // fork's overlay hide() restores editor focus automatically.
+        this.setEditorText(content)
+      },
+      onClose: () => this.closeHistorySearch(),
+    })
+    panel.start()
+    this.historyPanel = panel
+    this.historyOverlay = this.showOverlayOnHost(new Frame(panel), { width, maxHeight })
+  }
+
+  /** Close the history panel (Esc/Ctrl+C, accept, surface dispose). */
+  closeHistorySearch(): void {
+    if (this.historyOverlay === undefined) return
+    this.historyPanel?.dispose()
+    this.historyOverlay.hide()
+    this.historyOverlay = undefined
+    this.historyPanel = undefined
   }
 
   /** Publish the current match position for the overlay header (1-based, total). */
