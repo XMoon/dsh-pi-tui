@@ -5509,7 +5509,7 @@ export class TuiApp {
     expanded: boolean,
   ): MessageComponentEntry {
     const registry = this.renderers
-    const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, boundary)
+    const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, expanded)
     return {
       // The EFFECTIVE expansion (the secondary-disclosure rule) drives the
       // renderer: inside an open Thought the foldable process cards default
@@ -5968,16 +5968,18 @@ export class TuiApp {
    */
   private renderThroughExtensions(
     message: TranscriptMessage,
-    boundary: number,
+    expanded: boolean,
   ): { component: Component; rendererId: string } | undefined {
     const registry = this.renderers
     if (registry === undefined) return undefined
     const snapshot = this.semanticSnapshotOf(message)
     if (snapshot === undefined) return undefined
     if (snapshot.kind === 'tool' && snapshot.tool !== undefined) {
-      // The tool snapshot's expanded state follows the fold boundary +
-      // click override (the host's own card does the same).
-      const tool = { ...snapshot.tool, expanded: snapshot.turn >= boundary || this.expandedOverride.get(message) === true }
+      // The tool snapshot's expanded state is the SAME effective rule the
+      // host renderer uses (the secondary-disclosure rule) — a plugin
+      // renderer must never see a recent tool as expanded inside an open
+      // Thought when the host keeps it compact (review finding).
+      const tool = { ...snapshot.tool, expanded }
       const compiled = new Map<string, Component>()
       const rendered = registry.renderTool(tool, (id, error) => this.rendererError?.({ id, error, slot: 'tool' }), (id, view) => {
         const component = this.compileExtensionViewIsolated(view, id, 'tool')
