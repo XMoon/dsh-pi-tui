@@ -1132,16 +1132,20 @@ export class TranscriptFolder {
         // Every thinking entry stops streaming when the turn closes
         // (interrupted steps never see their assistant/message).
         for (const entry of this.thinkingEntries.values()) entry.running = false
+        // The synthetic cards carry the EVENT's own turn — never
+        // this.currentTurn: a turn-start-less fragment's end must land in
+        // its own turn (review finding).
+        const endTurn = event.data.turn
         if (event.data.reason.kind === 'error') {
           // Defensive: a malformed/legacy reason without the error detail
           // degrades to the bare marker instead of crashing the fold
           // (plan §10.2 — Focus aggregates the same events).
           const error = event.data.reason.error
-          this.appendItem({ kind: 'tool', turn: this.currentTurn, name: 'error', args: '', result: error === undefined ? 'error' : `${error.code}: ${error.message}`, status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: error === undefined ? 'error' : `${error.code}: ${error.message}`, status: 'error' })
         } else if (event.data.reason.kind === 'aborted') {
-          this.appendItem({ kind: 'tool', turn: this.currentTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
         } else if (event.data.reason.kind === 'max-tokens') {
-          this.appendItem({ kind: 'system', turn: this.currentTurn, text: 'max tokens reached — output truncated' })
+          this.appendItem({ kind: 'system', turn: endTurn, text: 'max tokens reached — output truncated' })
         }
         // Focus aggregation: turn/end is the authoritative finalization —
         // it settles timing, the end reason, and makes the final assistant

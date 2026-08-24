@@ -251,6 +251,28 @@ test('tok/s samples only steps carrying both a decode window and usage', () => {
   // (6100→7000 window above proves it: last delta was at 6200).
 })
 
+test('StatsFolder drops the step timing entry at step/end (no unbounded growth)', () => {
+  const folder = new StatsFolder()
+  folder.apply([
+    event('step/start', { turn: 0, step: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hi' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 2),
+    event('step/end', { turn: 0, step: 0 }, 3),
+  ])
+  const perStep = (folder as unknown as { perStep: Map<string, unknown> }).perStep
+  assert.equal(perStep.size, 0, 'the step timing entry must be dropped at step/end')
+  // The settled timing survives in the snapshot.
+  assert.equal(folder.snapshot().llmMs, 2_000)
+})
+
 test('llmMs spans step/start to assistant/message, not to step/end', () => {
   const t = 1_700_000_000_000
   const stats = computeStats([

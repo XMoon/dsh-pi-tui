@@ -75,6 +75,10 @@ function stepKey(turn: number, step: number): string {
 export class StepUsageAccumulator {
   /** Open steps: their current usage (undefined = no usage fact yet). */
   private readonly perStep = new Map<string, { usage?: UsageLike }>()
+  /** Orphan usage facts (no open step) per (turn, step): the authoritative
+   * assistant/message value REPLACES the provisional chunk exactly like the
+   * open-step path — never adds to it (review finding). */
+  private readonly orphanByStep = new Map<string, UsageLike>()
   /** Committed per-turn totals (completed steps + orphan facts). */
   private readonly turnTotals = new Map<number, TokenUsageTotals>()
   /** Open steps' current usage per turn (the running display share). */
@@ -98,13 +102,14 @@ export class StepUsageAccumulator {
         this.addPending(turn, usage)
       }
     } else {
-      this.commitOrphan(turn, usage)
+      this.commitOrphan(turn, step, usage)
     }
   }
 
   /** The authoritative usage of a settled step replaces the provisional
-   * one (never adds to it). A message without an open step (replay edge)
-   * commits to the turn's totals immediately. */
+   * one (never adds to it) — on the open-step path AND the orphan path.
+   * A message without an open step (replay edge) commits to the turn's
+   * totals immediately. */
   onAssistantMessage(turn: number, step: number, usage?: UsageLike): void {
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
@@ -114,7 +119,7 @@ export class StepUsageAccumulator {
         this.addPending(turn, usage)
       }
     } else if (usage !== undefined) {
-      this.commitOrphan(turn, usage)
+      this.commitOrphan(turn, step, usage)
     }
   }
 
@@ -130,6 +135,10 @@ export class StepUsageAccumulator {
       }
       this.perStep.delete(key)
     }
+    // An orphan fact of the same step is settled by its step/end too: the
+    // step is closed, so a later fact for it is a NEW commit (never a
+    // replacement of the closed one).
+    this.orphanByStep.delete(key)
   }
 
   /** The committed per-turn totals (completed steps + orphan facts);
@@ -188,10 +197,28 @@ export class StepUsageAccumulator {
 
   /** A usage fact without an open step (replay edge) is a settled fact:
    * commit it to the turn's totals immediately, so
-   * sum(per-turn committed) == session total stays strict. */
-  private commitOrphan(turn: number, usage: UsageLike): void {
+   * sum(per-turn committed) == session total stays strict. The
+   * authoritative assistant/message value REPLACES the provisional chunk
+   * of the same (turn, step) — the same replace-never-add rule as the
+   * open-step path (review finding). */
+  private commitOrphan(turn: number, step: number, usage: UsageLike): void {
+    const key = stepKey(turn, step)
+    const prior = this.orphanByStep.get(key)
+    if (prior !== undefined) {
+      this.subtractTotals(this.turnTotalFor(turn), prior)
+      this.subtractTotals(this.session, prior)
+    }
+    this.orphanByStep.set(key, usage)
     addTotals(this.turnTotalFor(turn), usage)
     addTotals(this.session, usage)
+  }
+
+  /** Subtract one usage record from a totals accumulator. */
+  private subtractTotals(target: TokenUsageTotals, usage: UsageLike): void {
+    target.inputTokens -= usage.inputTokens
+    target.outputTokens -= usage.outputTokens
+    target.cacheReadTokens -= usage.cacheReadTokens ?? 0
+    target.cacheWriteTokens -= usage.cacheWriteTokens ?? 0
   }
 }
 
