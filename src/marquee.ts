@@ -158,9 +158,13 @@ export class SelectedMarquee {
   }
 
   /** Reset the cycle anchor to NOW (selection/search/type/resize changed
-   * and the caller wants an explicit re-pause, not a mid-cycle jump). */
+   * and the caller wants an explicit re-pause, not a mid-cycle jump). The
+   * armed timer is CLEARED too: a stale repaint targeting the OLD cycle
+   * must never fire after the selection moved (review round 2). The next
+   * render of the newly selected row re-arms a fresh deadline. */
   reset(): void {
     this.anchor = ''
+    this.clearTimer()
   }
 
   /** Clear the timer and mark the driver disposed (the overlay closed).

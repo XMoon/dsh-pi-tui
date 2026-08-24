@@ -130,14 +130,39 @@ test('CJK/emoji content slices by CELL width, never mid-grapheme', () => {
   marquee.dispose()
 })
 
-test('dispose clears the timer and no render fires after disposal', () => {
+test('dispose clears the timer and no render fires after disposal (review round 2)', () => {
   const { marquee, renders } = fakeMarquee()
   marquee.render({ key: 'k', text: 'abcdefghij', maxWidth: 5, selected: true })
-  // The timer would fire requestRender eventually; after dispose it must
-  // not. The fake clock never advances, so nothing fires — assert the
-  // driver is inert.
+  // The timer IS armed (an overflowed selected row).
+  assert.equal(marquee.pendingTimerDeadlineForTest(), 800, 'precondition: timer armed')
   marquee.dispose()
+  // Dispose must CLEAR the timer — a stale callback would request a
+  // render for a dead driver. Assert the deadline is gone, not just that
+  // no render happened yet (the fake clock never advances, so the old
+  // assertion would pass even with a live timer).
+  assert.equal(marquee.pendingTimerDeadlineForTest(), -1, 'dispose must clear the armed timer')
   assert.equal(renders, 0)
+})
+
+test('selection switch clears the OLD timer and arms the NEW row (review round 2)', () => {
+  const { marquee, setNow } = fakeMarquee()
+  const text = 'abcdefghijklmnop'
+  setNow(0)
+  marquee.render({ key: 'row-a', text, maxWidth: 8, selected: true })
+  const deadlineA = marquee.pendingTimerDeadlineForTest()
+  assert.equal(deadlineA, 800, 'row A arms the pause-end deadline')
+  // The selection moves to row B BEFORE row A's timer fires. The old
+  // timer must be cleared (no stale repaint for a cycle that no longer
+  // owns the screen) and row B's render must arm its own fresh deadline.
+  setNow(400)
+  marquee.render({ key: 'row-b', text, maxWidth: 8, selected: true })
+  const deadlineB = marquee.pendingTimerDeadlineForTest()
+  assert.notEqual(deadlineB, 400, 'row B must re-arm from ITS anchor (not reuse row A)')
+  assert.equal(deadlineB, 400 + 800, 'row B pauses 800ms from its own anchor')
+  // Explicit reset() also drops the armed timer immediately.
+  marquee.reset()
+  assert.equal(marquee.pendingTimerDeadlineForTest(), -1, 'reset must clear the timer')
+  marquee.dispose()
 })
 
 test('UNSELECTED rows never reset the selected row\'s cycle (review finding F1)', () => {
