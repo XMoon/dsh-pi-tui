@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CAPABILITIES } from '../src/runtime/capability.ts'
+import { CAPABILITIES, DIRECT_IMPLEMENTED_CAPABILITIES } from '../src/runtime/capability.ts'
 import { createDirectBackend } from '../src/runtime/backend.ts'
 import type { SubagentPort } from '../src/runtime/subagent-port.ts'
 
@@ -26,7 +26,7 @@ test('the capability vocabulary covers the migration domains', () => {
   ])
 })
 
-test('the Direct backend is the current production surface and serves every capability', () => {
+test('the Direct backend is the current production surface and serves EXACTLY the implemented capabilities', () => {
   const subagent: SubagentPort = {
     followup: async () => ({ kind: 'rejected', reason: { kind: 'unavailable' } }),
   }
@@ -59,7 +59,12 @@ test('the Direct backend is the current production surface and serves every capa
   assert.equal(backend.sessionWriter, sessionWriter)
   assert.equal(backend.sessionLifecycle, sessionLifecycle)
   assert.equal(backend.interaction, interaction)
-  for (const capability of CAPABILITIES) {
+  // Truthful advertisement: the backend serves ONLY the implemented ports
+  // (catalog/config/host-file have no port yet — never advertised).
+  for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {
     assert.ok(backend.capabilities.has(capability), `direct serves ${capability}`)
+  }
+  for (const capability of ['catalog', 'config', 'host-file'] as const) {
+    assert.ok(!backend.capabilities.has(capability), `direct does NOT advertise ${capability} (no port yet)`)
   }
 })

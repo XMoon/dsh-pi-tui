@@ -57,6 +57,7 @@ import {
 import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
+import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import {
   credentialOptionsFor,
   deriveKeyRef,
@@ -219,28 +220,6 @@ export interface TuiSettingsLike {
   replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string; focusMode: string }): unknown
 }
 
-/** The agents-service surface /new and /fork create sessions through. */
-export interface AgentsLike {
-  create(options: {
-    sessionId: SessionId
-    meta: Record<string, unknown>
-    // AgentOptions' provider/model are optional; mirror that shape.
-    agentOptions: { provider?: string; model?: string }
-    setup: (agentCtx: Context) => Promise<void> | void
-    seed?: readonly SessionEvent[]
-    // Creation-only cancellation (upstream CreateAgentOptions.signal); the
-    // handle detaches from it on publication.
-    signal?: AbortSignal
-  }): Promise<AgentHandle>
-  /** Resume a session (the ordinary open path; a rejection is never
-   * retried — see the sticky-quarantine rule in the runner). */
-  resume(options: {
-    resumeSessionId: SessionId
-    agentOptions: { provider?: string; model?: string }
-    setup: (agentCtx: Context) => Promise<void> | void
-  }): Promise<AgentHandle>
-}
-
 
 /** The narrow Host-access surface commands consume (migration M1.7): every
  * Host service a command may read goes through this facade, never `ctx`
@@ -281,8 +260,13 @@ export interface TuiCommandRunner {
   readonly selected: ModelSelectionRef
   /** The TUI settings document, when the settings service is present. */
   readonly tuiSettings: TuiSettingsLike | undefined
-  /** The agents service, for /new and /fork. */
-  readonly agents: AgentsLike
+  /** The session lifecycle port (migration M1.5): /new and /fork create
+   * sessions through semantic requests (the Direct adapter resolves the
+   * preset composition internally). */
+  readonly agents: {
+    create(options: CreateSessionRequest): Promise<SessionHandle>
+    resume(options: ResumeSessionRequest): Promise<SessionHandle>
+  }
   /** The sessions service, for the /exit flush. */
   readonly sessions: { flush(session: Session): Promise<unknown> }
   /** The session READ port (migration M1.3): /sessions, /resume, /search
@@ -345,7 +329,7 @@ export interface TuiCommandRunner {
    * never deletes a persisted session). Callers create their child INSIDE
    * this transaction and must run it inside {@link withSessionTransition}.
    */
-  transitionTo<T extends AgentHandle>(steps: {
+  transitionTo<T>(steps: {
     /** The child's PRE-GENERATED session identity (MANDATORY): the
      * transaction reserves its lease BEFORE the DSH call (while the old
      * lock is still held), so a refusal aborts with zero child side
@@ -2178,11 +2162,12 @@ export function registerTuiCommands(
         target: { id: String(sessionId), header: { cwd } },
         fresh: true,
         create: () => runner.agents.create({
-          sessionId,
+          sessionId: String(sessionId),
           meta: metaOf(cwd, composition.agentPreset),
           // Before the first session the process-wide selection stands in.
-          agentOptions: newOptions,
-          setup: composition.setup,
+          provider: newOptions.provider,
+          model: newOptions.model,
+          agentPreset: composition.agentPreset,
         }),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
@@ -2654,7 +2639,9 @@ export function registerTuiCommands(
       // §14; in-flight submissions keep their pinned drafts — review
       // finding 2).
       runner.imageStore.clearUnpinned()
-      return { kind: 'success', text: `forked as ${result.next.agent.session.id}` }
+      // A Direct create always yields the live agent (port contract);
+      // Remote handles surface the session identity only.
+      return { kind: 'success', text: `forked as ${result.next.session.id}` }
     }),
   })
 

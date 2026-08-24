@@ -122,7 +122,7 @@ import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
 import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
-import type { CreateSessionOptions, ResumeSessionOptions } from './runtime/session-lifecycle-port.ts'
+import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -1317,13 +1317,6 @@ export function apply(ctx: Context, config: Config): void {
   // Host domains through narrow ports, never ctx.* directly. Direct is the
   // only backend today; remote/wire adapters join in later milestones
   // behind the SAME port interfaces.
-  const backend = createDirectBackend(
-    new DirectSubagentPort(ctx),
-    new DirectSessionReader(ctx),
-    new DirectSessionWriter(ctx),
-    new DirectSessionLifecycle(ctx),
-    new DirectInteractionPort(ctx),
-  )
   // Process diagnostics: stderr + a log file under $DSH_HOME/logs. The cordis
   // logger has no exporter in this process, so it is NOT the troubleshooting
   // channel — diag is (see diag.ts).
@@ -1400,6 +1393,19 @@ export function apply(ctx: Context, config: Config): void {
     const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, selected, presetId, focusState, diag)
     const withPresetMeta = (composition: AgentComposition): { agentPreset?: string } =>
       composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }
+
+    // The semantic backend (server/client migration M1): the TUI consumes
+    // Host domains through narrow ports, never ctx.* directly. Direct is the
+    // only backend today; remote/wire adapters join in later milestones
+    // behind the SAME port interfaces. Constructed here (after compose) so
+    // the Direct session lifecycle can resolve preset compositions.
+    const backend = createDirectBackend(
+      new DirectSubagentPort(ctx),
+      new DirectSessionReader(ctx),
+      new DirectSessionWriter(ctx),
+      new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
+      new DirectInteractionPort(ctx),
+    )
 
     // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
     // both fall back to the saved default (settings `agent-presets.default`,
@@ -1565,7 +1571,7 @@ export function apply(ctx: Context, config: Config): void {
     // sessionless (the next input creates a new session); the failure is
     // surfaced as a notify line.
     let resumeFailure: string | undefined
-    let handle: Awaited<ReturnType<typeof agents.resume>> | undefined
+    let handle: SessionHandle | undefined
     if (sessionId !== undefined) {
       try {
         // The lock file lives next to the session log, whose path needs the
@@ -1585,7 +1591,11 @@ export function apply(ctx: Context, config: Config): void {
         // preflight runs BEFORE the physical lock is taken (review
         // round 36): a preflight failure leaves no lock to release or pin.
         const recorded = await recordedPreset(ctx, sessionId)
-        const composition = await compose(recorded)
+        // Preflight: the preset composition is resolved BEFORE the physical
+        // lock (a roster failure must never pin a session that did not enter
+        // the DSH boundary). The setup itself is re-resolved by the Direct
+        // adapter from the recorded preset id — deterministic within a run.
+        await compose(recorded)
         // Refuse to resume a session another live dsh process holds: the
         // second open makes persistence synthesize interrupted-turn closers
         // into the shared log while the first process keeps appending from
@@ -1617,19 +1627,20 @@ export function apply(ctx: Context, config: Config): void {
         // fallback).
         handle = await backend.sessionLifecycle.resume({
           resumeSessionId: SessionId(sessionId),
-          agentOptions,
-          setup: composition.setup,
+          provider: agentOptions.provider,
+          model: agentOptions.model,
+          agentPreset: recorded ?? undefined,
         })
         diag.info('resume ok', {
           session: sessionId,
-          seq: handle.agent.session.events.length,
+          seq: (handle.directAgent as Agent).session.events.length,
           preset: recorded ?? 'default',
         })
         // A launch-time preset may still apply while the session is blank;
         // the blank check lives inside recomposeBlank (shared with /preset).
         if (launchPreset !== undefined && launchPreset !== recorded) {
           try {
-            const outcome = await recomposeBlank(ctx, handle.agent, launchPreset)
+            const outcome = await recomposeBlank(ctx, handle.directAgent as Agent, launchPreset)
             if (outcome.kind === 'locked') {
               const message = `session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
               ctx.logger.warn(`tui-runner: ${message}`)
@@ -1667,8 +1678,8 @@ export function apply(ctx: Context, config: Config): void {
       // session at all — zero agent, zero log, zero persistence — and the
       // first user message creates it (see ensureSession below).
     }
-    let liveHandle = handle
-    let liveAgent = handle?.agent
+    let liveHandle = handle?.directAgent as AgentHandle | undefined
+    let liveAgent = handle?.directAgent as Agent | undefined
     if (liveAgent !== undefined) {
       // The committed live session's lease becomes ACTIVE (a successful
       // launch resume must not stay TOUCHED — review round 32).
@@ -1893,7 +1904,16 @@ export function apply(ctx: Context, config: Config): void {
      * Must be called inside {@link transitionGate} (via
      * `withSessionTransition` or the rewind commit's own gate wrapper).
      */
-    const transitionTo = async <T extends AgentHandle>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
+
+/** Extract the live in-process agent from a transition next value: the
+ * Direct SessionHandle carries it as directAgent; an AgentHandle IS the
+ * agent handle. Remote handles carry neither (the client runtime owns the
+ * session there — M2+). */
+const transitionAgent = (next: unknown): Agent | undefined => {
+  const handle = next as { agent?: Agent; directAgent?: unknown }
+  return handle.directAgent as Agent | undefined ?? handle.agent
+}
+    const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
       const from = liveAgent?.session.id
       const oldHandle = liveHandle
       return runTransitionTo<T>({
@@ -1923,9 +1943,9 @@ export function apply(ctx: Context, config: Config): void {
           // async work from the old session cannot commit, and clear
           // old-session state.
           bumpSessionGeneration()
-          liveHandle = next
-          liveAgent = next.agent
-          leaseManager.markActive(next.agent.session.id)
+          liveHandle = next as AgentHandle | undefined
+          liveAgent = transitionAgent(next)
+          leaseManager.markActive(transitionAgent(next)!.session.id)
         },
         pinTarget: (sessionId, reason) => {
           leaseManager.pin(sessionId, reason)
@@ -1999,12 +2019,12 @@ export function apply(ctx: Context, config: Config): void {
             }
           }
           try {
-            await next.agent.whenIdle()
+            await transitionAgent(next)!.whenIdle()
           } catch (error) {
             retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
           }
           try {
-            await initLiveSession(next.agent)
+            await initLiveSession(transitionAgent(next)!)
           } catch (error) {
             retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
           }
@@ -2015,14 +2035,14 @@ export function apply(ctx: Context, config: Config): void {
           // the coordinator warns and the transition commands keep
           // re-validating).
           try {
-            await refreshLiveCatalog(next.agent)
+            await refreshLiveCatalog(transitionAgent(next)!)
           } catch (error) {
             retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
           }
           if (retired.length > 0) {
-            diag.error('transition retire failed (child committed)', { to: next.agent.session.id, failures: retired })
+            diag.error('transition retire failed (child committed)', { to: transitionAgent(next)!.session.id, failures: retired })
           }
-          diag.info('switch ok', { from: from ?? '(none)', to: next.agent.session.id, seq: next.agent.session.events.length })
+          diag.info('switch ok', { from: from ?? '(none)', to: transitionAgent(next)!.session.id, seq: transitionAgent(next)!.session.events.length })
         },
         recordFailure: (phase, error) => {
           diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
@@ -2070,16 +2090,17 @@ export function apply(ctx: Context, config: Config): void {
         } catch {
           // Best-effort; the resume path reports failures.
         }
-        // The composition is resolved ONCE and drives the resume (there is
-        // no recovery path — a rejected resume is pinned immediately).
-        const composition = await compose(await recordedPreset(ctx, sessionId))
+        // The recorded preset drives the resume; the composition is
+        // resolved by the Direct adapter from that id (preflight here only
+        // for lock ordering — a roster failure must not pin a session that
+        // never entered the DSH boundary).
+        const recorded = await recordedPreset(ctx, sessionId)
+        await compose(recorded)
         const resumeOptions = {
           resumeSessionId: SessionId(sessionId),
-          agentOptions: {
-            provider: liveAgent?.options.provider ?? selection.provider,
-            model: liveAgent?.options.model ?? selection.model,
-          },
-          setup: composition.setup,
+          provider: liveAgent?.options.provider ?? selection.provider,
+          model: liveAgent?.options.model ?? selection.model,
+          agentPreset: recorded ?? undefined,
         }
         const result = await transitionTo({
           target: { id: sessionId, header: lockHeader },
@@ -4889,7 +4910,7 @@ export function apply(ctx: Context, config: Config): void {
         // refusal aborts with zero side effects, and a create failure
         // PINNS the target (never a release, never a second fresh
         // fallback).
-        const createWithLock = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<Awaited<ReturnType<typeof agents.create>>> => {
+        const createWithLock = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<SessionHandle> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
           const lock = acquireOpenLock(String(sessionId), { cwd: process.cwd() })
           if (lock.kind === 'refused') throw new Error(lock.message)
@@ -4902,10 +4923,11 @@ export function apply(ctx: Context, config: Config): void {
           leaseManager.markTouched(String(sessionId))
           try {
             return await backend.sessionLifecycle.create({
-              sessionId,
+              sessionId: String(sessionId),
               meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-              agentOptions,
-              setup: composition.setup,
+              provider: agentOptions.provider,
+              model: agentOptions.model,
+              agentPreset: composition.agentPreset,
             })
           } catch (error) {
             leaseManager.pin(String(sessionId), `first-session creation failed: ${safeErrorMessage(error)}`)
@@ -4913,7 +4935,7 @@ export function apply(ctx: Context, config: Config): void {
             throw error
           }
         }
-        let created: Awaited<ReturnType<typeof agents.create>>
+        let created: SessionHandle
         try {
           created = await createWithLock(launched.composition)
         } catch (error) {
@@ -4930,9 +4952,12 @@ export function apply(ctx: Context, config: Config): void {
           resumeFailure = `could not create the first session: ${message}`
           throw error
         }
-        liveHandle = created
-        liveAgent = created.agent
-        leaseManager.markActive(liveAgent.session.id)
+        // A successful Direct create always yields the live agent (the
+        // port contract: directAgent is present on Direct backends).
+        const createdAgent = created.directAgent as Agent
+        liveHandle = created.directAgent as AgentHandle
+        liveAgent = createdAgent
+        leaseManager.markActive(createdAgent.session.id)
         // The open-time lock was acquired BEFORE the create (above — the
         // createWithLock helper REQUIRED an acquired result, so this record
         // is an idempotent no-op). This is a plain PHYSICAL re-record of
@@ -5096,10 +5121,7 @@ export function apply(ctx: Context, config: Config): void {
       const commitHost: RewindCommitHost = {
         sessionCwd: () => sessionCwd(),
         compose,
-        agents: {
-          create: (options: CreateSessionOptions) => backend.sessionLifecycle.create(options),
-          resume: (options: ResumeSessionOptions) => backend.sessionLifecycle.resume(options),
-        } as unknown as RewindCommitHost['agents'],
+        agents: backend.sessionLifecycle,
         liveIdentity: () => ({ sessionId: liveAgent?.session.id, generation: sessionGeneration }),
         // The unified transaction: the old session is flushed BEFORE the
         // child is created (a stale rewind is detected before anything is
@@ -5177,7 +5199,12 @@ export function apply(ctx: Context, config: Config): void {
       ensureSession,
       get selected() { return selected },
       get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
-      agents: agents as unknown as TuiCommandRunner['agents'],
+      // /new and /fork create through the session lifecycle port (semantic
+      // requests — the Direct adapter resolves the preset composition).
+      agents: {
+        create: (options) => backend.sessionLifecycle.create(options),
+        resume: (options) => backend.sessionLifecycle.resume(options),
+      },
       sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       // The narrow Host-access facade (migration M1.7): commands read Host
       // services through `host`, never ctx directly.

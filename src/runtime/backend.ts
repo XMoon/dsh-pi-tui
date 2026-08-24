@@ -10,7 +10,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/backend
  */
 
-import { CAPABILITIES, type CapabilitySet } from './capability.ts'
+import { DIRECT_IMPLEMENTED_CAPABILITIES, type CapabilitySet } from './capability.ts'
 import type { SubagentPort } from './subagent-port.ts'
 import type { SessionReader } from './session-reader-port.ts'
 import type { SessionWriter } from './session-writer-port.ts'
@@ -50,7 +50,7 @@ export function createDirectBackend(
 ): Backend {
   return {
     kind: 'direct',
-    capabilities: new Set(CAPABILITIES),
+    capabilities: new Set(DIRECT_IMPLEMENTED_CAPABILITIES),
     subagent,
     sessionReader,
     sessionWriter,
