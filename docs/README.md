@@ -29,6 +29,7 @@ knows where the rest lives.
 | `extension-capability-matrix.md` | plugin authors | The Pi capability reference: Pi capability → dsh equivalent → tier → status (roadmap, not a hash gate) |
 | `plugin-authoring.md` | plugin authors | The "which tier should I use?" decision tree and the authoring checklist |
 | `extension-unstable.md` | plugin authors | The UNSTABLE tier author guide (Phase 3): raw input interception, exclusive raw ownership, the emergency fail-safe, the low-level surface seam — NO compatibility guarantee |
+| `keybinding-architecture.md` | contributors | The user-orchestrable keybinding design: the semantic action inventory (`app.*`), the context-aware effective keymap, the input ladder, the leader (M6) machinery, user configuration, and the static gate |
 | `extension-tiers.md` | plugin authors | The three-tier contract table and the current tier status (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`) |
 | `tmux/` | — | Helper scripts (`ansi2html.mjs`, `tui-demo.sh`) with their own tests |
 | `dsh-pi-tui.png` | — | Screenshot used by the root README |

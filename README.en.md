@@ -187,6 +187,37 @@ Slash Commands registered by other plugins through `ctx.commands` are discovered
 | `!!`          | Enter local-only Shell mode                         |
 
 Use `/help` inside the TUI for the current command and keybinding list.
+### Customizing keybindings
+
+Host shortcuts are semantic actions (`app.*`) resolved through a
+context-aware keymap — the UI (footer hints, `/help`, `/keybindings`)
+always shows the EFFECTIVE keys, so a remap updates every hint. Configure
+them in the `pi-tui` settings namespace (hot-reloaded, no restart):
+
+```yaml
+pi-tui:
+  keybindings:
+    app.input.steer: ctrl+s          # one key
+    app.permission.cycle: [shift+tab, ctrl+shift+p]   # several keys
+    app.history.search: ctrl+r
+    app.transcript.toggleThinking: false   # disable the action's keys
+    leader: ctrl+x                    # M6: leader sequences
+    bindings:
+      app.tasks.open: <leader>t
+```
+
+- A plain printable key can never be bound to a Host action (it would
+  swallow typing); a bad entry is a warning, never a startup failure
+  (fail-soft).
+- `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores all user overrides (builtin
+  defaults only).
+- `/keybindings` shows the effective table; `/keybindings conflicts`
+  lists conflicts (same key + overlapping scope + same priority — never
+  silent last-write-wins); `/keybindings reload` re-reads the settings;
+  `/keybindings reset` clears the overrides through the settings service.
+- The subagent viewer blocks PARENT actions by action id, so a remapped
+  parent shortcut stays blocked inside the viewer.
+
 
 ## Installation
 

@@ -464,7 +464,7 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
       onGet?.(reads)
       return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }
     },
-    replace: doc => { currentTheme = doc.theme },
+    replace: doc => { currentTheme = doc.theme as string },
   }
 }
 

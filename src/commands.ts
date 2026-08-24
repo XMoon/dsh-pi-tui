@@ -27,6 +27,10 @@ import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { iconStyleOf } from './icons.ts'
+import { parseUserKeybindings } from './keybindings/config.ts'
+import { APP_KEYBINDINGS } from './keybindings/definitions.ts'
+import { formatKeyId, formatKeyList } from './keybindings/hints.ts'
+import type { AppKeybindingId } from './keybindings/types.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
@@ -204,11 +208,13 @@ export function presetDisplayText(preset: {
 }
 
 /** The TUI settings document surface (theme/footer/fullscreen/busyEnter/
- * localShellSandbox/homeEndKeys). The old `history` field moved to
- * $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
+ * localShellSandbox/homeEndKeys/focusMode). The old `history` field moved
+ * to $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
  * document anymore. The type now lives on the config port (M1.9); the
- * re-export keeps the public commands-surface name stable for tests. */
-export type { TuiSettingsLike } from './runtime/config-port.ts'
+ * re-export keeps the public commands-surface name stable for tests. The
+ * user keybinding overrides (`keybindings`, an unknown-key pass-through
+ * in the config port's document schema — see index.ts) ride along. */
+export type { TuiSettingsLike, TuiSettingsDoc } from './runtime/config-port.ts'
 import type { TuiSettingsLike } from './runtime/config-port.ts'
 
 
@@ -2857,16 +2863,26 @@ export function registerTuiCommands(
     name: 'help',
     description: 'Show keybindings and available commands',
     handler: () => {
-      const rows: SettingItem[] = [        { id: 'k-enter', label: 'Enter', description: 'Submit (steers the running turn while busy when Enter while busy is Steer; skill commands steer too, UI commands run locally)', currentValue: '' },
-        { id: 'k-queue', label: 'Ctrl+Enter', description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
-        { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
-        { id: 'k-cancel', label: 'Esc', description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
-        { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is Alt+T', currentValue: '' },
-        { id: 'k-todo', label: 'Ctrl+T', description: 'Toggle the todo panel', currentValue: '' },
-        { id: 'k-think', label: 'Alt+T', description: 'Collapse/expand thinking blocks (detail level — blocks stay visible)', currentValue: '' },
-        { id: 'k-steer', label: 'Ctrl+S', description: 'Steer the running turn with the draft', currentValue: '' },
-        { id: 'k-editor', label: 'Ctrl+G', description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
-        { id: 'k-search', label: 'Ctrl+F', description: 'Search the transcript (Enter/Shift+Enter jump, Esc closes)', currentValue: '' },
+      // M4: the key labels come from the EFFECTIVE keymap (plan §18) — a
+      // user remap updates /help automatically; the UI never hard-codes a
+      // physical shortcut.
+      const keybindings = app.keybindingsManager()
+      const keysLabel = (action: AppKeybindingId): string => {
+        const keys = keybindings.keysFor(action)
+        if (keys.length > 0) return formatKeyList(keys)
+        const hint = keybindings.keyHint(action)
+        return hint === '' ? '—' : hint
+      }
+      const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit (steers the running turn while busy when Enter while busy is Steer; skill commands steer too, UI commands run locally)', currentValue: '' },
+        { id: 'k-queue', label: keysLabel('app.input.queue'), description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
+        { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Quit the TUI (flushes the session)', currentValue: '' },
+        { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
+        { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: 'Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is Alt+T', currentValue: '' },
+        { id: 'k-todo', label: keysLabel('app.todo.toggle'), description: 'Toggle the todo panel', currentValue: '' },
+        { id: 'k-think', label: keysLabel('app.transcript.toggleThinking'), description: 'Collapse/expand thinking blocks (detail level — blocks stay visible)', currentValue: '' },
+        { id: 'k-steer', label: keysLabel('app.input.steer'), description: 'Steer the running turn with the draft', currentValue: '' },
+        { id: 'k-editor', label: keysLabel('app.editor.external'), description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
+        { id: 'k-search', label: keysLabel('app.transcript.search'), description: 'Search the transcript (Enter/Shift+Enter jump, Esc closes)', currentValue: '' },
         { id: 'k-tab', label: 'Tab', description: 'Autocomplete slash commands and file paths', currentValue: '' },
         { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
         { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs locally without recording', currentValue: '' },
@@ -2878,6 +2894,84 @@ export function registerTuiCommands(
           currentValue: '',
         })),
       ]
+      app.openSettings(rows, () => {}, () => {})
+      return { kind: 'success' }
+    },
+  })
+
+  // M4: the keybinding diagnostics command (plan §19). The panel is
+  // read-only (no key recorder in the first version); reload re-reads the
+  // settings document, reset clears the user overrides THROUGH the
+  // settings service (never a direct settings.yaml write).
+  commands.register({
+    name: 'keybindings',
+    description: 'Show effective keybindings (conflicts / reload / reset)',
+    input: { hint: '[conflicts|reload|reset]' },
+    handler: (invocation) => {
+      const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+      const keybindings = app.keybindingsManager()
+      if (verb === 'conflicts') {
+        const conflicts = keybindings.snapshot().conflicts
+        if (conflicts.length === 0) {
+          app.notify('No keybinding conflicts.', 'info')
+          return { kind: 'success', text: 'No keybinding conflicts.' }
+        }
+        const rows: SettingItem[] = conflicts.flatMap(conflict => [{
+          id: `conflict-${conflict.key}`,
+          label: color.warning(formatKeyId(conflict.key)),
+          description: conflict.actions
+            .map(entry => `${entry.action} (${entry.scope}, ${entry.source})`)
+            .join('  vs  '),
+          currentValue: 'conflict',
+        }])
+        app.openSettings(rows, () => {}, () => {})
+        return { kind: 'success' }
+      }
+      if (verb === 'reload') {
+        // Re-validate the settings document and rebuild the keymap
+        // (fail-soft: bad entries are diagnostics, never a crash).
+        const parsed = parseUserKeybindings(runner.tuiSettings?.get().keybindings)
+        for (const message of parsed.diagnostics) runner.diag.warn('keybindings', { message })
+        keybindings.setUserConfiguration(parsed)
+        app.notify('Keybindings reloaded.', 'info')
+        return { kind: 'success', text: 'Keybindings reloaded.' }
+      }
+      if (verb === 'reset') {
+        const settings = runner.tuiSettings
+        if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
+        const doc = { ...settings.get() } as Record<string, unknown>
+        delete doc.keybindings
+        detach('keybindings reset', () => settings.replace(doc), { notify: true })
+        app.notify('Keybindings reset to defaults.', 'info')
+        return { kind: 'success', text: 'Keybindings reset to defaults.' }
+      }
+      // The full effective table, grouped by category (plan §19).
+      const snapshot = keybindings.snapshot()
+      const categories = new Map<string, SettingItem[]>()
+      for (const binding of snapshot.bindings) {
+        const definition = APP_KEYBINDINGS[binding.action as AppKeybindingId]
+        const category = definition?.category ?? 'Other'
+        const list = categories.get(category) ?? []
+        list.push({
+          id: `kb-${binding.action}`,
+          label: binding.keys.length === 0 ? '—' : binding.keys.map(formatKeyId).join(' / '),
+          description: `${binding.action} — ${definition?.description ?? ''} (${binding.scope}, ${binding.source})`,
+          currentValue: '',
+        })
+        categories.set(category, list)
+      }
+      const rows: SettingItem[] = []
+      for (const [category, list] of categories) {
+        rows.push({ id: `sep-${category}`, label: color.border(`── ${category} ──`), currentValue: '' })
+        rows.push(...list)
+      }
+      const diagnostics = keybindings.diagnosticsList()
+      if (diagnostics.length > 0) {
+        rows.push({ id: 'sep-diag', label: color.border('── diagnostics ──'), currentValue: '' })
+        for (const message of diagnostics) {
+          rows.push({ id: `diag-${rows.length}`, label: color.warning('⚠'), description: message, currentValue: '' })
+        }
+      }
       app.openSettings(rows, () => {}, () => {})
       return { kind: 'success' }
     },

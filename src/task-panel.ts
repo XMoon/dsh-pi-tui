@@ -11,8 +11,9 @@
  * @module @xmoon76/dsh-pi-tui/task-panel
  */
 
-import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { Input, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
+import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color, taskStatusColor } from './theme.ts'
 import { SelectedMarquee } from './marquee.ts'
 
@@ -289,19 +290,21 @@ export class TaskBrowserPanel implements Component, Focusable {
     // the SelectList pattern: a filter box must be editable, not just
     // typeable.
     //
-    // All key matches go through matchesKey (never raw sequence compares):
-    // it recognizes legacy AND Kitty CSI-u / modifyOtherKeys encodings, so
-    // terminals that report CSI-u (zellij + Kitty-protocol, Windows
-    // Terminal, WezTerm, kitty…) keep the panel navigable — the raw
-    // compares ('\x1b[A' etc.) silently dropped every arrow/page key there.
+    // All key matches go through the component keymap (M5): the semantic
+    // tasks.* actions resolve through matchesKey (never raw sequence
+    // compares) — it recognizes legacy AND Kitty CSI-u / modifyOtherKeys
+    // encodings, so terminals that report CSI-u (zellij + Kitty-protocol,
+    // Windows Terminal, WezTerm, kitty…) keep the panel navigable — the
+    // raw compares ('\x1b[A' etc.) silently dropped every arrow/page key
+    // there.
     //
     // The `k`/`j` vim aliases for ↑/↓ apply ONLY when search is OFF: with a
     // search box up, `k`/`j` are ordinary letters a query may contain
     // ("task", "jq") — routing them as navigation would make those queries
     // untruncatable.
-    const isNavUp = matchesKey(data, 'up') || (!this.searchEnabled && data === 'k')
-    const isNavDown = matchesKey(data, 'down') || (!this.searchEnabled && data === 'j')
-    const isPage = matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')
+    const isNavUp = componentKeymap.matches(data, 'tasks.cursorUp') || (!this.searchEnabled && data === 'k')
+    const isNavDown = componentKeymap.matches(data, 'tasks.cursorDown') || (!this.searchEnabled && data === 'j')
+    const isPage = componentKeymap.matches(data, 'tasks.pageUp') || componentKeymap.matches(data, 'tasks.pageDown')
     // Row-level interrupt (`i`): fires while the search box is CLOSED, or
     // while it is open but EMPTY and the selection sits on an
     // INTERRUPTIBLE row (a continuable subagent — the only kind
@@ -314,13 +317,13 @@ export class TaskBrowserPanel implements Component, Focusable {
       const item = this.filtered[this.selected]
       return item !== undefined && item.interruptible === true
     }
-    if (data === 'i' && this.onAction !== undefined && !this.searchEnabled && interruptibleSelected()) {
+    if (componentKeymap.matches(data, 'tasks.interrupt') && this.onAction !== undefined && !this.searchEnabled && interruptibleSelected()) {
       const item = this.filtered[this.selected]
       if (item !== undefined) this.onAction(item.value, 'interrupt')
       return
     }
     if (
-      data === 'i' && this.onAction !== undefined && this.searchEnabled
+      componentKeymap.matches(data, 'tasks.interrupt') && this.onAction !== undefined && this.searchEnabled
       && (this.searchInput.getValue() ?? '') === ''
       && interruptibleSelected()
     ) {
@@ -330,11 +333,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
     // Tab cycles the type filter (All → subagent → bash → pwsh → …).
     // Consumed before the search input so a query can never contain a tab.
-    if (matchesKey(data, 'tab')) {
+    if (componentKeymap.matches(data, 'tasks.cycleType')) {
       this.cycleType()
       return
     }
-    if (!isNavUp && !isNavDown && !isPage && !matchesKey(data, 'enter') && !matchesKey(data, 'escape') && this.searchEnabled) {
+    if (!isNavUp && !isNavDown && !isPage && !componentKeymap.matches(data, 'tasks.confirm') && !componentKeymap.matches(data, 'tasks.cancel') && this.searchEnabled) {
       // Typing a search query is a user interaction with the list: a later
       // enrichment must not re-focus the head over the user's filter.
       this.selectionTouched = true
@@ -359,17 +362,17 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (isPage) {
       if (this.filtered.length === 0) return
       this.selectionTouched = true
-      if (matchesKey(data, 'pageUp')) this.selected = Math.max(0, this.selected - this.maxVisible)
+      if (componentKeymap.matches(data, 'tasks.pageUp')) this.selected = Math.max(0, this.selected - this.maxVisible)
       else this.selected = Math.min(this.filtered.length - 1, this.selected + this.maxVisible)
       this.ensureVisible()
       return
     }
-    if (matchesKey(data, 'enter')) {
+    if (componentKeymap.matches(data, 'tasks.confirm')) {
       const item = this.filtered[this.selected]
       if (item !== undefined) this.onSelect(item.value)
       return
     }
-    if (matchesKey(data, 'escape')) {
+    if (componentKeymap.matches(data, 'tasks.cancel')) {
       this.onCancel()
     }
   }

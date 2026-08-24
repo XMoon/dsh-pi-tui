@@ -22,6 +22,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance — no restart, no session reload. Third-party extensions,
   user/assistant/tool content and the image attachment marker are
   untouched.
+- **Keybindings are now user-orchestrable.** Every Host shortcut is a
+  semantic action (`app.*`) resolved through a context-aware keymap, so
+  the UI (footer hints, `/help`, `/keybindings`) always shows the
+  EFFECTIVE keys. Configure overrides in the `pi-tui` settings namespace
+  (`keybindings` field, hot-reloaded — no restart): a string for one
+  key, an array for several, `false` to disable an action's keys, and a
+  `leader` key plus `<leader>X` sequences for multi-key bindings (M6).
+  A plain printable key can never be bound to a Host action; a bad entry
+  is a warning, never a startup failure (fail-soft); conflicts (same key
+  + overlapping scope + same priority) are diagnosed and deactivated —
+  never silent last-write-wins. `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores
+  all user overrides. `/keybindings` shows the effective table,
+  `/keybindings conflicts` lists conflicts, `/keybindings reload`
+  re-reads the settings, and `/keybindings reset` clears the overrides
+  through the settings service.
+- **The subagent viewer guard is action-based.** The continuable viewer
+  blocks PARENT actions by action id (not by physical key), so a
+  remapped parent shortcut stays blocked inside the viewer — the
+  architecture no longer couples session safety to a physical key list.
+- **A static gate prevents new physical shortcuts.**
+  `scripts/check-host-keybindings.mts` (wired into `verify:prepush`)
+  fails on any new `matchesKey(data, 'ctrl+…'/'alt+…'/'shift+…')` chord
+  in the host input path, with a documented allowlist for the sanctioned
+  focused-component/protocol seams.
+
+### Changed
+
+- The question flow and the task browser route their keys through
+  semantic component actions (`question.*` / `tasks.*`); their behavior
+  and keys are unchanged.
+
 
 ## [0.3.4] - 2026-08-25
 

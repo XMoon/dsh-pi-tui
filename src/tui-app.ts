@@ -43,6 +43,7 @@ import {
   type SlashCommand,
   type Terminal,
   type TuiInputListenerResult,
+  type KeyId,
 } from '@xmoon76/pi-tui'
 import { ImageThumbnail } from './components/media/image-thumbnail.ts'
 import {
@@ -106,6 +107,13 @@ import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './input-router.ts'
+import { AppActionDispatcher, type AppActionHost } from './keybindings/action-dispatcher.ts'
+import { deriveKeybindingContext } from './keybindings/context.ts'
+import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './keybindings/definitions.ts'
+import { formatKeyId } from './keybindings/hints.ts'
+import type { LeaderStateMachine } from './keybindings/leader.ts'
+import { HostKeybindingManager } from './keybindings/manager.ts'
+import type { AppKeybindingId, KeybindingContext, UserKeybindingsConfig } from './keybindings/types.ts'
 import {
   isLocalShellCard,
   localShellHiddenMarker,
@@ -1777,6 +1785,12 @@ export class TuiApp {
   private readonly pluginActionIdFor: ((key: import('./extension/public-types.ts').NormalizedKey) => string | undefined) | undefined
   /** M6: the host-owned input precedence router (normalization + rules). */
   private readonly inputRouter: InputRouter
+  /** The user-orchestrable keybinding manager (M0–M6): the semantic
+   * action resolver + leader machine. Built by the constructor when the
+   * runner did not inject one. */
+  private readonly keybindings: HostKeybindingManager
+  /** The semantic action → host method router (plan §9). */
+  private readonly actionDispatcher: AppActionDispatcher
   /** M7: the transcript/tool renderer registry (optional). */
   private readonly renderers: RendererRegistry | undefined
   /** M9: the editor registry (optional). */
@@ -1998,6 +2012,20 @@ export class TuiApp {
     this.unstableInputsRevision = options.unstableInputsRevision
     this.unstableFailSafeRelease = options.unstableFailSafeRelease
     this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
+    // The keybinding manager (M0–M6): the app ALWAYS builds it (the
+    // runner configures it afterwards through keybindingsManager() — user
+    // overrides, safe mode, plugin rules), so the surface callbacks
+    // (repaint, which-key footer, leader dispatch) are never lost. The
+    // builtin defaults keep the surface behavior identical without any
+    // runner wiring.
+    this.keybindings = new HostKeybindingManager({
+      onInvalidate: () => this.requestRender(),
+      onLeaderStateChange: () => this.renderFooter(),
+      onLeaderActivate: (action) => {
+        this.dispatchResolvedAction(action as AppKeybindingId, '')
+      },
+    })
+    this.actionDispatcher = new AppActionDispatcher(this.buildActionHost())
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
     this.copySelection = options.copySelection
@@ -2567,21 +2595,23 @@ export class TuiApp {
       // Esc (exit) and Ctrl+O (fold) fall through to the host ladder.
     }
     // Transcript search owns these keys while its overlay is up; everything
-    // else falls through to the focused search input.
+    // else falls through to the focused search input. The keys route
+    // through the keymap's DEFAULT keys (the search actions are
+    // non-configurable overlay contracts — plan §3.3).
     if (this.searchOverlay !== undefined) {
-      if (matchesKey(data, 'escape')) {
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) {
         this.closeTranscriptSearch()
         return { consume: true }
       }
-      if (matchesKey(data, 'enter')) {
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.next')) {
         this.events.onSearchNext?.()
         return { consume: true }
       }
-      if (matchesKey(data, 'shift+enter')) {
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.previous')) {
         this.events.onSearchPrev?.()
         return { consume: true }
       }
-      if (matchesKey(data, 'ctrl+f')) {
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search')) {
         // Ctrl+F is the search toggle; a second press closes the overlay.
         this.closeTranscriptSearch()
         return { consume: true }
@@ -2599,302 +2629,46 @@ export class TuiApp {
     // lifecycle handlers must not consume its keys before pi-tui dispatches
     // them to that component.
     if (this.activeScreen.hasOverlayEntries) return undefined
-    // Ctrl+R input-history search (host-reserved lifecycle key, §29): the
-    // overlay guard above keeps the key with any active overlay/question/
-    // approval/viewer (plan §28/§30); with nothing up, the host opens the
-    // history panel. Unbound (no historySearchSource): falls through to the
-    // editor like any un-reserved key. The continuable subagent viewer keeps
-    // its OWN live editor — plan §30 M1 restricts Ctrl+R to the MAIN editor,
-    // so the chord is a no-op there (never the child draft, never the parent
-    // draft): the viewer's parent-owned chords already consume Enter etc.
-    if (matchesKey(data, 'ctrl+r') && this.historySearchSource !== undefined
-      && this.viewerMode === undefined) {
-      this.openHistorySearch()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'ctrl+shift+f') || matchesKey(data, 'ctrl+f')) {
-      this.startTranscriptSearch()
-      return { consume: true }
-    }
     // P1-10: a PLUGIN editor occupying the seat receives editor-routed input
     // before plugin keybindings. Enter remains host-owned: forward it through
     // the hidden host editor so active autocomplete gets its normal confirm /
     // submit semantics before the resulting draft is synchronized back. The
     // plugin editor never receives host-owned Enter; Shift+Enter stays with
-    // the plugin (its own multiline editing).
+    // the plugin (its own multiline editing). (Enter itself is NOT a host
+    // keybinding — app.input.submit is hostResolved: false, the fork editor
+    // owns it — so this seam stays physical: it is the focused-editor
+    // contract, not a host shortcut.)
     if (this.seatEditor().handleInput !== undefined
       && matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
       this.editorSeatHolder.handleHostFallbackInput(data)
       return { consume: true }
     }
-    if (matchesKey(data, 'shift+tab')) {
-      // Cycle the permission preset; overlays keep Shift+Tab for themselves.
-      if (this.activeScreen.hasOverlayEntries) return undefined
-      this.events.onCyclePermission?.()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'alt+up')) {
-      // Dequeue (Alt+↑): pull queued input back into the editor; overlays
-      // keep the key for themselves.
-      if (this.activeScreen.hasOverlayEntries) return undefined
-      this.events.onDequeue?.()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'alt+k')) {
-      // Dismiss settled local shell cards (Alt+K — plan §5.4 quick clear):
-      // completed `!`/`!!` runs leave the live view; running cards never
-      // do (the process is NOT cancelled — Esc owns that). Overlays keep
-      // the key for themselves like the other Alt chords.
-      if (this.activeScreen.hasOverlayEntries) return undefined
-      this.dismissSettledLocalShell()
-      this.requestRender()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'ctrl+enter')) {
-      // The busy-Enter opposite chord (web busyEnter parity): Ctrl+Enter
-      // forces the QUEUE delivery mode while the agent is busy, regardless
-      // of the busyEnter preference (plain Enter then steers when the
-      // preference is 'steer'). Overlays keep the key for themselves; the
-      // editor never sees the chord — the submit mirrors a plain Enter
-      // (history + notify clear + draft clear). Without a wired
-      // onQueueSubmit the key falls through to the editor instead of
-      // dropping the draft; an EMPTY draft falls through too — plain Enter
-      // on an empty editor does not submit, and an empty chord would
-      // otherwise dispatch a session-creating empty followup.
-      if (this.activeScreen.hasOverlayEntries) return undefined
-      if (this.events.onQueueSubmit === undefined) return undefined
-      const text = this.seatEditor().getText()
-      const serialized = this.serializeSeatDraft(text)
-      // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
-      // shell mode has an empty BODY but a non-empty wire form, and must
-      // reach the queue protocol like the literal prefix did before the
-      // mode feature.
-      if (serialized.trim() === '') return undefined
-      this.rememberInput(serialized)
-      this.clearNotify()
-      this.seatEditor().setText('')
-      this.editorSeatHolder.notifyChanged()
-      // Reset BEFORE the dispatch: a synchronous rejection restores the
-      // serialized text (and with it the mode) through setEditorText.
-      this.resetEditorMode()
-      // Consumed at the app level: request the frame ourselves (the
-      // stale-clear trap — see the Ctrl+C branch).
-      this.requestRender()
-      this.events.onQueueSubmit(serialized)
-      return { consume: true }
-    }
-    if (matchesKey(data, 'escape')) {
-      // Overlays (pickers, settings) own Esc while they are up.
-      if (this.activeScreen.hasOverlayEntries) return undefined
-      // Autocomplete owns Esc while the dropdown is open: let the editor
-      // close it (TuiEditor intercepts; kimi parity). Without this the
-      // app-level consume swallows Esc and the dropdown cannot close.
-      // Capability-detected: a REPLACEMENT editor with its own dropdown
-      // gets the same pass-through (its focused component handles Esc).
-      if ((this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true) {
-        return undefined
-      }
-      // The host may consume the first Esc (runner-owned modes like the
-      // subagent viewer); otherwise it arms the double-Esc cancel. A
-      // CONSUMED Esc is a fresh action: it disarms any pending window (a
-      // prior declined Esc may have armed it — the consumed Esc must not
-      // leave a stale cancel armed for an unrelated later press).
-      if (this.events.onSingleEscape?.() === true) {
-        this.lastEscapeAt = undefined
+// M6: the leader sequence machine (armed only when a leader key is
+    // configured). Fed AFTER the capturing flows and overlays, BEFORE the
+    // host action ladder — a completing key is consumed by the sequence,
+    // and a paste burst / non-matching key cancels the pending state and
+    // passes through (typing is never swallowed). The machine's onActivate
+    // callback ALREADY dispatched the action (the manager wires it to
+    // dispatchResolvedAction) — this branch only consumes the key.
+    const leader = this.keybindings.leaderMachine()
+    if (leader !== undefined) {
+      const outcome = leader.feed(data)
+      if (outcome.kind === 'consumed' || outcome.kind === 'cancelled-consume' || outcome.kind === 'activated') {
         return { consume: true }
       }
-      // pi parity: a SINGLE Esc while the agent is busy stops the current
-      // activity (turn, tool run, compaction) — partial content stays on
-      // screen. Idle keeps the double-Esc cancel. The busy cancel is
-      // Host-owned session control and keeps its priority over BOTH the
-      // shell-mode exit below and a replacement editor's own Esc state
-      // machine (a busy Esc must stop the agent, never vanish into a
-      // plugin's modal handling).
-      if (this.busy) {
-        this.lastEscapeAt = undefined
-        this.events.onCancel?.()
-        return { consume: true }
-      }
-      // P1-6: a REPLACEMENT editor owns Esc for its own modal state
-      // machine (vim normal-mode entry) — route it through the editor
-      // channel below instead of the host's double-Esc cancel. If the
-      // plugin DECLINES it, the editor route hands it back to the host
-      // fallback (which includes this cancel path on re-entry).
-      if (this.seatEditor().handleInput !== undefined) {
-        const routed = this.handleReplacementEditorInput(data, this.inputRouterContext(), true)
-        if (routed !== undefined) {
-          // A CONSUMED plugin Esc is a fresh action: disarm any pending
-          // double-Esc window (a prior declined Esc may have armed it).
-          this.lastEscapeAt = undefined
-          return routed
-        }
-        // The plugin DECLINED Esc: continue through the host Esc fallback
-        // (shell-mode exit, double-Esc cancel) instead of dropping the
-        // key — a dropped Esc would never arm the cancel.
-      }
-      // Shell-mode exit: the host editor in a shell mode with an EMPTY
-      // body owns Esc — it cancels the shell mode (the double-Esc cancel
-      // must not fire while the user is composing a shell command). The
-      // pass-through lets the focused editor handle the key, exactly like
-      // the autocomplete branch above. Host-owned priorities (the viewer's
-      // onSingleEscape, the busy cancel, overlays) keep their precedence.
-      if (this.seatEditor().id === 'host' && this.editor.getInputMode() !== 'prompt' && this.seatEditor().getText() === '') {
-        return undefined
-      }
-      const now = Date.now()
-      if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
-        this.lastEscapeAt = undefined
-        // Conversation rewind (pi parity): an EMPTY editor opens the rewind
-        // picker; a non-empty draft keeps the historical cancel semantics —
-        // a half-written draft is never dragged into a rewind (plan Case C).
-        // A host without rewind keeps the cancel for both cases.
-        if (this.seatEditor().getText().trim() === '' && this.events.onRewind !== undefined) {
-          this.events.onRewind()
-        } else {
-          this.events.onCancel?.()
-        }
-      } else {
-        this.lastEscapeAt = now
-      }
-      return { consume: true }
+      // cancelled-pass: the pending state was cancelled; the key is
+      // processed normally below.
     }
-    if (matchesKey(data, 'ctrl+o')) {
-      // Fullscreen + Focus: Ctrl+O is the Thought-root bulk owner (plan
-      // §3) — no expanded root → expand the recent `EXPAND_RECENT_TURNS`
-      // eligible roots; any expanded root → Collapse All. Every other
-      // surface/Focus combination keeps the historical tool/system detail
-      // master (regular behavior untouched).
-      if (this.fullscreen !== undefined && this.focusModeEnabled) {
-        this.toggleFullscreenFocusRoots()
-        return { consume: true }
-      }
-      this.toolOutputExpanded = !this.toolOutputExpanded
-      this.rebuildMessages()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'ctrl+v')) {
-      // Clipboard paste with image intake (plan M3): with a host handler
-      // the key is consumed and the runner probes the clipboard once — an
-      // image becomes a draft placeholder and plain text falls back to an
-      // editor insert. WITHOUT a handler the key falls through to the
-      // editor exactly like the pre-pipeline behavior (round-1 finding 6).
-      if (this.events.onClipboardPaste === undefined) return { consume: false }
-      this.events.onClipboardPaste()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'ctrl+t')) {
-      // Todo panel toggle (kimi semantics; Ctrl+T never reaches the editor).
-      this.toggleTodoPanel()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'alt+t')) {
-      // Alt+T = the Thinking DETAIL bulk owner (never hide/show): every
-      // Thinking block collapses or expands together, Focus ON/OFF and
-      // both surfaces alike. Per-message overrides are cleared first so
-      // the result is predictable (plan §9).
-      this.toggleThinkingExpanded()
-      return { consume: true }
-    }
-    if (matchesKey(data, 'ctrl+s')) {
-      // Steer: send the draft into the running turn and clear the editor.
-      // An empty draft still fires the event — the runner steers every
-      // queued message when the queue is non-empty, and only ignores the
-      // key when there is nothing to send at all.
-      if (this.activeScreen.hasOverlayEntries) return { consume: true }
-      const draft = this.seatEditor().getText()
-      const serialized = this.serializeSeatDraft(draft)
-      this.seatEditor().setText('')
-      this.editorSeatHolder.notifyChanged()
-      this.resetEditorMode()
-      // Consumed at the app level: request the frame ourselves (the
-      // stale-clear trap — see the Ctrl+C branch).
-      this.requestRender()
-      this.events.onSteer?.(serialized)
-      return { consume: true }
-    }
-    if (matchesKey(data, 'down')) {
-      // Task browser: with active background tasks and an EMPTY editor, ↓
-      // opens the task list (nothing to move the cursor through). With text
-      // present the key keeps its editing meaning; overlays own it. (The
-      // former Ctrl+J chord is gone: legacy terminals send Ctrl+J as LF,
-      // which the editor treats as Enter — the key was unreliable, and ↓
-      // plus `/tasks` remain the two entries.) A shell-mode editor with an
-      // empty BODY is composing a command — ↓ keeps its editing meaning
-      // (a no-op on the empty line), never the browser.
-      if (this.tasksActive && !this.activeScreen.hasOverlayEntries
-        && this.seatEditor().getText().trim() === '' && this.seatInputMode() === 'prompt') {
-        this.events.onOpenTasks?.()
-        return { consume: true }
-      }
-    }
-    if (matchesKey(data, 'ctrl+g')) {
-      // External editor; overlays own Ctrl+G while up (alt-screen search).
-      // An owned workflow routed through the host's runOwned (diag attached
-      // by the runner): a spawn failure lands in diagnostics and notifies
-      // here — never a bare `void somePromise()` (AGENTS.md). The editor
-      // hook and runOwned are a BOUND pair (type union + constructor
-      // check): without the editor hook Ctrl+G is a documented no-op.
-      // Single-flight: while one launch is pending (the latch inside
-      // launchExternalEditor is set synchronously), further Ctrl+G presses
-      // are consumed without starting another editor.
-      if (this.activeScreen.hasOverlayEntries) return { consume: true }
-      if (this.events.openExternalEditor !== undefined && !this.externalEditorInFlight) {
-        this.events.runOwned('external editor', () => this.launchExternalEditor(), {
-          onError: (error: unknown) => {
-            this.notify(`external editor failed: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-      }
-      return { consume: true }
-    }
-    if (matchesKey(data, 'ctrl+c')) {
-      // pi parity (handleCtrlC): a first press CLEARS a non-empty editor
-      // (recording the time); a second press within the window on the now
-      // EMPTY editor exits. Overlays own the key (the global overlay guard
-      // above already passed them through). Issue #8: every arm shows the
-      // footer hint for EXACTLY the exit window (armCtrlCExit), and the
-      // exit path disarms it — the hint never outlives the window.
-      const text = this.seatEditor().getText()
-      // A shell-mode draft is non-empty in its SERIALIZED form: the
-      // first press clears BOTH the body and the mode — an empty `! ` /
-      // `!!` editor would otherwise show a cleared body under a stale
-      // shell prompt, and the next Ctrl+C would exit instead of
-      // completing the pre-mode clear contract.
-      if (text !== '' || this.seatInputMode() !== 'prompt') {
-        this.seatEditor().setText('')
-        this.resetEditorMode()
-        this.editorSeatHolder.notifyChanged()
-        this.armCtrlCExit()
-        // The key is CONSUMED at the app level, so the fork's input path
-        // never reaches the focused editor and never requests its own
-        // frame — without an explicit render the cleared draft stays on
-        // screen until the next keypress (the stale-clear trap, seen in
-        // tmux: the editor reads empty but the old text is still
-        // visible). Same pattern as setDraft/submitDraft.
-        this.requestRender()
-        return { consume: true }
-      }
-      const now = Date.now()
-      if (this.lastCtrlCAt !== undefined && now - this.lastCtrlCAt < this.ctrlCExitWindowMs) {
-        this.clearCtrlCExit()
-        this.events.onExit()
-      } else {
-        // First press on an EMPTY editor changes nothing visible, and the
-        // exit window is easy to miss — announce the armed state so a
-        // slow second press is not a silent no-op (the next Enter would
-        // otherwise send an empty draft). The second press within the
-        // window exits.
-        this.armCtrlCExit()
-      }
-      return { consume: true }
-    }
-    if (matchesKey(data, 'ctrl+d')) {
-      // Ctrl+D quits like /exit (and Ctrl+C). The editor's delete-char-
-      // forward remains on the Delete key. Issue #8: an armed exit chord
-      // must not leave its hint behind on a Ctrl+D exit.
-      this.clearCtrlCExit()
-      this.events.onExit()
-      return { consume: true }
+
+    // M1/M2: the host semantic action ladder. The keymap resolves the raw
+    // event against the live context; the dispatcher routes the action to
+    // the host methods. A resolution that DECLINES (e.g. pasteMedia
+    // without a clipboard handler) falls through to the editor/plugin
+    // stages below.
+    const resolution = this.keybindings.resolve(data, this.keybindingContext())
+    if (resolution !== undefined) {
+      const consumed = this.dispatchResolvedAction(resolution.action as AppKeybindingId, data, resolution.key)
+      if (consumed) return { consume: true }
     }
     // M6: the router first determines whether a capturing path owns the key.
     // A replacement editor gets the first chance for editor-routed input;
@@ -2959,6 +2733,339 @@ export class TuiApp {
       return { consume: true }
     }
     return undefined
+  }
+
+  /** The keybinding manager (M3/M4): the runner applies user config, safe
+   * mode and plugin rules through it; diagnostics read its snapshot. */
+  keybindingsManager(): HostKeybindingManager {
+    return this.keybindings
+  }
+
+  /** Dispatch one resolved semantic action (plan §9). The Esc and exit
+   * paths are the two context-heavy host paths and stay host methods,
+   * keyed by the ACTION — a user remap of app.agent.interrupt moves the
+   * whole Esc path to the new key. Returns whether the key was consumed. */
+  private dispatchResolvedAction(action: AppKeybindingId, data: string, key?: KeyId): boolean {
+    if (action === 'app.agent.interrupt') {
+      return this.handleEscapeKey(data) !== undefined
+    }
+    if (action === 'app.exit.request') {
+      this.handleExitKey(data)
+      return true
+    }
+    return this.actionDispatcher.dispatch(action, key)
+  }
+
+  /** The Esc path (app.agent.interrupt): autocomplete/replacement-editor
+   * pass-through, the runner's single-Esc modes, the busy single-Esc
+   * cancel, the shell-mode exit pass-through, and the idle double-Esc
+   * cancel/rewind. Returns undefined when the key must fall through
+   * (autocomplete open, replacement editor). */
+  private handleEscapeKey(data: string): TuiInputListenerResult | undefined {
+    // Overlays (pickers, settings) own Esc while they are up.
+    if (this.activeScreen.hasOverlayEntries) return undefined
+    // Autocomplete owns Esc while the dropdown is open: let the editor
+    // close it (TuiEditor intercepts; kimi parity). Without this the
+    // app-level consume swallows Esc and the dropdown cannot close.
+    // Capability-detected: a REPLACEMENT editor with its own dropdown
+    // gets the same pass-through (its focused component handles Esc).
+    if ((this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true) {
+      return undefined
+    }
+    // The host may consume the first Esc (runner-owned modes like the
+    // subagent viewer); otherwise it arms the double-Esc cancel. A
+    // CONSUMED Esc is a fresh action: it disarms any pending window (a
+    // prior declined Esc may have armed it — the consumed Esc must not
+    // leave a stale cancel armed for an unrelated later press).
+    if (this.events.onSingleEscape?.() === true) {
+      this.lastEscapeAt = undefined
+      return { consume: true }
+    }
+    // pi parity: a SINGLE Esc while the agent is busy stops the current
+    // activity (turn, tool run, compaction) — partial content stays on
+    // screen. Idle keeps the double-Esc cancel. The busy cancel is
+    // Host-owned session control and keeps its priority over BOTH the
+    // shell-mode exit below and a replacement editor's own Esc state
+    // machine (a busy Esc must stop the agent, never vanish into a
+    // plugin's modal handling).
+    if (this.busy) {
+      this.lastEscapeAt = undefined
+      this.events.onCancel?.()
+      return { consume: true }
+    }
+    // P1-6: a REPLACEMENT editor owns Esc for its own modal state
+    // machine (vim normal-mode entry) — route it through the editor
+    // channel below instead of the host's double-Esc cancel. If the
+    // plugin DECLINES it, the editor route hands it back to the host
+    // fallback (which includes this cancel path on re-entry).
+    if (this.seatEditor().handleInput !== undefined) {
+      const routed = this.handleReplacementEditorInput(data, this.inputRouterContext(), true)
+      if (routed !== undefined) {
+        // A CONSUMED plugin Esc is a fresh action: disarm any pending
+        // double-Esc window (a prior declined Esc may have armed it).
+        this.lastEscapeAt = undefined
+        return routed
+      }
+      // The plugin DECLINED Esc: continue through the host Esc fallback
+      // (shell-mode exit, double-Esc cancel) instead of dropping the
+      // key — a dropped Esc would never arm the cancel.
+    }
+    // Shell-mode exit: the host editor in a shell mode with an EMPTY
+    // body owns Esc — it cancels the shell mode (the double-Esc cancel
+    // must not fire while the user is composing a shell command). The
+    // pass-through lets the focused editor handle the key, exactly like
+    // the autocomplete branch above. Host-owned priorities (the viewer's
+    // onSingleEscape, the busy cancel, overlays) keep their precedence.
+    if (this.seatEditor().id === 'host' && this.editor.getInputMode() !== 'prompt' && this.seatEditor().getText() === '') {
+      return undefined
+    }
+    const now = Date.now()
+    if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
+      this.lastEscapeAt = undefined
+      // Conversation rewind (pi parity): an EMPTY editor opens the rewind
+      // picker; a non-empty draft keeps the historical cancel semantics —
+      // a half-written draft is never dragged into a rewind (plan Case C).
+      // A host without rewind keeps the cancel for both cases.
+      if (this.seatEditor().getText().trim() === '' && this.events.onRewind !== undefined) {
+        this.events.onRewind()
+      } else {
+        this.events.onCancel?.()
+      }
+    } else {
+      this.lastEscapeAt = now
+    }
+    return { consume: true }
+  }
+
+  /** The exit path (app.exit.request): Ctrl+C keeps the clear-then-exit
+   * chord (a first press clears a non-empty draft and arms the window; a
+   * second press within it exits); every other key bound to the action
+   * (Ctrl+D or a user remap) exits immediately. */
+  private handleExitKey(data: string): TuiInputListenerResult {
+    if (matchesKey(data, 'ctrl+c')) {
+      // pi parity (handleCtrlC): a first press CLEARS a non-empty editor
+      // (recording the time); a second press within the window on the now
+      // EMPTY editor exits. Issue #8: every arm shows the footer hint for
+      // EXACTLY the exit window (armCtrlCExit), and the exit path disarms
+      // it — the hint never outlives the window.
+      const text = this.seatEditor().getText()
+      // A shell-mode draft is non-empty in its SERIALIZED form: the
+      // first press clears BOTH the body and the mode — an empty `! ` /
+      // `!!` editor would otherwise show a cleared body under a stale
+      // shell prompt, and the next Ctrl+C would exit instead of
+      // completing the pre-mode clear contract.
+      if (text !== '' || this.seatInputMode() !== 'prompt') {
+        this.seatEditor().setText('')
+        this.resetEditorMode()
+        this.editorSeatHolder.notifyChanged()
+        this.armCtrlCExit()
+        // The key is CONSUMED at the app level, so the fork's input path
+        // never reaches the focused editor and never requests its own
+        // frame — without an explicit render the cleared draft stays on
+        // screen until the next keypress (the stale-clear trap, seen in
+        // tmux: the editor reads empty but the old text is still
+        // visible). Same pattern as setDraft/submitDraft.
+        this.requestRender()
+        return { consume: true }
+      }
+      const now = Date.now()
+      if (this.lastCtrlCAt !== undefined && now - this.lastCtrlCAt < this.ctrlCExitWindowMs) {
+        this.clearCtrlCExit()
+        this.events.onExit()
+      } else {
+        // First press on an EMPTY editor changes nothing visible, and the
+        // exit window is easy to miss — announce the armed state so a
+        // slow second press is not a silent no-op (the next Enter would
+        // otherwise send an empty draft). The second press within the
+        // window exits.
+        this.armCtrlCExit()
+      }
+      return { consume: true }
+    }
+    // Ctrl+D (or a user-bound exit key) quits like /exit. The editor's
+    // delete-char-forward remains on the Delete key. Issue #8: an armed
+    // exit chord must not leave its hint behind on a non-chord exit.
+    this.clearCtrlCExit()
+    this.events.onExit()
+    return { consume: true }
+  }
+
+  /** The semantic action → host method surface (plan §9). The dispatcher
+   * never re-implements business state — every method calls the existing
+   * host path, which owns its guards. A method returns false when the key
+   * must fall through (e.g. pasteMedia without a clipboard handler). */
+  private buildActionHost(): AppActionHost {
+    return {
+      submitDraft: (forceQueue = false) => {
+        if (forceQueue) {
+          // The busy-Enter opposite chord (web busyEnter parity): without
+          // a wired onQueueSubmit the key falls through to the editor
+          // instead of dropping the draft; an EMPTY draft falls through
+          // too — plain Enter on an empty editor does not submit, and an
+          // empty chord would otherwise dispatch a session-creating empty
+          // followup.
+          if (this.events.onQueueSubmit === undefined) return false
+          // Emptiness is judged on the SERIALIZED wire form: a bare
+          // `!` / `!!` shell mode has an empty BODY but a non-empty wire
+          // form, and must reach the queue protocol like the literal
+          // prefix did before the mode feature.
+          if (this.serializeSeatDraft(this.seatEditor().getText()).trim() === '') return false
+        }
+        this.submitDraft(forceQueue)
+        return true
+      },
+      steerDraft: () => {
+        // Steer: send the draft into the running turn and clear the
+        // editor. An empty draft still fires the event — the runner
+        // steers every queued message when the queue is non-empty, and
+        // only ignores the key when there is nothing to send at all.
+        // The shell-editor-mode boundary, like the Ctrl+S path: the
+        // editor buffer holds the bare command body, so the wire form is
+        // re-serialized here (serializeSeatDraft) and the mode reset with
+        // the draft.
+        const draft = this.seatEditor().getText()
+        const serialized = this.serializeSeatDraft(draft)
+        this.seatEditor().setText('')
+        this.editorSeatHolder.notifyChanged()
+        this.resetEditorMode()
+        // Consumed at the app level: request the frame ourselves (the
+        // stale-clear trap — see the Ctrl+C branch).
+        this.requestRender()
+        this.events.onSteer?.(serialized)
+        return true
+      },
+      dequeueDraft: () => {
+        // Dequeue (Alt+↑): pull queued input back into the editor.
+        this.events.onDequeue?.()
+        return true
+      },
+      interruptActivity: () => true,
+      requestExit: () => true,
+      openTranscriptSearch: () => {
+        this.startTranscriptSearch()
+        return true
+      },
+      closeTranscriptSearch: () => {
+        this.closeTranscriptSearch()
+        return true
+      },
+      searchNext: () => {
+        this.events.onSearchNext?.()
+        return true
+      },
+      searchPrevious: () => {
+        this.events.onSearchPrev?.()
+        return true
+      },
+      toggleTranscriptExpand: () => {
+        // Fullscreen + Focus: Ctrl+O is the Thought-root bulk owner (plan
+        // §3) — no expanded root → expand the recent `EXPAND_RECENT_TURNS`
+        // eligible roots; any expanded root → Collapse All. Every other
+        // surface/Focus combination keeps the historical tool/system detail
+        // master (regular behavior untouched).
+        if (this.fullscreen !== undefined && this.focusModeEnabled) {
+          this.toggleFullscreenFocusRoots()
+          return true
+        }
+        this.toolOutputExpanded = !this.toolOutputExpanded
+        this.rebuildMessages()
+        return true
+      },
+      toggleThinking: () => {
+        // Alt+T = the Thinking DETAIL bulk owner (never hide/show): every
+        // Thinking block collapses or expands together, Focus ON/OFF and
+        // both surfaces alike. Per-message overrides are cleared first so
+        // the result is predictable (plan §9).
+        this.toggleThinkingExpanded()
+        return true
+      },
+      toggleFullscreen: () => {
+        this.toggleFullscreen()
+        return true
+      },
+      toggleTodo: () => {
+        // Todo panel toggle (kimi semantics; the key never reaches the
+        // editor).
+        this.toggleTodoPanel()
+        return true
+      },
+      cyclePermission: () => {
+        this.events.onCyclePermission?.()
+        return true
+      },
+      openExternalEditor: () => {
+        // External editor. An owned workflow routed through the host's
+        // runOwned (diag attached by the runner): a spawn failure lands in
+        // diagnostics and notifies here — never a bare `void somePromise()`
+        // (AGENTS.md). The editor hook and runOwned are a BOUND pair (type
+        // union + constructor check): without the editor hook the action
+        // is a documented no-op. Single-flight: while one launch is
+        // pending (the latch inside launchExternalEditor is set
+        // synchronously), further presses are consumed without starting
+        // another editor.
+        if (this.events.openExternalEditor !== undefined && !this.externalEditorInFlight) {
+          this.events.runOwned('external editor', () => this.launchExternalEditor(), {
+            onError: (error: unknown) => {
+              this.notify(`external editor failed: ${safeErrorMessage(error)}`, 'error')
+            },
+          })
+        }
+        return true
+      },
+      pasteMedia: () => {
+        // Clipboard paste with image intake (plan M3): with a host handler
+        // the key is consumed and the runner probes the clipboard once —
+        // an image becomes a draft placeholder and plain text falls back
+        // to an editor insert. WITHOUT a handler the key falls through to
+        // the editor exactly like the pre-pipeline behavior.
+        if (this.events.onClipboardPaste === undefined) return false
+        this.events.onClipboardPaste()
+        return true
+      },
+      openTasks: () => {
+        this.events.onOpenTasks?.()
+        return true
+      },
+      openHistorySearch: () => {
+        // Ctrl+R input-history search: unbound (no historySearchSource)
+        // falls through to the editor like any un-reserved key; the
+        // continuable subagent viewer keeps its OWN live editor — the
+        // chord is a no-op there (never the child draft, never the parent
+        // draft).
+        if (this.historySearchSource === undefined || this.viewerMode !== undefined) return false
+        this.openHistorySearch()
+        return true
+      },
+      dismissSettledShell: () => {
+        // Dismiss settled local shell cards (Alt+K — plan §5.4 quick
+        // clear): completed `!`/`!!` runs leave the live view; running
+        // cards never do (the process is NOT cancelled — Esc owns that).
+        this.dismissSettledLocalShell()
+        this.requestRender()
+        return true
+      },
+    }
+  }
+
+  /** The live keybinding context (plan §6): built in ONE place so the
+   * resolver never reads TuiApp private fields. `editorEmpty` is LAZY —
+   * the live editor is only read when a rule predicate actually needs it
+   * (the input path must not add a draft read per keystroke). */
+  private keybindingContext(): KeybindingContext {
+    return deriveKeybindingContext({
+      focusedSeat: this.activeScreen.hasOverlayEntries ? 'overlay' : 'editor',
+      questionActive: this.activeQuestions !== undefined,
+      approvalActive: this.activeApproval !== undefined,
+      viewerMode: this.viewerMode === undefined || this.activeScreen.hasOverlayEntries
+        ? 'none'
+        : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
+      searchActive: this.searchOverlay !== undefined,
+      overlayActive: this.activeScreen.hasOverlayEntries,
+      agentRunning: this.busy,
+      editorEmpty: () => this.seatEditor().getText().trim() === '',
+      autocompleteActive: (this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true,
+      tasksActive: this.tasksActive,
+    })
   }
 
   /** The live surface context the InputRouter reads (M6). */
@@ -3054,6 +3161,9 @@ export class TuiApp {
     if (this.disposed) {
       return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false }
     }
+    // M6: an overlay owns the focused component now — any pending leader
+    // sequence is cancelled (focus-transition cancellation).
+    this.keybindings.cancelLeader()
     const handle = this.activeScreen.showOverlay(component, options)
     // M8: the stacking graph + suspension rules live in the broker (plan
     // §13 — behavior identical; the existing modal-stacking tests gate
@@ -3287,6 +3397,9 @@ export class TuiApp {
    */
   setFullscreen(enabled: boolean): void {
     if (this.disposed) return
+    // M6: the screen swap is a focus transition — any pending leader
+    // sequence is cancelled.
+    this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
     const pending = this.activeApproval
@@ -4907,6 +5020,9 @@ export class TuiApp {
    * @param mode - the viewer target; `undefined` leaves the viewer.
    */
   setViewerMode(mode: SubagentViewerTarget | undefined): void {
+    // M6: the viewer owns the input policy now — any pending leader
+    // sequence is cancelled (focus-transition cancellation).
+    this.keybindings.cancelLeader()
     if (mode === undefined) {
       if (this.viewerMode === undefined) return
       const leaving = this.viewerMode
@@ -5096,28 +5212,14 @@ export class TuiApp {
   /** Keys the interactive (continuable) viewer consumes so they can never
    * act on the PARENT session: the host ladder handles them for the main
    * editor, and inside the viewer they must be inert (the child is the
-   * only input target). Esc/Ctrl+O/Enter are deliberately NOT listed —
-   * they fall through to the host's exit/fold/submit paths. */
+   * only input target). ACTION-based (plan §1.2/M1): the key resolves
+   * through the effective keymap, so a user remap of a parent action
+   * stays blocked automatically — the guard never maintains a physical
+   * key list. Esc/Ctrl+O/Enter are deliberately NOT listed — they fall
+   * through to the host's exit/fold/submit paths. */
   private viewerParentLockedKey(data: string): boolean {
-    if (matchesKey(data, 'down') && this.tasksActive && this.seatEditor().getText().trim() === ''
-      && this.seatInputMode() === 'prompt') {
-      // The empty-editor ↓ task-browser trigger must not open the
-      // PARENT's browser from inside the viewer. A shell-mode editor with
-      // an empty body is composing a command — ↓ keeps its editing
-      // meaning, never the browser.
-      return true
-    }
-    return matchesKey(data, 'ctrl+s')        // steer all (parent)
-      || matchesKey(data, 'ctrl+enter')      // queue submit (parent)
-      || matchesKey(data, 'alt+up')          // dequeue (parent)
-      || matchesKey(data, 'shift+tab')       // permission cycle (parent)
-      || matchesKey(data, 'ctrl+f') || matchesKey(data, 'ctrl+shift+f') // main-transcript search
-      || matchesKey(data, 'ctrl+c')          // clear/exit chord (would exit the TUI)
-      || matchesKey(data, 'ctrl+d')          // exit
-      || matchesKey(data, 'ctrl+g')          // external editor (main draft)
-      || matchesKey(data, 'ctrl+t')          // todo panel
-      || matchesKey(data, 'alt+t')           // thinking detail bulk toggle
-      || matchesKey(data, 'ctrl+v')          // clipboard image intake (main draft store)
+    const action = this.keybindings.actionFor(data, this.keybindingContext())
+    return action !== undefined && VIEWER_BLOCKED_PARENT_ACTIONS.has(action as AppKeybindingId)
   }
 
   /** Show a render-time placeholder hint on the host editor (empty draft
@@ -8366,12 +8468,24 @@ export class TuiApp {
     // the exit hint for EXACTLY the exit window (one shared timer) — it
     // temporarily covers the stats, and even the compact preset shows it
     // (the user just triggered an explicit interaction and needs the
-    // feedback).
+    // feedback). M6: a pending leader sequence shows the which-key hint
+    // (the same line-2 slot — the leader is an explicit interaction too).
+    const leader = this.keybindings.leaderMachine()
     const line2 = this.ctrlCExitArmed
-      ? 'Press Ctrl+C again to exit'
-      : this.footerPreset === 'compact' ? '' : this.status.statsLine
+      ? `Press ${this.keybindings.keyHint('app.exit.request')} again to exit`
+      : leader !== undefined && leader.pending
+        ? this.leaderHint(leader)
+        : this.footerPreset === 'compact' ? '' : this.status.statsLine
     this.footer.setText(this.footerRows(line1, line2, width))
     this.requestRender()
+  }
+
+  /** The M6 which-key hint: the pending leader sequence and its
+   * completions (the footer wraps/truncates long lists). */
+  private leaderHint(leader: LeaderStateMachine): string {
+    const completions = leader.leaderBindings
+      .map(binding => `${formatKeyId(binding.key)}: ${APP_KEYBINDINGS[binding.action]?.description ?? binding.action}`)
+    return `Leader: waiting for key — ${completions.join(' · ')} (Esc cancels)`
   }
 
   /** The shared footer layout (plan §14): line 1 wraps with the host row
@@ -9128,6 +9242,9 @@ export class TuiApp {
     }
     this.renderApprovalDialog(pending)
     this.activeApproval = pending
+    // M6: a capturing surface owns the input now — any pending leader
+    // sequence is cancelled (focus-transition cancellation).
+    this.keybindings.cancelLeader()
   }
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
@@ -9289,6 +9406,9 @@ export class TuiApp {
 
   /** Mount one flow into the editor seat and make it the active one. */
   private presentQuestion(state: QuestionState): void {
+    // M6: a question owns the seat now — any pending leader sequence is
+    // cancelled (focus-transition cancellation).
+    this.keybindings.cancelLeader()
     // Set the active flow BEFORE touching overlays: showOverlayOnHost and
     // the suspension bookkeeping branch on it.
     this.activeQuestions = state

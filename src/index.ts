@@ -77,6 +77,8 @@ import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
+import { parseUserKeybindings } from './keybindings/config.ts'
+import { normalizedKeyToKeyId } from './keybindings/manager.ts'
 import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
@@ -234,7 +236,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  * body — there is no command-execution wire for skills.
  */
 export const LOCAL_COMMANDS = new Set([
-  'copy', 'exit', 'export', 'focus', 'fork', 'help', 'image', 'kill', 'login', 'logout',
+  'copy', 'exit', 'export', 'focus', 'fork', 'help', 'image', 'keybindings', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
@@ -1418,6 +1420,12 @@ export function apply(ctx: Context, config: Config): void {
         // structural icon palette (see src/icons.ts). A persisted invalid
         // value fails safe to emoji at consumption.
         iconStyle: z.string(),
+        // NOTE: the user keybinding overrides (`keybindings`) are NOT in
+        // the schema — schemastery's z.object keeps unknown keys in the
+        // resolved doc (see the `history` migration note below), and the
+        // keybindings parser (src/keybindings/config.ts) owns the
+        // validation fail-soft. Adding a schema field here would break
+        // the z<T> inference of the whole register call (probed).
       }),
       // `history` used to live here (a per-cwd map in the settings
       // document). It moved to $DSH_HOME/user-history/*.jsonl (see
@@ -2382,6 +2390,9 @@ export function apply(ctx: Context, config: Config): void {
       }
       shellTempFiles.clear()
       app?.dispose()
+      // M3: stop the keybinding settings watch (the manager dies with the
+      // app; the watch must not outlive the surface).
+      stopKeybindingWatch?.()
       // Detach the extension service's surface bridge (its capability set
       // and state listeners die with the surface). The surfaceId lease
       // makes a stale detach a no-op (P1).
@@ -4302,6 +4313,39 @@ export function apply(ctx: Context, config: Config): void {
       unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
       unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
     })
+    // M3: the user-orchestrable keybinding manager (the app built it with
+    // the builtin defaults). Apply safe mode, the persisted user
+    // overrides, and the plugin contributions — all fail-soft (a bad entry
+    // is a diagnostic, never a startup failure; plan §16/§17).
+    const keybindings = app.keybindingsManager()
+    if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS === '1') {
+      keybindings.setSafeMode(true)
+      diag.info('keybindings', { safeMode: true })
+    }
+    const applyUserKeybindings = (): void => {
+      const parsed = parseUserKeybindings(tuiSettings?.get().keybindings)
+      for (const message of parsed.diagnostics) diag.warn('keybindings', { message })
+      keybindings.setUserConfiguration(parsed)
+    }
+    applyUserKeybindings()
+    // M3: hot reload — a settings change re-validates and rebuilds the
+    // keymap without a restart (plan §12/§16).
+    const stopKeybindingWatch = tuiSettings?.watch(() => applyUserKeybindings())
+    // M2: the plugin contributions compile into the effective keymap at
+    // the LOWEST priority (a Host action always wins). The runner syncs
+    // the registry snapshot on every invalidation (the manager skips
+    // unchanged rules, so the rebuild is cheap).
+    const syncPluginKeybindings = (): void => {
+      const registry = extensionService?.keybindings
+      if (registry === undefined) return
+      const snapshot = registry.snapshot()
+      keybindings.setPluginRules(snapshot.bindings.map(binding => ({
+        id: binding.id,
+        action: binding.action,
+        key: normalizedKeyToKeyId(binding.key),
+      })))
+    }
+    syncPluginKeybindings()
     /**
      * One follow-up send settled (plan §10/§11/§12):
      * - ACCEPTED: the child inbox owns the message — never restore the
@@ -4582,7 +4626,14 @@ export function apply(ctx: Context, config: Config): void {
         // The attachment lease (P1): a stale detachSurface from an older
         // generation must not tear down THIS surface's bridge.
         attached.surfaceId,
-        (force) => app.requestRender(force),
+        (force) => {
+          // M2: registry invalidations (including plugin keybinding
+          // register/unload) flush through the batcher into this callback
+          // — sync the plugin rules into the effective keymap (a no-op
+          // when unchanged), then repaint.
+          syncPluginKeybindings()
+          app.requestRender(force)
+        },
       )
     }
     // Fullscreen is a persisted preference like the theme and the footer
