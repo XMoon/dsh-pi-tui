@@ -2472,6 +2472,21 @@ export class TuiApp {
       if ((this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true) {
         return undefined
       }
+      // The host may consume the first Esc (runner-owned modes like the
+      // subagent viewer); otherwise it arms the double-Esc cancel.
+      if (this.events.onSingleEscape?.() === true) return { consume: true }
+      // pi parity: a SINGLE Esc while the agent is busy stops the current
+      // activity (turn, tool run, compaction) — partial content stays on
+      // screen. Idle keeps the double-Esc cancel. The busy cancel is
+      // Host-owned session control and keeps its priority over BOTH the
+      // shell-mode exit below and a replacement editor's own Esc state
+      // machine (a busy Esc must stop the agent, never vanish into a
+      // plugin's modal handling).
+      if (this.busy) {
+        this.lastEscapeAt = undefined
+        this.events.onCancel?.()
+        return { consume: true }
+      }
       // P1-6: a REPLACEMENT editor owns Esc for its own modal state
       // machine (vim normal-mode entry) — route it through the editor
       // channel below instead of the host's double-Esc cancel. If the
@@ -2479,20 +2494,6 @@ export class TuiApp {
       // fallback (which includes this cancel path on re-entry).
       if (this.seatEditor().handleInput !== undefined) {
         return this.handleReplacementEditorInput(data, this.inputRouterContext(), true)
-      }
-      // The host may consume the first Esc (runner-owned modes like the
-      // subagent viewer); otherwise it arms the double-Esc cancel.
-      if (this.events.onSingleEscape?.() === true) return { consume: true }
-      // pi parity: a SINGLE Esc while the agent is busy stops the current
-      // activity (turn, tool run, compaction) — partial content stays on
-      // screen. Idle keeps the double-Esc cancel. The busy cancel is
-      // Host-owned and keeps its priority over the shell-mode exit below
-      // (a shell-mode Esc while busy stops the agent, exactly like any
-      // other Esc while busy).
-      if (this.busy) {
-        this.lastEscapeAt = undefined
-        this.events.onCancel?.()
-        return { consume: true }
       }
       // Shell-mode exit: the host editor in a shell mode with an EMPTY
       // body owns Esc — it cancels the shell mode (the double-Esc cancel

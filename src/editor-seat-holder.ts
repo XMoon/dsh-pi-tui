@@ -25,7 +25,7 @@
 import type { Component } from '@xmoon76/pi-tui'
 import type { EditorHost, EditorSnapshot, ExtensionEditor } from './extension/public-types.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
-import { serializeEditorInput, shellPrefixForMode } from './editor-input-mode.ts'
+import { editorModeFromHistoryEntry, serializeEditorInput, shellPrefixForMode } from './editor-input-mode.ts'
 
 function safeEditorErrorMessage(error: unknown): string {
   try {
@@ -277,14 +277,22 @@ export class EditorSeatHolder {
    * shell-mode draft round-trips through a plugin editor with its mode,
    * and a plugin draft that starts with `!` decodes back into the shell
    * mode the user intended. The prefix length lets the caller shift the
-   * flat cursor offset between the two representations.
+   * flat cursor offset between the two representations: for the host it
+   * is the mode's prefix; for a plugin it is derived from the TEXT
+   * itself (a plugin draft may begin with `!` / `!!` even though the
+   * plugin has no mode).
    */
   private wireDraftOf(seat: SeatEditor): { text: string; prefixLength: number } {
     const mode = seat.getInputMode?.() ?? 'prompt'
-    return {
-      text: serializeEditorInput(mode, seat.getText()),
-      prefixLength: shellPrefixForMode(mode).length,
+    if (mode !== 'prompt') {
+      return {
+        text: serializeEditorInput(mode, seat.getText()),
+        prefixLength: shellPrefixForMode(mode).length,
+      }
     }
+    const text = seat.getText()
+    const decoded = editorModeFromHistoryEntry(text)
+    return { text, prefixLength: text.length - decoded.text.length }
   }
 
   /** The current seat snapshot (Phase 2: the ADVANCED editor controls
