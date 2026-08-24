@@ -214,3 +214,35 @@ test('high-frequency repaints never re-arm the timer (review finding F2)', () =>
   assert.equal(nextDeadline, 800 + 2 * MARQUEE_STEP_MS, 'one step later')
   marquee.dispose()
 })
+
+test('a clock that advances BETWEEN reads never shifts the timer deadline (review round 4)', () => {
+  // The render must capture the clock ONCE: state math and the timer
+  // deadline derive from the same instant. A fake clock that returns a
+  // different value on every call (Date.now() advancing between reads)
+  // must not produce a drifting deadline that re-arms the timer.
+  let ticks = 0
+  const marquee = new SelectedMarquee({
+    requestRender: () => {},
+    now: () => {
+      // Every read returns a LATER instant (simulating clock advance
+      // between separate Date.now() calls).
+      ticks += 1
+      return ticks * 10
+    },
+  })
+  const text = 'abcdefghijklmnop'
+  marquee.render({ key: 'k', text, maxWidth: 8, selected: true })
+  const deadline1 = marquee.pendingTimerDeadlineForTest()
+  // A repaint (more reads) must keep the SAME deadline — if each read
+  // were re-anchoring, the deadline would keep moving and the timer
+  // would be re-armed forever.
+  marquee.render({ key: 'k', text, maxWidth: 8, selected: true })
+  const deadline2 = marquee.pendingTimerDeadlineForTest()
+  assert.equal(deadline2, deadline1, 'the deadline must be stable across repaints even with an advancing clock')
+  // The fix captures the clock ONCE per render: two renders = exactly two
+  // reads. If the state math and the deadline each read the clock
+  // separately, two renders would need four reads — the assertion proves
+  // the single-capture fix is in place (the test is meaningful).
+  assert.equal(ticks, 2, 'one clock read per render (state + deadline share the instant)')
+  marquee.dispose()
+})

@@ -135,10 +135,16 @@ export class SelectedMarquee {
     if (!input.selected || width <= 0) {
       return truncateToWidth(input.text, Math.max(0, width), '…')
     }
+    // Capture the clock ONCE per render: the anchor, the phase state and
+    // the timer deadline must all derive from the SAME instant. Reading
+    // Date.now() separately in each place would let the clock advance
+    // between calls and shift the absolute deadline, needlessly
+    // re-arming the timer (review round 4).
+    const nowMs = this.now()
     const identity = `${input.key}\u0000${input.text}\u0000${width}`
     if (identity !== this.anchor) {
       this.anchor = identity
-      this.anchorMs = this.now()
+      this.anchorMs = nowMs
     }
     const totalWidth = visibleWidth(input.text)
     if (totalWidth <= width) {
@@ -147,13 +153,13 @@ export class SelectedMarquee {
       this.clearTimer()
       return input.text
     }
-    const state = marqueeStateAt(this.now() - this.anchorMs, totalWidth - width,
+    const state = marqueeStateAt(nowMs - this.anchorMs, totalWidth - width,
       this.initialPauseMs, this.stepMs, this.endPauseMs)
     const window = sliceByColumn(input.text, state.offset, width)
     const windowWidth = visibleWidth(window)
     const padded = window + ' '.repeat(Math.max(0, width - windowWidth))
     // Re-arm the timer for the NEXT phase transition (or the cycle wrap).
-    this.armTimer(state.msToNext)
+    this.armTimer(state.msToNext, nowMs)
     return padded
   }
 
@@ -182,7 +188,7 @@ export class SelectedMarquee {
     this.timerDeadline = -1
   }
 
-  private armTimer(msToNext: number): void {
+  private armTimer(msToNext: number, nowMs: number): void {
     if (this.disposed || !Number.isFinite(msToNext) || msToNext <= 0) {
       // 0 or already-past: the next render reads the new phase directly;
       // a finite positive delay arms the repaint.
@@ -195,8 +201,11 @@ export class SelectedMarquee {
     // the armed timer is kept instead of being cleared and re-set — a
     // repaint storm (elapsed tick, streaming) can never push the next
     // transition indefinitely into the future (review finding). Only an
-    // anchor/phase change moves the deadline and re-arms.
-    const deadline = this.now() + msToNext
+    // anchor/phase change moves the deadline and re-arms. `nowMs` is the
+    // render's captured instant (never a fresh clock read — a clock
+    // advance between the state math and the deadline would shift the
+    // deadline and violate the no-rearm contract, review round 4).
+    const deadline = nowMs + msToNext
     if (this.timer !== undefined && this.timerDeadline === deadline) return
     this.clearTimer()
     this.timerDeadline = deadline
