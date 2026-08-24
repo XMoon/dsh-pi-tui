@@ -14,9 +14,25 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SettingItem } from '@xmoon76/pi-tui'
 import { interruptAgent } from '../src/index.ts'
+import type { SessionWriter } from '../src/runtime/session-writer-port.ts'
 import { rewindPickerItem } from '../src/rewind.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** A writer stub that routes cancel to the agent's own cancel (the runner
+ * wires the Direct adapter the same way). */
+function writerStub(): SessionWriter {
+  return {
+    followup: () => {},
+    steer: async () => 'ok' as const,
+    dequeue: () => {},
+    cancel: (agent, cause, options) => {
+      ;(agent as { cancel(c: unknown, o: unknown): void }).cancel(cause, options)
+    },
+    rename: () => true,
+    refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
+  }
+}
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp; cancels: number } {
   const vt = new VirtualTerminal(100, 24)
@@ -543,7 +559,7 @@ test('interruptAgent cancels with keepInbox: true (web Stop parity)', () => {
   interruptAgent({
     status: 'running',
     cancel: (cause, options) => { calls.push({ cause, options }) },
-  })
+  }, writerStub())
   assert.equal(calls.length, 1, 'a running agent is interrupted exactly once')
   assert.deepEqual(calls[0]!.cause, { kind: 'user' })
   // THE regression: the default dsh cancel clears queued + steering
@@ -559,11 +575,11 @@ test('interruptAgent tolerates an idle agent (no status gate, no throw)', () => 
     // dsh's cancel, so the helper must NOT gate on the running status.
     status: 'idle',
     cancel: (cause, options) => { calls.push({ cause, options }) },
-  })
+  }, writerStub())
   assert.equal(calls.length, 1, 'the cancel call itself is still made (dsh no-ops when idle)')
   assert.deepEqual(calls[0]!.options, { keepInbox: true })
 })
 
 test('interruptAgent with no live agent is a silent no-op', () => {
-  interruptAgent(undefined)
+  interruptAgent(undefined, writerStub())
 })

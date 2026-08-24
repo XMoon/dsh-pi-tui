@@ -55,6 +55,7 @@ import {
   type SessionPickerRow,
 } from './sessions.ts'
 import type { SessionReader } from './runtime/session-reader-port.ts'
+import type { SessionWriter } from './runtime/session-writer-port.ts'
 import {
   credentialOptionsFor,
   deriveKeyRef,
@@ -263,6 +264,9 @@ export interface TuiCommandRunner {
   /** The session READ port (migration M1.3): /sessions, /resume, /search
    * and the title batches go through the port, never ctx directly. */
   readonly sessionReader: SessionReader
+  /** The session WRITE port (migration M1.4): follow-up delivery, steer,
+   * queue pull-back, cancel and title ops go through the port. */
+  readonly sessionWriter: SessionWriter
   /** The ONE exit orchestration (flush with a hard timeout, cleanup, warn,
    * resume hint, process exit) — shared by Ctrl+C/Ctrl+D, /exit and /quit.
    * Command handlers must NEVER stop the app, flush or exit themselves. */
@@ -2422,24 +2426,29 @@ export function registerTuiCommands(
   // message yet) leaves the title untouched and informs the user.
   const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult> => {
     const liveAgent = await requireAgent()
-    const titles = ctx.get('sessionTitle')
-    if (titles === undefined) return { kind: 'error', text: 'session title service unavailable' }
     const name = invocation.rawInput.trim()
     if (name !== '') {
+      // The session WRITE port (migration M1.4): the title service access
+      // lives in the Direct adapter, never here.
       try {
-        titles.rename(liveAgent.session, name)
+        if (!runner.sessionWriter.rename(liveAgent.session, name)) {
+          return { kind: 'error', text: 'session title service unavailable' }
+        }
       } catch (error) {
         return { kind: 'error', text: safeErrorMessage(error) }
       }
       return { kind: 'success', text: `title set: ${name}` }
     }
     try {
-      const regenerated = await titles.refresh(liveAgent.session, invocation.signal)
-      if (regenerated === undefined) {
+      const outcome = await runner.sessionWriter.refreshTitle(liveAgent.session, invocation.signal)
+      if (outcome.kind === 'unavailable') {
+        return { kind: 'error', text: 'session title service unavailable' }
+      }
+      if (outcome.title === undefined) {
         app.notify('no conversation yet — title left as-is', 'info')
         return { kind: 'success' }
       }
-      app.notify(`title regenerated: ${regenerated.title}`, 'info')
+      app.notify(`title regenerated: ${outcome.title}`, 'info')
       return { kind: 'success' }
     } catch (error) {
       return { kind: 'error', text: safeErrorMessage(error) }
