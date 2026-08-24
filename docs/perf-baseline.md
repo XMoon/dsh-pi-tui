@@ -83,3 +83,15 @@ the ledger revision, theme revision, width and row budget are unchanged);
 the burst coalescing is the `InvalidateBatcher` (one flush per tick). The
 renderer path adds a registry-revision cheap gate so renderer functions
 never run in the frame loop for unchanged content.
+
+## Migration baseline (M0)
+
+> The server/client migration (docs/client-server-migration.md) freezes its
+> pre-migration baseline at commit `658ed25` (M0 landing): `pnpm build`,
+> `pnpm typecheck`, `pnpm test:bundle` (1809 tests), `pnpm test:docs`,
+> `node scripts/naming-gate.mjs` and `node scripts/client-boundary-gate.mjs`
+> are all green there. Per the migration plan, no absolute numbers are set
+> yet — the M0–M5 rule is "no perceptible regression" on the Direct path,
+> and the wire-local phase adds its own measured gates (startup, first
+> paint, first keystroke, event-to-paint latency, idle RSS, streaming CPU)
+> before any default flip.
