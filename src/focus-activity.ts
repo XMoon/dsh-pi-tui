@@ -201,7 +201,10 @@ export class FocusActivityComponent {
 
   render(width: number): string[] {
     const lines: string[] = []
-    const indent = '  '
+    // At very narrow widths (1-3 cells) the unconditional two-cell indent
+    // would make every row wider than the terminal — drop it (review
+    // finding).
+    const indent = width >= 4 ? '  ' : ''
     const contentWidth = Math.max(1, width - visibleWidth(indent))
     // The header formatter budgets the CONTENT width (the indent is added
     // after), so a header that fits never wraps past the terminal — the

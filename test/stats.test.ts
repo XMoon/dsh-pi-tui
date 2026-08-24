@@ -252,6 +252,15 @@ test('tok/s samples only steps carrying both a decode window and usage', () => {
   // (6100→7000 window above proves it: last delta was at 6200).
 })
 
+test('a duplicate step/start never leaks the open step pending usage', () => {
+  const acc = new StepUsageAccumulator()
+  acc.onStepStart(0, 0)
+  acc.onUsageChunk(0, 0, { inputTokens: 100, outputTokens: 0 })
+  acc.onStepStart(0, 0) // duplicate
+  acc.onStepEnd(0, 0)
+  assert.equal(acc.sessionTotals().inputTokens, 100, 'the duplicate start must not lose the pending usage')
+})
+
 test('a late fact for an OLDER turn is ignored after the turn advanced (no double count)', () => {
   const acc = new StepUsageAccumulator()
   acc.onStepStart(0, 0)

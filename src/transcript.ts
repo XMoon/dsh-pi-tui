@@ -503,6 +503,10 @@ export class TranscriptFolder {
    * tail keeps the LAST fragment (bounded), and the preview is the tail's
    * latest non-empty line — never the whole stream (plan §10.6). */
   private foldThinking(activity: MutableTurnActivity, delta: string): void {
+    // After turn/end the Think slot was settled: a late reasoning delta
+    // (replay artifact) must not mutate it (review finding). The thinking
+    // transcript entry still accumulates the delta.
+    if (activity.completed) return
     activity.thinkingTail = (activity.thinkingTail + delta).slice(-TranscriptFolder.THINKING_TAIL_CAP)
     const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
     activity.think = line === '' ? undefined : { text: line }
@@ -524,6 +528,10 @@ export class TranscriptFolder {
     // it must never resurrect a candidate (nor confirm a newer one that
     // is still streaming) — review finding.
     if (activity.confirmedSteps.has(step)) return
+    // A delta for a step OLDER than the latest seen is stale: it must
+    // never roll back the candidate or the final-answer dedup (review
+    // finding).
+    if (step < (activity.lastAssistantStep ?? step)) return
     const candidate = activity.messageCandidate
     if (candidate !== undefined && candidate.step !== step) {
       this.confirmMessageCandidate(activity)
@@ -533,7 +541,9 @@ export class TranscriptFolder {
     } else {
       candidate.tail = (candidate.tail + delta).slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
     }
-    activity.lastAssistantStep = step
+    // Monotonic: a late event for an older step never regresses the last
+    // assistant step (review finding).
+    activity.lastAssistantStep = Math.max(activity.lastAssistantStep ?? -1, step)
     this.syncMessage(activity)
     activity.revision += 1
   }
@@ -1026,11 +1036,18 @@ export class TranscriptFolder {
         // A message of a DIFFERENT step than the open candidate proves the
         // earlier step's output was intermediate: confirm it first (plan
         // §5.3 C — a later step's output confirms the earlier candidate).
+        const priorLast = activity.lastAssistantStep ?? -1
         const prior = activity.messageCandidate
-        if (prior !== undefined && prior.step !== event.data.step) {
+        // Only a message for a NEWER step confirms the open candidate
+        // (plan §5.3 C); a message for an older step is stale and must
+        // never confirm a still-streaming candidate (review finding).
+        if (prior !== undefined && prior.step < event.data.step) {
           this.confirmMessageCandidate(activity)
         }
-        activity.lastAssistantStep = event.data.step
+        // Monotonic: a late event for an older step never regresses the
+        // last assistant step — the final-answer dedup depends on it
+        // (review finding).
+        activity.lastAssistantStep = Math.max(priorLast, event.data.step)
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step === event.data.step) {
           // The authoritative text replaces the streaming tail — bounded
@@ -1051,6 +1068,9 @@ export class TranscriptFolder {
         } else if (activity.confirmedSteps.has(event.data.step)) {
           // A late message for an OLDER confirmed step: the slot already
           // shows a newer intermediate — ignore it entirely.
+        } else if (event.data.step < priorLast) {
+          // A late message for an older step that was never a candidate:
+          // stale — ignore it entirely (review finding).
         } else if (text !== '' && !activity.completed) {
           // A settled message without a prior candidate (replay edge): the
           // authoritative text IS the step's output — it becomes the
@@ -1099,17 +1119,22 @@ export class TranscriptFolder {
         // known or custom, is a Tool (event-first classification, plan
         // §6.1 — never a name allowlist).
         const activity = this.activityFor(callTurn)
-        activity.toolCalls += 1
-        activity.tools.set(event.data.name, (activity.tools.get(event.data.name) ?? 0) + 1)
-        this.confirmMessageCandidate(activity)
-        this.syncMessage(activity)
-        activity.tool = {
-          callId: event.data.callId,
-          name: event.data.name,
-          args: event.data.arguments,
-          status: 'running',
+        // After turn/end the turn's summary was settled: a late tool/call
+        // (replay artifact) must not mutate the Focus counts or the Tool
+        // slot (review finding). The transcript card still folds.
+        if (!activity.completed) {
+          activity.toolCalls += 1
+          activity.tools.set(event.data.name, (activity.tools.get(event.data.name) ?? 0) + 1)
+          this.confirmMessageCandidate(activity)
+          this.syncMessage(activity)
+          activity.tool = {
+            callId: event.data.callId,
+            name: event.data.name,
+            args: event.data.arguments,
+            status: 'running',
+          }
+          activity.revision += 1
         }
-        activity.revision += 1
         break
       }
       case 'tool/result': {
@@ -1168,7 +1193,10 @@ export class TranscriptFolder {
         // belongs to the LATEST call (plan §10/§44) — an older parallel
         // call's result must never yank the slot back from the newer call.
         const activity = this.activityFor(turn)
-        if (activity.tool?.callId === key) {
+        // After turn/end the Tool slot was settled: a late result (replay
+        // artifact) must not mutate it (review finding). The transcript
+        // card still settles.
+        if (!activity.completed && activity.tool?.callId === key) {
           activity.tool.status = status
           activity.revision += 1
         }

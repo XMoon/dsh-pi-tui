@@ -611,6 +611,86 @@ test('an empty candidate confirmed after a prior intermediate clears the slot', 
   assert.equal(activity.message, undefined, 'the empty intermediate must clear the slot, never leave the stale earlier preview')
 })
 
+test('a late message for an older step never regresses the final-answer dedup', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: '最终答案' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    // A late message for the OLDER confirmed step (out-of-order replay).
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a0'), role: 'assistant', content: [{ type: 'text', text: '第一步权威' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 5),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
+  ])
+  const activity = folder.turnActivity(0)!
+  // The final (step 1) must be dropped from the slot; the confirmed
+  // intermediate (step 0's authoritative text) shows instead — the late
+  // message must not regress lastAssistantStep and duplicate the final.
+  assert.equal(activity.message?.text, '第一步权威')
+})
+
+test('late reasoning and tool events after turn/end never mutate the Focus state', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: '思考' } }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('c1') },
+      },
+    }, 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '最终' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+    // Late replay artifacts after finalization.
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: '迟到的思考' } }, 1006, 6),
+    eventAt('tool/call', { turn: 0, step: 1, callId: CallId('c2'), name: 'bash', arguments: '{}' }, 1007, 7),
+    eventAt('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('r2'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('c2') },
+      },
+    }, 1008, 8),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.think?.text, '思考', 'the late reasoning must not change the Think slot')
+  assert.equal(activity.toolCalls, 1, 'the late tool/call must not count')
+  assert.equal(activity.tool?.name, 'read', 'the late tool/call must not replace the Tool slot')
+  assert.equal(activity.tool?.status, 'ok', 'the late result must not settle anything new')
+})
+
+test('a late delta for an older unseen step never confirms the streaming candidate', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1001, 1),
+    // A late delta for an OLDER step that was never seen (replay).
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '迟到的第一步' } }, 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '最终答案' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.message, undefined, 'the final must be dropped; the stale delta must not roll back the candidate')
+})
+
 test('a late text-delta after turn/end never resurrects the Message candidate', () => {
   const folder = new TranscriptFolder()
   folder.apply([
@@ -1452,6 +1532,18 @@ test('the EXPANDED final is always the LAST block (a max-tokens system row canno
     `the final assistant must be the LAST expanded block, got: ${blocks.map(b => b.kind === 'message' ? b.message.kind : 'activity').join(',')}`)
   const assistants = blocks.filter(b => b.kind === 'message' && b.message.kind === 'assistant')
   assert.equal(assistants.length, 1, 'the expanded final never duplicates')
+})
+
+test('the Thought component never exceeds the terminal at widths 1-3', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(completedTurn(0, 0, 1000))
+  const activity = folder.turnActivity(0)!
+  const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
+  for (const width of [1, 2, 3]) {
+    for (const line of component.render(width)) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
+    }
+  }
 })
 
 test('the Thought component never renders a line wider than the terminal', () => {
