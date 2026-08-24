@@ -9,6 +9,7 @@ import test from 'node:test'
 import { MessageId, type CallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats, formatStats, StatsFolder } from '../src/stats.ts'
+import { StepUsageAccumulator } from '../src/token-usage.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -249,6 +250,20 @@ test('tok/s samples only steps carrying both a decode window and usage', () => {
   assert.equal(stats.outputTokens, 10_500)
   // The decode end uses the assistant/message time, not the last delta
   // (6100→7000 window above proves it: last delta was at 6200).
+})
+
+test('the accumulator drops settled records of older turns (bounded lifecycle)', () => {
+  const acc = new StepUsageAccumulator()
+  acc.onStepStart(0, 0)
+  acc.onUsageChunk(0, 0, { inputTokens: 100, outputTokens: 0 })
+  acc.onStepEnd(0, 0)
+  const settled = (acc as unknown as { settledByStep: Map<string, unknown> }).settledByStep
+  assert.equal(settled.size, 1, 'the closed step is tracked while its turn is current')
+  // A new turn's step/start drops the older turn's records.
+  acc.onStepStart(1, 0)
+  assert.equal(settled.size, 0, 'older turns\' records are dropped when the turn advances')
+  // The committed totals survive the cleanup.
+  assert.equal(acc.sessionTotals().inputTokens, 100)
 })
 
 test('StatsFolder drops the step timing entry at step/end (no unbounded growth)', () => {
