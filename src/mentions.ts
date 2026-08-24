@@ -22,6 +22,7 @@ import {
   type SlashCommand,
 } from '@xmoon76/pi-tui'
 import { shellCompletionContext, suggestShellCompletion } from './shell-completion.ts'
+import { shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
 
 /** Token separators: `@` must sit at the start of the current token. */
 const PATH_DELIMITERS = new Set([' ', '\t', '"', "'", '='])
@@ -493,20 +494,40 @@ export class MentionProvider implements AutocompleteProvider {
    * a trailing-space argument as a Tab file-completion site — every other
    * command keeps the fork's judgment. */
   private readonly pathArgumentCommands: ReadonlySet<string>
+  /** The live editor input mode (the shell-editor-mode plan): the editor
+   * buffer no longer contains the `!` / `!!` prefix, so the provider
+   * synthesizes a VIRTUAL serialized line at the completion boundary —
+   * the shell grammar in shell-completion.ts stays untouched. */
+  private readonly inputModeSource: () => EditorInputMode
 
   constructor(
     slashCommands: readonly SlashCommand[],
     workDir: string,
     fdPath: string | null,
+    inputModeSource: () => EditorInputMode = () => 'prompt',
   ) {
     this.workDir = workDir
     this.fdPath = fdPath
+    this.inputModeSource = inputModeSource
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, fdPath)
     this.pathArgumentCommands = new Set(
       slashCommands
         .filter(command => command.getArgumentCompletions !== undefined)
         .map(command => command.name),
     )
+  }
+
+  /** The virtual serialized line for a shell-mode editor position: the
+   * synthetic `!` / `!!` prefix plus the shifted cursor column. Null in
+   * prompt mode. */
+  private virtualShellLine(
+    line: string,
+    cursorCol: number,
+  ): { line: string; cursorCol: number; prefixLength: number } | null {
+    const mode = this.inputModeSource()
+    if (mode === 'prompt') return null
+    const prefix = shellPrefixForMode(mode)
+    return { line: prefix + line, cursorCol: cursorCol + prefix.length, prefixLength: prefix.length }
   }
 
   async getSuggestions(
@@ -530,13 +551,26 @@ export class MentionProvider implements AutocompleteProvider {
     }
     // `!`/`!!` shell lines: command names, subcommands and `$VAR` names come
     // from the real-shell compgen bridge (docs/input-and-card-polish.md §1);
-    // path positions fall through to the fork's fd completion below.
-    const shellContext = shellCompletionContext(currentLine, cursorCol)
+    // path positions fall through to the fork's fd completion below. In a
+    // shell MODE the buffer holds the bare body, so the shell grammar
+    // receives the VIRTUAL serialized line (the synthetic prefix); in
+    // prompt mode the line is parsed as-is (a literal `!` draft).
+    const virtual = this.virtualShellLine(currentLine, cursorCol)
+    const shellLine = virtual ?? { line: currentLine, cursorCol, prefixLength: 0 }
+    const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
     if (shellContext !== undefined) {
       const suggestions = await suggestShellCompletion(shellContext, this.workDir, options)
       if (suggestions !== null) return suggestions
       // No shell suggestions (or the shell is unavailable): fall through —
       // a path position still gets the fork's file completion.
+    } else if (virtual !== null && !options.force && currentLine.startsWith('/')) {
+      // A NATURAL trigger on a leading `/` in a shell mode is a PATH,
+      // never a slash command: the fork's slash-command branch must not
+      // flash the command list while the user types `/usr/lo`. Stay quiet
+      // until Tab (which routes through the path branch below) — this
+      // matches the pre-mode behavior, where the literal `!` prefix kept
+      // the fork's slash branch off.
+      return null
     }
     try {
       return await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
@@ -556,8 +590,14 @@ export class MentionProvider implements AutocompleteProvider {
     // A shell-completion item replaces the current word only (command
     // names, subcommands, `$VAR` names all land as one plain word); the
     // `!` prefix and everything before the word stay untouched. Same
-    // pattern as the fork's slash-command apply.
-    if (shellCompletionContext(currentLine, cursorCol) !== undefined) {
+    // pattern as the fork's slash-command apply. In a shell MODE the
+    // context check runs on the VIRTUAL serialized line, but the apply
+    // itself operates on the REAL line: the completion prefix sits after
+    // the synthetic `!`, so it is identical in both forms and no prefix
+    // stripping is needed — the synthetic prefix never enters the buffer.
+    const virtual = this.virtualShellLine(currentLine, cursorCol)
+    const shellLine = virtual ?? { line: currentLine, cursorCol, prefixLength: 0 }
+    if (shellCompletionContext(shellLine.line, shellLine.cursorCol) !== undefined) {
       const before = currentLine.slice(0, cursorCol - prefix.length)
       const after = currentLine.slice(cursorCol)
       const newLine = `${before}${item.value} ${after}`
@@ -593,6 +633,15 @@ export class MentionProvider implements AutocompleteProvider {
         const commandName = trimmedStart.slice(1, separatorIndex)
         if (this.pathArgumentCommands.has(commandName)) return true
       }
+    }
+    // In a shell MODE a leading `/` is a PATH, never a slash command: the
+    // fork's bare-slash-command block (`/usr/lo` has no space) must not
+    // swallow Tab. The VIRTUAL serialized line keeps the fork's own
+    // judgment on the line the shell dispatch would see.
+    const virtual = this.virtualShellLine(currentLine, cursorCol)
+    if (virtual !== null) {
+      const virtualLines = lines.map((line, index) => index === cursorLine ? virtual.line : line)
+      return this.inner.shouldTriggerFileCompletion?.(virtualLines, cursorLine, virtual.cursorCol) ?? true
     }
     return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true
   }

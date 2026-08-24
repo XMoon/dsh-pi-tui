@@ -34,7 +34,6 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
   type Component,
-  type Editor,
   type Focusable,
   type OverlayHandle,
   type OverlayOptions,
@@ -117,6 +116,7 @@ import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
 import { TuiEditor } from './tui-editor.ts'
+import { serializeEditorInput, type EditorInputMode } from './editor-input-mode.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
@@ -1326,7 +1326,7 @@ export class TuiApp {
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
   private readonly tui: TuiMainScreen
-  private readonly editor: Editor
+  private readonly editor: TuiEditor
   /**
    * The surface GENERATION: incremented only when a genuinely NEW surface
    * attaches (a fresh TuiApp / SurfaceHost), never by start/stop, fullscreen
@@ -1801,6 +1801,14 @@ export class TuiApp {
     this.editor = new TuiEditor(this.tui, editorTheme)
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
+      // The shell-editor-mode boundary: the editor buffer holds the bare
+      // command body, so the wire form is re-serialized here — the shell
+      // dispatch (shellModeOf) must keep receiving the exact same text as
+      // before the mode feature. The mode is read at submit time (the
+      // fork clears the editor BEFORE onSubmit fires) and reset to the
+      // prompt afterwards; a rejected submission restores the serialized
+      // text through setEditorText, which decodes the mode back.
+      const serialized = this.serializeSeatDraft(text)
       // DEFENSE IN DEPTH: the app-level guard consumes Enter while a
       // continuable viewer is up, so the host editor's own onSubmit never
       // fires there — but a replacement editor's submit routes through
@@ -1812,21 +1820,28 @@ export class TuiApp {
       const target = this.viewerMode
       if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
         this.clearNotify()
+        this.resetEditorMode()
         this.events.onSubagentSubmit?.({
           parentSessionId: target.parentSessionId,
           childSessionId: target.childSessionId,
-          text,
+          text: serialized,
         })
         return
       }
-      this.rememberInput(text)
+      this.rememberInput(serialized)
       // Fresh user input supersedes any transient notice (a stale error
       // from the previous submission must not outlive the next one).
       this.clearNotify()
       // Issue #8: a successful submit is a fresh explicit action — the
       // armed exit chord (and its footer hint) must not survive.
       this.clearCtrlCExit()
-      this.events.onSubmit(text)
+      // The mode resets BEFORE the dispatch: a SYNCHRONOUS rejection
+      // (e.g. the transition fence) restores the serialized text through
+      // setEditorText, which decodes the mode back — an async rejection
+      // does the same later. Resetting after the dispatch would clobber a
+      // synchronous restore.
+      this.resetEditorMode()
+      this.events.onSubmit(serialized)
     }
     this.editor.onChange = () => {
       // The footer's task badge advertises the ↓ browser ONLY while the
@@ -1836,9 +1851,11 @@ export class TuiApp {
       // The visible editor IS the child draft while a continuable viewer
       // is up: mirror every change into the per-child slot (the runner's
       // restore and stale guards read the slot, not the live component).
+      // The slot stores the SERIALIZED wire form (mode + body), so a
+      // shell-mode draft round-trips through the viewer with its mode.
       const viewer = this.viewerMode
       if (viewer !== undefined && isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
-        this.subagentDrafts.set(viewer.childSessionId, this.seatEditor().getText())
+        this.subagentDrafts.set(viewer.childSessionId, this.serializeSeatDraft(this.seatEditor().getText()))
       }
       // P1-11: every HOST-driven editor mutation notifies the seat
       // holder's subscribers (the fork Editor's own typing/editing flows
@@ -2417,14 +2434,18 @@ export class TuiApp {
       if (this.events.onQueueSubmit === undefined) return undefined
       const text = this.seatEditor().getText()
       if (text.trim() === '') return undefined
-      this.rememberInput(text)
+      const serialized = this.serializeSeatDraft(text)
+      this.rememberInput(serialized)
       this.clearNotify()
       this.seatEditor().setText('')
       this.editorSeatHolder.notifyChanged()
+      // Reset BEFORE the dispatch: a synchronous rejection restores the
+      // serialized text (and with it the mode) through setEditorText.
+      this.resetEditorMode()
       // Consumed at the app level: request the frame ourselves (the
       // stale-clear trap — see the Ctrl+C branch).
       this.requestRender()
-      this.events.onQueueSubmit(text)
+      this.events.onQueueSubmit(serialized)
       return { consume: true }
     }
     if (matchesKey(data, 'escape')) {
@@ -2449,6 +2470,15 @@ export class TuiApp {
       // The host may consume the first Esc (runner-owned modes like the
       // subagent viewer); otherwise it arms the double-Esc cancel.
       if (this.events.onSingleEscape?.() === true) return { consume: true }
+      // Shell-mode exit: the host editor in a shell mode with an EMPTY
+      // body owns Esc — it cancels the shell mode (the double-Esc cancel
+      // must not fire while the user is composing a shell command). The
+      // pass-through lets the focused editor handle the key, exactly like
+      // the autocomplete branch above. Host-owned priorities (the viewer's
+      // onSingleEscape, overlays) keep their precedence.
+      if (this.seatEditor().id === 'host' && this.editor.getInputMode() !== 'prompt' && this.seatEditor().getText() === '') {
+        return undefined
+      }
       // pi parity: a SINGLE Esc while the agent is busy stops the current
       // activity (turn, tool run, compaction) — partial content stays on
       // screen. Idle keeps the double-Esc cancel.
@@ -2513,12 +2543,14 @@ export class TuiApp {
       // key when there is nothing to send at all.
       if (this.activeScreen.hasOverlayEntries) return { consume: true }
       const draft = this.seatEditor().getText()
+      const serialized = this.serializeSeatDraft(draft)
       this.seatEditor().setText('')
       this.editorSeatHolder.notifyChanged()
+      this.resetEditorMode()
       // Consumed at the app level: request the frame ourselves (the
       // stale-clear trap — see the Ctrl+C branch).
       this.requestRender()
-      this.events.onSteer?.(draft)
+      this.events.onSteer?.(serialized)
       return { consume: true }
     }
     if (matchesKey(data, 'down')) {
@@ -4168,16 +4200,20 @@ export class TuiApp {
   /**
    * Replace the editor draft. The runner restores a submission that the
    * divergence guard blocked, so the user's text survives for a retry.
-   * While a CONTINUABLE subagent viewer covers the editor, the write goes
-   * to the CHILD's draft slot + the visible editor (the main draft stays
-   * untouched); a ONE-SHOT viewer keeps the main draft write (the
-   * placeholder bar stays up; the main draft is restored on exit).
+   * The text is a SERIALIZED user input (`!x` / `!!x`), so the host
+   * editor decodes it into mode + body (the shell-editor-mode boundary);
+   * a plugin editor (no mode) receives the raw text. While a CONTINUABLE
+   * subagent viewer covers the editor, the write goes to the CHILD's
+   * draft slot (serialized form) + the visible editor (decoded body; the
+   * main draft stays untouched); a ONE-SHOT viewer keeps the main draft
+   * write (the placeholder bar stays up; the main draft is restored on
+   * exit).
    */
   setEditorText(text: string): void {
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
-      this.seatEditor().setText(text)
+      this.setSeatSerializedInput(text)
       this.editorSeatHolder.notifyChanged()
       this.requestRender()
       return
@@ -4188,7 +4224,7 @@ export class TuiApp {
     }
     // M9: every public draft mutation targets the visible seat occupant, not
     // the hidden host editor left behind by an editor handoff.
-    this.seatEditor().setText(text)
+    this.setSeatSerializedInput(text)
     this.editorSeatHolder.notifyChanged()
     this.requestRender()
   }
@@ -4260,11 +4296,13 @@ export class TuiApp {
       }
       // M9 (round-2 finding 1): the viewer restore writes the preserved
       // main draft to the CURRENT seat occupant (a plugin editor's draft
-      // returns to the plugin, never to a hidden host editor).
+      // returns to the plugin, never to a hidden host editor). The
+      // preserved draft is the SERIALIZED wire form, so the host editor
+      // decodes it back into mode + body.
       const seat = this.seatEditor()
       seat.borderColor = this.editorBorder
       this.clearViewerPlaceholder()
-      seat.setText(this.mainDraftBeforeViewer ?? '')
+      this.setSeatSerializedInput(this.mainDraftBeforeViewer ?? '')
       this.mainDraftBeforeViewer = undefined
       seat.invalidate()
       this.editorSeatHolder.notifyChanged()
@@ -4274,7 +4312,9 @@ export class TuiApp {
       return
     }
     if (this.viewerMode === undefined) {
-      this.mainDraftBeforeViewer = this.seatEditor().getText()
+      // Preserve the main draft in its SERIALIZED wire form, so a
+      // shell-mode draft round-trips through the viewer with its mode.
+      this.mainDraftBeforeViewer = this.serializeSeatDraft(this.seatEditor().getText())
       // The viewer renders ONLY the child transcript: the main session's
       // local cards (`!` shell runs) must never leak into it. The runner
       // repaints the child folder right after, so the cleared list is
@@ -4294,9 +4334,11 @@ export class TuiApp {
     seat.borderColor = color.accent
     if (isViewerAccessInteractive(resolveViewerAccess(mode.mode, mode.access))) {
       // The empty-draft placeholder advertises the viewer's OWN verbs
-      // (Enter sends to the CHILD — never the parent — Esc returns).
+      // (Enter sends to the CHILD — never the parent — Esc returns). The
+      // child slot holds the SERIALIZED wire form, decoded into mode +
+      // body for the visible editor.
       this.setViewerPlaceholder(`Message ${mode.label}… — Enter send · Esc back`)
-      seat.setText(this.subagentDrafts.get(mode.childSessionId) ?? '')
+      this.setSeatSerializedInput(this.subagentDrafts.get(mode.childSessionId) ?? '')
     } else {
       this.clearViewerPlaceholder()
       seat.setText(`viewing subagent: ${mode.label} — ${viewerAccessHint(mode.mode, resolveViewerAccess(mode.mode, mode.access))} · Esc returns`)
@@ -4341,7 +4383,9 @@ export class TuiApp {
    *   visible text is appended beneath the map, nothing is lost.
    * Exact equality short-circuits as "already parked". */
   private parkSubagentDraft(childSessionId: string): void {
-    const visible = this.seatEditor().getText()
+    // The slot stores the SERIALIZED wire form (mode + body), so the
+    // visible text is serialized the same way before comparing/folding.
+    const visible = this.serializeSeatDraft(this.seatEditor().getText())
     const slotted = this.subagentDrafts.get(childSessionId)
     if (visible === slotted) return
     if (slotted === undefined || slotted === '') {
@@ -4386,6 +4430,10 @@ export class TuiApp {
     if (this.events.onSubagentSubmit === undefined) return
     const text = this.seatEditor().getText()
     if (text.trim() === '') return
+    // The shell-editor-mode boundary: the visible body is re-serialized
+    // into the wire form before it leaves the app (a shell-mode draft
+    // reaches the child exactly as the user would have typed it).
+    const serialized = this.serializeSeatDraft(text)
     this.clearNotify()
     // Issue #8: a successful submit is a fresh explicit action — the armed
     // exit chord (and its footer hint) must not survive into the next
@@ -4399,11 +4447,12 @@ export class TuiApp {
     this.subagentDrafts.set(target.childSessionId, '')
     this.seatEditor().setText('')
     this.editorSeatHolder.notifyChanged()
+    this.resetEditorMode()
     this.requestRender()
     this.events.onSubagentSubmit({
       parentSessionId: target.parentSessionId,
       childSessionId: target.childSessionId,
-      text,
+      text: serialized,
     })
   }
 
@@ -4435,12 +4484,12 @@ export class TuiApp {
    * only — it is NEVER part of the draft text). A replacement editor in
    * the seat has no placeholder surface; the hint is host-editor-only. */
   private setViewerPlaceholder(text: string): void {
-    ;(this.editor as import('./tui-editor.ts').TuiEditor).setPlaceholder(text)
+    this.editor.setPlaceholder(text)
   }
 
   /** Clear the host editor's render-time placeholder. */
   private clearViewerPlaceholder(): void {
-    ;(this.editor as import('./tui-editor.ts').TuiEditor).setPlaceholder('')
+    this.editor.setPlaceholder('')
   }
 
   /**
@@ -5287,6 +5336,7 @@ export class TuiApp {
       getText: () => editor.getText(),
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete(),
+      getInputMode: () => editor.getInputMode(),
       getCursor: () => {
         const cursor = editor.getCursor()
         const lines = editor.getText().split('\n')
@@ -5410,6 +5460,40 @@ export class TuiApp {
     return this.editorSeatHolder.currentEditor()
   }
 
+  /**
+   * The shell-editor-mode boundary: serialize a seat draft into the wire
+   * form the shell dispatch understands. The HOST editor's mode prefixes
+   * the body (`!` / `!!`); a plugin editor has no mode — its text IS the
+   * wire form (a stale hidden-host mode must never leak into a plugin
+   * editor's submission).
+   */
+  private serializeSeatDraft(text: string): string {
+    const seat = this.seatEditor()
+    const mode = seat.id === 'host' ? this.editor.getInputMode() : 'prompt'
+    return serializeEditorInput(mode, text)
+  }
+
+  /**
+   * Decode a SERIALIZED user input (`!x` / `!!x`) into the seat editor:
+   * the host editor restores mode + body; a plugin editor (no mode) gets
+   * the raw text. The single decode point for every host restore path.
+   */
+  private setSeatSerializedInput(text: string): void {
+    const seat = this.seatEditor()
+    if (seat.id === 'host') {
+      this.editor.setSerializedInput(text)
+    } else {
+      seat.setText(text)
+    }
+  }
+
+  /** After an accepted submission the editor returns to the prompt mode
+   * (a rejected submission restores the serialized text — and with it
+   * the mode — through setEditorText). */
+  private resetEditorMode(): void {
+    this.editor.setInputMode('prompt')
+  }
+
   /** M9 public hook: reconcile the seat with the registry's winner NOW
    * (tests + the runner call it after a winner change; the render-path
    * reconcile is the live fallback). */
@@ -5421,6 +5505,11 @@ export class TuiApp {
    * seat actually renders — getDraft preserves the viewer draft). */
   seatTextForTest(): string {
     return this.seatEditor().getText()
+  }
+
+  /** Shell-editor-mode test hook: the host editor's current input mode. */
+  inputModeForTest(): EditorInputMode {
+    return this.editor.getInputMode()
   }
 
   /** M9 test hook: the CURRENT seat occupant (component rendering probe). */
@@ -7171,16 +7260,19 @@ export class TuiApp {
 
   /**
    * Replace the editor draft wholesale (the Alt+↑ dequeue path pulls every
-   * queued message back into the editor for editing). While a CONTINUABLE
-   * subagent viewer covers the editor, the write goes to the CHILD's
-   * draft slot + the visible editor; a ONE-SHOT viewer keeps the main
-   * draft write (restored on exit).
+   * queued message back into the editor for editing). The text is a
+   * SERIALIZED user input (queued messages keep their `!` / `!!` wire
+   * form), so the host editor decodes it into mode + body. While a
+   * CONTINUABLE subagent viewer covers the editor, the write goes to the
+   * CHILD's draft slot (serialized form) + the visible editor (decoded
+   * body); a ONE-SHOT viewer keeps the main draft write (restored on
+   * exit).
    */
   setDraft(text: string): void {
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
-      this.seatEditor().setText(text)
+      this.setSeatSerializedInput(text)
       this.editorSeatHolder.notifyChanged()
       this.requestRender()
       return
@@ -7190,7 +7282,7 @@ export class TuiApp {
       return
     }
     // M9: write the CURRENT seat occupant (host default or plugin editor).
-    this.seatEditor().setText(text)
+    this.setSeatSerializedInput(text)
     this.editorSeatHolder.notifyChanged()
     this.requestRender()
   }
@@ -7232,6 +7324,9 @@ export class TuiApp {
     // An image-only draft is NOT empty: the placeholder expansion resolves
     // it to real content blocks at submission (plan §11.1).
     if (text.trim() === '' && this.events.isImageDraft?.() !== true) return
+    // The shell-editor-mode boundary: the visible body is re-serialized
+    // into the wire form (`!` / `!!` prefixes) before it leaves the app.
+    const serialized = this.serializeSeatDraft(text)
     this.clearNotify()
     // Issue #8: a successful submit is a fresh explicit action — the armed
     // exit chord (and its footer hint) must not survive into the next
@@ -7250,11 +7345,12 @@ export class TuiApp {
       this.subagentDrafts.set(target.childSessionId, '')
       this.seatEditor().setText('')
       this.editorSeatHolder.notifyChanged()
+      this.resetEditorMode()
       this.requestRender()
       this.events.onSubagentSubmit?.({
         parentSessionId: target.parentSessionId,
         childSessionId: target.childSessionId,
-        text,
+        text: serialized,
       })
       return
     }
@@ -7264,15 +7360,18 @@ export class TuiApp {
       // draft intact and does NOT fire a parent submit.
       return
     }
-    this.rememberInput(text)
+    this.rememberInput(serialized)
     // Clear the draft like a normal Enter submit (the runner's dispatch
     // owns the session/guard path). M9: clear the CURRENT seat occupant.
     this.seatEditor().setText('')
     this.editorSeatHolder.notifyChanged()
+    // Reset BEFORE the dispatch: a synchronous rejection restores the
+    // serialized text (and with it the mode) through setEditorText.
+    this.resetEditorMode()
     if (forceQueue) {
-      this.events.onQueueSubmit?.(text)
+      this.events.onQueueSubmit?.(serialized)
     } else {
-      this.events.onSubmit(text)
+      this.events.onSubmit(serialized)
     }
     this.requestRender()
   }
@@ -7525,7 +7624,7 @@ export class TuiApp {
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
   ): void {
-    const base = new MentionProvider([...commands], cwd, fdPath)
+    const base = new MentionProvider([...commands], cwd, fdPath, () => this.editor.getInputMode())
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return
