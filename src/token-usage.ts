@@ -75,13 +75,11 @@ function stepKey(turn: number, step: number): string {
 export class StepUsageAccumulator {
   /** Open steps: their current usage (undefined = no usage fact yet). */
   private readonly perStep = new Map<string, { usage?: UsageLike }>()
-  /** Committed per-turn totals (completed steps only). */
+  /** Committed per-turn totals (completed steps + orphan facts). */
   private readonly turnTotals = new Map<number, TokenUsageTotals>()
   /** Open steps' current usage per turn (the running display share). */
   private readonly turnPending = new Map<number, TokenUsageTotals>()
-  /** Usage facts without a step boundary (replay edge), counted once. */
-  private readonly orphan: TokenUsageTotals = emptyTotals()
-  /** The session-wide total (committed steps + orphan), kept O(1). */
+  /** The session-wide total (every committed fact), kept O(1). */
   private readonly session: TokenUsageTotals = emptyTotals()
 
   /** Open one step's accounting. */
@@ -90,7 +88,8 @@ export class StepUsageAccumulator {
   }
 
   /** Record a streaming usage chunk: the FIRST chunk of a step wins (the
-   * assembler value); a chunk without an open step counts immediately. */
+   * assembler value); a chunk without an open step (replay edge) is a
+   * settled fact and commits to the turn's totals immediately. */
   onUsageChunk(turn: number, step: number, usage: UsageLike): void {
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
@@ -99,13 +98,13 @@ export class StepUsageAccumulator {
         this.addPending(turn, usage)
       }
     } else {
-      this.addOrphan(usage)
+      this.commitOrphan(turn, usage)
     }
   }
 
   /** The authoritative usage of a settled step replaces the provisional
-   * one (never adds to it). A message without an open step counts
-   * immediately. */
+   * one (never adds to it). A message without an open step (replay edge)
+   * commits to the turn's totals immediately. */
   onAssistantMessage(turn: number, step: number, usage?: UsageLike): void {
     const entry = this.perStep.get(stepKey(turn, step))
     if (entry !== undefined) {
@@ -115,7 +114,7 @@ export class StepUsageAccumulator {
         this.addPending(turn, usage)
       }
     } else if (usage !== undefined) {
-      this.addOrphan(usage)
+      this.commitOrphan(turn, usage)
     }
   }
 
@@ -133,8 +132,8 @@ export class StepUsageAccumulator {
     }
   }
 
-  /** The committed per-turn totals (completed steps only); undefined when
-   * the turn has no committed usage fact. */
+  /** The committed per-turn totals (completed steps + orphan facts);
+   * undefined when the turn has no committed usage fact. */
   turnUsage(turn: number): TokenUsageTotals | undefined {
     return this.turnTotals.get(turn)
   }
@@ -153,7 +152,9 @@ export class StepUsageAccumulator {
     return totals
   }
 
-  /** The session-wide totals (all committed steps + orphan usage). */
+  /** The session-wide totals (every committed fact — the sum of the
+   * per-turn committed totals by construction, so the footer and the
+   * Focus per-turn projection can never drift). */
   sessionTotals(): TokenUsageTotals {
     return { ...this.session }
   }
@@ -185,8 +186,11 @@ export class StepUsageAccumulator {
     pending.cacheWriteTokens -= usage.cacheWriteTokens ?? 0
   }
 
-  private addOrphan(usage: UsageLike): void {
-    addTotals(this.orphan, usage)
+  /** A usage fact without an open step (replay edge) is a settled fact:
+   * commit it to the turn's totals immediately, so
+   * sum(per-turn committed) == session total stays strict. */
+  private commitOrphan(turn: number, usage: UsageLike): void {
+    addTotals(this.turnTotalFor(turn), usage)
     addTotals(this.session, usage)
   }
 }
