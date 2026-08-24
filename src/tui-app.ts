@@ -1914,9 +1914,14 @@ export class TuiApp {
           }
           case 'steer': {
             const text = this.seatEditor().getText()
+            // The shell-editor-mode boundary, like the Ctrl+S path: the
+            // wire form leaves the app (identity for a plugin editor,
+            // whose document IS the wire form; defensive for a host seat).
+            const serialized = this.serializeSeatDraft(text)
             this.seatEditor().setText('')
             this.editorSeatHolder.notifyChanged()
-            this.events.onSteer?.(text)
+            this.resetEditorMode()
+            this.events.onSteer?.(serialized)
             return true
           }
           case 'open-external-editor': {

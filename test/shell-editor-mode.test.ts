@@ -15,6 +15,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
 import { EditorRegistry } from '../src/editor-registry.ts'
+import { EditorSeatHolder } from '../src/editor-seat-holder.ts'
+import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -673,4 +675,81 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
   handle.dispose()
   app.reconcileEditorNow()
   app.stop()
+})
+
+// ── review round 5: sink steer serialization + adapter fallback ──────────
+
+test('the plugin action sink steers the wire form and clears the editor', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const steered: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSteer: (text) => steered.push(text),
+  }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  // A plugin editor whose document is the wire form dispatches steer.
+  let pluginHost: EditorHost | undefined
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'steer-plugin',
+    priority: 0,
+    create: (host: EditorHost) => {
+      pluginHost = host
+      const editor = pluginEditor()
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // The handoff transferred the (empty) host draft; the user then typed
+  // a shell line into the plugin — its document is the wire form.
+  created[0]!.setText('!pwd')
+  assert.equal(pluginHost?.dispatch('steer').kind, 'accepted')
+  assert.deepEqual(steered, ['!pwd'], 'the plugin document (the wire form) steers verbatim')
+  assert.equal(created[0]!.getText(), '', 'the steer clears the plugin document')
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
+
+test('a host adapter without setSerializedInput still receives the handoff draft (setText fallback)', () => {
+  const host = {
+    text: 'draft',
+    getText: () => host.text,
+    setText: (text: string) => { host.text = text },
+    setTextAndCursor: (text: string) => { host.text = text },
+    getCursor: () => 0,
+    setCursor: () => {},
+    focused: true,
+    borderColor: (text: string) => text,
+    invalidate: () => {},
+    addToHistory: () => {},
+    clearHistory: () => {},
+    component: new Text('host', 0, 0),
+  }
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => host,
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const plugin = pluginEditor('!pwd')
+  holder.handoff({ id: 'plugin', create: () => plugin })
+  assert.equal(holder.currentEditor().id, 'plugin')
+  assert.equal(plugin.getText(), 'draft', 'the host draft transferred to the plugin')
+  // The user edits in the plugin; the restore must land in the host even
+  // though the bare adapter has no setSerializedInput (the setText
+  // fallback — never a silently dropped draft).
+  plugin.setText('!pwd')
+  holder.handoff(undefined)
+  assert.equal(holder.currentEditor().id, 'host')
+  assert.equal(host.text, '!pwd', 'the draft must survive the restore through the setText fallback')
+  holder.dispose()
 })
