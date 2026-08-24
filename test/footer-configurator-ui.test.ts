@@ -42,10 +42,18 @@ test('the configurator renders the draft items and the live preview', async () =
     onCancel: () => {},
   })
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
+  let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Configure Footer'), `title missing:\n${view}`)
   assert.ok(view.includes('Row 1 · Left'), `row header missing:\n${view}`)
   assert.ok(view.includes('[x] Model'), `item row missing:\n${view}`)
+  // The content windows around the cursor: scroll to the BOTTOM (the last
+  // available item) so the preview comes into view. Direct model moves
+  // need an explicit render (the fork re-renders only after handleInput).
+  while (!model.state().cursorInAvailable) model.moveCursorDown()
+  for (let i = 0; i < 12; i += 1) model.moveCursorDown()
+  app.requestRender()
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
   assert.ok(view.includes('Preview'), `preview section missing:\n${view}`)
   assert.ok(view.includes('deepseek/flash'), `preview must compose the real snapshot:\n${view}`)
   app.stop()

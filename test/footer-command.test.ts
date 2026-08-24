@@ -39,7 +39,16 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown }): {
   return {
     doc,
     value: {
-      get: () => doc as never,
+      get: () => ({
+        theme: 'auto',
+        footer: doc.footer,
+        footerLayout: doc.footerLayout,
+        fullscreen: 'on',
+        busyEnter: 'queue',
+        localShellSandbox: 'bypass',
+        homeEndKeys: 'viewport',
+        focusMode: 'off',
+      }),
       replace: (next: { footer: string; footerLayout?: unknown }) => {
         doc.footer = next.footer
         doc.footerLayout = next.footerLayout
@@ -104,6 +113,7 @@ test('/footer is sessionless and opens the configurator; Enter saves and persist
     extensions: undefined,
     exit: () => {},
     applyFooterSettings: (doc) => {
+      if (doc === undefined) return
       applied.push({ ...doc })
       // Mirror the runner's apply: custom → set the layout on the app.
       if (doc.footer === 'custom') {
@@ -173,7 +183,7 @@ test('/footer Esc cancels without writing', async () => {
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
-    applyFooterSettings: (doc) => { applied.push({ ...doc }) },
+    applyFooterSettings: (doc) => { if (doc !== undefined) applied.push({ ...doc }) },
   }
   registerTuiCommands(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')

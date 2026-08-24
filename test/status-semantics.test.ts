@@ -16,7 +16,7 @@ import type { SessionStats } from '../src/stats.ts'
 
 // ── Access ────────────────────────────────────────────────────────────────
 
-function presets(current: string, label?: string): PermissionPresetsLike {
+function presets(current: string, label?: string): PermissionPresetsLike<never> {
   return {
     current: () => current,
     optionOf: name => ({ name, ...label === undefined ? {} : { label } }),

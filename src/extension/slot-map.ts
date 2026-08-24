@@ -16,6 +16,7 @@ const SLOT_SEMANTICS: Readonly<Record<PiTuiSlotName, PiTuiSlotSemantic>> = {
   'chrome.header.badge': 'list',
   'input.dock.item': 'list',
   'chrome.footer.status': 'list',
+  'chrome.footer.item': 'list',
   'input.widget.above': 'list',
   'input.widget.below': 'list',
 }

@@ -17,12 +17,13 @@
  */
 
 import type { Text } from '@xmoon76/pi-tui'
-import type { PiTuiCapability, SurfaceSnapshot, SurfaceStateValues } from '../public-types.ts'
+import type { FooterItemContribution, PiTuiCapability, SurfaceSnapshot, SurfaceStateValues } from '../public-types.ts'
 import type { ExtensionLedger } from './ledger.ts'
 import { InvalidateBatcher } from './batcher.ts'
 import { SurfaceStateStore } from './surface-state.ts'
 import { HeaderBadgeOutlet, DockItemOutlet, FooterSegmentOutlet } from './slot-outlet.ts'
 import { WidgetOutlet } from './widget-outlet.ts'
+import type { FooterItemDefinition } from '../../footer/types.ts'
 
 /** The surface host bound to one live surface. */
 export class SurfaceHost {
@@ -129,6 +130,7 @@ export class SurfaceHost {
     this.capabilities.add('slot.chrome.header.badge')
     this.capabilities.add('slot.input.dock.item')
     this.capabilities.add('slot.chrome.footer.status')
+    this.capabilities.add('slot.chrome.footer.item')
     this.capabilities.add('slot.input.widget')
     this.capabilities.add('surface.snapshot')
     // F-17: every ledger content change re-bakes the outlets and repaints,
@@ -276,6 +278,43 @@ export class SurfaceHost {
   /** The footer extension segments (host merges into its status line). */
   footerText(): string {
     return this.footerSegments.text()
+  }
+
+  // ── M4: the configurable footer item slot (chrome.footer.item) ────────
+
+  /** The canonical config id for one contribution: `ext:<owner>/<id>` (the
+   * plan §16.4 key — stable across HMR, never collides across owners). */
+  private static footerItemKey(owner: string, id: string): string {
+    return `ext:${owner}/${id}`
+  }
+
+  /** Every live chrome.footer.item contribution's canonical config id. */
+  footerItemIds(): string[] {
+    const snapshot = this.ledger.snapshot<FooterItemContribution>('chrome.footer.item')
+    return snapshot.records.map(record => SurfaceHost.footerItemKey(record.owner, record.id))
+  }
+
+  /** Build the footer item DEFINITION for one canonical id (the composer's
+   * registry resolves it on demand — the render reads the LIVE
+   * contribution, so replace() shows up on the next compose). */
+  footerItemDefinition(id: string): FooterItemDefinition | undefined {
+    const snapshot = this.ledger.snapshot<FooterItemContribution>('chrome.footer.item')
+    for (const record of snapshot.records) {
+      if (SurfaceHost.footerItemKey(record.owner, record.id) !== id) continue
+      const contribution = record.value
+      return {
+        id,
+        label: contribution.label,
+        ...contribution.description === undefined ? {} : { description: contribution.description },
+        defaultZone: contribution.defaultZone ?? 'left',
+        defaultImportance: contribution.importance ?? 0,
+        ...contribution.minWidth === undefined ? {} : { minWidth: contribution.minWidth },
+        formats: ['segment'],
+        defaultFormat: 'segment',
+        render: () => contribution.segment as unknown as import('../../footer/types.ts').FooterSegment,
+      }
+    }
+    return undefined
   }
 
   /** The above-editor widget rows (host merges into its editor zone). */

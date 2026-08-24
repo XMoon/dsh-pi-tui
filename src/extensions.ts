@@ -61,6 +61,7 @@ export {
   type EditorSnapshot,
   type ExtensionEditor,
   type ExtensionView,
+  type FooterItemContribution,
   type FooterSegment,
   type FrameView,
   type HeaderBadge,

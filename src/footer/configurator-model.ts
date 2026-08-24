@@ -17,6 +17,10 @@ export interface FooterConfiguratorState {
   readonly activeRow: number
   readonly activeZone: 'left' | 'right'
   readonly activeIndex: number
+  /** Whether the cursor is in the AVAILABLE section (items not in the
+   * layout — builtin and extension items alike). */
+  readonly cursorInAvailable: boolean
+  readonly availableIndex: number
 }
 
 /** The mutable draft shape (the persisted layout is deeply readonly). */
@@ -67,6 +71,8 @@ export class FooterConfiguratorModel {
   private activeRow = 0
   private activeZone: 'left' | 'right' = 'left'
   private activeIndex = 0
+  private cursorInAvailable = false
+  private availableIndex = 0
   private readonly registry: FooterItemRegistry
 
   constructor(initial: FooterLayoutV1, registry: FooterItemRegistry) {
@@ -81,7 +87,20 @@ export class FooterConfiguratorModel {
       activeRow: this.activeRow,
       activeZone: this.activeZone,
       activeIndex: this.activeIndex,
+      cursorInAvailable: this.cursorInAvailable,
+      availableIndex: this.availableIndex,
     }
+  }
+
+  /** The registry ids NOT present in the draft layout (addable items —
+   * builtin and extension items alike). */
+  availableIds(): string[] {
+    const present = new Set<string>()
+    for (const row of this.draft.rows) {
+      for (const ref of row.left) present.add(ref.id)
+      for (const ref of row.right) present.add(ref.id)
+    }
+    return this.registry.ids().filter(id => !present.has(id))
   }
 
   /** The active row's mutable record. */
@@ -108,11 +127,27 @@ export class FooterConfiguratorModel {
     return this.activeRefs()[this.activeIndex]
   }
 
-  /** Space: toggle the active item out of the layout. */
+  /** Space: toggle the active item out of the layout, or (in the
+   * available section) add the available item to the active zone. */
   toggleActive(): void {
+    if (this.cursorInAvailable) {
+      const id = this.availableIds()[this.availableIndex]
+      if (id === undefined) return
+      this.addAvailable(id)
+      return
+    }
     const ref = this.activeRef()
     if (ref === undefined) return
     this.setActiveRefs(this.activeRefs().filter(candidate => candidate !== ref))
+  }
+
+  /** Add one available item to the active zone (appended at the end). */
+  addAvailable(id: string): void {
+    const row = this.activeRowRecord()
+    const ref: MutableRef = { id }
+    if (this.activeZone === 'left') row.left = [...row.left, ref]
+    else row.right = [...row.right, ref]
+    this.activeIndex = (this.activeZone === 'left' ? row.left : row.right).length - 1
   }
 
   /** ←/→: move the active item to the other zone (appended at the end). */
@@ -127,15 +162,34 @@ export class FooterConfiguratorModel {
 
   /** ↑: move the cursor up (selection, no reorder). */
   moveCursorUp(): void {
-    if (this.activeIndex <= 0) return
-    this.activeIndex -= 1
+    if (this.cursorInAvailable) {
+      if (this.availableIndex > 0) {
+        this.availableIndex -= 1
+        return
+      }
+      this.cursorInAvailable = false
+      return
+    }
+    if (this.activeIndex > 0) this.activeIndex -= 1
   }
 
-  /** ↓: move the cursor down (selection, no reorder). */
+  /** ↓: move the cursor down (selection, no reorder); past the last zone
+   * item it enters the available section. */
   moveCursorDown(): void {
+    if (this.cursorInAvailable) {
+      const available = this.availableIds()
+      if (this.availableIndex < available.length - 1) this.availableIndex += 1
+      return
+    }
     const refs = this.activeRefs()
-    if (this.activeIndex >= refs.length - 1) return
-    this.activeIndex += 1
+    if (this.activeIndex < refs.length - 1) {
+      this.activeIndex += 1
+      return
+    }
+    if (this.availableIds().length > 0) {
+      this.cursorInAvailable = true
+      this.availableIndex = 0
+    }
   }
 
   /** Shift+↑: move the active item one position up. */
@@ -165,12 +219,16 @@ export class FooterConfiguratorModel {
     if (this.draft.rows.length < 2) return
     this.activeRow = (this.activeRow + 1) % this.draft.rows.length
     this.activeIndex = 0
+    this.cursorInAvailable = false
+    this.availableIndex = 0
   }
 
   /** Shift+Tab: switch the active zone. */
   switchZone(): void {
     this.activeZone = this.activeZone === 'left' ? 'right' : 'left'
     this.activeIndex = 0
+    this.cursorInAvailable = false
+    this.availableIndex = 0
   }
 
   /** Cycle the active item's finite formatter. */
@@ -207,6 +265,8 @@ export class FooterConfiguratorModel {
     this.draft.rows = next.rows
     this.activeRow = 0
     this.activeIndex = 0
+    this.cursorInAvailable = false
+    this.availableIndex = 0
   }
 
   /** Reset the draft to the builtin compact layout. */
@@ -215,6 +275,8 @@ export class FooterConfiguratorModel {
     this.draft.rows = next.rows
     this.activeRow = 0
     this.activeIndex = 0
+    this.cursorInAvailable = false
+    this.availableIndex = 0
   }
 
   /** Add a second row (1..2 rows). */

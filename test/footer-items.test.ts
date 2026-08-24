@@ -28,10 +28,13 @@ function render(id: string, snapshot: StatusSnapshot, ref: FooterItemRef = REF):
   return segment === null ? '' : plain(renderSpans(segment.spans))
 }
 
-function snapshotWith(patch: (snap: StatusSnapshot) => void): StatusSnapshot {
-  const snap = emptyStatusSnapshot()
+/** Deep-mutable build shape (the snapshot is deeply readonly). */
+type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
+
+function snapshotWith(patch: (snap: DeepMutable<StatusSnapshot>) => void): StatusSnapshot {
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
   patch(snap)
-  return snap
+  return snap as StatusSnapshot
 }
 
 test('permission-preset renders the four legacy badges and nothing else', () => {

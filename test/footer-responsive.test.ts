@@ -16,9 +16,12 @@ import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts
 const composer = new FooterComposer(createBuiltinFooterRegistry())
 const CONTEXT = { editorEmpty: true, extensionFooterText: '[EXT-SEG]' }
 
+/** Deep-mutable build shape (the snapshot is deeply readonly). */
+type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
+
 /** A busy snapshot: every default item renders. */
 function busySnapshot(): StatusSnapshot {
-  const snap = emptyStatusSnapshot()
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
   snap.composition.model = { provider: 'deepseek', id: 'deepseek-v4-flash', displayName: 'deepseek-v4-flash' }
   snap.access.permissionPreset = { id: 'danger-full-access', label: 'danger-full-access', matched: true }
   snap.collaboration.plan.effective = true
@@ -33,7 +36,7 @@ function busySnapshot(): StatusSnapshot {
     steps: 38,
   }
   snap.usage.context = { usedTokens: 160000, windowTokens: 1_000_000, percent: 16 }
-  return snap
+  return snap as StatusSnapshot
 }
 
 /** A custom layout with a right zone (the focus-mode pin). */
@@ -79,7 +82,7 @@ test('the default layout never overflows or breaks ANSI at any width', () => {
 })
 
 test('a right zone is never covered by the left zone at any width', () => {
-  const snap = busySnapshot()
+  const snap = busySnapshot() as DeepMutable<StatusSnapshot>
   snap.interaction.focusMode = true
   for (const width of WIDTHS) {
     const text = composer.render({ snapshot: snap, layout: RIGHT_ZONE_LAYOUT, width, context: CONTEXT })
@@ -94,7 +97,7 @@ test('a right zone is never covered by the left zone at any width', () => {
 })
 
 test('items drop by importance under pressure (the tail goes first)', () => {
-  const snap = busySnapshot()
+  const snap = busySnapshot() as DeepMutable<StatusSnapshot>
   snap.interaction.focusMode = true
   // A narrow width with a right zone: the left zone must compact/drop the
   // LOWEST-importance items (version 10, performance 40, token-usage 50,
@@ -108,7 +111,7 @@ test('items drop by importance under pressure (the tail goes first)', () => {
 })
 
 test('no dangling separator: separators only join surviving items', () => {
-  const snap = emptyStatusSnapshot()
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
   // Only the model renders (everything else absent) — the row must be
   // exactly the model badge, never ` │ [model]` or `[model] │ `.
   snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
