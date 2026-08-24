@@ -74,6 +74,12 @@ function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
 }
 
+/** The turn number encoded in a step key. */
+function turnOfStepKey(key: string): number {
+  const slash = key.indexOf('/')
+  return slash === -1 ? -1 : Number(key.slice(0, slash))
+}
+
 /** One step's timing accumulation, resolved at its boundaries. The usage
  * field feeds the decode-throughput sampling (settleStep); the token
  * ACCOUNTING itself lives in the shared {@link StepUsageAccumulator}, so
@@ -138,11 +144,21 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
       continue
     }
     switch (event.type) {
+      case 'turn/start': {
+        // Advance the shared usage accounting (review finding).
+        usage.onTurnStart(event.data.turn)
+        break
+      }
       case 'turn/end': {
         completedTurns.add(event.data.turn)
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         usage.onTurnEnd(event.data.turn)
+        // Drop the open timing entries of the ended turn (interrupted
+        // steps never see their step/end) — review finding.
+        for (const key of perStep.keys()) {
+          if (turnOfStepKey(key) === event.data.turn) perStep.delete(key)
+        }
         break
       }
       case 'step/start':
@@ -303,11 +319,21 @@ export class StatsFolder {
       return
     }
     switch (event.type) {
+      case 'turn/start': {
+        // Advance the shared usage accounting (review finding).
+        this.usage.onTurnStart(event.data.turn)
+        break
+      }
       case 'turn/end': {
         this.completedTurns.add(event.data.turn)
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         this.usage.onTurnEnd(event.data.turn)
+        // Drop the open timing entries of the ended turn (interrupted
+        // steps never see their step/end) — review finding.
+        for (const key of this.perStep.keys()) {
+          if (turnOfStepKey(key) === event.data.turn) this.perStep.delete(key)
+        }
         break
       }
       case 'step/start':

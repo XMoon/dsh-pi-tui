@@ -954,6 +954,10 @@ export class TranscriptFolder {
         // regress the current turn (turn-less events would land in the
         // wrong turn — review finding).
         this.currentTurn = Math.max(this.currentTurn, event.data.turn)
+        // Advance the shared usage accounting: a delayed fact for the
+        // prior turn becomes stale once the next turn starts (review
+        // finding).
+        this.usage.onTurnStart(event.data.turn)
         // Focus aggregation: turn timing comes from `SessionEvent.time`
         // (plan §10.1) — never a second clock. Idempotent: a replayed
         // turn/start for an already-finalized (or already-started) turn
@@ -1004,6 +1008,11 @@ export class TranscriptFolder {
       case 'assistant/chunk': {
         const { chunk } = event.data
         const step = event.data.step
+        // After turn/end a late assistant event is a replay artifact: it
+        // must not mutate the transcript entries — the final-answer
+        // selection reads the exact last assistant (review finding).
+        const activity = this.activityFor(event.data.turn)
+        if (activity.completed) break
         // Streaming text accumulates in place on the entry itself; there is
         // no separate accumulator map, so a long session's text is stored
         // once, not twice.
@@ -1021,19 +1030,18 @@ export class TranscriptFolder {
           this.foldThinking(this.activityFor(event.data.turn), chunk.text)
         } else if (chunk.type === 'usage') {
           // Focus aggregation: per-turn token facts (the shared
-          // accumulator — the footer and Focus can never drift). After
-          // turn/end the token segment was settled: a late usage chunk
-          // (replay artifact) must not add one retroactively (review
-          // finding).
-          const activity = this.activityFor(event.data.turn)
-          if (!activity.completed) {
-            this.usage.onUsageChunk(event.data.turn, step, chunk.usage)
-            this.syncUsage(activity)
-          }
+          // accumulator — the footer and Focus can never drift).
+          this.usage.onUsageChunk(event.data.turn, step, chunk.usage)
+          this.syncUsage(activity)
         }
         break
       }
       case 'assistant/message': {
+        // After turn/end a late message is a replay artifact: reject it
+        // BEFORE mutating the transcript entries — the final-answer
+        // selection reads the exact last assistant (review finding).
+        const activity = this.activityFor(event.data.turn)
+        if (activity.completed) break
         const key = stepKey(event.data.turn, event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
@@ -1060,12 +1068,6 @@ export class TranscriptFolder {
         // whether it is the final answer; the candidate keeps its step
         // identity and the turn/end resolution decides. The final answer
         // never enters the Message slot (plan §22).
-        const activity = this.activityFor(event.data.turn)
-        // After turn/end the Thought card was settled: a late message
-        // (replay artifact) must not mutate the Focus state — the count,
-        // the confirmed text, the revision (review finding). The
-        // transcript entry still folds.
-        if (activity.completed) break
         activity.assistantMessages += 1
         // Every accepted authoritative message settles its step's output —
         // EMPTY and image-only messages included: a later text-delta for

@@ -253,6 +253,37 @@ test('tok/s samples only steps carrying both a decode window and usage', () => {
   // (6100→7000 window above proves it: last delta was at 6200).
 })
 
+test('turn/start advances the accumulator: a delayed prior-turn usage fact is stale', () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 2, t + 2),
+    event('turn/start', { turn: 1 }, 3, t + 3),
+    // A delayed usage fact for the prior turn (replay artifact).
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 0 } } }, 4, t + 4),
+    event('step/end', { turn: 0, step: 0 }, 5, t + 5),
+  ]
+  const stats = computeStats(events)
+  const folder = new TranscriptFolder()
+  folder.apply(events)
+  assert.equal(stats.inputTokens, 100, 'the delayed prior-turn fact must be stale')
+  assert.equal(folder.turnActivity(0)!.totalTokens, 100, 'the Focus per-turn total must agree with the footer')
+})
+
+test('turn/end drops the open timing entries of the ended turn', () => {
+  const folder = new StatsFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 2),
+    // turn/end arrives while the step is still open (interrupted).
+    event('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 3),
+  ])
+  const perStep = (folder as unknown as { perStep: Map<string, unknown> }).perStep
+  assert.equal(perStep.size, 0, 'the open timing entries of the ended turn must be dropped')
+})
+
 test('turn/end with an open step finalizes its usage in BOTH folds', () => {
   const t = 1_700_000_000_000
   const events = [

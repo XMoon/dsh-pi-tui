@@ -636,6 +636,32 @@ test('a late message for an older step never regresses the final-answer dedup', 
   assert.equal(activity.message?.text, '第一步权威')
 })
 
+test('a late assistant event after turn/end never changes the exact final answer', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '最终答案' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
+    // A late message for a NEW step (replay artifact).
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: '迟到的最终' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const finals = blocks.filter(b => b.kind === 'message' && b.message.kind === 'assistant')
+  assert.equal(finals.length, 1, 'exactly one final')
+  if (finals[0]?.kind === 'message' && finals[0].message.kind === 'assistant') {
+    assert.equal(finals[0].message.text, '最终答案', 'the late message must not become the final')
+  } else {
+    assert.fail('the final block must be an assistant message')
+  }
+})
+
 test('an empty authoritative message settles its step (a late delta cannot resurrect a preview)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
@@ -1432,7 +1458,7 @@ test('Focus ON collapsed: user → FocusActivity → final, process hidden', () 
 test('intermediate assistant messages are hidden when collapsed', () => {
   const folder = new TranscriptFolder()
   folder.apply([
-    ...completedTurn(0, 0, 1000),
+    ...completedTurn(0, 0, 1000).slice(0, -1), // drop the turn/end
     eventAt('assistant/message', {
       turn: 0, step: 2,
       message: { id: MessageId('mid'), role: 'assistant', content: [{ type: 'text', text: 'intermediate step' }], source: { kind: 'model', provider: 'p', model: 'm' } },
