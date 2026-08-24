@@ -245,13 +245,13 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   await vt.waitForRender()
   view = vt.getViewport()
   assert.ok(view.join('\n').includes('🐋 Thought'), 'the root must collapse')
-  // The alt screen treats a fast repeat at the same cell as a double-click
-  // (word selection) — pause before the reopen click on the same cell.
-  await new Promise(resolve => setTimeout(resolve, 600))
-  await vt.waitForRender()
-  // Reopen: the secondaries must be COMPACT again (no restored long output).
+  // Reopen: the secondaries must be COMPACT again (no restored long
+  // output). The reopen click lands on a DIFFERENT cell of the header row
+  // (the whole row is the hit area) — the alt screen treats a fast repeat
+  // at the same cell as a double-click word selection, and a fixed sleep
+  // would be timing-sensitive.
   y = findRow(view, '🐋 Thought')
-  click(vt, 3, y + 1)
+  click(vt, 20, y + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
