@@ -29,7 +29,12 @@
 - The gate also covers `goal`, `planMode` and `sandboxPolicy` (dsh Host
   services with **zero baseline entries today** — no current `src/` usage).
   Any future feature that reads them is new Host coupling and must route
-  through the runner/allowlist, never a UI module.
+  through the runner/allowlist, never a UI module. The M0 status semantics
+  layer is the sanctioned seam: `src/status/derive-*.ts` read the official
+  services through STRUCTURAL interfaces (generic over the event type, so
+  the derives carry no Host type imports), and the runner (`src/index.ts`)
+  wires the real services in — the two new `index.ts` baseline entries
+  (`planMode`, `sandboxPolicy`) are exactly that wiring, not UI debt.
 
 ## Categories
 
@@ -46,7 +51,7 @@
 
 | File | Coupling | Notes |
 |---|---|---|
-| `src/index.ts` | `agents`, `sessions`, `subagents`, `jobs`, `attachments`, `llm`, `commands`, `settings`, `sessionPersistence`, `agentPresets`, `tools`, `permissionPresets`, `tokenMeter`, `agentDefaultModel`, `shell`; `import:dsh-agent`, `import:dsh-session` | The runner: agent create/resume, session ownership, event subscription, input dispatch, queue/steer, lifecycle. The primary migration coupling point (plan §4.1). M1.8/M1.9 relocated `credentials` and `authorization` into the config adapter; `llm`/`tools`/`permissionPresets`/`tokenMeter` remain here ONLY for the runner's own non-command paths (boot diagnostics, status footer, the pre-mount surface prefetch and the image-submission preparation — never for command handlers). |
+| `src/index.ts` | `agents`, `sessions`, `subagents`, `jobs`, `attachments`, `llm`, `commands`, `settings`, `sessionPersistence`, `agentPresets`, `tools`, `permissionPresets`, `tokenMeter`, `agentDefaultModel`, `shell`, `planMode`, `sandboxPolicy`; `import:dsh-agent`, `import:dsh-session` | The runner: agent create/resume, session ownership, event subscription, input dispatch, queue/steer, lifecycle. The primary migration coupling point (plan §4.1). M1.8/M1.9 relocated `credentials`, `authorization` and `userQuestions` into the config/interaction adapters; `llm`/`tools`/`permissionPresets`/`tokenMeter` remain here ONLY for the runner's own non-command paths (boot diagnostics, status footer, the pre-mount surface prefetch and the image-submission preparation — never for command handlers). `planMode`/`sandboxPolicy` are the M0 status-seam wiring (the derives consume them through structural interfaces). |
 | `src/session-lock.ts`, `src/session-lock-proc.ts` | owner.lock open/steal | Direct-mode session ownership; never removed as "cleanup" (AGENTS.md guardrail). |
 | `src/session-lease-manager.ts`, `src/session-lease-cooling.ts` | lease/cooling state machine | Same. |
 | `src/guard.ts` | write-path divergence guard | Same. |
