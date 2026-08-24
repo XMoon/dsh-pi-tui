@@ -9,16 +9,19 @@
 import type { SessionStats } from '../stats.ts'
 import type { UsageStatus } from './types.ts'
 
-/** Project a StatsFolder snapshot onto the structured usage section. */
-export function usageFromStats(stats: SessionStats): UsageStatus {
+/** Project a StatsFolder snapshot onto the structured usage section.
+ * @param stats - the folded statistics.
+ * @param contextTokens - the tokenMeter's live context measurement (the
+ *   legacy footer's context source); falls back to the billed input sum.
+ */
+export function usageFromStats(stats: SessionStats, contextTokens?: number): UsageStatus {
+  const used = contextTokens ?? stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens
   const context = stats.contextWindow === undefined || stats.contextWindow <= 0
     ? undefined
     : {
-        usedTokens: stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens,
+        usedTokens: used,
         windowTokens: stats.contextWindow,
-        percent: Math.min(100, Math.max(0, Math.round(
-          ((stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens) * 100) / stats.contextWindow,
-        ))),
+        percent: Math.min(100, Math.max(0, Math.round((used * 100) / stats.contextWindow))),
       }
   return {
     ...context === undefined ? {} : { context },

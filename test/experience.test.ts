@@ -33,14 +33,23 @@ test('footer shows model, cwd, branch, counters, context bar, and stats', async 
     statsLine: '2 轮 · 5 步| LLM 8.1s',
     contextTokens: 25_000,
     contextWindow: 100_000,
+    // M1: the footer composes the stats line from the STRUCTURED usage
+    // facts (the legacy statsLine string is no longer a footer input).
+    usage: {
+      tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 },
+      turns: 2,
+      steps: 5,
+    },
   })
   const view = await viewport(vt)
   assert.ok(view.includes('[opencode-go/deepseek-v4-flash]'), `model missing:\n${view}`)
-  assert.ok(view.includes('project/me/dsh-pi-tui'), `cwd missing:\n${view}`)
+  // The cwd item shortens the workspace to its last two segments.
+  assert.ok(view.includes('me/dsh-pi-tui'), `cwd missing:\n${view}`)
   assert.ok(view.includes(' main '), `branch missing:\n${view}`)
   assert.ok(view.includes('t2/s5'), `counters missing:\n${view}`)
   assert.ok(view.includes('] 25%'), `context bar missing:\n${view}`)
-  assert.ok(view.includes('2 轮 · 5 步| LLM 8.1s'), `stats line missing:\n${view}`)
+  assert.ok(view.includes('↑1.2k ↓3.4k | LLM 8.1s'), `stats line missing:\n${view}`)
 })
 
 test('plan mode shows badges in header and footer and tints the editor border', async () => {

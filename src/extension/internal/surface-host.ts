@@ -300,14 +300,6 @@ export class SurfaceHost {
     return this.widgetsBelow.hasContent()
   }
 
-  /** Whether any footer extension segment is registered AND baking content
-   * (F3: the host's t/s fallback turns off only when a segment actually
-   * PROVIDES the counters — a registered-but-empty segment, e.g. the
-   * builtin before its first state delivery, must not hide them). */
-  hasFooterSegments(): boolean {
-    return this.ledger.hasAny('chrome.footer.status') && this.footerSegments.text() !== ''
-  }
-
   /** Update the surface slice (resize, fullscreen, theme). */
   updateSurface(surface: Partial<SurfaceSnapshot>): void {
     if (this.disposed) return

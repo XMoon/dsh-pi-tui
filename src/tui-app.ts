@@ -65,9 +65,15 @@ import {
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
 import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
 import type { StatusStore } from './status/store.ts'
-import type { StatusPatch } from './status/types.ts'
+import type { StatusPatch, UsageStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
+import { initialStatusSnapshot } from './status/snapshot.ts'
+import { StatusStore as StatusStoreImpl } from './status/store.ts'
+import { FooterComposer } from './footer/composer.ts'
+import { createBuiltinFooterRegistry } from './footer/builtin-items.ts'
+import { resolveFooterInstruction } from './footer/instruction.ts'
+import { layoutForPreset } from './footer/presets.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
 import { SelectedMarquee } from './marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
@@ -217,11 +223,6 @@ function preview(text: string, lines: number): string {
   // the ellipsis slot (it is the same '…' the rest-marker would add).
   return truncateToWidth(first, rest === '' ? 120 : 119, rest)
 }
-
-
-
-/** Context bar width in cells; pi renders `[███░░░] pct` in the footer. */
-const CONTEXT_BAR_WIDTH = 12
 
 /**
  * Rounded-frame wrapper for overlay content: `╭─╮` border in the border
@@ -805,13 +806,24 @@ class OutputViewerPanel implements Component {
   }
 }
 
-/** Pi-style context progress bar: `[███░░░░░░░░░] 25%`. */
-function contextBar(used: number, window: number): string {
-  const ratio = Math.min(1, Math.max(0, used / window))
-  const filled = Math.round(ratio * CONTEXT_BAR_WIDTH)
-  const pct = Math.min(100, Math.max(0, Math.ceil(ratio * 100)))
-  const bar = '█'.repeat(filled) + '░'.repeat(CONTEXT_BAR_WIDTH - filled)
-  return `${color.primary(`[${bar}]`)} ${pct}%`
+/** M1: parse the legacy model label (`provider/model @effort`) into the
+ * structured composition model. `''` and the `no model` placeholder map
+ * to undefined (no model fact). */
+function modelFromLabel(label: string): { provider?: string; id: string; displayName: string; reasoningEffort?: string } | undefined {
+  if (label === '' || label === 'no model') return undefined
+  const at = label.lastIndexOf(' @')
+  const base = at === -1 ? label : label.slice(0, at)
+  const effort = at === -1 ? undefined : label.slice(at + 2)
+  const slash = base.indexOf('/')
+  if (slash === -1) {
+    return { id: base, displayName: base, ...effort === undefined ? {} : { reasoningEffort: effort } }
+  }
+  return {
+    provider: base.slice(0, slash),
+    id: base.slice(slash + 1),
+    displayName: base.slice(slash + 1),
+    ...effort === undefined ? {} : { reasoningEffort: effort },
+  }
 }
 
 /** The owned-task entry hosts wire to `runOwned` (diag pre-attached):
@@ -884,6 +896,9 @@ export interface SubagentViewerFooter {
   readonly steps: number
   /** The child's own stats line (formatStats of its event log). */
   readonly statsLine: string
+  /** M1: the child's structured usage facts (the footer's stats source
+   * while viewing). Absent = the legacy statsLine remains for /status. */
+  readonly usage?: UsageStatus
 }
 
 /** Base callbacks every TuiApp host must provide; the external-editor
@@ -1261,6 +1276,11 @@ export interface StatusData {
   contextTokens?: number
   /** Context window in tokens, when known. */
   contextWindow?: number
+  /** M1: the structured usage facts (the footer's stats source). The
+   * runner passes them through the status store; tests may supply them
+   * directly. Absent = the legacy statsLine remains for /status-style
+   * consumers and the footer renders the zeroed usage. */
+  usage?: UsageStatus
 }
 
 /** One queued inbox row for the queue pane (mirrors the agent Inbox's lists). */
@@ -1546,8 +1566,12 @@ export class TuiApp {
   private readonly terminal: Terminal
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
-  /** The unified status projection store (M0), when the runner wired one. */
-  private readonly statusStore: StatusStore | undefined
+  /** The unified status projection store (M0): the footer's single input.
+   * The runner's store when wired; an internal projection otherwise. */
+  private readonly statusStore: StatusStore
+  /** The footer composer (M1): renders the active layout against the
+   * snapshot. */
+  private readonly footerComposer: FooterComposer
   private readonly tui: TuiMainScreen
   private readonly editor: TuiEditor
   /**
@@ -1775,10 +1799,6 @@ export class TuiApp {
   private lastEscapeAt: number | undefined
   /** Idle double-Esc window in ms. */
   private static readonly ESCAPE_CANCEL_WINDOW_MS = 400
-  /** Footer wrap cap (plan §14): host line-1 wraps to at most 3 physical
-   * rows, the stats line to 1, total never above 4 — a long extension
-   * segment folds from the tail first. */
-  private static readonly FOOTER_MAX_LINES = 4
   /**
    * The agent-busy state pushed by the runner at turn/compaction
    * boundaries (pi parity): while busy, a SINGLE Esc stops the current
@@ -2036,7 +2056,12 @@ export class TuiApp {
     this.events = events
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.extensionHost = options.extensionHost
-    this.statusStore = options.statusStore
+    // M0: the unified status projection store. The runner passes its own
+    // store; without one the app keeps an internal projection so the
+    // footer always composes from a snapshot (headless tests drive it
+    // through setStatus).
+    this.statusStore = options.statusStore ?? new StatusStoreImpl(initialStatusSnapshot('0.0.0'))
+    this.footerComposer = new FooterComposer(createBuiltinFooterRegistry())
     // F-17: an invalidation batch re-bakes the outlets; the host then
     // re-merges its chrome rows so the new content reaches the screen.
     this.extensionHost?.setChromeRefresher(() => this.refreshChrome())
@@ -5399,6 +5424,30 @@ export class TuiApp {
    * refreshes it as the child's own events fold, and clears it on exit. */
   setViewerFooter(footer: SubagentViewerFooter | undefined): void {
     this.viewerFooter = footer
+    // M1: the display subject's facts follow the viewer (the layout never
+    // changes — only the data source). The child's structured usage rides
+    // the footer payload; turns/steps and the child workspace always
+    // project.
+    if (footer === undefined) {
+      this.projectStatus({ usage: this.usageFromStatus() })
+    } else {
+      const current = this.statusStore.snapshot().usage
+      this.projectStatus({
+        usage: {
+          ...footer.usage === undefined
+            ? { tokens: current.tokens, performance: current.performance }
+            : { tokens: footer.usage.tokens, performance: footer.usage.performance },
+          ...footer.usage?.cacheHitPct !== undefined ? { cacheHitPct: footer.usage.cacheHitPct } : {},
+          ...footer.usage?.context !== undefined ? { context: footer.usage.context } : {},
+          turns: footer.turns,
+          steps: footer.steps,
+        },
+        workspace: {
+          cwd: footer.cwd,
+          ...footer.cwd === '' ? {} : { project: footer.cwd.split('/').filter(Boolean).at(-1) ?? footer.cwd },
+        },
+      })
+    }
     this.renderFooter()
   }
 
@@ -8082,9 +8131,9 @@ export class TuiApp {
    */
   setTodoSummary(todos: readonly TodoItem[]): void {
     this.todoItems = todos
+    this.projectActivity()
     this.renderDock()
     if (this.todoPanelVisible) this.renderTodoPanel()
-    this.projectActivity()
     this.syncExtensionState()
   }
 
@@ -8237,12 +8286,12 @@ export class TuiApp {
   }
 
   /**
-   * M0: project one section patch into the unified status store. No-op
-   * without a wired store; the store's section-identity discipline keeps
-   * same-value projections from notifying.
+   * M0: project one section patch into the unified status store. The
+   * store's section-identity discipline keeps same-value projections from
+   * notifying.
    */
   private projectStatus(patch: StatusPatch): void {
-    this.statusStore?.update(patch)
+    this.statusStore.update(patch)
   }
 
   /** M0: project the activity section from the CURRENT machine facts
@@ -8272,11 +8321,11 @@ export class TuiApp {
   /** M0: project the surface section (focusedSeat/fullscreen) from the
    * current values plus a patch. */
   private projectSurface(patch: { focusedSeat?: 'editor' | 'overlay' | 'editor-panel' | 'none'; fullscreen?: boolean }): void {
-    const current = this.statusStore?.snapshot().surface
+    const current = this.statusStore.snapshot().surface
     this.projectStatus({
       surface: {
-        focusedSeat: current?.focusedSeat ?? 'editor',
-        fullscreen: current?.fullscreen ?? false,
+        focusedSeat: current.focusedSeat,
+        fullscreen: current.fullscreen,
         ...patch,
       },
     })
@@ -8373,15 +8422,59 @@ export class TuiApp {
   /**
    * Update the footer: line 1 `[model] …/cwd branch [ctx bar] t/steps`,
    * line 2 the stats line (full preset) or nothing (compact). Partial
-   * updates merge.
+   * updates merge. M1: the legacy fields still drive the legacy surfaces
+   * (/status, the extension session snapshot), and the SAME facts project
+   * into the unified status store the footer composes from.
    * @param status - the new status values.
    */
   setStatus(status: Partial<StatusData>): void {
     this.status = { ...this.status, ...status }
+    this.projectStatus({
+      composition: { model: modelFromLabel(this.status.model) },
+      access: this.status.permission === undefined ? {} : {
+        permissionPreset: {
+          id: this.status.permission,
+          label: this.status.permission,
+          matched: this.status.permission !== 'custom',
+        },
+      },
+      workspace: {
+        cwd: this.status.cwd,
+        ...this.status.branch === undefined || this.status.branch === '' ? {} : { branch: this.status.branch },
+      },
+      usage: this.usageFromStatus(),
+    })
     this.renderFooter()
     this.renderDock()
     this.renderGoalLine()
     this.syncExtensionState()
+  }
+
+  /** M1: the usage projection from the legacy status fields. Structured
+   * facts (tokens/performance) come from `status.usage` when provided,
+   * else the CURRENT store values (the runner's derivation) — the legacy
+   * fields only carry turns/steps/context. */
+  private usageFromStatus(): UsageStatus {
+    const current = this.statusStore.snapshot().usage
+    const provided = this.status.usage
+    const context = this.status.contextTokens !== undefined && this.status.contextWindow !== undefined
+      && this.status.contextWindow > 0
+      ? {
+          usedTokens: this.status.contextTokens,
+          windowTokens: this.status.contextWindow,
+          percent: Math.min(100, Math.max(0, Math.ceil((this.status.contextTokens * 100) / this.status.contextWindow))),
+        }
+      : provided?.context ?? current.context
+    return {
+      ...context === undefined ? {} : { context },
+      tokens: provided?.tokens ?? current.tokens,
+      ...provided?.cacheHitPct !== undefined
+        ? { cacheHitPct: provided.cacheHitPct }
+        : current.cacheHitPct !== undefined ? { cacheHitPct: current.cacheHitPct } : {},
+      performance: provided?.performance ?? current.performance,
+      turns: this.status.turns,
+      steps: this.status.steps,
+    }
   }
 
   /**
@@ -8392,8 +8485,8 @@ export class TuiApp {
   setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
     this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
-    this.renderFooter()
     this.projectActivity()
+    this.renderFooter()
     this.syncExtensionState()
   }
 
@@ -8406,8 +8499,8 @@ export class TuiApp {
   setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
     this.dockAgents = agents
     this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
-    this.renderFooter()
     this.projectActivity()
+    this.renderFooter()
     this.syncExtensionState()
   }
 
@@ -8424,8 +8517,8 @@ export class TuiApp {
    */
   setQueueItems(items: readonly QueueItem[]): void {
     this.queueItems = items
-    this.renderQueuePane()
     this.projectActivity()
+    this.renderQueuePane()
     this.syncExtensionState()
   }
 
@@ -8723,111 +8816,34 @@ export class TuiApp {
     return this.footerPreset
   }
 
-  /** Rebuild the two footer lines from the current status and plan badge. */
+  /** Rebuild the footer from the unified status snapshot (M1): the
+   * composer renders the active layout (default/compact) against the
+   * snapshot, and the Host instruction surface owns the Ctrl+C exit hint.
+   * The TuiApp no longer derives permission/plan/viewer/usage — the items
+   * do, from the snapshot. */
   private renderFooter(): void {
     const width = Math.max(1, this.terminal.columns)
-    // The subagent viewer is host-owned chrome: the footer switches to the
-    // VIEWED child's own identity (the parent's permission/model/plan/task
-    // badges and the extension footer segments describe a session the user
-    // is not looking at — extension segments do not render while viewing).
-    if (this.viewerFooter !== undefined) {
-      const footer = this.viewerFooter
-      const modeBadge = color.accent(footer.mode === 'one-shot'
-        ? '[subagent · one-shot]'
-        : '[subagent · continuable]')
-      const activity = footer.activity === 'running'
-        ? color.primary('● running')
-        : color.textMuted('inactive')
-      const line1 = [
-        modeBadge,
-        footer.label === '' ? '' : footer.label,
-        activity,
-        footer.cwd === '' ? '' : footer.cwd,
-        `t${footer.turns}/s${footer.steps}`,
-      ].filter(part => part !== '')
-      // The parent's Ctrl+C exit hint is meaningless inside the viewer
-      // (Ctrl+C is inert there — the viewer guard consumes it), so it is
-      // never rendered: the child's stats line shows instead (compact
-      // preset keeps its usual behavior of dropping line 2).
-      const line2Final = this.footerPreset === 'compact' ? '' : footer.statsLine
-      this.footer.setText(this.footerRows(line1, line2Final, width))
-      this.requestRender()
-      return
-    }
-    const context = this.status.contextTokens !== undefined && this.status.contextWindow !== undefined
-      && this.status.contextWindow > 0
-      ? contextBar(this.status.contextTokens, this.status.contextWindow)
-      : ''
-    // The mode slot (kimi parity): [yolo] flags the no-approval preset, and
-    // every other preset badges too — including the default workspace-write —
-    // so the effective write scope is always visible in the footer.
-    const permissionBadge = this.status.permission === 'danger-full-access'
-      ? color.warning('[yolo]')
-      : this.status.permission === 'read-only'
-        ? color.textMuted('[read-only]')
-        : this.status.permission === 'workspace-write'
-          ? color.text('[workspace-write]')
-          : this.status.permission === 'custom'
-            ? color.warning('[custom]')
-            : ''
-    // One combined badge (kimi splits bash/agent badges; a single badge
-    // keeps the ↓ hint in exactly one place): counts both active jobs and
-    // live continuable subagents.
-    const badgeParts: string[] = []
-    if (this.dockTasks.length > 0) {
-      badgeParts.push(`${this.dockTasks.length} task${this.dockTasks.length === 1 ? '' : 's'} running`)
-    }
-    if (this.dockAgents.length > 0) {
-      badgeParts.push(`${this.dockAgents.length} agent${this.dockAgents.length === 1 ? '' : 's'}`)
-    }
-    const taskBadge = badgeParts.length === 0
-      ? ''
-      // The ↓ hint matches the ↓ routing gate: only a PROMPT-mode empty
-      // editor opens the task browser — a shell-mode empty body is
-      // composing a command, so no hint is advertised. The VISIBLE seat
-      // editor decides (a plugin editor is prompt semantics).
-      : color.primary(`[${badgeParts.join(' · ')}${this.seatInputMode() === 'prompt' && this.seatEditor().getText().trim() === '' ? ' · ↓ view' : ''}]`)
-    const line1 = [
-      permissionBadge,
-      this.planMode ? color.warning('[plan]') : '',
-      // The goal badge moved OUT of the footer into its own line above the
-      // editor (goalLine) — the footer keeps only turn/step state.
-      this.status.model === '' ? '' : `[${this.status.model}]`,
-      taskBadge,
-      this.status.cwd,
-      this.status.branch === '' ? '' : this.status.branch,
-      context,
-      // Turn/step counters: the first-party builtin provides them through
-      // the extension footer segment (M3 dogfood). The host fallback stays
-      // on whenever NO footer segment provides them (F3: a host attached
-      // without the builtin — third-party-only or unloaded — must not lose
-      // the counters).
-      this.extensionHost?.hasFooterSegments() ? '' : `t${this.status.turns}/s${this.status.steps}`,
-      // Extension footer segments append after the host status (M2); the
-      // host owns ordering/truncation of its own parts, extensions join at
-      // the end so host state always reads first.
-      this.extensionHost?.footerText() ?? '',
-    ].filter(part => part !== '')
-    // Line 2: the stats line only; context pressure is the bar on line 1.
-    // Issue #8: while the Ctrl+C exit chord is armed, the second line is
-    // the exit hint for EXACTLY the exit window (one shared timer) — it
-    // temporarily covers the stats, and even the compact preset shows it
-    // (the user just triggered an explicit interaction and needs the
-    // feedback). M6: a pending leader sequence shows the which-key hint
-    // (the same line-2 slot — the leader is an explicit interaction too).
+    const snapshot = this.statusStore.snapshot()
+    // M6 keybindings: a pending leader sequence shows the which-key hint in
+    // the SAME line-2 slot as the Ctrl+C exit hint — both are Host-owned
+    // instructions (exit outranks the leader; the stats line comes last).
     const leader = this.keybindings.leaderMachine()
-    const line2 = this.ctrlCExitArmed
-      // The clear-then-exit chord is Ctrl+C-SPECIFIC (only a second
-      // Ctrl+C exits; a second Ctrl+X — or any other exit key — exits
-      // immediately instead). The armed hint must therefore name Ctrl+C
-      // literally, never the action's primary key (PR review finding:
-      // keyHint('app.exit.request') could say "Press Ctrl+X again" for a
-      // ['ctrl+x', 'ctrl+c'] binding, which is semantically wrong).
-      ? 'Press Ctrl+C again to exit'
-      : leader !== undefined && leader.pending
-        ? this.leaderHint(leader)
-        : this.footerPreset === 'compact' ? '' : this.status.statsLine
-    this.footer.setText(this.footerRows(line1, line2, width))
+    const instruction = resolveFooterInstruction({
+      ctrlCExitArmed: this.ctrlCExitArmed,
+      viewing: this.viewerFooter !== undefined,
+      leaderHint: leader !== undefined && leader.pending ? this.leaderHint(leader) : undefined,
+    })
+    const text = this.footerComposer.render({
+      snapshot,
+      layout: layoutForPreset(this.footerPreset),
+      width,
+      context: {
+        editorEmpty: this.editor.getText().trim() === '',
+        extensionFooterText: this.extensionHost?.footerText() ?? '',
+      },
+      instruction,
+    })
+    this.footer.setText(text)
     this.requestRender()
   }
 
@@ -8852,36 +8868,6 @@ export class TuiApp {
     }
     const expand = this.keybindings.keyHint('app.transcript.toggleExpand')
     return expand === '' ? 'the expand key' : expand.toLowerCase()
-  }
-
-  /** The shared footer layout (plan §14): line 1 wraps with the host row
-   * budget (≤3 physical rows), the stats line caps to one row; the caps
-   * are the overflow BACKSTOP, not the normal compression — a long
-   * extension segment folds from the tail first, matching the
-   * FooterSegmentOutlet's own priority folding (the 0710746 overflow
-   * concern stays covered by the outlet budget). */
-  private footerRows(line1: readonly string[], line2: string, width: number): string {
-    const hostBudget = TuiApp.FOOTER_MAX_LINES - (line2 === '' ? 0 : 1)
-    const line1Rows = wrapTextWithAnsi(line1.join('  '), width)
-    const rows: string[] = []
-    for (let index = 0; index < Math.min(line1Rows.length, hostBudget); index += 1) {
-      const row = line1Rows[index]!
-      rows.push(index === hostBudget - 1 && line1Rows.length > hostBudget
-        ? TuiApp.capRowWithEllipsis(row, width)
-        : row)
-    }
-    if (line2 !== '') {
-      const statsRows = wrapTextWithAnsi(line2, width)
-      rows.push(statsRows.length > 1 ? TuiApp.capRowWithEllipsis(statsRows[0]!, width) : statsRows[0]!)
-    }
-    return rows.map(row => dim(row)).join('\n')
-  }
-
-  /** Force a visible `…` on a wrapped row that still has hidden content
-   * behind it (wrapTextWithAnsi rows already fit the width, so a plain
-   * truncateToWidth would not add the marker). */
-  private static capRowWithEllipsis(row: string, width: number): string {
-    return `${truncateToWidth(row, Math.max(1, width - 1), '')}…`
   }
 
   /**
@@ -9902,7 +9888,6 @@ export class TuiApp {
 
 // Style helpers from the theme module's token functions.
 import { color } from './theme.ts'
-const dim = color.textDim
 
 /**
  * Start the TUI on the process terminal (raw-mode stdin/stdout). The runner

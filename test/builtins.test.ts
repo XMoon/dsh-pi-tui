@@ -3,9 +3,10 @@
  * API. A real Cordis tree (startup + extension host + builtins) + a real
  * TuiApp + VirtualTerminal proves:
  * - the version header badge renders;
- * - the turn/step footer segment renders and TRACKS state changes
- *   (replacing the host's hardcoded path — the host fallback is off when
- *   an extension host is attached, so parity is exact);
+ * - the turn/step counters are HOST-NATIVE since M1 (plan §13.4 — the
+ *   builtin extension segment was removed; the host core state no longer
+ *   depends on plugin loading), so they render with or without the
+ *   builtins fiber;
  * - builtins use the SAME service API as third-party plugins (no special
  *   host bypass).
  * @module @xmoon76/dsh-pi-tui/builtins.test
@@ -47,7 +48,7 @@ async function mountTree(ctx: Context): Promise<{ builtinsFiber: unknown }> {
   return { builtinsFiber }
 }
 
-test('builtins register the version badge and the turn/step footer segment through the PUBLIC service API', async () => {
+test('builtins register the version badge through the PUBLIC service API; turns/steps are host-native', async () => {
   const ctx = new Context()
   try {
     await mountTree(ctx)
@@ -56,8 +57,11 @@ test('builtins register the version badge and the turn/step footer segment throu
     }
     const badgeIds = service._ledger().snapshot('chrome.header.badge').records.map(record => record.id)
     assert.ok(badgeIds.includes('builtin-version'), `version badge missing: ${badgeIds.join(', ')}`)
+    // M1 (plan §13.4): the turn/step counters are a HOST-NATIVE footer
+    // item — the builtin no longer contributes a chrome.footer.status
+    // segment (the host core state must not depend on plugin loading).
     const footerIds = service._ledger().snapshot('chrome.footer.status').records.map(record => record.id)
-    assert.ok(footerIds.includes('builtin-turns-steps'), `turn/step segment missing: ${footerIds.join(', ')}`)
+    assert.ok(!footerIds.includes('builtin-turns-steps'), `the turns-steps segment must be host-native since M1: ${footerIds.join(', ')}`)
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
@@ -99,7 +103,7 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
 
     let view = vt.getViewport().join('\n')
     // Version badge after the host title; the footer shows t0/s0 from the
-    // builtin segment (the host's hardcoded path is OFF with a host).
+    // HOST-NATIVE turns-steps item (M1 — no extension segment involved).
     assert.ok(view.includes('dsh-pi-tui'), `host title missing:\n${view}`)
     // Version badge: the installed dsh version first, then the bundle
     // version prefixed `tui-` (`[dsh-… · tui-vX.Y.Z]`); without a dsh
@@ -107,7 +111,8 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
     assert.ok(/\[tui-v\d+\.\d+\.\d+\]/.test(view), `version badge missing:\n${view}`)
     assert.ok(view.includes('t0/s0'), `initial turn/step counter missing:\n${view}`)
 
-    // State change: the builtin segment re-bakes (async producer → replace).
+    // State change: the host-native item re-composes from the projected
+    // usage facts.
     app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 3, steps: 7, statsLine: '' })
     await settle()
     await vt.waitForRender()
@@ -151,12 +156,12 @@ test('builtins unload with their owner fiber (HMR parity)', async () => {
     }
     // Attach a state bridge so the builtin's subscribeState calls go live;
     // their disposers must be fiber-bound (F1 — no listener leak on
-    // unload). Two builtin subscriptions exist: turn/step counters and the
-    // todo-summary dock item (P1-5).
+    // unload). ONE builtin state subscription remains since M1 (the
+    // todo-summary dock item; the turns-steps segment is host-native now).
     let subscribed = 0
     const fakeBridge = { subscribe: () => { subscribed += 1; return () => { subscribed -= 1 } } }
     service.attachSurface(fakeBridge as never, new Set(), 'fake-surface')
-    assert.equal(subscribed, 2, 'both builtin state listeners must be live after attach')
+    assert.equal(subscribed, 1, 'the todo-summary state listener must be live after attach')
     // Unload the builtins fiber: its registrations AND its state
     // subscription must disappear.
     await (builtinsFiber as { dispose(): Promise<void> }).dispose()
