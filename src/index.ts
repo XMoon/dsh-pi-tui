@@ -122,7 +122,6 @@ import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
 import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
-import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { CreateSessionOptions, ResumeSessionOptions } from './runtime/session-lifecycle-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
@@ -375,6 +374,13 @@ export interface InterruptAgentLike {
   cancel(cause: { kind: 'user' }, options?: { keepInbox?: boolean }): void
 }
 
+/** The writer surface {@link interruptAgent} needs (structural — a LOCAL
+ * type so the public declaration never inlines internal runtime modules;
+ * the runner's SessionWriter satisfies it). */
+export interface InterruptWriterLike {
+  cancel(agent: InterruptAgentLike, reason: { kind: 'user' }, options: { keepInbox: boolean }): void
+}
+
 /**
  * Interrupt the live agent (web Stop parity): abort the current
  * turn/tool run while PRESERVING the pending queue. dsh's DEFAULT
@@ -394,7 +400,7 @@ export interface InterruptAgentLike {
  * log, which the design explicitly rejects — the parked queue is the
  * agreed web-parity behavior until upstream lands the capability.
  */
-export function interruptAgent(agent: InterruptAgentLike | undefined, writer: SessionWriter): void {
+export function interruptAgent(agent: InterruptAgentLike | undefined, writer: InterruptWriterLike): void {
   if (agent === undefined) return
   writer.cancel(agent, { kind: 'user' }, { keepInbox: true })
 }
