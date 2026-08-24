@@ -143,6 +143,9 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         }
         stats.steps += 1
         usage.onStepEnd(event.data.turn, event.data.step)
+        // The step's timing is settled at assistant/message; drop the
+        // entry so a long session's map stays bounded (review finding).
+        perStep.delete(stepKey(event.data.turn, event.data.step))
         break
       }
       case 'assistant/chunk': {
@@ -285,6 +288,10 @@ export class StatsFolder {
         }
         this.stats.steps += 1
         this.usage.onStepEnd(event.data.turn, event.data.step)
+        // The step's timing is settled at assistant/message; drop the
+        // entry so the long-lived folder's map stays bounded (review
+        // finding — the old fold deleted it here too).
+        this.perStep.delete(stepKey(event.data.turn, event.data.step))
         break
       }
       case 'assistant/chunk': {

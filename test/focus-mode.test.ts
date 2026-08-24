@@ -564,6 +564,37 @@ test('a usage chunk without assistant/message still counts (plan §45)', () => {
   assert.equal(activity.totalTokens, 100)
 })
 
+test('orphan usage: the authoritative message REPLACES the provisional chunk (never adds)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    // No step/start: both facts are orphan replay edges.
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 110, outputTokens: 0 },
+    }, 1002, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.totalTokens, 110, 'the authoritative orphan must replace the provisional orphan')
+})
+
+test('a turn-start-less turn/end attributes its synthetic cards to the EVENT turn', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    // Turn 2's end arrives without a turn/start (replay fragment).
+    eventAt('turn/end', { turn: 2, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, 2000, 1),
+  ])
+  const cards = folder.messages().filter((m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool')
+  assert.ok(cards.some(c => c.turn === 2 && c.name === 'error'), 'the error card must carry turn 2')
+  assert.ok(!cards.some(c => c.turn === 1 && c.name === 'error'), 'the error card must not land in turn 1')
+  const activity = folder.turnActivity(2)!
+  assert.equal(activity.reason?.kind, 'error')
+})
+
 test('usage without a step boundary still attributes to the turn (replay edge)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
