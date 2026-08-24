@@ -329,6 +329,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Ctrl+R defaults to the current session and gains a third scope.**
+  `Tab` now cycles `Current session` → `Current directory` → `All
+  directories` (the query survives). `Current session` — the new default
+  when a session is live — shows only the current session's own inputs
+  (v2 rows carry the session id; legacy rows are never guessed into a
+  session), so the first thing Ctrl+R offers is what THIS conversation
+  typed, while `Current directory` and `All directories` keep the
+  cross-session reach. On a deferred start (no session yet) the panel
+  falls back to `Current directory` and hides the session tab. The
+  session id is captured at panel open time, so a session switch makes
+  the next Ctrl+R search the new session. The scope tabs are responsive
+  (full labels on wide terminals, short labels on narrow ones).
 - **Ctrl+R history search is now bounded and recent-first.** Instead of
   parsing every candidate history file in full on each keystroke, the
   search reads the JSONL store from the tail backwards through a new

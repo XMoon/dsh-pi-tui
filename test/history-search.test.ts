@@ -48,9 +48,11 @@ async function search(
   scope: HistoryScope,
   cwd: string,
   query: string,
-  opts: { knownCwds?: Map<string, string>; signal?: AbortSignal } = {},
+  opts: { knownCwds?: Map<string, string>; signal?: AbortSignal; sessionId?: string } = {},
 ): Promise<HistorySearchResult[]> {
-  const page = await source(home, opts.knownCwds).search({ scope, cwd, query, limit: 100, signal: opts.signal })
+  const page = await source(home, opts.knownCwds).search({
+    scope, cwd, sessionId: opts.sessionId, query, limit: 100, signal: opts.signal,
+  })
   return page.results
 }
 
@@ -740,6 +742,145 @@ test('S21: a file shrunk under a continuation cursor is a stale-continuation err
       src.search(request, page1.continuation),
       (error: unknown) => error instanceof HistorySearchContinuationStaleError,
     )
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Session scope (the Ctrl+R panel optimization): eligibility, filtering
+// order, dedupe, continuation and cwd isolation.
+// ---------------------------------------------------------------------------
+
+test('S22: session scope returns only the requested session\'s rows (mixed file)', async () => {
+  const home = tempHome()
+  try {
+    writeV2(home, '/a', [
+      { content: 'from A one', ts: 1, sessionId: 'ses_a' },
+      { content: 'from B', ts: 2, sessionId: 'ses_b' },
+      { content: 'from A two', ts: 3, sessionId: 'ses_a' },
+    ])
+    const results = await search(home, 'session', '/a', '', { sessionId: 'ses_a' })
+    assert.deepEqual(results.map(row => row.content), ['from A two', 'from A one'])
+    assert.ok(results.every(row => row.sessionId === 'ses_a'), 'every row carries the requested session')
+    assert.ok(results.every(row => row.cwd === '/a'), 'matching rows inherit the effective cwd')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S23: session scope excludes v1 rows and v2 rows without a sessionId', async () => {
+  const home = tempHome()
+  try {
+    const file = historyFilePath(home, '/a')
+    mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true })
+    writeFileSync(file, [
+      JSON.stringify({ content: 'legacy' }),
+      JSON.stringify({ v: 2, content: 'no session', cwd: '/a', ts: 1 }),
+      JSON.stringify({ v: 2, content: 'mine', cwd: '/a', ts: 2, sessionId: 'ses_a' }),
+    ].join('\n') + '\n', { mode: 0o600 })
+    const results = await search(home, 'session', '/a', '', { sessionId: 'ses_a' })
+    assert.deepEqual(results.map(row => row.content), ['mine'],
+      'legacy rows and sessionless v2 rows are never guessed into a session')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S24: the session filter runs BEFORE the query filter', async () => {
+  const home = tempHome()
+  try {
+    writeV2(home, '/a', [
+      { content: 'needle from B', ts: 1, sessionId: 'ses_b' },
+      { content: 'needle from A', ts: 2, sessionId: 'ses_a' },
+      { content: 'other from A', ts: 3, sessionId: 'ses_a' },
+    ])
+    const results = await search(home, 'session', '/a', 'needle', { sessionId: 'ses_a' })
+    assert.deepEqual(results.map(row => row.content), ['needle from A'],
+      'a query match in another session must never leak through')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S25: session scope dedupes by content — the newest occurrence in the session wins', async () => {
+  const home = tempHome()
+  try {
+    writeV2(home, '/a', [
+      { content: 'same', ts: 1, sessionId: 'ses_a' },
+      { content: 'same', ts: 3, sessionId: 'ses_a' },
+      { content: 'same', ts: 2, sessionId: 'ses_b' },
+    ])
+    const results = await search(home, 'session', '/a', '', { sessionId: 'ses_a' })
+    const same = results.filter(row => row.content === 'same')
+    assert.equal(same.length, 1, 'one row per content within the session')
+    assert.equal(same[0]?.ts, 3, 'the NEWEST occurrence in the session wins')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S26: session continuation pages return only the current session', async () => {
+  const home = tempHome()
+  try {
+    // 300 rows: session A rows every 100th, session B fillers — the
+    // continuation must never let session B rows leak into the pages.
+    const rows = Array.from({ length: 300 }, (_, i) => ({
+      content: i % 100 === 0 ? `needle-${i}` : `filler-${i}`,
+      ts: i,
+      sessionId: i % 100 === 0 ? 'ses_a' : 'ses_b',
+    }))
+    writeV2(home, '/a', rows)
+    const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 100 })
+    const request = { scope: 'session' as const, cwd: '/a', sessionId: 'ses_a', query: 'needle', limit: 100 }
+    const page1 = await src.search(request)
+    assert.equal(page1.results.length, 1, 'page 1 scanned the newest 100 rows (needle-200)')
+    assert.equal(page1.exhausted, false)
+    assert.ok(page1.continuation !== undefined)
+    const all: string[] = [...page1.results.map(row => row.content)]
+    let continuation: import('../src/history-search.ts').HistorySearchContinuation | undefined = page1.continuation
+    for (let i = 0; i < 5; i += 1) {
+      const page: import('../src/history-search.ts').HistorySearchPage | undefined = continuation === undefined
+        ? undefined
+        : await src.search(request, continuation)
+      if (page === undefined) break
+      all.push(...page.results.map(row => row.content))
+      continuation = page.exhausted ? undefined : page.continuation
+    }
+    assert.deepEqual(new Set(all), new Set(['needle-200', 'needle-100', 'needle-0']),
+      'every page returns only the current session\'s rows')
+    assert.equal(continuation, undefined, 'exhausted only after the old snapshot is fully scanned')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S27: a continuation with a mismatched sessionId is a typed error', async () => {
+  const home = tempHome()
+  try {
+    writeV2(home, '/a', Array.from({ length: 1000 }, (_, i) => ({ content: `p-${i}`, ts: i, sessionId: 'ses_a' })))
+    const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 100 })
+    const request = { scope: 'session' as const, cwd: '/a', sessionId: 'ses_a', query: 'zzz', limit: 100 }
+    const page = await src.search(request)
+    assert.ok(page.continuation !== undefined)
+    await assert.rejects(
+      src.search({ ...request, sessionId: 'ses_b' }, page.continuation),
+      (error: unknown) => error instanceof HistorySearchContinuationError,
+    )
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('S28: session scope never scans other cwds', async () => {
+  const home = tempHome()
+  try {
+    writeV2(home, '/a', [{ content: 'mine in a', ts: 1, sessionId: 'ses_a' }])
+    // The same session ALSO has rows in /b — the session scope opens only
+    // the live cwd's file, so /b must never be scanned.
+    writeV2(home, '/b', [{ content: 'mine in b', ts: 2, sessionId: 'ses_a' }])
+    const results = await search(home, 'session', '/a', '', { sessionId: 'ses_a' })
+    assert.deepEqual(results.map(row => row.content), ['mine in a'])
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

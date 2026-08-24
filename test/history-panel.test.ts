@@ -20,7 +20,7 @@ const visibleWidthOf = visibleWidth
 /** A controllable fake source: records calls and resolves with the rows of
  * the CURRENT query (or a preset per-call response). */
 class FakeSource implements HistorySearchSource {
-  requests: Array<{ scope: HistoryScope; query: string; cwd: string; limit: number }> = []
+  requests: Array<{ scope: HistoryScope; query: string; cwd: string; sessionId?: string; limit: number }> = []
   rows: HistorySearchResult[] = []
   delayMs = 0
   /** Per-query delay override: the SLOW query's response arrives last. */
@@ -33,7 +33,10 @@ class FakeSource implements HistorySearchSource {
    * {@link resolveNext}. Otherwise it resolves after the delay. */
   manual = false
   search(request: import('../src/history-search.ts').HistorySearchRequest): Promise<import('../src/history-search.ts').HistorySearchPage> {
-    this.requests.push({ scope: request.scope, query: request.query, cwd: request.cwd, limit: request.limit })
+    this.requests.push({
+      scope: request.scope, query: request.query, cwd: request.cwd,
+      sessionId: request.sessionId, limit: request.limit,
+    })
     if (this.fail) return Promise.reject(new Error('boom'))
     if (this.manual) {
       return new Promise<import('../src/history-search.ts').HistorySearchPage>((resolve, reject) => {
@@ -405,4 +408,89 @@ test('panel: a 500-line prompt is clamped in the detail pane (never fills the te
   // the loaded render is covered by the budget test above.
   const lines = panel.render(70)
   assert.ok(lines.length <= 16, 'the panel render is bounded by its budget')
+})
+
+// ---------------------------------------------------------------------------
+// Session scope (the Ctrl+R panel optimization): default scope, Tab cycle,
+// responsive tabs.
+// ---------------------------------------------------------------------------
+
+test('UI1: with a session identity the default scope is session', async () => {
+  const source = new FakeSource()
+  const { panel } = makePanel(source, { sessionId: 'ses_1' })
+  panel.start()
+  await settle()
+  assert.equal(source.requests[0]?.scope, 'session', 'the default scope is the current session')
+  assert.equal(source.requests[0]?.sessionId, 'ses_1', 'the request carries the captured session identity')
+})
+
+test('UI2: without a session identity the default scope is current', async () => {
+  const source = new FakeSource()
+  const { panel } = makePanel(source)
+  panel.start()
+  await settle()
+  assert.equal(source.requests[0]?.scope, 'current', 'a deferred start has no session — current is the fallback')
+  assert.equal(source.requests[0]?.sessionId, undefined)
+})
+
+test('UI3: Tab cycles session → current → all → session (query preserved)', async () => {
+  const source = new FakeSource()
+  const { panel } = makePanel(source, { sessionId: 'ses_1' })
+  panel.start()
+  await settle()
+  panel.handleInput('x')
+  await settle()
+  panel.handleInput('\t')
+  await settle()
+  assert.equal(source.requests[2]?.scope, 'current')
+  assert.equal(source.requests[2]?.query, 'x', 'the query survives the scope switch')
+  panel.handleInput('\t')
+  await settle()
+  assert.equal(source.requests[3]?.scope, 'all')
+  assert.equal(source.requests[3]?.query, 'x')
+  panel.handleInput('\t')
+  await settle()
+  assert.equal(source.requests[4]?.scope, 'session')
+  assert.equal(source.requests[4]?.sessionId, 'ses_1', 'the cycle wraps back to the session scope')
+  panel.handleInput('\t')
+  await settle()
+  assert.equal(source.requests[5]?.scope, 'current', 'the cycle is closed')
+})
+
+test('UI3b: without a session identity Tab cycles current ⇄ all only', async () => {
+  const source = new FakeSource()
+  const { panel } = makePanel(source)
+  panel.start()
+  await settle()
+  panel.handleInput('\t')
+  await settle()
+  assert.equal(source.requests[1]?.scope, 'all')
+  panel.handleInput('\t')
+  await settle()
+  assert.equal(source.requests[2]?.scope, 'current', 'no session tab without a session identity')
+})
+
+test('UI3c: the title renders the scope tabs responsively', async () => {
+  const source = new FakeSource()
+  const { panel } = makePanel(source, { sessionId: 'ses_1' })
+  panel.start()
+  await settle()
+  // Wide: the full labels fit on one line.
+  const wide = panel.render(100)
+  assert.ok(wide.some(line => line.includes('[ Current session ]')
+    && line.includes('Current directory') && line.includes('All directories')),
+  'wide terminals get the full three labels')
+  // Narrow: the short labels — three full labels must never be forced
+  // onto one line.
+  const narrow = panel.render(74)
+  assert.ok(narrow.some(line => line.includes('[ Session ]')
+    && line.includes('Directory') && line.includes('All')),
+  'narrow terminals get the short labels')
+  // Without a session identity the session tab is hidden entirely.
+  const { panel: noSession } = makePanel(source)
+  noSession.start()
+  await settle()
+  const twoTabs = noSession.render(100)
+  assert.ok(twoTabs.some(line => line.includes('Current directory') && line.includes('All directories')))
+  assert.ok(!twoTabs.some(line => line.includes('Current session')), 'no session tab without a session identity')
 })

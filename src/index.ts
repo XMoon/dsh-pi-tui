@@ -90,7 +90,8 @@ import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner 
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
-import { appendHistoryLine, appendHistoryRecord, historyFilePath, loadHistoryFile } from './history.ts'
+import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
+import { persistAfterSession, persistHistoryRecord } from './history-persist.ts'
 import { FileHistorySearchSource } from './history-search.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { DraftImageStore } from './image/draft-store.ts'
@@ -2955,7 +2956,7 @@ export function apply(ctx: Context, config: Config): void {
     /** The session-backed dispatch: create the session lazily (the first
      * user input is the deferred trigger), guard against cross-process
      * divergence, then execute a registered slash command or follow up. */
-    const dispatchViaSession = (text: string): void => {
+    const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void): void => {
       // Capture the advertised claim BEFORE any session creation: the
       // boolean must reflect the completion generation at submit time, never
       // a re-query after ensureSession (a refresh may have already revoked
@@ -2981,9 +2982,23 @@ export function apply(ctx: Context, config: Config): void {
       runOwned('submit', () => runReservedSubmit({
         reserve: (t) => draftImages.pinReferenced(t),
         run: async () => {
-        await ensureSession()
-        const agent = liveAgent
-        if (agent === undefined) return
+          // The deferred-start gate (history-persist.ts): the history row
+          // is written AFTER the session exists, with the FINAL session
+          // id — the first prompt of a deferred start creates the session
+          // inside resolveSession, and a row written before creation would
+          // carry no sessionId and vanish from the Ctrl+R `Current
+          // session` scope. A failed creation persists sessionless (the
+          // input was still typed; it stays reachable in Current
+          // directory / All directories).
+          await persistAfterSession(
+            async () => {
+              await ensureSession()
+              return liveAgent?.session.id
+            },
+            persistHistory,
+          )
+          const agent = liveAgent
+          if (agent === undefined) return
         // The guard checks THIS agent's session; capture the identity so
         // the write below can never target a session the guard did not see
         // (a session switch while the file read is in flight).
@@ -3207,7 +3222,7 @@ export function apply(ctx: Context, config: Config): void {
      * layer only). A sessionless command that failed to register falls back
      * to the session dispatch, which reports unknown commands as messages.
      */
-    const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string): void => {
+    const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string, persistHistory: (sessionId: string | undefined) => void): void => {
       // M5: a plugin-declared local command with a bridge handler routes
       // to the bridge FIRST (its rawInput is passed verbatim — never
       // re-parsed or rewritten, the skill rawInput regression gate); the
@@ -3217,7 +3232,11 @@ export function apply(ctx: Context, config: Config): void {
       const commands = ctx.get('commands')
       const definition = commands?.find(undefined as unknown as Agent, parsed.name)
       if (bridgeHandler === undefined && (commands === undefined || definition === undefined)) {
-        dispatchViaSession(text)
+        // The "sessionless" command is actually unknown: it falls back to
+        // a session dispatch — the history row goes through the
+        // deferred-start gate (persist AFTER the session exists, with the
+        // final session id), never a sessionless write here.
+        dispatchViaSession(text, persistHistory)
         return
       }
       const invocation = {
@@ -3228,9 +3247,13 @@ export function apply(ctx: Context, config: Config): void {
       } as CommandInvocation
       const handler = bridgeHandler ?? definition?.handler
       if (handler === undefined) {
-        dispatchViaSession(text)
+        dispatchViaSession(text, persistHistory)
         return
       }
+      // A truly local command: no session is created — the row persists
+      // with `sessionId: undefined` (Current directory / All directories,
+      // never Current session).
+      persistHistory(undefined)
       // An owned workflow: the result decides the notify, the failure lands
       // in diagnostics — runOwned (AGENTS.md), never a bare void. The
       // handler may be a SYNC implementation, so the factory must run inside
@@ -3414,31 +3437,44 @@ export function apply(ctx: Context, config: Config): void {
       // dropping it. `!` shell lines persist verbatim so ↑ recall re-runs
       // the shell branch.
       const trimmed = text.trim()
-      // A MULTIMODAL submission (draft text referencing staged images) is
-      // NOT persisted to the plain-text history: the placeholder dies with
-      // its draft on consumeDraftImages, so an ↑ recall would re-send the
+      // Submission-time facts snapshotted BEFORE any async work: the
+      // timestamp (the row must record the USER's submission time, not the
+      // disk-write time — an agent-facing write lands after session
+      // creation) and the image check (a MULTIMODAL submission is NOT
+      // persisted to the plain-text history: the placeholder dies with its
+      // draft on consumeDraftImages, so an ↑ recall would re-send the
       // placeholder as ORDINARY TEXT — the images would silently vanish
-      // from the model input (review finding 3). Structured attachment
-      // history (text + refs, recalled on recall) is a post-v1 extension.
-      if (trimmed !== '' && trimmed !== lastHistoryContent && !draftHasImages(text, draftImages)) {
-        // All submission-time facts are snapshotted BEFORE the detached
-        // write: the cwd (file path + row must agree), the timestamp (the
-        // row must record the USER's submission time, not the disk-write
-        // time) and the session id (a session switch must never label a
-        // session A row with session B — it would corrupt all-directory
-        // ordering/provenance). The callback only performs I/O.
+      // from the model input (review finding 3). A late check would miss
+      // the already-consumed images. Structured attachment history (text +
+      // refs, recalled on recall) is a post-v1 extension.)
+      const historyTs = Date.now()
+      const historyHasImages = draftHasImages(text, draftImages)
+      /**
+       * Persist the submitted line under the given session identity. The
+       * sessionId is a PARAMETER, resolved at the CALL SITE — the
+       * deferred-start gate (history-persist.ts): an agent-facing
+       * submission passes the FINAL session id AFTER the session exists
+       * (the first prompt of a deferred start creates the session; a row
+       * written before creation would carry no sessionId and vanish from
+       * the Ctrl+R `Current session` scope). Sessionless submissions pass
+       * undefined and stay visible in `Current directory` / `All
+       * directories`. The cwd is resolved at PERSIST time so the row
+       * lands in the session's cwd file with a `cwd` field that agrees
+       * with the file hash.
+       */
+      const persistHistory = (sessionId: string | undefined): void => {
         const historyCwd = sessionCwd()
-        const historyTs = Date.now()
-        const historySessionId = liveAgent?.session.id
         const file = historyFilePath(dshHome(process.env), historyCwd)
         runDetached('input history write', () => {
-          const written = appendHistoryRecord(file, {
-            v: 2,
+          const written = persistHistoryRecord({
             content: trimmed,
             cwd: historyCwd,
+            sessionId,
             ts: historyTs,
-            sessionId: historySessionId,
-          }, lastHistoryContent)
+            lastContent: lastHistoryContent,
+            hasImages: historyHasImages,
+            file,
+          })
           if (written) lastHistoryContent = trimmed
         }, {
           diag,
@@ -3453,16 +3489,24 @@ export function apply(ctx: Context, config: Config): void {
       // (the FIRST user message is the deferred trigger).
       if (text.startsWith('!')) {
         if (text.startsWith('!!')) {
+          persistHistory(liveAgent?.session.id)
           runLocalShell(text)
         } else if (shellCommandOf(text) !== '') {
           // An owned workflow: the session creation failure restores the
           // draft (failSubmission) — runOwned (AGENTS.md), never a bare
-          // void.
-          runOwned('contextual shell', () => ensureSession().then(() => runLocalShell(text)), {
+          // void. The history row is written AFTER the session exists
+          // (the deferred-start gate), so a `!` line that creates the
+          // session carries its id.
+          runOwned('contextual shell', () => ensureSession().then(() => {
+            persistHistory(liveAgent?.session.id)
+            runLocalShell(text)
+          }), {
             diag,
             sessionId: () => liveAgent?.session.id,
             onError: failSubmission(text),
           })
+        } else {
+          persistHistory(liveAgent?.session.id)
         }
         return
       }
@@ -3494,7 +3538,12 @@ export function apply(ctx: Context, config: Config): void {
         || (extensionService?.commands.isSessionless(parsed.name, SESSIONLESS_COMMANDS) ?? false)
       )
       if (parsed !== undefined && liveAgent === undefined && isSessionless) {
-        runLocalCommand(parsed, text)
+        // A truly sessionless command: no session exists (and none is
+        // created) — the row persists with `sessionId: undefined` inside
+        // runLocalCommand (its fallback path goes through the
+        // deferred-start gate instead, so an unknown "sessionless" command
+        // that creates a session still carries the final session id).
+        runLocalCommand(parsed, text, persistHistory)
         return
       }
       // Busy-Enter preference (web busyEnter parity): while the agent is
@@ -3516,10 +3565,11 @@ export function apply(ctx: Context, config: Config): void {
         // skill's own slash name and injects its body; the raw `/skill
         // <name>` form would never match (review finding 2). Image
         // placeholders ride the normalized line untouched.
+        persistHistory(liveAgent?.session.id)
         steerNow(normalizeSkillInvocation(text) ?? text, true)
         return
       }
-      dispatchViaSession(text)
+      dispatchViaSession(text, persistHistory)
     }
     // M3 runner wiring (F-1): when the extension host service is mounted,
     // the TUI surface attaches a SurfaceHost over its ledger — extensions
@@ -3979,6 +4029,10 @@ export function apply(ctx: Context, config: Config): void {
         knownCwds: () => knownHistoryCwds(),
       }),
       historySearchCwd: () => sessionCwd(),
+      // The session scope's identity — a GETTER like the cwd: a session
+      // switch must make the next Ctrl+R search the NEW session (the
+      // panel captures it once at open time).
+      historySearchSessionId: () => liveAgent?.session.id,
       // The transcript image surface (plan M8/M9): the durable loader plus
       // the dim fallback coloring.
       imageLoader,

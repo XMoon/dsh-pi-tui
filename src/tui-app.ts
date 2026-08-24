@@ -1214,6 +1214,15 @@ export interface TuiAppOptions {
    * cwd keeps the search scoped to the session root.
    */
   historySearchCwd?: () => string
+  /**
+   * The live session identity the `session` scope filters by (the runner
+   * forwards `liveAgent?.session.id`). A GETTER like `historySearchCwd` —
+   * resolved at panel OPEN time, never a snapshot: a session switch must
+   * make the next Ctrl+R search the NEW session. Absent (or resolving
+   * undefined — no session yet on a deferred start), the panel defaults
+   * to the `current` scope and hides the session tab.
+   */
+  historySearchSessionId?: () => string | undefined
 }
 
 /**
@@ -1437,6 +1446,10 @@ export class TuiApp {
    * the whole surface's cwd with the new session header, so the panel must
    * resolve the cwd at OPEN time, not at construction time. */
   private readonly historySearchCwd: (() => string) | undefined
+  /** The live session identity for the panel's `session` scope — a GETTER
+   * (the runner's `liveAgent?.session.id`), never a snapshot: a session
+   * switch must make the next Ctrl+R search the NEW session. */
+  private readonly historySearchSessionId: (() => string | undefined) | undefined
   /** The open CATEGORIZED picker (e.g. /sessions): Tab cycles its
    * categories while it is open. Cleared when the picker closes. */
   private activeCategorizedPicker: CategorizedPickerState | undefined
@@ -1804,6 +1817,9 @@ export class TuiApp {
     // Keep the GETTER: the cwd must be resolved at panel-open time (a
     // session switch changes `sessionCwd()` — see the field doc).
     this.historySearchCwd = options.historySearchCwd
+    // Same for the session identity: a session switch must make the next
+    // Ctrl+R search the NEW session (see the field doc).
+    this.historySearchSessionId = options.historySearchSessionId
     this.editorSeatHolder = new EditorSeatHolder({
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
@@ -3083,6 +3099,11 @@ export class TuiApp {
       // injected getter reflects the LIVE session, the status cwd is the
       // fallback when no getter is wired.
       cwd: this.historySearchCwd?.() ?? this.status.cwd,
+      // The session identity is captured ONCE at open time, like the cwd:
+      // the panel's default scope and every request use this snapshot for
+      // the panel's whole lifetime (a switch while the panel is up keeps
+      // the search stable; the next open re-resolves).
+      sessionId: this.historySearchSessionId?.(),
       maxRows: maxHeight - 2, // the Frame adds its two border rows
       onResultsChanged: () => this.requestRender(),
       onAccept: (content) => {
