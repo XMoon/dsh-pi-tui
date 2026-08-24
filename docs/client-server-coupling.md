@@ -60,13 +60,14 @@
 
 | File | Coupling | Notes |
 |---|---|---|
-| `src/commands.ts` | `settings`, `llm`, `authorization`, `credentials`, `commands`, `approval`, `permissionPresets`, `sessionPersistence`, `sessionTitle`, `tokenMeter`, `agentDefaultModel`, `agentPresets`, `tools`; `import:dsh-agent`, `import:dsh-session` | The command runner — the second god interface (plan §M1.3). M1 narrows it to `TuiCommandContext` capabilities; `sessionQuery` moved to the session reader port (M1.3). |
+| `src/commands.ts` | `settings`, `llm`, `authorization`, `credentials`, `commands`, `approval`, `permissionPresets`, `sessionPersistence`, `tokenMeter`, `agentDefaultModel`, `agentPresets`, `tools`; `import:dsh-agent`, `import:dsh-session` | The command runner — the second god interface (plan §M1.3). M1 narrows it to `TuiCommandContext` capabilities; `sessionQuery` moved to the session reader port (M1.3), `sessionTitle` to the session writer port (M1.4). |
 | `src/skill-catalog.ts` | `agentPresets`, `skills` | Already isolated: structural types + capability detection (decision 11). Model for the catalog port. |
 | `src/surface-catalog.ts` | `commands`, `import:dsh-agent` | Isolated catalog module; standing-scope reads. |
 | `src/skill-catalog-refresh.ts` | `import:dsh-agent` | Coordinator; agent-scoped refresh. |
 | `src/subagent-viewer-submit.ts` | (structural `ctx.subagents` followup surface, injected) | The pure follow-up delivery core; consumed by the `SubagentPort` (M1.2). |
 | `src/runtime/direct/subagent-direct.ts` | `subagents` | The Direct `SubagentPort` adapter (M1.2) — the ONLY module in the follow-up path that touches `ctx`; the runner depends on the port. Baseline entry added by the M1.2 relocation. |
 | `src/runtime/direct/session-direct.ts` | `sessionPersistence`, `sessionQuery` | The Direct `SessionReader` adapter (M1.3) — owns the live-preferred listing, the bounded content search and the cached title batches; the consumer (commands.ts) depends on the port. Baseline entries added by the M1.3 relocation. |
+| `src/runtime/direct/session-writer-direct.ts` | `sessionTitle` | The Direct `SessionWriter` adapter (M1.4) — wraps the raw agent/session write ops (followup, steer, dequeue, cancel) and the `ctx.sessionTitle` service (rename/refresh); the runner keeps the Direct-mode orchestration (guard/fence/barrier) around the port calls. Baseline entry added by the M1.4 relocation. |
 | `src/image/*` | (structural `ctx.attachments` / `ctx.llm` subsets, injected) | Already seamed; image intake/submit/loader. |
 | `src/model-menu.ts` | `import:dsh-agent` | Type-only model selection types. |
 | `src/sessions.ts` | `import:dsh-session` | Type-only session types. |

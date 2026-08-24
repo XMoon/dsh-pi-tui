@@ -66,6 +66,26 @@ function stubRunner(
       search: async () => [],
       titles: async () => new Map(),
     },
+    sessionWriter: {
+      followup: () => {},
+      steer: async () => 'ok' as const,
+      dequeue: () => {},
+      cancel: () => {},
+      // The /title tests provide a fake sessionTitle service on the ctx;
+      // the stub writer routes to it exactly like the Direct adapter.
+      rename: (session, name) => {
+        const titles = ctx.get('sessionTitle') as { rename(s: unknown, n: string): void } | undefined
+        if (titles === undefined) return false
+        titles.rename(session, name)
+        return true
+      },
+      refreshTitle: async (session, signal) => {
+        const titles = ctx.get('sessionTitle') as { refresh(s: unknown, signal: AbortSignal): Promise<{ title: string } | undefined> } | undefined
+        if (titles === undefined) return { kind: 'unavailable' as const }
+        const regenerated = await titles.refresh(session, signal)
+        return { kind: 'ok' as const, title: regenerated?.title }
+      },
+    },
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: new DraftImageStore(),

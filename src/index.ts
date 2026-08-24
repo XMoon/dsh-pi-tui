@@ -118,7 +118,9 @@ import {
 import { createDirectBackend } from './runtime/backend.ts'
 import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
 import { DirectSessionReader } from './runtime/direct/session-direct.ts'
+import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
+import type { SessionWriter } from './runtime/session-writer-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -389,9 +391,9 @@ export interface InterruptAgentLike {
  * log, which the design explicitly rejects — the parked queue is the
  * agreed web-parity behavior until upstream lands the capability.
  */
-export function interruptAgent(agent: InterruptAgentLike | undefined): void {
+export function interruptAgent(agent: InterruptAgentLike | undefined, writer: SessionWriter): void {
   if (agent === undefined) return
-  agent.cancel({ kind: 'user' }, { keepInbox: true })
+  writer.cancel(agent, { kind: 'user' }, { keepInbox: true })
 }
 
 /** One unsettled subagent delegation, in tool/call order. */
@@ -1306,7 +1308,11 @@ export function apply(ctx: Context, config: Config): void {
   // Host domains through narrow ports, never ctx.* directly. Direct is the
   // only backend today; remote/wire adapters join in later milestones
   // behind the SAME port interfaces.
-  const backend = createDirectBackend(new DirectSubagentPort(ctx), new DirectSessionReader(ctx))
+  const backend = createDirectBackend(
+    new DirectSubagentPort(ctx),
+    new DirectSessionReader(ctx),
+    new DirectSessionWriter(ctx),
+  )
   // Process diagnostics: stderr + a log file under $DSH_HOME/logs. The cordis
   // logger has no exporter in this process, so it is NOT the troubleshooting
   // channel — diag is (see diag.ts).
@@ -3135,7 +3141,7 @@ export function apply(ctx: Context, config: Config): void {
                               : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
                             return
                           }
-                          agent.followup(message)
+                          backend.sessionWriter.followup(agent, message)
                           // Consume ONLY the referenced drafts — a concurrent
                           // intake's newer image survives (round-5 finding 1).
                           consumeDraftImages(text, draftImages)
@@ -3205,7 +3211,7 @@ export function apply(ctx: Context, config: Config): void {
                 : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
               return
             }
-            agent.followup(message)
+            backend.sessionWriter.followup(agent, message)
             // Consume ONLY the referenced drafts — a concurrent intake's
             // newer image survives (round-5 finding 1).
             consumeDraftImages(text, draftImages)
@@ -3376,7 +3382,7 @@ export function apply(ctx: Context, config: Config): void {
         // splice or session switch while the guard reads the file aborts
         // with a retry notice instead of losing messages or writing to a
         // session the guard never checked.
-        const outcome = await steerAll({
+        const outcome = await backend.sessionWriter.steer({
           currentAgent: () => liveAgent as unknown as SteerAgentLike,
           currentGeneration: () => sessionGeneration,
           guard: {
@@ -3776,7 +3782,7 @@ export function apply(ctx: Context, config: Config): void {
         // may change while the turn is being torn down).
         guardToken = undefined
         localShellController?.abort()
-        interruptAgent(liveAgent)
+        interruptAgent(liveAgent, backend.sessionWriter)
       },
       // Conversation rewind: the TuiApp fires this only when IDLE with an
       // EMPTY editor and a fast second Esc (busy stays a cancel; overlays,
@@ -3825,7 +3831,7 @@ export function apply(ctx: Context, config: Config): void {
           case 'cancel-activity': {
             guardToken = undefined
             localShellController?.abort()
-            interruptAgent(liveAgent)
+            interruptAgent(liveAgent, backend.sessionWriter)
             break
           }
           case 'open-search': {
@@ -4045,7 +4051,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         // Remove exactly the pulled-back messages (durable splice), keeping
         // any notices queued behind them.
-        for (const message of queued) liveAgent.inbox.remove(message.id)
+        for (const message of queued) backend.sessionWriter.dequeue(liveAgent, message.id)
         const current = app.getDraft()
         app.setDraft([recalledText, current].filter(part => part.trim() !== '').join('\n\n'))
         refreshQueue()
@@ -5162,6 +5168,9 @@ export function apply(ctx: Context, config: Config): void {
       // The session READ port (migration M1.3): /sessions, /resume, /search
       // and the title batches go through the port, never ctx directly.
       sessionReader: backend.sessionReader,
+      // The session WRITE port (migration M1.4): follow-up delivery, steer,
+      // queue pull-back, cancel and title ops go through the port.
+      sessionWriter: backend.sessionWriter,
       cwd,
       imageStore: draftImages,
       // Issue #7: /copy shares the fullscreen selection's clipboard policy.
