@@ -9,6 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import { buildCommandInput } from './command-protocol.ts'
 import type { StatusSnapshot } from '../status/types.ts'
@@ -108,8 +109,11 @@ export class FooterCommandRunner {
       finish(undefined)
     }, Math.min(config.timeoutMs, MAX_COMMAND_TIMEOUT_MS))
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (output.length < MAX_COMMAND_OUTPUT_BYTES) {
-        output += chunk.toString('utf8').slice(0, MAX_COMMAND_OUTPUT_BYTES - output.length)
+      if (Buffer.byteLength(output, 'utf8') < MAX_COMMAND_OUTPUT_BYTES) {
+        // The cap is a UTF-8 BYTE cap (the plan's 16 KiB): a multibyte
+        // chunk is sliced by bytes, never by JS string length.
+        const room = MAX_COMMAND_OUTPUT_BYTES - Buffer.byteLength(output, 'utf8')
+        output += chunk.toString('utf8', 0, Math.min(chunk.length, room))
       }
     })
     child.on('error', () => {
@@ -128,7 +132,10 @@ export class FooterCommandRunner {
         finish(undefined)
         return
       }
-      finish(lines.slice(0, Math.max(1, config.maxRows)))
+      // Each row is width-truncated ANSI-safely (the status surface is
+      // single-line per row — a long row must never wrap or overflow).
+      const width = Math.max(1, this.options.width())
+      finish(lines.slice(0, Math.max(1, config.maxRows)).map(line => truncateToWidth(line, width, '…')))
     })
     const input = JSON.stringify(buildCommandInput(
       this.options.snapshot(),

@@ -36,9 +36,18 @@ export class StatusStore {
     return this.rev
   }
 
-  /** Replace the whole snapshot. Notifies only when a section changed. */
+  /** Replace the whole snapshot. Notifies only when a section changed
+   * (the same section-identity discipline as update — an identical
+   * replace is a no-op, never a render storm). */
   replace(next: StatusSnapshot): void {
-    this.commit(next)
+    let changed = false
+    for (const key of Object.keys(next) as (keyof StatusSnapshot)[]) {
+      if (this.current[key] !== next[key]) {
+        changed = true
+        break
+      }
+    }
+    if (changed) this.commit(next)
   }
 
   /** Merge a section-level patch. Sections keep their identity when the

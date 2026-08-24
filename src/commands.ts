@@ -1529,13 +1529,19 @@ export function registerTuiCommands(
             app.notify(`footer layout invalid: ${parsed.message}`, 'error')
             return
           }
-          // Memory commit only after the settings write succeeds (plan
-          // §15.7): apply first, persist best-effort.
-          runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed })
           if (settings !== undefined) {
-            detach('footer configurator write', () => settings.replace({ ...settings.get(), footer: 'custom', footerLayout: parsed }) as Promise<unknown>, { notify: true })
+            // Persist FIRST; the memory commit happens only after the
+            // settings write succeeds (plan §15.7 — a failed write keeps
+            // the old layout and notifies).
+            detach('footer configurator write', async () => {
+              await settings.replace({ ...settings.get(), footer: 'custom', footerLayout: parsed })
+              runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed })
+              app.notify('footer layout saved', 'info')
+            }, { notify: true })
+          } else {
+            runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed })
+            app.notify('footer layout saved', 'info')
           }
-          app.notify('footer layout saved', 'info')
         },
         onCancel: () => {
           // Esc: close without writing (the configurator's live preview

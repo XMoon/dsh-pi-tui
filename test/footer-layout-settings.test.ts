@@ -11,6 +11,12 @@ import { TuiApp } from '../src/tui-app.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import { StatusStore } from '../src/status/store.ts'
 import { initialStatusSnapshot } from '../src/status/snapshot.ts'
+import { FooterComposer } from '../src/footer/composer.ts'
+import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+
+/** Deep-mutable build shape (the snapshot is deeply readonly). */
+type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
@@ -128,4 +134,29 @@ test('the custom layout renders the screenshot-like acceptance fixture', async (
   assert.ok(view.includes('v0.3.3'), `version missing:\n${view}`)
   assert.ok(view.includes('focus'), `focus-mode missing:\n${view}`)
   app.stop()
+})
+
+test('layout overrides apply: prefix/suffix wrap the item, tone overrides the semantic tone, separator tone styles the separator', () => {
+  // The composer is the authority (the viewport strips ANSI).
+  const composer = new FooterComposer(createBuiltinFooterRegistry())
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [{
+        left: [{ id: 'model', prefix: '‹ ', suffix: ' ›', tone: 'warning' }],
+        right: [],
+        separator: { text: ' │ ', tone: 'error' },
+      }],
+    },
+    width: 100,
+    context: { editorEmpty: true, extensionFooterText: '' },
+  })
+  assert.ok(text.includes('‹ '), `prefix must wrap the item: ${JSON.stringify(text)}`)
+  assert.ok(text.includes(' ›'), `suffix must wrap the item: ${JSON.stringify(text)}`)
+  // The tone override replaces the item's semantic tone (the model item is
+  // uncolored by default — the warning override must color it).
+  assert.ok(text.includes('\x1b[38;2;232;168;56m'), `the tone override must apply: ${JSON.stringify(text)}`)
 })

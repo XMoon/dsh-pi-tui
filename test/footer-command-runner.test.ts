@@ -190,3 +190,21 @@ test('the app renders the command surface; the Host instruction still merges on 
   assert.ok(view.includes('t0/s0'), `the native surface must return:\n${view}`)
   app.stop()
 })
+
+test('the output cap is a UTF-8 BYTE cap (multibyte output cannot exceed 16 KiB)', async () => {
+  // 6000 CJK chars = 18000 UTF-8 bytes > 16384: the cap must cut it.
+  const rows = await runOnce(CONFIG, 'process.stdout.write("\\u4f60".repeat(6000) + "\\n")')
+  assert.ok(rows !== undefined)
+  const bytes = Buffer.byteLength(rows[0]!, 'utf8')
+  assert.ok(bytes <= 16 * 1024, `the byte cap must hold: ${bytes}`)
+})
+
+test('command rows are width-truncated ANSI-safely before the sink', async () => {
+  const { visibleWidth } = await import('@xmoon76/pi-tui')
+  const rows = await runOnce({ ...CONFIG, maxRows: 1 }, 'process.stdout.write("x".repeat(500) + "\\n")')
+  assert.ok(rows !== undefined)
+  // The runner's width is 100: the row must be truncated to 100 VISIBLE
+  // cells (the JS length includes the ANSI resets).
+  assert.ok(visibleWidth(rows[0]!) <= 100, `the row must be width-truncated: ${visibleWidth(rows[0]!)}`)
+  assert.ok(rows[0]!.includes('…'), 'the truncation must carry the ellipsis')
+})

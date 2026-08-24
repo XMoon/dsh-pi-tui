@@ -81,3 +81,18 @@ test('undefined patch values are skipped', () => {
   assert.equal(store.snapshot().interaction.focusMode, true)
   assert.equal(store.revision(), 1)
 })
+
+test('replace with an identical snapshot does not notify (same identity discipline as update)', () => {
+  const store = new StatusStore()
+  let notified = 0
+  store.subscribe(() => { notified += 1 })
+  const next = snapshotWith({ interaction: { focusMode: true } })
+  store.replace(next)
+  assert.equal(notified, 1)
+  // The SAME snapshot object again: no change.
+  store.replace(next)
+  assert.equal(notified, 1)
+  // A NEW object with a changed section notifies.
+  store.replace(snapshotWith({ interaction: { focusMode: false } }))
+  assert.equal(notified, 2)
+})

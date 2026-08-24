@@ -253,3 +253,63 @@ test('/footer starts from the persisted custom layout when active', async () => 
   assert.ok(!view.includes('[x] Permission preset'), `the default-only items must not be listed:\n${view}`)
   app.stop()
 })
+
+test('/footer Enter with a FAILED settings write keeps the old layout and notifies', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const commands = fakeCommands()
+  ctx.provide('commands', commands.service as never)
+  // A settings document whose replace REJECTS (the write fails).
+  const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
+  const failingSettings: TuiSettingsLike = {
+    get: () => ({ theme: 'auto', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+    replace: () => { throw new Error('write failed') },
+  }
+  const applied: Array<{ footer: string }> = []
+  const runner: TuiCommandRunner = {
+    ctx, app, diag: {} as never,
+    get liveAgent() { return undefined },
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    tuiSettings: failingSettings,
+    agents: {} as never, sessions: { flush: async () => {} },
+    cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
+    copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    get sessionGeneration() { return 0 },
+    compose: async () => ({ setup: () => {} }),
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    get pendingPreset() { return undefined },
+    set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
+    applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
+  }
+  registerTuiCommands(runner)
+  const def = commands.defs.find(entry => entry.name === 'footer')
+  await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  vt.sendInput(' ')
+  vt.sendInput('\r')
+  // The write fails: the memory commit must NOT happen (the old layout
+  // stays) — the apply is deferred until the write succeeds.
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(applied.length, 0, 'a failed write must not apply the layout')
+  assert.equal(app.getFooterMode(), 'default', 'the old layout must stay active')
+  app.stop()
+})
