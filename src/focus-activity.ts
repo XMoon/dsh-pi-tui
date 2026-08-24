@@ -227,7 +227,22 @@ export class FocusActivityComponent {
  * @param focusMode - whether Focus is on (off = the normal projection).
  */
 export type FocusProjectedBlock =
-  | { kind: 'message'; message: TranscriptMessage; truncated?: boolean }
+  | {
+    kind: 'message'
+    message: TranscriptMessage
+    truncated?: boolean
+    /**
+     * Set ONLY on process rows that exist BECAUSE the owner Thought is
+     * expanded (thinking / tool / system / intermediate-assistant /
+     * compaction rows revealed by the disclosure). The fullscreen click
+     * handler collapses the owner turn when this is set — the user's own
+     * messages and the FINAL assistant are NOT marked, so clicking them
+     * never collapses the Thought (plan §8.8, review P2: the
+     * body-click-collapse scope is exactly the expanded process content,
+     * never the turn's persistent rows).
+     */
+    collapseFocusOwnerOnClick?: number
+  }
   | { kind: 'activity'; activity: TurnActivity }
 
 export function projectFocus(
@@ -275,10 +290,13 @@ export function projectFocus(
       // the final assistant held back and appended LAST (a max-tokens
       // turn's `max tokens reached` system row must never land after the
       // final: the settled order is User → Thought → process → final).
+      // Every revealed process row carries the owner-turn collapse mark:
+      // the user's rows and the FINAL assistant stay unmarked (clicking
+      // them must not collapse the Thought — review P2).
       for (const member of group) {
         if (member.kind === 'user') continue
         if (final !== undefined && member === final.message) continue
-        out.push({ kind: 'message', message: member })
+        out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
       }
       if (final !== undefined) {
         out.push(final.truncated ? { kind: 'message', message: final.message, truncated: true } : { kind: 'message', message: final.message })

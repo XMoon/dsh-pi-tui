@@ -10,14 +10,14 @@
  *    never be matched to its child transcript — label/order/time are never
  *    identity (see subagentJobTranscriptId).
  *
- * Source B — the subagent registry (`ctx.subagents.listChildren`):
- * live child subagents. Continuable children are separate durable
- * conversations that deliver no result to the parent, so Enter may open
- * the read-only transcript viewer directly. A RUNNING one-shot child
- * (the parent's pending foreground tool call, which registers no job
- * record) is merged the same way, so the ↓ trigger stays armed while a
- * foreground delegation is in flight. A finished one-shot child is not
- * merged — its work is over and `/subagents` remains its surface.
+ * Source B — the subagent registry (`ctx.subagents.listDescendants`):
+ * the durable descendant tree. Every healthy child — continuable AND
+ * one-shot, running AND inactive — is a viewable row: `activity` is
+ * live-store presence, never an outcome, and a finished one-shot child
+ * stays reachable through its persisted transcript (plan §6.4). Rows keep
+ * the DSH stable pre-order VERBATIM (plan §6.5): the tree structure comes
+ * from `parentId` + `depth`, so no running-first re-sort may ever break
+ * the lineage.
  *
  * Deliberate overlap: a running BACKGROUND one-shot has BOTH a job record
  * and a child record with no cross-reference, so it may appear twice — the
@@ -25,8 +25,8 @@
  * impossible without the missing childSessionId on the job record; the
  * viewable child row is strictly more useful, so the overlap is accepted.
  *
- * Pure and injectable so row typing, ordering, and descriptions are
- * unit-testable without any dsh service.
+ * Pure and injectable so row typing, ordering, tree prefixes, and
+ * descriptions are unit-testable without any dsh service.
  * @module @xmoon76/dsh-pi-tui/tasks-browser
  */
 
@@ -50,7 +50,9 @@ export interface TaskBrowserJobInput {
   readonly finishedAt?: number
 }
 
-/** Structural subagent-list entry (a projection of SubagentListEntry). */
+/** Structural subagent-list entry (a projection of dsh's
+ * SubagentDescendantListEntry). parentId/depth are the CATALOG'S OWN
+ * facts (plan §6.3) — never guessed from labels or order. */
 export interface TaskBrowserAgentInput {
   readonly kind: 'child' | 'diagnostic'
   readonly id: string
@@ -60,6 +62,11 @@ export interface TaskBrowserAgentInput {
   /** Absent on diagnostic rows. */
   readonly activity?: 'running' | 'inactive'
   readonly hasChildren?: boolean
+  /** Durable direct parent (descendant rows; absent for direct children
+   * of the requested root — the root is then the implicit parent). */
+  readonly parentId?: string
+  /** Edge distance from the requested root; direct children are `1`. */
+  readonly depth?: number
   /** Diagnostic rows carry the fold reason instead of identity facts. */
   readonly reason?: 'corrupt' | 'unsupported' | 'unavailable'
 }
@@ -89,32 +96,50 @@ export type TaskBrowserRow =
       readonly mode: 'one-shot' | 'continuable'
       readonly activity: 'running' | 'inactive'
       readonly hasChildren: boolean
+      /** Durable direct parent ('' for a direct child — the browser's
+       * root is the implicit parent). */
+      readonly parentId: string
+      /** Edge distance from the requested root; direct children are 1. */
+      readonly depth: number
     }
 
 const isActiveJob = (status: string): boolean => status === 'running' || status === 'stopping'
 
+/** Whether a job status is ACTIVE (running/stopping) — the preferred-row
+ * rule's job half (plan §6.6). */
+export function isActiveJobStatus(status: string): boolean {
+  return isActiveJob(status)
+}
+
 /**
- * Ordering shared with kimi's tasks browser: active rows first, terminal
- * rows last. Jobs keep their registry order within each class (active by
- * startedAt, terminal newest-finish first); subagents keep the registry's
- * createdAt order (running before inactive).
+ * Build the merged browser rows.
+ *
+ * SUBAGENT rows keep the catalog's stable pre-order VERBATIM (plan §6.5):
+ * the descendant listing IS the tree, so rows are NEVER re-sorted by
+ * activity — a running grandchild must not jump above its inactive
+ * parent. Every healthy child (kind 'child' with a classified mode) is a
+ * row: the finished one-shot filter is REMOVED (plan §6.4), because
+ * `activity` is live-store presence, never an outcome.
+ *
+ * JOB rows keep their own registry ordering (active by startedAt,
+ * terminal newest-finish first) as a separate flat group after the tree —
+ * job status is never fused into subagent lineage (plan §2.2).
  */
 export function buildTaskRows(
   jobs: readonly TaskBrowserJobInput[],
   agents: readonly TaskBrowserAgentInput[],
 ): TaskBrowserRow[] {
-  // Child rows: every continuable child (resumable conversations stay
-  // reachable) plus RUNNING one-shot children (the parent's pending
-  // foreground tool call). Finished one-shot children and diagnostics
-  // stay out — their surface is /subagents. The filter is a TYPE GUARD on
-  // mode: a catalog entry whose mode is missing is NOT treated as a
-  // healthy interactive child — it is dropped like a diagnostic (never
-  // silently defaulted to continuable).
+  // Child rows: every healthy classified child — continuable AND one-shot,
+  // running AND inactive (a settled one-shot's persisted transcript is
+  // still viewable, plan §6.3). The filter is a TYPE GUARD on mode: a
+  // catalog entry whose mode is missing is NOT treated as a healthy
+  // interactive child — it is dropped like a diagnostic (never silently
+  // defaulted to continuable).
   type AgentRow = Extract<TaskBrowserRow, { kind: 'subagent' }>
   const agentRows: AgentRow[] = agents
     .filter((agent): agent is TaskBrowserAgentInput & { mode: 'one-shot' | 'continuable' } =>
       agent.kind === 'child' && (
-        agent.mode === 'continuable' || (agent.mode === 'one-shot' && agent.activity === 'running')
+        agent.mode === 'continuable' || agent.mode === 'one-shot'
       ))
     .map(agent => ({
       kind: 'subagent' as const,
@@ -124,11 +149,10 @@ export function buildTaskRows(
       mode: agent.mode,
       activity: agent.activity ?? 'inactive',
       hasChildren: agent.hasChildren ?? false,
+      parentId: agent.parentId ?? '',
+      depth: agent.depth ?? 1,
     }))
-  const sortedAgents: TaskBrowserRow[] = [...agentRows].sort((a, b) => {
-    if (a.activity !== b.activity) return a.activity === 'running' ? -1 : 1
-    return 0
-  })
+  // The tree order is the catalog order: no running-first re-sort.
   const sortedJobs = [...jobs].sort((a, b) => {
     const aTerminal = !isActiveJob(a.status)
     const bTerminal = !isActiveJob(b.status)
@@ -146,7 +170,19 @@ export function buildTaskRows(
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
   }))
-  return [...sortedAgents, ...sortedJobs]
+  return [...agentRows, ...sortedJobs]
+}
+
+/**
+ * The tree connector prefix for one subagent row: indentation by depth
+ * (the browser's root is depth 1) plus a stable `├─ ` branch connector.
+ * The connector is a fixed layout region (plan §6.7) — it never scrolls
+ * with the selected label (M4 marquee) and never carries label text, so
+ * the marquee's moving window starts after it.
+ */
+export function taskTreePrefix(depth: number): string {
+  const safe = Math.max(1, Math.floor(depth))
+  return `${'  '.repeat(safe - 1)}├─ `
 }
 
 /** The one-line picker label for a row. The subagent label CARRIES the
@@ -176,5 +212,71 @@ export function describeTaskRow(row: TaskBrowserRow, now: number): string {
     const elapsed = Math.max(0, Math.floor((now - row.startedAt) / 1000))
     return `${row.status}${row.detail === undefined ? '' : ` — ${row.detail}`} · ${elapsed}s`
   }
-  return `${row.activity}${row.hasChildren ? ' · has children' : ''}`
+  return `${row.activity}${row.hasChildren ? ' · has children' : ''}${row.depth > 1 ? ` · depth ${row.depth}` : ''}`
+}
+
+/** The viewer's interaction authority for one row (plan §6.10): mode is
+ * the DURABLE semantic, access is the CURRENT surface authority. A direct
+ * (depth 1) continuable child is interactive from the root; every other
+ * row is read-only from this surface — nested descendants belong to their
+ * exact parent, never to the root (plan §2.4). */
+export type ViewerAccess =
+  | 'interactive-direct-child'
+  | 'readonly-one-shot'
+  | 'readonly-nested'
+
+/** Classify a subagent row's viewer authority from the row's own facts
+ * (mode + depth — never activity). */
+export function viewerAccessOf(row: Extract<TaskBrowserRow, { kind: 'subagent' }>): ViewerAccess {
+  if (row.depth > 1) return 'readonly-nested'
+  if (row.mode === 'one-shot') return 'readonly-one-shot'
+  return 'interactive-direct-child'
+}
+
+/** Resolve a viewer target's authority, deriving the DEFAULT from the
+ * mode when the caller did not pass one (a plain depth-1 viewer): a
+ * continuable child is interactive, a one-shot child is read-only. A
+ * caller that KNOWS the row is nested passes `readonly-nested` explicitly
+ * (the mode alone cannot express it). */
+export function resolveViewerAccess(
+  mode: 'one-shot' | 'continuable',
+  access: ViewerAccess | undefined,
+): ViewerAccess {
+  if (access !== undefined) return access
+  return mode === 'continuable' ? 'interactive-direct-child' : 'readonly-one-shot'
+}
+
+/** Whether an access permits drafting a follow-up to the child (only the
+ * interactive direct child does, plan §6.10). */
+export function isViewerAccessInteractive(access: ViewerAccess): boolean {
+  return access === 'interactive-direct-child'
+}
+
+/** The viewer header hint for one access (plan §6.10: the UI shows the
+ * REAL mode and states the surface authority explicitly — a nested
+ * continuable child is never relabeled one-shot to borrow read-only
+ * logic, and a nested ONE-SHOT child keeps its own mode too). MODE is
+ * the durable semantic, ACCESS the surface authority — the hint must
+ * render BOTH truthfully, so it takes the mode alongside the access: a
+ * nested one-shot row reads `one-shot · nested · read-only from this
+ * parent`, never `continuable · …` (review P2). */
+export function viewerAccessHint(mode: 'one-shot' | 'continuable', access: ViewerAccess): string {
+  switch (access) {
+    case 'interactive-direct-child': return 'continuable · interactive'
+    case 'readonly-one-shot': return 'one-shot · read-only'
+    case 'readonly-nested': return `${mode} · nested · read-only from this parent`
+  }
+}
+
+/** The interrupt authority for one subagent row (review P1): DSH's
+ * `{ kind: 'user', parentSessionId }` contract requires the child's
+ * DURABLE DIRECT parent — a deep descendant passed with the main session
+ * id is rejected as unauthorized. The row's own parentId is the durable
+ * address the tree already carries; a direct child (no parentId) falls
+ * back to the browser root (the live main session). */
+export function subagentInterruptParent(
+  row: Extract<TaskBrowserRow, { kind: 'subagent' }>,
+  rootSessionId: string,
+): string {
+  return row.parentId !== '' ? row.parentId : rootSessionId
 }

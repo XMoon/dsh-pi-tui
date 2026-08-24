@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.3] - 2026-08-24
 
 ### Added
 
@@ -70,6 +70,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and quoted (`@"dir with spaces/f.ts"`) forms are supported; a mention
   that does not resolve (a typo, or a non-path `@` word) is sent verbatim.
   Email addresses and `pkg@1.0.0`-style text are never touched.
+- **`/tasks` shows the full subagent lineage as a tree.** The browser now
+  reads the durable descendant catalog (`listDescendants`): a subagent's
+  subagent appears under its parent with a `├─` connector indented by
+  depth, in stable pre-order — a running grandchild never jumps above its
+  inactive parent, and jobs stay their own flat group after the tree. A
+  FINISHED one-shot child stays reachable: `inactive` is live-store
+  presence, not an outcome, so Enter still opens its persisted
+  transcript. The cursor lands on the first RUNNING subagent when the
+  browser opens (or the first active job), without ever re-sorting the
+  tree. Viewing a NESTED (depth > 1) descendant is read-only — mode is
+  the durable semantic, access is the surface authority, and only a
+  direct continuable child is interactive from the root; the header
+  advertises `<mode> · nested · read-only from this parent` (the real
+  mode — continuable or one-shot — is always shown).
+- **The selected row's long label marquees.** A selected task or session
+  row whose label overflows its column scrolls the label horizontally
+  (pause → one cell per 250ms → tail pause → loop) instead of sitting
+  truncated — only the MAIN label moves; the tree connector, the current-
+  session marker, the mode suffix, status and elapsed stay fixed, and
+  CJK/emoji/ZWJ never split mid-grapheme. Unselected rows keep the
+  ellipsis, and only one marquee timer per panel exists (disposed on
+  close).
 - **The task browser filters by row type.** Pressing Tab in `/tasks` (or
   the ↓/Ctrl+J trigger) cycles `All → subagent → bash → pwsh → …`; the
   header shows the active scope (`[bash]`) and the counts follow it. The
@@ -102,6 +124,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Local `!`/`!!` shell cards preview instead of flooding the screen.**
+  A running card collapses to the newest 5 lines, a settled card to at
+  most 20 visual rows (long lines wrap and count as several), each with
+  an honest hidden-line marker — and Ctrl+O (the same master switch that
+  folds recent tool turns) expands to the retained buffer, streaming
+  live while the command still runs. The capture layer is untouched
+  (the byte/line/disk caps still own memory); only what the card SHOWS
+  is bounded. **Alt+K** quick-dismisses the settled cards (a running
+  card is never dismissed, the process is not cancelled — Esc owns that
+  — and an already-submitted `!` context payload is untouched); `!!`
+  stays local-only.
+- **Focus Mode fullscreen disclosure anchors the Thought instead of the
+  tail.** Clicking a collapsed Thought now expands it with the header
+  near the top of the viewport (one row of context above) and leaves
+  follow-end, so a long revealed block never drags the view to its end.
+  Clicking the expanded turn's ordinary rows — thinking, tool call,
+  tool result — collapses the OWNER Thought again (the header stays in
+  view); an attachment's own hit area still wins (its info bar toggles
+  only the image, never the whole Thought). Anchoring is fullscreen-
+  only; the regular surface keeps its terminal-owned scrollback.
 - **Esc never destroys your queue again.** Interrupting the agent (one
   Esc while busy, double-Esc while idle) now preserves queued input — the
   same `keepInbox` semantics as the web Stop button. The pending queue is
@@ -121,6 +163,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Task overlays no longer draw a black mask beside the border.** A
+  framed overlay that declares a fixed width now fills exactly that
+  width (`Frame(child, true)`): the picker, task browser, settings and
+  output viewer boxes span the full declared rectangle on every row —
+  the compositor's leftover padding (a black band on dark terminals)
+  is gone. The computed-width approval dialog is unchanged.
 - **Session transitions are now a single-writer transaction.** `/new`,
   `/fork`, `/rewind` and `/sessions` switches all run through one unified
   transaction (`transitionTo`, ordered in `src/transition.ts`): the OLD
@@ -276,6 +324,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files, tripping the tarball declaration-leak gate. The seam now takes a
   minimal structural surface (the three phase/busy/working setters), so
   `dist/` declarations stay limited to the public runner surface.
+
+## [Unreleased]
 
 ## [0.3.2] - 2026-08-22
 
@@ -1052,7 +1102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...v0.3.0

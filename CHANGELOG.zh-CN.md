@@ -5,7 +5,7 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.3.3] - 2026-08-24
 
 ### 新增
 
@@ -78,8 +78,39 @@
   `parentSession`/`seedLength` 的 agent 创建),因此 preset、provider/model
   与 cwd 的继承在两个表面之间永远不会漂移;`/fork` 现在使用当前会话的
   cwd,而不是启动时捕获的值。
+- **`/tasks` 以树形展示完整的 subagent 世系。** 浏览器现在读取 durable
+  的后代目录(`listDescendants`):子代理的子代理会挂在父节点之下,按深度
+  缩进并带 `├─` 连接符,顺序为稳定的 pre-order——运行中的孙节点绝不会
+  跳到其 inactive 父节点之上,jobs 仍然作为树后的独立平铺组。已结束的
+  one-shot 子代理仍然可达:`inactive` 只是 live-store 的存在状态,不是
+  结果,所以 Enter 依然能打开其持久化 transcript。浏览器打开时光标落在
+  第一个 RUNNING 子代理上(或第一个活跃 job),但绝不为光标重排树。
+  查看嵌套(深度 > 1)后代时只读——mode 是持久语义,access 是当前表面
+  的权限,只有直接(深度 1)continuable 子代理可从根交互;头部会标注
+  `<mode> · nested · read-only from this parent`(始终显示真实 mode——
+  continuable 或 one-shot)。
+- **选中行的超长标签现在会横向滚动(marquee)。** 选中的 task 或 session
+  行标签超出列宽时,标签会水平滚动(停顿 → 每 250ms 一列 → 尾部停顿 →
+  循环),而不是静止截断——只有**主标签**在动;树连接符、当前会话标记、
+  mode 后缀、状态与耗时保持固定,CJK/emoji/ZWJ 不会在字素中间裂开。
+  未选中行保持省略号,每个面板只有一个 marquee 定时器(关闭时销毁)。
 
 ### 变更
+
+- **本地 `!`/`!!` shell 卡片改为预览,不再刷屏。** 运行中的卡片折叠为
+  最新 5 行,已结束的卡片最多显示 20 个视觉行(超长行会换行并按多行计),
+  各自带诚实的隐藏行数标记——Ctrl+O(与折叠最近工具回合的同一个主开关)
+  展开到 retained buffer,命令仍在跑时也会实时跟随。capture 层完全不动
+  (字节/行/磁盘上限仍然掌管内存);被约束的只是卡片**展示**的内容。
+  **Alt+K** 快速清除已结束的卡片(运行中的卡片绝不会被清除,进程也不会
+  被取消——那是 Esc 的职责——已经提交的 `!` context payload 不受影响);
+  `!!` 仍然是纯本地。
+- **Focus 全屏展开现在锚定 Thought 而非末尾。** 点击折叠的 Thought 展开
+  后,头部会停在视口顶部附近(上方保留一行上下文),并退出 follow-end,
+  长长的展开块不会再把视图拖到末尾。点击已展开回合的普通行——思考、
+  工具调用、工具结果——会再次收起**所属** Thought(头部仍停在视野内);
+  附件的自身命中区仍然优先(点击图片信息栏只切换该图片,绝不会收起整个
+  Thought)。锚定只发生在全屏;常规表面保留终端自有的 scrollback。
 
 - **Esc 不再清空你的队列。** 中断 agent(忙碌时按一次 Esc,空闲时按两次)
   现在会保留已排队的输入——与 web Stop 按钮相同的 `keepInbox` 语义。
@@ -96,6 +127,11 @@
 
 ### 修复
 
+- **Task 弹层不再在边框旁出现黑色遮罩。** 声明了固定宽度的带框弹层现在
+  精确填满该宽度(`Frame(child, true)`):picker、task 浏览器、设置与
+  输出查看器盒子在每一行都占满声明的矩形——compositor 补出来的空白
+  (深色终端上就是一条黑带)消失了。按终端宽度计算的 approval 对话框
+  保持不变。
 - **Session transition 现在是单写事务。** `/new`、`/fork`、`/rewind` 与
   `/sessions` 切换统一走同一个事务(顺序由 `src/transition.ts` 固定并
   单元测试):先让**旧** agent 安静(`whenIdle`——busy 时的切换现在会
@@ -215,6 +251,8 @@
   以及 vendored pi-tui 类型——被内联进发布的 `.d.mts`,触发 tarball
   声明泄漏门禁失败。该函数现在只接收一个最小结构化表面(phase/busy/
   working 三个 setter),`dist/` 声明仅保留公开 runner 表面。
+
+## [Unreleased]
 
 ## [0.3.2] - 2026-08-22
 
@@ -844,7 +882,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.2.2...v0.3.0

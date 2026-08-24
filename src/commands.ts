@@ -51,6 +51,7 @@ import {
   headerToPickerRow,
   loadSessionTitleBatch,
   sameWorkspace,
+  sessionLabelParts,
   sessionPickerItem,
   type SessionPickerItem,
   type SessionPickerRow,
@@ -1566,6 +1567,9 @@ export function registerTuiCommands(
         maxHeight: 26,
         showHint: true,
         categories,
+        // The selected session's long title marquees; the lineage tree
+        // connector and the `●` current marker stay fixed (plan §7.6/§7.7).
+        marquee: { labelPartsOf: sessionLabelParts },
       },
     )
     // Enrich rows with titles as they load (progressive: the first
