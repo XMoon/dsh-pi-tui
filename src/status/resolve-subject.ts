@@ -15,6 +15,7 @@ export interface ViewerStateLike {
   readonly childSessionId: string
   readonly label?: string
   readonly mode: 'one-shot' | 'continuable'
+  readonly activity?: 'running' | 'inactive'
 }
 
 /**
@@ -30,6 +31,7 @@ export function resolveDisplaySubject(viewer: ViewerStateLike | undefined): View
       id: viewer.childSessionId,
       ...viewer.label === undefined || viewer.label === '' ? {} : { label: viewer.label },
       mode: viewer.mode,
+      ...viewer.activity === undefined ? {} : { activity: viewer.activity },
     },
   }
 }

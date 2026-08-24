@@ -7,11 +7,10 @@
  * dogfooded (plan M3: builtins and third-party plugins share one service
  * API; the host keeps no special builtin slot setters).
  *
- * M3 scope: the chrome that maps to the M2 slots — the version header badge
- * and the turn/step footer segment. The turn/step counters were previously
- * hardcoded in the host's renderFooter; they now flow through an extension
- * footer segment that subscribes to the surface state (the host deleted its
- * duplicated hardcoded path — headless parity preserved).
+ * M1 scope: the version header badge and the todo-summary dock item. The
+ * turn/step footer counters were migrated OUT of the extension slot into
+ * the host-native `turns-steps` footer item (plan §13.4) — the host core
+ * state no longer depends on plugin loading.
  * @module @xmoon76/dsh-pi-tui/builtins
  */
 
@@ -20,7 +19,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { dshVersion } from './dsh-version.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
-import type { DockItem, FooterSegment, HeaderBadge, StyledSpan } from './extension/public-types.ts'
+import type { DockItem, HeaderBadge, StyledSpan } from './extension/public-types.ts'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 
 /** Stable Cordis plugin name for the builtins row. */
@@ -67,23 +66,6 @@ export function apply(ctx: Context): void {
       ? `tui-v${packageVersion()}`
       : `dsh-${installedDsh} · tui-v${packageVersion()}`,
     tone: 'info',
-  })
-
-  // Turn/step footer segment: `t3/s7` — migrated from the host's hardcoded
-  // renderFooter path (M3 dogfood). Subscribes to the session slice and
-  // replaces the segment on every turn/step change.
-  const counters = service.register<FooterSegment>('chrome.footer.status', {
-    id: 'builtin-turns-steps',
-    order: 1000,
-    description: 'Completed turns/steps counters (first-party builtin).',
-  }, { spans: [] })
-
-  const renderCounters = (state: { session: { turns: number; steps: number } }): void => {
-    const spans: StyledSpan[] = [{ text: `t${state.session.turns}/s${state.session.steps}` }]
-    counters.replace({ spans })
-  }
-  service.subscribeState(state => {
-    renderCounters(state)
   })
 
   // Todo summary dock item (P1-5): the todo summary — previously hardcoded

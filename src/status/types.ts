@@ -20,6 +20,9 @@ export interface ViewStatus {
         readonly id: string
         readonly label?: string
         readonly mode: 'one-shot' | 'continuable'
+        /** Store-snapshot activity (running = live record, inactive =
+         * persisted only). Display fact of the viewer identity block. */
+        readonly activity?: 'running' | 'inactive'
       }
 }
 

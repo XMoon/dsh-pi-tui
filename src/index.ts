@@ -89,6 +89,7 @@ import { initialStatusSnapshot } from './status/snapshot.ts'
 import { deriveAccessStatus } from './status/derive-access.ts'
 import { derivePlanStatus } from './status/derive-plan.ts'
 import { usageFromStats } from './status/derive-usage.ts'
+import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
@@ -2339,10 +2340,11 @@ export function apply(ctx: Context, config: Config): void {
         ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
       })
       // M0: project the DSH-derived facts into the unified status store.
-      // The DISPLAY SUBJECT's stats feed the usage section — while the
-      // subagent viewer is open that is the viewed child's own fold, so
-      // the footer layout never changes, only the data source.
+      // The DISPLAY SUBJECT's facts feed the sections — while the subagent
+      // viewer is open that is the viewed child's own fold and workspace,
+      // so the footer layout never changes, only the data source.
       const events = liveAgent?.session.events ?? []
+      const displayCwd = viewing?.cwd ?? liveCwd
       statusStore.update({
         composition: deriveCompositionStatus(),
         access: deriveAccessStatus(
@@ -2356,8 +2358,8 @@ export function apply(ctx: Context, config: Config): void {
           liveAgent?.session,
         ),
         collaboration: { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, events, foldPlanMode) },
-        workspace: deriveWorkspaceStatus(liveCwd),
-        usage: usageFromStats(viewing?.stats.snapshot() ?? stats),
+        workspace: deriveWorkspaceStatus(displayCwd),
+        usage: usageFromStats(viewing?.stats.snapshot() ?? stats, contextTokens),
         host: deriveHostStatus(),
       })
     }
@@ -2916,6 +2918,8 @@ export function apply(ctx: Context, config: Config): void {
         app.clearNotify()
         app.setViewerMode(undefined)
         app.setViewerFooter(undefined)
+        // M1: the display subject returns to main on a session swap.
+        statusStore.update({ view: { subject: { kind: 'main' } } })
         // Session swap: the OLD parent session is gone — its parked Focus
         // disclosures must be DISCARDED, never restored into the new
         // session (clearSessionOverrides already dropped the stack; this
@@ -2971,7 +2975,9 @@ export function apply(ctx: Context, config: Config): void {
     let viewerSessionAbort: AbortController | undefined
     /** Push the viewed child's OWN identity into the footer (label/mode/
      * activity/cwd + the child's own turns/steps/stats line) — the parent
-     * session's status describes a session the user is not looking at. */
+     * session's status describes a session the user is not looking at.
+     * M1: the unified status store follows the same display subject — the
+     * view/workspace/usage sections switch to the child's facts. */
     const refreshViewerFooter = (): void => {
       if (viewing === undefined) return
       const stats = viewing.stats.snapshot()
@@ -2983,6 +2989,17 @@ export function apply(ctx: Context, config: Config): void {
         turns: stats.turns,
         steps: stats.steps,
         statsLine: formatStats(stats),
+        usage: usageFromStats(stats),
+      })
+      statusStore.update({
+        view: resolveDisplaySubject({
+          childSessionId: viewing.id,
+          label: viewing.label,
+          mode: viewing.mode,
+          activity: viewing.activity,
+        }),
+        workspace: deriveWorkspaceStatus(viewing.cwd),
+        usage: usageFromStats(stats),
       })
     }
     const enterView = async (
@@ -3085,6 +3102,9 @@ export function apply(ctx: Context, config: Config): void {
       app.clearNotify() // a viewer notify (if any) is stale now
       app.setViewerMode(undefined)
       app.setViewerFooter(undefined) // the parent footer returns
+      // M1: the display subject returns to main (the parent's facts follow
+      // on the refreshStatus below).
+      statusStore.update({ view: { subject: { kind: 'main' } } })
       // Restore the parent's Focus disclosures BEFORE the repaint so the
       // projection uses them (plan §26).
       app.exitFocusViewerScope()

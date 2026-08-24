@@ -35,10 +35,18 @@ const SHORT_STATUS: StatusData = {
   permission: 'workspace-write',
   contextTokens: 1000,
   contextWindow: 10000,
+  // M1: the footer composes the stats line from the STRUCTURED usage.
+  usage: {
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+    turns: 3,
+    steps: 7,
+  },
 }
 
 /** Extreme status: more than the 3-row host budget even at 40 columns —
- * the cap must cut the tail with '…'. */
+ * the cap must cut the tail with '…'. The stats line is the longest the
+ * pi vocabulary can produce, so it wraps and caps too. */
 const EXTREME_STATUS: StatusData = {
   model: 'deepseek/deepseek-v4-flash',
   cwd: '/home/xmoon/project/dsh-pi-tui/src',
@@ -49,6 +57,13 @@ const EXTREME_STATUS: StatusData = {
   permission: 'workspace-write',
   contextTokens: 1000,
   contextWindow: 10000,
+  usage: {
+    tokens: { input: 999_900_000, output: 999_900_000, cacheRead: 999_900_000, cacheWrite: 999_900_000 },
+    cacheHitPct: 99.9,
+    performance: { llmMs: 999_900, firstTokenMs: 999_900, tokensPerSec: 999 },
+    turns: 3,
+    steps: 7,
+  },
 }
 
 /** The viewport rows that carry footer content. */
@@ -56,7 +71,7 @@ function footerRows(view: string): string[] {
   return view.split('\n').filter(line => line.trim() !== '' && (
     line.includes('[workspace-write]') || line.includes('[yolo]') || line.includes('[read-only]')
     || line.includes('deepseek') || line.includes('/home/') || line.includes('t3/s7')
-    || line.includes('turns ·') || line.includes('stats ') || line.includes('…')))
+    || line.includes('LLM') || line.includes('↑') || line.includes('…')))
 }
 
 test('a narrow terminal wraps the footer to multiple rows without losing host info', async () => {
@@ -85,7 +100,7 @@ test('runaway host content is capped: ≤3 host rows + 1 stats row, tail cut', a
   assert.ok(rows.length <= 4, `the footer must never exceed 4 rows, saw ${rows.length}:\n${view}`)
   assert.ok(rows.length >= 3, `the extreme state must still wrap to multiple rows, saw ${rows.length}:\n${view}`)
   assert.ok(rows.some(row => row.includes('…')), `the capped rows must carry the ellipsis:\n${view}`)
-  assert.ok(view.includes('stats…'), `the stats row must survive its own cap with the ellipsis:\n${view}`)
+  assert.ok(rows.some(row => row.includes('↑') && row.includes('…')), `the stats row must survive its own cap with the ellipsis:\n${view}`)
   app.stop()
 })
 
