@@ -618,6 +618,11 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
       search: async () => [],
       titles: async () => new Map(),
     },
+    interaction: {
+      registerQuestionProvider: () => true,
+      onApprovalRequest: () => {},
+      setApprovalPolicy: () => true,
+    },
     sessionWriter: {
       followup: () => {},
       steer: async () => 'ok' as const,

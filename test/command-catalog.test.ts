@@ -70,6 +70,11 @@ function stubRunner(
       search: async () => [],
       titles: async () => new Map(),
     },
+    interaction: {
+      registerQuestionProvider: () => true,
+      onApprovalRequest: () => {},
+      setApprovalPolicy: () => true,
+    },
     sessionWriter: {
       followup: () => {},
       steer: async () => 'ok' as const,

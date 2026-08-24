@@ -47,12 +47,18 @@ test('the Direct backend is the current production surface and serves every capa
     create: async () => ({}) as never,
     resume: async () => ({}) as never,
   }
-  const backend = createDirectBackend(subagent, sessionReader, sessionWriter, sessionLifecycle)
+  const interaction = {
+    registerQuestionProvider: () => true,
+    onApprovalRequest: () => {},
+    setApprovalPolicy: () => true,
+  }
+  const backend = createDirectBackend(subagent, sessionReader, sessionWriter, sessionLifecycle, interaction)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
   assert.equal(backend.sessionWriter, sessionWriter)
   assert.equal(backend.sessionLifecycle, sessionLifecycle)
+  assert.equal(backend.interaction, interaction)
   for (const capability of CAPABILITIES) {
     assert.ok(backend.capabilities.has(capability), `direct serves ${capability}`)
   }

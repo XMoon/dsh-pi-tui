@@ -2,7 +2,6 @@
  "commands.ts": [
   "agentDefaultModel",
   "agentPresets",
-  "approval",
   "authorization",
   "commands",
   "credentials",
@@ -32,8 +31,7 @@
   "shell",
   "subagents",
   "tokenMeter",
-  "tools",
-  "userQuestions"
+  "tools"
  ],
  "model-menu.ts": [
   "import:dsh-agent"
@@ -46,6 +44,10 @@
  ],
  "rewind.ts": [
   "import:dsh-session"
+ ],
+ "runtime/direct/interaction-direct.ts": [
+  "approval",
+  "userQuestions"
  ],
  "runtime/direct/session-direct.ts": [
   "sessionPersistence",
