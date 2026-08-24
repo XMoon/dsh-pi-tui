@@ -2561,7 +2561,11 @@ export class TuiApp {
       // plugin DECLINES it, the editor route hands it back to the host
       // fallback (which includes this cancel path on re-entry).
       if (this.seatEditor().handleInput !== undefined) {
-        return this.handleReplacementEditorInput(data, this.inputRouterContext(), true)
+        const routed = this.handleReplacementEditorInput(data, this.inputRouterContext(), true)
+        if (routed !== undefined) return routed
+        // The plugin DECLINED Esc: continue through the host Esc fallback
+        // (shell-mode exit, double-Esc cancel) instead of dropping the
+        // key — a dropped Esc would never arm the cancel.
       }
       // Shell-mode exit: the host editor in a shell mode with an EMPTY
       // body owns Esc — it cancels the shell mode (the double-Esc cancel

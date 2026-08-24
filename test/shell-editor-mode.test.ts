@@ -844,3 +844,49 @@ test('a plugin-to-host restore shifts the cursor by the wire prefix in the TEXT'
   assert.equal(host.cursor, 2, 'the cursor shifts back by the text-derived prefix length')
   holder.dispose()
 })
+
+// ── review round 7: a DECLINED plugin Esc reaches the host fallback ───────
+
+test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  let cancels = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+  }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  // A vim-like plugin that DECLINES Esc (returns false — it has no modal
+  // state to enter).
+  const handle = registry.register({
+    id: 'esc-declining-plugin',
+    priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: '' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      get focused() { return false },
+      borderColor: (text: string) => text,
+      handleInput: () => false,
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // First Esc: the plugin declines, the host fallback arms the window.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancels, 0, 'one Esc only arms the double-Esc window')
+  // Second Esc within the window: the host cancel fires.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancels, 1, 'a declined plugin Esc must not swallow the host cancel')
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
