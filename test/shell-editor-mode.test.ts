@@ -540,18 +540,24 @@ test('a bare ! reaches the child via the subagent submit path', async () => {
 // ── review round 3: plugin handoff (the wire form round-trips) ────────────
 
 /** A minimal plugin editor (the editor-registry test shape). */
-function pluginEditor(initial = ''): ExtensionEditor & { text: string; disposed: boolean } {
-  const state = { text: initial, disposed: false }
+function pluginEditor(initial = ''): ExtensionEditor & {
+  text: string
+  cursor: number
+  disposed: boolean
+  setCursor: (offset: number) => void
+} {
+  const state = { text: initial, cursor: 0, disposed: false }
   return {
     get component() { return { kind: 'text' as const, spans: [{ text: state.text }] } },
     getText: () => state.text,
     setText: (text) => { state.text = text },
-    getCursor: () => 0,
-    setCursor: () => {},
+    getCursor: () => state.cursor,
+    setCursor: (offset) => { state.cursor = offset },
     get focused() { return false },
     borderColor: (text) => text,
     dispose: () => { state.disposed = true },
     get text() { return state.text },
+    get cursor() { return state.cursor },
     get disposed() { return state.disposed },
   }
 }
@@ -751,5 +757,90 @@ test('a host adapter without setSerializedInput still receives the handoff draft
   holder.handoff(undefined)
   assert.equal(holder.currentEditor().id, 'host')
   assert.equal(host.text, '!pwd', 'the draft must survive the restore through the setText fallback')
+  holder.dispose()
+})
+
+// ── review round 6: busy-Esc vs plugin editors; cursor restoration ───────
+
+test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  let cancels = 0
+  let pluginEscs = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+  }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  // A plugin editor whose handleInput CONSUMES every event (vim-like).
+  const handle = registry.register({
+    id: 'esc-consuming-plugin',
+    priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: '' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      get focused() { return false },
+      borderColor: (text: string) => text,
+      handleInput: () => { pluginEscs += 1; return true },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  app.setBusy(true)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancels, 1, 'a busy Esc must cancel the running activity, never the plugin')
+  assert.equal(pluginEscs, 0, 'the consuming plugin must not see a busy Esc')
+  app.setBusy(false)
+  // Idle: the plugin keeps its own Esc state machine.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(pluginEscs, 1, 'an idle Esc routes to the plugin editor')
+  assert.equal(cancels, 1, 'an idle plugin Esc must not cancel')
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
+
+test('a plugin-to-host restore shifts the cursor by the wire prefix in the TEXT', () => {
+  const host = {
+    text: '',
+    cursor: 0,
+    getText: () => host.text,
+    setText: (text: string) => { host.text = text },
+    setTextAndCursor: (text: string, cursor: number) => { host.text = text; host.cursor = cursor },
+    getCursor: () => host.cursor,
+    setCursor: (offset: number) => { host.cursor = offset },
+    focused: true,
+    borderColor: (text: string) => text,
+    invalidate: () => {},
+    addToHistory: () => {},
+    clearHistory: () => {},
+    component: new Text('host', 0, 0),
+  }
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => host,
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const plugin = pluginEditor()
+  holder.handoff({ id: 'plugin', create: () => plugin })
+  // The user typed a shell line in the plugin: the document is the wire
+  // form `!pwd` with the cursor after `!pw` (offset 3).
+  plugin.setText('!pwd')
+  plugin.setCursor(3)
+  holder.handoff(undefined)
+  assert.equal(host.text, '!pwd', 'the wire draft survives the restore')
+  assert.equal(host.cursor, 2, 'the cursor shifts back by the text-derived prefix length')
   holder.dispose()
 })
