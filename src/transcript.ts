@@ -889,6 +889,16 @@ export class TranscriptFolder {
         }
         break
       }
+      case 'step/end': {
+        // Focus aggregation: commit the step's usage ONCE and drop the
+        // open state (the accumulator's contract — a later chunk for the
+        // closed step is a settled fact, never swallowed by
+        // first-chunk-wins). The visible total is unchanged, so the
+        // revision only moves when the display value actually changed.
+        this.usage.onStepEnd(event.data.turn, event.data.step)
+        this.syncUsage(this.activityFor(event.data.turn))
+        break
+      }
       case 'turn/start': {
         this.currentTurn = event.data.turn
         // Focus aggregation: turn timing comes from `SessionEvent.time`
@@ -1065,7 +1075,11 @@ export class TranscriptFolder {
         const name = key === undefined ? 'tool' : (this.callNames.get(key) ?? 'tool')
         const text = textOf(block?.content ?? [])
         const status = event.data.error !== undefined || block?.isError === true ? 'error' : 'ok'
-        const turn = pending?.turn ?? this.currentTurn
+        // The result's OWN turn (event.data.turn) when no pending call
+        // pairs it — never this.currentTurn: an orphan result of a replay
+        // fragment must not land in the stale current turn (review
+        // finding).
+        const turn = pending?.turn ?? event.data.turn
         this.pendingCalls.delete(key ?? '')
         if (key !== undefined) this.callNames.delete(key)
         if (pending !== undefined) {
