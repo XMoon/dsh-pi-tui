@@ -127,10 +127,23 @@ import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapsh
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
 
-/** Fullscreen Focus anchoring (plan §8.6): the expanded Thought's header
+/** Fullscreen Focus anchoring (plan §8.6): the collapsed Thought's header
  * lands one row below the viewport top so the previous context row stays
- * visible above it. */
+ * visible above it. Used on the COLLAPSE direction; the EXPAND direction
+ * follows the end (plan supplement: the default view after expansion is
+ * the latest content). */
 export const FOCUS_ANCHOR_TOP_PADDING = 1
+
+/** Whether a message is a Focus SECONDARY disclosure: a foldable process
+ * card inside an expanded Thought that has its own compact/full two-state
+ * renderer (plan §10). Shared by the render rule and the click handler —
+ * never two different foldable sets. */
+function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
+  return message.kind === 'thinking'
+    || message.kind === 'tool'
+    || message.kind === 'system'
+    || message.kind === 'compaction'
+}
 
 /** The compaction lifecycle phase the working row advertises: idle (no
  * compaction), summarizing (compaction/start seen, the summary is being
@@ -3191,11 +3204,17 @@ export class TuiApp {
 
   /** Toggle one turn's Thought disclosure (click on the header — plan
    * §16.1). Running turns are toggleable; turn/end never reverts the
-   * choice. In fullscreen the viewport anchors to the Thought header on
-   * BOTH directions (plan §8): expanding shows the header near the top
-   * instead of the block's tail; collapsing keeps the Thought in view. */
+   * choice. Closing is a COLLAPSE ALL: the turn's secondary expansions
+   * are cleared with it (plan §6/§18), so reopening shows the process
+   * timeline compact again. In fullscreen the EXPAND direction follows
+   * the end (the user sees the latest content) and the COLLAPSE direction
+   * anchors the Thought header in view (plan supplement). */
   toggleFocusTurn(turn: number): void {
-    this.setFocusTurnExpanded(turn, !this.focusExpandedTurns.has(turn), { anchorFullscreen: true })
+    if (this.focusExpandedTurns.has(turn)) {
+      this.collapseFocusTurn(turn, { anchorFullscreen: true })
+      return
+    }
+    this.setFocusTurnExpanded(turn, true, { anchorFullscreen: true })
   }
 
   /** Force one turn's Thought open (transcript-search jumps — plan §23:
@@ -3207,13 +3226,50 @@ export class TuiApp {
     this.setFocusTurnExpanded(turn, true)
   }
 
+  /** Reveal one search-matched message: open its owner Thought (Focus on)
+   * and full-reveal the matched SECONDARY card, so the hit is visible
+   * even though the process timeline defaults to compact (plan §28). The
+   * search caller owns the jump target — no anchor. */
+  revealSearchMatch(message: TranscriptMessage): void {
+    const turn = 'turn' in message ? message.turn : undefined
+    if (turn !== undefined && this.focusModeEnabled) {
+      this.setFocusTurnExpanded(turn, true)
+    }
+    if (isFocusSecondaryDisclosure(message)) {
+      this.expandedOverride.set(message, true)
+    }
+    this.rebuildMessages()
+  }
+
+  /** Clear every secondary expansion of one turn (the root Collapse All
+   * reset — plan §16): reopening the Thought must show the process
+   * timeline compact, never the previous long outputs. */
+  private clearFocusSecondaryExpansions(turn: number): void {
+    for (const message of this.messages) {
+      if (!('turn' in message)) continue
+      if (message.turn !== turn) continue
+      if (!isFocusSecondaryDisclosure(message)) continue
+      this.expandedOverride.delete(message)
+    }
+  }
+
+  /** The explicit user-facing Collapse All: clear the turn's secondary
+   * expansions, then close the root Thought (plan §16/§18). */
+  private collapseFocusTurn(turn: number, options: { anchorFullscreen?: boolean } = {}): void {
+    this.clearFocusSecondaryExpansions(turn)
+    this.setFocusTurnExpanded(turn, false, options)
+  }
+
   /**
    * The unified Focus disclosure transition (plan §8.4): every entry
    * point — header click, expanded-body click, search jumps — funnels
    * through here. With `anchorFullscreen` (user clicks only, never the
-   * search path), the fullscreen viewport is anchored to the turn's
-   * Thought header AFTER the rebuild, with follow-end disabled so the
-   * growing content cannot drag the view back to the tail (plan §8.6/§8.7).
+   * search path), the fullscreen viewport is adjusted AFTER the rebuild:
+   * the EXPAND direction follows the END (the default view after
+   * expansion is the latest content — the final answer or the newest
+   * process output — and the viewport keeps following as it grows), and
+   * the COLLAPSE direction anchors the turn's Thought header in view with
+   * follow-end disabled (plan supplement).
    */
   private setFocusTurnExpanded(
     turn: number,
@@ -3229,26 +3285,32 @@ export class TuiApp {
     this.rebuildMessages()
     if (options.anchorFullscreen && this.fullscreenScroll !== undefined) {
       this.refreshMessageRows()
-      // 4. locate the turn's header in the projected row map.
-      const transcriptRow = this.focusTurnTranscriptRow(turn)
-      if (transcriptRow !== undefined) {
-        const width = this.terminal.columns
-        const welcomeHeight = this.welcomeCard.render(width).length
-        // The ScrollView's content height must reflect the NEW projection
-        // BEFORE the anchor, or scrollTo would clamp against the stale
-        // collapsed height. The layout pass uses the same rendered line
-        // count the frame will paint (cached renders make this cheap).
-        const contentHeight = this.messagesView.render(width).length
-        const viewportHeight = this.fullscreenScroll.viewportHeight
-        this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
-        // 5. anchor: the header lands `FOCUS_ANCHOR_TOP_PADDING` rows
-        // below the viewport top (one row of previous context stays
-        // visible); disableFollow breaks follow-end so the freshly
-        // expanded content cannot snap back to the tail (plan §8.7).
-        this.fullscreenScroll.scrollTo(
-          welcomeHeight + transcriptRow - FOCUS_ANCHOR_TOP_PADDING,
-          { disableFollow: true },
-        )
+      const width = this.terminal.columns
+      // The ScrollView's content height must reflect the NEW projection
+      // BEFORE the scroll, or scrollTo would clamp against the stale
+      // collapsed height. The layout pass uses the same rendered line
+      // count the frame will paint (cached renders make this cheap).
+      const contentHeight = this.messagesView.render(width).length
+      const viewportHeight = this.fullscreenScroll.viewportHeight
+      this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+      if (expanded) {
+        // 4. EXPAND: follow the end — the user sees the latest content
+        // and the viewport keeps following as the process grows (plan
+        // supplement: the default view after expansion is the end).
+        this.fullscreenScroll.scrollToEnd()
+      } else {
+        // 4. COLLAPSE: anchor the Thought header `FOCUS_ANCHOR_TOP_PADDING`
+        // rows below the viewport top (one row of previous context stays
+        // visible); disableFollow breaks follow-end so the collapsed
+        // content cannot snap back to the tail (plan §8.7).
+        const transcriptRow = this.focusTurnTranscriptRow(turn)
+        if (transcriptRow !== undefined) {
+          const welcomeHeight = this.welcomeCard.render(width).length
+          this.fullscreenScroll.scrollTo(
+            welcomeHeight + transcriptRow - FOCUS_ANCHOR_TOP_PADDING,
+            { disableFollow: true },
+          )
+        }
       }
     }
     this.requestRender()
@@ -3708,6 +3770,16 @@ export class TuiApp {
     }
   }
 
+  /** Scroll the fullscreen transcript to the top (the symmetric
+   * counterpart of scrollToBottom). */
+  scrollToTop(): void {
+    if (this.fullscreenScroll !== undefined) {
+      this.fullscreenScroll.scrollToStart()
+    } else {
+      this.tui.requestRender(true)
+    }
+  }
+
   /** M5 test hook: the fullscreen ScrollView's live geometry (plan §14.2 —
    * tests assert `scrollTop` / `isFollowingEnd` / `viewportHeight` /
    * `maxScrollTop` directly, never a terminal screenshot). `contentHeight`
@@ -3850,15 +3922,27 @@ export class TuiApp {
         }
         // A message row REVEALED BY an expanded Focus Thought (its
         // thinking / tool / result / intermediate rows carry the owner
-        // mark from the projection, plan §8.8 / review P2): clicking it
-        // collapses the OWNER turn — the Thought header stays anchored in
-        // view. The user's OWN rows and the FINAL assistant never carry
-        // the mark, so clicking them keeps the old behavior (ordinary
-        // card toggle, no Thought collapse).
+        // mark from the projection, plan §8.8 / review P2): the click
+        // routes to the NEAREST disclosure owner (plan §14/§15) —
+        // attachment > secondary > outer Thought. The user's OWN rows
+        // and the FINAL assistant never carry the mark, so clicking them
+        // keeps the old behavior (ordinary card toggle, no Thought
+        // collapse).
         if (entry.collapseFocusOwnerOnClick !== undefined) {
-          this.setFocusTurnExpanded(entry.collapseFocusOwnerOnClick, false, { anchorFullscreen: true })
+          // 2. nearest disclosure: a SECONDARY card (thinking / tool /
+          // system / compaction) toggles ITSELF — the root Thought stays
+          // open (plan §14 step 2).
+          if (isFocusSecondaryDisclosure(message)) {
+            this.toggleMessageExpanded(message)
+            return
+          }
+          // 3. outer disclosure: a NON-secondary process row (e.g. an
+          // intermediate assistant) collapses the owner Thought — the
+          // header stays anchored in view (plan §14 step 3).
+          this.collapseFocusTurn(entry.collapseFocusOwnerOnClick, { anchorFullscreen: true })
           return
         }
+        // 4. ordinary message toggle (the pre-Focus behavior).
         this.toggleMessageExpanded(message)
         return
       }
@@ -3866,9 +3950,11 @@ export class TuiApp {
     }
   }
 
-  /** Toggle one collapsible message's individual expansion (mouse click). */
+  /** Toggle one collapsible message's individual expansion (mouse click).
+   * The same foldable set as the render rule (plan §32 — never two
+   * different sets): thinking / tool / system / compaction. */
   private toggleMessageExpanded(message: TranscriptMessage): void {
-    if (message.kind !== 'thinking' && message.kind !== 'tool' && message.kind !== 'system') return
+    if (!isFocusSecondaryDisclosure(message)) return
     if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
     } else {
@@ -5319,6 +5405,36 @@ export class TuiApp {
     }
   }
 
+  /** Whether a message currently sits inside an EXPANDED Focus Thought
+   * (its turn's root disclosure is open — plan §33). */
+  private isInsideExpandedFocus(message: TranscriptMessage): boolean {
+    return this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)
+  }
+
+  /** The effective expansion of one foldable message (plan §9/§33): a
+   * SECONDARY card inside an expanded Focus Thought is compact unless its
+   * per-card override says otherwise (Focus L1 default compact, L2 full);
+   * every other context keeps the existing rule (Ctrl+O / recent-turn
+   * boundary / per-card override). */
+  private effectiveMessageExpanded(message: TranscriptMessage, boundary: number): boolean {
+    if (this.isInsideExpandedFocus(message) && isFocusSecondaryDisclosure(message)) {
+      return this.expandedOverride.get(message) === true
+    }
+    return this.existingMessageExpandedRule(message, boundary)
+  }
+
+  /** The pre-secondary expansion rule: LOCAL `!`/`!!` shell cards read the
+   * master Ctrl+O switch (never the unbounded turn marker — a long log
+   * would fill the TUI); every other foldable card reads the recent-turn
+   * boundary or its per-card override. */
+  private existingMessageExpandedRule(message: TranscriptMessage, boundary: number): boolean {
+    if (isLocalShellCard(message)) {
+      return this.toolOutputExpanded || this.expandedOverride.get(message) === true
+    }
+    return (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
+      && (message.turn >= boundary || this.expandedOverride.get(message) === true)
+  }
+
   /**
    * Get (or rebuild) the component for one message at this fold boundary.
    * Unchanged messages reuse their component instance, so the fork's
@@ -5330,20 +5446,13 @@ export class TuiApp {
    * switch (clearSessionOverrides).
    */
   private componentForMessage(message: TranscriptMessage, boundary: number): Component {
-    // Focus-expanded turns render their foldable rows FULLY (plan §15.1:
-    // the outer disclosure IS the reveal — no second per-card disclosure
-    // inside an open Thought). Collapsed Focus turns never reach this
-    // method: their process rows are absent from the projection.
-    const focusExpanded = this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)
-    // LOCAL `!`/`!!` shell cards (the 2026-08-24 plan §5.3) read the SAME
-    // master Ctrl+O switch as the recent-turn fold — never the unbounded
-    // turn marker (POSITIVE_INFINITY would keep them permanently expanded
-    // and a long log would fill the TUI). A per-card click override still
-    // wins, exactly like every other card.
-    const expanded = isLocalShellCard(message)
-      ? (this.toolOutputExpanded || this.expandedOverride.get(message) === true)
-      : (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
-        && (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
+    // Focus-expanded turns reveal their process TIMELINE (plan §15.1 +
+    // the secondary-disclosure supplement): the foldable process cards
+    // (thinking / tool / system / compaction) default COMPACT inside an
+    // open Thought and only the per-card override full-reveals them.
+    // Collapsed Focus turns never reach this method: their process rows
+    // are absent from the projection.
+    const expanded = this.effectiveMessageExpanded(message, boundary)
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
     // affected components (an HMR must never hit an old component).
@@ -5401,11 +5510,11 @@ export class TuiApp {
   ): MessageComponentEntry {
     const registry = this.renderers
     const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, boundary)
-    // Focus-expanded turns render their foldable rows FULLY (the outer
-    // disclosure IS the reveal — plan §15.1, no double disclosure).
-    const focusExpanded = this.focusModeEnabled && 'turn' in message && this.focusExpandedTurns.has(message.turn)
     return {
-      component: rendered === undefined ? this.renderMessage(message, boundary, focusExpanded) : rendered.component,
+      // The EFFECTIVE expansion (the secondary-disclosure rule) drives the
+      // renderer: inside an open Thought the foldable process cards default
+      // compact and only the per-card override full-reveals them.
+      component: rendered === undefined ? this.renderMessage(message, expanded) : rendered.component,
       boundary,
       themeRev: this.themeRevision,
       expanded,
@@ -5557,7 +5666,7 @@ export class TuiApp {
     return container
   }
 
-  private renderMessage(message: TranscriptMessage, boundary: number, focusExpanded = false): Component {
+  private renderMessage(message: TranscriptMessage, expanded: boolean): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
       // `--dsw-specific-bubble` background block) with a brand-blue ❯ —
@@ -5587,7 +5696,6 @@ export class TuiApp {
       return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), `${color.primary('🐋')}  `)
     }
     if (message.kind === 'thinking') {
-      const expanded = focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true
       if (expanded) {
         // Expanded thinking stays dim+italic so reasoning never reads like
         // the assistant's actual output (web parity: a distinct style).
@@ -5618,7 +5726,6 @@ export class TuiApp {
       return new Text(rows.join('\n'), 0, 0)
     }
     if (message.kind === 'system') {
-      const expanded = focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true
       // Labeled entries are context injections: the row names the producer
       // like the Web ContextInjectionRow (Context injection · label), with a notice
       // form's one-line account on the folded row. Unlabeled entries keep
@@ -5677,7 +5784,6 @@ export class TuiApp {
       // Compaction card (web CompactionItem parity): a title row with the
       // shadowed item/token counts, expandable to the summary body. The
       // running card shows "Compacting context…" until the summary lands.
-      const expanded = focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true
       const title = message.error !== undefined
         ? color.error('🗜 Compaction failed')
         : message.running === true
@@ -5723,15 +5829,16 @@ export class TuiApp {
     // never the unbounded turn marker: collapsed by default so a long log
     // cannot fill the TUI, expanded only while Ctrl+O is on.
     const localShell = isLocalShellCard(message)
-    const expanded = localShell
-      ? (this.toolOutputExpanded || this.expandedOverride.get(message) === true)
-      : (focusExpanded || message.turn >= boundary || this.expandedOverride.get(message) === true)
     if (expanded) {
       card.addChild(new Text(head, 0, 0))
       // An explicitly expanded card (mouse click, or an open Focus Thought)
       // renders diff bodies in full; the default recent-turn view caps
       // them (kimi parity).
-      this.renderToolBody(card, message, focusExpanded || this.expandedOverride.get(message) === true)
+      // The third flag is EXPLICIT expansion (the per-card override — the
+      // secondary disclosure inside an open Thought): a big diff caps in
+      // the default view even when the recent-turn boundary expands the
+      // card; only an explicit reveal renders it in full.
+      this.renderToolBody(card, message, this.expandedOverride.get(message) === true)
     } else {
       // Folded cards render 2–3 rows instead of one cramped line: the header
       // row, then the call preview (bash `$ command` / edit-write diff —

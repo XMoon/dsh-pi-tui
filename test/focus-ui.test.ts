@@ -503,3 +503,206 @@ test('max-tokens keeps the settled output with the truncated marker', async () =
   app.setFullscreen(false)
   app.stop()
 })
+
+// ── secondary disclosures (the 2026-08-24 supplement) ───────────────────
+
+test('a RUNNING turn supports live secondary disclosures (plan §41)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  app.setWorking(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root.
+  let view = vt.getViewport()
+  let y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  // The Thinking secondary is COMPACT (the latest reasoning line visible).
+  assert.ok(view.join('\n').includes('locating the transcript path'), 'the compact Thinking preview must be visible')
+  // Click the compact Thinking card: full reveal.
+  const ty = findRow(view, 'locating the transcript path')
+  click(vt, 10, ty + 1)
+  await vt.waitForRender()
+  // Append a new reasoning delta: it streams into the OPEN secondary.
+  folder.apply([
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'checking turn boundaries…' } }, T0 + 4000, 10),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.ok(joined.includes('checking turn boundaries…'), `new reasoning must stream into the open secondary:\n${joined}`)
+  // Click the reasoning body (a DIFFERENT cell than the expand click —
+  // the alt screen treats a fast repeat at the same cell as a double-click
+  // word selection): the secondary folds, the root stays open.
+  const bodyY = findRow(view, 'checking turn boundaries')
+  click(vt, 30, bodyY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const after = view.join('\n')
+  assert.ok(after.includes('🐳 Thought'), 'the root must stay open')
+  // The compact card carries the expand hint; the full one does not.
+  assert.ok(after.includes('(ctrl+o to expand)'), `the secondary must fold back to compact:\n${after}`)
+  assert.ok(after.includes('Working...'), 'the WorkingIndicator must stay')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('turn/end keeps the root and the secondary open; the final appears outside (plan §42)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root, then the Thinking secondary.
+  let view = vt.getViewport()
+  let y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const ty = findRow(view, 'locating the transcript path')
+  click(vt, 10, ty + 1)
+  await vt.waitForRender()
+  // turn/end: the root AND the secondary stay open; the final appears.
+  folder.apply(settleEvents(0))
+  show(app, folder)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'the root must stay open after turn/end')
+  assert.ok(joined.includes('locating the transcript path'), 'the secondary must stay open after turn/end')
+  assert.ok(joined.includes('The transcript folds events incrementally.'), 'the final must appear outside the Thought')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('Ctrl+O cannot force the secondaries full inside an expanded Thought (plan §44)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  app.setToolOutputExpanded(true) // Ctrl+O master switch ON
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Focus collapsed: no process leak.
+  let joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('🐳'), 'Ctrl+O must not leak collapsed process rows')
+  // Expand the root: the secondaries stay COMPACT even with Ctrl+O on
+  // (the compact Thinking card carries the expand hint; the full one does
+  // not).
+  const y = findRow(vt.getViewport(), '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'the root must expand')
+  assert.ok(joined.includes('(ctrl+o to expand)'), 'the Thinking secondary must stay compact under Ctrl+O')
+  // Focus OFF restores the Ctrl+O semantics (the recent-turn boundary
+  // expands the thinking card — no hint).
+  app.setFocusMode(false)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('(ctrl+o to expand)'), 'Focus OFF must restore the Ctrl+O expansion')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('Alt+T: the Thinking secondary stays visible COMPACT inside an expanded Thought (plan §45)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  app.toggleThinkingHidden() // Alt+T: hideThinking = true
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root: the Thinking secondary is COMPACT but visible.
+  let view = vt.getViewport()
+  const y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.ok(joined.includes('locating the transcript path'), 'the compact Thinking row must stay visible under Alt+T')
+  assert.ok(joined.includes('(ctrl+o to expand)'), 'the Thinking secondary must be COMPACT under Alt+T')
+  // Click it: the full reasoning appears (the hint disappears).
+  const ty = findRow(view, 'locating the transcript path')
+  click(vt, 10, ty + 1)
+  await vt.waitForRender()
+  const full = vt.getViewport().join('\n')
+  assert.ok(full.includes('locating the transcript path'), 'the full reasoning must appear')
+  assert.ok(!full.includes('(ctrl+o to expand)'), 'the full reasoning must not carry the compact hint')
+  // Focus OFF: the old hideThinking behavior returns.
+  app.setFocusMode(false)
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(!restored.includes('locating the transcript path'), 'Focus OFF must restore hideThinking')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a session switch clears the secondary expansions with the other overrides (plan §30)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root + the Thinking secondary.
+  let view = vt.getViewport()
+  let y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const ty = findRow(view, 'locating the transcript path')
+  click(vt, 10, ty + 1)
+  await vt.waitForRender()
+  // Session switch: the secondary overrides are cleared with the rest.
+  app.clearSessionOverrides()
+  show(app, folder)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.ok(joined.includes('🐋 Thought'), 'the switch must re-collapse the turn')
+  // Reopen: the secondary is compact again.
+  y = findRow(view, '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const reopened = view.join('\n')
+  assert.ok(reopened.includes('🐳 Thought'), 'the root must reopen')
+  assert.ok(reopened.includes('(ctrl+o to expand)'), 'the secondary must be compact after the switch')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('revealSearchMatch opens the owner Thought and full-reveals the matched secondary (plan §28)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The search hit is the THINKING card (a secondary) inside the collapsed
+  // turn: the jump must open the Thought AND full-reveal the matched card,
+  // or the hit would stay hidden in the compact timeline.
+  const messages = folder.messages()
+  const thinking = messages.find(m => m.kind === 'thinking')
+  assert.ok(thinking !== undefined, 'fixture: the thinking card exists')
+  app.revealSearchMatch(thinking)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🐳 Thought'), 'the owner Thought must open')
+  assert.ok(view.includes('locating the transcript path'), 'the matched reasoning must be visible')
+  assert.ok(!view.includes('(ctrl+o to expand)'), 'the matched secondary must be full-revealed (no compact hint)')
+  app.setFullscreen(false)
+  app.stop()
+})
