@@ -1067,6 +1067,11 @@ export class TranscriptFolder {
         // transcript entry still folds.
         if (activity.completed) break
         activity.assistantMessages += 1
+        // Every accepted authoritative message settles its step's output —
+        // EMPTY and image-only messages included: a later text-delta for
+        // it is a replay artifact and must never resurrect a preview
+        // (review finding).
+        activity.settledSteps.add(event.data.step)
         // A message of a DIFFERENT step than the open candidate proves the
         // earlier step's output was intermediate: confirm it first (plan
         // §5.3 C — a later step's output confirms the earlier candidate).
@@ -1088,9 +1093,6 @@ export class TranscriptFolder {
           // to the tail cap, never a second full copy of the assistant
           // output (plan §34 — the transcript entry owns the full text).
           candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
-          // The step's output is now authoritatively settled: later
-          // text-deltas for it are replay artifacts (review finding).
-          activity.settledSteps.add(event.data.step)
         } else if (activity.messageConfirmedStep === event.data.step) {
           // The step's candidate was already confirmed (a tool/call
           // followed the text) and it is still the LATEST confirmed: the
@@ -1119,7 +1121,6 @@ export class TranscriptFolder {
             step: event.data.step,
             tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
           }
-          activity.settledSteps.add(event.data.step)
         }
         this.syncMessage(activity)
         this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
