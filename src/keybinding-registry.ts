@@ -16,10 +16,22 @@
  *   registry REJECTS a reserved key loudly);
  * - unload removes the bindings (fiber-bound);
  * - duplicates are an explicit conflict error.
+ *
+ * Protected actions (plan §10): {@link PROTECTED_HOST_ACTIONS} is the
+ * action-level abstraction of the host's safety-critical set
+ * (app.exit.request / app.agent.interrupt / app.input.submit). The
+ * registry keeps the KEY-level reservation (RESERVED_HOST_KEYS) as the
+ * compatibility guard; a plugin binding a protected action to a NEW key
+ * is ADDITIVE (the host's own handler still executes — the runner routes
+ * the semantic action through the host paths), so it is allowed. The
+ * protected set is what the USER-config surface and the viewer guard use.
  * @module @xmoon76/dsh-pi-tui/keybinding-registry
  */
 
 import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
+import { PROTECTED_HOST_ACTIONS } from './keybindings/definitions.ts'
+
+export { PROTECTED_HOST_ACTIONS }
 
 
 /** Internal registration record. */

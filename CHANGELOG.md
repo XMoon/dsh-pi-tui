@@ -19,6 +19,32 @@
   最终 glyph,所以 `/settings` 切换后同一运行实例内已渲染的卡片立即换
   图标,无需重启或重新加载会话;第三方扩展、用户/assistant/tool 内容
   与图片 attachment marker 均不受影响。
+- **快捷键现在可用户编排。** 每个 Host 快捷键都是语义 action
+  (`app.*`),通过 context-aware keymap 解析,因此 UI(页脚提示、
+  `/help`、`/keybindings`)始终显示**生效**的按键。在 `pi-tui`
+  settings 命名空间的 `keybindings` 字段配置覆盖(热加载,无需重启):
+  字符串表示单个按键,数组表示多个按键,`false` 禁用某 action 的
+  按键,`leader` 键加 `<leader>X` 序列支持多键绑定(M6)。普通可打印键
+  永远不能绑定到 Host action;坏配置只是警告,绝不会导致启动失败
+  (fail-soft);冲突(同键 + 作用域重叠 + 同优先级)会被诊断并停用——
+  绝不静默 last-write-wins。`DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有
+  用户覆盖。`/keybindings` 显示生效表,`/keybindings conflicts` 列出
+  冲突,`/keybindings reload` 重新读取设置,`/keybindings reset` 通过
+  settings 服务清除覆盖。
+- **子代理查看器守卫改为基于 action。** continuable 查看器按 action id
+  (而非物理键)阻止父级 action,因此改键后的父级快捷键在查看器内依然
+  被阻止——会话安全不再与物理键列表耦合。
+- **新增静态门禁阻止物理快捷键回潮。**
+  `scripts/check-host-keybindings.mts`(已接入 `verify:prepush`)对
+  host 输入路径中新增的 `matchesKey(data, 'ctrl+…'/'alt+…'/'shift+…')`
+  和弦直接报错,并带有针对受认可的 focused-component/protocol 接缝的
+  白名单。
+
+### 变更
+
+- 问题流与任务浏览器改为通过语义组件 action(`question.*` /
+  `tasks.*`)路由按键;行为与按键保持不变。
+
 
 ## [0.3.4] - 2026-08-25
 

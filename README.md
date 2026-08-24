@@ -186,6 +186,35 @@ TUI 使用 DSH 提供的模型和设置服务。
 | `!!`          | 进入 Local-only Shell 模式 |
 
 完整按键和命令以 TUI 中的 `/help` 为准。
+### 自定义快捷键
+
+Host 快捷键是语义 action(`app.*`),通过 context-aware keymap 解析——
+UI(页脚提示、`/help`、`/keybindings`)始终显示**生效**的按键,因此
+改键后所有提示自动更新。在 `pi-tui` settings 命名空间中配置
+(热加载,无需重启):
+
+```yaml
+pi-tui:
+  keybindings:
+    app.input.steer: ctrl+s          # 单个按键
+    app.permission.cycle: [shift+tab, ctrl+shift+p]   # 多个按键
+    app.history.search: ctrl+r
+    app.transcript.toggleThinking: false   # 禁用该 action 的按键
+    leader: ctrl+x                    # M6:leader 序列
+    bindings:
+      app.tasks.open: <leader>t
+```
+
+- 普通可打印键永远不能绑定到 Host action(会吞掉输入);坏配置只是
+  警告,绝不会导致启动失败(fail-soft)。
+- `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖(仅使用内置默认)。
+- `/keybindings` 显示生效表;`/keybindings conflicts` 列出冲突(同键 +
+  作用域重叠 + 同优先级——绝不静默 last-write-wins);`/keybindings
+  reload` 重新读取设置;`/keybindings reset` 通过 settings 服务清除
+  覆盖。
+- 子代理查看器按 action id 阻止父级 action,因此改键后的父级快捷键
+  在查看器内依然被阻止。
+
 
 ## 安装
 

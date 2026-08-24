@@ -1,0 +1,141 @@
+/**
+ * The user config validation contract (plan §13/§14/§21): valid scalar,
+ * valid list, false, unknown id, invalid key, duplicate values, printable
+ * Host-global rejection, leader sequences.
+ * @module @xmoon76/dsh-pi-tui/keybinding-config.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { isValidKeyId, isPlainPrintableKey, LEADER_PREFIX, parseUserKeybindings } from '../src/keybindings/config.ts'
+
+test('KeyId validation accepts the fork grammar', () => {
+  assert.ok(isValidKeyId('ctrl+s'))
+  assert.ok(isValidKeyId('ctrl+shift+f'))
+  assert.ok(isValidKeyId('alt+up'))
+  assert.ok(isValidKeyId('pageUp'))
+  assert.ok(isValidKeyId('f5'))
+  assert.ok(isValidKeyId('super+1'))
+  assert.ok(isValidKeyId('ctrl+-'))
+  assert.ok(!isValidKeyId(''))
+  assert.ok(!isValidKeyId('ctrl'))
+  assert.ok(!isValidKeyId('ctrl+ctrl+s'))
+  assert.ok(!isValidKeyId('ctrl+foo'))
+  assert.ok(!isValidKeyId('ctrl+shift+'))
+})
+
+test('plain printable detection', () => {
+  assert.ok(isPlainPrintableKey('a'))
+  assert.ok(isPlainPrintableKey('1'))
+  assert.ok(isPlainPrintableKey('/'))
+  assert.ok(!isPlainPrintableKey('ctrl+a'))
+  assert.ok(!isPlainPrintableKey('shift+tab'))
+  assert.ok(!isPlainPrintableKey('enter'))
+})
+
+test('valid scalar', () => {
+  const parsed = parseUserKeybindings({ 'app.input.steer': 'ctrl+x' })
+  assert.deepEqual(parsed.bindings, { 'app.input.steer': 'ctrl+x' })
+  assert.deepEqual(parsed.diagnostics, [])
+})
+
+test('valid list', () => {
+  const parsed = parseUserKeybindings({ 'app.permission.cycle': ['shift+tab', 'ctrl+shift+p'] })
+  assert.deepEqual(parsed.bindings, { 'app.permission.cycle': ['shift+tab', 'ctrl+shift+p'] })
+})
+
+test('false disables the action', () => {
+  const parsed = parseUserKeybindings({ 'app.transcript.toggleThinking': false })
+  assert.deepEqual(parsed.bindings, { 'app.transcript.toggleThinking': false })
+})
+
+test('unknown action → diagnostic + ignore', () => {
+  const parsed = parseUserKeybindings({ 'app.foo.bar': 'ctrl+x', 'app.input.steer': 'ctrl+s' })
+  assert.deepEqual(parsed.bindings, { 'app.input.steer': 'ctrl+s' })
+  assert.equal(parsed.diagnostics.length, 1)
+  assert.ok(parsed.diagnostics[0]!.includes('unknown action'))
+})
+
+test('invalid key → diagnostic + ignore', () => {
+  const parsed = parseUserKeybindings({ 'app.input.steer': 'ctrl+zzz' })
+  assert.deepEqual(parsed.bindings, {})
+  assert.equal(parsed.diagnostics.length, 1)
+  assert.ok(parsed.diagnostics[0]!.includes('invalid key'))
+})
+
+test('duplicate values in one action are deduplicated by the keymap', () => {
+  const parsed = parseUserKeybindings({ 'app.input.steer': ['ctrl+s', 'ctrl+s'] })
+  assert.deepEqual(parsed.bindings, { 'app.input.steer': ['ctrl+s', 'ctrl+s'] })
+  // The keymap dedupes at rule level (keysFor returns unique keys).
+})
+
+test('plain printable bound to a Host action → rejected', () => {
+  const parsed = parseUserKeybindings({ 'app.todo.toggle': 'x' })
+  assert.deepEqual(parsed.bindings, {})
+  assert.equal(parsed.diagnostics.length, 1)
+  assert.ok(parsed.diagnostics[0]!.includes('plain printable'))
+})
+
+test('non-configurable action → rejected', () => {
+  const parsed = parseUserKeybindings({ 'question.confirm': 'ctrl+m' })
+  assert.deepEqual(parsed.bindings, {})
+  assert.ok(parsed.diagnostics[0]!.includes('not user-configurable'))
+})
+
+test('malformed value → diagnostic + ignore', () => {
+  const parsed = parseUserKeybindings({ 'app.input.steer': 42 })
+  assert.deepEqual(parsed.bindings, {})
+  assert.equal(parsed.diagnostics.length, 1)
+})
+
+test('non-object config → diagnostic + empty result', () => {
+  const parsed = parseUserKeybindings('nope')
+  assert.deepEqual(parsed.bindings, {})
+  assert.equal(parsed.diagnostics.length, 1)
+})
+
+test('leader key + leader sequences parse', () => {
+  const parsed = parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.tasks.open': `${LEADER_PREFIX}t`,
+      'app.history.search': `${LEADER_PREFIX}r`,
+    },
+  })
+  assert.equal(parsed.leader?.key, 'ctrl+x')
+  assert.deepEqual(parsed.leaderBindings, [
+    { action: 'app.tasks.open', key: 't' },
+    { action: 'app.history.search', key: 'r' },
+  ])
+  assert.deepEqual(parsed.bindings, {})
+})
+
+test('leader sequences without a leader key are inert with a diagnostic', () => {
+  const parsed = parseUserKeybindings({ 'app.tasks.open': `${LEADER_PREFIX}t` })
+  assert.deepEqual(parsed.leaderBindings, [])
+  assert.equal(parsed.diagnostics.length, 1)
+  assert.ok(parsed.diagnostics[0]!.includes('no "leader" key'))
+})
+
+test('invalid leader sequence → diagnostic + ignore', () => {
+  const parsed = parseUserKeybindings({ leader: 'ctrl+x', 'app.tasks.open': `${LEADER_PREFIX}zzz` })
+  assert.deepEqual(parsed.leaderBindings, [])
+  assert.equal(parsed.diagnostics.length, 1)
+})
+
+test('terminal-unreliable keys warn but stay', () => {
+  const parsed = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+j' })
+  assert.deepEqual(parsed.bindings, { 'app.todo.toggle': 'ctrl+j' })
+  assert.ok(parsed.diagnostics.some(message => message.includes('legacy terminals')))
+})
+
+test('nested bindings map merges with top-level entries', () => {
+  const parsed = parseUserKeybindings({
+    'app.input.steer': 'ctrl+s',
+    bindings: { 'app.todo.toggle': 'ctrl+shift+t' },
+  })
+  assert.deepEqual(parsed.bindings, {
+    'app.input.steer': 'ctrl+s',
+    'app.todo.toggle': 'ctrl+shift+t',
+  })
+})

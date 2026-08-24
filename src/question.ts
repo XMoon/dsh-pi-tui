@@ -11,9 +11,10 @@
  * @module @xmoon76/dsh-pi-tui/question
  */
 
-import { Input, matchesKey, type KeyId } from '@xmoon76/pi-tui'
+import { Input, type KeyId } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color } from './theme.ts'
 
 /** One question in a user-questions ask (dsh shape mirrored for testability). */
@@ -646,26 +647,28 @@ export class QuestionFlow implements Component, Focusable {
     // Text mode: printable/cursor keys go to the real Input; Enter/Esc are
     // the flow's own verbs. PageUp/PageDown scroll the body even while
     // typing ('e' stays a letter here — expand is a list-mode verb).
-    // All matches go through matchesKey so Kitty CSI-u (and modifyOtherKeys)
-    // sequences are recognized alongside legacy ones — the flow previously
-    // compared raw sequences ('\x1b[A' etc.), which silently dropped every
-    // key on terminals that report CSI-u (the zellij + Kitty-protocol case).
+    // All matches go through the component keymap (M5): the semantic
+    // question.* actions resolve through matchesKey, so Kitty CSI-u (and
+    // modifyOtherKeys) sequences are recognized alongside legacy ones —
+    // the flow previously compared raw sequences ('\x1b[A' etc.), which
+    // silently dropped every key on terminals that report CSI-u (the
+    // zellij + Kitty-protocol case).
     if (this.editingOther) {
-      if (matchesKey(data, 'enter')) {
+      if (componentKeymap.matches(data, 'question.confirm')) {
         this.commitOther(this.otherInput.getValue())
-      } else if (matchesKey(data, 'escape')) {
+      } else if (componentKeymap.matches(data, 'question.cancel')) {
         this.exitOther()
-      } else if (matchesKey(data, 'pageUp')) {
+      } else if (componentKeymap.matches(data, 'question.pageUp')) {
         this.scrollBody(-1)
-      } else if (matchesKey(data, 'pageDown')) {
+      } else if (componentKeymap.matches(data, 'question.pageDown')) {
         this.scrollBody(1)
-      } else if (matchesKey(data, 'left')) {
+      } else if (componentKeymap.matches(data, 'question.previous')) {
         if (this.tab > 0) {
           this.tab -= 1
           this.cursor = 0
           this.syncEditMode()
         }
-      } else if (matchesKey(data, 'right')) {
+      } else if (componentKeymap.matches(data, 'question.next')) {
         // → in text mode: same "move on" verb as in list mode — commit the
         // typed answer (an empty one counts as skipped) and advance. Enter
         // stays the primary save key; → never discards in-progress text.
@@ -683,11 +686,11 @@ export class QuestionFlow implements Component, Focusable {
       // question (drafts survive). The keys match user intuition and the
       // page carries one less state machine. `h` stays the vim alias for
       // ← (as in list mode).
-      if (matchesKey(data, 'enter')) {
+      if (componentKeymap.matches(data, 'question.confirm')) {
         this.submit()
-      } else if (matchesKey(data, 'escape')) {
+      } else if (componentKeymap.matches(data, 'question.cancel')) {
         this.onCancel()
-      } else if (matchesKey(data, 'left') || data === 'h') {
+      } else if (componentKeymap.matches(data, 'question.previous') || data === 'h') {
         // ← back to the last question (drafts survive).
         this.tab = Math.max(0, this.questions.length - 1)
         this.cursor = 0
@@ -705,7 +708,7 @@ export class QuestionFlow implements Component, Focusable {
       }
       return
     }
-    if (matchesKey(data, 'up') || data === 'k') {
+    if (componentKeymap.matches(data, 'question.cursorUp') || data === 'k') {
       if (rows.length === 0) return
       if (this.cursor === 0 && this.bodyScroll > 0) {
         // ↑ at the FIRST row with the page scrolled: scroll the body UP so
@@ -718,7 +721,7 @@ export class QuestionFlow implements Component, Focusable {
       this.pendingCursorScroll = true
       return
     }
-    if (matchesKey(data, 'down') || data === 'j') {
+    if (componentKeymap.matches(data, 'question.cursorDown') || data === 'j') {
       if (rows.length === 0) return
       const atLastRow = this.cursor === rows.length - 1
       const scrolled = this.lastExpandable && this.lastContentRows > this.bodyScroll + this.lastVisibleRows
@@ -733,21 +736,21 @@ export class QuestionFlow implements Component, Focusable {
       this.pendingCursorScroll = true
       return
     }
-    if (matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')) {
+    if (componentKeymap.matches(data, 'question.pageUp') || componentKeymap.matches(data, 'question.pageDown')) {
       // PageUp/PageDown: scroll the body scrollport (no-op when it fits).
-      this.scrollBody(matchesKey(data, 'pageUp') ? -1 : 1)
+      this.scrollBody(componentKeymap.matches(data, 'question.pageUp') ? -1 : 1)
       return
     }
-    if (data === 'e') {
+    if (componentKeymap.matches(data, 'question.toggleExpand')) {
       // Expand/collapse the body region (the scroll marker's keyboard twin).
       this.toggleExpanded()
       return
     }
-    if (matchesKey(data, 'enter')) {
+    if (componentKeymap.matches(data, 'question.confirm')) {
       this.confirm()
       return
     }
-    if (matchesKey(data, 'left') || data === 'h') {
+    if (componentKeymap.matches(data, 'question.previous') || data === 'h') {
       // ← back: previous question (keeps the draft).
       if (this.tab > 0) {
         this.tab -= 1
@@ -756,7 +759,7 @@ export class QuestionFlow implements Component, Focusable {
       }
       return
     }
-    if (matchesKey(data, 'right') || data === 'l') {
+    if (componentKeymap.matches(data, 'question.next') || data === 'l') {
       // → move on (the arrows own back/skip now, replacing the old 's'
       // skip key): an UNANSWERED question is marked skipped and advances
       // (web QuestionComposer skip parity); an ANSWERED one keeps its draft
@@ -778,7 +781,7 @@ export class QuestionFlow implements Component, Focusable {
       }
       return
     }
-    if (matchesKey(data, 'escape')) {
+    if (componentKeymap.matches(data, 'question.cancel')) {
       this.onCancel()
     }
   }
