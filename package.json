@@ -58,6 +58,8 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "CHANGELOG.md",
+    "CHANGELOG.en.md",
     "LICENSE"
   ],
   "publishConfig": {
@@ -174,6 +176,7 @@
     "prepack": "pnpm clean && pnpm clean:fork && pnpm build && pnpm typecheck:bundle && pnpm test:bundle",
     "postpack": "node scripts/tarball-smoke.mjs && node scripts/extension-fixture-smoke.mjs && node scripts/advanced-plugin-smoke.mjs && node scripts/phase4-plugin-smoke.mjs && node scripts/unstable-plugin-smoke.mjs && node scripts/vim-plugin-smoke.mjs && node scripts/examples-plugin-smoke.mjs",
     "pack:release": "rm -f xmoon76-dsh-pi-tui-*.tgz && pnpm pack --pack-destination .",
+    "release:notes": "node scripts/release-notes.mjs",
     "smoke:pack": "node scripts/tarball-smoke.mjs",
     "verify:prepush": "pnpm typecheck:fork && pnpm test:fork && pnpm test:docs && node scripts/naming-gate.mjs && pnpm gate:boundary && pnpm audit --prod --audit-level high && pnpm pack:release",
     "verify:prepush:nofork": "pnpm test:docs && node scripts/naming-gate.mjs && pnpm gate:boundary && pnpm audit --prod --audit-level high && pnpm pack:release",
