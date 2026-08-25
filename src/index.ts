@@ -2376,6 +2376,10 @@ export function apply(ctx: Context, config: Config): void {
       } catch {
         sandboxFold = undefined
       }
+      // The fold settled (resolved OR definitively absent): repaint the
+      // status once so a first projection that ran before the probe
+      // settled picks up the sandbox fact (review round 25).
+      refreshStatus()
     }
     runDetached('sandbox fold probe', resolveSandboxFold, { diag })
     const refreshStatus = (): void => {
