@@ -770,6 +770,28 @@ test('ANOTHER attempt\'s pre-bind SETTLED event never settles this flow (attempt
   assert.deepEqual(answered, ['mine'], 'the bound attempt\'s prompt is answered after the foreign settle')
 })
 
+test('repeated pre-bind SETTLED events keep at most one terminal event; replay stops at settlement', async () => {
+  let opened = 0
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => { opened += 1; return () => {} },
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'x' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, { respond: async () => {}, cancel: async () => {} })
+  // Multiple terminal events + notices in the pre-bind window: the buffer
+  // must keep at most ONE settled (a later one replaces the earlier), and
+  // replay must STOP at settlement — notices buffered after it must never
+  // reopen UI after the flow closed.
+  flow.onEvent({ kind: 'notice', attemptId: 'a', notice: { message: 'n1' } })
+  flow.onEvent({ kind: 'settled', attemptId: 'a', status: 'cancelled' })
+  flow.onEvent({ kind: 'notice', attemptId: 'a', notice: { message: 'n2' } })
+  flow.onEvent({ kind: 'settled', attemptId: 'a', status: 'authorized' })
+  flow.bind('a')
+  await settle()
+  assert.equal((await flow.outcome).status, 'authorized', 'the LAST terminal event wins')
+  assert.equal(opened, 1, 'the notice before the terminal event opened the panel once; post-settle notices never reopen it')
+})
+
 test('bind() is ONE-SHOT: rebinding to another attempt is refused', async () => {
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
@@ -961,9 +983,30 @@ test('a SYNCHRONOUS begin throw still unsubscribes and closes the flow UI', asyn
   // listener or the notice/prompt UI handles — the try/finally cleanup
   // runs on every path, and the error surfaces as stable copy.
   const t = setup({ syncBeginThrow: true })
+  const controller = new AbortController()
+  t.runner.signal = controller.signal
+  // Count add/removeEventListener on the runner signal: the adapter must
+  // dispose the caller-abort listener even when begin fails BEFORE any
+  // attempt exists — a leaked listener on the long-lived runner signal
+  // would accumulate across logins (review finding).
+  let adds = 0
+  let removes = 0
+  const signal = controller.signal
+  const originalAdd = signal.addEventListener.bind(signal)
+  const originalRemove = signal.removeEventListener.bind(signal)
+  signal.addEventListener = ((type: string, listener: unknown, options?: unknown) => {
+    if (type === 'abort') adds += 1
+    return originalAdd(type as 'abort', listener as () => void, options as boolean | EventListenerOptions | undefined)
+  }) as typeof signal.addEventListener
+  signal.removeEventListener = ((type: string, listener: unknown, options?: unknown) => {
+    if (type === 'abort') removes += 1
+    return originalRemove(type as 'abort', listener as () => void, options as boolean | EventListenerOptions | undefined)
+  }) as typeof signal.removeEventListener
   const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
   assert.equal(result.kind, 'error')
   assert.ok(result.text?.includes('sign-in failed'), result.text)
+  assert.equal(adds, 1, 'the attempt registers one caller-abort listener')
+  assert.equal(removes, 1, 'the synchronous failure disposes it (no leak across logins)')
   t.app.stop()
 })
 

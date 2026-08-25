@@ -406,10 +406,15 @@ export function createAuthorizationFlow(
       // events of ANY other attempt are dropped. The pre-bind terminal
       // event is applied HERE — only for the bound attempt — so a
       // concurrent attempt's settled event can never settle this flow
-      // (attempt isolation).
+      // (attempt isolation). Replay STOPS at the terminal event: the flow
+      // is closed by settlement, and any events buffered after it (the
+      // buffer keeps at most one terminal event) must never reopen UI.
       const pending = buffered.get(attemptId)
       if (pending !== undefined) {
-        for (const event of pending) handle(event)
+        for (const event of pending) {
+          handle(event)
+          if (event.kind === 'settled') break
+        }
       }
       buffered.clear()
     },
@@ -420,13 +425,20 @@ export function createAuthorizationFlow(
         // begin must not grow the buffer without limit, but the bound
         // attempt's SETTLED event is never dropped — the outcome must
         // resolve even if the settlement lands beyond the buffer limit (a
-        // silent drop would hang the login forever). Non-terminal
-        // overflow events are dropped (fail-closed). Terminal events of
-        // OTHER attempts are kept only in the bounded per-attempt slot
-        // and dropped at bind (never applied).
+        // silent drop would hang the login forever). At most ONE terminal
+        // event per attempt is kept (a later one REPLACES the earlier —
+        // the buffer stays bounded and replay stops at settlement).
+        // Non-terminal overflow events are dropped (fail-closed).
+        // Terminal events of OTHER attempts are kept only in the bounded
+        // per-attempt slot and dropped at bind (never applied).
         const pending = buffered.get(event.attemptId) ?? []
         if (event.kind === 'settled') {
-          pending.push(event)
+          const lastSettled = pending.findIndex(candidate => candidate.kind === 'settled')
+          if (lastSettled === -1) {
+            pending.push(event)
+          } else {
+            pending[lastSettled] = event
+          }
         } else if (pending.length < BUFFER_LIMIT) {
           pending.push(event)
         }
