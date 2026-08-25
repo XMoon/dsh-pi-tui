@@ -135,15 +135,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   card is never dismissed, the process is not cancelled — Esc owns that
   — and an already-submitted `!` context payload is untouched); `!!`
   stays local-only.
-- **Focus Mode fullscreen disclosure anchors the Thought instead of the
-  tail.** Clicking a collapsed Thought now expands it with the header
-  near the top of the viewport (one row of context above) and leaves
-  follow-end, so a long revealed block never drags the view to its end.
-  Clicking the expanded turn's ordinary rows — thinking, tool call,
-  tool result — collapses the OWNER Thought again (the header stays in
-  view); an attachment's own hit area still wins (its info bar toggles
-  only the image, never the whole Thought). Anchoring is fullscreen-
-  only; the regular surface keeps its terminal-owned scrollback.
+- **Focus Mode is surface-adaptive.** Regular mode is keyboard-driven:
+  Ctrl+O derives a full reveal of the recent Focus Thoughts (never
+  written into the manual disclosures), Thinking is hidden by default
+  and Alt+T shows it, and any expanded Thought root full-reveals its
+  process. Fullscreen is mouse-driven: expanding a Thought FOLLOWS THE
+  END (the latest content stays in view), collapsing anchors the header;
+  the process timeline shows COMPACT secondary cards and a click
+  full-reveals one card (attachment > secondary > outer Thought), with
+  `(click to expand)` hints. The fullscreen per-card clicks never leak
+  into the keyboard surface and vice versa.
 - **Esc never destroys your queue again.** Interrupting the agent (one
   Esc while busy, double-Esc while idle) now preserves queued input — the
   same `keepInbox` semantics as the web Stop button. The pending queue is
