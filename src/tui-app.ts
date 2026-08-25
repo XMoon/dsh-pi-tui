@@ -2839,6 +2839,19 @@ export class TuiApp {
       this.handleExitKey(data)
       return true
     }
+    if (action === 'app.input.submit' && data !== '') {
+      // The fork editor OWNS the direct submit keys (paste-burst and
+      // backslash-newline semantics live in its tui.input.submit — the
+      // effective keys are synced there by onEditorSubmitSync). The host
+      // ladder never consumes a DIRECT submit key: resolving it here would
+      // bypass the editor's full submit logic (PR review finding — a
+      // remapped Ctrl+X submitted via submitDraft and skipped the
+      // backslash-newline/paste-burst handling). Fall through so the
+      // editor processes the key natively. The LEADER-activated submit
+      // (data === '') is the exception: the leader machine already
+      // consumed the completing key, so the host dispatches it.
+      return false
+    }
     return this.actionDispatcher.dispatch(action, key)
   }
 
