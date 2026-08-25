@@ -647,7 +647,27 @@ async function runAuthorizationLogin(
       return { kind: 'error', text: 'authorization service unavailable' }
     }
     flow.bind(started.attemptId)
-    const outcome = await flow.outcome
+    // The wait RACES the runner signal: a provider that ignores its abort
+    // signal must never hang the command on an outcome that never settles
+    // (the adapter already withdrew the prompt bridges on the abort — the
+    // UI is closed either way). Whichever finishes first wins; the
+    // listener is removed on every path.
+    const outcome = await new Promise<{ status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }>((resolve) => {
+      let done = false
+      const finish = (value: { status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }): void => {
+        if (done) return
+        done = true
+        runner.signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      }
+      const onAbort = (): void => finish({ status: 'cancelled' })
+      flow.outcome.then(finish, () => finish({ status: 'failed', message: 'login failed' }))
+      if (runner.signal.aborted) {
+        finish({ status: 'cancelled' })
+        return
+      }
+      runner.signal.addEventListener('abort', onAbort, { once: true })
+    })
     if (outcome.status === 'cancelled' || runner.signal.aborted) return { kind: 'error', text: 'login cancelled' }
     if (outcome.status === 'failed') {
       if (outcome.code === 'NOT_COMMITTED') {
