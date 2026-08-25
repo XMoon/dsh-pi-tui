@@ -5090,7 +5090,12 @@ export class TuiApp {
       getEditorState: () => app.editorSeatHolder.snapshot(),
       setEditorText: (text) => {
         if (app.disposed) return
-        app.seatEditor().setText(text)
+        // The shell-editor-mode boundary: the host editor decodes a
+        // SERIALIZED draft (`!pwd` → shell mode + body) — a raw write
+        // would leave the previous shell mode active and submit the
+        // replacement as a shell command. A plugin editor (no mode)
+        // receives the raw text.
+        app.setSeatSerializedInput(text)
         app.editorSeatHolder.notifyChanged()
       },
       setEditorCursor: (offset) => {
