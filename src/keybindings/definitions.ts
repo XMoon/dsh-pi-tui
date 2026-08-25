@@ -3,7 +3,10 @@
  * Every default key here MUST match the pre-migration behavior — M0's
  * gate is "no production behavior change" (plan §20 M0). When a new host
  * shortcut lands, extend THIS table in the same commit (and the
- * RESERVED_HOST_KEYS inventory in keybinding-registry.ts).
+ * RESERVED_HOST_KEYS plugin-registration guard in keybinding-registry.ts
+ * if plugins must not claim the new default — that list is NOT the
+ * runtime authority; the effective keymap and the action-driven
+ * hostResolves reservation are).
  *
  * Scope semantics (plan §4): the static context contract used for conflict
  * detection and diagnostics. The resolver additionally honors per-rule
@@ -405,6 +408,11 @@ export const VIEWER_BLOCKED_PARENT_ACTIONS: ReadonlySet<AppKeybindingId> = new S
   'app.transcript.toggleThinking',
   'app.clipboard.pasteMedia',
   'app.tasks.open',
+  // Interrupting the PARENT agent from inside a subagent viewer would
+  // cancel the very session the child is part of — meaningless and
+  // destructive. The viewer's OWN exit is the fixed Esc lifecycle key,
+  // independent of the user-configurable interrupt (PR review finding).
+  'app.agent.interrupt',
 ])
 
 /** The actions whose keys are Host-owned overlay contracts for the first

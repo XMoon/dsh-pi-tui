@@ -545,3 +545,78 @@ test('a plugin key does NOT collide with the leader prefix (PR review P2)', () =
   assert.ok(!manager.diagnosticsList().some(message => message.includes('active host key')),
     `no collision expected: ${manager.diagnosticsList().join(' | ')}`)
 })
+
+test('read-only viewer: Esc ALWAYS closes it, even with interrupt remapped (PR review P1)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let singleEscapes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSingleEscape: () => { singleEscapes += 1; return true },
+  })
+  app.start()
+  // Remap interrupt away from Esc to Ctrl+X.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
+  app.setViewerMode({
+    parentSessionId: 'session-main',
+    childSessionId: 'session-child',
+    label: 'child',
+    mode: 'one-shot',
+    activity: 'inactive',
+  })
+  await vt.waitForRender()
+  // Esc must still close the read-only viewer (the fixed lifecycle key),
+  // even though interrupt no longer resolves on Esc.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(singleEscapes, 1, 'Esc must run the viewer close (single-Esc) path')
+  app.stop()
+})
+
+test('read-only viewer: a remapped interrupt key (Ctrl+X) is inert, never the parent (PR review P1)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let singleEscapes = 0
+  let cancels = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSingleEscape: () => { singleEscapes += 1; return true },
+    onCancel: () => { cancels += 1 },
+  })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
+  app.setViewerMode({
+    parentSessionId: 'session-main',
+    childSessionId: 'session-child',
+    label: 'child',
+    mode: 'one-shot',
+    activity: 'inactive',
+  })
+  await vt.waitForRender()
+  // Ctrl+X inside the read-only viewer: consumed as locked — neither the
+  // viewer closes nor the parent cancels.
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  assert.equal(singleEscapes, 0, 'Ctrl+X must not run the viewer close path')
+  assert.equal(cancels, 0, 'Ctrl+X must not cancel the parent agent')
+  // Esc still closes normally.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(singleEscapes, 1)
+  app.stop()
+})
+
+test('a leader-prefix collision stops advertising the leader bindings (PR review P2)', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+f', // collides with app.transcript.search's ctrl+f
+    bindings: { 'app.session.new': '<leader>n' },
+  }))
+  assert.equal(manager.leaderMachine(), undefined, 'the colliding leader is disabled')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('active host key')))
+  // The UI must NOT advertise the dead leader sequence anywhere.
+  assert.equal(manager.keyHint('app.session.new'), '', 'keyHint must not advertise the shadowed leader')
+  assert.equal(manager.keysLabelFor('app.session.new'), '', 'keysLabelFor must not advertise the shadowed leader')
+  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.session.new')
+  assert.equal(binding?.leaderKeys, undefined, 'the snapshot must not carry the shadowed leader')
+})

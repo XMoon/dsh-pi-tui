@@ -48,8 +48,11 @@
  *   sequences; there is deliberately NO `onTerminalInput(raw)` seam;
  * - terminal protocol replies (Kitty press/repeat/release filtering) are
  *   handled BEFORE plugins — a plugin can never see them;
- * - reserved Host lifecycle keys (the M5 RESERVED_HOST_KEYS inventory)
- *   are handled before plugin bindings and cannot be preempted;
+ * - host lifecycle keys are handled before plugin bindings and cannot be
+ *   preempted — the reservation is ACTION-DRIVEN via
+ *   {@link InputRouterContext.hostResolves} (a key is reserved only while
+ *   an ACTIVE host action binds it; the static RESERVED_HOST_KEYS list is
+ *   only the plugin REGISTRATION guard, never a runtime reservation);
  * - a plugin binding is consulted ONLY when nothing earlier consumed the
  *   input AND the editor did not consume it (non-capturing, last in the
  *   ladder);

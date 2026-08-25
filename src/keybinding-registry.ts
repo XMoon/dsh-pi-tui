@@ -45,18 +45,20 @@ interface BindingRecord {
 }
 
 /**
- * The keys the HOST reserves for its own lifecycle: a plugin can never
- * claim them (plan §11.3 — reserved lifecycle key cannot be preempted).
- * This inventory is the SINGLE authoritative list, kept in sync with the
- * host's `matchesKey` lifecycle checks in tui-app.ts (Ctrl+C/D exit,
- * Ctrl+S steer-all, Ctrl+F transcript search, Ctrl+Shift+F search, Ctrl+O
- * expand, Ctrl+T todo panel, Ctrl+G external editor, Ctrl+R input-history
- * search, Ctrl+V clipboard image intake, Ctrl+Enter queue,
- * Enter submit, Esc cancel, Shift+Tab permission cycle, Alt+Up dequeue,
- * Alt+T thinking detail toggle). Every
- * reserved binding here must match a host `matchesKey(data, ...)` call;
- * when a new host lifecycle key lands, extend THIS list in the same
- * commit.
+ * The keys a PLUGIN can never claim (plan §11.3 — the Stable v1 plugin
+ * registration compatibility guard). This inventory is NOT the runtime
+ * source of truth: the InputRouter's runtime reservation is ACTION-driven
+ * (hostResolves — a key is reserved only while an ACTIVE host action
+ * binds it), and the user-orchestrable keymap (src/keybindings/
+ * definitions.ts) owns the effective keys. This list exists ONLY to
+ * reject plugin registrations on the host's DEFAULT lifecycle keys
+ * (Ctrl+C/D exit, Ctrl+S steer-all, Ctrl+F search, Ctrl+O expand, Ctrl+T
+ * todo, Ctrl+G external editor, Ctrl+R history search, Ctrl+V clipboard,
+ * Ctrl+Enter queue, Enter submit, Esc cancel, Shift+Tab permission,
+ * Alt+Up dequeue, Alt+T thinking, Alt+K dismiss). When a NEW default
+ * host lifecycle key lands, extend THIS list in the same commit so
+ * plugins cannot claim it; the runtime reservation needs no change (it
+ * follows the keymap).
  */
 export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'c', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+C exit
