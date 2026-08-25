@@ -969,3 +969,106 @@ test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)
   assert.ok(!joined.includes('more changes hidden'), 'no cap footer in the regular Focus reveal')
   app.stop()
 })
+
+test('cache identity: Ctrl+O ON caps a large diff, then /focus on FULL-REVEALS the same component (review finding)', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const newLines = Array.from({ length: 30 }, (_, i) => `new ${i}`).join('\n')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/big.ts',
+        diffs: [{ path: 'src/big.ts', oldText: null, newText: newLines }],
+        locations: [],
+      }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
+  ])
+  // Focus OFF + Ctrl+O ON: the ordinary fold expands the card, the diff CAPS.
+  app.setToolOutputExpanded(true)
+  show(app, folder)
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('Edit src/big.ts'), 'the card renders')
+  assert.ok(!joined.includes('new 15'), 'the diff is capped (Focus OFF ordinary fold)')
+  // /focus on: the SAME card with the SAME expanded state — but the
+  // surface contract full-reveals the diff. The cache MUST rebuild.
+  app.setFocusMode(true)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('new 15'), 'the same tool must become FULL after /focus on')
+  assert.ok(!joined.includes('more changes hidden'), 'no cap footer after /focus on')
+  app.stop()
+})
+
+test('cache identity: /focus off restores the ordinary CAPPED diff presentation (review finding)', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const newLines = Array.from({ length: 30 }, (_, i) => `new ${i}`).join('\n')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/big.ts',
+        diffs: [{ path: 'src/big.ts', oldText: null, newText: newLines }],
+        locations: [],
+      }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
+  ])
+  // Focus ON + Ctrl+O ON: the derived root full-reveals the diff.
+  app.setFocusMode(true)
+  app.setToolOutputExpanded(true)
+  show(app, folder)
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('new 15'), 'the Focus reveal renders the diff FULL')
+  // /focus off: the ordinary fold must restore the CAPPED presentation —
+  // the cache must rebuild (same expanded state, fullReveal changed).
+  app.setFocusMode(false)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('new 15'), 'Focus OFF must restore the capped ordinary presentation')
+  assert.ok(joined.includes('more changes hidden'), 'the cap footer returns')
+  app.stop()
+})
+
+test('cache identity: the click hint never survives a Focus toggle (review finding)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root + reveal the Thinking secondary (compact, click hint).
+  let y = findRow(vt.getViewport(), '🐋 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.toggleFocusThinkingVisible()
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('(click to expand)'), 'fullscreen compact secondary shows the click hint')
+  // /focus off (still fullscreen): the SAME thinking card folds via the
+  // ordinary rule — expanded stays false, but the hint must become
+  // keyboard-owned. The cache must rebuild.
+  app.setFocusMode(false)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('(ctrl+o to expand)'), 'Focus OFF must restore the keyboard hint')
+  assert.ok(!joined.includes('(click to expand)'), 'the click hint must not survive the Focus toggle')
+  app.stop()
+})
