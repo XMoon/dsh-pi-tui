@@ -541,7 +541,7 @@ test('runner permission projection clears on service/agent absence (runner-level
   // deriveRunnerPermission: a missing permission service OR a missing
   // live agent must yield EXPLICIT undefined (never the stale value) —
   // that explicit undefined is what clears the extension snapshot.
-  const { deriveRunnerPermission } = await import('../src/index.ts')
+  const { deriveRunnerPermission } = await import('../src/status/derive-permission.ts')
   const agent = { session: { events: [{ kind: 'session/created' }] } }
   const presets = { current: (events: unknown) => (events as unknown[]).length > 0 ? 'workspace-write' : undefined }
   assert.equal(deriveRunnerPermission(presets, agent as never), 'workspace-write')

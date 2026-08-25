@@ -85,6 +85,7 @@ import type { TranscriptMessage } from './transcript.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { plainSectionEqual } from './status/equal.ts'
+import { deriveRunnerPermission } from './status/derive-permission.ts'
 import { StatusStore } from './status/store.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
 import { deriveAccessStatus } from './status/derive-access.ts'
@@ -262,26 +263,6 @@ export const LOCAL_COMMANDS = new Set([
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
 ])
-
-/**
- * The runner's PERMISSION projection decision (review round 21): the
- * permission sent to the app must be EXPLICITLY undefined when the
- * permission-preset service or the live agent is unavailable — an
- * omitted field would keep the stale value in the legacy merge and
- * publish a stale permission to the extension snapshot. Pure so the
- * runner-level regression is testable without mounting the bundle.
- * @param permission - the permission-preset service (undefined when absent).
- * @param agent - the live agent (undefined when absent).
- * @param events - the agent's session events (the permission source).
- * @returns the value to pass as setStatus' permission field.
- */
-export function deriveRunnerPermission(
-  permission: { current(events: unknown): string | undefined } | undefined,
-  agent: { session: { events: unknown } } | undefined,
-): string | undefined {
-  if (permission === undefined || agent === undefined) return undefined
-  return permission.current(agent.session.events)
-}
 
 /**
  * Command semantics matrix (plan §19.3/M12): a LOCAL command line carrying a
