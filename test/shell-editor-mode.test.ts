@@ -2164,3 +2164,58 @@ test('a text change after a declined Tab cancels the stale dropdown (no stale ac
   app.reconcileEditorNow()
   app.stop()
 })
+
+test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'pageup-dropdown-plugin',
+    priority: 0,
+    create: () => {
+      const editor = pluginEditor()
+      editor.handleInput = () => false // decline: the host fallback owns every key
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  const plugin = created[0]!
+  // Variable completion (uncached) so every request consults the stub.
+  let compgenCalls = 0
+  setCompgenRunnerForTest(() => {
+    compgenCalls += 1
+    return Promise.resolve({ ok: true, lines: ['git1', 'git2'] })
+  })
+  try {
+    // Tab 1: the shell dropdown opens.
+    plugin.setText('!echo $g')
+    plugin.setCursor(plugin.getText().length)
+    vt.sendInput('\t')
+    await pollUntil(() => compgenCalls === 1, 'the variable completion request ran')
+    await vt.waitForRender()
+    // pageUp is a dropdown interaction (the vendored SelectList navigates
+    // its selection on it): it must NOT force-close the dropdown, so the
+    // next Tab accepts the still-open dropdown's selection SYNCHRONOUSLY
+    // (no fresh completion request — compgenCalls stays put).
+    vt.sendInput('\x1b[5~') // pageUp
+    await vt.waitForRender()
+    const callsAfterPageUp = compgenCalls
+    vt.sendInput('\t')
+    await pollUntil(() => plugin.getText() !== '!echo $g',
+      'the pageUp-surviving dropdown accepts on the next Tab')
+    assert.equal(compgenCalls, callsAfterPageUp,
+      'the accept after pageUp must reuse the OPEN dropdown, never fire a fresh request')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})

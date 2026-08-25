@@ -672,11 +672,15 @@ export class EditorSeatHolder {
           //   mutation or cursor move invalidates the selection the
           //   moment the key runs.
           // An UNCHANGED document with a Tab/Enter/arrow keeps the
-          // dropdown (the Tab+Tab accept stays synchronous).
+          // dropdown (the Tab+Tab accept stays synchronous). pageUp/
+          // pageDown are dropdown interactions too (the vendored
+          // SelectList navigates its selection on them — fork parity:
+          // they must reach the open dropdown, never force-close it).
           const contextBefore = { text: host.getText(), cursor: host.getCursor?.() ?? 0 }
           const stagedDiffers = contextBefore.text !== decoded.text || contextBefore.cursor !== stagedCursor
           const dropdownInteraction = matchesKey(data, 'tab') || matchesKey(data, 'enter')
             || matchesKey(data, 'up') || matchesKey(data, 'down')
+            || matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')
           host.setTextAndCursor(decoded.text, stagedCursor)
           host.setInputMode?.(decoded.mode)
           if (host.cancelAutocomplete !== undefined
@@ -696,6 +700,7 @@ export class EditorSeatHolder {
           const stagedDiffers = contextBefore.text !== wireText || contextBefore.cursor !== wireCursor
           const dropdownInteraction = matchesKey(data, 'tab') || matchesKey(data, 'enter')
             || matchesKey(data, 'up') || matchesKey(data, 'down')
+            || matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')
           host.setTextAndCursor(wireText, wireCursor)
           if (host.cancelAutocomplete !== undefined
             && (stagedDiffers || (!dropdownInteraction && host.isShowingAutocomplete?.() === true))) {
