@@ -603,6 +603,44 @@ test('I1–I6: the /settings Thinking row is the SAME state as Alt+T (detail sem
   t.app.stop()
 })
 
+test('I7: the /settings declarative setter clears per-card overrides like Alt+T (bulk statement)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(twoThinkingTurn(0))
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Fullscreen click: beta full (per-card override), bulk compact.
+  const betaY = findRow(vt.getViewport(), 'beta latest')
+  click(vt, 10, betaY + 1)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('\n  beta reasoning'), 'precondition: beta full via the click override')
+  // The settings picker sets the SAME value ('collapsed' — the early
+  // return path): the stale override must still be cleared, so beta
+  // falls back to the bulk compact state.
+  app.setThinkingExpanded(false)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\n  beta reasoning'), `the declarative set must reset the stale override:\n${view}`)
+  assert.equal(hintCount(view, 'click'), 2, 'both cards compact again (no leftover override)')
+  // The flip path clears overrides as well: click alpha full, then the
+  // settings picker chooses 'expanded' — alpha follows the bulk.
+  const alphaY = findRow(vt.getViewport(), 'alpha latest')
+  click(vt, 10, alphaY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('\n  alpha reasoning'), 'alpha: full via the click override')
+  app.setThinkingExpanded(true)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('\n  alpha reasoning') && view.includes('\n  beta reasoning'),
+    `the declarative expanded must own BOTH cards (overrides cleared):\n${view}`)
+  assert.equal(hintCount(view, 'click'), 0, 'no compact card under the bulk-expanded statement')
+  app.setFullscreen(false)
+  app.stop()
+})
+
 // ── J. No reasoning ──────────────────────────────────────────────────────
 
 test('J1: a turn without reasoning-delta never manufactures a Thinking block', async () => {
