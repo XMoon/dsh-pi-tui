@@ -132,11 +132,14 @@ function visualTail(
  *   live; a settled card's hint is identical in wording).
  * @param partial - whether the cut happened inside a line (the hidden
  *   content is the earlier part of the kept line(s)).
+ * @param expandVerb - the EFFECTIVE expand label ('click' or the keymap's
+ *   expand key — the caller owns the keymap lookup, so a remap updates
+ *   the hint; this module never hard-codes the key).
  */
-export function localShellHiddenMarker(hidden: number, _running: boolean, partial = false): string {
+export function localShellHiddenMarker(hidden: number, _running: boolean, partial: boolean, expandVerb: string): string {
   if (hidden <= 0) return ''
   const what = partial ? 'earlier output hidden' : `${hidden} more lines`
-  return `${what} (ctrl+o to expand)`
+  return `${what} (${expandVerb} to expand)`
 }
 
 /** Whether a message is a LOCAL `!`/`!!` shell card (the runner pushes

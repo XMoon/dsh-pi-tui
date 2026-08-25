@@ -95,12 +95,14 @@ for (const file of SCANNED_STRING_FILES) {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!
     // Skip comment-only lines (comments are covered by the convention in
-    // docs/keybinding-architecture.md, not by this mechanical check) and
-    // matchesKey CALLS (key-matching code, not user-facing copy).
+    // docs/keybinding-architecture.md, not by this mechanical check).
     const trimmed = line.trim()
     if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
-    if (line.includes('matchesKey(')) continue
-    if (!STRING_CHORD_PATTERN.test(line)) continue
+    // Strip matchesKey CALLS (key-matching code, not user-facing copy) — a
+    // hard-coded chord string elsewhere on the SAME line must still be
+    // caught (a whole-line skip could hide it).
+    const stripped = line.replace(/matchesKey\(\s*data\s*,\s*'[^']*'\)/g, '')
+    if (!STRING_CHORD_PATTERN.test(stripped)) continue
     if (STRING_ALLOWLIST.some(label => line.includes(label))) continue
     failures += 1
     console.error(`check-host-keybindings: ${file}:${index + 1}: hard-coded key label in a user-facing string — use keyHint()/keysFor() instead:\n  ${trimmed}`)
