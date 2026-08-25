@@ -71,8 +71,10 @@ import type {} from '@deepseek-ai/dsh-jobs'
 import type { JobId } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 // The sandbox/mode knob event merge (permission presets fold it too).
+// The VALUE is capability-detected at apply time (see
+// resolveSandboxFold) — a Harness whose dsh-sandbox-policy lacks the
+// effectiveSandboxMode export must degrade, never crash at load.
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
-import { effectiveSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 // P5e merges: shell capability for `!` mode and credentials for /login.
 import type {} from '@deepseek-ai/dsh-shell'
@@ -2358,6 +2360,24 @@ export function apply(ctx: Context, config: Config): void {
       ...dshVersion() === undefined ? {} : { dshVersion: dshVersion() },
       tuiVersion: packageVersion(),
     })
+    /** The sandbox fold (dsh-sandbox-policy's effectiveSandboxMode),
+     * capability-detected: the VALUE import must not break module load on
+     * a Harness whose dsh-sandbox-policy lacks the export — the derive
+     * degrades to the sandboxPolicy service or an absent fact. The
+     * detection is detached (a bare promise would violate the failure
+     * model); the fold is resolved before the first refresh in practice
+     * and re-read on every status projection. */
+    let sandboxFold: ((events: readonly unknown[]) => string | undefined) | undefined
+    const resolveSandboxFold = async (): Promise<void> => {
+      try {
+        const mod = await import('@deepseek-ai/dsh-sandbox-policy')
+        const fold = (mod as { effectiveSandboxMode?: (events: readonly unknown[]) => string | undefined }).effectiveSandboxMode
+        sandboxFold = typeof fold === 'function' ? fold : undefined
+      } catch {
+        sandboxFold = undefined
+      }
+    }
+    runDetached('sandbox fold probe', resolveSandboxFold, { diag })
     const refreshStatus = (): void => {
       const stats = statsFolder.snapshot()
       let contextTokens: number | undefined
@@ -2403,7 +2423,7 @@ export function apply(ctx: Context, config: Config): void {
               permissionPresets: permission,
               sandboxPolicy: ctx.get('sandboxPolicy'),
               approvalFold: effectiveApprovalPolicy,
-              sandboxFold: effectiveSandboxMode,
+              sandboxFold: sandboxFold,
             },
             events,
             liveAgent?.session,
