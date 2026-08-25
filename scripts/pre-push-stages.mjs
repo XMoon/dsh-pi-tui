@@ -41,8 +41,10 @@ if (typeof script !== 'string' || script === '') {
 }
 
 // Split on top-level `&&` only: walk the string tracking single-quote,
-// double-quote and backslash escapes; a `&&` seen at depth 0 (no open quote)
-// is a command separator.
+// double-quote and backslash escapes; a `&&` seen at depth 0 (no open
+// quote) is a command separator. Escapes are honoured OUTSIDE quotes too
+// (`\&&` is an escaped literal `&`, not a separator), and a script with
+// an unterminated quote is rejected — sh would reject it as well.
 const stages = []
 let current = ''
 let quote = null
@@ -59,6 +61,14 @@ for (let i = 0; i < script.length; i++) {
     current += ch
     continue
   }
+  if (ch === '\\') {
+    // Outside quotes: escape the next character (incl. `&`, so `\&&`
+    // stays literal). Keep the backslash in the fragment — it is
+    // meaningful to the shell that later runs the stage.
+    current += ch + (script[i + 1] ?? '')
+    i++
+    continue
+  }
   if (ch === '"' || ch === "'") {
     quote = ch
     current += ch
@@ -73,6 +83,10 @@ for (let i = 0; i < script.length; i++) {
   current += ch
 }
 stages.push(current)
+
+if (quote !== null) {
+  fail(`script "${name}" has an unterminated ${quote === '"' ? 'double' : 'single'} quote — sh would reject it; fix package.json`)
+}
 
 const trimmed = stages.map((s) => s.trim())
 if (trimmed[trimmed.length - 1] === '') {

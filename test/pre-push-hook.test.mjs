@@ -1,0 +1,96 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const HOOK = join(ROOT, '.husky', 'pre-push')
+
+// Run the hook the way husky does: `sh -e .husky/pre-push` with refs on
+// stdin and env vars.
+function runHook(refs, env) {
+  const r = spawnSync('sh', ['-e', HOOK], {
+    cwd: ROOT,
+    input: refs.join('\n') + '\n',
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+  })
+  return { code: r.status, out: r.stdout + r.stderr }
+}
+
+const FEAT = ['refs/heads/feat/x 0000000000000000000000000000000000000000 refs/heads/feat/x 1111111111111111111111111111111111111111']
+
+function tmpScript(contents) {
+  const dir = mkdtempSync(join(tmpdir(), 'hook-'))
+  const p = join(dir, 'stage.sh')
+  writeFileSync(p, contents)
+  chmodSync(p, 0o755)
+  return p
+}
+
+test('pre-push hook: stage with quotes executes via sh -c with quotes intact (F1)', () => {
+  const stage = 'node -e "if (\'a && b\'.indexOf(\'&\') === -1) process.exit(1); console.log(\'quoted-stage-ran\')"'
+  const { code, out } = runHook(FEAT, { PUSH_GATE_TEST_MODE: '1', PUSH_GATE_STAGES: stage })
+  assert.equal(code, 0, out)
+  assert.match(out, /quoted-stage-ran/)
+})
+
+test('pre-push hook: multi-ref aggregation keeps the strict fork level (F2)', () => {
+  // ref1 = main with a DIFFERENT base (fork changed), ref2 = same-base
+  // (would reset FORK_CHANGED to 0 under the old overwrite logic).
+  const base1 = spawnSync('git', ['rev-parse', 'HEAD~3'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim()
+  const head1 = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim()
+  const refs = [
+    `refs/heads/main ${base1} refs/heads/main ${head1}`,
+    `refs/heads/feat/q ${head1} refs/heads/feat/q ${head1}`,
+  ]
+  const { code, out } = runHook(refs, { PUSH_GATE_TEST_MODE: '1', PUSH_GATE_STAGES: 'echo m1' })
+  assert.equal(code, 0, out)
+  // The header must show the FULL chain (verify:prepush), never nofork.
+  assert.match(out, /pre-push gate: verify:prepush \(1 stage\)/)
+})
+
+test('pre-push hook: whitespace-only test override is refused (F5)', () => {
+  const { code, out } = runHook(FEAT, { PUSH_GATE_TEST_MODE: '1', PUSH_GATE_STAGES: '   ' })
+  assert.equal(code, 1)
+  assert.match(out, /no runnable stages/)
+})
+
+test('pre-push hook: final drain emits the last line exactly once (F3)', () => {
+  const stage = tmpScript('#!/bin/sh\necho "final-line-XYZ"\n')
+  const { code, out } = runHook(FEAT, { PUSH_GATE_VERBOSE: '1', PUSH_GATE_TEST_MODE: '1', PUSH_GATE_STAGES: stage })
+  assert.equal(code, 0, out)
+  const count = (out.match(/final-line-XYZ/g) ?? []).length
+  assert.equal(count, 1, `final line must appear exactly once, got ${count}:\n${out}`)
+})
+
+test('pre-push hook: PUSH_GATE_STAGES ignored without PUSH_GATE_TEST_MODE', () => {
+  const { code, out } = runHook(FEAT, { PUSH_GATE_STAGES: 'echo fake-stage-should-not-run' })
+  // Without test mode the real gate derives (typecheck here — feat branch,
+  // fork changed → single `pnpm typecheck` stage). Assert the fake stage
+  // never ran and the real stage name appears.
+  assert.equal(code, 0, out)
+  assert.ok(!out.includes('fake-stage-should-not-run'), out)
+  assert.match(out, /typecheck/)
+})
+
+test('pre-push hook: failing stage reports and exits 1', () => {
+  const { code, out } = runHook(FEAT, {
+    PUSH_GATE_TEST_MODE: '1',
+    PUSH_GATE_STAGES: 'echo good\nsh -c "echo boom; exit 7"',
+  })
+  assert.equal(code, 1)
+  assert.match(out, /failed stage: sh -c/)
+  assert.match(out, /exit 7/)
+})
+
+test('pre-push hook: quiet mode prints only the summary line', () => {
+  const { code, out } = runHook(FEAT, { PUSH_GATE_QUIET: '1', PUSH_GATE_TEST_MODE: '1', PUSH_GATE_STAGES: 'echo q' })
+  assert.equal(code, 0, out)
+  const lines = out.trim().split('\n')
+  assert.equal(lines.length, 1, out)
+  assert.match(lines[0], /pre-push verification passed/)
+})

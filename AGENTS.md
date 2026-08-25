@@ -432,20 +432,26 @@ gitignored):
   push always shows WHICH stage is live (the ≈2 min full chain, the
   ≈1:45 nofork chain, or the ≈10–15 s typecheck). The stage list is NOT
   hard-coded: the hook derives it from the selected package.json script
-  via `scripts/pre-push-stages.mjs` (top-level `&&` split, quote-aware),
-  so `verify:prepush` / `verify:prepush:nofork` remain the single source
-  of truth — adding, removing or reordering a stage in those scripts is
-  picked up automatically, and a dangling `&&` fails the hook loudly.
-  Verbose mode (`PUSH_GATE_VERBOSE=1`) also streams every captured log
-  line live with a `[HH:MM:SS]` prefix (a polling subshell with a final
-  drain after the last stage, so the final < poll-interval output is not
-  lost), making a stuck stage show its raw tail as it happens;
-  `PUSH_GATE_QUIET=1` restores a single summary line for scripted
-  pushes. Success prints one summary line with the elapsed time (logs
-  discarded); failure prints the failed stage, the last 60 log lines and
-  retains the full log + progress timeline paths. `PUSH_GATE_STAGES`
-  (test/dry-run only) is ignored unless `PUSH_GATE_TEST_MODE=1` is set,
-  so a stray env var can never shrink a real push's gate.
+  via `scripts/pre-push-stages.mjs` (top-level `&&` split, quote- and
+  escape-aware; rejects unterminated quotes and dangling `&&`), so
+  `verify:prepush` / `verify:prepush:nofork` remain the single source of
+  truth — adding, removing or reordering a stage in those scripts is
+  picked up automatically. Stages run via `sh -c` so their own quoting
+  survives; the fork-change check aggregates across ALL pushed refs (any
+  ref touching `packages/pi-tui/` or with an unknown base forces the full
+  chain — a later clean ref never downgrades it). Verbose mode
+  (`PUSH_GATE_VERBOSE=1`) also streams every captured log line live with
+  a `[HH:MM:SS]` prefix (a polling subshell, stopped BEFORE a final
+  exact-once drain, so no line is lost or duplicated), making a stuck
+  stage show its raw tail as it happens; `PUSH_GATE_QUIET=1` restores a
+  single summary line for scripted pushes. Success prints one summary
+  line with the elapsed time (logs discarded); failure prints the failed
+  stage, the last 60 log lines and retains the full log + progress
+  timeline paths. `PUSH_GATE_STAGES` (test/dry-run only) is ignored
+  unless `PUSH_GATE_TEST_MODE=1` is set — and a whitespace-only override
+  is refused — so a stray env var can never shrink a real push's gate.
+  The derivation and hook behavior are guarded by
+  `test/pre-push-stages.test.mjs` and `test/pre-push-hook.test.mjs`.
   Run `pnpm run verify:prepush` manually for the unabridged reference
   run.
 - Escape hatch: `git push --no-verify` (then rely on CI).
