@@ -365,3 +365,72 @@ test('a malformed item contribution degrades gracefully (never breaks the footer
     }
   }
 })
+
+test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subagent viewer is open', async () => {
+  const ctx = new Context()
+  try {
+    const { service } = await mountTree(ctx)
+    const { vt, app } = attachApp(service)
+    service.register<FooterItemContribution>('chrome.footer.item', { id: 'quota', order: 200 }, {
+      label: 'API quota',
+      segment: { spans: [{ text: 'quota 82%', tone: 'success' }], minWidth: 8 },
+    })
+    await settle()
+    await vt.waitForRender()
+    const key = canonicalKey(service, 'chrome.footer.item', 'quota')
+    app.setFooterLayout({
+      schemaVersion: 1,
+      rows: [{ left: [{ id: key }, { id: 'cwd' }], right: [] }],
+    })
+    app.setStatus({ model: 'm', cwd: 'c' })
+    await vt.waitForRender()
+    let view = vt.getViewport().join('\n')
+    assert.ok(view.includes('quota 82%'), `the item must render on the main subject:\n${view}`)
+    // Enter the subagent viewer: the data source switches to the CHILD,
+    // and a static plugin contribution (which has no snapshot access to
+    // self-gate) must not describe the viewed child.
+    app.setViewerFooter({
+      label: 'child',
+      childSessionId: 'child-1',
+      mode: 'one-shot',
+      activity: 'inactive',
+      cwd: '/child-ws',
+      turns: 1,
+      steps: 1,
+      usage: undefined,
+      statsLine: '',
+    })
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+    assert.ok(!view.includes('quota 82%'), `the M4 item must not render while viewing:\n${view}`)
+    assert.ok(view.includes('child-ws'), `the child workspace must show:\n${view}`)
+    // Leaving the viewer restores it.
+    app.setViewerFooter(undefined)
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+    assert.ok(view.includes('quota 82%'), `the item must return after the viewer closes:\n${view}`)
+    app.stop()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('a chrome.footer.item registration id containing "/" is rejected (canonical-key boundary)', async () => {
+  const ctx = new Context()
+  try {
+    const { service } = await mountTree(ctx)
+    assert.throws(
+      () => service.register<FooterItemContribution>('chrome.footer.item', { id: 'a/b', order: 100 }, {
+        label: 'bad', segment: { spans: [{ text: 'x' }] },
+      }),
+      /must not contain "\/"/,
+      'a slash in the registration id must be rejected',
+    )
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})

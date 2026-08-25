@@ -787,6 +787,12 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // rolled back so the (slot, id) pair is not blocked by a ghost.
     const caller = this.ctx
     const owner = caller.fiber.name
+    // The chrome.footer.item canonical key is ext:<owner>/<id> — a `/` in
+    // either part would make distinct contributions collide (the key is
+    // used whole, never parsed). Enforce the constraint at registration.
+    if (slot === 'chrome.footer.item' && (owner.includes('/') || spec.id.includes('/'))) {
+      throw new Error(`chrome.footer.item registration id must not contain "/" (owner "${owner}", id "${spec.id}")`)
+    }
     const handle = this.ledger.register<T>(slot, spec, contribution, owner)
     let dispose: () => void
     try {
