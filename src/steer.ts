@@ -298,10 +298,12 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   if (forced) deps.notify(deps.forcedNotice(), 'error')
   if (current.length === 0) {
     // Classic single-draft steer: a running turn takes it now; an idle
-    // agent starts a regular turn with it.
+    // agent starts a regular turn with it. The delivery goes through the
+    // writer seam (SessionWriter) like every other path — never a direct
+    // agent call that would bypass the semantic port.
     const message = deps.createDraft(text)
-    if (now.status === 'running') now.steer(message)
-    else now.followup(message)
+    if (now.status === 'running') deliverSteer(deps, message)
+    else deliverFollowup(deps, message)
     return 'ok'
   }
   const draft = text.trim()

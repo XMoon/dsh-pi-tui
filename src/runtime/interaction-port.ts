@@ -1,27 +1,51 @@
 /**
- * The interaction domain port (M1.6) — the semantic contract between the
- * TUI and Host-side approval/question authority (approval requests, the
- * interactive question provider, approval policy), implemented by
- * `src/runtime/direct/` (Direct) today and by a Remote adapter in a later
- * milestone. The port owns the REGISTRATION channels (subscribe to
- * approval requests, register the question provider, set the approval
- * policy); the listeners/providers stay runner-owned (they render through
- * TuiApp), so the port is the boundary — never a callback serializer.
+ * The interaction domain port (M1.6, contract-reviewed round 4) — the
+ * semantic contract between the TUI and Host-side approval/question
+ * authority (approval requests, the interactive question provider, the
+ * approval policy). Implemented by `src/runtime/direct/` (Direct) today
+ * and by a Remote adapter in a later milestone. The port owns the
+ * REGISTRATION channels; the listeners/providers stay runner-owned (they
+ * render through TuiApp), so the port is the boundary — never a callback
+ * serializer.
  *
- * The contracts use the OFFICIAL dsh types (type-only imports from the
- * declared peers — the port is the Host boundary, the shapes are Host
- * shapes). Plan review rides the same channels; no separate method.
+ * The contract is TRANSPORT-NEUTRAL:
+ *
+ * - `setApprovalPolicy` addresses the session by id (a Remote adapter maps
+ *   it to the official wire capability; the Direct adapter resolves the
+ *   live Agent internally). Never a Host Agent object across the port.
+ * - `ApprovalRequestLike` is the SUB-SET of the official ApprovalRequest
+ *   the TUI actually consumes (signal / callId / toolName / reason) — the
+ *   official type also carries a same-process `agent`, which a Remote
+ *   backend would never have (its pending interaction is the
+ *   identity-based PendingWait). The Direct adapter adapts the real
+ *   ApprovalRequest onto this shape; the listener stays Host-free.
+ * - `registerQuestionProvider` uses the official provider type — the
+ *   question provider is a pure data-in/data-out contract.
+ *
+ * Plan review rides the same channels; no separate method.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/interaction-port
  */
 
-import type { ApprovalPolicy, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import type { ApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { UserQuestionProvider } from '@deepseek-ai/dsh-user-questions'
+
+/** The sub-set of the official approval request the TUI consumes — the
+ * transport-neutral shape (no same-process Agent). A Remote backend maps
+ * its PendingWait onto this; the Direct adapter maps the official
+ * ApprovalRequest. */
+export interface ApprovalRequestLike {
+  signal?: AbortSignal
+  callId?: string
+  /** The tool asking for permission (the TUI renders the prompt for it). */
+  toolName: string
+  reason?: string
+}
 
 /** The approval request listener (the TUI answers through its prompt). */
 export type ApprovalRequestListener = (
-  request: ApprovalRequest,
+  request: ApprovalRequestLike,
   next: unknown,
 ) => unknown
 
@@ -33,7 +57,8 @@ export interface InteractionPort {
   /** Subscribe to approval requests. The listener renders the approval
    * prompt and returns the outcome. */
   onApprovalRequest(listener: ApprovalRequestListener): void
-  /** Set the approval policy for a live agent. `false` = the approval
-   * service is absent. */
-  setApprovalPolicy(agent: unknown, policy: ApprovalPolicy): boolean
+  /** Set the approval policy for a SESSION (identity-based). `false` = the
+   * approval service or the session is unavailable. The Direct adapter
+   * resolves the live Agent internally. */
+  setApprovalPolicy(sessionId: string, policy: ApprovalPolicy): boolean
 }

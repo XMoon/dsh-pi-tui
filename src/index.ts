@@ -1405,7 +1405,7 @@ export function apply(ctx: Context, config: Config): void {
       new DirectSessionReader(ctx),
       new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
-      new DirectInteractionPort(ctx),
+      new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
     )
 
     // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
@@ -1594,9 +1594,10 @@ export function apply(ctx: Context, config: Config): void {
         const recorded = await recordedPreset(ctx, sessionId)
         // Preflight: the preset composition is resolved BEFORE the physical
         // lock (a roster failure must never pin a session that did not enter
-        // the DSH boundary). The setup itself is re-resolved by the Direct
-        // adapter from the recorded preset id — deterministic within a run.
-        await compose(recorded)
+        // the DSH boundary). The RESOLVED composition (with its concrete
+        // agentPreset) is what the adapter re-mounts — never a second
+        // compose(undefined) that could resolve a different default preset.
+        const launchComposition = await compose(recorded)
         // Refuse to resume a session another live dsh process holds: the
         // second open makes persistence synthesize interrupted-turn closers
         // into the shared log while the first process keeps appending from
@@ -1630,12 +1631,14 @@ export function apply(ctx: Context, config: Config): void {
           resumeSessionId: SessionId(sessionId),
           provider: agentOptions.provider,
           model: agentOptions.model,
-          agentPreset: recorded ?? undefined,
+          // The RESOLVED preset id from the preflight composition — the
+          // adapter composes this EXACT id, never a re-resolved default.
+          agentPreset: launchComposition.agentPreset,
         })
         diag.info('resume ok', {
           session: sessionId,
           seq: (handle.direct!.agent as Agent).session.events.length,
-          preset: recorded ?? 'default',
+          preset: launchComposition.agentPreset ?? 'default',
         })
         // A launch-time preset may still apply while the session is blank;
         // the blank check lives inside recomposeBlank (shared with /preset).
@@ -2095,12 +2098,14 @@ export function apply(ctx: Context, config: Config): void {
         // for lock ordering — a roster failure must not pin a session that
         // never entered the DSH boundary).
         const recorded = await recordedPreset(ctx, sessionId)
-        await compose(recorded)
+        // Preflight with the resolved composition (see the launch resume
+        // note): the adapter re-mounts the EXACT resolved preset id.
+        const switchComposition = await compose(recorded)
         const resumeOptions = {
           resumeSessionId: SessionId(sessionId),
           provider: liveAgent?.options.provider ?? selection.provider,
           model: liveAgent?.options.model ?? selection.model,
-          agentPreset: recorded ?? undefined,
+          agentPreset: switchComposition.agentPreset,
         }
         const result = await transitionTo({
           target: { id: sessionId, header: lockHeader },
@@ -5637,7 +5642,7 @@ export function apply(ctx: Context, config: Config): void {
     // previews the paired tool call's arguments and flags dangerous commands.
     backend.interaction.onApprovalRequest((req, next) => {
       if (req.signal?.aborted === true) return Promise.resolve<ApprovalOutcome>('cancelled')
-      const args = req.callId === undefined ? undefined : callArgs.get(req.callId)
+      const args = req.callId === undefined ? undefined : callArgs.get(req.callId as never)
       return app.showApprovalPrompt({
         toolName: req.toolName,
         reason: req.reason,

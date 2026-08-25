@@ -519,3 +519,30 @@ test('refuseByTransitionFence MERGES newer input below the unsent submission', (
   assert.ok(editor.includes('newer draft') && editor.includes('older unsent'), 'nothing is lost')
   assert.deepEqual(notices, ['info: the draft changed while transitioning — review it before submitting again'])
 })
+
+test('P1: the empty-queue classic steer delivers through the SessionWriter, never a direct agent call', async () => {
+  // The empty-queue path (queue == 0 + Ctrl+S + draft) previously called
+  // now.steer/now.followup DIRECTLY, bypassing the semantic port. It must
+  // go through the writer seam: writer.steer/writer.followup exactly once,
+  // and the agent's own steer/followup NEVER called.
+  for (const status of ['running', 'idle'] as const) {
+    const agent = fakeAgent([])
+    agent.status = status
+    const writerCalls: string[] = []
+    const deps = makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) })
+    deps.writer = {
+      steer: (sessionId, messages) => { writerCalls.push(`steer:${sessionId}:${(messages[0] as { id: string }).id}`) },
+      followup: (sessionId, message) => { writerCalls.push(`followup:${sessionId}:${(message as { id: string }).id}`) },
+      dequeue: () => { writerCalls.push('dequeue') },
+    }
+    const outcome = await steerAll(deps, 'hello')
+    assert.equal(outcome, 'ok')
+    assert.equal(agent.steered.length, 0, `${status}: the agent's own steer is NEVER called directly`)
+    assert.equal(agent.followed.length, 0, `${status}: the agent's own followup is NEVER called directly`)
+    if (status === 'running') {
+      assert.deepEqual(writerCalls, ['steer:session-steer:draft:hello'], 'running → writer.steer exactly once')
+    } else {
+      assert.deepEqual(writerCalls, ['followup:session-steer:draft:hello'], 'idle → writer.followup exactly once')
+    }
+  }
+})
