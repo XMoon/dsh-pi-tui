@@ -17,7 +17,9 @@ import {
   SUBAGENT_GROUP,
   buildTaskRows,
   describeTaskRow,
+  isSubagentRowInterruptible,
   isViewerAccessInteractive,
+  projectSubagentActivity,
   resolveViewerAccess,
   rowGroup,
   subagentInterruptParent,
@@ -311,4 +313,106 @@ test('interrupt authority names the DURABLE direct parent, never the root (revie
   assert.equal(subagentInterruptParent(subagent({ parentId: '', depth: 1 }), 'session-main'), 'session-main')
   // The root is NEVER used for a nested row, whatever the depth.
   assert.equal(subagentInterruptParent(subagent({ parentId: 'session-A', depth: 3 }), 'session-main'), 'session-A')
+})
+
+// ── `has children` display removal (the tree connector already expresses
+// parenthood — the DATA fact stays for future fold/disclosure work) ───────
+
+test('a parent row never renders "has children" while the data fact survives', () => {
+  const rows = buildTaskRows([], [
+    agent({ id: 'parent', activity: 'inactive', hasChildren: true }),
+    agent({ id: 'child', mode: 'one-shot', activity: 'running', hasChildren: false, depth: 2 }),
+  ])
+  const parent = rows[0] as Extract<TaskBrowserRow, { kind: 'subagent' }>
+  // The DATA fact stays a row field…
+  assert.equal(parent.hasChildren, true)
+  assert.equal(parent.depth, 1)
+  // …but neither the description nor the label render the text.
+  assert.equal(describeTaskRow(parent, 5_000), 'inactive')
+  assert.ok(!describeTaskRow(parent, 5_000).includes('has children'))
+  assert.ok(!taskRowLabel(parent).includes('has children'))
+  // A nested row keeps its depth description (unchanged).
+  const child = rows[1] as Extract<TaskBrowserRow, { kind: 'subagent' }>
+  assert.equal(describeTaskRow(child, 5_000), 'running · depth 2')
+  assert.ok(!describeTaskRow(child, 5_000).includes('has children'))
+})
+
+// ── runtime activity projection (plan §7.3: the Agent registry decides,
+// never the catalog's store-presence activity) ─────────────────────────────
+
+test('projectSubagentActivity overwrites child activity from the Agent registry at commit time', () => {
+  // The core repro: an idle continuable child whose session is still
+  // live in the store (catalog `activity: 'running'`) must project
+  // INACTIVE — the registry says its driver is idle.
+  const entries = [
+    agent({ id: 'child-idle', activity: 'running' }),
+    agent({ id: 'child-cold', activity: 'inactive' }),
+    agent({ id: 'child-one', mode: 'one-shot', activity: 'inactive' }),
+  ]
+  const projected = projectSubagentActivity(entries, (id) =>
+    id === 'child-idle' ? 'idle' : 'running')
+  // TaskBrowserAgentInput is a single object type (kind is a union), so
+  // the child facts are read through a structural pick.
+  const child = (entry: TaskBrowserAgentInput): string =>
+    (entry as TaskBrowserAgentInput & { activity: 'running' | 'inactive' }).activity
+  assert.equal(child(projected[0]!), 'inactive')
+  assert.equal(child(projected[1]!), 'running')
+  assert.equal(child(projected[2]!), 'running')
+})
+
+test('projectSubagentActivity never touches catalog facts or the pre-order', () => {
+  const entries: TaskBrowserAgentInput[] = [
+    agent({ id: 'parent', activity: 'inactive', hasChildren: true, parentId: 'root', depth: 1 }),
+    agent({ id: 'grand', mode: 'one-shot', activity: 'inactive', hasChildren: false, parentId: 'parent', depth: 2 }),
+    { kind: 'diagnostic', id: 'child-x', reason: 'corrupt' },
+  ]
+  const projected = projectSubagentActivity(entries, () => 'running')
+  assert.deepEqual(projected.map(entry => entry.id), ['parent', 'grand', 'child-x'])
+  type ChildEntry = TaskBrowserAgentInput & { kind: 'child' }
+  const parent = projected[0] as ChildEntry
+  const grand = projected[1] as ChildEntry
+  assert.equal(parent.parentId, 'root')
+  assert.equal(parent.depth, 1)
+  assert.equal(parent.hasChildren, true)
+  assert.equal(parent.activity, 'running')
+  assert.equal(grand.parentId, 'parent')
+  assert.equal(grand.depth, 2)
+  assert.equal(grand.mode, 'one-shot')
+  // Diagnostic rows pass through unchanged (never projected).
+  assert.deepEqual(projected[2], { kind: 'diagnostic', id: 'child-x', reason: 'corrupt' })
+})
+
+test('projectSubagentActivity: an absent registry agent reads inactive (disposed/cold)', () => {
+  const projected = projectSubagentActivity([agent({ id: 'child-a', activity: 'running' })], () => undefined)
+  const child = projected[0] as TaskBrowserAgentInput & { kind: 'child' }
+  assert.equal(child.activity, 'inactive')
+})
+
+// ── interrupt authority (plan §I: only a continuable row with a LIVE
+// running driver may advertise/fire the stop verb) ─────────────────────────
+
+test('only a running continuable subagent is interruptible (plan §I)', () => {
+  const subagent = (overrides: Partial<Extract<TaskBrowserRow, { kind: 'subagent' }>> = {}): Extract<TaskBrowserRow, { kind: 'subagent' }> => ({
+    kind: 'subagent',
+    value: 'agent:child-abc',
+    childId: 'child-abc',
+    label: 'research',
+    mode: 'continuable',
+    activity: 'running',
+    hasChildren: false,
+    parentId: '',
+    depth: 1,
+    ...overrides,
+  })
+  // Running continuable: interruptible.
+  assert.equal(isSubagentRowInterruptible(subagent()), true)
+  // Idle continuable: no driver to stop — NOT interruptible (the UI must
+  // not advertise a dead stop verb).
+  assert.equal(isSubagentRowInterruptible(subagent({ activity: 'inactive' })), false)
+  // One-shot: never interruptible, running or not.
+  assert.equal(isSubagentRowInterruptible(subagent({ mode: 'one-shot', activity: 'running' })), false)
+  assert.equal(isSubagentRowInterruptible(subagent({ mode: 'one-shot', activity: 'inactive' })), false)
+  // Nested continuable rows follow the same rule (depth is orthogonal).
+  assert.equal(isSubagentRowInterruptible(subagent({ depth: 2, activity: 'running' })), true)
+  assert.equal(isSubagentRowInterruptible(subagent({ depth: 2, activity: 'inactive' })), false)
 })

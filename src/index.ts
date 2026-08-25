@@ -25,7 +25,6 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { CallId, ContentBlock } from '@deepseek-ai/dsh-llm'
 // P7d: the subagent registry merge for ctx.subagents (listChildren/interrupt).
 import type {} from '@deepseek-ai/dsh-subagent'
-import type { SubagentDescendantListEntry, SubagentListEntry } from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 // P6: the agent-preset roster — ctx.agentPresets, the session preset
@@ -82,10 +81,12 @@ import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import {
-  buildTaskRows, isActiveJobStatus, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessOf, isViewerAccessInteractive,
+  buildTaskRows, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessOf, isViewerAccessInteractive,
   type TaskBrowserRow, type ViewerAccess,
 } from './tasks-browser.ts'
 import type { TaskPanelItem } from './task-panel.ts'
+import { TaskBrowserRuntime } from './task-browser-runtime.ts'
+import type { TaskBrowserHandle } from './tui-app.ts'
 import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
 import { customThemeNames } from './theme.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
@@ -1297,6 +1298,55 @@ export async function recomposeBlank(
 /** Set the terminal window title (OSC 0); a no-op without a TTY. */
 function setTerminalTitle(title: string): void {
   if (process.stdout.isTTY === true) process.stdout.write(`\x1b]0;${title}\x07`)
+}
+
+/**
+ * The task-browser row → panel-item projection (runner glue, module-level
+ * so the open browser AND the runtime refresh coordinator share ONE
+ * mapping). JOB rows keep their status/detail; SUBAGENT rows carry the
+ * projected runtime activity as the status word, the durable mode as the
+ * non-truncatable suffix, and the tree connector from the catalog depth.
+ * The interrupt verb is advertised ONLY for a continuable child with a
+ * LIVE running driver (`isSubagentRowInterruptible`) — an idle
+ * continuable has no driver to stop. `has children` is deliberately NOT
+ * a detail line: the tree connector already expresses parenthood.
+ */
+function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
+  return target.map(row => row.kind === 'job'
+    ? {
+        value: row.value,
+        // A `subagent`-kind job is the registry's reliable contract
+        // for a background one-shot delegation: its `one-shot` mode
+        // rides as the non-truncatable suffix, like the child rows.
+        label: row.jobKind === 'subagent' ? `subagent job · ${row.label}` : taskRowLabel(row),
+        suffix: row.jobKind === 'subagent' ? 'one-shot' : undefined,
+        status: row.status,
+        detail: row.detail,
+        startedAt: row.startedAt,
+        group: rowGroup(row),
+        // The Tab type filter: job rows filter by their job kind.
+        type: row.jobKind,
+      }
+    : {
+        value: row.value,
+        // The mode rides as the panel's non-truncatable SUFFIX
+        // (`subagent · <label> · continuable`): the label itself may
+        // truncate on a narrow screen, the mode never silently does.
+        label: `subagent · ${row.label}`,
+        suffix: row.mode,
+        status: row.activity,
+        group: rowGroup(row),
+        type: 'subagent',
+        // Only a continuable row with a LIVE running driver is
+        // interruptible (one-shot ids are accepted no-ops for the
+        // interrupt transport; an idle continuable has no driver to
+        // stop — the UI must not advertise a dead stop verb).
+        interruptible: isSubagentRowInterruptible(row),
+        // The durable descendant tree connector: indentation + branch
+        // glyph from the catalog's `depth` (plan §6.7) — a fixed
+        // region that never scrolls with the selected label.
+        treePrefix: taskTreePrefix(row.depth),
+      })
 }
 
 /**
@@ -2726,6 +2776,15 @@ export function apply(ctx: Context, config: Config): void {
       searchCurrent = -1
       app.setSearchResult(0, 0)
       app.clearSessionOverrides()
+      // A new session owns the surface: close the task browser opened for
+      // the old session (its rows would otherwise go stale — the runtime
+      // refresh is fenced to the old root) and drop the cached descendant
+      // catalog, so stale-session `agent/status` flips find no membership
+      // and the next refresh reads the new root. The coordinator is
+      // re-populated by initLiveSession → refreshAgents.
+      activeTaskBrowser?.close()
+      activeTaskBrowser = undefined
+      taskRuntime?.reset()
       // A new session owns the surface: tear down the subagent viewer. The
       // old viewer's parent session is gone (the continuation contract
       // requires the EXACT live parent), so the child transcript, the
@@ -4329,10 +4388,13 @@ export function apply(ctx: Context, config: Config): void {
       // The trigger only fires while something is ACTIVE (jobs or live
       // children), so an empty jobs half is NOT an empty browser: the
       // children half enriches below. Never early-return on row count —
-      // a children-only session would never open the browser.
-      let rows: TaskBrowserRow[] = buildTaskRows(jobSnapshots, [])
+      // a children-only session would never open the browser. The row
+      // identity source is the RUNNER-level `taskBrowserRows` (kept fresh
+      // by every coordinator commit), so the select/action paths below
+      // never contradict a runtime refresh that already repainted.
+      taskBrowserRows = buildTaskRows(jobSnapshots, [])
       const selectRow = (value: string): void => {
-        const row = rows.find(candidate => candidate.value === value)
+        const row = taskBrowserRows.find(candidate => candidate.value === value)
         if (row === undefined) return
         if (row.kind === 'subagent') {
           // The viewer target carries the row's OWN parent (plan §6.10:
@@ -4342,10 +4404,11 @@ export function apply(ctx: Context, config: Config): void {
           // to the browser root (the live main session).
           const parentSessionId = row.parentId !== '' ? row.parentId as SessionId : liveAgent?.session.id
           if (parentSessionId === undefined) return
-          // The row carries the catalog MODE + activity + DEPTH: the viewer
-          // target is pinned to them (continuable → interactive editor only
-          // at depth 1, one-shot → read-only, depth > 1 → nested read-only),
-          // and the follow-up write path to the exact parent.
+          // The row carries the catalog MODE + projected activity + DEPTH:
+          // the viewer target is pinned to them (continuable → interactive
+          // editor only at depth 1, one-shot → read-only, depth > 1 →
+          // nested read-only), and the follow-up write path to the exact
+          // parent.
           runOwned('subagent view from tasks', () => enterView(
             row.childId as SessionId, row.label, row.mode, parentSessionId, row.activity, row.depth,
           ), {
@@ -4358,7 +4421,7 @@ export function apply(ctx: Context, config: Config): void {
         openJobView(row.jobId)
       }
       const actionRow = (value: string, action: 'interrupt'): void => {
-        const row = rows.find(candidate => candidate.value === value)
+        const row = taskBrowserRows.find(candidate => candidate.value === value)
         // ONLY continuable children are interruptible: `subagents.interrupt`
         // on a one-shot id is an accepted no-op, so firing it for a
         // one-shot row would be a fake action (the panel already hides the
@@ -4379,66 +4442,25 @@ export function apply(ctx: Context, config: Config): void {
         service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
         app.notify(`interrupting ${row.label}`, 'info')
       }
-      const taskPanelItems = (target: readonly TaskBrowserRow[]): TaskPanelItem[] =>
-        target.map(row => row.kind === 'job'
-          ? {
-              value: row.value,
-              // A `subagent`-kind job is the registry's reliable contract
-              // for a background one-shot delegation: its `one-shot` mode
-              // rides as the non-truncatable suffix, like the child rows.
-              label: row.jobKind === 'subagent' ? `subagent job · ${row.label}` : taskRowLabel(row),
-              suffix: row.jobKind === 'subagent' ? 'one-shot' : undefined,
-              status: row.status,
-              detail: row.detail,
-              startedAt: row.startedAt,
-              group: rowGroup(row),
-              // The Tab type filter: job rows filter by their job kind.
-              type: row.jobKind,
-            }
-          : {
-              value: row.value,
-              // The mode rides as the panel's non-truncatable SUFFIX
-              // (`subagent · <label> · continuable`): the label itself may
-              // truncate on a narrow screen, the mode never silently does.
-              label: `subagent · ${row.label}`,
-              suffix: row.mode,
-              status: row.activity,
-              detail: row.hasChildren ? 'has children' : undefined,
-              group: rowGroup(row),
-              type: 'subagent',
-              // Only continuable children are interruptible (one-shot ids
-              // are accepted no-ops for the interrupt transport).
-              interruptible: row.mode === 'continuable',
-              // The durable descendant tree connector: indentation + branch
-              // glyph from the catalog's `depth` (plan §6.7) — a fixed
-              // region that never scrolls with the selected label.
-              treePrefix: taskTreePrefix(row.depth),
-            })
       const handle = app.openTaskBrowser(
-        taskPanelItems(rows),
-        selectRow,
-        () => {},
+        taskPanelItems(taskBrowserRows),
+        // Selection and cancel both close the overlay (the app closes it
+        // before invoking the callback): drop the active-handle reference
+        // so a later runtime refresh cannot repaint a closed browser.
+        (value) => { activeTaskBrowser = undefined; selectRow(value) },
+        () => { activeTaskBrowser = undefined },
         { header: 'tasks · subagents', enableSearch: true, onAction: actionRow },
       )
-      if (subagents !== undefined) {
-        const sessionId = liveAgent.session.id
-        const generation = sessionGeneration
-        runOwned('task browser descendants', () => subagents.listDescendants(sessionId), {
+      activeTaskBrowser = handle
+      // The open triggers a CATALOG refresh (membership may have drifted
+      // since the last listing): the coordinator fences it against a
+      // session switch and commits through the ACTIVE handle — a browser
+      // closed while the listing is in flight is never repainted.
+      const runtime = taskRuntime
+      if (runtime !== undefined) {
+        runOwned('task browser descendants', () => runtime.refreshCatalog(), {
           diag,
           sessionId: () => liveAgent?.session.id,
-          onResult: (entries) => {
-            // The browser belongs to the session it was opened for; a
-            // switch while the listing was in flight must not repaint it.
-            if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
-            rows = buildTaskRows(jobSnapshots, entries)
-            // Preferred cursor (plan §6.6): the first RUNNING subagent in
-            // tree order, else the first active job — the tree itself never
-            // re-sorts for the cursor.
-            const preferred = rows.find(row =>
-              row.kind === 'subagent' && row.activity === 'running')?.value
-              ?? rows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
-            handle.setItems(taskPanelItems(rows), preferred)
-          },
         })
       }
     }
@@ -4665,7 +4687,23 @@ export function apply(ctx: Context, config: Config): void {
     // (openJobView, defined earlier in this closure) can refresh the badge
     // after stop/close.
     let refreshTasks: () => void = () => {}
+    // The subagent half of the dock badge + the open task browser. Two
+    // refresh modes, both hoisted like refreshTasks (the browser is
+    // defined earlier in this closure):
+    // - `refreshAgents` — a CATALOG refresh (listDescendants + commit):
+    //   subagent lifecycle events, subagent tool calls and jobs changes;
+    // - `refreshAgentRuntimeOnly` — a RUNTIME-only refresh (no listing):
+    //   the `agent/status` handler re-projects the cached catalog.
     let refreshAgents: () => void = () => {}
+    let refreshAgentRuntimeOnly: () => void = () => {}
+    // The ACTIVE task-browser overlay handle (one at a time — the ↓
+    // trigger and /tasks share the same surface) and the row-identity
+    // source the open browser's select/action paths read. Tracked at
+    // runner scope so the runtime refresh repaints the OPEN panel and a
+    // session switch closes it (see bumpSessionGeneration).
+    let activeTaskBrowser: TaskBrowserHandle | undefined
+    let taskBrowserRows: TaskBrowserRow[] = []
+    let taskRuntime: TaskBrowserRuntime | undefined
     const jobs = ctx.get('jobs')
     if (jobs !== undefined) {
       refreshTasks = (): void => {
@@ -4686,41 +4724,80 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Continuable children and foreground one-shot children never register
     // jobs records (AGENTS.md), so the dock badge and the task browser need
-    // their own channel into the subagent registry. `refreshAgents` is
-    // event-driven: subagent lifecycle events (start/end), subagent tool
-    // calls in the live session (the scope-filtered lifecycle events may
-    // not reach this context), and every jobs change (a one-shot settlement
-    // implies a child may have gone inactive). listDescendants is async
-    // and may read persistence for cold children, so the commit is
-    // generation-guarded and never lands on a newer session. The badge
-    // counts every RUNNING descendant (plan §6.13) — the user cares that a
-    // deep agent is still working — while durable inactive children never
-    // keep the badge permanently armed.
+    // their own channel into the subagent registry. The
+    // TaskBrowserRuntime coordinator owns the split:
+    // - `refreshAgents` (CATALOG): event-driven — subagent lifecycle events
+    //   (start/end), subagent tool calls in the live session (the
+    //   scope-filtered lifecycle events may not reach this context), and
+    //   every jobs change (a one-shot settlement implies membership may
+    //   have moved). listDescendants is async and may read persistence for
+    //   cold children, so the commit is session-key fenced and never lands
+    //   on a newer session.
+    // - `refreshAgentRuntimeOnly` (RUNTIME): the `agent/status` handler —
+    //   NEVER re-lists. The catalog's store-presence `activity` is not an
+    //   execution state: an idle continuable child stays live in the
+    //   session store and would otherwise keep the row and the badge stuck
+    //   on `running` forever. Every child's `running`/`inactive` is
+    //   re-projected from the Agent registry (`ctx.agents.get(id)?.status`)
+    //   AT COMMIT TIME, so a slow catalog response can never overwrite a
+    //   newer runtime state (plan §7.3). The badge counts every RUNNING
+    //   descendant (plan §6.13) — the user cares that a deep agent is
+    //   still working — while durable inactive children never keep it
+    //   permanently armed.
     const subagents = ctx.get('subagents')
     if (subagents !== undefined) {
+      taskRuntime = new TaskBrowserRuntime({
+        // The session fence key: generation + session id, captured when a
+        // refresh starts and re-checked after the async listing.
+        currentKey: () => liveAgent === undefined ? undefined : `${sessionGeneration}:${liveAgent.session.id}`,
+        listDescendants: () => {
+          const sessionId = liveAgent?.session.id
+          return sessionId === undefined ? Promise.resolve([]) : subagents.listDescendants(sessionId)
+        },
+        // The merged rows re-read the CURRENT jobs snapshot at every
+        // commit, so a job settlement repaints an open browser too.
+        readJobs: () => {
+          if (jobs === undefined || liveAgent === undefined) return []
+          try {
+            return jobs.list(liveAgent)
+          } catch {
+            // The registry read is best-effort; the jobs half stays empty.
+            return []
+          }
+        },
+        // The LIVE runtime fact, read at COMMIT time: the Agent registry,
+        // never the catalog's store-presence activity.
+        agentStatusOf: (childId) => agents?.get(childId as SessionId)?.status,
+        commitRows: (rows, preferred) => {
+          // The row-identity source for the open browser's select path
+          // always reflects the latest commit (a runtime refresh that
+          // repainted the panel is never contradicted by a stale local
+          // snapshot), and the repaint targets ONLY the open handle.
+          taskBrowserRows = [...rows]
+          activeTaskBrowser?.setItems(taskPanelItems(rows), preferred)
+        },
+        commitBadge: (running) => app.setAgents(running.map(entry => ({
+          id: entry.id,
+          label: entry.label,
+          activity: 'running',
+        }))),
+      })
       refreshAgents = (): void => {
         if (liveAgent === undefined) {
           app.setAgents([])
           return
         }
-        const sessionId = liveAgent.session.id
-        const generation = sessionGeneration
-        runOwned('task browser agents refresh', () => subagents.listDescendants(sessionId), {
+        runOwned('task browser agents refresh', () => taskRuntime!.refreshCatalog(), {
           diag,
           sessionId: () => liveAgent?.session.id,
-          onResult: (entries) => {
-            if (sessionGeneration !== generation || liveAgent?.session.id !== sessionId) return
-            // Running descendants arm the badge/trigger: continuable AND
-            // one-shot children at every depth while they work (a
-            // foreground delegation is the parent's pending tool call and
-            // registers no job row). Inactive children never arm it —
-            // activity is live-store presence, not an outcome.
-            app.setAgents(entries
-              .filter((entry): entry is Extract<SubagentDescendantListEntry, { kind: 'child' }> =>
-                entry.kind === 'child' && entry.activity === 'running')
-              .map(entry => ({ id: entry.id, label: entry.label ?? entry.id, activity: entry.activity })))
-          },
         })
+      }
+      refreshAgentRuntimeOnly = (): void => {
+        if (liveAgent === undefined) {
+          app.setAgents([])
+          return
+        }
+        taskRuntime!.refreshRuntime()
       }
       refreshAgents()
     }
@@ -5581,9 +5658,26 @@ export function apply(ctx: Context, config: Config): void {
     // Subagent lifecycle events drive the continuable-children half of the
     // dock badge (they never register jobs). Scope-filtered by the
     // delegating parent — when they do not reach this context, the
-    // tool/call fallback above still arms the badge.
+    // tool/call fallback above still arms the badge. These are CATALOG
+    // events: membership/tree may have changed, so they re-list.
     ctx.on('subagent/start', () => refreshAgents())
     ctx.on('subagent/end', () => refreshAgents())
+    // `agent/status` is the LIVE runtime channel: a child's driver
+    // transition (running ↔ idle) must repaint the task browser and the
+    // badge WITHOUT a re-listing — membership changes come only from the
+    // lifecycle events above, and `listDescendants().activity` is
+    // store-presence, never execution state (an idle continuable child
+    // stays live in the session store and would otherwise read as
+    // `running` forever). The membership gate keeps this cheap and safe:
+    // only flips of children in the CACHED catalog refresh the surface —
+    // the MAIN agent's own per-turn flips (and any stale post-switch
+    // event) never repaint, and the coordinator re-projects every child
+    // from the Agent registry at commit time.
+    ctx.on('agent/status', ({ agent }) => {
+      if (liveAgent === undefined) return
+      if (taskRuntime?.has(agent.id) !== true) return
+      refreshAgentRuntimeOnly()
+    })
     // Provider-topology and credential events refresh the footer model row
     // and the welcome card: a /login /logout /add-provider (or an external
     // settings.yaml / .credentials.yaml edit) changes the live provider /

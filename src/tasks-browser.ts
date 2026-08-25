@@ -11,13 +11,21 @@
  *    identity (see subagentJobTranscriptId).
  *
  * Source B — the subagent registry (`ctx.subagents.listDescendants`):
- * the durable descendant tree. Every healthy child — continuable AND
- * one-shot, running AND inactive — is a viewable row: `activity` is
- * live-store presence, never an outcome, and a finished one-shot child
- * stays reachable through its persisted transcript (plan §6.4). Rows keep
- * the DSH stable pre-order VERBATIM (plan §6.5): the tree structure comes
+ * the durable child tree. Every row — continuable AND one-shot, running
+ * AND inactive — is a viewable row: the catalog `activity` is live-store
+ * PRESENCE, never an outcome, and a finished one-shot child stays
+ * reachable through its persisted transcript (plan §6.4). Rows keep the
+ * DSH stable pre-order VERBATIM (plan §6.5): the tree structure comes
  * from `parentId` + `depth`, so no running-first re-sort may ever break
  * the lineage.
+ *
+ * Runtime activity is NOT a catalog fact: the UI projects each child's
+ * `running` / `inactive` word from the Agent registry at COMMIT time
+ * (`ctx.agents.get(id)?.status === 'running'` — see
+ * {@link projectSubagentActivity}). The catalog's store-presence
+ * `activity` must never reach a row or the badge as the execution state:
+ * an idle continuable child stays live in the session store and would
+ * otherwise read as `running` forever.
  *
  * Deliberate overlap: a running BACKGROUND one-shot has BOTH a job record
  * and a child record with no cross-reference, so it may appear twice — the
@@ -52,14 +60,22 @@ export interface TaskBrowserJobInput {
 
 /** Structural subagent-list entry (a projection of dsh's
  * SubagentDescendantListEntry). parentId/depth are the CATALOG'S OWN
- * facts (plan §6.3) — never guessed from labels or order. */
+ * facts (plan §6.3) — never guessed from labels or order. The `activity`
+ * field may carry the catalog's store-presence value on INPUT, but the
+ * caller MUST overwrite it with the live Agent-registry projection before
+ * the entry becomes a row (see {@link projectSubagentActivity}) — a row's
+ * `running`/`inactive` means "an Agent driver is executing right now". */
 export interface TaskBrowserAgentInput {
   readonly kind: 'child' | 'diagnostic'
   readonly id: string
   /** Absent for a one-shot child; continuable children always carry one. */
   readonly label?: string
   readonly mode?: 'one-shot' | 'continuable'
-  /** Absent on diagnostic rows. */
+  /** UI-PROJECTED runtime activity of the child's Agent driver
+   * (`running` = the registry reports `status === 'running'` right now;
+   * `inactive` = no live driver — idle, cold, or disposed, never
+   * completed/failed/terminal). Never interpret the catalog's
+   * store-presence value as execution state. */
   readonly activity?: 'running' | 'inactive'
   readonly hasChildren?: boolean
   /** Durable direct parent (descendant rows; absent for direct children
@@ -94,6 +110,11 @@ export type TaskBrowserRow =
        * is not necessarily one-shot. The viewer's interactivity and the
        * follow-up write path both key off this exact field. */
       readonly mode: 'one-shot' | 'continuable'
+      /** UI-PROJECTED runtime activity (see {@link projectSubagentActivity}):
+       * `running` = the child's Agent driver is executing right now;
+       * `inactive` = no live driver (idle/cold/disposed) — never
+       * completed/failed. The catalog's store-presence value never
+       * reaches a row. */
       readonly activity: 'running' | 'inactive'
       readonly hasChildren: boolean
       /** Durable direct parent ('' for a direct child — the browser's
@@ -118,8 +139,9 @@ export function isActiveJobStatus(status: string): boolean {
  * the descendant listing IS the tree, so rows are NEVER re-sorted by
  * activity — a running grandchild must not jump above its inactive
  * parent. Every healthy child (kind 'child' with a classified mode) is a
- * row: the finished one-shot filter is REMOVED (plan §6.4), because
- * `activity` is live-store presence, never an outcome.
+ * row: the finished one-shot filter is REMOVED (plan §6.4), because the
+ * projected activity is runtime-only, never an outcome — a settled
+ * one-shot's persisted transcript stays viewable.
  *
  * JOB rows keep their own registry ordering (active by startedAt,
  * terminal newest-finish first) as a separate flat group after the tree —
@@ -174,6 +196,39 @@ export function buildTaskRows(
 }
 
 /**
+ * Project the UI runtime activity of one descendant catalog onto its
+ * entries: a child's `activity` is overwritten from the live Agent
+ * registry (`agentStatusOf(id) === 'running'`), read AT COMMIT TIME —
+ * never captured when the (async) listing started. A slow catalog
+ * response must not flip an already-idle child back to `running` with
+ * the store-presence status it captured earlier (plan §7.3).
+ *
+ * EVERYTHING else is untouched: id/label/mode/hasChildren/parentId/depth
+ * and the pre-order all stay catalog facts (plan §7.5). Diagnostic rows
+ * pass through unchanged.
+ */
+export function projectSubagentActivity(
+  entries: readonly TaskBrowserAgentInput[],
+  agentStatusOf: (childId: string) => string | undefined,
+): TaskBrowserAgentInput[] {
+  return entries.map(entry =>
+    entry.kind === 'child'
+      ? { ...entry, activity: agentStatusOf(entry.id) === 'running' ? 'running' : 'inactive' }
+      : entry)
+}
+
+/** Whether a subagent row can be interrupted RIGHT NOW: only a
+ * continuable child with a LIVE running driver — an idle/inactive
+ * continuable has no driver to stop, so the UI must not advertise (or
+ * fire) the stop verb for it. One-shot rows are never interruptible (the
+ * interrupt transport is an accepted no-op for them). */
+export function isSubagentRowInterruptible(
+  row: Extract<TaskBrowserRow, { kind: 'subagent' }>,
+): boolean {
+  return row.mode === 'continuable' && row.activity === 'running'
+}
+
+/**
  * The tree connector prefix for one subagent row: indentation by depth
  * (the browser's root is depth 1) plus a stable `├─ ` branch connector.
  * The connector is a fixed layout region (plan §6.7) — it never scrolls
@@ -206,13 +261,17 @@ export function rowGroup(row: TaskBrowserRow): string {
   return row.kind === 'job' ? JOB_GROUP : SUBAGENT_GROUP
 }
 
-/** The picker description line for a row. */
+/** The picker description line for a row. The subagent line carries the
+ * PROJECTED runtime activity only — `has children` is deliberately NOT
+ * shown: the tree connector already expresses parenthood, so the text
+ * would duplicate the structure (the `hasChildren` data fact stays on
+ * the row for future fold/disclosure work). */
 export function describeTaskRow(row: TaskBrowserRow, now: number): string {
   if (row.kind === 'job') {
     const elapsed = Math.max(0, Math.floor((now - row.startedAt) / 1000))
     return `${row.status}${row.detail === undefined ? '' : ` — ${row.detail}`} · ${elapsed}s`
   }
-  return `${row.activity}${row.hasChildren ? ' · has children' : ''}${row.depth > 1 ? ` · depth ${row.depth}` : ''}`
+  return `${row.activity}${row.depth > 1 ? ` · depth ${row.depth}` : ''}`
 }
 
 /** The viewer's interaction authority for one row (plan §6.10): mode is
