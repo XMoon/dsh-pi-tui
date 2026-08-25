@@ -215,6 +215,14 @@ export class HostKeybindingManager {
     if (this.isDisabled('app.input.submit')) return []
     const keys = this.keymap.keysFor('app.input.submit')
     if (keys.length > 0) return keys
+    // A LEADER-ONLY submit override (`app.input.submit: <leader>s`) has
+    // NO direct keys: Enter must NOT submit (only the leader sequence
+    // does) — do NOT fall back to the builtin 'enter' (PR review
+    // finding). The override lives in leaderBindings (the parser never
+    // puts `<leader>X` into the direct bindings map).
+    const hasSubmitOverride = this.userBindings['app.input.submit'] !== undefined
+      || this.leaderBindings.some(binding => binding.action === 'app.input.submit')
+    if (hasSubmitOverride) return []
     // The builtin submit rule is hostResolved: false (the host ladder
     // never consumes it), so keysFor() is EMPTY by default — fall back to
     // the definition's default ('enter'). A user remap compiles as a
@@ -234,6 +242,7 @@ export class HostKeybindingManager {
     readonly leader: LeaderConfig | undefined
     readonly leaderBindings: readonly LeaderBinding[]
   }): void {
+    if (this.disposed) return
     this.userBindings = config.bindings
     this.leaderConfig = config.leader
     this.leaderBindings = config.leaderBindings
@@ -243,6 +252,7 @@ export class HostKeybindingManager {
   /** Safe mode (plan §17): ignore user overrides, keep builtin defaults.
    * Plugin keybindings still load. */
   setSafeMode(enabled: boolean): void {
+    if (this.disposed) return
     if (this.safeMode === enabled) return
     this.safeMode = enabled
     this.rebuild()
@@ -257,6 +267,7 @@ export class HostKeybindingManager {
    * registry's snapshot). A no-op when the rules are unchanged (the
    * runner may call this on every registry invalidation). */
   setPluginRules(rules: readonly PluginKeybindingRule[]): void {
+    if (this.disposed) return
     if (this.pluginRules.length === rules.length
       && this.pluginRules.every((rule, index) => {
         const next = rules[index]!
