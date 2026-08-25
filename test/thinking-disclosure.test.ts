@@ -26,6 +26,9 @@ import { DraftImageStore } from '../src/image/draft-store.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
+import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
+import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
 function startApp(width = 100, height = 30): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(width, height)
@@ -486,7 +489,7 @@ function fakeTuiSettings(): { value: TuiSettingsLike; writes: Array<Record<strin
   return {
     writes,
     value: {
-      get: () => ({ ...doc }) as TuiSettingsLike['get'] extends () => infer R ? R : never,
+      get: () => ({ ...doc }) as unknown as TuiSettingsLike['get'] extends () => infer R ? R : never,
       replace: (next) => {
         writes.push({ ...next })
         Object.assign(doc, next)
@@ -522,25 +525,17 @@ function setupSettings() {
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     tuiSettings: settings.value,
     agents: {} as never,
-    sessions: { flush: async () => {} },
     sessionReader: {
       list: async () => [],
       search: async () => [],
       titles: async () => new Map(),
+      measureContext: () => undefined,
+      readExportData: async () => ({ kind: 'none' as const }),
     },
-    host: {
-      settings: () => ctx.get('settings'),
-      llm: () => ctx.get('llm'),
-      credentials: () => ctx.get('credentials'),
-      authorization: () => ctx.get('authorization'),
-      defaultModel: () => ctx.get('agentDefaultModel'),
-      presets: () => ctx.get('agentPresets'),
-      tools: () => ctx.get('tools'),
-      permission: () => ctx.get('permissionPresets'),
-      tokenMeter: () => ctx.get('tokenMeter'),
-      commands: () => ctx.get('commands'),
-      persistence: () => ctx.get('sessionPersistence'),
-    },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
+    commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     interaction: {
       registerQuestionProvider: () => true,
       onApprovalRequest: () => {},
@@ -563,7 +558,6 @@ function setupSettings() {
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
     get sessionGeneration() { return 0 },
-    compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
