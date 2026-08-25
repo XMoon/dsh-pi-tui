@@ -1740,6 +1740,14 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'an open overlay must block the blank-row collapse')
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('(click to expand)'), `the Thinking card must stay untouched behind the overlay:\n${after}`)
+  // CONCRETE rows are equally inert behind the overlay: the guard covers
+  // the whole transcript hit-test, not just the blank fallback — the
+  // Bash content row must not full-reveal either.
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'a content row must not reach the transcript behind the overlay')
+  const after2 = vt.getViewport().join('\n')
+  assert.ok(!after2.includes('out 1 line 39'), `the Bash card must not full-reveal behind the overlay:\n${after2}`)
   app.closeTranscriptSearch()
   app.setFullscreen(false)
   app.stop()
@@ -1829,6 +1837,168 @@ test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message
   const joined = vt.getViewport().join('\n')
   assert.ok(!joined.includes('out 1 line 39'), `the parked override must not resurrect the full-reveal:\n${joined}`)
   assert.ok(joined.includes('🐳 Thought'), 're-expansion must work after Collapse All')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+/** A settled turn whose LAST process row is a reasoning-only assistant
+ * message (NO text block): the image pipeline keeps it as a zero-height
+ * entry, so the Thought's boundary spacer visually follows the tool card
+ * — the interior test must follow the VISUAL sequence, never a
+ * zero-height entry (round-2 review finding). */
+function reasoningTailTurn(seqBase: number): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, seqBase),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, seqBase + 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, T0 + 2, seqBase + 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'x' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('c1') },
+      },
+    }, T0 + 4, seqBase + 4),
+    // The reasoning-only assistant message: zero rendered rows.
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('e1'), role: 'assistant',
+        content: [{ type: 'reasoning', text: 'only reasoning' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 5, seqBase + 5),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'Done.' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 6, seqBase + 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 7, seqBase + 7),
+  ]
+}
+
+test('a zero-height trailing process row must not turn the boundary spacer into an interior blank (round-2 P1)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(reasoningTailTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('🐳 Thought'), 'precondition: root expanded')
+  // The reasoning-only row renders NOTHING: the blank directly above the
+  // final is the Thought's BOUNDARY spacer (the final follows visually) —
+  // clicking it must be a no-op, never a collapse.
+  const doneY = findRow(view, 'Done.')
+  assert.ok(doneY >= 0, `final missing:\n${view.join('\n')}`)
+  assert.equal(view[doneY - 1].trim(), '', 'precondition: the clicked row is blank')
+  click(vt, 3, doneY)
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'the boundary spacer must stay a no-op')
+  const after = vt.getViewport().join('\n')
+  assert.ok(after.includes('🐳 Thought'), `the Thought must stay expanded:\n${after}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a Thought with NO process cards: the header trailing spacer stays a no-op', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }, T0 + 1, 1),
+    eventAt('assistant/message', { turn: 1, step: 0, message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'hi back' }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + 2, 2),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 3, 3),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const headerY = findRow(view, '🐳 Thought')
+  assert.ok(headerY >= 0, `expanded header missing:\n${view.join('\n')}`)
+  // No process rows follow the header: its trailing spacer is the
+  // boundary before the final — a no-op, never a collapse.
+  assert.equal(view[headerY + 1].trim(), '', 'precondition: the row below the header is blank')
+  click(vt, 3, headerY + 2)
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'the no-card Thought blank must be a no-op')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the boundary spacer between two adjacent Thoughts is a no-op', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(settledThoughtTurn(1, 0))
+  folder.apply(settledThoughtTurn(2, 100))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand turn 1 only.
+  let y = findRow(vt.getViewport(), '🐋 Thought')
+  assert.ok(y >= 0, `first Thought header missing:\n${vt.getViewport().join('\n')}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'precondition: only turn 1 expanded')
+  // The blank above turn 2's header belongs to turn 1's LAST row (the
+  // final, unmarked): clicking it must never collapse turn 1 — and must
+  // never touch turn 2 (its header row is not the click target).
+  const t2y = findRow(view, '🐋 Thought')
+  assert.ok(t2y >= 0, `turn-2 header missing:\n${view.join('\n')}`)
+  assert.equal(view[t2y - 1].trim(), '', 'precondition: the clicked row is blank')
+  click(vt, 3, t2y)
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'the boundary blank must not collapse the neighbor')
+  const after = vt.getViewport().join('\n')
+  assert.ok(after.includes('🐳 Thought'), `turn 1 must stay expanded:\n${after}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the collapsed header block trailing spacer stays a no-op — never expands (plan §13/§16)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  // The collapsed block = header + preview rows; the blank BELOW the last
+  // preview row is its trailing spacer — a no-op (the Thought is not
+  // expanded, so nothing collapses; it must not toggle-open either).
+  const toolY = findRow(view, 'Tool:')
+  assert.ok(toolY >= 0, `collapsed preview missing:\n${view.join('\n')}`)
+  assert.equal(view[toolY + 1].trim(), '', 'precondition: the clicked row is blank')
+  click(vt, 3, toolY + 2)
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'the collapsed block blank must not expand the Thought')
+  const after = vt.getViewport().join('\n')
+  assert.ok(!after.includes('🐳'), `no expansion may happen:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })

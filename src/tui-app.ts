@@ -4218,6 +4218,12 @@ export class TuiApp {
       }
       return
     }
+    // Any OTHER managed overlay (search / settings / approvals / extension
+    // overlays) owns the click: with one up, NO transcript / dock / todo
+    // interaction below is reachable — concrete rows AND the blank-row
+    // fallback stay inert behind it (plan §17/§23.7). The question frame
+    // above is the only overlay that routes clicks itself.
+    if (this.activeScreen.hasOverlayEntries) return
     void x
     const width = this.terminal.columns
     const height = this.terminal.rows
@@ -4276,11 +4282,22 @@ export class TuiApp {
         // row-based hit map is unchanged: content rows keep their own
         // owners, and a boundary spacer (the next Thought / a user message
         // / the final assistant follows) is unclaimed → no-op (plan
-        // §14/§16). An active overlay owns the click — the fallback never
-        // pierces it (plan §17/§23.7).
+        // §14/§16). Overlays were already handled above.
         if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
-          if (this.activeScreen.hasOverlayEntries) return
-          const owner = this.blankRowFocusCollapseOwner(entry, this.messageRows[index + 1])
+          // The interior test follows the VISUAL sequence: zero-height
+          // blocks render nothing, so a spacer whose following entries are
+          // all zero-height is the Thought's BOUNDARY spacer — the next
+          // VISIBLE block decides (a reasoning-only process row at the
+          // tail must not make the boundary look interior).
+          let next: Readonly<{ activity?: TurnActivity; collapseFocusOwnerOnClick?: number }> | undefined
+          for (let nextIndex = index + 1; nextIndex < this.messageRows.length; nextIndex += 1) {
+            const candidate = this.messageRows[nextIndex]!
+            if (candidate.height > 0) {
+              next = candidate
+              break
+            }
+          }
+          const owner = this.blankRowFocusCollapseOwner(entry, next)
           if (owner !== undefined) {
             this.collapseFocusTurn(owner, { anchorFullscreen: true })
           }
@@ -4342,8 +4359,9 @@ export class TuiApp {
   /** The expanded Thought that OWNS a blank visual row — the inter-block
    * spacer charged to `entry` (plan §9/§14): the row is INSIDE the
    * Thought's outer region when the entry's own block and the FOLLOWING
-   * block both belong to the same expanded Thought (header → card,
-   * card → card). The Thought's trailing boundary spacer — the next
+   * VISIBLE block both belong to the same expanded Thought (header →
+   * card, card → card; zero-height blocks render nothing and are skipped
+   * by the caller). The Thought's trailing boundary spacer — the next
    * Thought / a user message / the final assistant follows — is NOT
    * claimed, so a click there stays a no-op (plan §16: never guess a
    * "nearest Thought"). Returns undefined for every non-Focus row. */
