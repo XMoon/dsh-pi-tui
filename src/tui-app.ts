@@ -1361,7 +1361,11 @@ export class TuiApp {
   private readonly inputHistory: string[] = []
   /** Cap for the persisted input history per working directory. */
   private static readonly INPUT_HISTORY_LIMIT = 100
-  /** Ctrl+O master switch: expand the most recent turns' collapsible entries. */
+  /** Ctrl+O master switch: expand the most recent turns' collapsible
+   * entries (the ordinary fold) — and, in REGULAR Focus, the DERIVED
+   * reveal of the recent Focus Thoughts (never written into
+   * focusExpandedTurns). Fullscreen Focus disclosures are mouse-owned:
+   * Ctrl+O does not pierce them. */
   private toolOutputExpanded = false
   /** Alt+T: hide thinking entries entirely (they stay in the log). */
   private hideThinking = false
@@ -1618,8 +1622,10 @@ export class TuiApp {
   /**
    * Per-message expansion overrides from mouse clicks: a message whose entry
    * is true stays expanded even when the global fold is off; absent falls
-   * back to the global boundary. The global Ctrl+O fold always wins, so the
-   * keyboard behavior is unaffected by mouse toggles.
+   * back to the global boundary. The Ctrl+O fold wins in the ordinary
+   * transcript and the regular Focus detail mode; in FULLSCREEN Focus the
+   * per-card override IS the disclosure owner (the mouse controls the
+   * secondaries — Ctrl+O does not pierce them).
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
   /**
@@ -3177,7 +3183,9 @@ export class TuiApp {
   /**
    * Replace the transcript and rebuild the message components. Collapsible
    * entries (thinking, tool cards) render folded unless the Ctrl+O master
-   * switch is on and the entry belongs to the most recent turns.
+   * switch is on and the entry belongs to the most recent turns (or, in
+   * REGULAR Focus, an expanded Thought root full-reveals its process —
+   * fullscreen secondaries are mouse-owned).
    * @param messages - the folded transcript.
    * @param activities - the same fold state's per-turn Focus activities
    *   (plan §19: messages and activities must come from ONE fold snapshot,
@@ -3871,7 +3879,8 @@ export class TuiApp {
    * Map a fullscreen click (0-based screen cell, from the alt screen's
    * onCellClick) onto a transcript message and toggle its individual
    * expansion — the web's click-to-disclose behavior for one card at a time.
-   * The global Ctrl+O fold still wins, so keyboard behavior is unchanged.
+   * Fullscreen Focus disclosures are mouse-owned: the per-card override
+   * decides, and the Ctrl+O keyboard fold does not pierce them.
    */
   private handleFullscreenClick(x: number, y: number): void {
     // A question owns the modal front: clicks inside its frame (the editor
