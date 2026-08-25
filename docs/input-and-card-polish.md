@@ -711,8 +711,65 @@ rounds (codex / gpt-5.6-luna):
   repository's async-UI pattern, never a timing assertion). Regression
   test: advanced controls replace a shell-mode draft through the wire
   boundary (plain text clears the mode; serialized text re-enters it).
+- **Round 22**: accepted, no open findings (on the rebased HEAD).
+- **PR review round 4** (human, replacement-editor execution context): P1 —
+  the fallback mixed the VISIBLE seat mode into HOST-owned callbacks.
+  The host editor's `onSubmit` serialized through `serializeSeatDraft`,
+  which reads the VISIBLE seat (`'prompt'` for a mode-less plugin), so a
+  declined-Enter submit of a `!!pwd` plugin document degraded into a
+  plain `pwd` — a LOCAL-ONLY command leaking into the model path. The
+  completion mode source read the same visible seat, so a declined
+  `!gi` Tab lost the shell completion grammar and the extension query
+  lost the `!` wire prefix. FIXED: the split is now explicit — HOST
+  EXECUTION MODE (the host editor's own state, authoritative for its
+  callbacks: `onSubmit` serializes from `this.editor.getInputMode()`,
+  the MentionProvider mode source and the delegated getMode read the
+  host editor's mode — always freshly decoded from the plugin wire
+  document before a forwarded key) vs VISIBLE SEAT MODE (`seatInputMode()`
+  stays for the ↓ task-browser gate, the Ctrl+C clear, the viewer lock
+  and the footer badge). Regression tests: a replacement editor keeps
+  `!pwd` / `!!pwd` / plain prose on Enter submits; a replacement Tab
+  runs the shell compgen grammar and hands the extension chain the wire
+  line with the shifted cursor; the round-20 "ch" prompt-seat test is
+  unchanged and still passes.
+- **Round 23**: accepted-with-followups — P2: a fixed `setTimeout(50)`
+  before the second Tab in the replacement-completion test (FIXED: the
+  test now synchronizes on `waitForRender` — the repository's settle
+  helper — after polling the compgen spy, so the microtask chain and the
+  render pipeline drain before the next Tab; no timing race).
+- **Round 24**: accepted-with-followups — P2: STALE DROPDOWN — the
+  fallback stages with `setTextAndCursor`, which deliberately preserves
+  the host autocomplete state, so an earlier declined Tab's dropdown
+  survived into later keys; the fork's refresh is async, and a Tab
+  landing before it resolved ACCEPTED a stale candidate into the new
+  text (`!echo $gs` became the corrupted `!echo $$git `). FIXED: the
+  fallback cancels the host dropdown/pending request when the staged
+  document differs from the host text/cursor, or when the forwarded key
+  is not a dropdown interaction and the dropdown is open; an unchanged
+  document with a Tab/Enter/arrow keeps it (the Tab+Tab accept stays
+  synchronous). `TuiEditor.cancelHostAutocomplete()` is deliberately
+  distinct from the fork's private `cancelAutocomplete` (a same-named
+  override shadowed it and recursed). Regression test: a variable-
+  completion dropdown (uncached compgen) stays pending while the user
+  edits `!echo $g` → `!echo $gs`; the next Tab must not accept the stale
+  candidate, and the fresh dropdown applies after the refresh resolves.
+- **Round 25**: accepted-with-follow-ups — P2: pageUp/pageDown are
+  SelectList interactions too and must not force-close the dropdown
+  (FIXED: both guard sites include them; regression test proves a
+  declined pageUp keeps the dropdown alive — the next Tab accepts
+  synchronously with no fresh completion request; verified to fail
+  without the fix). The fork's editor itself does NOT forward
+  pageUp/pageDown into the dropdown list (upstream behavior — the keys
+  page-scroll the editor and the dropdown refreshes asynchronously), so
+  no further consumer-side change is warranted (fork stays pristine).
+- **Round 26**: a reviewer fragment (truncated, not a verdict) claimed
+  pageUp/pageDown are not forwarded to the SelectList — adjudicated
+  against the fork code as upstream semantics; re-launched fresh.
+- **Round 26 (fresh)**: accepted, no findings — the full 9-file sweep
+  re-confirmed host execution mode, the stale-dropdown guard, the
+  test-sync fix and every prior-round invariant.
 
-The full-suite tests (2060+), typecheck, `git diff --check` and the
+The full-suite tests (2137), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the
 public extension surface remain unchanged.
 
