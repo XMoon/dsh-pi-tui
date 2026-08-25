@@ -447,29 +447,50 @@ test('I01: commitRewind creates, swaps and restores the selected prompt', async 
   assert.deepEqual(rig.drafts, ['B'], 'the selected prompt restores into the editor')
 })
 
-test('review: the preflight composition is resolved ONCE and the create receives its id (no drift)', async () => {
+test('review: the preflight and the Direct lifecycle compose the SAME concrete id (no drift)', async () => {
   // The M1.5 lock-ordering preflight composes the source's recorded
   // preset BEFORE the target lock is acquired; the Direct lifecycle then
-  // composes from the SAME resolved id. The runner must pass the
-  // PREFLIGHT result — a roster that changes between the two awaits can
-  // never make the create re-resolve a different id.
+  // composes AGAIN from the id the semantic create carries. The second
+  // resolution must receive the PREFLIGHT's resolved id — a roster that
+  // would change between the two awaits can never make the create
+  // re-resolve the SOURCE's alias to a different id.
   const rig = makeRig()
-  // A compose that would DRIFT on a second call (a hostile roster):
-  let calls = 0
+  const preflightIds: Array<string | undefined> = []
+  const lifecycleIds: Array<string | undefined> = []
+  // Deterministic roster: the alias 'minimal' resolves ONCE to the
+  // concrete id 'concrete-minimal'; a concrete id resolves to itself
+  // (composeAgent/presets.resolve semantics).
+  const runnerCompose = async (presetId?: string): Promise<{ agentPreset?: string; setup: () => void }> => ({
+    agentPreset: presetId === 'minimal' ? 'concrete-minimal' : presetId,
+    setup: () => {},
+  })
   rig.host.compose = async (presetId?: string) => {
-    calls += 1
-    return { agentPreset: calls === 1 ? 'stable-first' : 'drifted-second', setup: () => {} }
+    preflightIds.push(presetId)
+    return runnerCompose(presetId)
+  }
+  const baseCreate = rig.host.agents.create
+  rig.host.agents.create = async (call) => {
+    // The Direct lifecycle (migration M1.11): the adapter composes
+    // internally from the request's preset id before creating.
+    lifecycleIds.push(call.agentPreset)
+    await runnerCompose(call.agentPreset)
+    return baseCreate(call)
   }
   const events = [...turn(0, 1, 'A'), ...turn(4, 2, 'B')]
   const candidates = collectRewindCandidates(events)
-  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, {
+  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events, 'minimal'), candidates[0]!, {
     sessionId: 'session-source',
     generation: 1,
   })
   assert.equal(outcome.kind, 'rewound')
-  assert.equal(calls, 1, 'the preflight composes exactly once')
-  assert.equal(rig.created[0]!.meta.agentPreset, 'stable-first', 'the create rides the PREFLIGHT id, never a re-resolution')
-  assert.equal(rig.created[0]!.agentPreset, 'stable-first')
+  assert.equal(preflightIds.length, 1, 'the preflight composes exactly once')
+  assert.equal(lifecycleIds.length, 1)
+  assert.equal(
+    lifecycleIds[0],
+    'concrete-minimal',
+    'the lifecycle composes the PREFLIGHT-resolved id, never the source alias',
+  )
+  assert.equal(rig.created[0]!.meta.agentPreset, 'concrete-minimal', 'the semantic create carries the resolved id')
 })
 
 test('I03: rewinding to the FIRST turn seeds an empty child', async () => {
