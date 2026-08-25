@@ -81,12 +81,19 @@ export class FooterCommandRunner {
 
   /** Replace the config (a settings change): the in-flight child is
    * invalidated and terminated immediately (its result must never commit
-   * under the new config), then a refresh starts with the new config. */
+   * under the new config), the committed rows of the OLD configuration are
+   * cleared at once (stale output must not linger while the new command
+   * runs), then a refresh starts with the new config. */
   setConfig(config: FooterCommandConfig): void {
     this.generation += 1
     this.killChild()
     this.options.config = config
     this.errorGeneration = 0
+    // The old config's rows describe a surface the user no longer has
+    // configured: clear them synchronously (the next result repaints).
+    // Direct sink call — no failure accounting (a config change is not
+    // a failure).
+    this.options.onOutput(undefined)
     this.requestRefresh()
   }
 

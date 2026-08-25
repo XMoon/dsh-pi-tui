@@ -49,6 +49,15 @@ test('invalid documents fail soft with a message', () => {
     [{ schemaVersion: 1, rows: [{ left: [{ id: 'model', prefix: 'x'.repeat(20) }] }] }, /prefix/],
     [{ schemaVersion: 1, rows: [{ separator: { text: 'x'.repeat(10) } }] }, /separator text/],
     [{ schemaVersion: 1, rows: [{ left: Array.from({ length: 33 }, (_, i) => ({ id: `i${i}` })) }] }, /32 items/],
+    // Explicit null zones are malformed (only an ABSENT zone is omitted).
+    [{ schemaVersion: 1, rows: [{ left: null }] }, /left\/right must be arrays/],
+    [{ schemaVersion: 1, rows: [{ right: null, left: [] }] }, /left\/right must be arrays/],
+    // Terminal control characters in decoration strings are rejected (a
+    // project-supplied layout must never inject ESC/OSC/C0 sequences).
+    [{ schemaVersion: 1, rows: [{ left: [{ id: 'model', prefix: '\u001b]0;title\u0007' }] }] }, /control characters/],
+    [{ schemaVersion: 1, rows: [{ left: [{ id: 'model', suffix: '\u001b[2J' }] }] }, /control characters/],
+    [{ schemaVersion: 1, rows: [{ separator: { text: '\u001b[?1049h' } }] }, /control characters/],
+    [{ schemaVersion: 1, rows: [{ separator: { text: '\u0000' } }] }, /control characters/],
   ]
   for (const [input, pattern] of cases) {
     const parsed = parseFooterLayout(input)

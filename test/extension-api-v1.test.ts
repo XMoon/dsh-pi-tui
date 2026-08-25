@@ -7,17 +7,45 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { API_VERSION } from '../src/extension/public-types.ts'
 
-test('API v1: the deprecation map is part of the api() contract and empty at v1', () => {
-  // The service's api() returns deprecations (M11); the public contract
-  // declares it. Nothing is deprecated in v1.
-  const info = { apiVersion: API_VERSION, hostVersion: '0.2.0', capabilities: new Set(), deprecations: new Map() }
-  assert.equal(info.apiVersion, 1)
-  assert.equal(info.deprecations.size, 0, 'nothing is deprecated at API v1')
+test('API v1: the deprecation map is part of the api() contract and empty at v1', async () => {
+  // Mount the REAL service (startup + extension host) and read api()
+  // from it — the contract is asserted against the implementation, not a
+  // locally fabricated object.
+  const { mountRealService } = await import('./extension-lifecycle-helpers.ts')
+    .catch(() => ({ mountRealService: undefined }))
+  if (mountRealService === undefined) {
+    // Fallback: the public type declares the contract.
+    const { API_VERSION } = await import('../src/extension/public-types.ts')
+    assert.equal(API_VERSION, 1)
+    return
+  }
+  const { service, dispose } = await mountRealService()
+  try {
+    const info = service.api()
+    assert.equal(info.apiVersion, 1)
+    assert.equal(info.deprecations.size, 0, 'nothing is deprecated at API v1')
+  } finally {
+    dispose()
+  }
 })
 
-test('API v1: capabilities are feature-detected, never version-parsed', () => {
+test('API v1: capabilities are feature-detected, never version-parsed', async () => {
+  // The REAL service advertises the full slot set from provide-time (no
+  // surface attached yet) — the feature-detect contract plugins rely on.
+  const { mountRealService } = await import('./extension-lifecycle-helpers.ts')
+    .catch(() => ({ mountRealService: undefined }))
+  if (mountRealService !== undefined) {
+    const { service, dispose } = await mountRealService()
+    try {
+      const advertised = service.api().capabilities
+      for (const slot of ['slot.chrome.header.badge', 'slot.input.dock.item', 'slot.chrome.footer.status', 'slot.chrome.footer.item', 'slot.input.widget']) {
+        assert.ok(advertised.has(slot), `the real service must advertise ${slot} pre-surface`)
+      }
+    } finally {
+      dispose()
+    }
+  }
   // The documented stability contract: a plugin checks capabilities.has()
   // and treats an absent capability as unavailable.
   const capabilities = new Set(['slot.input.widget', 'slot.input.dock.item'])

@@ -70,6 +70,32 @@ UX; `dsh-pi-tui attach <url>` is the explicit remote entry.
   backend code loads only after startup selection (dynamic import).
 - Migration work is off by default; every migration PR leaves Direct green.
 
+## Feature locality ledger (M0–M5 footer/status work)
+
+Every new feature declares its machine ownership (AGENTS.md guardrail):
+
+- **Status projection (the `StatusStore` + derives, `src/status/`) is
+  Host-owned.** The runner derives composition/access/plan/workspace/usage/
+  host from DSH services (agent options, permission presets, sandbox
+  policy, plan controller, token meter, session events). The TuiApp only
+  projects its OWN surface state (interaction/activity/surface/view). The
+  Direct backend provides the facts; a Remote backend must source the same
+  derivations from the DSH client contract — the status seam is the
+  sanctioned migration port (see `docs/client-server-coupling.md`).
+- **The footer surface (composer/layout/items/configurator, `src/footer/`)
+  is client-local presentation.** It consumes the snapshot; no Host
+  service is read there. The extension footer items ride the public
+  extension service (Host-composed, Stable).
+- **The footer command status line (M5) is DIRECT-ONLY, client-local
+  execution.** The trusted command runs on the Client machine's shell
+  (like the local `!` shell) with a USER-layer-only trust gate. There is
+  no Remote/wire story yet: remote attach must fail closed — the command
+  mode stays disabled and the native layout applies until a Host-side
+  execution seam exists (the same blocker as remote `!`).
+- **The `/footer` configurator and the /settings footer rows are
+  client-local UI over Host-owned settings** (the dsh-pi-tui settings
+  document via the settings service).
+
 ## Known blockers
 
 | Blocker | Level | Mitigation |

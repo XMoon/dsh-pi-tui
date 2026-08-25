@@ -100,15 +100,28 @@ test('coalescing: requests within the interval produce ONE spawn', async () => {
   runner.requestRefresh()
   runner.requestRefresh()
   // The first request spawns; the others coalesce onto the next interval.
-  await new Promise(resolve => setTimeout(resolve, 200))
-  assert.equal(spawns, 1, `only one spawn within the interval, saw ${spawns}`)
+  const deadline = Date.now() + 5000
+  while (outputs.length === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.equal(spawns, 1, `the first start must produce one result, saw ${spawns}`)
+  // Within a window far shorter than the 1000ms interval, no second start
+  // may appear (the two later requests coalesced, they never overlap).
+  await new Promise(resolve => setTimeout(resolve, 150))
+  assert.equal(spawns, 1, `no second spawn within the interval, saw ${spawns}`)
   runner.dispose()
 })
 
-test('a stale child result never commits over a newer generation', async () => {
+test('requests within the interval NEVER overlap a running child (coalescing guarantee)', async () => {
+  // The interval is the minimum start spacing and the timeout ceiling is
+  // the interval minimum, so through requestRefresh a second child can
+  // never start while the first is still in flight — the supersede guard
+  // is reachable only via setConfig (covered below). A slow child that
+  // finishes within its timeout must therefore COMMIT its output: the
+  // in-interval request coalesces, it does not kill or shadow the child.
   const outputs: Array<string[] | undefined> = []
   const runner = new FooterCommandRunner({
-    config: { ...CONFIG, command: 'node -e "setTimeout(() => process.stdout.write(\'stale\\n\'), 300)"' },
+    config: { ...CONFIG, command: 'node -e "setTimeout(() => process.stdout.write(\'slow\\n\'), 150)"' },
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,
@@ -116,12 +129,15 @@ test('a stale child result never commits over a newer generation', async () => {
     signal: new AbortController().signal,
   })
   runner.requestRefresh()
-  // A second request supersedes the slow first child.
-  await new Promise(resolve => setTimeout(resolve, 50))
+  // A second request lands INSIDE the interval: it must coalesce.
+  await new Promise(resolve => setTimeout(resolve, 20))
   runner.requestRefresh()
-  await new Promise(resolve => setTimeout(resolve, 500))
-  // The stale child's result must not commit (its generation is old).
-  assert.ok(!outputs.some(rows => rows?.includes('stale')), 'a stale child must never commit')
+  const deadline = Date.now() + 5000
+  while (outputs.length === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.equal(outputs.length, 1, `exactly one child result (no overlap): ${JSON.stringify(outputs)}`)
+  assert.deepEqual(outputs[0], ['slow'], 'the in-flight child must commit its own result')
   runner.dispose()
 })
 
@@ -272,7 +288,10 @@ test('setConfig invalidates the in-flight child (its result never commits under 
     signal: new AbortController().signal,
   })
   runner.requestRefresh()
-  await new Promise(resolve => setTimeout(resolve, 50))
+  // start() spawns synchronously, so the child is in flight after one
+  // settle; setConfig supersedes it (generation bump + kill) and starts
+  // the new generation immediately.
+  await Promise.resolve()
   runner.setConfig({ ...CONFIG, command: 'node -e "process.stdout.write(\'new\\n\')"' })
   const deadline = Date.now() + 5000
   while (!outputs.some(rows => rows?.includes('new')) && Date.now() < deadline) {
@@ -280,5 +299,37 @@ test('setConfig invalidates the in-flight child (its result never commits under 
   }
   assert.ok(outputs.some(rows => rows?.includes('new')), 'the new config must commit')
   assert.ok(!outputs.some(rows => rows?.includes('old')), 'the old child must never commit')
+  runner.dispose()
+})
+
+test('setConfig clears the OLD config\'s committed rows immediately (no stale surface)', async () => {
+  const outputs: Array<string[] | undefined> = []
+  let notifyCount = 0
+  const runner = new FooterCommandRunner({
+    config: { ...CONFIG, command: 'node -e "process.stdout.write(\'first\\n\')"' },
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: (rows) => outputs.push(rows),
+    onNotifyOnce: () => { notifyCount += 1 },
+    signal: new AbortController().signal,
+  })
+  runner.requestRefresh()
+  const deadline = Date.now() + 5000
+  while (!outputs.some(rows => rows?.includes('first')) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  // Config change: the old rows must be cleared SYNCHRONOUSLY (an
+  // explicit undefined from setConfig — not a failure, so no notify),
+  // before the new config's result lands.
+  const before = outputs.length
+  runner.setConfig({ ...CONFIG, command: 'node -e "process.stdout.write(\'second\\n\')"' })
+  assert.equal(outputs[before], undefined, 'the old config rows must clear synchronously on setConfig')
+  assert.equal(notifyCount, 0, 'a config change is not a failure (no notify)')
+  const deadline2 = Date.now() + 5000
+  while (!outputs.some(rows => rows?.includes('second')) && Date.now() < deadline2) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.ok(outputs.some(rows => rows?.includes('second')), 'the new config must commit')
   runner.dispose()
 })

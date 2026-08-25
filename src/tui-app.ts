@@ -832,8 +832,10 @@ function modelFromLabel(label: string): { provider?: string; id: string; display
 
 /** Structural equality for the status sections (plain JSON-safe data):
  * the projection only commits sections whose CONTENT changed — a
- * same-value setStatus must not churn the store's revision. */
-function plainSectionEqual(a: unknown, b: unknown): boolean {
+ * same-value setStatus must not churn the store's revision. Shared with
+ * the runner's refreshStatus (same-value refreshes must not churn the
+ * store's revision nor the command runner's refresh). */
+export function plainSectionEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
   const aKeys = Object.keys(a)
@@ -9531,9 +9533,9 @@ export class TuiApp {
       registry: options.registry,
       snapshot: () => this.statusStore.snapshot(),
       composer: this.footerComposer,
-      editorEmpty: this.editor.getText().trim() === '',
-      extensionFooterText: this.extensionHost?.footerText() ?? '',
-      maxVisible: Math.max(8, Math.min(30, this.terminal.rows - 2)),
+      editorEmpty: () => this.editor.getText().trim() === '',
+      extensionFooterText: () => this.extensionHost?.footerText() ?? '',
+      maxVisible: () => Math.max(8, Math.min(30, this.terminal.rows - 2)),
       onSave: (layout) => {
         handle?.hide()
         options.onSave(layout)

@@ -140,3 +140,45 @@ test('Shift+↑/↓ reorder and Tab switches the row', async () => {
   assert.equal(model.state().activeRow, 1)
   app.stop()
 })
+
+test('the preview context is LIVE: an extension segment update while open shows up', async () => {
+  // The panel receives GETTERS for the editor-empty flag and the
+  // extension footer text: a change while the panel is open (a segment
+  // updated, a draft typed) must be reflected on the next render.
+  let extensionText = ''
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  // Avoid the real extension host: drive the panel directly with getters.
+  const { FooterConfiguratorPanel } = await import('../src/footer/configurator.ts')
+  const { FooterComposer } = await import('../src/footer/composer.ts')
+  const { createBuiltinFooterRegistry } = await import('../src/footer/builtin-items.ts')
+  const model = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'ext:*' }], right: [] }],
+  }, app.getFooterItemRegistry())
+  const panel = new FooterConfiguratorPanel({
+    model,
+    registry: app.getFooterItemRegistry(),
+    snapshot: () => {
+      const snap = (app as unknown as { statusStore: { snapshot(): { context?: unknown } & Record<string, unknown> } }).statusStore.snapshot() as { context?: unknown } & Record<string, unknown>
+      // Give the preview subjects (the main subject shows the extension text).
+      return { ...snap, view: { subject: { kind: 'main' } } } as never
+    },
+    composer: new FooterComposer(createBuiltinFooterRegistry()),
+    editorEmpty: () => true,
+    extensionFooterText: () => extensionText,
+    maxVisible: () => 100,
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  // The layout's ext:* item renders the extension footer text. Window the
+  // panel to its TAIL (the preview section) so the assertion sees it.
+  const renderTail = (): string => panel.render(100).join('\n')
+  const first = renderTail()
+  assert.ok(!first.includes('fresh-segment'), 'no extension text yet')
+  // The extension host updates while the panel is open (a replace()).
+  extensionText = 'fresh-segment'
+  const second = renderTail()
+  assert.ok(second.includes('fresh-segment'), `the live getter must show the update:\n${second}`)
+  app.stop()
+})

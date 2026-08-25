@@ -84,6 +84,7 @@ import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
 import { formatStats, StatsFolder } from './stats.ts'
+import { plainSectionEqual } from './status/equal.ts'
 import { StatusStore } from './status/store.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
 import { deriveAccessStatus } from './status/derive-access.ts'
@@ -94,7 +95,7 @@ import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/ty
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
-import { resolveTrustedFooterCommand, type SettingsDescriptorLike } from './footer/command-trust.ts'
+import { resolveTrustedFooterCommand, resolveUserLayerFooterMode, type SettingsDescriptorLike } from './footer/command-trust.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -2390,27 +2391,45 @@ export function apply(ctx: Context, config: Config): void {
       // items and the command status surface read. The child's OWN facts
       // (workspace/usage) follow the display subject below; the parent
       // context measurement must not ride the child's usage either.
-      statusStore.update({
-        composition: viewing === undefined ? deriveCompositionStatus() : {},
-        access: viewing === undefined
-          ? deriveAccessStatus(
-              {
-                permissionPresets: permission,
-                sandboxPolicy: ctx.get('sandboxPolicy'),
-                approvalFold: effectiveApprovalPolicy,
-                sandboxFold: effectiveSandboxMode,
-              },
-              events,
-              liveAgent?.session,
-            )
-          : {},
-        collaboration: viewing === undefined
-          ? { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, events, foldPlanMode) }
-          : { plan: { effective: false } },
-        workspace: deriveWorkspaceStatus(displayCwd),
-        usage: usageFromStats(viewing?.stats.snapshot() ?? stats, viewing === undefined ? contextTokens : undefined),
-        host: deriveHostStatus(),
-      })
+      // The derivations mint fresh objects every call: only sections whose
+      // CONTENT actually changed are committed — an identical refresh must
+      // not churn the store's revision (the store compares by identity) nor
+      // wake the command runner's refresh on every streaming event.
+      const current = statusStore.snapshot()
+      const composition = viewing === undefined ? deriveCompositionStatus() : {}
+      const access = viewing === undefined
+        ? deriveAccessStatus(
+            {
+              permissionPresets: permission,
+              sandboxPolicy: ctx.get('sandboxPolicy'),
+              approvalFold: effectiveApprovalPolicy,
+              sandboxFold: effectiveSandboxMode,
+            },
+            events,
+            liveAgent?.session,
+          )
+        : {}
+      const collaboration = viewing === undefined
+        ? { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, events, foldPlanMode) }
+        : { plan: { effective: false } }
+      const workspace = deriveWorkspaceStatus(displayCwd)
+      const usage = usageFromStats(viewing?.stats.snapshot() ?? stats, viewing === undefined ? contextTokens : undefined)
+      const host = deriveHostStatus()
+      const patch: {
+        composition?: typeof composition
+        access?: typeof access
+        collaboration?: typeof collaboration
+        workspace?: typeof workspace
+        usage?: typeof usage
+        host?: typeof host
+      } = {}
+      if (!plainSectionEqual(current.composition, composition)) patch.composition = composition
+      if (!plainSectionEqual(current.access, access)) patch.access = access
+      if (!plainSectionEqual(current.collaboration, collaboration)) patch.collaboration = collaboration
+      if (!plainSectionEqual(current.workspace, workspace)) patch.workspace = workspace
+      if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
+      if (!plainSectionEqual(current.host, host)) patch.host = host
+      statusStore.update(patch)
       app.setStatus({
         model: modelLabel(),
         cwd: shortCwd(liveCwd),
@@ -4924,12 +4943,17 @@ export function apply(ctx: Context, config: Config): void {
     const applyFooterSettings = (doc: { footer: string; footerLayout?: unknown } | undefined): void => {
       if (doc === undefined) return
       if (doc.footer === 'command') {
-        // The trust gate: the command must live in the USER layer of the
-        // settings descriptor (never the merged/project value).
+        // The trust gate: the COMMAND must live in the USER layer of the
+        // settings descriptor (never the merged/project value), AND the
+        // command MODE must be user-layer-owned — a project flipping the
+        // merged `footer: command` must never silently trigger the user's
+        // command (plan §17.4).
         const settingsService = ctx.get('settings')
         const descriptors = settingsService?.describe?.() as readonly SettingsDescriptorLike[] | undefined
-        const config = resolveTrustedFooterCommand(descriptors, settingsNamespace('dsh-pi-tui') as unknown as string)
-        if (config === undefined) {
+        const namespace = settingsNamespace('dsh-pi-tui') as unknown as string
+        const config = resolveTrustedFooterCommand(descriptors, namespace)
+        const userMode = resolveUserLayerFooterMode(descriptors, namespace)
+        if (config === undefined || userMode !== 'command') {
           disableFooterCommand()
           if (!footerWarningShown) {
             footerWarningShown = true

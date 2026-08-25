@@ -12,6 +12,7 @@
  */
 
 import { emptyStatusSnapshot, type StatusPatch, type StatusSnapshot } from './types.ts'
+import { plainSectionEqual } from './equal.ts'
 
 /** A listener receiving the new snapshot after a change. */
 export type StatusListener = (snapshot: StatusSnapshot) => void
@@ -37,12 +38,12 @@ export class StatusStore {
   }
 
   /** Replace the whole snapshot. Notifies only when a section changed
-   * (the same section-identity discipline as update — an identical
+   * (the same content-equality discipline as update — an identical
    * replace is a no-op, never a render storm). */
   replace(next: StatusSnapshot): void {
     let changed = false
     for (const key of Object.keys(next) as (keyof StatusSnapshot)[]) {
-      if (this.current[key] !== next[key]) {
+      if (!plainSectionEqual(this.current[key], next[key])) {
         changed = true
         break
       }
@@ -51,14 +52,18 @@ export class StatusStore {
   }
 
   /** Merge a section-level patch. Sections keep their identity when the
-   * patch does not touch them. */
+   * patch does not touch them; a patch whose sections are CONTENT-equal to
+   * the current ones (fresh objects, same values — the runner's derives
+   * and the app's projections mint new objects on every call) does not
+   * notify and does not bump the revision: an identical refresh must
+   * never trigger a render storm or a command refresh. */
   update(patch: StatusPatch): void {
     const keys = (Object.keys(patch) as (keyof StatusSnapshot)[])
       .filter(key => patch[key] !== undefined)
     if (keys.length === 0) return
     let changed = false
     for (const key of keys) {
-      if (this.current[key] !== patch[key]) {
+      if (!plainSectionEqual(this.current[key], patch[key])) {
         changed = true
         break
       }
