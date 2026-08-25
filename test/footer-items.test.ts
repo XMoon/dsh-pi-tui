@@ -177,3 +177,16 @@ test('the registry rejects duplicate ids and lists every id', () => {
   assert.ok(registry.ids().includes('view-scope'))
   assert.ok(registry.ids().includes('ext:*'))
 })
+
+test('an unknown format string degrades to the item default, never throws', () => {
+  // The layout parser accepts any format string (extension items declare
+  // their own); builtin items must fall back to their default formatter.
+  const model = render('model', snapshotWith(snap => {
+    snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
+  }), { id: 'x', format: 'zzz-not-a-format' })
+  assert.equal(model, '[deepseek/flash]', 'the unknown format must render the default label')
+  const context = render('context', snapshotWith(snap => {
+    snap.usage.context = { usedTokens: 25000, windowTokens: 100000, percent: 25 }
+  }), { id: 'x', format: 'zzz' })
+  assert.equal(context, '[███░░░░░░░░░] 25%', 'the unknown context format must fall back to the default bar')
+})

@@ -88,3 +88,25 @@ test('command MODE must be user-layer-owned: a project flipping footer: command 
   assert.equal(resolveUserLayerFooterMode(undefined, NS), undefined)
   assert.equal(resolveUserLayerFooterMode([descriptor(undefined)], NS), undefined)
 })
+
+test('the Direct config-port trust read resolves the same USER-layer facts', async () => {
+  // The runner's gate goes through the CONFIG PORT: the Direct adapter
+  // reads the settings descriptor's user layer — same refusal semantics,
+  // no raw ctx access in the runner.
+  const { DirectConfigPort } = await import('../src/runtime/direct/config-direct.ts')
+  const ctx = {
+    get: () => ({
+      describe: () => [{
+        ns: 'dsh-pi-tui',
+        user: { footer: 'command', footerCommand: { schemaVersion: 1, command: '~/.config/dsh/statusline.sh' } },
+      }],
+    }),
+  }
+  const port = new DirectConfigPort(ctx as never, undefined, () => undefined)
+  assert.equal(port.footerCommandTrust.userFooterMode, 'command')
+  assert.equal(port.footerCommandTrust.command?.command, '~/.config/dsh/statusline.sh')
+  // No user layer: refused.
+  const empty = new DirectConfigPort({ get: () => ({ describe: () => [{ ns: 'dsh-pi-tui' }] }) } as never, undefined, () => undefined)
+  assert.equal(empty.footerCommandTrust.userFooterMode, undefined)
+  assert.equal(empty.footerCommandTrust.command, undefined)
+})

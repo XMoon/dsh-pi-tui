@@ -26,6 +26,7 @@
  */
 
 import type { AuthorizationTarget } from '../authorization.ts'
+import type { FooterCommandConfig } from '../footer/command-runner.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode). The old
@@ -63,6 +64,20 @@ export interface TuiSettingsDoc {
 export interface TuiSettingsConfig {
   get(): TuiSettingsDoc
   replace(doc: TuiSettingsDoc): unknown
+}
+
+/** The USER-layer footer-command trust read (M5, plan §17.4): whether the
+ * USER layer of the settings document declares the footer command mode
+ * AND a trusted command. The adapter owns the settings descriptor access
+ * (a Remote adapter replays the same facts from the wire) — the runner
+ * never touches the raw settings service for the trust gate. */
+export interface FooterCommandTrust {
+  /** The user layer's declared footer mode ('command' when the user opted
+   * in), undefined when the user layer has no opinion. */
+  readonly userFooterMode: string | undefined
+  /** The trusted command config (the user layer's footerCommand, bounds
+   * validated), undefined when untrusted/absent. */
+  readonly command: FooterCommandConfig | undefined
 }
 
 /** The TUI settings document surface as the commands surface names it
@@ -261,6 +276,8 @@ export interface PresetDefaultConfig {
 export interface ConfigPort {
   /** The TUI settings document (theme/footer/...). */
   readonly tuiSettings: TuiSettingsConfig | undefined
+  /** The M5 footer-command trust read (USER-layer only). */
+  readonly footerCommandTrust: FooterCommandTrust
   /** Provider profiles (the add-provider wizard + /login section reads). */
   readonly providers: ProviderProfileConfig
   /** Credentials (API keys + stored records). */
