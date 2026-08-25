@@ -5464,7 +5464,8 @@ export class TuiApp {
    * (its turn's root disclosure is open — plan §33): a MANUAL disclosure
    * (focusExpandedTurns) or the regular Ctrl+O keyboard master's DERIVED
    * reveal (never written into focusExpandedTurns — the two surfaces do
-   * not pollute each other). */
+   * not pollute each other). Both count: regular mode full-reveals ANY
+   * expanded root. */
   private isInsideExpandedFocus(message: TranscriptMessage, boundary: number): boolean {
     if (!this.focusModeEnabled || !('turn' in message)) return false
     const turn = message.turn
@@ -5472,9 +5473,9 @@ export class TuiApp {
   }
 
   /** Regular + Focus + Ctrl+O: whether `turn` is a DERIVED recent Focus
-   * turn — the keyboard master's full-reveal scope. Fullscreen and
-   * manually revealed turns are excluded (the manual disclosure has its
-   * own per-card semantics; the search reveal its own jump). */
+   * turn — the keyboard master's root-expansion scope (it feeds the
+   * projection and isInsideExpandedFocus; never written into
+   * focusExpandedTurns). Fullscreen never derives. */
   private isRegularCtrlOExpandedTurn(turn: number, boundary: number): boolean {
     if (!this.focusModeEnabled || this.fullscreen !== undefined || !this.toolOutputExpanded) return false
     return Number.isFinite(boundary) && turn >= boundary
@@ -5483,10 +5484,11 @@ export class TuiApp {
   /** The effective expansion of one foldable message (plan §9/§33),
    * SURFACE-ADAPTIVE: inside an expanded Focus Thought a SECONDARY card
    * is compact unless its per-card override says otherwise in FULLSCREEN
-   * (the mouse fine-inspection mode), while in REGULAR the Ctrl+O
-   * keyboard master full-reveals the DERIVED recent turns (root open ==
-   * child full — no fake unclickable affordances). Every other context
-   * keeps the existing rule. */
+   * (the mouse fine-inspection mode), while in REGULAR ANY expanded root
+   * — Ctrl+O-derived or manually revealed — full-reveals its
+   * non-Thinking process (no mouse, so no dead compact affordances) and
+   * Thinking follows Alt+T (hidden or full). Every other context keeps
+   * the existing rule. */
   private effectiveMessageExpanded(message: TranscriptMessage, boundary: number): boolean {
     if ('turn' in message && this.isInsideExpandedFocus(message, boundary) && isFocusSecondaryDisclosure(message)) {
       if (this.fullscreen !== undefined) {
