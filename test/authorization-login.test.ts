@@ -668,6 +668,45 @@ test('withdrawing ONE prompt closes only ITS UI (prompt-scoped handles)', async 
   assert.equal(closedP2, 0, 'the other prompt\'s UI stays open')
 })
 
+test('the pre-bind buffer is BOUNDED and dropped on close (a wedged begin cannot grow it)', async () => {
+  const answered: Array<string | null> = []
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'x' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  // A wedged begin: flood events before any bind. The buffer must cap
+  // (fail-closed), and close() must clear it.
+  for (let i = 0; i < 200; i += 1) {
+    flow.onEvent({ kind: 'notice', attemptId: 'wedged', notice: { message: `n${i}` } })
+  }
+  flow.close()
+  // After close, no event is accepted at all.
+  flow.onEvent({ kind: 'prompt', attemptId: 'wedged', promptId: 'p', prompt: { kind: 'text', message: 'x' } })
+  await settle()
+  assert.deepEqual(answered, [], 'no event after close is ever presented or answered')
+})
+
+test('bind() is ONE-SHOT: rebinding to another attempt is refused', async () => {
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'x' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, { respond: async () => {}, cancel: async () => {} })
+  flow.bind('attempt-a')
+  flow.bind('attempt-a') // idempotent for the same id
+  assert.throws(
+    () => flow.bind('attempt-b'),
+    /already bound/,
+    'a second bind to a DIFFERENT attempt is a caller bug and must fail loudly',
+  )
+})
+
 // ── §17.6 method selection ─────────────────────────────────────────────────
 
 test('/login runs the flow directly when it offers one method', async () => {

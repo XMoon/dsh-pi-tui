@@ -5718,8 +5718,11 @@ export function apply(ctx: Context, config: Config): void {
     })
     const refreshCredentialSurface = (): void => { refreshStatus(); updateWelcomeCard() }
     // The credential event wiring is the config port's (migration M1.9):
-    // reference- and record-updated both change the same surface.
-    backend.config.credentials.onChanged(refreshCredentialSurface)
+    // reference- and record-updated both change the same surface. The
+    // subscription is DISPOSED on teardown — a remount/HMR must never
+    // accumulate duplicate Host listeners (review finding).
+    const disposeCredentialSubscription = backend.config.credentials.onChanged(refreshCredentialSurface)
+    lifecycleController.signal.addEventListener('abort', disposeCredentialSubscription, { once: true })
     // Initial plan badge, busy indicator, and auto title from the log (a
     // resumed session may be persisted mid-turn). Without a session the
     // surfaces stay at their idle defaults.

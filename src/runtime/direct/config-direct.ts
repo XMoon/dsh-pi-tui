@@ -325,9 +325,17 @@ export class DirectCredentialConfig implements CredentialConfig {
     }))
   }
 
-  onChanged(listener: () => void): void {
-    this.ctx.on?.('credentials/reference-updated', listener)
-    this.ctx.on?.('credentials/record-updated', listener)
+  onChanged(listener: () => void): () => void {
+    const disposers: Array<() => void> = []
+    const register = (event: string): void => {
+      const dispose = this.ctx.on?.(event, listener)
+      if (typeof dispose === 'function') disposers.push(dispose as () => void)
+    }
+    register('credentials/reference-updated')
+    register('credentials/record-updated')
+    // The port returns a disposer so surface remounts/HMR can never
+    // accumulate duplicate listeners (review finding).
+    return () => { for (const dispose of disposers) dispose() }
   }
 }
 
@@ -505,6 +513,12 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       if (pending.attemptId !== attemptId) continue
       this.pendingPrompts.delete(promptId)
       pending.reject(cancellationError('authorization attempt settled'))
+      // The client UI must close EVEN IF the upstream flow never settles
+      // (a cancel aborts the controller, but a flow that ignores its
+      // signal would otherwise leave the prompt UI open forever): the
+      // withdrawal event closes exactly the prompt it names (review
+      // finding).
+      this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
     }
   }
 

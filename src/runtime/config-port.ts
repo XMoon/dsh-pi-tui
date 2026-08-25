@@ -100,8 +100,9 @@ export interface CredentialConfig {
   listRecords(): Promise<readonly { key: string; kind?: string }[]>
   /** Subscribe to credential surface changes (reference- and
    * record-updated — the footer/welcome refresh; a listener is a LOCAL
-   * subscription callback, never a wire callback). */
-  onChanged(listener: () => void): void
+   * subscription callback, never a wire callback). Returns the
+   * UNSUBSCRIBE — a surface remount/HMR must dispose, never accumulate. */
+  onChanged(listener: () => void): () => void
 }
 
 /** One authorization flow as the /login surface sees it (detached — the

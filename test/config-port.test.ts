@@ -371,6 +371,51 @@ test('authorization cancel() rejects pending prompt bridges IMMEDIATELY', async 
   assert.equal(promptSettled, true, 'cancel rejects the pending bridge immediately (the upstream await releases)')
 })
 
+test('authorization cancel() emits prompt-withdrawn so the UI closes even if the flow never settles', async () => {
+  // A cancel must close the client's prompt UI EVEN IF the upstream flow
+  // ignores its abort signal and never settles: the adapter emits the
+  // withdrawal event itself, never waiting on the upstream settlement.
+  const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  let promptSettled = false
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        // The upstream flow NEVER settles (a wedged/ignored abort); only
+        // the bridge rejection releases the prompt await, and even then
+        // no `settled` event is emitted.
+        try {
+          await request.interaction.prompt({ kind: 'text', message: 'enter' })
+          promptSettled = true
+        } catch {
+          promptSettled = true
+        }
+        return await new Promise<{ status: 'authorized' }>(() => {}) // never settles
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai' })
+  assert.equal(started.kind, 'started')
+  await settle()
+  const promptEvent = events.find(event => event.kind === 'prompt')
+  assert.ok(promptEvent !== undefined && promptEvent.kind === 'prompt')
+  await authorization.cancel(promptEvent.attemptId)
+  await settle()
+  off()
+  assert.equal(promptSettled, true, 'cancel rejects the pending bridge immediately')
+  const withdrawn = events.find(event => event.kind === 'prompt-withdrawn'
+    && event.attemptId === promptEvent.attemptId && event.promptId === promptEvent.promptId)
+  assert.ok(withdrawn !== undefined,
+    `cancel must emit prompt-withdrawn for the open prompt (the UI closes without a settled event):\n${JSON.stringify(events)}`)
+})
+
 /** Flush the microtask queue (the event bridge is promise-based). */
 async function settle(): Promise<void> {
   await new Promise<void>((resolve) => { resolve() })
@@ -457,4 +502,19 @@ test('credential onChanged subscribes both reference- and record-updated', async
   ctx.emit('credentials/record-updated', 'llm-pi-ai/openai' as never)
   await Promise.resolve()
   assert.deepEqual(refreshes, ['refresh', 'refresh'])
+})
+
+test('credential onChanged returns a disposer (a remount never accumulates listeners)', async () => {
+  const ctx = new Context()
+  const refreshes: string[] = []
+  const dispose = new DirectConfigPort(ctx as never, undefined, () => undefined)
+    .credentials.onChanged(() => { refreshes.push('refresh') })
+  ctx.emit('credentials/reference-updated', 'OPENAI_API_KEY' as never)
+  await Promise.resolve()
+  assert.equal(refreshes.length, 1)
+  dispose()
+  ctx.emit('credentials/reference-updated', 'OPENAI_API_KEY' as never)
+  ctx.emit('credentials/record-updated', 'llm-pi-ai/openai' as never)
+  await Promise.resolve()
+  assert.deepEqual(refreshes, ['refresh'], 'after dispose no credential event reaches the listener')
 })

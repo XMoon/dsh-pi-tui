@@ -249,9 +249,14 @@ export function createAuthorizationFlow(
    * prompt it names; answers settle exactly the prompt they answer). */
   const openPrompts = new Map<string, { withdraw(): void }>()
   /** Events received before `bind` (the subscription starts before the
-   * attempt id is known — the runner subscribes before begin). */
+   * attempt id is known — the runner subscribes before begin). BOUNDED:
+   * the window is one microtask turn in practice, but a wedged begin
+   * must never grow the buffer without limit or retain a concurrent
+   * attempt's payloads past close(). */
   const buffered: AuthorizationFlowEvent[] = []
+  const BUFFER_LIMIT = 32
   let boundAttemptId: string | undefined
+  let closed = false
   /** Resolve the attempt outcome when the `settled` event arrives. */
   let settle: (outcome: { status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }) => void
   const outcome = new Promise<{ status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }>((resolve) => {
@@ -273,6 +278,8 @@ export function createAuthorizationFlow(
     openPrompts.clear()
     noticeHandle?.()
     noticeHandle = undefined
+    buffered.length = 0
+    closed = true
   }
   /** Present one prompt event and answer it through the port. */
   const presentPrompt = (event: {
@@ -383,6 +390,13 @@ export function createAuthorizationFlow(
   }
   return {
     bind: (attemptId) => {
+      // ONE-SHOT: a flow is created per attempt and must never be
+      // retargeted — a second bind to a DIFFERENT attempt is a caller
+      // bug (the isolation guarantee would silently break otherwise).
+      if (boundAttemptId !== undefined) {
+        if (boundAttemptId === attemptId) return
+        throw new Error(`authorization flow already bound to ${boundAttemptId}, cannot rebind to ${attemptId}`)
+      }
       boundAttemptId = attemptId
       // Replay the events that arrived before the attempt id was known
       // (the runner subscribes before begin so no early event is missed);
@@ -393,8 +407,11 @@ export function createAuthorizationFlow(
       buffered.length = 0
     },
     onEvent: (event) => {
+      if (closed) return
       if (boundAttemptId === undefined) {
-        buffered.push(event)
+        // Bounded fail-closed: a wedged begin must not grow the buffer
+        // without limit (and stale pre-bind events are dropped on close).
+        if (buffered.length < BUFFER_LIMIT) buffered.push(event)
         return
       }
       if (event.attemptId !== boundAttemptId) return
