@@ -2008,17 +2008,20 @@ test('a replacement editor submit keeps the shell wire form through the host fal
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.deepEqual([...submitted], ['!pwd'], 'a replacement !pwd submit keeps the shell-context wire form')
+  assert.equal(plugin.getText(), '', 'a successful submit clears the plugin document (accepted-control)')
   // shell-local: `!!pwd` is LOCAL-ONLY — degrading it to a plain `pwd`
   // would leak the local command into the session/model.
   plugin.setText('!!pwd')
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.deepEqual([...submitted], ['!pwd', '!!pwd'], 'a replacement !!pwd submit keeps the local-only wire form')
+  assert.equal(plugin.getText(), '', 'a successful submit clears the plugin seat (accepted-control)')
   // prompt-mode wire: unchanged (identity — a plugin document is raw).
   plugin.setText('plain prose')
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.deepEqual([...submitted], ['!pwd', '!!pwd', 'plain prose'])
+  assert.equal(plugin.getText(), '', 'a successful submit clears the plugin seat (accepted-control)')
   handle.dispose()
   app.reconcileEditorNow()
   app.stop()
@@ -2215,6 +2218,62 @@ test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', a
     setCompgenRunnerForTest(undefined)
     resetCommandCacheForTest()
   }
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
+
+// ── review round: synchronous rejection restore survives the fallback ──────
+// The fork clears the host editor BEFORE onSubmit, and a SYNCHRONOUS
+// rejection (the runner's divergence-guard shape: onSubmit restores the
+// draft through the wire boundary and returns) rewrites the VISIBLE
+// plugin seat while the fallback dispatch is still on the stack. The
+// fallback tail must not clobber that restore with the post-submit empty
+// host state — the seat's change revision distinguishes "nothing
+// external touched the seat" from "explicitly rewritten", even when the
+// restored text equals the pre-dispatch document.
+
+test('a synchronous rejection restore survives the fallback sync-back', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  let app: TuiApp
+  app = new TuiApp(vt, {
+    onSubmit: (text) => {
+      submitted.push(text)
+      // Synchronous rejection: restore the draft through the wire
+      // boundary and return (the divergence-guard shape).
+      app.setEditorText(text)
+    },
+    onExit: () => {},
+  }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'sync-reject-plugin',
+    priority: 0,
+    create: () => {
+      const editor = pluginEditor()
+      editor.handleInput = () => false // decline: the host fallback owns Enter
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  const plugin = created[0]!
+  // The plugin document is the WIRE form; the restore rewrites the SAME
+  // text, so only the mutation epoch — never a text comparison — can
+  // tell the restore apart from "nothing touched the seat".
+  plugin.setText('!!pwd')
+  plugin.setCursor(plugin.getText().length)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual([...submitted], ['!!pwd'], 'the wire form reaches the submit event')
+  assert.equal(plugin.getText(), '!!pwd',
+    'the synchronous rejection restore must survive the fallback sync-back (the post-submit empty host state must not clobber it)')
   handle.dispose()
   app.reconcileEditorNow()
   app.stop()
