@@ -190,3 +190,27 @@ test('an unknown format string degrades to the item default, never throws', () =
   }), { id: 'x', format: 'zzz' })
   assert.equal(context, '[███░░░░░░░░░] 25%', 'the unknown context format must fall back to the default bar')
 })
+
+test('formatStatsLine is source-consistent with the legacy formatStats (guarded)', async () => {
+  // The formatter's doc comment claims a source-consistency guard — make
+  // it real: the structured stats line must equal the legacy pi-vocabulary
+  // line for the same stats.
+  const { formatStatsLine } = await import('../src/footer/formatters.ts')
+  const { formatStats } = await import('../src/stats.ts')
+  const { usageFromStats } = await import('../src/status/derive-usage.ts')
+  const stats = {
+    turns: 12,
+    steps: 38,
+    llmMs: 120000,
+    firstTokenMsAvg: 2000,
+    tokensPerSec: 40,
+    cacheHitPct: 91.9,
+    inputTokens: 2579,
+    outputTokens: 5507,
+    contextWindow: 1_000_000,
+    cacheReadTokens: 20000,
+    cacheWriteTokens: 0,
+  }
+  assert.equal(formatStatsLine(usageFromStats(stats as never)), formatStats(stats as never),
+    'formatStatsLine must mirror formatStats exactly')
+})

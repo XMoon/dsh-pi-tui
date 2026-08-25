@@ -128,27 +128,39 @@ interface SettingsDescriptorLike {
  * adapter replays the same facts from the wire. */
 class DirectFooterCommandTrust implements FooterCommandTrust {
   private readonly ctx: HostContextLike
+  /** The descriptor snapshot for the CURRENT read pair (both getters
+   * share one describe() call per applyFooterSettings evaluation). */
+  private descriptorCache: SettingsDescriptorLike | undefined | null = null
 
   constructor(ctx: HostContextLike) {
     this.ctx = ctx
   }
 
   get userFooterMode(): string | undefined {
-    const descriptor = this.descriptor()
+    const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
     return resolveUserLayerFooterMode([descriptor], settingsNamespace('dsh-pi-tui'))
   }
 
   get command() {
-    const descriptor = this.descriptor()
+    const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
     return resolveTrustedFooterCommand([descriptor], settingsNamespace('dsh-pi-tui'))
   }
 
-  private descriptor(): SettingsDescriptorLike | undefined {
+  /** One describe() read per synchronous evaluation: the two getters are
+   * read together by applyFooterSettings, so caching the descriptor for
+   * the current tick halves the settings-service read. */
+  private readDescriptor(): SettingsDescriptorLike | undefined {
+    if (this.descriptorCache !== null) return this.descriptorCache
     const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
     const descriptors = settings?.describe?.()
-    return descriptors?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+    const found = descriptors?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+    this.descriptorCache = found ?? undefined
+    // The cache is per-synchronous-evaluation only: reset on the next
+    // macrotask so a settings change is picked up.
+    queueMicrotask(() => { this.descriptorCache = null })
+    return found
   }
 }
 
