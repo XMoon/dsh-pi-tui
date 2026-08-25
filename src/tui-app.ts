@@ -3519,6 +3519,9 @@ export class TuiApp {
     this.messagesView.clear()
     this.messagesView.addChild(this.welcomeCard)
     const boundary = this.expandBoundary()
+    // The derived projection set is computed ONCE per rebuild (never per
+    // activity block — review finding).
+    const projectionExpanded = this.focusProjectionExpandedTurns()
     // Row heights for mouse hit-testing: components render (and cache) at
     // the same width the frame pass uses, so the heights match the screen.
     const width = this.terminal.columns
@@ -3546,7 +3549,7 @@ export class TuiApp {
         // render as ordinary message blocks below it (plan §15).
         component = this.focusActivityComponentFor(
           block.activity,
-          this.focusProjectionExpandedTurns().has(block.activity.turn),
+          projectionExpanded.has(block.activity.turn),
           this.focusToolDisplayFor(block.activity),
         )
         rendered = component.render(width)
@@ -3684,6 +3687,9 @@ export class TuiApp {
   private refreshMessageRows(): void {
     const width = this.terminal.columns
     const boundary = this.expandBoundary()
+    // The derived projection set is computed ONCE per refresh (never per
+    // activity block — review finding).
+    const projectionExpanded = this.focusProjectionExpandedTurns()
     const blocks: FocusProjectedBlock[] = [
       ...this.projectedBlocks().filter(block => !this.shouldHideThinkingBlock(block)),
       ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
@@ -3702,7 +3708,7 @@ export class TuiApp {
       if (block.kind === 'activity') {
         component = this.focusActivityComponentFor(
           block.activity,
-          this.focusProjectionExpandedTurns().has(block.activity.turn),
+          projectionExpanded.has(block.activity.turn),
           this.focusToolDisplayFor(block.activity),
         )
         rendered = component.render(width)
