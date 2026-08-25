@@ -485,6 +485,63 @@ export class BulletedComponent implements Component {
 }
 
 /**
+ * The COMPACT Thinking disclosure card, WIDTH-AWARE (the unified
+ * disclosure model, plan §4/§13): the `▸ Thinking` title, the latest
+ * reasoning line as the preview and the owner hint are truncated AT
+ * RENDER TIME to the CURRENT terminal width. The message component cache
+ * deliberately does NOT key on width — a terminal resize keeps the same
+ * component, and this card re-derives its rows per render (the same
+ * live-child pattern as BulletedComponent), so:
+ *   - a wide → narrow resize truncates every row to the new width and
+ *     the fixed three-row geometry never wraps (the stale-build trap:
+ *     Text wraps its pre-truncated text at the new width and inflates
+ *     the block);
+ *   - a narrow → wide resize restores the full-width preview instead of
+ *     freezing the old narrow truncation.
+ * The EMPTY entry renders the bare title — never a fake "No reasoning"
+ * row (plan §13.3). The output is REFERENCE-STABLE per width: the same
+ * component + same width returns the same array instance, so steady
+ * frames keep the fork's per-frame processed-line reuse.
+ */
+export class ThinkingCompactComponent implements Component {
+  private readonly message: Extract<TranscriptMessage, { kind: 'thinking' }>
+  private readonly hint: ExpandHint
+  private cached: string[] | undefined
+  private cachedWidth = -1
+
+  constructor(message: Extract<TranscriptMessage, { kind: 'thinking' }>, hint: ExpandHint) {
+    this.message = message
+    this.hint = hint
+  }
+
+  invalidate(): void {
+    this.cached = undefined
+    this.cachedWidth = -1
+  }
+
+  render(width: number): string[] {
+    if (this.cached !== undefined && this.cachedWidth === width) return this.cached
+    const previewLine = latestLine(this.message.text)
+    let lines: string[]
+    if (previewLine === '') {
+      // An existing block with no text yet (a very short streaming /
+      // replay edge): the bare title — never a fake "No reasoning" row.
+      lines = [truncateToWidth(color.textDim('▸ Thinking'), Math.max(1, width), '…')]
+    } else {
+      const hintVerb = this.hint ?? 'ctrl+o'
+      lines = [
+        truncateToWidth(color.textDim('▸ Thinking'), Math.max(1, width), '…'),
+        truncateToWidth(color.textDimItalic(`  ${previewLine}`), Math.max(1, width), '…'),
+        truncateToWidth(color.textDim(`  (${hintVerb} to expand)`), Math.max(1, width), '…'),
+      ]
+    }
+    this.cached = lines
+    this.cachedWidth = width
+    return lines
+  }
+}
+
+/**
  * User-message bubble: the whole row is painted with the role background
  * (dsh-web `--dsw-specific-bubble` parity — user input is a floating
  * block, NOT a text colour, so it never collides with the assistant's
@@ -5878,33 +5935,19 @@ export class TuiApp {
       return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), `${color.primary('🐋')}  `)
     }
     if (message.kind === 'thinking') {
-      // The unified Thinking disclosure card (plan §4/§13): a title row
-      // with the ▸/▾ disclosure marker, then either the COMPACT preview —
-      // the LATEST reasoning line (the streaming summary: the newest
-      // thought expresses the current direction) truncated to the width,
-      // plus the owner hint — or the FULL reasoning body (dim+italic so
-      // reasoning never reads like the assistant's actual output; the
-      // compact preview is never repeated next to the full body). An
-      // empty entry renders the bare title — never a fake "No reasoning"
-      // row (plan §13.3). The compact geometry (title + preview + hint)
-      // is height-stable while reasoning streams. EVERY row truncates to
-      // the terminal width — a narrow terminal must never wrap a row and
-      // break the fixed geometry (review finding).
-      const head = truncateToWidth(color.textDim(`${expanded ? '▾' : '▸'} Thinking`), this.terminal.columns, '…')
-      const previewLine = latestLine(message.text)
-      if (!expanded && previewLine === '') {
-        // An existing block with no text yet (a very short streaming /
-        // replay edge): the bare title — never a fake "No reasoning" row
-        // (plan §13.3).
-        return new Text(head, 0, 0)
-      }
-      const hintVerb = expandHint ?? 'ctrl+o'
+      // The unified Thinking disclosure card (plan §4/§13): COMPACT is
+      // the width-aware ThinkingCompactComponent — its rows truncate AT
+      // RENDER TIME to the current terminal width, so a resize keeps the
+      // fixed three-row geometry and never freezes a stale truncation
+      // (the message cache does not key on width). FULL stays a plain
+      // Text: the `▾ Thinking` title plus the whole reasoning body
+      // (dim+italic so reasoning never reads like the assistant's actual
+      // output), wrapping normally per the Text/Markdown policy; the
+      // compact preview is never repeated next to the full body.
       if (!expanded) {
-        const rows = [head]
-        rows.push(color.textDimItalic(`  ${truncateToWidth(previewLine, Math.max(1, this.terminal.columns - 2), '…')}`))
-        rows.push(color.textDim(truncateToWidth(`  (${hintVerb} to expand)`, this.terminal.columns, '…')))
-        return new Text(rows.join('\n'), 0, 0)
+        return new ThinkingCompactComponent(message, expandHint)
       }
+      const head = color.textDim('▾ Thinking')
       const body = message.text === '' ? '' : message.text.split('\n').map(line => `  ${line}`).join('\n')
       return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
     }

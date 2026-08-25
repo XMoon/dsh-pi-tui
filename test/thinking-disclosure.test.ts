@@ -747,6 +747,107 @@ test('K2: FULL running reasoning live-appends new deltas into the open body', as
 
 // ── L. Cache identity ────────────────────────────────────────────────────
 
+test('P2a: a wide → narrow resize re-derives the compact Thinking rows (no stale build at 100 cols)', async () => {
+  // The compact card truncates AT RENDER TIME: resizing 100 → 8 must
+  // keep the fixed three-row geometry with every row within the new
+  // width — a stale build-time truncation would make the cached Text
+  // wrap at the new width and inflate the block (review finding).
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview that must re-truncate' }])
+  await vt.waitForRender()
+  let lines = vt.getViewport()
+  let start = lines.findIndex(line => line.includes('▸ Thinking'))
+  assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
+  assert.ok(lines[start + 1]!.includes('a fairly long reasoning preview'),
+    'precondition: the 100-col preview is untruncated')
+  vt.resize(8, 24)
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  start = lines.findIndex(line => line.includes('Think'))
+  assert.ok(start >= 0, `thinking block missing after resize:\n${lines.join('\n')}`)
+  const block = lines.slice(start, start + 3)
+  assert.equal(block.length, 3, `resize must keep the fixed 3-row geometry:\n${block.join('\n')}`)
+  for (const line of block) {
+    assert.ok(visibleWidth(line) <= 8, `a row exceeds 8 cols after resize: ${JSON.stringify(line)}`)
+  }
+  app.stop()
+})
+
+test('P2b: a narrow → wide resize restores the untruncated preview', async () => {
+  // The 8-col truncation must never survive a widening: the SAME cached
+  // component re-derives its rows at the new width (review finding).
+  const vt = new VirtualTerminal(8, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview line' }])
+  await vt.waitForRender()
+  let lines = vt.getViewport()
+  let start = lines.findIndex(line => line.includes('Think'))
+  assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
+  const narrowPreview = lines[start + 1]!
+  assert.ok(visibleWidth(narrowPreview) <= 8, `precondition: truncated at 8 cols (${JSON.stringify(narrowPreview)})`)
+  assert.ok(!narrowPreview.includes('reasoning preview line'), 'precondition: the 8-col preview is truncated')
+  vt.resize(100, 24)
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  start = lines.findIndex(line => line.includes('▸ Thinking'))
+  assert.ok(start >= 0, `thinking block missing after widening:\n${lines.join('\n')}`)
+  const widePreview = lines[start + 1]!
+  assert.ok(widePreview.includes('a fairly long reasoning preview line'),
+    `the widened preview must recover from the stale 8-col truncation:\n${widePreview}`)
+  assert.ok(visibleWidth(widePreview) <= 100, `preview row exceeds 100 cols: ${JSON.stringify(widePreview)}`)
+  app.stop()
+})
+
+test('P2c: fullscreen resize keeps the compact rows stable and the click map aligned', async () => {
+  // The fullscreen click hit-map depends on stable row heights: after a
+  // 100 -> 8 resize the compact Thinking card must stay exactly 3 rows
+  // AND a click on the re-derived title row must still toggle the card.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setFullscreen(true)
+  app.setTranscript([
+    { kind: 'thinking', turn: 0, text: 'one\ntwo\nthree' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+  ])
+  await vt.waitForRender()
+  // Precondition: compact, click the title row → full.
+  let lines = vt.getViewport()
+  let start = findRow(lines, '▸ Thinking')
+  assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
+  click(vt, 3, start + 1)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('\n  two'), 'precondition: the click expands the card')
+  // Collapse again (a different cell — the alt screen treats a fast
+  // repeat at the same cell as a double-click word selection).
+  lines = vt.getViewport()
+  const bodyY = findRow(lines, 'two')
+  click(vt, 20, bodyY + 1)
+  await vt.waitForRender()
+  // Resize to 8: the card stays 3 rows, each within the new width.
+  vt.resize(8, 24)
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  start = lines.findIndex(line => line.includes('Think'))
+  assert.ok(start >= 0, `thinking block missing after resize:\n${lines.join('\n')}`)
+  const block = lines.slice(start, start + 3)
+  assert.equal(block.length, 3, `fullscreen resize must keep the 3-row geometry:\n${block.join('\n')}`)
+  for (const line of block) {
+    assert.ok(visibleWidth(line) <= 8, `a row exceeds 8 cols after resize: ${JSON.stringify(line)}`)
+  }
+  // The click map follows: clicking the (new) title row toggles the card.
+  click(vt, 3, start + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('one'), `the post-resize click must still expand the card:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('P2: the compact Thinking card never wraps on a narrow terminal', async () => {
   // Every compact row must truncate to the terminal width — a wrapped
   // hint row would break the fixed three-row geometry (review finding).
