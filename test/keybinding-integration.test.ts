@@ -414,3 +414,26 @@ test('a remapped submit does not leak into a NEW TuiApp instance (PR review P1)'
   assert.deepEqual(second, ['fresh'], 'Enter must submit in the fresh default app')
   app2.dispose()
 })
+
+test('disposing the app with an armed leader prefix clears the pending timer (PR review P2)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let tasksOpened = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onOpenTasks: () => { tasksOpened += 1 } })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.tasks.open': '<leader>t' },
+  }))
+  await vt.waitForRender()
+  vt.sendInput('\x18') // leader — arms the pending state + starts the timeout
+  await vt.waitForRender()
+  assert.ok(app.keybindingsManager().leaderMachine()?.pending === true, 'the leader must be pending')
+  // Dispose with the leader armed: the manager's dispose clears the
+  // timeout, so nothing fires against the stopped app afterwards.
+  app.dispose()
+  // Let any (incorrectly) pending macrotask land: nothing must throw and
+  // the leader must be gone.
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(app.keybindingsManager().leaderMachine(), undefined, 'the leader machine is gone after dispose')
+  assert.equal(tasksOpened, 0, 'no action may fire after dispose')
+})

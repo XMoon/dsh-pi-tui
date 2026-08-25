@@ -2436,6 +2436,12 @@ export class TuiApp {
     // subscribe, invalidate) becomes inert; a late plugin callback can no
     // longer mutate the seat or dispatch a real submission.
     this.editorSeatHolder.dispose()
+    // The keybinding manager's final disposal: a PENDING leader timeout
+    // must never fire after the surface is gone (its onStateChange →
+    // renderFooter would schedule work against the stopped app — PR
+    // review finding). The manager's dispose also latches the disposed
+    // flag, making the leader machine inert.
+    this.keybindings.dispose()
   }
 
   /** The surface generation (M0): stable across start/stop/fullscreen/
