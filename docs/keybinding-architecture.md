@@ -240,7 +240,13 @@ README/CHANGELOG language flip) and re-reviewed:
   '—' for them); duplicate `<leader>X` entries of the SAME action are
   deduped before ambiguity detection (only cross-action same-key pairs
   are ambiguous).
+- Round 12 (accepted, none) — after the SECOND rebase onto main
+  (76c8c96, the focus-viewport policy): the reviewer swept all 39
+  changed files, verified the keybinding feature coexists with the
+  focus viewport-anchoring logic in src/tui-app.ts, re-checked every
+  prior-round fix survived both rebases, and accepted with no findings.
 
-Final gates after the rebase: 2405 bundle tests, 985 fork tests, 11
-docs tests, typecheck (fork + bundle), `check-host-keybindings` gate,
-`git diff --check` — all green.
+Final gates after the second rebase: 2413 bundle tests (incl. the
+focus-viewport-policy suite), 985 fork tests, 11 docs tests, typecheck
+(fork + bundle), `check-host-keybindings` gate, `git diff --check` —
+all green.
