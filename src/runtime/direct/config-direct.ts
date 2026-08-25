@@ -422,8 +422,12 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // hanging on the outcome) until some settlement that never comes.
     // The listener is DISPOSED on every settlement/cancel path (never
     // left attached to the long-lived runner signal — a leak per login).
+    // The attempt is REMOVED from the map by the SAME idempotent path
+    // (see finalizeAttempt), so a provider that ignores its signal and
+    // never settles cannot retain the attempt/controller/listener either
+    // — repeated aborted logins leave nothing behind.
     const withdrawOnCallerAbort = (): void => {
-      this.rejectAttemptPrompts(attemptId)
+      this.finalizeAttempt(attemptId)
     }
     const disposeCallerAbortListener = (): void => {
       request.signal?.removeEventListener('abort', withdrawOnCallerAbort)
@@ -455,17 +459,17 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // The attempt runs detached: its settlement is an EVENT, never a
     // return value. The settlement promise is HELD in the attempts map
     // (observed, never a floating discard) and removed when it settles.
+    // The handlers are IDEMPOTENT against a prior finalizeAttempt (the
+    // caller abort): a late upstream settlement after the finalization
+    // only emits (the command already unsubscribed — a listener-less emit
+    // is a no-op) and removes nothing twice.
     const settlement = flow.then(
       (outcome) => {
-        this.attempts.delete(attemptId)
-        this.rejectAttemptPrompts(attemptId)
-        disposeCallerAbortListener()
+        this.finalizeAttempt(attemptId)
         this.emit({ kind: 'settled', attemptId, status: outcome.status })
       },
       (error: unknown) => {
-        this.attempts.delete(attemptId)
-        this.rejectAttemptPrompts(attemptId)
-        disposeCallerAbortListener()
+        this.finalizeAttempt(attemptId)
         this.emit({
           kind: 'settled',
           attemptId,
@@ -495,17 +499,25 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
   }
 
   cancel(attemptId: string): Promise<void> {
+    this.finalizeAttempt(attemptId)
+    return Promise.resolve()
+  }
+
+  /** The ONE idempotent local-finalization path for an attempt: rejects
+   * and withdraws every pending prompt bridge, disposes the caller-abort
+   * listener, removes the attempt from the map and aborts the upstream
+   * controller. Safe to call from cancel(), the caller-abort listener and
+   * the settlement handlers (whichever runs first wins; later calls are
+   * no-ops). A provider that ignores its signal and never settles cannot
+   * retain the attempt/controller/listener — repeated aborted logins
+   * leave nothing behind (review finding). */
+  private finalizeAttempt(attemptId: string): void {
     const attempt = this.attempts.get(attemptId)
-    if (attempt === undefined) return Promise.resolve()
-    // Withdraw the attempt: reject the pending prompt bridges IMMEDIATELY
-    // (never wait on the upstream settlement — a flow that does not honor
-    // its signal must not leave the client's prompt UI hanging), then
-    // abort the upstream controller. The caller-abort listener is
-    // disposed too (this attempt is over).
+    if (attempt === undefined) return
+    this.attempts.delete(attemptId)
     this.rejectAttemptPrompts(attemptId)
     attempt.disposeCallerAbortListener()
     attempt.controller.abort()
-    return Promise.resolve()
   }
 
   /** Bridge one upstream prompt into an event + a pending answer promise. */
