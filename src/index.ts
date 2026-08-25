@@ -370,6 +370,7 @@ export function shouldConsumeAdvertisedMiss(
 /** The live-agent surface {@link interruptAgent} needs (structural — the
  * TUI never imports the agent runtime for this call). */
 export interface InterruptAgentLike {
+  readonly session: { readonly id: string }
   readonly status: string
   cancel(cause: { kind: 'user' }, options?: { keepInbox?: boolean }): void
 }
@@ -378,7 +379,7 @@ export interface InterruptAgentLike {
  * type so the public declaration never inlines internal runtime modules;
  * the runner's SessionWriter satisfies it). */
 export interface InterruptWriterLike {
-  cancel(agent: InterruptAgentLike, reason: { kind: 'user' }, options: { keepInbox: boolean }): void
+  cancel(sessionId: string, reason: { kind: 'user' }, options: { keepInbox: boolean }): void
 }
 
 /**
@@ -402,7 +403,7 @@ export interface InterruptWriterLike {
  */
 export function interruptAgent(agent: InterruptAgentLike | undefined, writer: InterruptWriterLike): void {
   if (agent === undefined) return
-  writer.cancel(agent, { kind: 'user' }, { keepInbox: true })
+  writer.cancel(agent.session.id, { kind: 'user' }, { keepInbox: true })
 }
 
 /** One unsettled subagent delegation, in tool/call order. */
@@ -1402,7 +1403,7 @@ export function apply(ctx: Context, config: Config): void {
     const backend = createDirectBackend(
       new DirectSubagentPort(ctx),
       new DirectSessionReader(ctx),
-      new DirectSessionWriter(ctx),
+      new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx),
     )
@@ -1633,14 +1634,14 @@ export function apply(ctx: Context, config: Config): void {
         })
         diag.info('resume ok', {
           session: sessionId,
-          seq: (handle.directAgent as Agent).session.events.length,
+          seq: (handle.direct!.agent as Agent).session.events.length,
           preset: recorded ?? 'default',
         })
         // A launch-time preset may still apply while the session is blank;
         // the blank check lives inside recomposeBlank (shared with /preset).
         if (launchPreset !== undefined && launchPreset !== recorded) {
           try {
-            const outcome = await recomposeBlank(ctx, handle.directAgent as Agent, launchPreset)
+            const outcome = await recomposeBlank(ctx, handle.direct!.agent as Agent, launchPreset)
             if (outcome.kind === 'locked') {
               const message = `session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
               ctx.logger.warn(`tui-runner: ${message}`)
@@ -1678,8 +1679,8 @@ export function apply(ctx: Context, config: Config): void {
       // session at all — zero agent, zero log, zero persistence — and the
       // first user message creates it (see ensureSession below).
     }
-    let liveHandle = handle?.directAgent as AgentHandle | undefined
-    let liveAgent = handle?.directAgent as Agent | undefined
+    let liveHandle = handle?.direct?.ownerHandle as AgentHandle | undefined
+    let liveAgent = handle?.direct?.agent as Agent | undefined
     if (liveAgent !== undefined) {
       // The committed live session's lease becomes ACTIVE (a successful
       // launch resume must not stay TOUCHED — review round 32).
@@ -1906,12 +1907,12 @@ export function apply(ctx: Context, config: Config): void {
      */
 
 /** Extract the live in-process agent from a transition next value: the
- * Direct SessionHandle carries it as directAgent; an AgentHandle IS the
+ * Direct SessionHandle carries it via direct.agent; an AgentHandle IS the
  * agent handle. Remote handles carry neither (the client runtime owns the
  * session there — M2+). */
 const transitionAgent = (next: unknown): Agent | undefined => {
-  const handle = next as { agent?: Agent; directAgent?: unknown }
-  return handle.directAgent as Agent | undefined ?? handle.agent
+  const handle = next as { agent?: Agent; direct?: { agent?: unknown } }
+  return handle.direct?.agent as Agent | undefined ?? handle.agent
 }
     const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
       const from = liveAgent?.session.id
@@ -3173,7 +3174,7 @@ const transitionAgent = (next: unknown): Agent | undefined => {
                               : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
                             return
                           }
-                          backend.sessionWriter.followup(agent, message)
+                          backend.sessionWriter.followup(agent.session.id, message)
                           // Consume ONLY the referenced drafts — a concurrent
                           // intake's newer image survives (round-5 finding 1).
                           consumeDraftImages(text, draftImages)
@@ -3243,7 +3244,7 @@ const transitionAgent = (next: unknown): Agent | undefined => {
                 : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
               return
             }
-            backend.sessionWriter.followup(agent, message)
+            backend.sessionWriter.followup(agent.session.id, message)
             // Consume ONLY the referenced drafts — a concurrent intake's
             // newer image survives (round-5 finding 1).
             consumeDraftImages(text, draftImages)
@@ -3414,7 +3415,7 @@ const transitionAgent = (next: unknown): Agent | undefined => {
         // splice or session switch while the guard reads the file aborts
         // with a retry notice instead of losing messages or writing to a
         // session the guard never checked.
-        const outcome = await backend.sessionWriter.steer({
+        const outcome = await steerAll({
           currentAgent: () => liveAgent as unknown as SteerAgentLike,
           currentGeneration: () => sessionGeneration,
           guard: {
@@ -4083,7 +4084,7 @@ const transitionAgent = (next: unknown): Agent | undefined => {
         }
         // Remove exactly the pulled-back messages (durable splice), keeping
         // any notices queued behind them.
-        for (const message of queued) backend.sessionWriter.dequeue(liveAgent, message.id)
+        for (const message of queued) backend.sessionWriter.dequeue(liveAgent.session.id, message.id)
         const current = app.getDraft()
         app.setDraft([recalledText, current].filter(part => part.trim() !== '').join('\n\n'))
         refreshQueue()
@@ -4953,9 +4954,9 @@ const transitionAgent = (next: unknown): Agent | undefined => {
           throw error
         }
         // A successful Direct create always yields the live agent (the
-        // port contract: directAgent is present on Direct backends).
-        const createdAgent = created.directAgent as Agent
-        liveHandle = created.directAgent as AgentHandle
+        // port contract: direct.agent is present on Direct backends).
+        const createdAgent = created.direct!.agent as Agent
+        liveHandle = created.direct!.ownerHandle as AgentHandle
         liveAgent = createdAgent
         leaseManager.markActive(createdAgent.session.id)
         // The open-time lock was acquired BEFORE the create (above — the

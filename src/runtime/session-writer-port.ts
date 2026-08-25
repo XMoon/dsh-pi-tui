@@ -1,57 +1,41 @@
 /**
- * The session WRITE domain port (M1.4) — the semantic contract between the
- * TUI and session writes (follow-up delivery, steer, queue pull-back,
- * cancel, title rename/refresh), implemented by `src/runtime/direct/`
- * (Direct) today and by a Remote adapter in a later milestone. The port
- * wraps the RAW agent/session operations; the runner keeps the Direct-mode
- * orchestration (divergence guard, transition fence, operation barrier,
- * lease/cooling) around the port calls.
+ * The session WRITE domain port (M1.4, contract-reviewed round 2) — the
+ * semantic contract between the TUI and session writes (follow-up
+ * delivery, queue pull-back, cancel, title rename/refresh). The contract
+ * is IDENTITY-BASED: every operation addresses a session by id, never by
+ * a live agent object. A Direct adapter resolves the agent internally; a
+ * Remote adapter maps the session id to the official DSH API.
+ *
+ * Steer is deliberately NOT part of the port: Ctrl+S steer is Direct-mode
+ * orchestration (divergence guard, transition fence, operation barrier —
+ * the whole steerAll seam in src/steer.ts). A Remote backend steers
+ * through its own wire capability; the runner keeps the Direct
+ * orchestration on the direct path.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/session-writer-port
  */
 
-import type { SteerAllOptions, SteerDeps, SteerOutcome } from '../steer.ts'
+/** One prepared user message (the runner's image/admission pipeline
+ * produced it; the port only delivers). */
+export type PreparedMessage = unknown
 
-/** The minimal live-agent surface the writer needs (structural). */
-export interface AgentLike {
-  readonly session: { readonly id: string }
-  /** Deliver one prepared user message (the ONLY prompt path). */
-  followup(message: unknown): void
-  /** The pending queue (pull-back removes by id, never a clear). */
-  readonly inbox: { remove(id: string): void }
-}
-
-/** The minimal cancel surface (the interrupt helper's agent is narrower
- * than the full writer agent). */
-export interface CancelAgentLike {
-  cancel(reason: unknown, options: { keepInbox: boolean }): void
-}
-
-/** The minimal session surface the title ops need (structural). */
-export interface SessionLike {
-  readonly id: string
-}
-
-/** The session WRITE domain port. */
+/** The session WRITE domain port. Addresses sessions by id only. */
 export interface SessionWriter {
-  /** Deliver a prepared user message to the agent. */
-  followup(agent: AgentLike, message: unknown): void
-  /** Steer the queued messages + optional draft into the next step. The
-   * Direct adapter runs the guard-orchestrated steerAll seam; a Remote
-   * adapter implements the wire steer. */
-  steer(deps: SteerDeps, text: string, options?: SteerAllOptions): Promise<SteerOutcome>
-  /** Remove one queued message (pull-back). */
-  dequeue(agent: AgentLike, messageId: string): void
-  /** Cancel the agent's current run. */
-  cancel(agent: CancelAgentLike, reason: unknown, options: { keepInbox: boolean }): void
+  /** Deliver a prepared user message to the session's agent. */
+  followup(sessionId: string, message: PreparedMessage): void
+  /** Remove one queued message (pull-back; by id, never a clear). */
+  dequeue(sessionId: string, messageId: string): void
+  /** Cancel the session's current run. `reason` is opaque (the runner's
+   * `{ kind: 'user' }` in Direct mode); `keepInbox` preserves the queue. */
+  cancel(sessionId: string, reason: unknown, options: { keepInbox: boolean }): void
   /** Pin the session title (explicit user rename). `false` = the title
    * service is unavailable. */
-  rename(session: SessionLike, name: string): boolean
+  rename(sessionId: string, name: string): boolean
   /** Regenerate the title from the conversation. `unavailable` = the title
    * service is absent; `ok` with `title: undefined` = no conversation yet
    * (the title is left as-is). */
-  refreshTitle(session: SessionLike, signal: AbortSignal): Promise<
+  refreshTitle(sessionId: string, signal: AbortSignal): Promise<
     | { kind: 'unavailable' }
     | { kind: 'ok'; title: string | undefined }
   >

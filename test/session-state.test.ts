@@ -86,21 +86,21 @@ function stubRunner(
     },
     sessionWriter: {
       followup: () => {},
-      steer: async () => 'ok' as const,
       dequeue: () => {},
       cancel: () => {},
       // The /title tests provide a fake sessionTitle service on the ctx;
-      // the stub writer routes to it exactly like the Direct adapter.
-      rename: (session, name) => {
+      // the stub writer routes to it exactly like the Direct adapter
+      // (identity-based: the sessionId resolves to the live session).
+      rename: (sessionId, name) => {
         const titles = ctx.get('sessionTitle') as { rename(s: unknown, n: string): void } | undefined
         if (titles === undefined) return false
-        titles.rename(session, name)
+        titles.rename({ id: sessionId } as never, name)
         return true
       },
-      refreshTitle: async (session, signal) => {
+      refreshTitle: async (sessionId, signal) => {
         const titles = ctx.get('sessionTitle') as { refresh(s: unknown, signal: AbortSignal): Promise<{ title: string } | undefined> } | undefined
         if (titles === undefined) return { kind: 'unavailable' as const }
-        const regenerated = await titles.refresh(session, signal)
+        const regenerated = await titles.refresh({ id: sessionId } as never, signal)
         return { kind: 'ok' as const, title: regenerated?.title }
       },
     },
@@ -614,18 +614,18 @@ function fakeTitles(overrides: {
   rename?: (session: unknown, name: string) => unknown
 } = {}) {
   const calls = {
-    rename: [] as { session: unknown; name: string }[],
-    refresh: [] as { session: unknown; signal: AbortSignal | undefined }[],
+    rename: [] as { sessionId: string; name: string }[],
+    refresh: [] as { sessionId: string; signal: AbortSignal | undefined }[],
   }
   const titles = {
     get: () => undefined,
     rename: (session: unknown, name: string): unknown => {
-      calls.rename.push({ session, name })
+      calls.rename.push({ sessionId: (session as { id: string }).id, name })
       if (overrides.rename !== undefined) return overrides.rename(session, name)
       return { title: name, eventSeq: 1, messageSeqs: [], source: { kind: 'user' } }
     },
     refresh: async (session: unknown, signal?: AbortSignal): Promise<unknown> => {
-      calls.refresh.push({ session, signal })
+      calls.refresh.push({ sessionId: (session as { id: string }).id, signal })
       if (overrides.refresh !== undefined) return overrides.refresh(session, signal)
       return undefined
     },
@@ -670,7 +670,7 @@ test('/title without an argument regenerates and overwrites the current title', 
   assert.equal(result.kind, 'success')
   assert.deepEqual(calls.rename, [], 'a no-argument call must never pin a title')
   assert.equal(calls.refresh.length, 1, 'a no-argument call must refresh once')
-  assert.equal(calls.refresh[0]!.session, state.agent.session, 'refresh must target the live session')
+  assert.equal(calls.refresh[0]!.sessionId, state.agent.session.id, 'refresh must target the live session id')
   assert.equal(calls.refresh[0]!.signal, signal, 'the invocation signal must be forwarded to refresh')
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
@@ -742,7 +742,7 @@ test('/title with an argument pins the title; an invalid title surfaces as an er
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const ok = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('fix footer'))
   assert.equal(ok.kind, 'success')
-  assert.deepEqual(calls.rename, [{ session: state.agent.session, name: 'fix footer' }],
+  assert.deepEqual(calls.rename, [{ sessionId: state.agent.session.id, name: 'fix footer' }],
     'an argument must pin exactly the trimmed name')
   assert.deepEqual(calls.refresh, [], 'an argument must never trigger regeneration')
   // Whitespace-only input counts as NO argument: it regenerates, never pins.

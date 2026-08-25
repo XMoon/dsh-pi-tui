@@ -1,24 +1,34 @@
 /**
- * The Direct session writer (M1.4) — the in-process implementation of
- * `SessionWriter` over the live agent/session objects and the dsh
- * `sessionTitle` service. This is the ONLY module in the session-write
- * path that touches `ctx`; the runner keeps the Direct-mode orchestration
- * (divergence guard, transition fence, operation barrier) around the port
- * calls, and a Remote adapter will implement the same interface in a later
- * milestone.
+ * The Direct session writer (M1.4, contract-reviewed round 2) — the
+ * in-process implementation of `SessionWriter` over the live agent objects
+ * and the dsh `sessionTitle` service. The contract is identity-based: the
+ * adapter resolves the live agent/session FROM THE SESSION ID through the
+ * runner-injected resolver (never a stale captured object — the resolver
+ * re-reads the live surface on every call). This is the ONLY module in the
+ * session-write path that touches `ctx`; a Remote adapter will implement
+ * the same interface over the wire.
+ *
+ * Steer is NOT here: Ctrl+S steer is Direct-mode orchestration (guard /
+ * fence / barrier — steerAll in src/steer.ts), kept in the runner.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-writer-direct
  */
 
-import { steerAll } from '../../steer.ts'
-import type { SteerAllOptions, SteerDeps, SteerOutcome } from '../../steer.ts'
-import type { AgentLike, CancelAgentLike, SessionLike, SessionWriter } from '../session-writer-port.ts'
+import type { SessionWriter } from '../session-writer-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
 export interface HostContextLike {
   get(name: string): unknown
+}
+
+/** The live-agent surface the Direct adapter drives (structural). */
+export interface LiveAgentLike {
+  readonly session: { readonly id: string }
+  followup(message: unknown): void
+  cancel(reason: unknown, options: { keepInbox: boolean }): void
+  readonly inbox: { remove(id: string): void }
 }
 
 /** The structural `sessionTitle` service surface. */
@@ -27,49 +37,55 @@ export interface SessionTitleServiceLike {
   refresh(session: unknown, signal: AbortSignal): Promise<{ title: string } | undefined>
 }
 
-/** The Direct backend's session writer: raw agent/session operations and
- * the `ctx.sessionTitle` service behind the semantic `SessionWriter`
- * interface. */
+/** The Direct backend's session writer: identity-based operations over the
+ * live agents and the `ctx.sessionTitle` service. The agent resolver is
+ * injected by the runner (a closure over the live surface), so a session
+ * switch between calls is observed at call time. */
 export class DirectSessionWriter implements SessionWriter {
   private readonly ctx: HostContextLike
+  private readonly agentFor: (sessionId: string) => LiveAgentLike | undefined
 
-  constructor(ctx: HostContextLike) {
+  constructor(ctx: HostContextLike, agentFor: (sessionId: string) => LiveAgentLike | undefined) {
     this.ctx = ctx
+    this.agentFor = agentFor
   }
 
-  followup(agent: AgentLike, message: unknown): void {
+  followup(sessionId: string, message: unknown): void {
+    const agent = this.agentFor(sessionId)
+    if (agent === undefined) return
     agent.followup(message)
   }
 
-  steer(deps: SteerDeps, text: string, options?: SteerAllOptions): Promise<SteerOutcome> {
-    // The guard-orchestrated steer seam (steer.ts) stays the pure core;
-    // the port is the boundary a Remote adapter will implement over the
-    // wire.
-    return steerAll(deps, text, options)
-  }
-
-  dequeue(agent: AgentLike, messageId: string): void {
+  dequeue(sessionId: string, messageId: string): void {
+    const agent = this.agentFor(sessionId)
+    if (agent === undefined) return
     agent.inbox.remove(messageId)
   }
 
-  cancel(agent: CancelAgentLike, reason: unknown, options: { keepInbox: boolean }): void {
+  cancel(sessionId: string, reason: unknown, options: { keepInbox: boolean }): void {
+    const agent = this.agentFor(sessionId)
+    if (agent === undefined) return
     agent.cancel(reason, options)
   }
 
-  rename(session: SessionLike, name: string): boolean {
+  rename(sessionId: string, name: string): boolean {
     const titles = this.ctx.get('sessionTitle') as SessionTitleServiceLike | undefined
     if (titles === undefined) return false
-    titles.rename(session, name)
+    const agent = this.agentFor(sessionId)
+    if (agent === undefined) return false
+    titles.rename(agent.session, name)
     return true
   }
 
-  async refreshTitle(session: SessionLike, signal: AbortSignal): Promise<
+  async refreshTitle(sessionId: string, signal: AbortSignal): Promise<
     | { kind: 'unavailable' }
     | { kind: 'ok'; title: string | undefined }
   > {
     const titles = this.ctx.get('sessionTitle') as SessionTitleServiceLike | undefined
     if (titles === undefined) return { kind: 'unavailable' }
-    const regenerated = await titles.refresh(session, signal)
+    const agent = this.agentFor(sessionId)
+    if (agent === undefined) return { kind: 'unavailable' }
+    const regenerated = await titles.refresh(agent.session, signal)
     return { kind: 'ok', title: regenerated?.title }
   }
 }

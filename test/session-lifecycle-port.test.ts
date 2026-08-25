@@ -43,13 +43,15 @@ test('create resolves the preset composition internally and delegates with the D
   const lifecycle = new DirectSessionLifecycle(host({
     create: async (options: { sessionId: unknown; meta: unknown; agentOptions: unknown; setup: unknown }) => {
       calls.push({ sessionId: options.sessionId, meta: options.meta, agentOptions: options.agentOptions, setup: options.setup })
-      return { agent: { session: { id: 'session-new' } } }
+      return { agent: { session: { id: 'session-new' } }, dispose: async () => {} }
     },
-    resume: async () => ({ agent: { session: { id: 'x' } } }),
+    resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
   }), compose('preset-a'))
   const handle = await lifecycle.create(createRequest)
   assert.equal(handle.session.id, 'session-new')
-  assert.equal(handle.directAgent !== undefined, true, 'Direct handle carries the live agent')
+  assert.equal(handle.direct !== undefined, true, 'Direct handle carries the ownership escape')
+  assert.ok(handle.direct && typeof handle.direct.agent === 'object', 'carries the live agent')
+  assert.ok(handle.direct && typeof handle.direct.ownerHandle === 'object' && typeof (handle.direct.ownerHandle as { dispose?: unknown }).dispose === 'function', 'carries the real owner handle with dispose()')
   assert.equal(calls.length, 1)
   assert.equal(calls[0].sessionId, 'session-new')
   assert.deepEqual(calls[0].agentOptions, { provider: 'p', model: 'm' })
@@ -62,11 +64,12 @@ test('resume resolves the preset composition internally and delegates with the D
     create: async () => ({ agent: { session: { id: 'x' } } }),
     resume: async (options: { resumeSessionId: unknown; agentOptions: unknown; setup: unknown }) => {
       calls.push({ resumeSessionId: options.resumeSessionId, agentOptions: options.agentOptions, setup: options.setup })
-      return { agent: { session: { id: 'session-old' } } }
+      return { agent: { session: { id: 'session-old' } }, dispose: async () => {} }
     },
   }), compose('preset-a'))
   const handle = await lifecycle.resume(resumeRequest)
   assert.equal(handle.session.id, 'session-old')
+  assert.equal(handle.direct !== undefined, true)
   assert.equal(calls.length, 1)
   assert.equal(calls[0].resumeSessionId, 'session-old')
   assert.deepEqual(calls[0].agentOptions, { provider: 'p', model: 'm' })
@@ -77,4 +80,27 @@ test('create and resume fail loudly when the agents service is absent', async ()
   const lifecycle = new DirectSessionLifecycle(host(undefined), compose('preset-a'))
   await assert.rejects(() => lifecycle.create(createRequest), /agents service unavailable/)
   await assert.rejects(() => lifecycle.resume(resumeRequest), /agents service unavailable/)
+})
+
+test('P1 regression: the ownership escape preserves the real AgentHandle so the runner can dispose it on retirement', async () => {
+  // The runner stores liveHandle = handle.direct.ownerHandle and calls
+  // dispose() when transitioning AWAY from the session. A lost handle
+  // previously pinned the old lease (review finding). This pins the
+  // create → SessionHandle → dispose chain.
+  let disposed = 0
+  const lifecycle = new DirectSessionLifecycle(host({
+    create: async () => ({
+      agent: { session: { id: 'session-a' } },
+      dispose: async () => { disposed += 1 },
+    }),
+    resume: async () => ({ agent: { session: { id: 'session-a' } }, dispose: async () => {} }),
+  }), compose('preset-a'))
+  const handle = await lifecycle.create(createRequest)
+  // The runner's retirement path:
+  const liveHandle = handle.direct?.ownerHandle as { dispose(): Promise<void> } | undefined
+  assert.ok(liveHandle !== undefined, 'the runner receives the real owner handle')
+  await liveHandle.dispose()
+  assert.equal(disposed, 1, 'the original AgentHandle.dispose() is called exactly once')
+  // The live agent is the same object the runner drives:
+  assert.equal((handle.direct!.agent as { session: { id: string } }).session.id, 'session-a')
 })

@@ -24,15 +24,18 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 function writerStub(): SessionWriter {
   return {
     followup: () => {},
-    steer: async () => 'ok' as const,
     dequeue: () => {},
-    cancel: (agent, cause, options) => {
-      ;(agent as { cancel(c: unknown, o: unknown): void }).cancel(cause, options)
+    cancel: (sessionId, cause, options) => {
+      ;(stubAgents.get(sessionId) as { cancel(c: unknown, o: unknown): void }).cancel(cause, options)
     },
     rename: () => true,
     refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
   }
 }
+
+/** The fake live agents the interrupt tests drive (written by the agent
+ * fakes below). */
+const stubAgents = new Map<string, { cancel(c: unknown, o: unknown): void }>()
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp; cancels: number } {
   const vt = new VirtualTerminal(100, 24)
@@ -556,10 +559,13 @@ test('Esc Esc while busy never opens the rewind picker (plan §28 second half)',
 
 test('interruptAgent cancels with keepInbox: true (web Stop parity)', () => {
   const calls: Array<{ cause: unknown; options: unknown }> = []
-  interruptAgent({
+  const agent = {
+    session: { id: 'session-a' },
     status: 'running',
-    cancel: (cause, options) => { calls.push({ cause, options }) },
-  }, writerStub())
+    cancel: (cause: unknown, options: unknown) => { calls.push({ cause, options }) },
+  }
+  stubAgents.set('session-a', agent)
+  interruptAgent(agent as never, writerStub())
   assert.equal(calls.length, 1, 'a running agent is interrupted exactly once')
   assert.deepEqual(calls[0]!.cause, { kind: 'user' })
   // THE regression: the default dsh cancel clears queued + steering
@@ -570,12 +576,15 @@ test('interruptAgent cancels with keepInbox: true (web Stop parity)', () => {
 
 test('interruptAgent tolerates an idle agent (no status gate, no throw)', () => {
   const calls: Array<{ cause: unknown; options: unknown }> = []
-  interruptAgent({
+  const agent = {
+    session: { id: 'session-b' },
     // 'idle' — a maintenance task (compaction) may still be aborted by
     // dsh's cancel, so the helper must NOT gate on the running status.
     status: 'idle',
-    cancel: (cause, options) => { calls.push({ cause, options }) },
-  }, writerStub())
+    cancel: (cause: unknown, options: unknown) => { calls.push({ cause, options }) },
+  }
+  stubAgents.set('session-b', agent)
+  interruptAgent(agent as never, writerStub())
   assert.equal(calls.length, 1, 'the cancel call itself is still made (dsh no-ops when idle)')
   assert.deepEqual(calls[0]!.options, { keepInbox: true })
 })
