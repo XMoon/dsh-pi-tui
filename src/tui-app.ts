@@ -6983,9 +6983,12 @@ export class TuiApp {
    * states (plan §9): the user asked for ALL Thinking at one detail
    * level, so old click/search overrides must not survive. Also used by
    * the fullscreen → regular transition (plan §6.2's preferred cleanup:
-   * regular must never re-read a fullscreen click state). */
+   * regular must never re-read a fullscreen click state). Iterates the
+   * OVERRIDE MAP — the visible transcript is windowed, so a clicked card
+   * that scrolled out of the window must still be reset (a later search
+   * jump or window restore must never resurrect a stale per-card state). */
   private clearThinkingExpansionOverrides(): void {
-    for (const message of this.messages) {
+    for (const message of this.expandedOverride.keys()) {
       if (message.kind !== 'thinking') continue
       this.expandedOverride.delete(message)
     }
