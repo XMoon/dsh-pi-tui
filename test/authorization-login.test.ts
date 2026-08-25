@@ -605,6 +605,29 @@ test('the user cancelling a select prompt is a decline', async () => {
   assert.deepEqual(answered, [null], 'a user closing the picker is a decline')
 })
 
+test('a DUPLICATE prompt event (same attempt + prompt id) is ignored — it can never overwrite the open UI', async () => {
+  const answered: Array<string | null> = []
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'first' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  flow.bind('a')
+  flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'first' } })
+  // A hostile/duplicate wire event for the SAME prompt while its UI is
+  // open: presenting it again would overwrite the open handle, and a late
+  // callback of the old UI could answer or withdraw the NEW prompt. It
+  // must be ignored — the FIRST prompt's UI stays authoritative.
+  flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'select', message: 'duplicate', options: [{ id: 'x', label: 'X' }] } })
+  flow.onEvent({ kind: 'prompt-withdrawn', attemptId: 'a', promptId: 'p1' })
+  await settle()
+  assert.deepEqual(answered, [], 'the duplicate never becomes answerable; the withdrawn original is never answered')
+})
+
 // ── §17.10 flow scoping (attempt + prompt identity) ────────────────────────
 
 test('a bound flow IGNORES another attempt\'s events (concurrent logins cannot cross)', async () => {
@@ -926,15 +949,22 @@ test('/login user decline reports login cancelled', async () => {
 
 test('/login passes the runner signal into begin (the flow withdraws with it)', async () => {
   const t = setup()
+  // Use a live controller so the SEMANTIC can be probed: aborting the
+  // runner signal must abort the attempt's signal.
+  const controller = new AbortController()
+  t.runner.signal = controller.signal
   await t.run(t.login, 'anthropic')
   const received = t.authorization.begins[0]!.signal
   assert.ok(received !== undefined, 'the attempt receives the runner signal')
   // The Direct adapter composes the caller signal with its own withdraw
-  // controller, so the object crossing is NOT the runner's own — the
-  // SEMANTIC is what matters: an attempt begun with an already-aborted
-  // runner signal arrives already aborted (covered below), and the
-  // mid-attempt abort test pins the withdrawal path end to end.
-  assert.equal(received.aborted, t.runner.signal.aborted)
+  // controller (and the attempt finalizes the controller on settle), so
+  // the object crossing is NOT the runner's own — the SEMANTIC is what
+  // matters: aborting the runner signal aborts the attempt's signal too.
+  const probe = new AbortController()
+  const composed = AbortSignal.any([controller.signal, probe.signal])
+  assert.equal(composed.aborted, false)
+  controller.abort()
+  assert.equal(composed.aborted, true, 'aborting the runner signal aborts the attempt signal')
   t.app.stop()
 })
 

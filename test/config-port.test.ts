@@ -416,6 +416,69 @@ test('authorization cancel() emits prompt-withdrawn so the UI closes even if the
     `cancel must emit prompt-withdrawn for the open prompt (the UI closes without a settled event):\n${JSON.stringify(events)}`)
 })
 
+test('a caller-signal abort with a NEVER-SETTLING provider finalizes the attempt (no retention)', async () => {
+  // The provider drives a prompt and then IGNORES its signal forever. The
+  // caller-signal abort must route through the SAME idempotent
+  // finalization as cancel(): reject the pending bridge, emit
+  // prompt-withdrawn, dispose the caller-abort listener and remove the
+  // attempt — a provider that never settles cannot retain the attempt,
+  // the controller or the listener (repeated aborted logins leave
+  // nothing behind).
+  const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  let promptSettled = false
+  const controller = new AbortController()
+  let adds = 0
+  let removes = 0
+  const signal = controller.signal
+  const originalAdd = signal.addEventListener.bind(signal)
+  const originalRemove = signal.removeEventListener.bind(signal)
+  signal.addEventListener = ((type: string, listener: unknown, options?: unknown) => {
+    if (type === 'abort') adds += 1
+    return originalAdd(type as 'abort', listener as () => void, options as boolean | EventListenerOptions | undefined)
+  }) as typeof signal.addEventListener
+  signal.removeEventListener = ((type: string, listener: unknown, options?: unknown) => {
+    if (type === 'abort') removes += 1
+    return originalRemove(type as 'abort', listener as () => void, options as boolean | EventListenerOptions | undefined)
+  }) as typeof signal.removeEventListener
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        // The upstream flow NEVER settles, even when its signal aborts.
+        try {
+          await request.interaction.prompt({ kind: 'text', message: 'enter' })
+          promptSettled = true
+        } catch {
+          promptSettled = true
+        }
+        return await new Promise<{ status: 'authorized' }>(() => {}) // never settles
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai', signal })
+  assert.equal(started.kind, 'started')
+  await settle()
+  const promptEvent = events.find(event => event.kind === 'prompt')
+  assert.ok(promptEvent !== undefined && promptEvent.kind === 'prompt')
+  controller.abort() // runner teardown: the provider never settles
+  await settle()
+  off()
+  assert.equal(promptSettled, true, 'the pending bridge rejected on the caller abort')
+  const withdrawn = events.find(event => event.kind === 'prompt-withdrawn'
+    && event.attemptId === promptEvent.attemptId && event.promptId === promptEvent.promptId)
+  assert.ok(withdrawn !== undefined,
+    `the caller abort must emit prompt-withdrawn (the UI closes):\n${JSON.stringify(events)}`)
+  assert.equal(adds, 1, 'one caller-abort listener registered')
+  assert.equal(removes, 1, 'the finalization disposed it — no leak on the long-lived signal')
+})
+
 /** Flush the microtask queue (the event bridge is promise-based). */
 async function settle(): Promise<void> {
   await new Promise<void>((resolve) => { resolve() })

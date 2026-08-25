@@ -291,6 +291,13 @@ export function createAuthorizationFlow(
     prompt: AuthorizationPromptEvent
   }): void => {
     const { attemptId, promptId, prompt } = event
+    // A duplicate prompt event (same attempt + prompt id while a UI for
+    // that prompt is ALREADY open) is IGNORED: presenting it again would
+    // overwrite the open handle, and a late callback of the old UI could
+    // answer or withdraw the NEW prompt (review finding). Prompt ids are
+    // bridge-generated unique ids, but a wire backend must not be able to
+    // corrupt the client's open-prompt map with duplicates.
+    if (openPrompts.has(promptId)) return
     const finish = (answer: string | null): void => {
       const open = openPrompts.get(promptId)
       if (open === undefined) return // already withdrawn or settled
