@@ -3844,7 +3844,6 @@ export class TuiApp {
     this.extensionHost?.updateSurface({ fullscreen: enabled })
     // M0: the unified status surface section follows the mode switch.
     this.projectSurface({ fullscreen: enabled })
-    this.renderFooter()
     // The screen swap re-established focus (or re-mounted the approval
     // dialog): re-derive the seat from the live state (follow-up P1).
     this.setFocusSeat('editor')
@@ -3999,16 +3998,11 @@ export class TuiApp {
   setFocusMode(enabled: boolean): void {
     if (this.focusModeEnabled === enabled) return
     this.focusModeEnabled = enabled
-    // Entering Focus resets the Focus Thinking visibility to the default
-    // (hidden): the user opted into the Focus surface, not the ordinary
-    // hideThinking preference. Leaving Focus never touches hideThinking.
-    if (enabled) this.focusThinkingVisible = false
     // Focus is a transcript PROJECTION, never a Thinking preference
     // owner: switching Focus ON/OFF leaves the shared thinkingExpanded
     // bulk preference untouched (plan §17). The rebuild re-derives the
     // projection for the new mode.
     this.projectStatus({ interaction: { focusMode: enabled } })
-    this.renderFooter()
     this.rebuildMessages()
     this.requestRender()
   }
@@ -4647,7 +4641,6 @@ export class TuiApp {
   setBusy(busy: boolean): void {
     this.busy = busy
     this.projectActivity()
-    this.renderFooter()
   }
 
   /**
@@ -4666,7 +4659,6 @@ export class TuiApp {
     this.compactionPhase = phase
     this.reconcileWorkingRow()
     this.projectActivity()
-    this.renderFooter()
     this.requestRender()
   }
 
@@ -4815,7 +4807,6 @@ export class TuiApp {
     this.workingActive = active
     this.reconcileWorkingRow()
     this.projectActivity()
-    this.renderFooter()
     this.requestRender()
     this.syncExtensionState()
   }
