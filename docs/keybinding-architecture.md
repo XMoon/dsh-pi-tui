@@ -223,9 +223,14 @@ README/CHANGELOG language flip) and re-reviewed:
   search-overlay ownership resolve the EFFECTIVE keymap (a remap of
   `app.transcript.toggleExpand` / `app.transcript.search` stays
   authoritative — the router consults `matchesEffective`); leader-only
-  actions appear in the `/keybindings` snapshot with the `leader` flag;
-  the changelog namespace examples corrected to `dsh-pi-tui`.
+  actions appear in the `/keybindings` snapshot with their leader
+  completing keys; the changelog namespace examples corrected to
+  `dsh-pi-tui`.
+- Round 9 (needs-fixes): MIXED direct + leader bindings
+  (`['ctrl+z', '<leader>h']`) render BOTH in the snapshot (`keys` +
+  `leaderKeys`) and in `keyHint` (`Ctrl+Z / Leader H`) — the leader
+  sequence used to vanish behind the direct key.
 
-Final gates after the rebase: 2397 bundle tests, 985 fork tests, 11
+Final gates after the rebase: 2402 bundle tests, 985 fork tests, 11
 docs tests, typecheck (fork + bundle), `check-host-keybindings` gate,
 `git diff --check` — all green.
