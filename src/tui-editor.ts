@@ -131,6 +131,10 @@ export class TuiEditor extends Editor {
    * accumulated so far. While set, every input chunk belongs to the
    * paste and is buffered here — never passed to the base editor. */
   private pasteCapture: { promptEmpty: boolean; buffer: string } | null = null
+  /** A trailing `\x1b[20` / `\x1b[200` / `\x1b[201` chunk tail that may
+   * be a paste marker split across chunks; stitched onto the next chunk
+   * at the top of handleInput. */
+  private pendingPasteMarker: string | null = null
 
   constructor(tui: TUI, theme: EditorTheme) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -215,6 +219,30 @@ export class TuiEditor extends Editor {
   }
 
   override handleInput(data: string): void {
+    // A bracketed-paste marker split across input chunks (real terminals
+    // keep markers whole, but a chunk boundary must not lose them):
+    // stitch a buffered marker prefix onto this chunk, and buffer a
+    // trailing `\x1b[20` / `\x1b[200` / `\x1b[201` prefix for the next
+    // one. A stitched sequence that never forms a real marker flows
+    // through the normal chain (upstream behavior for split CSI).
+    if (this.pendingPasteMarker !== null) {
+      data = this.pendingPasteMarker + data
+      this.pendingPasteMarker = null
+    }
+    // A COMPLETE marker ends with `~` — `\x1b[200~`/`\x1b[201~` also end
+    // with the 5-char prefixes `\x1b[200`/`\x1b[201`, so the tail check
+    // must exclude a trailing `~` first (a complete closing marker is
+    // never a split prefix). The tail lengths are the FULL prefix byte
+    // counts (`\x1b` is one char): `\x1b[20` = 4, `\x1b[200`/`\x1b[201` = 5.
+    let markerTail = 0
+    if (!data.endsWith('~')) {
+      if (data.endsWith('\x1b[201') || data.endsWith('\x1b[200')) markerTail = 5
+      else if (data.endsWith('\x1b[20')) markerTail = 4
+    }
+    if (markerTail > 0) {
+      this.pendingPasteMarker = data.slice(-markerTail)
+      data = data.slice(0, -markerTail)
+    }
     // Esc + autocomplete activity: close WITHOUT re-triggering (kimi
     // parity — otherwise Esc would immediately reopen the list). This
     // keeps its priority over the shell-mode Esc exit below.
@@ -278,11 +306,19 @@ export class TuiEditor extends Editor {
     // the fork's paste-registry path because the stripped content is
     // re-wrapped as a bracketed paste below.
     if (this.pasteCapture !== null || data.includes('\x1b[200~')) {
-      this.capturePaste(data)
+      const residuals = this.capturePaste(data)
+      // Residual input (trailing keys after the closing marker) goes
+      // through the FULL interception chain — never straight into the
+      // base document. The autocomplete reopen runs AFTER the normalized
+      // paste and the residuals landed, so a pasted `@dir/` reopens like
+      // ordinary input.
+      for (const residual of residuals) {
+        if (residual !== '') this.handleInput(residual)
+      }
       this.reopenAutocompleteAfterInput()
       return
     }
-    super.handleInput(data)
+    if (data !== '') super.handleInput(data)
     this.reopenAutocompleteAfterInput()
   }
 
@@ -292,15 +328,20 @@ export class TuiEditor extends Editor {
    * re-wrapped bracketed paste, so the fork's full handlePaste path
    * (text normalization, large-paste registry, atomic undo) applies. A
    * paste into a non-empty editor, or into an already-shell-mode editor,
-   * is never reinterpreted — its `!` is ordinary body text. */
-  private capturePaste(data: string): void {
+   * is never reinterpreted — its `!` is ordinary body text. Returns the
+   * residual input (trailing keys after the closing marker) for the
+   * caller to route through the full interception chain. */
+  private capturePaste(data: string): string[] {
+    const residuals: string[] = []
     if (this.pasteCapture === null) {
       const start = data.indexOf('\x1b[200~')
       const before = data.slice(0, start)
       if (before !== '') {
-        // Defense: content before the opening marker (real terminals do
-        // not interleave, but a chunk boundary must not eat input).
-        super.handleInput(before)
+        // Residual input BEFORE the opening marker goes through the FULL
+        // interception chain FIRST — a `!` in the same chunk enters the
+        // shell mode and the paste then lands in that state (`!\x1b[200~cmd…`
+        // is a shell command, never a prompt with a literal `!`).
+        this.handleInput(before)
       }
       this.pasteCapture = { promptEmpty: this.inputMode === 'prompt' && this.getText() === '', buffer: '' }
       data = data.slice(start + '\x1b[200~'.length)
@@ -308,7 +349,7 @@ export class TuiEditor extends Editor {
     const end = data.indexOf('\x1b[201~')
     if (end === -1) {
       this.pasteCapture.buffer += data
-      return
+      return residuals
     }
     this.pasteCapture.buffer += data.slice(0, end)
     const capture = this.pasteCapture
@@ -323,9 +364,10 @@ export class TuiEditor extends Editor {
       content = content.slice(1)
     }
     if (mode !== 'prompt') this.setInputMode(mode)
-    const remaining = data.slice(end + '\x1b[201~'.length)
     if (content !== '') super.handleInput(`\x1b[200~${content}\x1b[201~`)
-    if (remaining !== '') super.handleInput(remaining)
+    const remaining = data.slice(end + '\x1b[201~'.length)
+    if (remaining !== '') residuals.push(remaining)
+    return residuals
   }
 
   /** Reopen `@dir/` mention completion right after a key closed it (e.g.

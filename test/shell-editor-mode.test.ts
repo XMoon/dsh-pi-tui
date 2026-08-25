@@ -1279,3 +1279,69 @@ test('the Stable autocomplete extension query keeps the WIRE document in shell m
   }
   app.stop()
 })
+
+// ── review round: paste chunk boundaries + autocomplete reopen ────────────
+
+test('input before the opening marker in the same chunk enters the shell mode first', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  // `!` and the paste arrive in ONE chunk: the `!` must go through the
+  // interception chain (enter shell-context) BEFORE the paste lands.
+  vt.sendInput('!\x1b[200~cmd\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the leading ! must enter the shell mode')
+  assert.equal(app.seatTextForTest(), 'cmd', 'the paste lands as the shell body')
+  app.stop()
+})
+
+test('trailing keys after the closing marker go through the full interception chain', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('\x1b[200~!git status\x1b[201~x')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  assert.equal(app.seatTextForTest(), 'git statusx', 'the trailing key appends as ordinary input')
+  // A trailing `!` must NOT be swallowed or re-parsed — it is body text.
+  app.setEditorText('')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[200~!echo\x1b[201~!')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  assert.equal(app.seatTextForTest(), 'echo!', 'a trailing ! after the paste is a literal body character')
+  app.stop()
+})
+
+test('a paste opening marker split across chunks is stitched back together', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('\x1b[20') // first half of \x1b[200~
+  await vt.waitForRender()
+  vt.sendInput('0~!git status\x1b[201~') // second half + the paste
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the split opening marker must still open the paste')
+  assert.equal(app.seatTextForTest(), 'git status')
+  app.stop()
+})
+
+test('a paste closing marker split across chunks is stitched back together', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('\x1b[200~!git status\x1b[201') // closing marker without its final ~
+  await vt.waitForRender()
+  vt.sendInput('~')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the split closing marker must still close the paste')
+  assert.equal(app.seatTextForTest(), 'git status')
+  app.stop()
+})
+
+test('a pasted @dir/ path reopens the mention dropdown like ordinary input', async () => {
+  const { vt, app } = startApp(fixtureWithFiles())
+  await vt.waitForRender()
+  // Paste `@src/`: the reopen runs AFTER the paste landed, so the
+  // dropdown shows the directory children exactly like typed input.
+  vt.sendInput('\x1b[200~@src/\x1b[201~')
+  await waitForDropdownRow(vt, 'deep.ts', 'mention dropdown after a pasted @dir/')
+  assert.equal(app.seatTextForTest(), '@src/')
+  app.stop()
+})
