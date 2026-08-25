@@ -119,14 +119,51 @@ test('the TuiApp setStatus projection MERGES into the current sections (runner-d
       sandbox: { mode: 'workspace-write' },
       approval: { policy: 'ask' },
     },
-    workspace: { cwd: '/full/path', project: 'space4', branch: 'main' },
+    workspace: { cwd: '/home/x/space4', project: 'space4', branch: 'main' },
   })
-  // A legacy setStatus update arrives (the runner's setStatus call).
-  app.setStatus({ model: 'deepseek/flash', cwd: '/full/path', branch: 'main' })
+  // A legacy setStatus update arrives (the runner's setStatus call — the
+  // legacy cwd is the SHORT form; the derived project is consistent).
+  app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/space4', branch: 'main' })
   const snapshot = store.snapshot()
   assert.deepEqual(snapshot.composition.agentPreset, { id: 'code', label: 'PTC mode' }, 'agentPreset must survive')
   assert.equal(snapshot.access.sandbox?.mode, 'workspace-write', 'sandbox must survive')
   assert.equal(snapshot.access.approval?.policy, 'ask', 'approval must survive')
   assert.equal(snapshot.workspace.project, 'space4', 'workspace project must survive')
+  app.stop()
+})
+
+test('setStatus clears stale owned facts: a gone model, a changed cwd re-derives project, an emptied branch clears', async () => {
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const store = (app as unknown as { statusStore: StatusStore }).statusStore
+  app.setStatus({ model: 'deepseek/flash', cwd: '/a/b', branch: 'main' })
+  // The model disappears (the legacy label becomes the empty/'no model'
+  // placeholder): the old model must be CLEARED, not kept.
+  app.setStatus({ model: '', cwd: '/a/b', branch: 'main' })
+  assert.equal(store.snapshot().composition.model, undefined, 'a gone model must be cleared')
+  // The cwd changes: the derived project follows the new cwd.
+  app.setStatus({ model: 'm', cwd: '/x/y/z', branch: 'main' })
+  assert.equal(store.snapshot().workspace.project, 'z', 'the project must follow the cwd')
+  // The branch empties: the old branch must be cleared.
+  app.setStatus({ model: 'm', cwd: '/x/y/z', branch: '' })
+  assert.equal(store.snapshot().workspace.branch, undefined, 'an emptied branch must be cleared')
+  app.stop()
+})
+
+test('a same-value setStatus does not bump the store revision', async () => {
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const store = (app as unknown as { statusStore: StatusStore }).statusStore
+  app.setStatus({ model: 'deepseek/flash', cwd: '/a/b', branch: 'main', turns: 1, steps: 2 })
+  const revision = store.revision()
+  // The SAME values again: no section content changed — no revision bump.
+  app.setStatus({ model: 'deepseek/flash', cwd: '/a/b', branch: 'main', turns: 1, steps: 2 })
+  assert.equal(store.revision(), revision, 'a same-value setStatus must not bump the revision')
   app.stop()
 })
