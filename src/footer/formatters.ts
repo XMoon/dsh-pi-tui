@@ -6,7 +6,7 @@
  * @module @xmoon76/dsh-pi-tui/footer/formatters
  */
 
-import { formatTokens } from '../stats.ts'
+import { formatTokens } from '../token-usage.ts'
 import type { UsageStatus } from '../status/types.ts'
 
 /** Short cwd for the footer: last two path segments (idempotent). */
