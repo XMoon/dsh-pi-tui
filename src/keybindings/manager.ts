@@ -100,6 +100,12 @@ export class HostKeybindingManager {
     this.onEditorSubmitSync = options.onEditorSubmitSync ?? (() => {})
     this.leaderTimeoutMs = options.leaderTimeoutMs ?? 1500
     this.keymap = this.buildKeymap()
+    // Sync the BUILTIN submit keys immediately: the fork's keybindings
+    // are PROCESS-GLOBAL, so a fresh manager must restore the default
+    // `tui.input.submit` — otherwise a previous TUI instance's remap/
+    // disable leaks into this one (PR review finding: remap → stop →
+    // new default app kept the old ctrl+x/disabled submit).
+    this.onEditorSubmitSync(this.editorSubmitKeysFor())
   }
 
   private buildKeymap(): EffectiveKeymap {

@@ -2367,6 +2367,18 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // Restore the fork's global submit binding to the builtin default:
+    // the fork keybindings are PROCESS-GLOBAL, and a disposed surface
+    // must not leak its remap/disable into a LATER TuiApp instance (PR
+    // review finding — remap → stop → new app inherited ctrl+x/inert
+    // Enter). The manager's constructor re-syncs the builtin default for
+    // a fresh instance too; this covers the no-new-instance case.
+    try {
+      const kb = getKeybindings()
+      kb.setUserBindings({ ...kb.getUserBindings(), 'tui.input.submit': 'enter' })
+    } catch {
+      // Best effort: the global keybindings may already be torn down.
+    }
     // Settle every pending approval BEFORE stop(): settling hides overlay
     // handles (hideCursor), and stop() ends with showCursor — the reverse
     // order would leave the user's cursor hidden after exit. Iterate a COPY:
