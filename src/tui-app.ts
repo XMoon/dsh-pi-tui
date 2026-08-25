@@ -5,13 +5,18 @@
  * entry point (startProcessTui) supplies ProcessTerminal.
  *
  * Surface layout (regular mode): header (todo status), message transcript,
- * editor, footer status line. Fullscreen mode (Ctrl+F) renders the same
- * component tree through TuiAltScreen's layout engine, where the transcript
- * scrolls inside the alt screen.
+ * editor, footer status line. Fullscreen mode renders the same component
+ * tree through TuiAltScreen's layout engine, where the transcript scrolls
+ * inside the alt screen.
  *
- * Keys: Enter submit, Ctrl+C/Ctrl+D exit, Ctrl+O expand/collapse recent turns
- * (in fullscreen Focus it bulk-toggles the Thought roots),
- * Ctrl+F toggle fullscreen, Tab autocomplete (slash commands + paths).
+ * KEYS ARE NOT HARD-CODED HERE: host shortcuts are semantic actions
+ * (app.*) resolved through the user-orchestrable keymap (plan M0–M6). The
+ * single source of truth for default keys is
+ * src/keybindings/definitions.ts; the effective map (user overrides
+ * applied) is inspectable at runtime with `/keybindings`. Comments in this
+ * file name keys only when the SEMANTICS are key-specific (e.g. the
+ * Ctrl+C clear-then-exit chord); every other mention is a shorthand for
+ * the action and must never be relied on as the live binding.
  * @module @xmoon76/dsh-pi-tui/tui-app
  */
 
@@ -880,8 +885,8 @@ export interface TuiAppEventsBase {
   /** The user submitted a line in the editor. */
   onSubmit: (text: string) => void
   /**
-   * Ctrl+V with image intake (plan M3): the host consumed the key and asks
-   * the runner to probe the clipboard — an image lands as a draft
+   * Clipboard paste with image intake (the paste-media action, plan M3):
+   * the host consumed the key and asks the runner to probe the clipboard — an image lands as a draft
    * placeholder, plain text as an editor insert. Optional; absent keeps
    * the pre-pipeline behavior (the key falls through to the editor).
    */
@@ -901,31 +906,36 @@ export interface TuiAppEventsBase {
    * absent means the draft text is the only emptiness authority.
    */
   isImageDraft?: () => boolean
-  /** The user asked to quit (Ctrl+C in the TUI's own raw mode). */
+  /** The user asked to quit (the exit action; Ctrl+C keeps its
+   * clear-then-exit chord in the TUI's own raw mode). */
   onExit: () => void
-  /** Stop the current activity (busy: a SINGLE Esc fires this directly;
-   * idle: a double-Esc within the window fires it when the editor is
-   * non-empty — an empty editor opens the rewind picker instead, see
+  /** Stop the current activity (the interrupt action, default: Esc — a
+   * SINGLE press fires this directly while busy; idle, a double press
+   * within the window fires it when the editor is non-empty, and an
+   * empty editor opens the rewind picker instead, see
    * {@link onRewind}). The runner's handler interrupts the agent while
    * preserving its queue (web Stop parity). Optional. */
   onCancel?: () => void
   /**
-   * Conversation rewind (pi parity): an idle double-Esc within the window
-   * with an EMPTY editor asks the host to open the rewind picker (fork the
-   * conversation from an earlier user turn). Busy Esc, overlays,
-   * autocomplete, replacement editors and a NON-empty draft never reach
-   * this (they keep their existing semantics). Optional; absent keeps the
-   * historical double-Esc cancel.
+   * Conversation rewind (pi parity): an idle double press of the
+   * interrupt key (default: Esc) within the window with an EMPTY editor
+   * asks the host to open the rewind picker (fork the conversation from
+   * an earlier user turn). A busy press, overlays, autocomplete,
+   * replacement editors and a NON-empty draft never reach this (they keep
+   * their existing semantics). Optional; absent keeps the historical
+   * double-press cancel.
    */
   onRewind?: () => void
   /**
-   * Ctrl+S: steer with the current draft (possibly empty). The runner sends
-   * the whole queue when it has messages, with the draft riding along, and
-   * falls back to the draft alone otherwise. Optional.
+   * Steer with the current draft, possibly empty (the steer action,
+   * default: Ctrl+S). The runner sends the whole queue when it has
+   * messages, with the draft riding along, and falls back to the draft
+   * alone otherwise. Optional.
    */
   onSteer?: (text: string) => void
   /**
-   * The busy-Enter opposite chord (Ctrl+Enter): submit the draft in the
+   * The busy-Enter opposite chord (the queue action, default: Ctrl+Enter):
+   * submit the draft in the
    * QUEUE delivery mode regardless of the busyEnter preference (web
    * busyEnter parity — the accelerated chord uses the other behavior).
    * Optional.
@@ -940,38 +950,42 @@ export interface TuiAppEventsBase {
    * is rejected, through the app's viewer-draft API. Optional.
    */
   onSubagentSubmit?: (request: SubagentViewerSubmit) => void
-  /** Fullscreen mode changed (Ctrl+F toggle or a settings-panel write). Optional. */
+  /** Fullscreen mode changed (a fullscreen toggle or a settings-panel
+   * write — the toggle action has no default key; Ctrl+F is transcript
+   * search). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
-  /** The transcript-search query changed (Ctrl+Shift+F opens the search). Optional. */
+  /** The transcript-search query changed (the search action opened it;
+   * the search keys are fixed overlay contracts). Optional. */
   onSearchQuery?: (query: string) => void
-  /** Enter inside the search: jump to the next match. Optional. */
+  /** The search's next-match key (fixed overlay contract): jump to the next match. Optional. */
   onSearchNext?: () => void
-  /** Shift+Enter inside the search: jump to the previous match. Optional. */
+  /** The search's previous-match key (fixed): jump to the previous match. Optional. */
   onSearchPrev?: () => void
-  /** The search was closed (Escape). Optional. */
+  /** The search was closed (its close key, fixed). Optional. */
   onSearchClose?: () => void
   /**
-   * The FIRST Esc press with no overlay up. The host may consume it (return
-   * true) to exit a runner-owned mode (e.g. the subagent viewer) instead of
-   * arming the double-Esc cancel. Optional.
+   * The FIRST press of the interrupt key (default: Esc) with no overlay
+   * up. The host may consume it (return true) to exit a runner-owned mode
+   * (e.g. the subagent viewer) instead of arming the double-press
+   * cancel. Optional.
    */
   onSingleEscape?: () => boolean | void
   /**
-   * Shift+Tab with no overlay up: cycle the permission preset (read-only →
-   * workspace-write → danger-full-access). The host applies the switch and
-   * refreshes the footer. Optional.
+   * Cycle the permission preset (the permission-cycle action, default:
+   * Shift+Tab; read-only → workspace-write → danger-full-access). The host
+   * applies the switch and refreshes the footer. Optional.
    */
   onCyclePermission?: () => void
   /**
-   * ↓ / Ctrl+J with an EMPTY editor and active background tasks: open the
-   * task browser (running jobs/subagents). The host lists the jobs and
-   * mounts the picker/viewer. Optional.
+   * The empty-editor ↓ affordance (the app.tasks.open action) with active
+   * background tasks: open the task browser (running jobs/subagents). The
+   * host lists the tasks and mounts the picker/viewer. Optional.
    */
   onOpenTasks?: () => void
   /**
-   * Alt+↑ with queued input and no overlay up: pull every queued message back
-   * into the editor draft (pi's dequeue). The host clears the inbox and the
-   * draft lands via {@link TuiApp.setDraft}. Optional.
+   * The dequeue action (default: Alt+↑): pull every queued message back
+   * into the editor draft (pi's dequeue). The host clears the inbox and
+   * the draft lands via {@link TuiApp.setDraft}. Optional.
    */
   onDequeue?: () => void
   /**
@@ -996,17 +1010,17 @@ export interface TuiAppEventsBase {
 /**
  * The application-surface events. The external-editor capability is a
  * BOUND pair declared only in the union: wiring `openExternalEditor`
- * REQUIRES `runOwned` — the Ctrl+G flow routes through the owned entry
- * (AGENTS.md), so a host cannot legally wire an editor hook without the
- * runner. Enforced at the type level (union) AND at construction time
- * (runtime check); without the editor hook neither field is needed and
- * Ctrl+G is a no-op.
+ * REQUIRES `runOwned` — the external-editor action routes through the
+ * owned entry (AGENTS.md), so a host cannot legally wire an editor hook
+ * without the runner. Enforced at the type level (union) AND at
+ * construction time (runtime check); without the editor hook neither
+ * field is needed and the action is a no-op.
  */
 export type TuiAppEvents = TuiAppEventsBase & (
   | {
-      /** Ctrl+G: open the external editor with the current draft. The TUI
-       * stops before the call and restarts after it resolves; return the
-       * new text. */
+      /** Open the external editor with the current draft (the
+       * external-editor action, default: Ctrl+G). The TUI stops before
+       * the call and restarts after it resolves; return the new text. */
       openExternalEditor: (draft: string) => Promise<string>
       runOwned: OwnedRunner
     }
@@ -1956,7 +1970,8 @@ export class TuiApp {
   private viewerFooter: SubagentViewerFooter | undefined
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
-    // The external-editor capability is a BOUND pair: the Ctrl+G flow
+    // The external-editor capability is a BOUND pair: the external-editor
+    // action flow
     // routes through the owned-task entry, so an editor hook without the
     // runner would silently swallow the key. The type union already
     // forbids it at compile time; this catches runtime violations (plain
@@ -2130,7 +2145,7 @@ export class TuiApp {
     // session switch changes `sessionCwd()` — see the field doc).
     this.historySearchCwd = options.historySearchCwd
     // Same for the session identity: a session switch must make the next
-    // Ctrl+R search the NEW session (see the field doc).
+    // history search the NEW session (see the field doc).
     this.historySearchSessionId = options.historySearchSessionId
     this.editorSeatHolder = new EditorSeatHolder({
       hostAdapter: () => this.hostEditorAdapter(),
@@ -2358,7 +2373,7 @@ export class TuiApp {
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
     this.searchComponent = undefined
-    // The Ctrl+R history panel dies with the surface: its in-flight search
+    // The history-search panel dies with the surface: its in-flight search
     // is aborted (a late result must never touch a dead component).
     this.historyPanel?.dispose()
     this.historyPanel = undefined
@@ -2955,7 +2970,7 @@ export class TuiApp {
         return true
       },
       dequeueDraft: () => {
-        // Dequeue (Alt+↑): pull queued input back into the editor.
+        // The dequeue action: pull queued input back into the editor.
         this.events.onDequeue?.()
         return true
       },
@@ -3047,7 +3062,7 @@ export class TuiApp {
         return true
       },
       openHistorySearch: () => {
-        // Ctrl+R input-history search: unbound (no historySearchSource)
+        // Input-history search: unbound (no historySearchSource)
         // falls through to the editor like any un-reserved key; the
         // continuable subagent viewer keeps its OWN live editor — the
         // chord is a no-op there (never the child draft, never the parent
@@ -3057,7 +3072,8 @@ export class TuiApp {
         return true
       },
       dismissSettledShell: () => {
-        // Dismiss settled local shell cards (Alt+K — plan §5.4 quick
+        // Dismiss settled local shell cards (the dismiss-settled action —
+        // plan §5.4 quick
         // clear): completed `!`/`!!` runs leave the live view; running
         // cards never do (the process is NOT cancelled — Esc owns that).
         this.dismissSettledLocalShell()
@@ -4654,7 +4670,8 @@ export class TuiApp {
     const todoBottom = Math.max(0, Math.min(height, height - footerHeight - editorHeight - workingHeight - queueHeight - goalHeight))
     const todoTop = Math.max(0, todoBottom - todoHeight)
     // The dock strip (the todo summary row) sits directly above the panel:
-    // clicking it opens the panel (mouse parity with Ctrl+T). The summary
+    // clicking it opens the panel (mouse parity with the todo-toggle
+    // action). The summary
     // is hidden while the panel is open, so the dock renders zero rows and
     // this branch is inert — the two regions never fight.
     const dockHeight = this.dock.render(width).length
@@ -4664,7 +4681,7 @@ export class TuiApp {
     }
     // A click on the todo panel's own rows runs the three-state loop
     // (compact → full list → back to the summary row), so the mouse opens
-    // AND closes the panel without Ctrl+T.
+    // AND closes the panel without the todo-toggle action.
     if (todoTop < todoBottom && y >= todoTop && y < todoBottom) {
       this.handleTodoPanelClick()
       return
@@ -6496,6 +6513,7 @@ export class TuiApp {
     // turns never reach this method: their process rows are absent from
     // the projection.
     const state = this.messageRenderState(message, boundary)
+
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
     // affected components (an HMR must never hit an old component).
@@ -6918,9 +6936,9 @@ export class TuiApp {
         ? color.error('[error]')
         : color.textDim('[running]')
     const head = `${color.textDim(`${icon}${header.title}${summary}`)} ${pill}`
-    // LOCAL `!`/`!!` shell cards read the master Ctrl+O switch (plan §5.3),
+    // LOCAL `!`/`!!` shell cards read the master expand switch (plan §5.3),
     // never the unbounded turn marker: collapsed by default so a long log
-    // cannot fill the TUI, expanded only while Ctrl+O is on.
+    // cannot fill the TUI, expanded only while the expand switch is on.
     const localShell = isLocalShellCard(message)
     if (expanded) {
       card.addChild(new Text(head, 0, 0))
@@ -7815,7 +7833,7 @@ export class TuiApp {
   /** Toggle the todo panel between the transcript and the editor. */
   toggleTodoPanel(): boolean {
     this.todoPanelVisible = !this.todoPanelVisible
-    // Hiding resets the expansion: the next Ctrl+T shows the compact panel.
+    // Hiding resets the expansion: the next todo-toggle shows the compact panel.
     if (!this.todoPanelVisible) this.todoExpanded = false
     this.renderTodoPanel()
     // The dock summary hides while the panel is expanded (it would sit on
