@@ -1622,10 +1622,11 @@ export class TuiApp {
   /**
    * Per-message expansion overrides from mouse clicks: a message whose entry
    * is true stays expanded even when the global fold is off; absent falls
-   * back to the global boundary. The Ctrl+O fold wins in the ordinary
-   * transcript and the regular Focus detail mode; in FULLSCREEN Focus the
-   * per-card override IS the disclosure owner (the mouse controls the
-   * secondaries — Ctrl+O does not pierce them).
+   * back to the global boundary. In FULLSCREEN Focus the per-card override
+   * IS the secondary disclosure owner (the mouse controls the cards —
+   * Ctrl+O does not pierce them); in REGULAR Focus any expanded root
+   * full-reveals its non-Thinking process regardless of the fold or the
+   * override.
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
   /**
