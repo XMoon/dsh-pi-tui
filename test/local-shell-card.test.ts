@@ -73,14 +73,14 @@ test('empty text previews as empty', () => {
 })
 
 test('the hidden marker carries the expand hint and stays honest', () => {
-  assert.equal(localShellHiddenMarker(0, false), '')
-  assert.equal(localShellHiddenMarker(3, false), '3 more lines (ctrl+o to expand)')
-  assert.equal(localShellHiddenMarker(3, true), '3 more lines (ctrl+o to expand)')
+  assert.equal(localShellHiddenMarker(0, false, false, 'ctrl+o'), '')
+  assert.equal(localShellHiddenMarker(3, false, false, 'ctrl+o'), '3 more lines (ctrl+o to expand)')
+  assert.equal(localShellHiddenMarker(3, true, false, 'ctrl+o'), '3 more lines (ctrl+o to expand)')
   // A PARTIAL cut (the front of the same line hidden) must not claim
   // "1 more line" — that would lie about what is hidden (review P1).
-  assert.equal(localShellHiddenMarker(1, true, true), 'earlier output hidden (ctrl+o to expand)')
-  assert.equal(localShellHiddenMarker(1, false, true), 'earlier output hidden (ctrl+o to expand)')
-  assert.equal(localShellHiddenMarker(0, true, true), '')
+  assert.equal(localShellHiddenMarker(1, true, true, 'ctrl+o'), 'earlier output hidden (ctrl+o to expand)')
+  assert.equal(localShellHiddenMarker(1, false, true, 'ctrl+o'), 'earlier output hidden (ctrl+o to expand)')
+  assert.equal(localShellHiddenMarker(0, true, true, 'ctrl+o'), '')
 })
 
 test('isLocalShellCard recognizes only the unbounded-turn shell card', () => {
@@ -172,7 +172,7 @@ test('a RUNNING gigantic single line is bounded by the visual ceiling, not the l
   assert.equal(hidden, 1, 'the single line is counted hidden')
   assert.equal(partial, true, 'the cut is mid-line: the hidden content is the EARLIER part of the same line')
   // The marker must say so honestly — never "1 more lines".
-  assert.equal(localShellHiddenMarker(hidden, true, partial), 'earlier output hidden (ctrl+o to expand)')
+  assert.equal(localShellHiddenMarker(hidden, true, partial, 'ctrl+o'), 'earlier output hidden (ctrl+o to expand)')
 })
 
 test('a RUNNING preview with many SHORT lines keeps the 5-line budget and is not partial', () => {

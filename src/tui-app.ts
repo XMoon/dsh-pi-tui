@@ -7205,7 +7205,7 @@ export class TuiApp {
       rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
     }
     if (preview.hidden > 0) {
-      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running, preview.partial)}`))
+      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running, preview.partial, this.expandHint(false))}`))
     }
     card.addChild(new Text(rows.join('\n'), 0, 0))
   }
