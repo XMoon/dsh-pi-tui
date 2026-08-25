@@ -97,6 +97,24 @@ test('search skips unreadable sessions and caps at 20 hits', async () => {
   assert.ok(!hits.some(h => h.id === 'session-0'), 'unreadable session skipped')
 })
 
+test('search never sorts the persistence list in place (the shared array stays untouched)', async () => {
+  // The persistence service may hand out a SHARED array: an in-place sort
+  // inside the adapter would reorder it for every other consumer (review
+  // finding). The adapter must copy before sorting.
+  const shared = [header('session-old', 100), header('session-new', 300)]
+  const before = [...shared]
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: {
+      list: async () => shared,
+      readRaw: async (id: string) => (id === 'session-new' ? { content: 'needle here' } : undefined),
+    },
+  }))
+  const hits = await reader.search('needle')
+  assert.ok(hits !== undefined)
+  assert.equal(hits[0].id, 'session-new')
+  assert.deepEqual(shared, before, 'the shared array keeps its original order')
+})
+
 test('titles delegates to the title batch loader through the query engine', async () => {
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: header('session-a', 100), live: false }]),

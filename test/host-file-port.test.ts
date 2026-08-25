@@ -162,3 +162,61 @@ test('candidates are detached plain DTOs (value/label/description/kind)', async 
   assert.equal(typeof item.description, 'string')
   assert.ok(item.kind === 'file' || item.kind === 'directory')
 })
+
+// ── the fd-backed branch (the fork's whole-tree fuzzy search) ─────────────
+
+/** A fake `fd` executable: a script that prints the fixture's RELATIVE
+ * paths the way real fd does (directories with a trailing `/`). The fork
+ * spawns it with `--base-directory <root>` and parses stdout. */
+function fakeFd(body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-fakefd-'))
+  const script = join(dir, 'fd')
+  writeFileSync(script, `#!/bin/sh\n${body}\n`)
+  chmodSync(script, 0o755)
+  return script
+}
+
+test('the fd branch delegates to the fork fuzzy search and returns its candidates', async () => {
+  const root = fixtureWorkspace()
+  const port = new DirectHostFilePort(() => undefined, fakeFd(
+    `printf 'file-one.txt\\nfile-two.ts\\nsrc/\\nsrc/deep-nested.ts\\n'`))
+  const scope = { kind: 'workspace', cwd: root } as const
+  const hits = await port.listReferences(scope, '@file')
+  const values = hits.map(candidate => candidate.value)
+  assert.ok(values.includes('@file-one.txt') || values.includes('@file-two.ts'),
+    `the fd candidates flow through as DTOs:\n${JSON.stringify(values)}`)
+  const [item] = hits
+  assert.ok(item !== undefined)
+  assert.deepEqual(Object.keys(item).sort(), ['description', 'kind', 'label', 'value'])
+})
+
+test('the fd branch maps the QUOTED prefix to quoted values', async () => {
+  const root = fixtureWorkspace()
+  const port = new DirectHostFilePort(() => undefined, fakeFd(
+    `printf 'my file.txt\\nsrc/\\nsrc/deep-nested.ts\\n'`))
+  const hits = await port.listReferences({ kind: 'workspace', cwd: root } as const, '@"my file')
+  assert.ok(hits.some(candidate => candidate.value === '@"my file.txt"'),
+    `a spaced fd candidate must come back quoted:\n${JSON.stringify(hits.map(h => h.value))}`)
+})
+
+test('an abort mid-fd-query fails closed (the port re-checks AFTER the await)', async () => {
+  const root = fixtureWorkspace()
+  // A fake fd that would answer eventually but sleeps past the abort.
+  const port = new DirectHostFilePort(() => undefined, fakeFd('sleep 30'))
+  const controller = new AbortController()
+  const pending = port.listReferences({ kind: 'workspace', cwd: root } as const, '@file', { signal: controller.signal })
+  controller.abort()
+  assert.deepEqual(await pending, [], 'a cancelled fd query must never serve a late result')
+})
+
+test('a failing fd yields NO candidates (fail closed, pre-migration parity)', async () => {
+  const root = fixtureWorkspace()
+  // Non-zero exit: real fd would have failed (e.g. a broken query); the
+  // adapter returns empty rather than partial or wrong data.
+  const port = new DirectHostFilePort(() => undefined, fakeFd('exit 3'))
+  assert.deepEqual(
+    await port.listReferences({ kind: 'workspace', cwd: root } as const, '@file'),
+    [],
+    'a failed fd spawn must not fabricate candidates',
+  )
+})

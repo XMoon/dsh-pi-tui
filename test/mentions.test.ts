@@ -540,3 +540,32 @@ test('the completion scope is resolved at SUGGESTION time, so a session switch n
   await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
   assert.deepEqual(scopes[2], { kind: 'workspace', cwd: root }, 'the sessionless fallback resolves the workspace')
 })
+
+test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-session commit)', async () => {
+  // The reviewer repro (rebase review round 3): a discovery started under
+  // session A settles AFTER the live agent moved to B. The request is NOT
+  // aborted (a session switch does not cancel editor completion), so the
+  // port's own abort check cannot help — the provider must re-verify the
+  // scope identity after the await and drop A's candidates.
+  const root = fixtureWorkspace()
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async () => {
+      await gate
+      return [{ value: '@file-one.txt', label: 'file-one.txt', description: join(root, 'file-one.txt'), kind: 'file' }]
+    },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  let liveAgent: { session: { id: string } } | undefined = { session: { id: 'session-a' } }
+  const provider = new MentionProvider([], root, seam, undefined, () =>
+    liveAgent === undefined
+      ? { kind: 'workspace', cwd: root }
+      : { kind: 'session', sessionId: liveAgent.session.id })
+  const pending = provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  // The switch lands while the discovery is in flight (no abort).
+  liveAgent = { session: { id: 'session-b' } }
+  release!()
+  assert.equal(await pending, null, 'a result resolved for the OLD session must never commit')
+})

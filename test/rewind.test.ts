@@ -447,6 +447,31 @@ test('I01: commitRewind creates, swaps and restores the selected prompt', async 
   assert.deepEqual(rig.drafts, ['B'], 'the selected prompt restores into the editor')
 })
 
+test('review: the preflight composition is resolved ONCE and the create receives its id (no drift)', async () => {
+  // The M1.5 lock-ordering preflight composes the source's recorded
+  // preset BEFORE the target lock is acquired; the Direct lifecycle then
+  // composes from the SAME resolved id. The runner must pass the
+  // PREFLIGHT result — a roster that changes between the two awaits can
+  // never make the create re-resolve a different id.
+  const rig = makeRig()
+  // A compose that would DRIFT on a second call (a hostile roster):
+  let calls = 0
+  rig.host.compose = async (presetId?: string) => {
+    calls += 1
+    return { agentPreset: calls === 1 ? 'stable-first' : 'drifted-second', setup: () => {} }
+  }
+  const events = [...turn(0, 1, 'A'), ...turn(4, 2, 'B')]
+  const candidates = collectRewindCandidates(events)
+  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, {
+    sessionId: 'session-source',
+    generation: 1,
+  })
+  assert.equal(outcome.kind, 'rewound')
+  assert.equal(calls, 1, 'the preflight composes exactly once')
+  assert.equal(rig.created[0]!.meta.agentPreset, 'stable-first', 'the create rides the PREFLIGHT id, never a re-resolution')
+  assert.equal(rig.created[0]!.agentPreset, 'stable-first')
+})
+
 test('I03: rewinding to the FIRST turn seeds an empty child', async () => {
   const rig = makeRig()
   const events = turn(0, 1, 'A')

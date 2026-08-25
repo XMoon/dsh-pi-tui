@@ -96,7 +96,10 @@ export class DirectSessionReader implements SessionReader {
     const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
     if (persistence === undefined) return undefined
     const needle = query.toLowerCase()
-    const headers = (await persistence.list())
+    // Copy before sorting: the persistence service's list() result is a
+    // shared array — an in-place sort would reorder it for every other
+    // consumer (review finding).
+    const headers = [...(await persistence.list())]
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, 100)
     const hits: SessionSearchHit[] = []

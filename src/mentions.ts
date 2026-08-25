@@ -432,6 +432,16 @@ const NO_HOST_REFERENCES: HostReferencesSeam = {
  * never by a client-side path assumption. */
 export type MentionScope = import('./runtime/host-file-port.ts').HostFileScope
 
+/** Whether two scopes address the SAME host identity (the stale-safety
+ * re-check after a port await: a session switch mid-flight must drop the
+ * old session's candidate list). */
+function sameMentionScope(left: MentionScope, right: MentionScope): boolean {
+  if (left.kind !== right.kind) return false
+  return left.kind === 'session'
+    ? left.sessionId === (right as { sessionId: string }).sessionId
+    : left.cwd === (right as { cwd: string }).cwd
+}
+
 /**
  * The editor's autocomplete provider: `@` mentions through the Host-file
  * port (the Direct adapter runs the fd whole-tree fuzzy search or the
@@ -542,14 +552,20 @@ export class MentionProvider implements AutocompleteProvider {
       // suggestions (the editor must never crash on a discovery failure),
       // and an aborted request is re-checked AFTER the await: a late
       // result can never overwrite newer suggestions (the fork's own
-      // post-await abort check, applied to the port branch).
+      // post-await abort check, applied to the port branch). The scope is
+      // ALSO re-verified after the await: a session switch mid-flight
+      // does not abort the request, but a candidate list resolved for the
+      // OLD session must never commit under the new one (stale-safety —
+      // the live scope source is re-read, never an install-time capture).
+      const scope = this.scopeOf()
       let candidates: readonly import('./runtime/host-file-port.ts').HostFileCandidate[]
       try {
-        candidates = await this.fileReferences.listReferences(this.scopeOf(), atPrefix, { signal: options.signal })
+        candidates = await this.fileReferences.listReferences(scope, atPrefix, { signal: options.signal })
       } catch {
         return null
       }
       if (options.signal.aborted || candidates.length === 0) return null
+      if (!sameMentionScope(scope, this.scopeOf())) return null
       return {
         prefix: atPrefix,
         items: candidates.map(candidate => ({
