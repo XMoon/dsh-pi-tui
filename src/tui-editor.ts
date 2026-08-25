@@ -316,9 +316,16 @@ export class TuiEditor extends Editor {
    * delay every Esc press; real terminals write a paste marker
    * atomically, so a split after the first byte is not observable in
    * practice). A complete `~`-terminated marker is never a split prefix.
-   * The tail lengths are FULL byte counts (`\x1b` is one char). A
-   * stitched sequence that never forms a real marker flows through the
-   * normal chain (upstream behavior for split CSI). */
+   * The tail lengths are FULL byte counts (`\x1b` is one char).
+   *
+   * TRADEOFF (documented): a stitched sequence that never forms a real
+   * marker flows through the normal chain — this also REPAIRS split CSI
+   * sequences (`\x1b[A` arriving as `\x1b[` + `A`), which the fork
+   * otherwise drops. The only loss is an input stream that ENDS with an
+   * incomplete CSI tail and never delivers the continuation — real
+   * terminals send each key's sequence atomically, so this does not
+   * occur in practice, and the upstream editor is strictly worse (it
+   * loses the tail immediately). */
   private bufferTrailingPasteMarker(data: string): string {
     if (data.endsWith('~')) return data
     let markerTail = 0

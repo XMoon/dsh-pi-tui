@@ -646,6 +646,21 @@ rounds (codex / gpt-5.6-luna):
   condition check, never a fixed-delay assertion). Regression tests:
   getDraft/setDraft wire symmetry incl. merge-restore round-trips, and a
   wire-prefixed extension prefix applying cleanly.
+- **Round 16**: P1 — the extension prefix normalization stripped a
+  MID-BODY literal `!` token (e.g. `echo !ch`) along with the synthetic
+  prefix (FIXED: the strip now applies ONLY when the prefix starts at
+  the WIRE line start — `cursorCol + synthetic − prefix.length === 0` —
+  so a literal document `!` is never touched); P2 — the marker-tail
+  buffering was flagged for swallowing an incomplete non-paste CSI tail
+  that never receives a continuation (BY DESIGN, documented in code and
+  here: the stitched tail flows through the normal chain when it never
+  forms a marker — which also REPAIRS split CSI sequences the fork
+  otherwise drops — and real terminals send each key's sequence
+  atomically, so an input stream ending mid-CSI does not occur in
+  practice; the upstream editor is strictly worse, losing the tail
+  immediately). Regression tests: a mid-body `!` completion token keeps
+  its literal `!`; an incomplete CSI tail buffers without loss and
+  stitches a split sequence.
 
 The full-suite tests (2060+), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the

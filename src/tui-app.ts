@@ -7876,14 +7876,20 @@ export class TuiApp {
       applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
         // A Stable plugin computes its prefix on the WIRE document it
         // received (line 0 carries the synthetic `!` / `!!`), so its
-        // prefix may legitimately include it (`!ch` for `!checkout`).
-        // Normalize back to BARE coordinates before the host apply —
-        // the base adapter adds its own virtual prefix and strips it
-        // exactly once; a doubled prefix would corrupt the result
-        // (`checkout` → `heckout`).
+        // prefix may include it (`!ch` for the wire line `!ch`).
+        // Normalize back to BARE coordinates before the host apply — the
+        // base adapter adds its own virtual prefix and strips it exactly
+        // once; a doubled prefix would corrupt the result. The strip
+        // applies ONLY when the prefix starts at the WIRE line start
+        // (cursorCol + synthetic length − prefix length === 0): a
+        // mid-body `!` token (e.g. `echo !ch`) is a literal document
+        // character and must never be stripped.
         const mode = getMode()
-        const barePrefix = mode !== 'prompt' && cursorLine === 0
+        const synthetic = mode === 'prompt' ? 0 : shellPrefixForMode(mode).length
+        const stripWirePrefix = mode !== 'prompt' && cursorLine === 0 && synthetic > 0
           && (prefix.startsWith('!!') || prefix.startsWith('!'))
+          && cursorCol + synthetic - prefix.length === 0
+        const barePrefix = stripWirePrefix
           ? prefix.slice(prefix.startsWith('!!') ? 2 : 1)
           : prefix
         return base.applyCompletion(lines, cursorLine, cursorCol, item, barePrefix)
