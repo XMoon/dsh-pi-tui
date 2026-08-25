@@ -449,7 +449,9 @@ gitignored):
   interrupted mid-drain, and the final drain from the persisted offset
   is exact-once (no lost or duplicated lines). A stuck stage shows its
   raw tail as it happens; `PUSH_GATE_QUIET=1` restores a single summary
-  line for scripted pushes. Success prints one summary line with the
+  line for scripted pushes and takes precedence over `PUSH_GATE_VERBOSE`
+  (under QUIET the poller is not started and streamed log lines are
+  suppressed). Success prints one summary line with the
   elapsed time (logs discarded); failure prints the failed stage, the
   last 60 log lines and retains the full log + progress timeline paths.
   `PUSH_GATE_STAGES` (test/dry-run only) is ignored unless
