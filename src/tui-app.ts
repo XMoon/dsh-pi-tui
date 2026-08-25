@@ -8437,7 +8437,10 @@ export class TuiApp {
       ...this.status.model === '' ? {} : { model: this.status.model },
       ...this.status.cwd === '' ? {} : { cwd: this.status.cwd },
       ...this.status.branch === '' ? {} : { branch: this.status.branch },
-      ...this.status.permission === undefined ? {} : { permission: this.status.permission },
+      // ALWAYS written (like todoSummary): the extension snapshot merge
+      // is per-field monotonic, so an OMITTED permission would keep the
+      // stale value — an explicit undefined clears it.
+      permission: this.status.permission,
     })
   }
 
