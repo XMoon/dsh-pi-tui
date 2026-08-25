@@ -5482,11 +5482,15 @@ export class TuiApp {
         view: { subject: { kind: 'main' } },
       })
     } else {
-      const current = this.statusStore.snapshot().usage
       this.projectStatus({
         usage: {
+          // Absent structured usage = NO usage facts (the child's stats
+          // line then has nothing to show): the PARENT's token figures
+          // must never leak into the child's stats line. Only the
+          // runner's refreshStatus projection (the child's own
+          // usageFromStats) supplies the child's tokens while viewing.
           ...footer.usage === undefined
-            ? { tokens: current.tokens, performance: current.performance }
+            ? { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, performance: { llmMs: 0, firstTokenMs: 0, tokensPerSec: 0 } }
             : { tokens: footer.usage.tokens, performance: footer.usage.performance },
           ...footer.usage?.cacheHitPct !== undefined ? { cacheHitPct: footer.usage.cacheHitPct } : {},
           ...footer.usage?.context !== undefined ? { context: footer.usage.context } : {},
