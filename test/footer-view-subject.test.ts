@@ -182,11 +182,20 @@ test('absent child usage never leaks the PARENT token figures into the child sta
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
-  // Paint the parent's usage facts first (real token figures).
-  app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3 })
-  app.setStatus({ turns: 2, steps: 3, statsLine: 'up 9999' })
-  ;(app as unknown as { statusStore: { snapshot(): { usage: { tokens: { input: number } } } } }).statusStore
+  // Paint the parent's STRUCTURED usage facts first (real token figures) —
+  // these are what the stats-line item composes from.
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3, statsLine: 'x', usage: {
+    tokens: { input: 9999, output: 8888, cacheRead: 0, cacheWrite: 0 },
+    performance: { llmMs: 120000, firstTokenMs: 2000, tokensPerSec: 40 },
+    turns: 2,
+    steps: 3,
+  } })
   await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  // 9999 formats as 10.0k, 8888 as 8.9k (pi's formatTokens) — the parent
+  // figures must be painted first (precondition).
+  assert.ok(view.includes('↑10.0k'), `the parent token figures must be painted first (precondition):\n${view}`)
+  assert.ok(view.includes('↓8.9k'), `the parent output figures must be painted first (precondition):\n${view}`)
   // Enter the viewer WITHOUT structured usage: the child's stats line must
   // not show the parent's token figures (a fresh/empty surface instead).
   app.setViewerFooter({
@@ -201,8 +210,9 @@ test('absent child usage never leaks the PARENT token figures into the child sta
     statsLine: 'child line',
   })
   await vt.waitForRender()
-  let view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('9999'), `the parent token figures must not leak:\n${view}`)
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('10.0k'), `the parent input-token figure must not leak:\n${view}`)
+  assert.ok(!view.includes('8.9k'), `the parent output-token figure must not leak:\n${view}`)
   assert.ok(view.includes('↑0 ↓0'), `the child stats line shows its OWN zeroed facts (never the parent's):\n${view}`)
   // The child's own turns/steps still show via the viewer identity.
   assert.ok(view.includes('child-ws'), `the child workspace must show:\n${view}`)

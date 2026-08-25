@@ -218,3 +218,24 @@ test('the preview editor-empty getter is LIVE: a draft typed under the panel upd
   assert.ok(!second.includes('↓ view'), `a non-empty editor must drop the hint:\n${second}`)
   app.stop()
 })
+
+test('the configurator budget never exceeds a very short terminal (resize-safe floor)', async () => {
+  // A 6-row terminal: the old Math.max(8, rows-2) floor produced an
+  // 8-row content window PLUS Frame borders — overflowing the viewport.
+  const vt = new VirtualTerminal(100, 6)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
+  app.openFooterConfigurator({
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  // The panel content must be windowed to the terminal (no overflow past
+  // the last row); every rendered row is within the viewport.
+  assert.ok(view.length <= 6, `the panel must fit a 6-row terminal:\n${view.join('\n')}`)
+  app.stop()
+})
