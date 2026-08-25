@@ -1488,3 +1488,115 @@ test('Ctrl+C on a BARE ! (empty body, shell mode) clears the mode and arms the e
   assert.equal(exits, 1, 'the second press exits')
   app.stop()
 })
+
+// ── PR review round 2: declined-input fallback wire coordinate ────────────
+
+test('a plugin DECLINED ! round-trips through the host shell mode into the wire document', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'decline-all',
+    priority: 0,
+    create: () => {
+      const editor = pluginEditor()
+      // A plugin that DECLINES every key: the host fallback owns the
+      // editing semantics.
+      editor.handleInput = () => false
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  const plugin = created[0]!
+  // 1. Declined `!` on an empty plugin: the host consumes it into the
+  //    shell mode and the WIRE document reflects it.
+  vt.sendInput('!')
+  await vt.waitForRender()
+  assert.equal(plugin.getText(), '!', 'a declined ! must reach the plugin as the wire prefix')
+  // 2. Declined second `!`: shell-local.
+  vt.sendInput('!')
+  await vt.waitForRender()
+  assert.equal(plugin.getText(), '!!', 'a declined second ! reaches the plugin as !!')
+  // 3. Declined Backspace on `!!`: steps back to `!`.
+  vt.sendInput('\x7f')
+  await vt.waitForRender()
+  assert.equal(plugin.getText(), '!', 'a declined Backspace steps the wire form back to !')
+  // 4. Declined Backspace on `!`: back to the empty prompt.
+  vt.sendInput('\x7f')
+  await vt.waitForRender()
+  assert.equal(plugin.getText(), '', 'a declined Backspace on ! returns the empty wire document')
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
+
+// ── PR review round 2: symmetric wire apply ───────────────────────────────
+
+test('accepting an absolute-path completion in a shell mode never doubles the slash', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  // shell-context: `/u` → Tab → accept `/usr/` — the fork's line-start
+  // judgment runs on the VIRTUAL wire line (`!/u`), so the absolute path
+  // is never mistaken for a slash command (`//usr/ ` must not happen).
+  vt.sendInput('!')
+  vt.sendInput('/u')
+  vt.sendInput('\t')
+  await waitForDropdownRow(vt, 'usr', 'path completion for /u in shell-context')
+  vt.sendInput('\t') // accept /usr/
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '/usr/', 'the accepted absolute path must not double the slash')
+  // shell-local: same rule.
+  app.setEditorText('')
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('!')
+  vt.sendInput('/u')
+  vt.sendInput('\t')
+  await waitForDropdownRow(vt, 'usr', 'path completion for /u in shell-local')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '/usr/', 'shell-local accepts the absolute path without a doubled slash')
+  app.stop()
+})
+
+test('a Stable extension suggestion applies through the wire adapter symmetrically', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let queries = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.setCommandCompletions([], fixtureWorkspace(), null, async () => {
+    queries += 1
+    // TWO suggestions: a single one would be auto-applied by the fork on
+    // the first Tab, so the dropdown opens and the accept path runs.
+    return {
+      items: [
+        { value: '/zzz-no-such-dir/', label: 'zzz-no-such-dir' },
+        { value: '/zzz-no-such-file', label: 'zzz-no-such-file' },
+      ],
+      prefix: '/zzz-no-such',
+    }
+  })
+  app.start()
+  await vt.waitForRender()
+  // Natural typing of the path must NOT consult the plugin chain (the
+  // shell-mode leading-/ suppression stays host-owned): no dropdown may
+  // open mid-typing, or the next Tab would double-apply.
+  vt.sendInput('!')
+  vt.sendInput('/zzz-no-such')
+  await vt.waitForRender()
+  await waitForNoDropdownRow(vt, 'zzz-no-such-dir', 'no extension dropdown during natural typing')
+  assert.equal(queries, 0, 'a natural trigger on a shell-mode path never consults the plugin chain')
+  // Tab (force) consults the plugin chain with the WIRE document, and
+  // the accepted suggestion applies symmetrically into the bare body.
+  vt.sendInput('\t')
+  await waitForDropdownRow(vt, 'zzz-no-such-dir', 'extension suggestion in shell mode')
+  vt.sendInput('\t') // accept
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '/zzz-no-such-dir/', 'the extension apply lands in the bare body without a doubled slash')
+  app.stop()
+})

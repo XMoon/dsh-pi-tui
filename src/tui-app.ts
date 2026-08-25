@@ -5468,6 +5468,7 @@ export class TuiApp {
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete(),
       getInputMode: () => editor.getInputMode(),
+      setInputMode: (mode) => editor.setInputMode(mode),
       setSerializedInput: (text) => editor.setSerializedInput(text),
       getCursor: () => {
         const cursor = editor.getCursor()
@@ -7835,6 +7836,16 @@ export class TuiApp {
       async getSuggestions(lines, cursorLine, cursorCol, options) {
         const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
         if (host !== null) return host
+        // Preserve the shell-mode natural-trigger suppression: a leading
+        // `/` on the first line in a shell mode is a PATH, and the host
+        // provider deliberately stays quiet until Tab — the plugin chain
+        // must not flash its suggestions over it (that would reopen the
+        // dropdown mid-typing and double-apply on the next Tab).
+        const mode = getMode()
+        if (mode !== 'prompt' && cursorLine === 0 && options.force !== true
+          && (lines[cursorLine] ?? '').startsWith('/')) {
+          return null
+        }
         // M5 Stable-compatibility adapter: the plugin chain's query is
         // the WIRE document — the same lines the host exposed BEFORE the
         // shell-editor-mode feature. A shell-mode body is re-prefixed
@@ -7842,7 +7853,6 @@ export class TuiApp {
         // plugin keeps parsing shell lines exactly as before and can
         // still tell a shell line from plain prose; the query shape is
         // unchanged (no new fields, no semantic drift).
-        const mode = getMode()
         const prefix = shellPrefixForMode(mode)
         // The wire document carries the shell prefix on LINE 0 only: a
         // body continuation line is ordinary text in the wire form too,
