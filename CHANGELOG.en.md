@@ -48,10 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strings, with a documented allowlist for the sanctioned
   focused-component/protocol seams and fork editor-level keys.
 - **User-facing key copy follows the effective keymap.** The footer
-  hints, `/help` rows, `/settings` descriptions and the divergence-guard
-  notices render their key labels through `keyHint()`/`keysFor()` — a
-  remap updates every copy, and comments name keys only where the
-  semantics are key-specific (the Ctrl+C chord, the double-Esc window).
+  hints, the fold/queue-pane hints (`to expand`, `to steer all`), the
+  `/help` rows, `/settings` descriptions and the divergence-guard notices
+  render their key labels through `keyHint()`/`keysFor()` — a remap
+  updates every copy, and comments name keys only where the semantics
+  are key-specific (the Ctrl+C chord, the double-Esc window).
 
 ### Changed
 
