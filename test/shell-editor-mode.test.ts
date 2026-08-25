@@ -1804,3 +1804,43 @@ test('provider-level: a continuation-line /u applies as a path on any shell line
   const natural = await provider.getSuggestions(['git status', '/u'], 1, 2, { signal: abort })
   assert.equal(natural, null)
 })
+
+// ── review round: extension suppression covers continuation lines ─────────
+
+test('the extension chain is NOT consulted on a continuation-line natural / trigger (only Tab)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let queries = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.setCommandCompletions([], fixtureWorkspace(), null, async () => {
+    queries += 1
+    return {
+      items: [
+        { value: '/zzz-no-such-dir/', label: 'zzz-no-such-dir' },
+        { value: '/zzz-no-such-file', label: 'zzz-no-such-file' },
+      ],
+      prefix: '/zzz-no-such',
+    }
+  })
+  app.start()
+  await vt.waitForRender()
+  setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+  try {
+    // A multiline shell draft: natural typing of a path on the
+    // CONTINUATION line must not consult the plugin chain.
+    vt.sendInput('!')
+    vt.sendInput('git status')
+    vt.sendInput('\n')
+    vt.sendInput('/zzz-no-such')
+    await vt.waitForRender()
+    await waitForNoDropdownRow(vt, 'zzz-no-such-dir', 'no extension dropdown during continuation-line typing')
+    assert.equal(queries, 0, 'a continuation-line natural / trigger never consults the plugin chain')
+    // Tab (force) still consults it with the wire document.
+    vt.sendInput('\t')
+    await waitForDropdownRow(vt, 'zzz-no-such-dir', 'extension suggestion on the continuation line via Tab')
+    assert.equal(queries, 1, 'Tab consults the plugin chain exactly once')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  app.stop()
+})
