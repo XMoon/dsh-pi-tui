@@ -1,16 +1,17 @@
 /**
  * The session WRITE domain port (M1.4, contract-reviewed round 2) — the
  * semantic contract between the TUI and session writes (follow-up
- * delivery, queue pull-back, cancel, title rename/refresh). The contract
- * is IDENTITY-BASED: every operation addresses a session by id, never by
- * a live agent object. A Direct adapter resolves the agent internally; a
- * Remote adapter maps the session id to the official DSH API.
+ * delivery, steer delivery, queue pull-back, cancel, title
+ * rename/refresh). The contract is IDENTITY-BASED: every operation
+ * addresses a session by id, never by a live agent object. A Direct
+ * adapter resolves the agent internally; a Remote adapter maps the
+ * session id to the official DSH API.
  *
- * Steer is deliberately NOT part of the port: Ctrl+S steer is Direct-mode
- * orchestration (divergence guard, transition fence, operation barrier —
- * the whole steerAll seam in src/steer.ts). A Remote backend steers
- * through its own wire capability; the runner keeps the Direct
- * orchestration on the direct path.
+ * The STEER ORCHESTRATION stays in the Direct runner (divergence guard,
+ * transition fence, operation barrier — the steerAll seam in
+ * src/steer.ts); its FINAL delivery (steer batch / followup / queue
+ * removal) goes through THIS port, so Direct and Remote share the same
+ * delivery semantics.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/session-writer-port

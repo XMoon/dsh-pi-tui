@@ -1343,7 +1343,7 @@ export function registerTuiCommands(
         (id, value, revert) => {
           if (id === 'approval') {
             if ((value === 'ask' || value === 'never') && liveAgent !== undefined) {
-              runner.interaction.setApprovalPolicy(liveAgent, value)
+              runner.interaction.setApprovalPolicy(liveAgent.session.id, value)
               // The footer's permission badge derives from the knob folds;
               // reflect the change immediately.
               runner.refreshStatus()
