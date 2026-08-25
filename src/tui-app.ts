@@ -3461,9 +3461,11 @@ export class TuiApp {
   /** Clear every secondary expansion of one turn (the root Collapse All
    * reset — plan §16): reopening the Thought never restores the previous
    * long outputs — the FULLSCREEN timeline re-derives compact, while
-   * regular mode full-reveals the process anyway. */
+   * regular mode full-reveals the process anyway. The single-turn and
+   * bulk variants share the override-map iteration (see
+   * clearAllFocusSecondaryExpansions — parked overrides never survive). */
   private clearFocusSecondaryExpansions(turn: number): void {
-    for (const message of this.messages) {
+    for (const message of this.expandedOverride.keys()) {
       if (!('turn' in message)) continue
       if (message.turn !== turn) continue
       if (!isFocusSecondaryDisclosure(message)) continue
@@ -3566,10 +3568,13 @@ export class TuiApp {
 
   /** Clear every Focus-secondary local override across ALL turns (the
    * bulk Collapse All reset — plan §7): a later re-expansion of ANY
-   * Thought never restores the previous long outputs. */
+   * Thought never restores the previous long outputs. Iterates the
+   * override MAP itself, never the current transcript window: an override
+   * parked on a windowed-away message (the same message object returns
+   * when the window widens again — search jumps / history) must not
+   * survive the bulk fold and resurrect a stale full-reveal. */
   private clearAllFocusSecondaryExpansions(): void {
-    for (const message of this.messages) {
-      if (!('turn' in message)) continue
+    for (const message of this.expandedOverride.keys()) {
       if (!isFocusSecondaryDisclosure(message)) continue
       this.expandedOverride.delete(message)
     }

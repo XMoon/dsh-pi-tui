@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder } from '../src/transcript.ts'
+import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
 import { EXPAND_RECENT_TURNS, TuiApp } from '../src/tui-app.ts'
 import type { ToolPresenter } from '../src/present.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -1283,9 +1283,14 @@ function settledThoughtTurn(turn: number, baseSeq: number): SessionEvent[] {
   ]
 }
 
-/** A settled turn whose bash result is LONG (120 lines) with an
- * intermediate assistant before the final — the header-scrolled-out-of-view
- * blank-row scenario (plan §23.1). */
+/** A settled turn whose FIRST bash result is LONG (120 lines), followed
+ * by a SECOND Thinking card and a SECOND (small) tool card before the
+ * final — the header-scrolled-out-of-view blank-row scenario (plan
+ * §23.1). The blank row above the second tool card is an INTERIOR blank
+ * of the expanded Thought (between two of its cards): a click there
+ * collapses the Thought, while pre-fix the spacer was charged to the
+ * SECONDARY Thinking card and only toggled it — the test discriminates
+ * the new fallback. */
 function offscreenThoughtTurn(seqBase: number): SessionEvent[] {
   const lines = Array.from({ length: 120 }, (_, i) => `result line ${i}`).join('\n')
   return [
@@ -1305,23 +1310,17 @@ function offscreenThoughtTurn(seqBase: number): SessionEvent[] {
         source: { kind: 'tool', callId: CallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'cross-checking the tail…' } }, T0 + 5, seqBase + 5),
+    eventAt('tool/call', { turn: 1, step: 2, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'echo done' }) }, T0 + 6, seqBase + 6),
     eventAt('assistant/message', {
-      turn: 1, step: 1,
+      turn: 1, step: 3,
       message: {
         id: MessageId('a1'), role: 'assistant',
-        content: [{ type: 'text', text: 'intermediate step' }],
-        source: { kind: 'model', provider: 'p', model: 'm' },
-      },
-    }, T0 + 5, seqBase + 5),
-    eventAt('assistant/message', {
-      turn: 1, step: 2,
-      message: {
-        id: MessageId('a2'), role: 'assistant',
         content: [{ type: 'text', text: 'Done.' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
-    }, T0 + 6, seqBase + 6),
-    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 7, seqBase + 7),
+    }, T0 + 7, seqBase + 7),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 8, seqBase + 8),
   ]
 }
 
@@ -1526,13 +1525,19 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   await vt.waitForRender()
   let view = vt.getViewport()
   assert.ok(findRow(view, '🐳 Thought') < 0, `precondition: the header must be scrolled out of view:\n${view.join('\n')}`)
-  const midY = findRow(view, 'intermediate step')
-  assert.ok(midY >= 0, `the intermediate assistant must be visible at the tail:\n${view.join('\n')}`)
-  // The blank row between the result body and the intermediate card is
-  // INSIDE the expanded Thought (both rows are its process): clicking it
-  // collapses the Thought and anchors its header back into view — the
-  // existing collapse anchor, no new scrolling (plan §18).
-  click(vt, 3, midY)
+  // The tail shows the result body, then a SECOND Thinking card, then a
+  // SECOND tool card. The blank row above the tool card is an INTERIOR
+  // blank of the same expanded Thought (between two of its cards) — the
+  // blank-row escape hatch: pre-fix that spacer belonged to the Thinking
+  // secondary (a click toggled only the card), so this test discriminates
+  // the new fallback.
+  const echoY = findRow(view, 'Bash echo done')
+  assert.ok(echoY >= 0, `the second tool card must be visible at the tail:\n${view.join('\n')}`)
+  assert.equal(view[echoY - 1].trim(), '', `the clicked row must be a blank visual row:\n${view.join('\n')}`)
+  // Click the blank row (0-based `echoY - 1`): the Thought collapses and
+  // its header anchors back into view — the existing collapse anchor, no
+  // new scrolling (plan §18).
+  click(vt, 3, echoY)
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
@@ -1571,8 +1576,10 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   // collapses the Thought; the card's own rows never do.
   app.scrollToTop()
   await vt.waitForRender()
-  const topBashY = findRow(vt.getViewport(), 'Bash cmd 1')
-  assert.ok(topBashY >= 0, `Bash card missing at the top:\n${vt.getViewport().join('\n')}`)
+  const topView = vt.getViewport()
+  const topBashY = findRow(topView, 'Bash cmd 1')
+  assert.ok(topBashY >= 0, `Bash card missing at the top:\n${topView.join('\n')}`)
+  assert.equal(topView[topBashY - 1].trim(), '', `the clicked row must be a blank visual row:\n${topView.join('\n')}`)
   click(vt, 3, topBashY)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
@@ -1637,6 +1644,7 @@ test('a blank-row click collapses ONLY the owning Thought (plan §23.4)', async 
   // only turn 2 collapses.
   const bash2Y = findRow(view, 'Bash cmd 2')
   assert.ok(bash2Y >= 0, `turn-2 Bash card missing:\n${joined}`)
+  assert.equal(view[bash2Y - 1].trim(), '', `the clicked row must be a blank spacer row:\n${joined}`)
   click(vt, 3, bash2Y)
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'only the OWNING Thought collapses')
@@ -1664,6 +1672,8 @@ test('clicking a blank row that belongs to NO Thought is a no-op (plan §23.5)',
   // there must be no-ops (plan §16 — never guess a "nearest Thought").
   const finalY = findRow(vt.getViewport(), 'done 1')
   assert.ok(finalY >= 0, `final assistant missing:\n${vt.getViewport().join('\n')}`)
+  const blankView = vt.getViewport()
+  assert.equal(blankView[finalY + 2].trim(), '', `the clicked row must be blank and outside every Thought region:\n${blankView.join('\n')}`)
   const before = [...app.focusExpandedTurnsForTest()]
   click(vt, 3, finalY + 3) // two blank rows below the final
   await vt.waitForRender()
@@ -1716,14 +1726,20 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   await vt.waitForRender()
   assert.ok(vt.getViewport().join('\n').includes('🐳 Thought'), 'precondition: root expanded')
   // An open overlay owns the click: the blank row between Thinking and
-  // Bash is INSIDE the expanded Thought, yet must NOT collapse it.
+  // Bash is INSIDE the expanded Thought, yet must NOT collapse it — and
+  // must not even reach the secondary (the Thinking card stays compact:
+  // pre-fix the spacer click toggled it behind the overlay).
   app.startTranscriptSearch()
   await vt.waitForRender()
-  const bashY = findRow(vt.getViewport(), 'Bash cmd 1')
-  assert.ok(bashY >= 0, `Bash card missing:\n${vt.getViewport().join('\n')}`)
+  const overlayView = vt.getViewport()
+  const bashY = findRow(overlayView, 'Bash cmd 1')
+  assert.ok(bashY >= 0, `Bash card missing:\n${overlayView.join('\n')}`)
+  assert.equal(overlayView[bashY - 1].trim(), '', `the clicked row must be blank:\n${overlayView.join('\n')}`)
   click(vt, 3, bashY)
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'an open overlay must block the blank-row collapse')
+  const after = vt.getViewport().join('\n')
+  assert.ok(after.includes('(click to expand)'), `the Thinking card must stay untouched behind the overlay:\n${after}`)
   app.closeTranscriptSearch()
   app.setFullscreen(false)
   app.stop()
@@ -1754,14 +1770,65 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   vt.resize(60, 40)
   await vt.waitForRender()
   view = vt.getViewport()
-  const midY = findRow(view, 'intermediate step')
-  assert.ok(midY >= 0, `intermediate assistant missing after resize:\n${view.join('\n')}`)
-  // The blank row above the intermediate card is still an INTERIOR blank
+  const echoY = findRow(view, 'Bash echo done')
+  assert.ok(echoY >= 0, `the second tool card missing after resize:\n${view.join('\n')}`)
+  assert.equal(view[echoY - 1].trim(), '', `the clicked row must still be the interior blank after resize:\n${view.join('\n')}`)
+  // The blank row above the second tool card is still an INTERIOR blank
   // of the same expanded Thought: collapses with the header anchored.
-  click(vt, 3, midY)
+  click(vt, 3, echoY)
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('🐋 Thought'), `the blank-row collapse must work after resize:\n${after}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message (plan §7 review finding)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(settledThoughtTurn(1, 0))
+  folder.apply(settledThoughtTurn(2, 100))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand turn 1 and full-reveal its Bash card: a per-card override on
+  // turn 1's tool message.
+  let y = findRow(vt.getViewport(), '🐋 Thought')
+  assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  const bashY = findRow(view, 'Bash cmd 1')
+  assert.ok(bashY >= 0, `Bash card missing:\n${view.join('\n')}`)
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('out 1 line 39'), 'precondition: turn-1 Bash is locally full')
+  // Window turn 1 away (the transcript folds to the most recent turn):
+  // the override stays PARKED on turn 1's old message objects.
+  app.setTranscript(windowMessages(folder.messages(), 1), folder.turnActivities())
+  await vt.waitForRender()
+  // Ctrl+O = Collapse All (turn 1's root is still in the disclosure set).
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Collapse All cleared the roots')
+  // Widen the window again: turn 1 returns with the SAME message objects.
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  // Re-expand turn 1: the parked override must NOT resurrect the old
+  // full-reveal (the bulk fold's cleanup contract covers parked state).
+  app.scrollToTop()
+  await vt.waitForRender()
+  y = findRow(vt.getViewport(), '🐋 Thought')
+  assert.ok(y >= 0, `collapsed header missing:\n${vt.getViewport().join('\n')}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('out 1 line 39'), `the parked override must not resurrect the full-reveal:\n${joined}`)
+  assert.ok(joined.includes('🐳 Thought'), 're-expansion must work after Collapse All')
   app.setFullscreen(false)
   app.stop()
 })
