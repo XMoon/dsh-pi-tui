@@ -2720,9 +2720,10 @@ export function apply(ctx: Context, config: Config): void {
       // Focus Mode: the search hits the FULL transcript (hidden process
       // rows included — plan §23), so a jump into a collapsed turn must
       // open its Thought for the hit to be visible — and a hit inside a
-      // SECONDARY card (the process timeline defaults to compact) must
-      // full-reveal that card (plan §28). The disclosure is not reverted
-      // when search closes.
+      // SECONDARY card must full-reveal that card (plan §28; the compact
+      // timeline is a FULLSCREEN property — regular Focus full-reveals
+      // any expanded root anyway). The disclosure is not reverted when
+      // search closes.
       if (turn !== undefined && app.isFocusModeEnabled()) {
         app.revealSearchMatch(match)
       }

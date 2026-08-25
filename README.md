@@ -374,7 +374,10 @@ the Advanced/Unstable roadmap).
 - `Alt+↑` — dequeue: pull every queued message back into the editor draft.
 - `Ctrl+O` — expand/collapse the most recent turns' collapsible entries
   (thinking, tool cards). The same master switch expands the local
-  `!`/`!!` shell cards (see Local shell below).
+  `!`/`!!` shell cards (see Local shell below). In Focus Mode (regular
+  surface) it derives a full reveal of the recent Thoughts; the
+  fullscreen Focus secondary cards are mouse-owned and Ctrl+O does not
+  expand them.
 - `Alt+K` — dismiss the SETTLED local `!`/`!!` shell cards from the live
   view; a RUNNING card is never dismissed and the process is not
   cancelled (Esc owns that). See Local shell below.
