@@ -2502,6 +2502,7 @@ export function registerTuiCommands(
         const raw = await runner.sessionReader.readExportData(liveAgent.session.id)
         if (raw.kind === 'unavailable') return { kind: 'error', text: 'session persistence unavailable' }
         if (raw.kind === 'none') return { kind: 'error', text: 'no materialized session log to export' }
+        if (raw.kind === 'error') return { kind: 'error', text: raw.message }
         writeFileSync(target, raw.data.content)
         return { kind: 'success', text: `exported ${raw.data.filename} to ${target}` }
       } catch (error) {
