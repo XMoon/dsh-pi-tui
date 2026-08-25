@@ -22,6 +22,8 @@ import type {
   AppKeybindingId,
   KeybindingContext,
   KeybindingResolution,
+  KeybindingScope,
+  KeybindingSource,
   KeymapSnapshot,
   LeaderBinding,
   LeaderConfig,
@@ -235,9 +237,16 @@ export class HostKeybindingManager {
   keyHint(action: AppKeybindingId): string {
     if (this.isDisabled(action)) return ''
     const direct = this.keymap.keyHint(action)
+    const leaderKeys = this.effectiveLeaderBindings
+      .filter(binding => binding.action === action)
+      .map(binding => formatLeaderSequence(binding.key))
+    if (direct !== '' && leaderKeys.length > 0) {
+      // Mixed direct + leader: show both (review finding — the leader
+      // sequence used to vanish behind the direct key).
+      return [direct, ...leaderKeys].join(' / ')
+    }
     if (direct !== '') return direct
-    const leaderBinding = this.effectiveLeaderBindings.find(binding => binding.action === action)
-    if (leaderBinding !== undefined) return formatLeaderSequence(leaderBinding.key)
+    if (leaderKeys.length > 0) return leaderKeys[0]!
     const definition = APP_KEYBINDINGS[action]
     if (definition !== undefined && definition.defaultKeys.length > 0) {
       return formatKeyId(definition.defaultKeys[0]!)
@@ -266,7 +275,26 @@ export class HostKeybindingManager {
       list.push(binding.key)
       leaderKeys.set(binding.action, list)
     }
-    const merged = [...snapshot.bindings]
+    type MutableSnapshotBinding = {
+      action: string
+      keys: KeyId[]
+      scope: KeybindingScope
+      source: KeybindingSource
+      leaderKeys?: KeyId[]
+    }
+    const merged: MutableSnapshotBinding[] = snapshot.bindings.map(binding => ({
+      action: binding.action,
+      keys: [...binding.keys],
+      scope: binding.scope,
+      source: binding.source,
+    }))
+    // Actions with BOTH direct and leader keys: attach the leader keys to
+    // the existing row (review finding — they were silently dropped).
+    for (const binding of merged) {
+      const leader = leaderKeys.get(binding.action)
+      if (leader === undefined) continue
+      binding.leaderKeys = leader
+    }
     for (const [id, definition] of Object.entries(APP_KEYBINDINGS)) {
       if (present.has(id)) continue
       if (this.isDisabled(id as AppKeybindingId)) continue
@@ -274,10 +302,10 @@ export class HostKeybindingManager {
       if (leader !== undefined) {
         merged.push({
           action: id,
-          keys: leader,
+          keys: [],
+          leaderKeys: leader,
           scope: definition.scope,
           source: 'user',
-          leader: true,
         })
         continue
       }

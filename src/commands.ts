@@ -2975,7 +2975,7 @@ export function registerTuiCommands(
         const list = categories.get(category) ?? []
         list.push({
           id: `kb-${binding.action}`,
-          label: binding.keys.length === 0 ? '—' : binding.keys.map(key => binding.leader === true ? formatLeaderSequence(key as never) : formatKeyId(key)).join(' / '),
+          label: [ ...binding.keys.map(key => formatKeyId(key)), ...(binding.leaderKeys ?? []).map(key => formatLeaderSequence(key)) ].join(' / ') || '—',
           description: `${binding.action} — ${definition?.description ?? ''} (${binding.scope}, ${binding.source})`,
           currentValue: '',
         })
