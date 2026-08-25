@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preference survives Focus and fullscreen switches; leaving fullscreen
   clears stale per-card click states so regular always follows the bulk.
 
-[0.3.3] - 2026-08-24
+## [0.3.3] - 2026-08-24
 
 ### Added
 
