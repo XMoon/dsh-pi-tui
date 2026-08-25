@@ -487,7 +487,7 @@ export class BulletedComponent implements Component {
 
 /**
  * The COMPACT Thinking disclosure card, WIDTH-AWARE (the unified
- * disclosure model, plan §4/§13): the `▸ Thinking` title, the latest
+ * disclosure model, plan §4/§13): the `🌊 Thinking` title, the latest
  * reasoning line as the preview and the owner hint are truncated AT
  * RENDER TIME to the CURRENT terminal width. The message component cache
  * deliberately does NOT key on width — a terminal resize keeps the same
@@ -530,11 +530,11 @@ export class ThinkingCompactComponent implements Component {
     if (previewLine === '') {
       // An existing block with no text yet (a very short streaming /
       // replay edge): the bare title — never a fake "No reasoning" row.
-      lines = [truncateToWidth(color.textDim('▸ Thinking'), Math.max(1, width), '…')]
+      lines = [truncateToWidth(color.textDim('🌊 Thinking'), Math.max(1, width), '…')]
     } else {
       const hintVerb = this.hint ?? 'ctrl+o'
       lines = [
-        truncateToWidth(color.textDim('▸ Thinking'), Math.max(1, width), '…'),
+        truncateToWidth(color.textDim('🌊 Thinking'), Math.max(1, width), '…'),
         truncateToWidth(color.textDimItalic(`  ${previewLine}`), Math.max(1, width), '…'),
         truncateToWidth(color.textDim(`  (${hintVerb} to expand)`), Math.max(1, width), '…'),
       ]
@@ -6379,14 +6379,14 @@ export class TuiApp {
       // RENDER TIME to the current terminal width, so a resize keeps the
       // fixed three-row geometry and never freezes a stale truncation
       // (the message cache does not key on width). FULL stays a plain
-      // Text: the `▾ Thinking` title plus the whole reasoning body
+      // Text: the `🌊 Thinking` title plus the whole reasoning body
       // (dim+italic so reasoning never reads like the assistant's actual
       // output), wrapping normally per the Text/Markdown policy; the
       // compact preview is never repeated next to the full body.
       if (!expanded) {
         return new ThinkingCompactComponent(message, expandHint)
       }
-      const head = color.textDim('▾ Thinking')
+      const head = color.textDim('🌊 Thinking')
       const body = message.text === '' ? '' : message.text.split('\n').map(line => `  ${line}`).join('\n')
       return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
     }

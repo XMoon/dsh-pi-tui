@@ -1452,7 +1452,7 @@ test('fullscreen Ctrl+O Collapse All clears every secondary override; the global
   // the fold here.
   app.toggleThinkingExpanded()
   await vt.waitForRender()
-  const thinkY = findRow(vt.getViewport(), '▾ Thinking')
+  const thinkY = findRow(vt.getViewport(), '🌊 Thinking')
   assert.ok(thinkY >= 0, `full Thinking card missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 10, thinkY + 1)
   await vt.waitForRender()
@@ -1628,7 +1628,7 @@ test('clicking the Thinking row toggles the secondary, never the root (plan §23
   await vt.waitForRender()
   let joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('(click to expand)'), 'precondition: Thinking compact with the hint')
-  const thinkY = findRow(vt.getViewport(), '▸ Thinking')
+  const thinkY = findRow(vt.getViewport(), '🌊 Thinking')
   assert.ok(thinkY >= 0, `Thinking card missing:\n${joined}`)
   click(vt, 10, thinkY + 1)
   await vt.waitForRender()
