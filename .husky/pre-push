@@ -10,8 +10,14 @@
 # fork), the fork's own typecheck/tests are skipped (~15 s saved) — the
 # fork suite only guards fork changes, and CI still runs it regardless.
 #
+# The stage list is NOT hard-coded: .husky/pre-push runs the exact script
+# selected below (verify:prepush / verify:prepush:nofork / pnpm typecheck /
+# pnpm typecheck:bundle) by deriving its per-command stages from
+# package.json via scripts/pre-push-stages.mjs — package.json stays the
+# single source of truth, so there is nothing to drift.
+#
 # Output: the gate never goes silent. Every stage prints a timestamped
-# progress line (start / ok + elapsed / FAILED + elapsed) as it runs, and
+# progress line (start / ok + elapsed / FAIL + elapsed) as it runs, and
 # the full command output is captured into a log (discarded on success;
 # on failure the last 60 lines plus the retained log + progress paths are
 # printed). A long push therefore always shows WHICH stage is live.
@@ -20,8 +26,10 @@
 #                         [HH:MM:SS] prefix, so a stuck stage shows its
 #                         raw tail as it happens.
 #   PUSH_GATE_QUIET=1     single summary line only (scripted pushes).
-#   PUSH_GATE_STAGES="..."  test/dry-run only: override the stage list
-#                         (never set this for real pushes).
+#   PUSH_GATE_STAGES="..."  test/dry-run ONLY: override the stage list.
+#                         Ignored unless PUSH_GATE_TEST_MODE=1 is set, so
+#                         a stray env var can never shrink a real push's
+#                         gate. Never set it for real pushes.
 # Run `pnpm run verify:prepush` manually for the unabridged reference run.
 # Escape hatch: git push --no-verify.
 
@@ -47,56 +55,26 @@ done
 if [ "$FULL" -eq 1 ]; then
   if [ "$FORK_CHANGED" -eq 1 ]; then
     VERIFY="verify:prepush"
-    STAGES='pnpm typecheck:fork
-pnpm test:fork
-pnpm test:docs
-node scripts/naming-gate.mjs
-pnpm gate:boundary
-pnpm audit --prod --audit-level high
-pnpm pack:release'
   else
     VERIFY="verify:prepush:nofork"
-    STAGES='pnpm test:docs
-node scripts/naming-gate.mjs
-pnpm gate:boundary
-pnpm audit --prod --audit-level high
-pnpm pack:release'
   fi
 else
   if [ "$FORK_CHANGED" -eq 1 ]; then
     VERIFY="typecheck"
-    STAGES='pnpm typecheck'
   else
     VERIFY="typecheck:bundle"
-    STAGES='pnpm typecheck:bundle'
   fi
 fi
 
-# Normalize the stage list to canonical lines (defensive: a future edit
-# that indents the continuation lines must not silently break the drift
-# guard or the run loop below). Test/dry-run override for the hook itself.
-if [ -n "${PUSH_GATE_STAGES:-}" ]; then
+# Single source of truth: derive the ordered stage list from the selected
+# package.json script. Non-verify scripts (typecheck / typecheck:bundle)
+# are passed through as a single stage.
+if [ "${PUSH_GATE_TEST_MODE:-0}" = "1" ] && [ -n "${PUSH_GATE_STAGES:-}" ]; then
   STAGES=$PUSH_GATE_STAGES
-fi
-STAGES=$(printf '%s\n' "$STAGES" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-
-# Drift guard for the full chain: every stage below must still appear
-# verbatim in the packaged verify:* scripts (single source of truth stays
-# in package.json; `pnpm run verify:prepush` remains the reference run).
-if [ "$FULL" -eq 1 ]; then
-  VERIFY_TEXT=$(node -p "const p = require('./package.json').scripts; Object.keys(p).filter(k => k.startsWith('verify:')).map(k => p[k]).join('\n')")
-  if ! printf '%s\n' "$STAGES" | while IFS= read -r stage; do
-    [ -n "$stage" ] || continue
-    case "$VERIFY_TEXT" in
-      *"$stage"*) ;;
-      *)
-        echo "pre-push gate: stage no longer in package.json verify:*: $stage (update .husky/pre-push to stay in sync)" >&2
-        exit 3
-        ;;
-    esac
-  done; then
-    exit 1
-  fi
+elif case "$VERIFY" in verify:*) true ;; *) false ;; esac; then
+  STAGES=$(node scripts/pre-push-stages.mjs "$VERIFY")
+else
+  STAGES="pnpm $VERIFY"
 fi
 
 TMP_DIR="${TMPDIR:-/tmp}"
@@ -123,21 +101,39 @@ if [ "$QUIET" -ne 1 ]; then
   echo "pre-push gate: $VERIFY ($STAGE_COUNT $LABEL) — log: $LOG"
 fi
 
+# Read previously-unstreamed lines from the log and print them with a
+# timestamp. Prints to stderr (the hook's progress lines go to stdout),
+# and echoes the next unread offset (total+1, or start when the log has
+# not grown) so callers can track position. Used by the poller loop and
+# by the final drain, so every line is streamed exactly once — nothing is
+# lost in the poll gap.
+drain_log() {
+  start=${1:-1}
+  total=$(wc -l <"$LOG" 2>/dev/null || echo 0)
+  if [ "$total" -ge "$start" ]; then
+    sed -n "${start},${total}p" "$LOG" | while IFS= read -r line; do
+      printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$line"
+    done >&2
+    next=$((total + 1))
+  else
+    next=$start
+  fi
+  echo "$next"
+}
+
 # Verbose mode: stream the captured log live, one timestamped line per
-# new line (poll the log; the poller is a single subshell, so killing
-# STREAM_PID never orphans a child like `tail -f` in a pipeline would).
+# new line (drain_log off the shared LOG_OFFSET position). The poller is
+# a single subshell (killing STREAM_PID never orphans a tail -f child).
+# The offset file lets the main shell drain the final partial poll window
+# before killing the poller.
 if [ "$VERBOSE" -eq 1 ]; then
+  LOG_OFFSET=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.offset")
   (
     next=1
     while :; do
-      total=$(wc -l <"$LOG" 2>/dev/null || echo 0)
-      if [ "$total" -ge "$next" ]; then
-        sed -n "${next},${total}p" "$LOG" | while IFS= read -r line; do
-          printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$line"
-        done >&2
-        next=$((total + 1))
-      fi
-      sleep 0.2
+      next=$(drain_log "$next")
+      printf '%s\n' "$next" >"$LOG_OFFSET"
+      sleep 0.4
     done
   ) &
   STREAM_PID=$!
@@ -164,7 +160,17 @@ $STAGES
 EOF
 
 if [ "$VERBOSE" -eq 1 ]; then
+  # Final drain: emit any lines the poller has not streamed yet (its
+  # offset lags by up to one poll interval), then stop the poller.
+  if [ -n "${LOG_OFFSET:-}" ] && [ -f "$LOG_OFFSET" ]; then
+    offset=$(cat "$LOG_OFFSET" 2>/dev/null || echo 1)
+    drain_log "$offset" >/dev/null
+  else
+    drain_log 1 >/dev/null
+  fi
   kill "$STREAM_PID" 2>/dev/null || true
+  wait "$STREAM_PID" 2>/dev/null || true
+  rm -f "$LOG_OFFSET"
 fi
 
 END=$(date +%s)
