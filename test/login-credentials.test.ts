@@ -115,6 +115,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     },
     sessionWriter: {
       followup: () => {},
+      steer: () => {},
       dequeue: () => {},
       cancel: () => {},
       rename: () => true,

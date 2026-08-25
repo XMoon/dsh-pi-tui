@@ -122,7 +122,7 @@ import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
 import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
-import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
+import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -1910,10 +1910,9 @@ export function apply(ctx: Context, config: Config): void {
  * Direct SessionHandle carries it via direct.agent; an AgentHandle IS the
  * agent handle. Remote handles carry neither (the client runtime owns the
  * session there — M2+). */
-const transitionAgent = (next: unknown): Agent | undefined => {
-  const handle = next as { agent?: Agent; direct?: { agent?: unknown } }
-  return handle.direct?.agent as Agent | undefined ?? handle.agent
-}
+// transition agent/handle extraction lives in runtime/session-lifecycle-port.ts
+// (ownerHandleOf / directAgentOf) so the runner AND the contract tests share
+// the exact extraction the transition commit uses.
     const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
       const from = liveAgent?.session.id
       const oldHandle = liveHandle
@@ -1944,9 +1943,9 @@ const transitionAgent = (next: unknown): Agent | undefined => {
           // async work from the old session cannot commit, and clear
           // old-session state.
           bumpSessionGeneration()
-          liveHandle = next as AgentHandle | undefined
-          liveAgent = transitionAgent(next)
-          leaseManager.markActive(transitionAgent(next)!.session.id)
+          liveHandle = ownerHandleOf(next) as AgentHandle | undefined
+          liveAgent = directAgentOf(next) as Agent
+          leaseManager.markActive((directAgentOf(next) as Agent).session.id)
         },
         pinTarget: (sessionId, reason) => {
           leaseManager.pin(sessionId, reason)
@@ -2020,12 +2019,12 @@ const transitionAgent = (next: unknown): Agent | undefined => {
             }
           }
           try {
-            await transitionAgent(next)!.whenIdle()
+            await (directAgentOf(next) as Agent).whenIdle()
           } catch (error) {
             retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
           }
           try {
-            await initLiveSession(transitionAgent(next)!)
+            await initLiveSession(directAgentOf(next) as Agent)
           } catch (error) {
             retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
           }
@@ -2036,14 +2035,14 @@ const transitionAgent = (next: unknown): Agent | undefined => {
           // the coordinator warns and the transition commands keep
           // re-validating).
           try {
-            await refreshLiveCatalog(transitionAgent(next)!)
+            await refreshLiveCatalog(directAgentOf(next) as Agent)
           } catch (error) {
             retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
           }
           if (retired.length > 0) {
-            diag.error('transition retire failed (child committed)', { to: transitionAgent(next)!.session.id, failures: retired })
+            diag.error('transition retire failed (child committed)', { to: (directAgentOf(next) as Agent).session.id, failures: retired })
           }
-          diag.info('switch ok', { from: from ?? '(none)', to: transitionAgent(next)!.session.id, seq: transitionAgent(next)!.session.events.length })
+          diag.info('switch ok', { from: from ?? '(none)', to: (directAgentOf(next) as Agent).session.id, seq: (directAgentOf(next) as Agent).session.events.length })
         },
         recordFailure: (phase, error) => {
           diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
@@ -3449,6 +3448,10 @@ const transitionAgent = (next: unknown): Agent | undefined => {
           forcedNotice: () => GUARD_FORCED_NOTIFY,
           staleNotice: () => 'the queue or session changed while sending — try again',
           mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
+          // The FINAL delivery goes through the session WRITE port: the
+          // Direct guard/fence/barrier orchestration above stays in the
+          // runner, the port only delivers (steer/followup/dequeue).
+          writer: backend.sessionWriter,
         }, text, onlyDraft ? { onlyDraft: true } : undefined)
         // Only a successful send consumes the drafts: on block/stale the
         // draft was restored and the images are still referenced — removing

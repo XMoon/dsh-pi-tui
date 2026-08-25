@@ -30,8 +30,10 @@
  */
 
 /** Create one fresh session (the /new and first-session paths). All fields
- * are serializable wire data — no callbacks, no Host types. The caller
- * passes cancellation separately (client-local, never serialized). */
+ * are serializable wire data — no callbacks, no Host types. The fields
+ * are what a Remote adapter serializes; `signal` is the ONE client-local
+ * control field (cancellation) that Remote adapters MUST NOT serialize —
+ * they map it to their own client-side cancellation instead. */
 export interface CreateSessionRequest {
   /** The pre-generated session identity (the TUI owns the id). */
   sessionId: string
@@ -45,7 +47,8 @@ export interface CreateSessionRequest {
   /** The seed events (fork/rewind); a Remote backend maps them to its own
    * seed contract. */
   seed?: readonly unknown[]
-  /** Creation-only cancellation; the handle detaches on publication. */
+  /** CLIENT-LOCAL control field (never serialized): creation-only
+   * cancellation; the handle detaches on publication. */
   signal?: AbortSignal
 }
 
@@ -85,4 +88,27 @@ export interface SessionHandle {
 export interface SessionLifecycle {
   create(request: CreateSessionRequest): Promise<SessionHandle>
   resume(request: ResumeSessionRequest): Promise<SessionHandle>
+}
+
+/** Extract the Direct ownership handle (the real AgentHandle with
+ * `dispose()`) from a lifecycle result. Accepts BOTH the SessionHandle
+ * (via `direct.ownerHandle`) and a legacy AgentHandle (which IS the
+ * handle) so the runner's transition code never stores the SessionHandle
+ * where it expects the AgentHandle — a lost handle would make
+ * `dispose()` at retirement throw and PIN the old lease (the P1
+ * regression class). Remote handles lack `direct` and yield undefined. */
+export function ownerHandleOf(next: unknown): unknown {
+  const handle = next as { dispose?: unknown; direct?: { ownerHandle?: unknown } }
+  if (handle.direct?.ownerHandle !== undefined) return handle.direct.ownerHandle
+  if (typeof handle.dispose === 'function') return handle
+  return undefined
+}
+
+/** Extract the live in-process agent from a lifecycle result (the Direct
+ * SessionHandle via `direct.agent`, or a legacy AgentHandle's `agent`).
+ * Remote handles yield undefined — the client runtime owns the session
+ * there. */
+export function directAgentOf(next: unknown): unknown {
+  const handle = next as { agent?: unknown; direct?: { agent?: unknown } }
+  return handle.direct?.agent ?? handle.agent
 }

@@ -153,6 +153,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     },
     sessionWriter: {
       followup: () => {},
+      steer: () => {},
       dequeue: () => {},
       cancel: () => {},
       rename: () => true,

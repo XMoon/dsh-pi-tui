@@ -143,6 +143,7 @@ function stubRunner(options: {
     },
     sessionWriter: {
       followup: () => {},
+      steer: () => {},
       dequeue: () => {},
       cancel: () => {},
       rename: () => true,

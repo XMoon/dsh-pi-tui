@@ -86,6 +86,7 @@ function stubRunner(
     },
     sessionWriter: {
       followup: () => {},
+      steer: () => {},
       dequeue: () => {},
       cancel: () => {},
       // The /title tests provide a fake sessionTitle service on the ctx;

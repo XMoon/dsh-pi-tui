@@ -87,6 +87,7 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     },
     sessionWriter: {
       followup: () => {},
+      steer: () => {},
       dequeue: () => {},
       cancel: () => {},
       rename: () => true,

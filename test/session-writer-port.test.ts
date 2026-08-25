@@ -21,6 +21,7 @@ function agent(id: string, overrides: Partial<LiveAgentLike> = {}): LiveAgentLik
   return {
     session: { id },
     followup: () => {},
+    steer: () => {},
     cancel: () => {},
     inbox: { remove: () => {} },
     ...overrides,
