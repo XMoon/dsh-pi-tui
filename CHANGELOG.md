@@ -37,8 +37,13 @@
 - **新增静态门禁阻止物理快捷键回潮。**
   `scripts/check-host-keybindings.mts`(已接入 `verify:prepush`)对
   host 输入路径中新增的 `matchesKey(data, 'ctrl+…'/'alt+…'/'shift+…')`
-  和弦直接报错,并带有针对受认可的 focused-component/protocol 接缝的
+  和弦、以及用户可见字符串中写死的和弦标签直接报错,并带有针对受
+  认可的 focused-component/protocol 接缝与 fork 编辑器级按键的
   白名单。
+- **用户可见的键位文案跟随生效 keymap。** 页脚提示、`/help` 行、
+  `/settings` 行与 divergence-guard 通知都通过
+  `keymap.keyHint()/keysFor()` 渲染键标签——改键后所有文案自动更新;
+  注释只在语义键特有(如 Ctrl+C 和弦、双击 Esc 窗口)时保留键名。
 
 ### 变更
 
