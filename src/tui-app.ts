@@ -4910,7 +4910,6 @@ export class TuiApp {
    * decides, and the Ctrl+O keyboard fold does not pierce them.
    */
   private handleFullscreenClick(x: number, y: number): void {
-    console.log('CLICK', x, y, 'footerRows', this.footer.render(this.terminal.columns).length, 'todoVisible', this.todoPanelVisible, 'todoExpanded', this.todoExpanded, 'todoPanelRows', this.todoPanel.render(this.terminal.columns).length)
     // A question owns the modal front: clicks inside its frame (the editor
     // seat, pinned above the footer) route to the flow — option rows select,
     // the body scroll marker toggles the expanded region. The seat's screen
@@ -8461,16 +8460,27 @@ export class TuiApp {
    */
   setStatus(status: Partial<StatusData>): void {
     this.status = { ...this.status, ...status }
+    // The projection MERGES into the store's current sections: the legacy
+    // fields only own model/permission/cwd/branch — the runner-derived
+    // facts (agentPreset, sandbox/approval, workspace project, usage
+    // tokens/performance) must survive a legacy update (a replacing
+    // projection would erase them).
+    const current = this.statusStore.snapshot()
+    const model = modelFromLabel(this.status.model)
     this.projectStatus({
-      composition: { model: modelFromLabel(this.status.model) },
-      access: this.status.permission === undefined ? {} : {
-        permissionPreset: {
-          id: this.status.permission,
-          label: this.status.permission,
-          matched: this.status.permission !== 'custom',
-        },
-      },
+      composition: { ...current.composition, ...model === undefined ? {} : { model } },
+      access: this.status.permission === undefined
+        ? current.access
+        : {
+            ...current.access,
+            permissionPreset: {
+              id: this.status.permission,
+              label: this.status.permission,
+              matched: this.status.permission !== 'custom',
+            },
+          },
       workspace: {
+        ...current.workspace,
         cwd: this.status.cwd,
         ...this.status.branch === undefined || this.status.branch === '' ? {} : { branch: this.status.branch },
       },

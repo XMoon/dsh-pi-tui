@@ -43,7 +43,11 @@ test('success: the sanitized rows reach the output sink', async () => {
 })
 
 test('maxRows caps the output rows', async () => {
-  const rows = await runOnce({ ...CONFIG, maxRows: 2 }, 'process.stdout.write("a\\nb\\nc\\n")')
+  // A generous timeout: the child is a trivial echo, but under the packed
+  // packaging chain a spawn can exceed the 300ms PRODUCTION default — the
+  // test must not hit the runner's own timeout (the timeout behavior is
+  // covered by its own dedicated test).
+  const rows = await runOnce({ ...CONFIG, maxRows: 2, timeoutMs: 10000 }, 'process.stdout.write("a\\nb\\nc\\n")')
   assert.deepEqual(rows, ['a', 'b'])
 })
 
