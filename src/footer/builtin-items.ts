@@ -49,17 +49,22 @@ const permissionPresetItem: FooterItemDefinition = {
   },
 }
 
-/** The plan badge: `[plan]` while plan mode is effective. */
+/** The plan badge: `[plan]` while plan mode is effective, `[plan pending]`
+ * while a plan-mode switch is pending (plan §4.3 — BOTH pending-enter and
+ * pending-exit render the pending badge; the derive never guesses it). */
 const planStateItem: FooterItemDefinition = {
   id: 'plan-state',
   label: 'Plan state',
-  description: 'The plan-mode badge ([plan] while effective).',
+  description: 'The plan-mode badge ([plan] while effective, [plan pending] while a switch is pending).',
   defaultZone: 'left',
   defaultImportance: 115,
   formats: ['badge'],
   defaultFormat: 'badge',
   render(snapshot: StatusSnapshot) {
     if (snapshot.view.subject.kind !== 'main') return null
+    if (snapshot.collaboration.plan.pending !== undefined) {
+      return { spans: [{ text: '[plan pending]', tone: 'warning' }] }
+    }
     if (!snapshot.collaboration.plan.effective) return null
     return { spans: [{ text: '[plan]', tone: 'warning' }] }
   },

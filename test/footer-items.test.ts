@@ -65,6 +65,24 @@ test('plan-state renders [plan] only while effective', () => {
   assert.equal(render('plan-state', emptyStatusSnapshot()), '')
 })
 
+test('plan-state renders [plan pending] for BOTH pending directions (plan §4.3)', () => {
+  // Pending ENTER: the user selected plan mode, not yet effective.
+  const entering = render('plan-state', snapshotWith(snap => {
+    snap.collaboration.plan = { effective: false, pending: true }
+  }))
+  assert.equal(entering, '[plan pending]', 'pending enter must badge [plan pending]')
+  // Pending EXIT: the user selected exit, plan still effective until applied.
+  const exiting = render('plan-state', snapshotWith(snap => {
+    snap.collaboration.plan = { effective: true, pending: false }
+  }))
+  assert.equal(exiting, '[plan pending]', 'pending exit must badge [plan pending]')
+  // Effective with no pending stays the plain badge.
+  const plainBadge = render('plan-state', snapshotWith(snap => {
+    snap.collaboration.plan = { effective: true }
+  }))
+  assert.equal(plainBadge, '[plan]')
+})
+
 test('model renders the legacy label with the effort; absent → nothing', () => {
   const plain = render('model', snapshotWith(snap => {
     snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }

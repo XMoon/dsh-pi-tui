@@ -4935,8 +4935,10 @@ export function apply(ctx: Context, config: Config): void {
             footerWarningShown = true
             app.notify('footer command is not user-configured — using the native layout', 'error')
           }
-          app.setFooterPreset('full')
-          app.setFooterLayout(undefined)
+          // The native layout is the user's own (default/compact/custom):
+          // never reset it — the command surface overrides the composer
+          // only while commandRows is set, and the M5 fallback contract
+          // restores the LAST native layout on failure.
           return
         }
         if (footerCommandRunner === undefined) {
@@ -4954,8 +4956,9 @@ export function apply(ctx: Context, config: Config): void {
         } else {
           footerCommandRunner.setConfig(config)
         }
-        app.setFooterPreset('full')
-        app.setFooterLayout(undefined)
+        // The native layout stays untouched while command mode is armed:
+        // a failed command (undefined rows) falls back to the user's OWN
+        // default/compact/custom layout, never the builtin default.
         footerCommandRunner.requestRefresh()
         return
       }

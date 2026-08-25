@@ -245,6 +245,36 @@ test('the activity setters repaint the run-state item (no status refresh needed)
   app.stop()
 })
 
+test('command-mode fallback restores the user\'s custom layout, never the builtin default', async () => {
+  const { vt, app } = startApp()
+  // A user custom layout with an item the DEFAULT layout never shows.
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  app.setWorking(true)
+  app.setStatus({})
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `the custom run-state item must render:\n${view}`)
+  assert.equal(app.getFooterMode(), 'custom', 'the native mode must be custom')
+  // Command mode arms: the command surface overrides the composer, but
+  // the native layout state must stay untouched.
+  app.setFooterCommandRows(['command-status-line'])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('command-status-line'), `the command surface must render:\n${view}`)
+  assert.equal(app.getFooterMode(), 'custom', 'command mode must not reset the native layout')
+  // The command FAILS (undefined rows — the runner's fallback): the user's
+  // OWN custom layout returns, not the builtin default.
+  app.setFooterCommandRows(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `the custom layout must return on failure:\n${view}`)
+  assert.ok(!view.includes('command-status-line'), `the command surface must clear:\n${view}`)
+  app.stop()
+})
+
 test('an emptied footer surface reflows with no stale content', async () => {
   const { vt, app } = startApp()
   // Fill the transcript so the fullscreen scroll pane overflows, then
