@@ -83,8 +83,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     tuiSettings: undefined,
     providers: {
       available: () => true,
-      readSection: () => undefined,
-      readPiAiProviders: () => undefined,
+      listCredentialOptions: () => [],
       writeProfile: async () => {},
       writeKeylessProfile: async () => {},
     },

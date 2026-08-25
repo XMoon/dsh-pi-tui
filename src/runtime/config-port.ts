@@ -24,6 +24,7 @@
 
 import type { AuthorizationInteraction } from '@deepseek-ai/dsh-authorization'
 import type { AuthorizationTarget } from '../authorization.ts'
+import type { ProviderOption } from '../provider-catalog.ts'
 
 /** The TUI settings document (theme/footer/fullscreen/busyEnter/
  * localShellSandbox/homeEndKeys/focusMode). The old `history` field moved
@@ -55,29 +56,28 @@ export interface TuiSettingsLike {
 }
 
 /** The provider-profile sub-domain: the add-provider wizard and the
- * /login merge. Profile READS of the provider directory live on the
- * catalog port (`ModelCatalog.listConfigurableProviders`); mutation and
- * section reads live here. The adapter owns the Host schema knowledge —
- * a consumer names a route, never a settings namespace or path. */
+ * /login merge. The adapter owns the Host schema knowledge — a consumer
+ * names a ROUTE, never a settings namespace or path: the merged
+ * credential options (directory + per-entry sections + the settings-only
+ * fallback) arrive as one semantic read, and the keyless profile write
+ * resolves the route's location internally. */
 export interface ProviderProfileConfig {
   /** Whether the settings service (the persistence surface) is present. */
   available(): boolean
-  /** Read the llm-pi-ai provider-config section (the /login merge's
-   * section reads). Detached copy — the caller can never alias or mutate
-   * the Host's live document. */
-  readSection(): unknown
-  /** The llm-pi-ai `providers` dict (route → apiKeyEnv), or undefined
-   * when the settings service or the section is absent (the settings-only
-   * /login fallback). Detached copy. */
-  readPiAiProviders(): Record<string, { apiKeyEnv?: string } | undefined> | undefined
+  /** The merged /login credential options: the llm configurable-provider
+   * directory over its PER-ENTRY settings sections when the llm service
+   * is present, the settings-only fallback otherwise (the pure
+   * provider-catalog.ts merge, wired by the adapter). Detached DTOs. */
+  listCredentialOptions(): readonly ProviderOption[]
   /** Persist one provider profile (the add-provider wizard; the adapter
    * owns the llm-pi-ai schema). */
   writeProfile(route: string, profile: Record<string, unknown>): Promise<void>
   /** After a successful authorization: write a MINIMAL keyless profile for
    * a catalog route (never an apiKeyEnv — provider-native auth keeps the
    * request path off an unset reference). The adapter resolves the
-   * route's profile location internally; `route` is validated against the
-   * provider directory (a hostile route writes nothing). */
+   * route's profile location internally from the CURRENT directory; a
+   * hostile route (or a route that vanished from the directory) writes
+   * nothing. */
   writeKeylessProfile(route: string): Promise<void>
 }
 
