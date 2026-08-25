@@ -65,7 +65,7 @@ import {
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
 import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
 import type { StatusStore } from './status/store.ts'
-import type { StatusPatch, UsageStatus } from './status/types.ts'
+import type { AccessStatus, CompositionStatus, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
@@ -828,6 +828,21 @@ function modelFromLabel(label: string): { provider?: string; id: string; display
     displayName: base.slice(slash + 1),
     ...effort === undefined ? {} : { reasoningEffort: effort },
   }
+}
+
+/** Structural equality for the status sections (plain JSON-safe data):
+ * the projection only commits sections whose CONTENT changed — a
+ * same-value setStatus must not churn the store's revision. */
+function plainSectionEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+  const aKeys = Object.keys(a)
+  const bKeys = Object.keys(b)
+  if (aKeys.length !== bKeys.length) return false
+  for (const key of aKeys) {
+    if (!plainSectionEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false
+  }
+  return true
 }
 
 /** The owned-task entry hosts wire to `runOwned` (diag pre-attached):
@@ -8462,30 +8477,43 @@ export class TuiApp {
     this.status = { ...this.status, ...status }
     // The projection MERGES into the store's current sections: the legacy
     // fields only own model/permission/cwd/branch — the runner-derived
-    // facts (agentPreset, sandbox/approval, workspace project, usage
-    // tokens/performance) must survive a legacy update (a replacing
-    // projection would erase them).
+    // facts (agentPreset, sandbox/approval, usage tokens/performance)
+    // must survive a legacy update (a replacing projection would erase
+    // them). The owned fields are ALWAYS set — a disappearing model, an
+    // empty cwd (which clears the derived project) or an emptied branch
+    // must not leave a stale fact behind.
     const current = this.statusStore.snapshot()
     const model = modelFromLabel(this.status.model)
-    this.projectStatus({
-      composition: { ...current.composition, ...model === undefined ? {} : { model } },
-      access: this.status.permission === undefined
-        ? current.access
-        : {
-            ...current.access,
-            permissionPreset: {
-              id: this.status.permission,
-              label: this.status.permission,
-              matched: this.status.permission !== 'custom',
-            },
+    const cwd = this.status.cwd
+    const project = cwd === '' ? undefined : cwd.split('/').filter(Boolean).at(-1)
+    const branch = this.status.branch === undefined || this.status.branch === '' ? undefined : this.status.branch
+    const composition: CompositionStatus = { ...current.composition, model }
+    const access: AccessStatus = this.status.permission === undefined
+      ? current.access
+      : {
+          ...current.access,
+          permissionPreset: {
+            id: this.status.permission,
+            label: this.status.permission,
+            matched: this.status.permission !== 'custom',
           },
-      workspace: {
-        ...current.workspace,
-        cwd: this.status.cwd,
-        ...this.status.branch === undefined || this.status.branch === '' ? {} : { branch: this.status.branch },
-      },
-      usage: this.usageFromStatus(),
-    })
+        }
+    const workspace: WorkspaceStatus = {
+      ...current.workspace,
+      cwd,
+      project,
+      branch,
+    }
+    const usage = this.usageFromStatus()
+    // Only project the sections whose CONTENT changed — a same-value
+    // setStatus must not churn the store's revision (its no-notify
+    // contract) nor the command runner's refresh.
+    const patch: { composition?: CompositionStatus; access?: AccessStatus; workspace?: WorkspaceStatus; usage?: UsageStatus } = {}
+    if (!plainSectionEqual(current.composition, composition)) patch.composition = composition
+    if (!plainSectionEqual(current.access, access)) patch.access = access
+    if (!plainSectionEqual(current.workspace, workspace)) patch.workspace = workspace
+    if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
+    this.projectStatus(patch)
     this.renderFooter()
     this.renderDock()
     this.renderGoalLine()
