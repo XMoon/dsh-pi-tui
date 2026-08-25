@@ -12,7 +12,10 @@
  * god API — the Direct adapter owns the Host schema knowledge, e.g. the
  * `llm-pi-ai` / `permission` / `agent-presets` namespaces). Host schema
  * knowledge is NOT the consumer's business: a command handler never names
- * a settings namespace or path.
+ * a settings namespace or path — and the DTOs that cross the port carry
+ * SEMANTIC facts only (`CredentialProviderOption.canProvisionProfile`),
+ * never a namespace or a path (the adapter maps its schema knowledge to
+ * the flag; a Remote adapter computes the same flag from the wire).
  *
  * Future wire mapping (M2): `settings.*` / `credentials.*` remotes and the
  * authorization capabilities; operations with no 1:1 Remote today are
@@ -23,7 +26,6 @@
  */
 
 import type { AuthorizationTarget } from '../authorization.ts'
-import type { ProviderOption } from '../provider-catalog.ts'
 
 /** The TUI settings document (theme/footer/fullscreen/busyEnter/
  * localShellSandbox/homeEndKeys/focusMode). The old `history` field moved
@@ -54,20 +56,61 @@ export interface TuiSettingsLike {
   replace(doc: TuiSettingsDoc): unknown
 }
 
+/** One /login credential target as the CLIENT sees it — a detached DTO
+ * with SEMANTIC facts only. The adapter owns every Host schema fact: a
+ * consumer never sees a settings namespace or path, only
+ * `canProvisionProfile` (whether a keyless profile write for this route
+ * would be accepted by the Host). A Remote adapter computes the same flag
+ * from the wire. */
+export interface CredentialProviderOption {
+  /** The provider route key (the settings dict key, e.g. `acme-gateway`). */
+  readonly route: string
+  /** The human label (the picker row). */
+  readonly label: string
+  /** The env-var reference this target names (to set or clear). */
+  readonly ref: string
+  /** Whether a user profile already exists for the route. */
+  readonly configured: boolean
+  /**
+   * Whether the owning adapter knows this route only because configuration
+   * declared it — a hand-written gateway the installed catalog ships nothing
+   * about. Only such routes need the full add wizard.
+   */
+  readonly declared: boolean
+  /**
+   * Whether the route's profile EXPLICITLY names a credential reference
+   * (`apiKeyEnv` set to a non-empty env-var name). False for a keyless
+   * profile (provider-native auth — an authorization flow owns the
+   * credential record), for a bare profile, and for the unconfigured case
+   * where the reference is only the derived convention. An explicitly
+   * named reference wins over any authorization flow for the same route.
+   */
+  readonly namesCredential: boolean
+  /** Group label for the picker (configured / available / custom). */
+  readonly group: 'configured' | 'available' | 'custom'
+  /** Whether a keyless profile write for this route would be ACCEPTED by
+   * the Host (a real writable slot exists — false for the deepseek
+   * official builtin, which has no provider-profile section, and for a
+   * route whose directory entry does not map to one). A directory race
+   * after the read is still reported by the write's explicit outcome. */
+  readonly canProvisionProfile: boolean
+}
+
 /** The provider-profile sub-domain: the add-provider wizard and the
  * /login merge. The adapter owns the Host schema knowledge — a consumer
  * names a ROUTE, never a settings namespace or path: the merged
  * credential options (directory + per-entry sections + the settings-only
- * fallback) arrive as one semantic read, and the keyless profile write
- * resolves the route's location internally. */
+ * fallback) arrive as one semantic read of detached DTOs, and the keyless
+ * profile write resolves the route's location internally. */
 export interface ProviderProfileConfig {
   /** Whether the settings service (the persistence surface) is present. */
   available(): boolean
   /** The merged /login credential options: the llm configurable-provider
    * directory over its PER-ENTRY settings sections when the llm service
    * is present, the settings-only fallback otherwise (the pure
-   * provider-catalog.ts merge, wired by the adapter). Detached DTOs. */
-  listCredentialOptions(): readonly ProviderOption[]
+   * provider-catalog.ts merge, wired by the adapter). Detached DTOs with
+   * semantic flags only — no settings namespace or path ever crosses. */
+  listCredentialOptions(): readonly CredentialProviderOption[]
   /** Persist one provider profile (the add-provider wizard; the adapter
    * owns the llm-pi-ai schema). */
   writeProfile(route: string, profile: Record<string, unknown>): Promise<void>

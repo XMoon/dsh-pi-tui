@@ -25,7 +25,14 @@ export interface LoginCredentialOption {
   readonly ref: string
 }
 
-/** Extra facts the picker needs beyond a plain option. */
+/**
+ * The merged option as the ADAPTER sees it — richer than the port's
+ * client DTO (`CredentialProviderOption` in runtime/config-port.ts):
+ * `settingsNs`/`settingsPath` are Host-schema facts the adapter maps to
+ * the semantic `canProvisionProfile` flag at the port boundary. They
+ * NEVER cross the port — a consumer (and a Remote adapter) sees semantic
+ * flags only, never a settings namespace or path.
+ */
 export interface ProviderOption extends LoginCredentialOption {
   /** The provider route key (the settings dict key, e.g. `acme-gateway`). */
   readonly route: string

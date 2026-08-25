@@ -53,10 +53,24 @@ test('providers listCredentialOptions merges the directory over PER-ENTRY sectio
   assert.ok(acme !== undefined)
   assert.equal(acme.ref, 'ACME_KEY', 'the apiKeyEnv from the llm-pi-ai section wins')
   assert.equal(acme.configured, true)
+  // The conventional llm-pi-ai providers.<route> slot is keyless-writable.
+  assert.equal(acme.canProvisionProfile, true)
   const legacy = options.find(option => option.route === 'deepseek')
   assert.ok(legacy !== undefined, 'the llm-deepseek entry is read from ITS OWN section')
   assert.equal(legacy.ref, 'DEEPSEEK_LEGACY')
   assert.equal(legacy.configured, true)
+  // A route whose profile lives in its OWN section has no keyless-writable
+  // slot (the adapter refuses writes outside llm-pi-ai providers.<route>).
+  assert.equal(legacy.canProvisionProfile, false)
+  const official = options.find(option => option.route === 'deepseek-official')
+  assert.ok(official !== undefined)
+  assert.equal(official.canProvisionProfile, false, 'the builtin has no provider-profile slot')
+  // The client DTO carries SEMANTIC flags only — no Host schema fact
+  // (settings namespace/path) ever crosses the port.
+  for (const option of options) {
+    assert.equal('settingsNs' in option, false, 'no settings namespace on the client DTO')
+    assert.equal('settingsPath' in option, false, 'no settings path on the client DTO')
+  }
 })
 
 test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
@@ -66,7 +80,9 @@ test('providers listCredentialOptions falls back to the settings-only reader wit
   const options = providers.listCredentialOptions()
   assert.equal(options.length, 2, 'deepseek official + the acme route')
   assert.equal(options[0]!.route, 'deepseek-official')
+  assert.equal(options[0]!.canProvisionProfile, false, 'the builtin has no keyless-writable slot')
   assert.equal(options[1]!.ref, 'ACME_KEY')
+  assert.equal(options[1]!.canProvisionProfile, true, 'the settings-only fallback slot is keyless-writable')
   assert.equal(port({}).providers.available(), false)
   assert.deepEqual(port({}).providers.listCredentialOptions().map(option => option.route), ['deepseek-official'])
 })
@@ -135,6 +151,10 @@ test('providers writeKeylessProfile refuses a hostile directory entry (namespace
   }).providers
   assert.deepEqual(await providers.writeKeylessProfile('acme'), { kind: 'skipped', reason: 'hostile or malformed directory entry for acme' })
   assert.deepEqual(writes, [], 'hostile directory metadata can never reach a mutate')
+  // The option DTO says the SAME thing: a route whose directory entry is
+  // not a conventional llm-pi-ai providers.<route> slot is not
+  // keyless-writable (one shared rule drives the flag and the write).
+  assert.equal(providers.listCredentialOptions().find(option => option.route === 'acme')?.canProvisionProfile, false)
   const writes2: Array<{ ns: string; ops: unknown }> = []
   const providers2 = port({
     settings: settings({}, writes2),
@@ -190,6 +210,9 @@ test('config DTOs are DETACHED — mutating a returned value never aliases Host 
   const options = config.providers.listCredentialOptions()
   const acme = options.find(option => option.route === 'acme')
   assert.ok(acme !== undefined)
+  // The client DTO never carries a Host schema fact (namespace/path).
+  assert.equal('settingsNs' in acme, false)
+  assert.equal('settingsPath' in acme, false)
   // The DTO is detached: mutating the returned option never reaches the
   // Host section (the settings fake holds the live document).
   ;(acme as { ref: string }).ref = 'MUTATED'

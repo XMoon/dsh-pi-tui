@@ -32,6 +32,7 @@ import {
   type AuthorizationTarget,
 } from '../src/authorization.ts'
 import { providerOptionsFor, type ProviderCatalogEntry } from '../src/provider-catalog.ts'
+import { credentialOptionOf } from '../src/runtime/direct/config-direct.ts'
 import { QuestionFlow, type QuestionFlowQuestion } from '../src/question.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -308,7 +309,7 @@ function flow(key: string, label: string, methods: { id: string; label: string }
 
 test('mergeLoginTargets: configured apiKeyEnv route wins over its flow', () => {
   const section = { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY' } } }
-  const options = providerOptionsFor(DIRECTORY, ns => (ns === 'llm-pi-ai' ? section : undefined))
+  const options = providerOptionsFor(DIRECTORY, ns => (ns === 'llm-pi-ai' ? section : undefined)).map(option => credentialOptionOf(option))
   const targets = authorizationTargets([{
     key: credentialKey('llm-pi-ai', 'openai'),
     label: 'openai',
@@ -328,7 +329,7 @@ test('mergeLoginTargets: configured apiKeyEnv route wins over its flow', () => {
 
 test('mergeLoginTargets: keyless route with a flow wins the authorization target', () => {
   const section = { providers: { anthropic: {} } }
-  const options = providerOptionsFor(DIRECTORY, ns => (ns === 'llm-pi-ai' ? section : undefined))
+  const options = providerOptionsFor(DIRECTORY, ns => (ns === 'llm-pi-ai' ? section : undefined)).map(option => credentialOptionOf(option))
   const targets = authorizationTargets([{
     key: credentialKey('llm-pi-ai', 'anthropic'),
     label: 'Anthropic',
@@ -343,7 +344,7 @@ test('mergeLoginTargets: keyless route with a flow wins the authorization target
 })
 
 test('mergeLoginTargets: a route without a flow keeps the derived reference fallback', () => {
-  const options = providerOptionsFor(DIRECTORY, ns => (ns === 'llm-pi-ai' ? LLM_PI_AI_SECTION : undefined))
+  const options = providerOptionsFor(DIRECTORY, ns => (ns === 'llm-pi-ai' ? LLM_PI_AI_SECTION : undefined)).map(option => credentialOptionOf(option))
   const merged = mergeLoginTargets(options, [])
   const openrouter = merged.find(target => target.route === 'openrouter')
   assert.ok(openrouter !== undefined && openrouter.kind === 'reference')
@@ -351,7 +352,7 @@ test('mergeLoginTargets: a route without a flow keeps the derived reference fall
 })
 
 test('mergeLoginTargets: foreign-scope flows are standalone targets', () => {
-  const options = providerOptionsFor(DIRECTORY, ns => (ns === 'llm-pi-ai' ? LLM_PI_AI_SECTION : undefined))
+  const options = providerOptionsFor(DIRECTORY, ns => (ns === 'llm-pi-ai' ? LLM_PI_AI_SECTION : undefined)).map(option => credentialOptionOf(option))
   const targets = authorizationTargets([{
     key: credentialKey('acme-vendor', 'chatgpt'),
     label: 'ChatGPT (vendor)',
