@@ -13,6 +13,7 @@ import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import type { ToolPresenter } from '../src/present.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
@@ -1071,5 +1072,164 @@ test('cache identity: the Thinking hint rebuilds on surface switches (alt+t ↔ 
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('(alt+t to expand)'), 'regular must restore the Alt+T hint')
   assert.ok(!joined.includes('(click to expand)'), 'the click hint must not survive back into regular')
+  app.stop()
+})
+
+/** A realistic multiline Bash heredoc (the ghost-row repro shape). */
+const MULTILINE_BASH_COMMAND = [
+  "python3 - <<'PYEOF'",
+  'p = "src/commands.ts"',
+  's = open(p).read()',
+  'old = "..."',
+  'assert old in s',
+  'PYEOF',
+].join('\n')
+
+/** A presenter whose bash call returns the FULL multiline command as the
+ * terminal card title (the DSH bash presenter's real shape). */
+function bashHeredocPresenter(): ToolPresenter {
+  return {
+    call(name) {
+      return name === 'bash'
+        ? { card: 'terminal', title: MULTILINE_BASH_COMMAND, description: 'Patch commands test' }
+        : undefined
+    },
+    result() { return undefined },
+  }
+}
+
+/** A running turn with ONE multiline Bash call (no reasoning). */
+function multilineBashTurn(seqBase: number): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, seqBase),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'run the patch' }],
+      source: { kind: 'user' },
+    }, T0 + 1, seqBase + 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: MULTILINE_BASH_COMMAND }) }, T0 + 2, seqBase + 2),
+  ]
+}
+
+/** The same turn WITHOUT the tool call: the clean baseline frame that
+ * establishes the alt-screen diff state before the call arrives. */
+function noToolTurn(seqBase: number): SessionEvent[] {
+  return multilineBashTurn(seqBase).slice(0, 2)
+}
+
+/** The remaining events that settle the multiline Bash turn (✓ ok). */
+function settleMultilineBashTurn(seqBase: number): SessionEvent[] {
+  return [
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('c1') },
+      },
+    }, T0 + 5000, seqBase + 3),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'patched.' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 6000, seqBase + 4),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 7000, seqBase + 5),
+  ]
+}
+
+test('fullscreen Focus: a multiline Bash heredoc stays ONE row and never ghosts across repeated repaints (ghost-row fix)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: bashHeredocPresenter() })
+  app.start()
+  const folder = new TranscriptFolder()
+  // Baseline frame WITHOUT the tool: the alt screen's diff state is
+  // established cleanly (a first frame with the multiline row would be a
+  // full redraw that self-heals — the ghost only escapes when the row is
+  // written by a DIFF frame whose following rows are unchanged).
+  folder.apply(noToolTurn(0))
+  app.setFocusMode(true)
+  app.setWorking(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const assertNoGhost = (label: string) => {
+    const joined = vt.getViewport().join('\n')
+    assert.ok(joined.includes("python3 - <<'PYEOF'"), `${label}: the Tool preview must carry the command:\n${joined}`)
+    for (const ghost of ['p = "src/commands.ts"', 's = open(p)', 'assert old']) {
+      assert.ok(!joined.includes(ghost), `${label}: heredoc line leaked as a ghost row:\n${joined}`)
+    }
+  }
+  // The multiline tool call arrives in a DIFF frame: pre-fix its embedded
+  // newlines escape onto the unchanged rows below the Tool slot.
+  folder.apply(multilineBashTurn(0).slice(2))
+  show(app, folder)
+  await vt.waitForRender()
+  assertNoGhost('tool call frame')
+  // The turn settles: the Tool row is rewritten (✓ prefix) — pre-fix that
+  // rewrite re-ghosts; the final assistant row lands below it.
+  folder.apply(settleMultilineBashTurn(0))
+  show(app, folder)
+  await vt.waitForRender()
+  assertNoGhost('settle frame')
+  // Repeated repaints (the runner's snapshot contract / streaming
+  // heartbeats) WITHOUT any resize must not accumulate ghost rows.
+  for (let i = 0; i < 3; i++) {
+    show(app, folder)
+    await vt.waitForRender()
+    assertNoGhost(`repaint ${i + 1}`)
+  }
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen Focus expand/collapse: the expanded Bash card keeps the multiline command, collapse returns to ONE line (ghost-row fix)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: bashHeredocPresenter() })
+  app.start()
+  const folder = new TranscriptFolder()
+  // Same diff-frame sequence: clean baseline, then the call + settle land
+  // in one later frame (the collapsed ghost would appear here pre-fix).
+  folder.apply(noToolTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  folder.apply([...multilineBashTurn(0).slice(1), ...settleMultilineBashTurn(0)])
+  show(app, folder)
+  await vt.waitForRender()
+  // Collapsed: the Tool slot is ONE row with the command identity only.
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes("python3 - <<'PYEOF'"), `collapsed preview missing:\n${joined}`)
+  assert.ok(!joined.includes('p = "src/commands.ts"'), `heredoc leaked while collapsed:\n${joined}`)
+  // Expand the Thought: the Bash full card renders the complete multiline
+  // command (expanded mode legitimately uses multiple physical rows).
+  let y = findRow(vt.getViewport(), '🐋 Thought')
+  assert.ok(y >= 0, `Thought header missing:\n${joined}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  // The folded card caps the command; clicking the cap marker (fullscreen
+  // mouse-owned disclosure) full-reveals it.
+  let capY = findRow(vt.getViewport(), 'more command lines')
+  assert.ok(capY >= 0, `cap marker missing:\n${vt.getViewport().join('\n')}`)
+  click(vt, 10, capY + 1)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐳 Thought'), `expansion failed:\n${joined}`)
+  assert.ok(joined.includes('p = "src/commands.ts"'), `expanded Bash card must keep the full command:\n${joined}`)
+  assert.ok(joined.includes('assert old in s'), `expanded Bash card must keep the full command:\n${joined}`)
+  // Collapse again: only the single-line preview may remain — the old
+  // multiline command rows must not be left behind (no resize anywhere).
+  y = findRow(vt.getViewport(), '🐳 Thought')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐋 Thought'), `collapse failed:\n${joined}`)
+  assert.ok(joined.includes("python3 - <<'PYEOF'"), `collapsed preview missing after collapse:\n${joined}`)
+  assert.ok(!joined.includes('p = "src/commands.ts"'), `old multiline command rows must not survive the collapse:\n${joined}`)
+  assert.ok(!joined.includes('assert old in s'), `old multiline command rows must not survive the collapse:\n${joined}`)
+  app.setFullscreen(false)
   app.stop()
 })

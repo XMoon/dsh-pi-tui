@@ -1417,6 +1417,100 @@ test('the Tool display is presenter-first with a static fallback (plan §9/§43)
   assert.equal(focusToolDisplay({ name: 'read', args: JSON.stringify({ path: 'a.ts' }) }, { presenter: guarded }), 'Read a.ts')
 })
 
+/** A realistic multiline Bash heredoc command (the ghost-row repro shape). */
+const MULTILINE_BASH_COMMAND = [
+  "python3 - <<'PYEOF'",
+  'p = "src/commands.ts"',
+  's = open(p).read()',
+  'assert old in s',
+  'PYEOF',
+].join('\n')
+
+test('focusToolDisplay keeps a multiline terminal title to ONE line (ghost-row fix)', () => {
+  const presenter: ToolPresenter = {
+    call(name) {
+      return name === 'bash'
+        ? { card: 'terminal', title: MULTILINE_BASH_COMMAND, description: 'Patch commands test' }
+        : undefined
+    },
+    result() { return undefined },
+  }
+  // LF, CRLF and lone-CR variants all collapse to the first line.
+  const variants = [
+    MULTILINE_BASH_COMMAND,
+    MULTILINE_BASH_COMMAND.replace(/\n/g, '\r\n'),
+    MULTILINE_BASH_COMMAND.replace(/\n/g, '\r'),
+  ]
+  for (const title of variants) {
+    const display = focusToolDisplay({ name: 'bash', args: '{}' }, {
+      presenter: { call: () => ({ card: 'terminal' as const, title }), result: () => undefined },
+    })
+    assert.equal(display.includes('\n'), false, JSON.stringify(display))
+    assert.equal(display.includes('\r'), false, JSON.stringify(display))
+    assert.match(display, /python3/, JSON.stringify(display))
+    // The compact line keeps the command IDENTITY (its first line), never
+    // the heredoc continuation.
+    assert.equal(display, "python3 - <<'PYEOF'", JSON.stringify(display))
+  }
+})
+
+test('focusCollapsedBody keeps a multiline Tool slot on ONE physical row (ghost-row fix)', () => {
+  const activity = activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
+  ])!
+  const rows = focusCollapsedBody(activity, 100, MULTILINE_BASH_COMMAND)
+  const toolRow = rows.find(row => row.startsWith('Tool:'))
+  assert.ok(toolRow !== undefined, rows.join('|'))
+  assert.equal(toolRow.includes('\n'), false, JSON.stringify(toolRow))
+  assert.equal(toolRow.includes('\r'), false, JSON.stringify(toolRow))
+  assert.ok(visibleWidth(toolRow) <= 100, `${JSON.stringify(toolRow)} (${visibleWidth(toolRow)})`)
+  // Heredoc continuation lines must never surface in the collapsed rows
+  // (they are the ghost rows), even though they fit the width.
+  assert.equal(rows.some(row => row.includes('p = "src/commands.ts"')), false, rows.join('|'))
+  assert.equal(rows.some(row => row.includes('s = open')), false, rows.join('|'))
+})
+
+test('every compact slot is ONE physical row even with multiline input (ghost-row fix, plan §6.3)', () => {
+  const activity = activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first think line\nsecond think line' } }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'first message line\r\nsecond message line' } }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'first error line\nsecond error line' } } }, 2000, 4),
+  ])!
+  const rows = focusCollapsedBody(activity, 80, MULTILINE_BASH_COMMAND)
+  // All four slots render, and every one is a single physical row.
+  for (const label of ['Think:', 'Message:', 'Tool:', 'Error:']) {
+    assert.ok(rows.some(row => row.startsWith(label)), `${label} missing:\n${rows.join('\n')}`)
+  }
+  for (const row of rows) {
+    assert.equal(row.includes('\n'), false, JSON.stringify(row))
+    assert.equal(row.includes('\r'), false, JSON.stringify(row))
+    assert.ok(visibleWidth(row) <= 80, `${JSON.stringify(row)} (${visibleWidth(row)})`)
+  }
+})
+
+test('FocusActivityComponent.render returns only physical rows for a multiline Tool display (plan §6.4)', () => {
+  const activity = activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
+  ])!
+  const component = new FocusActivityComponent({
+    activity,
+    expanded: false,
+    now: () => 35000,
+    toolDisplay: MULTILINE_BASH_COMMAND,
+  })
+  const rendered = component.render(120)
+  for (const row of rendered) {
+    assert.equal(row.includes('\n'), false, JSON.stringify(row))
+    assert.equal(row.includes('\r'), false, JSON.stringify(row))
+    assert.ok(visibleWidth(row) <= 120, `${JSON.stringify(row)} (${visibleWidth(row)})`)
+  }
+  assert.equal(rendered.some(row => row.includes('p = "src/commands.ts"')), false, rendered.join('|'))
+})
+
 test('formatTokens renders the pi abbreviation vocabulary', () => {
   assert.equal(formatTokens(847), '847')
   assert.equal(formatTokens(3200), '3.2k')
