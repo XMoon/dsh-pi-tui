@@ -178,7 +178,7 @@ export class HostKeybindingManager {
     // so e.g. `leader: enter` would silently swallow Enter — PR review
     // finding).
     const leaderCollision = leaderKey !== undefined
-      ? this.keymap.activeKeys().some(key => key === leaderKey)
+      ? this.keymap.hostActiveKeys().some(key => key === leaderKey)
         || this.editorSubmitKeysFor().some(key => key === leaderKey)
       : false
     if (leaderCollision && leaderKey !== undefined) {
@@ -219,7 +219,9 @@ export class HostKeybindingManager {
    * only consumer. */
   editorSubmitKeysFor(): KeyId[] {
     if (this.isDisabled('app.input.submit')) return []
-    const keys = this.keymap.keysFor('app.input.submit')
+    // HOST sources only: a PLUGIN submit binding is additive — it never
+    // replaces the builtin Enter (PR review finding).
+    const keys = this.keymap.hostKeysFor('app.input.submit')
     if (keys.length > 0) return keys
     // SAFE MODE (PR review finding): the raw user overrides are IGNORED —
     // a previously remapped/disabled submit must not keep Enter inert
@@ -318,6 +320,13 @@ export class HostKeybindingManager {
    * sequences live in {@link leaderKeysFor}). */
   keysFor(action: AppKeybindingId): KeyId[] {
     return this.keymap.keysFor(action)
+  }
+
+  /** Whether one raw input resolves to a HOST-owned action (PLUGIN rules
+   * excluded — a plugin binding is not a Host action and must reach the
+   * plugin dispatch stage; PR review finding). */
+  hostResolves(data: string, context: KeybindingContext): boolean {
+    return this.keymap.hostResolves(data, context)
   }
 
   /** The EFFECTIVE `<leader>X` completing keys of one action (M6),

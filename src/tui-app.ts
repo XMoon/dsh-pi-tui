@@ -3219,7 +3219,7 @@ export class TuiApp {
       // away old key (e.g. Ctrl+V after pasteMedia moved to Ctrl+P) is
       // NOT reserved and falls through to the editor/plugin (PR review
       // finding — no static physical-key swallowing).
-      hostResolves: (data) => this.keybindings.resolve(data, this.keybindingContext()) !== undefined,
+      hostResolves: (data) => this.keybindings.hostResolves(data, this.keybindingContext()),
       editorReplacement: this.seatEditor().handleInput !== undefined,
       // P1-06: the focused EDITOR owns its keys. The fork dispatches to
       // app-level listeners BEFORE the focused component, so the router

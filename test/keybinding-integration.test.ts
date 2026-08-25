@@ -493,3 +493,55 @@ test('leader: enter collides with the editor-owned submit key — leader disable
     `no collision diagnostic: ${manager.diagnosticsList().join(' | ')}`)
   assert.deepEqual(manager.editorSubmitKeysFor(), ['enter'], 'the editor submit key stays intact')
 })
+
+test('a plugin-only key is NOT host-reserved — it reaches the plugin dispatch (PR review P1)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const actions: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onExtensionAction: (action: string) => { actions.push(action) },
+  }, {
+    // A plugin binds Ctrl+Alt+X (no host action uses it): the router's
+    // hostResolves must NOT claim it — the plugin dispatch fires.
+    pluginActionFor: (key) => key.key === 'x' && key.ctrl && key.alt ? 'open-search' : undefined,
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b\x18') // ctrl+alt+x
+  await vt.waitForRender()
+  assert.deepEqual(actions, ['open-search'], 'the plugin-only key must reach the plugin dispatch')
+  app.stop()
+})
+
+test('a plugin submit binding is ADDITIVE — the builtin Enter stays (PR review P1)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text: string) => submitted.push(text),
+    onExit: () => {},
+  }, {
+    // A plugin binds app.input.submit to ctrl+p: additive — Enter must
+    // STILL submit (the plugin never replaces the host's key).
+    pluginActionFor: (key) => key.key === 'p' && key.ctrl ? 'submit-draft' : undefined,
+  })
+  app.start()
+  app.keybindingsManager().setPluginRules([{ id: 'plugin-submit', action: 'app.input.submit', key: 'ctrl+p' }])
+  await vt.waitForRender()
+  assert.deepEqual(app.keybindingsManager().editorSubmitKeysFor(), ['enter'], 'the builtin Enter survives a plugin submit binding')
+  app.setDraft('via enter')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['via enter'], 'Enter still submits under an additive plugin binding')
+  app.stop()
+})
+
+test('a plugin key does NOT collide with the leader prefix (PR review P2)', () => {
+  const manager = new HostKeybindingManager()
+  manager.setPluginRules([{ id: 'plugin-x', action: 'app.tasks.open', key: 'ctrl+alt+x' }])
+  manager.setUserConfiguration(parseUserKeybindings({ leader: 'ctrl+alt+x', bindings: { 'app.session.new': '<leader>n' } }))
+  assert.ok(manager.leaderMachine() !== undefined, 'a plugin-only key must not disable the leader')
+  assert.ok(!manager.diagnosticsList().some(message => message.includes('active host key')),
+    `no collision expected: ${manager.diagnosticsList().join(' | ')}`)
+})

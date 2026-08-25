@@ -244,10 +244,54 @@ export class EffectiveKeymap {
 
   /** Every ACTIVE key across all rules (conflict detection: the leader
    * prefix must not collide with an active direct key — PR review
-   * finding). */
+   * finding). NOTE: this includes PLUGIN rules — use
+   * {@link hostActiveKeys} for the host-owned reservation/conflict
+   * checks (PR review finding: plugin rules must never be treated as
+   * Host actions). */
   activeKeys(): KeyId[] {
     const keys = new Set<KeyId>()
     for (const rule of this.activeRules) keys.add(rule.key)
+    return [...keys]
+  }
+
+  /** Every ACTIVE key of the HOST-owned sources only (builtin / user /
+   * composition — PLUGIN rules excluded). The runtime reservation and
+   * the leader-prefix collision check must consider only these: a
+   * plugin binding is NOT a Host action, so it neither reserves a key
+   * in the router nor collides with the leader prefix (PR review
+   * finding). */
+  hostActiveKeys(): KeyId[] {
+    const keys = new Set<KeyId>()
+    for (const rule of this.activeRules) {
+      if (rule.source === 'plugin') continue
+      keys.add(rule.key)
+    }
+    return [...keys]
+  }
+
+  /** Whether the raw input resolves to a HOST-owned action (plugin rules
+   * excluded). The input router's runtime reservation uses this: a key
+   * only a PLUGIN binds is NOT host-reserved and must reach the plugin
+   * dispatch stage (PR review finding). */
+  hostResolves(data: string, context: KeybindingContext): boolean {
+    for (const rule of this.activeRules) {
+      if (rule.source === 'plugin') continue
+      if (!matchesKey(data, rule.key)) continue
+      if (rule.predicate !== undefined && !rule.predicate(context)) continue
+      return true
+    }
+    return false
+  }
+
+  /** The effective keys of one action from the HOST sources ONLY
+   * (plugin rules excluded — a plugin binding is additive, never a
+   * replacement of the host's key; PR review finding). */
+  hostKeysFor(action: string): KeyId[] {
+    const keys = new Set<KeyId>()
+    for (const rule of this.activeRules) {
+      if (rule.source === 'plugin') continue
+      if (rule.action === action) keys.add(rule.key)
+    }
     return [...keys]
   }
 
