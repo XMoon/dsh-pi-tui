@@ -220,3 +220,21 @@ test('activity: nonzero child counts ride the section', () => {
   assert.equal(status.childAgentCount, 4)
   assert.equal(status.taskCount, 0)
 })
+
+test('access: the sandbox FOLD is a pure capability input (the derive never imports the upstream module)', async () => {
+  // The runner's sandboxFold is capability-detected at apply time (a
+  // dynamic import in a detached probe — a Harness whose
+  // dsh-sandbox-policy lacks effectiveSandboxMode degrades to the
+  // sandboxPolicy service or an absent fact, never a load-time crash).
+  // The derive itself stays pure: any fold function is accepted, and its
+  // absence falls back to the service.
+  const status = deriveAccessStatus(
+    { sandboxFold: (events: readonly never[]) => (events.length > 0 ? 'workspace-write' : undefined) },
+    [{ kind: 'sandbox/mode' }] as never,
+  )
+  assert.deepEqual(status.sandbox, { mode: 'workspace-write' })
+  // Absent fold + absent service: absent fact (already covered by the
+  // missing-services test — this pins the fold fallback order).
+  const without = deriveAccessStatus({}, [])
+  assert.deepEqual(without, {})
+})

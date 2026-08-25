@@ -285,16 +285,17 @@ export class SurfaceHost {
 
   /** The canonical config id for one contribution: `ext:<owner>/<id>` (the
    * plan §16.4 key — stable across HMR, never collides across owners).
-   * The key is used WHOLE (never parsed), so `/` inside either part would
-   * make distinct contributions collide (`ext:a/b/c` from owner `a` +
-   * id `b/c` or owner `a/b` + id `c`): both parts must be `/`-free. */
+   * The key is used WHOLE (never parsed), so the OWNER's `/` (an npm
+   * scoped plugin name like `@scope/name` is the fiber name) is ESCAPED
+   * to `~` — `ext:@scope/name~<id>` is unambiguous while the id stays
+   * `/`-free (register() enforces that). */
   private static footerItemKey(owner: string, id: string): string {
-    if (owner.includes('/') || id.includes('/')) {
+    if (id.includes('/')) {
       // Unreachable in practice: register() enforces the constraint; this
       // guards a future caller that bypasses it.
       throw new Error(`chrome.footer.item id must not contain "/" (owner "${owner}", id "${id}")`)
     }
-    return `ext:${owner}/${id}`
+    return `ext:${owner.replaceAll('/', '~')}/${id}`
   }
 
   /** Every live chrome.footer.item contribution's canonical config id. */

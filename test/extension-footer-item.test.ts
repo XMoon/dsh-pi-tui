@@ -51,7 +51,9 @@ interface PiTuiExtensionServiceLike {
 function canonicalKey(service: PiTuiExtensionServiceLike, slot: string, id: string): string {
   const record = service._ledger().snapshot(slot).records.find(entry => entry.id === id)
   assert.ok(record !== undefined, `record ${id} missing`)
-  return `ext:${record.owner}/${record.id}`
+  // Match the host's canonical key construction (the owner's `/` — an npm
+  // scoped plugin name — is ESCAPED to `~`).
+  return `ext:${record.owner.replaceAll('/', '~')}/${record.id}`
 }
 
 /** Attach a live TuiApp + SurfaceHost to the tree. */
@@ -422,7 +424,7 @@ test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subag
   }
 })
 
-test('a chrome.footer.item registration id containing "/" is rejected (canonical-key boundary)', async () => {
+test('a chrome.footer.item registration id containing "/" is rejected; a SCOPED plugin owner is escaped, not rejected', async () => {
   const ctx = new Context()
   try {
     const { service } = await mountTree(ctx)
@@ -442,6 +444,21 @@ test('a chrome.footer.item registration id containing "/" is rejected (canonical
     const widget = service.register('input.dock.item', { id: 'dock/item', order: 100 }, { label: [{ text: 'x' }] })
     await settle()
     widget.dispose()
+    // An npm-SCOPED plugin (fiber name `@scope/name` contains `/`) must
+    // STILL be able to register a chrome.footer.item: its owner is
+    // escaped (`~`) in the canonical key.
+    const scopedFiber = ctx.plugin({ name: '@quota/scope', apply(c) {
+      const svc = c.get('piTuiExtensions') as unknown as PiTuiExtensionServiceLike
+      svc.register<FooterItemContribution>('chrome.footer.item', { id: 'quota', order: 100 }, {
+        label: 'scoped quota', segment: { spans: [{ text: 's' }] },
+      })
+    } })
+    await scopedFiber
+    const scopedKey = canonicalKey(service, 'chrome.footer.item', 'quota')
+    assert.ok(scopedKey.startsWith('ext:@quota~scope/'), `the scoped owner must be ESCAPED: ${scopedKey}`)
+    assert.ok(!scopedKey.includes('@quota/scope/'), `a raw slash owner must never appear: ${scopedKey}`)
+    await (scopedFiber as { dispose(): Promise<void> }).dispose()
+    await settle()
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
