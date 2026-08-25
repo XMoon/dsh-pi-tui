@@ -1493,6 +1493,12 @@ interface MessageComponentEntry {
    * hint resolves the EFFECTIVE key through the keymap (a remap updates
    * the copy; the identity field stays semantic). */
   expandHint: ExpandHint
+  /** The keymap revision the fold-hint string was rendered at: the
+   * RENDERED hint bakes the EFFECTIVE key, so a keymap rebuild (user
+   * remap, safe-mode flip, plugin sync) must invalidate every cached
+   * fold hint — the semantic owner alone cannot detect a remap (review
+   * finding). */
+  keymapRev: number
   /** The values the component was built from, for O(1) staleness checks:
    * text-bearing kinds compare the CURRENT text object — an unchanged
    * message keeps the same string instance, so the check is O(1) and
@@ -2040,7 +2046,16 @@ export class TuiApp {
     // builtin defaults keep the surface behavior identical without any
     // runner wiring.
     this.keybindings = new HostKeybindingManager({
-      onInvalidate: () => this.requestRender(),
+      // A keymap rebuild (user remap / safe mode / plugin sync) must
+      // refresh BOTH the cached transcript fold hints (their RENDERED
+      // key strings are baked into the components) and the footer/which-
+      // key copy — a plain repaint reuses the cached components (review
+      // finding). Guarded: the initial manager build runs before
+      // messagesView exists.
+      onInvalidate: () => {
+        if (this.messagesView !== undefined) this.rebuildMessages()
+        this.requestRender()
+      },
       onLeaderStateChange: () => this.renderFooter(),
       onLeaderActivate: (action) => {
         // M6: a leader sequence must never bypass the viewer's
@@ -2051,9 +2066,13 @@ export class TuiApp {
         if (target !== undefined
           && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))
           && VIEWER_BLOCKED_PARENT_ACTIONS.has(action as AppKeybindingId)) {
-          return
+          return true
         }
-        this.dispatchResolvedAction(action as AppKeybindingId, '')
+        // The dispatch result propagates to the feed consumer: an action
+        // that DECLINES (pasteMedia without a handler, unbound history
+        // search) must fall through like a direct key — the completing
+        // key is NOT consumed by the sequence (review finding).
+        return this.dispatchResolvedAction(action as AppKeybindingId, '')
       },
     })
     this.actionDispatcher = new AppActionDispatcher(this.buildActionHost())
@@ -2626,9 +2645,12 @@ export class TuiApp {
       // Esc (exit) and Ctrl+O (fold) fall through to the host ladder.
     }
     // Transcript search owns these keys while its overlay is up; everything
-    // else falls through to the focused search input. The keys route
-    // through the keymap's DEFAULT keys (the search actions are
-    // non-configurable overlay contracts — plan §3.3).
+    // else falls through to the focused search input. The close/next/
+    // previous keys are NON-CONFIGURABLE overlay contracts (scope
+    // 'search', plan §3.3) and route through the keymap's DEFAULT keys;
+    // the search TOGGLE (app.transcript.search) is user-configurable, so
+    // a remap of the toggle must work while the overlay is open too —
+    // matching the EFFECTIVE keys (review finding).
     if (this.searchOverlay !== undefined) {
       if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) {
         this.closeTranscriptSearch()
@@ -2642,8 +2664,9 @@ export class TuiApp {
         this.events.onSearchPrev?.()
         return { consume: true }
       }
-      if (this.keybindings.matchesDefault(data, 'app.transcript.search')) {
-        // Ctrl+F is the search toggle; a second press closes the overlay.
+      if (this.keybindings.matches(data, 'app.transcript.search')) {
+        // Ctrl+F (or the remapped toggle) closes the overlay on a second
+        // press.
         this.closeTranscriptSearch()
         return { consume: true }
       }
@@ -2684,8 +2707,14 @@ export class TuiApp {
     const leader = this.keybindings.leaderMachine()
     if (leader !== undefined) {
       const outcome = leader.feed(data)
-      if (outcome.kind === 'consumed' || outcome.kind === 'cancelled-consume' || outcome.kind === 'activated') {
+      if (outcome.kind === 'consumed' || outcome.kind === 'cancelled-consume') {
         return { consume: true }
+      }
+      if (outcome.kind === 'activated') {
+        // Consume ONLY when the dispatch actually consumed the key; a
+        // declined action falls through to the editor/plugin stages
+        // (review finding).
+        if (outcome.consumed) return { consume: true }
       }
       // cancelled-pass: the pending state was cancelled; the key is
       // processed normally below.
@@ -6549,6 +6578,7 @@ export class TuiApp {
       || entry.expanded !== state.expanded
       || entry.fullReveal !== state.fullReveal
       || entry.expandHint !== state.expandHint
+      || entry.keymapRev !== this.keybindings.revision()
       || rendererRevisionChanged
       || this.componentStale(entry, message)) {
       // Dispose the OLD component (a thumbnail's loader subscription) so a
@@ -6570,6 +6600,7 @@ export class TuiApp {
       entry.expanded = rebuilt.expanded
       entry.fullReveal = rebuilt.fullReveal
       entry.expandHint = rebuilt.expandHint
+      entry.keymapRev = rebuilt.keymapRev
       entry.rendererId = rebuilt.rendererId
       entry.rendererRevision = rebuilt.rendererRevision
       this.captureComponentState(entry, message)
@@ -6630,6 +6661,10 @@ export class TuiApp {
       expanded: state.expanded,
       fullReveal: state.fullReveal,
       expandHint: state.expandHint,
+      // The RENDERED fold hints bake the EFFECTIVE key: the keymap
+      // revision joins the cache identity so a remap/safe-mode/plugin
+      // rebuild refreshes every hint-bearing card (review finding).
+      keymapRev: this.keybindings.revision(),
       rendererId: rendered?.rendererId,
       rendererRevision: registry === undefined ? undefined : registry.snapshot().revision,
     }

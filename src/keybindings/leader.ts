@@ -37,12 +37,17 @@ export type LeaderFeedResult =
   | { kind: 'cancelled-pass' }
   /** The pending state was cancelled by Esc; the event is consumed. */
   | { kind: 'cancelled-consume' }
-  /** A leader sequence completed; the app must dispatch this action. */
-  | { kind: 'activated'; action: string }
+  /** A leader sequence completed; the app must dispatch this action.
+   * `consumed` is the dispatch result: an action that DECLINES (e.g.
+   * pasteMedia without a clipboard handler) must fall through to the
+   * editor/plugin stages, exactly like a direct key (review finding). */
+  | { kind: 'activated'; action: string; consumed: boolean }
 
 export interface LeaderMachineCallbacks {
-  /** A leader sequence completed (the app dispatches the action). */
-  readonly onActivate: (action: string) => void
+  /** A leader sequence completed (the app dispatches the action).
+   * Returns whether the dispatch consumed the key (false → the key must
+   * fall through, mirroring the direct-key resolver contract). */
+  readonly onActivate: (action: string) => boolean
   /** The pending state changed (the app repaints the which-key hint). */
   readonly onStateChange: () => void
 }
@@ -107,8 +112,8 @@ export class LeaderStateMachine {
     for (const binding of this.bindings) {
       if (matchesKey(data, binding.key)) {
         this.cancel()
-        this.callbacks.onActivate(binding.action)
-        return { kind: 'activated', action: binding.action }
+        const consumed = this.callbacks.onActivate(binding.action)
+        return { kind: 'activated', action: binding.action, consumed }
       }
     }
     // A non-matching key cancels the pending state and is processed

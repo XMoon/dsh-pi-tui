@@ -32,7 +32,20 @@ const SCANNED_FILES = ['src/tui-app.ts']
 
 /** The user-facing string files (hard-coded chord labels must not
  * resurface in anything the user sees). */
-const SCANNED_STRING_FILES = ['src/index.ts', 'src/commands.ts', 'src/tui-app.ts', 'src/local-shell-card.ts']
+const SCANNED_STRING_FILES = [
+  'src/index.ts',
+  'src/commands.ts',
+  'src/tui-app.ts',
+  'src/local-shell-card.ts',
+  // The action TABLE's descriptions are USER-FACING (they render in
+  // /keybindings and /help) — a hard-coded chord label there lies after a
+  // remap, exactly like any other user-facing string (review finding).
+  // The `defaultKeys` arrays are the machine-readable source of truth and
+  // are EXCLUDED by the line-based check below (the pattern only fires on
+  // lines whose quoted string contains a chord label OUTSIDE a
+  // matchesKey/defaultKeys context).
+  'src/keybindings/definitions.ts',
+]
 
 /** The chord pattern: a matchesKey call with a ctrl/alt/shift modifier. */
 const CHORD_PATTERN = /matchesKey\(\s*data\s*,\s*'(?:ctrl|alt|shift)\+/
@@ -98,6 +111,11 @@ for (const file of SCANNED_STRING_FILES) {
     // docs/keybinding-architecture.md, not by this mechanical check).
     const trimmed = line.trim()
     if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    // The keybinding table's `defaultKeys` arrays are the machine-readable
+    // source of truth (not user-facing copy) — a hard-coded chord there
+    // is the DEFINITION, not a lie. Only the table's `description`
+    // strings are user-facing and must stay key-neutral.
+    if (trimmed.startsWith('defaultKeys:')) continue
     // Strip matchesKey CALLS (key-matching code, not user-facing copy) — a
     // hard-coded chord string elsewhere on the SAME line must still be
     // caught (a whole-line skip could hide it).

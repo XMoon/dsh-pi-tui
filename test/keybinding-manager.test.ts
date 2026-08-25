@@ -69,3 +69,16 @@ test('an ambiguous leader sequence is never advertised (review round 3)', () => 
   // The leader machine itself carries no bindings.
   assert.deepEqual(manager.leaderMachine()?.leaderBindings ?? [], [])
 })
+
+test('matches() reflects a remap of a configurable action; matchesDefault() stays on defaults', () => {
+  // Review finding: the search TOGGLE (app.transcript.search) is
+  // configurable, so the overlay handler must match the EFFECTIVE keys
+  // (matches), while the non-configurable overlay keys (close/next/
+  // previous) keep their default matching (matchesDefault).
+  const manager = managerWith({ 'app.transcript.search': 'ctrl+x' })
+  assert.ok(manager.matches('\x18', 'app.transcript.search'), 'the remapped toggle must match')
+  assert.ok(!manager.matches('\x06', 'app.transcript.search'), 'the old default must no longer match')
+  assert.ok(manager.matchesDefault('\x1b', 'app.transcript.search.close'), 'the fixed overlay keys keep their defaults')
+  assert.ok(manager.matchesDefault('\r', 'app.transcript.search.next'), 'the fixed overlay keys keep their defaults')
+  assert.ok(manager.matchesDefault('\x1b[13;2u', 'app.transcript.search.previous'), 'the fixed overlay keys keep their defaults')
+})

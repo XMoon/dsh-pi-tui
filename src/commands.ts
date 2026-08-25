@@ -2957,8 +2957,20 @@ export function registerTuiCommands(
         if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
         const doc = { ...settings.get() } as Record<string, unknown>
         delete doc.keybindings
-        detach('keybindings reset', () => settings.replace(doc as unknown as import('./runtime/config-port.ts').TuiSettingsDoc), { notify: true })
-        app.notify('Keybindings reset to defaults.', 'info')
+        // Owned persistence: the success notify fires only after the
+        // write RESOLVES (a false "reset to defaults" on a failed write
+        // would lie — review finding). runOwned records the failure
+        // diagnostics and onError notifies.
+        runOwned('keybindings reset', () => settings.replace(doc as unknown as import('./runtime/config-port.ts').TuiSettingsDoc), {
+          diag: runner.diag,
+          sessionId: () => runner.liveAgent?.session.id,
+          onResult: () => {
+            app.notify('Keybindings reset to defaults.', 'info')
+          },
+          onError: (error: unknown) => {
+            app.notify(`keybindings reset failed: ${safeErrorMessage(error)}`, 'error')
+          },
+        })
         return { kind: 'success', text: 'Keybindings reset to defaults.' }
       }
       // The full effective table, grouped by category (plan §19).

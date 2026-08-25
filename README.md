@@ -190,11 +190,11 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 Host 快捷键是语义 action(`app.*`),通过 context-aware keymap 解析——
 UI(页脚提示、`/help`、`/keybindings`)始终显示**生效**的按键,因此
-改键后所有提示自动更新。在 `pi-tui` settings 命名空间中配置
+改键后所有提示自动更新。在 `dsh-pi-tui` settings 命名空间中配置
 (热加载,无需重启):
 
 ```yaml
-pi-tui:
+dsh-pi-tui:
   keybindings:
     app.input.steer: ctrl+s          # 单个按键
     app.permission.cycle: [shift+tab, ctrl+shift+p]   # 多个按键

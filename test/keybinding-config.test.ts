@@ -137,6 +137,22 @@ test('a plain printable leader key is rejected (it would swallow typing)', () =>
   assert.equal(chord.leaderBindings.length, 1)
 })
 
+test('the space key is printable: rejected as a leader and as a direct binding', () => {
+  // Review finding: `space` is the fork alias for the spacebar (char 32),
+  // so a bare `space` leader or Host binding would swallow every typed
+  // space — the printable check must cover it, not just single chars.
+  const asLeader = parseUserKeybindings({ leader: 'space', 'app.tasks.open': `${LEADER_PREFIX}x` })
+  assert.equal(asLeader.leader, undefined)
+  assert.deepEqual(asLeader.leaderBindings, [])
+  assert.ok(asLeader.diagnostics.some(message => message.includes('invalid leader key')))
+  const asBinding = parseUserKeybindings({ 'app.todo.toggle': 'space' })
+  assert.deepEqual(asBinding.bindings, {})
+  assert.ok(asBinding.diagnostics.some(message => message.includes('plain printable key')))
+  // A MODIFIED space stays bindable (ctrl+space is a chord, not typing).
+  const chord = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+space' })
+  assert.deepEqual(chord.bindings, { 'app.todo.toggle': 'ctrl+space' })
+})
+
 test('terminal-unreliable keys warn but stay', () => {
   const parsed = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+j' })
   assert.deepEqual(parsed.bindings, { 'app.todo.toggle': 'ctrl+j' })

@@ -209,6 +209,28 @@ test('safe mode disables the leader machine too', async () => {
   app.stop()
 })
 
+test('a remap of the thinking key refreshes cached fold hints (keymap revision)', async () => {
+  // Review finding: the transcript component cache keyed the fold hint on
+  // the semantic owner only — a remap of the owner action left already-
+  // rendered cards showing the OLD key until an unrelated rebuild. The
+  // keymap revision now joins the cache identity, so the card copy
+  // follows the effective key within one repaint.
+  const { vt, app } = startApp()
+  // A compact Thinking card renders its hint through ThinkingCompactComponent
+  // (the THINKING owner: the effective app.transcript.toggleThinking key).
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a preview line' }])
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('(alt+t to expand)'), `default thinking hint missing:\n${view}`)
+  // Remap the thinking owner (hot reload path: manager rebuild bumps the revision).
+  managerWith({ 'app.transcript.toggleThinking': 'ctrl+x' })(app.keybindingsManager())
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('(ctrl+x to expand)'), `the cached card must show the remapped key:\n${view}`)
+  assert.ok(!view.includes('(alt+t to expand)'), `the old key must not linger in cached cards:\n${view}`)
+  app.stop()
+})
+
 test('a disabled action no longer fires', async () => {
   const steered: string[] = []
   const { vt, app } = startApp({ onSteer: (text: string) => steered.push(text) }, managerWith({ 'app.input.steer': false }))

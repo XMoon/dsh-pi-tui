@@ -70,7 +70,10 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'app.exit.request': {
     id: 'app.exit.request',
     defaultKeys: ['ctrl+c', 'ctrl+d'],
-    description: 'Quit the TUI (Ctrl+C clears the draft first; a second press exits)',
+    // Key-neutral on purpose: the description shows in /keybindings and
+    // must not hard-code a physical chord (a remap must not make it a
+    // lie — see the copy-convention in docs/keybinding-architecture.md).
+    description: 'Quit the TUI (the default chord clears the draft first; a second press exits)',
     category: 'Agent',
     scope: 'global',
     configurable: true,

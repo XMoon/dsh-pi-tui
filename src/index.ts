@@ -4341,13 +4341,23 @@ export function apply(ctx: Context, config: Config): void {
       diag.info('keybindings', { safeMode: true })
     }
     const applyUserKeybindings = (): void => {
-      const parsed = parseUserKeybindings(tuiSettings?.get().keybindings)
-      for (const message of parsed.diagnostics) diag.warn('keybindings', { message })
-      keybindings.setUserConfiguration(parsed)
+      // Fail-soft hot reload (review finding): a transient settings read
+      // error must never abort the watcher or leave the keymap in a
+      // partial state — the previous (last-known-good) configuration
+      // stays active, and the failure is a diagnostic.
+      try {
+        const parsed = parseUserKeybindings(tuiSettings?.get().keybindings)
+        for (const message of parsed.diagnostics) diag.warn('keybindings', { message })
+        keybindings.setUserConfiguration(parsed)
+      } catch (error: unknown) {
+        diag.warn('keybindings', { error: String(error), message: 'keybindings reload aborted — keeping the last-known-good configuration' })
+      }
     }
     applyUserKeybindings()
     // M3: hot reload — a settings change re-validates and rebuilds the
-    // keymap without a restart (plan §12/§16).
+    // keymap without a restart (plan §12/§16). The settings watcher
+    // contains listener failures; the try/catch above keeps the keymap's
+    // last-known-good state on any read/parse error.
     const stopKeybindingWatch = tuiSettings?.watch(() => applyUserKeybindings())
     // M2: the plugin contributions compile into the effective keymap at
     // the LOWEST priority (a Host action always wins). The runner syncs
