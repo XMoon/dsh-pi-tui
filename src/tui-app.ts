@@ -5503,10 +5503,12 @@ export class TuiApp {
       // Regular: Ctrl+O is the master full-reveal mechanism for the
       // DERIVED recent turns — non-Thinking process cards full-reveal,
       // and Thinking (when visible via Alt+T) renders FULL (regular has
-      // no secondary click, so no compact affordance); a manually
-      // revealed turn (search) stays compact except for its per-card
-      // override.
-      if (this.isRegularCtrlOExpandedTurn(message.turn, boundary)) {
+      // no secondary click, so no compact affordance). A MANUALLY
+      // revealed turn (search / viewer restore) stays compact even when
+      // it also falls inside the Ctrl+O recent boundary — only DERIVED
+      // turns full-reveal (review finding).
+      if (this.isRegularCtrlOExpandedTurn(message.turn, boundary)
+        && !this.focusExpandedTurns.has(message.turn)) {
         return message.kind !== 'thinking' || this.focusThinkingVisible
       }
       return this.expandedOverride.get(message) === true
