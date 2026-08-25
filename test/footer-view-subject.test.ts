@@ -13,6 +13,8 @@ import { FooterComposer } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { TuiApp } from '../src/tui-app.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 
 const composer = new FooterComposer(createBuiltinFooterRegistry())
 const CONTEXT = { editorEmpty: true, extensionFooterText: '[EXT]' }
@@ -97,4 +99,42 @@ test('returning to the main subject restores the parent footer', () => {
   assert.ok(text.includes('main'), `parent branch missing:\n${text}`)
   assert.ok(text.includes('t9/s9'), `parent counters missing:\n${text}`)
   assert.ok(text.includes('[EXT]'), `extension segments must return:\n${text}`)
+})
+
+test('a legacy parent setStatus while viewing never clobbers the child workspace', async () => {
+  // The runner's refreshStatus projects the DISPLAY SUBJECT (the viewed
+  // child) into the store BEFORE the legacy setStatus call repaints the
+  // footer. A setStatus carrying the parent's cwd must not overwrite the
+  // child's workspace — the cwd item follows the display subject.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  // The runner's store update first: the child's workspace lands in the
+  // store (the app's statusStore is internal, so setViewerFooter plays
+  // the same role — it projects the child facts).
+  app.setViewerFooter({
+    mode: 'one-shot',
+    label: 'child',
+    activity: 'inactive',
+    cwd: '/child-ws',
+    turns: 5,
+    steps: 9,
+    usage: undefined,
+    statsLine: '',
+  })
+  // Then the legacy parent-status update (the runner's setStatus): the
+  // parent's cwd must NOT clobber the child's workspace.
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', branch: 'main', turns: 2, steps: 3, statsLine: 'x' })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('child-ws'), `the child workspace must stay:\n${view}`)
+  assert.ok(!view.includes('parent-ws'), `the parent cwd must not leak in:\n${view}`)
+  // Leaving the viewer restores the parent facts (the next refresh's
+  // setStatus owns the workspace again).
+  app.setViewerFooter(undefined)
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', branch: 'main', turns: 2, steps: 3, statsLine: 'x' })
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(restored.includes('parent-ws'), `the parent workspace must return:\n${restored}`)
+  app.stop()
 })
