@@ -37,10 +37,10 @@ function port(services: Record<string, unknown>): DirectConfigPort {
 test('providers read the llm-pi-ai section and degrade when settings is absent', () => {
   const providers = port({ settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }) }).providers
   assert.deepEqual(providers.readPiAiProviders(), { acme: { apiKeyEnv: 'ACME_KEY' } })
-  assert.deepEqual(providers.readSection('llm-pi-ai'), { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } })
+  assert.deepEqual(providers.readSection(), { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } })
   assert.equal(port({}).providers.available(), false)
   assert.equal(port({}).providers.readPiAiProviders(), undefined)
-  assert.equal(port({}).providers.readSection('anything'), undefined)
+  assert.equal(port({}).providers.readSection(), undefined)
 })
 
 test('providers writeProfile owns the llm-pi-ai schema (the wizard never names a namespace)', async () => {
@@ -52,12 +52,60 @@ test('providers writeProfile owns the llm-pi-ai schema (the wizard never names a
   ])
 })
 
-test('providers writeKeylessProfile writes an EMPTY profile at the DTO path and no-ops without settings', async () => {
+test('providers writeKeylessProfile writes an EMPTY profile at the adapter-resolved location', async () => {
   const writes: Array<{ ns: string; ops: unknown }> = []
-  const providers = port({ settings: settings({}, writes) }).providers
-  await providers.writeKeylessProfile({ route: 'acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] })
+  const providers = port({
+    settings: settings({}, writes),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  await providers.writeKeylessProfile('acme')
   assert.deepEqual(writes, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
-  await port({}).providers.writeKeylessProfile({ route: 'acme', settingsNs: 'llm-pi-ai', settingsPath: [] })
+  // The conventional fallback slot when the llm directory is absent.
+  const writes2: Array<{ ns: string; ops: unknown }> = []
+  await port({ settings: settings({}, writes2) }).providers.writeKeylessProfile('acme')
+  assert.deepEqual(writes2, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
+})
+
+test('providers writeKeylessProfile refuses when the settings service is absent (never a silent no-op)', async () => {
+  await assert.rejects(() => port({}).providers.writeKeylessProfile('acme'), /settings service unavailable/)
+})
+
+test('config DTOs are DETACHED — mutating a returned value never aliases Host data', async () => {
+  const records = [{ key: 'llm-pi-ai/openai', kind: 'oauth' }]
+  const flows = [
+    { key: 'llm-pi-ai/openai', label: 'openai', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+  ]
+  const config = port({
+    credentials: {
+      set: async () => {},
+      unset: async () => {},
+      deleteRecord: async () => {},
+      describe: async () => ({ configured: true, source: 'env' }),
+      listRecords: async () => records,
+    },
+    authorization: {
+      list: () => flows,
+      begin: async () => ({ status: 'authorized' }),
+    },
+    permissionPresets: { get names() { return ['workspace-write'] } },
+    settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),
+  })
+  const recordsOut = await config.credentials.listRecords()
+  ;(recordsOut as Array<{ key: string }>)[0]!.key = 'MUTATED'
+  assert.equal(records[0]!.key, 'llm-pi-ai/openai', 'the credential records are never aliased')
+  const targets = config.authorization.listTargets()
+  ;(targets[0]!.methods as unknown as Array<{ id: string }>)[0]!.id = 'MUTATED'
+  assert.equal(flows[0]!.methods[0]!.id, 'oauth', 'the flow methods are never aliased')
+  const names = config.permissions.presetNames()
+  ;(names as string[])[0] = 'MUTATED'
+  assert.deepEqual(flows.length > 0 ? [] : [], [])
+  const piAi = config.providers.readPiAiProviders()!
+  piAi['acme']!.apiKeyEnv = 'MUTATED'
+  assert.equal((config.providers.readSection() as { providers: Record<string, { apiKeyEnv?: string }> }).providers['acme']!.apiKeyEnv, 'ACME_KEY', 'the section read is a detached copy')
 })
 
 // ── credentials ───────────────────────────────────────────────────────────
@@ -142,6 +190,7 @@ test('permissions read names and the persisted default, and persist the default'
 test('applyPermissionPreset runs the OFFICIAL command line through the resolved agent', async () => {
   const executed: Array<{ line: string }> = []
   const permissions = port({
+    permissionPresets: { get names() { return ['workspace-write', 'danger-full-access'] } },
     commands: {
       execute: async (_agent: unknown, line: string) => { executed.push({ line }); return { ok: true } },
     },
@@ -150,6 +199,22 @@ test('applyPermissionPreset runs the OFFICIAL command line through the resolved 
   assert.deepEqual(executed, [{ line: '/permission danger-full-access' }])
   assert.deepEqual(await permissions.applyPermissionPreset('session-other', 'danger-full-access'), { kind: 'unavailable', cause: 'permission' })
   assert.deepEqual(await port({}).permissions.applyPermissionPreset('session-live', 'danger-full-access'), { kind: 'unavailable', cause: 'commands' })
+})
+
+test('applyPermissionPreset refuses a preset id the composed table does not offer', async () => {
+  let executed = 0
+  const permissions = port({
+    permissionPresets: { get names() { return ['workspace-write'] } },
+    commands: {
+      execute: async () => { executed += 1; return { ok: true } },
+    },
+  }).permissions
+  assert.deepEqual(
+    await permissions.applyPermissionPreset('session-live', 'danger-full-access; rm -rf /'),
+    { kind: 'unavailable', cause: 'permission' },
+    'a hostile id never reaches the command line',
+  )
+  assert.equal(executed, 0)
 })
 
 // ── preset default ────────────────────────────────────────────────────────

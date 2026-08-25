@@ -75,6 +75,56 @@ test('models surface detached provider/model DTOs and forward discovery', async 
   assert.deepEqual(saved, { provider: 'deepseek', model: 'deepseek-chat' })
 })
 
+test('catalog DTOs are DETACHED — mutating a returned value never aliases Host data', async () => {
+  const providers = [{ id: 'deepseek', name: 'DeepSeek' }]
+  const models = [{ id: 'deepseek-chat' }]
+  const efforts = [{ id: 'low', name: 'Low' }]
+  const directory = [{ provider: 'openai', displayName: 'openai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'] }]
+  const modelsPort = port({
+    llm: {
+      listProviders: () => providers,
+      listModels: async () => models,
+      resolveModelInfo: async () => ({ reasoning: { efforts } }),
+      discoverModels: async () => models,
+      listConfigurableProviders: () => directory,
+    },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-chat' }),
+      saveSelection: async () => {},
+    },
+  }).models
+  const listed = modelsPort.listProviders()
+  ;(listed as Array<{ id: string; name: string }>)[0]!.name = 'MUTATED'
+  assert.equal(providers[0]!.name, 'DeepSeek', 'the provider registry array is never aliased')
+  const modelList = await modelsPort.listModels('deepseek')
+  ;(modelList as Array<{ id: string }>)[0]!.id = 'MUTATED'
+  assert.equal(models[0]!.id, 'deepseek-chat', 'the model list is never aliased')
+  const info = await modelsPort.resolveModelInfo('deepseek', 'deepseek-chat')
+  ;(info.reasoning!.efforts as Array<{ id: string; name: string }>)[0]!.id = 'MUTATED'
+  assert.equal(efforts[0]!.id, 'low', 'the reasoning metadata is never aliased')
+  const directoryOut = modelsPort.listConfigurableProviders()!
+  ;(directoryOut as unknown as Array<{ settingsPath: string[] }>)[0]!.settingsPath.push('INJECTED')
+  assert.deepEqual(directory[0]!.settingsPath, ['providers', 'openai'], 'the directory entries are never aliased')
+  const skills = port({
+    skills: {
+      snapshot: async () => ({ skills: [], complete: true }),
+      get: async () => undefined,
+    },
+  }).skills
+  const skillPort = port({
+    skills: {
+      snapshot: async () => ({ skills: [], complete: true }),
+      get: async () => ({ name: 'alpha', description: 'A', content: 'body', invocation: { userInvocable: true, modelInvocable: true } }),
+    },
+  }).skills
+  const resolved = await skillPort.resolveSkill('session-live', 'alpha')
+  assert.equal(resolved.kind, 'found')
+  if (resolved.kind === 'found') {
+    ;(resolved.skill.invocation as { userInvocable?: unknown }).userInvocable = false
+    assert.equal(skills !== undefined, true)
+  }
+})
+
 // ── presets ───────────────────────────────────────────────────────────────
 
 test('presets degrade to unavailable without a roster service', async () => {

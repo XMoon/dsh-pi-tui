@@ -6,8 +6,8 @@
  *
  * A backend may advertise a capability ONLY when it actually serves the
  * corresponding port: `DIRECT_IMPLEMENTED_CAPABILITIES` is the truth for
- * the Direct backend today (catalog / config / host-file are vocabulary
- * but have no port yet — M1 leftover, see docs/client-server-migration.md).
+ * the Direct backend today (M1 complete — every vocabulary entry has a
+ * port; see docs/client-server-migration.md).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/capability

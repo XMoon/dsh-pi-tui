@@ -51,7 +51,10 @@ const MAX_FALLBACK_SUGGESTIONS = 50
 
 /** Locate an executable `fd` on the HOST PATH (bare command names resolve
  * through PATH at spawn time; absolute/relative entries must exist and be
- * X_OK). */
+ * X_OK). POSIX PATH separators only — moved VERBATIM from the pre-migration
+ * mentions.ts (this deployment targets POSIX hosts; a Windows Host would
+ * need a platform-aware probe, recorded as a portability note, not a
+ * Direct behavior change). */
 export function resolveFdPath(): string | null {
   const pathEntries = process.env.PATH?.split(':').filter(entry => entry !== '') ?? []
   for (const dir of pathEntries) {
@@ -81,7 +84,11 @@ export class DirectHostFilePort implements HostFilePort {
   }
 
   /** The scope's workspace cwd (undefined = the session is unresolvable —
-   * a fail-closed empty discovery). */
+   * a fail-closed empty discovery). A RESOLVED session without a header
+   * cwd falls back to the process cwd — DIRECT-mode parity with the
+   * runner's sessionCwd() (the Client machine IS the Host machine); a
+   * Remote adapter must NOT inherit this fallback (the plan's locality
+   * rule: remote discovery fails closed on an unresolvable scope). */
   private scopeCwd(scope: HostFileScope): string | undefined {
     if (scope.kind === 'workspace') return scope.cwd
     const agent = this.agentFor(scope.sessionId) as LiveAgentLike | undefined
@@ -159,7 +166,10 @@ function toCandidate(item: { value: string; label?: string; description?: string
 }
 
 /** Recursively collect candidates under the workspace (bounded, `.git`
- * skipped). */
+ * skipped). PRESERVED pre-migration behavior: the fd path follows the
+ * Host's ignore rules, the fallback deliberately skips only `.git` (kimi
+ * parity) — ignored/sensitive files may appear when fd is absent, exactly
+ * as before the migration (documented, not a regression). */
 function collectFsMentionCandidates(
   workDir: string,
   signal?: AbortSignal,

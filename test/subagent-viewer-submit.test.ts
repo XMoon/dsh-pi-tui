@@ -99,6 +99,21 @@ test('the caller signal is the one passed to followup (cancellation is real, nev
   assert.equal(calls.length, 1)
 })
 
+test('a signal aborted while canonicalizing rejects BEFORE the write path (never a stale accept)', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let calls = 0
+  const outcome = await submitSubagentFollowup(request, deps({
+    makeSignal: () => controller.signal,
+    canonicalizeText: async (text) => text,
+    subagents: () => ({
+      followup: async () => { calls += 1; return 'inbox-1' },
+    }),
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'cancelled' } })
+  assert.equal(calls, 0, 'the write path must never be invoked with an already-aborted signal')
+})
+
 test('rejects when there is no live parent at send time', async () => {
   const calls: unknown[] = []
   const outcome = await submitSubagentFollowup(request, deps({
