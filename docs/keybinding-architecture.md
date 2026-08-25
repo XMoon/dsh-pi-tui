@@ -133,6 +133,15 @@ leader sequence (requires `leader`). A plain printable key can never be
 bound to a Host action (it would swallow typing). Hot reload: the runner
 watches the settings document and rebuilds the keymap without a restart.
 
+**Conditional affordances are ADDITIVE, never replaced.** A composition
+rule (the empty-editor `↓` task-browser affordance → `app.tasks.open`)
+stays live alongside a user binding of the same action: binding
+`app.tasks.open: ctrl+x` ADDS another trigger — `↓` (with an empty
+editor + active tasks) still opens the browser. Only `false` disables
+the affordance along with every other key of the action. The README
+uses "override" loosely; the effective semantics are: *a user binding
+adds a trigger for that semantic action; `false` removes them all*.
+
 ## Diagnostics
 
 `/keybindings` shows the effective table (action, keys, scope, source)

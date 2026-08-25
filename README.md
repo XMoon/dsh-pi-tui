@@ -214,6 +214,9 @@ dsh-pi-tui:
   覆盖。
 - 子代理查看器按 action id 阻止父级 action,因此改键后的父级快捷键
   在查看器内依然被阻止。
+- 条件 affordance 是**累加**的:绑定 `app.tasks.open: ctrl+x` 是**增加**
+  一个触发——空编辑器的 `↓` 任务浏览器仍然有效;只有 `false` 才会
+  移除某 action 的全部触发。
 
 
 ## 安装

@@ -48,6 +48,15 @@ export interface HostKeybindingManagerOptions {
   readonly onLeaderActivate?: (action: string) => boolean
   /** The leader timeout in ms (defaults to the config default). */
   readonly leaderTimeoutMs?: number
+  /**
+   * Called after every rebuild with the EFFECTIVE submit keys of
+   * `app.input.submit` (an empty array = the action is disabled). The
+   * app syncs them into the fork editor's `tui.input.submit` binding so
+   * a user remap/disable of submit REALLY moves/removes the editor's
+   * Enter submission (review finding — the editor path was previously
+   * physical-only and ignored user config).
+   */
+  readonly onEditorSubmitSync?: (keys: readonly KeyId[]) => void
 }
 
 /** The stateful keybinding facade. */
@@ -55,6 +64,7 @@ export class HostKeybindingManager {
   private readonly onInvalidate: () => void
   private readonly onLeaderStateChange: () => void
   private readonly onLeaderActivate: (action: string) => boolean
+  private readonly onEditorSubmitSync: (keys: readonly KeyId[]) => void
   private readonly leaderTimeoutMs: number
 
   private userBindings: UserKeybindingsConfig = {}
@@ -65,6 +75,10 @@ export class HostKeybindingManager {
   private effectiveLeaderBindings: readonly LeaderBinding[] = []
   private pluginRules: readonly PluginKeybindingRule[] = []
   private safeMode = false
+  /** True when the leader machine was DISABLED because the leader key
+   * collided with an ACTIVE host key (PR review finding — the direct key
+   * wins, never a silent shadow). */
+  private leaderConfigShadowed = false
   private diagnostics: string[] = []
 
   private keymap: EffectiveKeymap
@@ -83,6 +97,7 @@ export class HostKeybindingManager {
     this.onInvalidate = options.onInvalidate ?? (() => {})
     this.onLeaderStateChange = options.onLeaderStateChange ?? (() => {})
     this.onLeaderActivate = options.onLeaderActivate ?? (() => true)
+    this.onEditorSubmitSync = options.onEditorSubmitSync ?? (() => {})
     this.leaderTimeoutMs = options.leaderTimeoutMs ?? 1500
     this.keymap = this.buildKeymap()
   }
@@ -142,16 +157,67 @@ export class HostKeybindingManager {
     }
     this.keymap = this.buildKeymap()
     this.effectiveLeaderBindings = leaderBindings
-    // Rebuild the leader machine (its bindings/config may have changed).
-    this.leader?.dispose()
-    this.leader = undefined
-    if (effectiveLeaderConfig !== undefined) {
-      this.leader = new LeaderStateMachine(effectiveLeaderConfig, leaderBindings, {
-        onActivate: (action) => this.onLeaderActivate(action),
-        onStateChange: () => this.onLeaderStateChange(),
-      })
+    // Leader PREFIX collision (PR review finding): the leader key is fed
+    // BEFORE the host ladder, so a leader key that is ALSO an ACTIVE
+    // direct key of any host action would silently shadow that action
+    // (e.g. `leader: ctrl+f` swallows app.transcript.search). Fail-soft:
+    // the direct key wins, the leader machine is DISABLED, and the
+    // collision is a diagnostic — never a silent shadow. A leader key
+    // that only collides with a DISABLED action's key is fine (no active
+    // rule).
+    const leaderKey = effectiveLeaderConfig?.key
+    const leaderCollision = leaderKey !== undefined
+      ? this.keymap.activeKeys().some(key => key === leaderKey)
+      : false
+    if (leaderCollision && leaderKey !== undefined) {
+      this.diagnostics.push(
+        `keybinding: leader key ${formatKeyId(leaderKey)} is also an active host key — the leader machine is disabled (the direct key wins)`,
+      )
+      // Disable the leader machine: the direct key wins (never a silent
+      // shadow — PR review finding).
+      this.leaderConfigShadowed = true
+      this.leader?.dispose()
+      this.leader = undefined
+    } else {
+      this.leaderConfigShadowed = false
+      this.leader?.dispose()
+      this.leader = undefined
+      // Rebuild the leader machine (its bindings/config may have changed).
+      if (effectiveLeaderConfig !== undefined && effectiveLeaderConfig.key !== undefined) {
+        this.leader = new LeaderStateMachine(effectiveLeaderConfig, leaderBindings, {
+          onActivate: (action) => this.onLeaderActivate(action),
+          onStateChange: () => this.onLeaderStateChange(),
+        })
+      }
     }
+    // Sync the effective submit keys into the fork editor's binding
+    // (review finding): a user remap or `false` of app.input.submit must
+    // REALLY move/remove the editor's submission — the fork editor routes
+    // Enter (or the remapped key) through tui.input.submit. Empty = the
+    // action is disabled (no key submits).
+    this.onEditorSubmitSync(this.editorSubmitKeysFor())
     this.onInvalidate()
+  }
+
+  /** The effective submit keys of `app.input.submit` as the fork editor's
+   * `tui.input.submit` should carry them: the action's effective direct
+   * keys, or an EMPTY array when disabled (`false`) or safe mode dropped
+   * them. `app.input.submit` is hostResolved:false — the host ladder
+   * NEVER consumes these keys; the editor owns them, so the sync is the
+   * only consumer. */
+  editorSubmitKeysFor(): KeyId[] {
+    if (this.isDisabled('app.input.submit')) return []
+    const keys = this.keymap.keysFor('app.input.submit')
+    if (keys.length > 0) return keys
+    // The builtin submit rule is hostResolved: false (the host ladder
+    // never consumes it), so keysFor() is EMPTY by default — fall back to
+    // the definition's default ('enter'). A user remap compiles as a
+    // `user` rule and is returned above; `false` was handled above.
+    const definition = APP_KEYBINDINGS['app.input.submit']
+    if (definition !== undefined && definition.defaultKeys.length > 0) {
+      return [...definition.defaultKeys]
+    }
+    return []
   }
 
   // ── Configuration ──────────────────────────────────────────────────────

@@ -217,6 +217,9 @@ dsh-pi-tui:
   `/keybindings reset` clears the overrides through the settings service.
 - The subagent viewer blocks PARENT actions by action id, so a remapped
   parent shortcut stays blocked inside the viewer.
+- Conditional affordances are ADDITIVE: binding `app.tasks.open: ctrl+x`
+  ADDS a trigger — the empty-editor `↓` task-browser affordance still
+  works; only `false` removes every trigger of an action.
 
 
 ## Installation
