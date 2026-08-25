@@ -246,9 +246,18 @@ read the DURABLE descendant catalog, not the live-child list:
   expresses parenthood, so the extra detail line duplicated the
   structure; the `hasChildren` data fact stays on the row for future
   fold/disclosure work.
-- **The interrupt verb is advertised only for a continuable row whose
-  driver is running right now**: an idle continuable has no driver to
-  stop, so the UI must not advertise (or fire) a dead stop.
+- **The open browser's FIRST FRAME seeds from the cached catalog.**
+  Opening `/tasks` (or the ↓ trigger) paints the coordinator's CURRENT
+  state — cached membership + fresh jobs + fresh registry statuses —
+  synchronously (no persistence), so the panel never flashes a
+  jobs-only list that contradicts the badge, and a failed fresh listing
+  cannot leave a panel/badge mismatch. The async membership refresh
+  then calibrates in the background.
+- **The interrupt verb is advertised AND fired only for a continuable
+  row whose driver is running right now** — one predicate
+  (`isSubagentRowInterruptible`) gates both the panel hint and the
+  runner's execution path, so an idle continuable has no driver to stop
+  and the UI never advertises (or fires) a dead stop.
 
 ## Focus fullscreen disclosure
 

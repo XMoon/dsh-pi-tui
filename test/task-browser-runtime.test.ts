@@ -352,6 +352,36 @@ test('reset() also supersedes a listing still in flight', async () => {
   assert.equal(h.runtime.has('child-a'), false)
 })
 
+test('the open-browser FIRST FRAME reuses the cached catalog and survives a failed fresh listing (PR review P3)', async () => {
+  // The runner seeds the first frame with refreshRuntime() (the cached
+  // catalog + current jobs + registry statuses — synchronous, no
+  // persistence) BEFORE the async membership refresh starts. The seeded
+  // frame must match the badge, and a FAILED fresh listing must never
+  // leave the panel contradicting the badge (both keep the cached
+  // membership).
+  const h = makeHarness()
+  h.setStatus('child-a', 'running')
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [child({ activity: 'running' })])
+  await listing
+  assert.equal(h.runtime.has('child-a'), true)
+  // Simulate the open: seed the first frame from the cache.
+  h.runtime.refreshRuntime()
+  const seed = h.runtime.rows()
+  assert.deepEqual(rowValue(seed), [`${AGENT_ROW_PREFIX}child-a`, 'job:bash-1'],
+    'the first frame must carry the cached subagent, not a jobs-only flash')
+  assert.equal(subagentActivity(seed, 'child-a'), 'running')
+  // The fresh listing the open triggers FAILS: the seeded frame (and the
+  // badge) must stay intact — no commit, cache untouched.
+  const fresh = h.runtime.refreshCatalog()
+  h.rejectListing(1, new Error('persistence read failed'))
+  await assert.rejects(fresh)
+  assert.equal(h.commits().length, 2, 'the failed listing must not commit')
+  assert.equal(h.runtime.has('child-a'), true, 'the cache keeps the child after the failure')
+  assert.deepEqual(rowValue(h.runtime.rows()), [`${AGENT_ROW_PREFIX}child-a`, 'job:bash-1'])
+  assert.deepEqual(h.badges()[0]!.map(entry => entry.id), ['child-a'])
+})
+
 // ── production wiring lock (review round 1, P2) ───────────────────────────
 // The coordinator tests alone would pass even if the runner never wired
 // `agent/status` (or wired it to the catalog refresh). The runner cannot
@@ -398,4 +428,28 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
   // SYNCHRONOUSLY.
   assert.ok(bump.includes('app.setAgents([])'), 'the session bump must clear the badge synchronously')
   assert.ok(bump.includes('taskBrowserRows = []'), 'the session bump must clear the row identity source')
+})
+
+test('openTasksBrowser seeds the FIRST FRAME from the cached runtime and gates interrupt execution with the SAME predicate (PR review P3)', () => {
+  const open = indexSource.slice(
+    indexSource.indexOf('const openTasksBrowser'),
+    indexSource.indexOf('// M3: attach the extension host'),
+  )
+  // The first frame must be seeded from the coordinator's CURRENT state
+  // (cached catalog + current jobs + registry statuses), never a
+  // jobs-only flash that could contradict the badge until the async
+  // listing lands — or after it fails.
+  assert.ok(open.includes('runtime.refreshRuntime()'),
+    'the open must seed the first frame from the cached runtime')
+  const seedStart = open.indexOf('const runtime = taskRuntime')
+  const seedBlock = open.slice(seedStart, seedStart + 220)
+  assert.ok(seedBlock.includes('buildTaskRows(jobSnapshots, [])'),
+    'the jobs-only fallback must apply only without the runtime')
+  // The interrupt EXECUTION gate must be the SAME predicate as the
+  // panel's advertisement gate — a panel change can never release an
+  // idle/one-shot interrupt.
+  assert.ok(open.includes('!isSubagentRowInterruptible(row)'),
+    'the interrupt execution gate must use isSubagentRowInterruptible')
+  assert.ok(!open.replace(/\/\/.*$/gm, '').includes("row.mode !== 'continuable'"),
+    'the interrupt execution gate must not drift back to a mode-only check')
 })
