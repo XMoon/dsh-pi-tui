@@ -840,3 +840,24 @@ test('switching to fullscreen drops the Ctrl+O-derived reveal; back to regular i
   assert.ok(joined.includes('🐳 Thought'), 'regular must restore the Ctrl+O full detail')
   app.stop()
 })
+
+test('a manually revealed turn keeps its secondaries compact under regular Ctrl+O (review finding)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  // Manually expand the turn (the search-reveal path), reveal the
+  // Thinking category, then turn the Ctrl+O master ON — the turn is ALSO
+  // inside the recent boundary, but only DERIVED turns full-reveal.
+  app.expandFocusTurn(1)
+  app.toggleFocusThinkingVisible()
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'the manual reveal keeps the Thought open')
+  assert.ok(joined.includes('(ctrl+o to expand)'),
+    `a MANUAL turn must stay compact under Ctrl+O (only DERIVED turns full-reveal):\n${joined}`)
+  app.stop()
+})
