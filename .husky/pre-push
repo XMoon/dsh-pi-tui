@@ -37,9 +37,11 @@ set -eu
 
 FULL=0
 # Aggregate across ALL pushed refs: the gate must run the strictest level
-# any ref demands. Initialise to the safe "fork changed" default and only
-# ever raise it — a later ref without fork changes must NOT reset it.
-FORK_CHANGED=1
+# any ref demands. Initialize to 0 (clean) and only ever RAISE it to 1 —
+# on an unknown remote base or a fork-touching range — never reset it, so
+# a later clean ref cannot downgrade an earlier strict one. A fully clean
+# multi-ref push still selects the fast nofork/bundle chain.
+FORK_CHANGED=0
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
     refs/heads/main | refs/tags/v*) FULL=1 ;;
@@ -50,6 +52,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     if ! git diff --quiet "$remote_sha" "$local_sha" -- packages/pi-tui/; then
       FORK_CHANGED=1
     fi
+  else
+    FORK_CHANGED=1
   fi
 done
 
@@ -134,16 +138,21 @@ drain_log() {
 
 # Verbose mode: stream the captured log live, one timestamped line per
 # new line (drain_log off the shared LOG_OFFSET position). The poller is
-# a single subshell (killing STREAM_PID never orphans a tail -f child).
-# The offset file lets the main shell drain the final partial poll window
-# before killing the poller.
+# a single subshell that checks a STOP file between drains; killing it
+# therefore lands cleanly AFTER a drain+offset-write pair (kill is
+# delivered between iterations, not mid-drain), so the main shell's final
+# drain never re-reads lines the poller already emitted. The offset file
+# also lets the main shell drain the final partial poll window.
 if [ "$VERBOSE" -eq 1 ]; then
   LOG_OFFSET=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.offset")
+  LOG_STOP=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.stop")
   (
     next=1
     while :; do
+      [ -e "$LOG_STOP" ] && break
       next=$(drain_log "$next")
       printf '%s\n' "$next" >"$LOG_OFFSET"
+      [ -e "$LOG_STOP" ] && break
       sleep 0.4
     done
   ) &
@@ -175,11 +184,12 @@ $STAGES
 EOF
 
 if [ "$VERBOSE" -eq 1 ]; then
-  # Stop the poller FIRST, then drain once from its last persisted offset:
-  # draining before the kill could race the poller and print lines twice
-  # (both would read the same range). After the wait, the main shell is
-  # the only reader, so the drain is exact-once.
-  kill "$STREAM_PID" 2>/dev/null || true
+  # Cooperative shutdown: signal the poller to stop BETWEEN drain cycles
+  # (it checks LOG_STOP before each drain and before each sleep), then
+  # wait for it to finish its current cycle — the offset it persisted is
+  # then exactly what it emitted. The final drain from that offset is
+  # therefore idempotent: it only ever prints lines the poller never saw.
+  : >"$LOG_STOP"
   wait "$STREAM_PID" 2>/dev/null || true
   if [ -n "${LOG_OFFSET:-}" ] && [ -f "$LOG_OFFSET" ]; then
     offset=$(cat "$LOG_OFFSET" 2>/dev/null || echo 1)
@@ -187,7 +197,7 @@ if [ "$VERBOSE" -eq 1 ]; then
   else
     drain_log 1 >/dev/null
   fi
-  rm -f "$LOG_OFFSET"
+  rm -f "$LOG_OFFSET" "$LOG_STOP"
 fi
 
 END=$(date +%s)
