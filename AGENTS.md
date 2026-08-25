@@ -409,6 +409,18 @@ Headless UI tests drive `@xterm/headless` through `test/virtual-terminal.ts`
 (copied from the fork's `test/virtual-terminal.ts`, import path changed) — rendering
 and input routing are verified without a TTY or a model connection.
 
+### Releasing (npm publish runs on GitHub CI)
+
+A release is: bump `version` in the root `package.json`, move the
+accumulated `[Unreleased]` entries into a dated `[X.Y.Z]` section in BOTH
+changelogs (bilingual sync), commit `chore: release vX.Y.Z`, tag `vX.Y.Z`,
+and push. **npm publishing is done by GitHub CI from the pushed tag**
+(`.github/workflows/ci.yml`, npm Trusted Publishing with `id-token: write`)
+— never run `npm publish` from a dev machine; the local npm token is not
+the publishing credential. On a changelog/version-only range the push runs
+`verify:prepush:nofork`; a range touching `packages/pi-tui/` runs the full
+`verify:prepush`.
+
 ### Pre-push verification gate (husky)
 
 `git push` runs a local gate (husky, `.husky/pre-push`; installed by the
