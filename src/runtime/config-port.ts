@@ -30,7 +30,10 @@ import type { AuthorizationTarget } from '../authorization.ts'
 /** The TUI settings document (theme/iconStyle/footer/fullscreen/busyEnter/
  * localShellSandbox/homeEndKeys/focusMode). The old `history` field moved
  * to $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
- * document anymore. */
+ * document anymore. The user keybinding overrides (`keybindings`, an
+ * unknown-key pass-through of the schemastery-registered document — the
+ * keybindings parser in src/keybindings/config.ts owns its validation)
+ * ride along. */
 export interface TuiSettingsDoc {
   theme: string
   iconStyle: string
@@ -40,6 +43,7 @@ export interface TuiSettingsDoc {
   localShellSandbox: string
   homeEndKeys: string
   focusMode: string
+  keybindings?: unknown
 }
 
 /** The TUI settings document surface (get/replace — the same shape the

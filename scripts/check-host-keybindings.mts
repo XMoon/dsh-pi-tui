@@ -32,7 +32,7 @@ const SCANNED_FILES = ['src/tui-app.ts']
 
 /** The user-facing string files (hard-coded chord labels must not
  * resurface in anything the user sees). */
-const SCANNED_STRING_FILES = ['src/index.ts', 'src/commands.ts', 'src/tui-app.ts']
+const SCANNED_STRING_FILES = ['src/index.ts', 'src/commands.ts', 'src/tui-app.ts', 'src/local-shell-card.ts']
 
 /** The chord pattern: a matchesKey call with a ctrl/alt/shift modifier. */
 const CHORD_PATTERN = /matchesKey\(\s*data\s*,\s*'(?:ctrl|alt|shift)\+/
