@@ -13,7 +13,6 @@
  */
 
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
-import { expandFileMentionsForSubmit } from '../mentions.ts'
 import { admitDraftImages, type AttachmentsLike } from './admission.ts'
 import { assertModelSupportsImages, type LlmLike } from './capability.ts'
 import { ImageAdmissionError } from './errors.ts'
@@ -39,6 +38,9 @@ export interface PrepareInputDeps {
   /** The session's working directory — the resolution base for send-time
    * `@`-file mention canonicalization (the 2026-08-22 plan, item 7). */
   sessionCwd(): string
+  /** Send-time `@`-file mention canonicalization through the Host-file
+   * port (migration M1.10) — the runner wires the live session scope. */
+  canonicalizeMentions(text: string): Promise<string>
 }
 
 /** Whether the draft text references any staged image (the image-only
@@ -98,8 +100,9 @@ export async function prepareUserMessage(
   // item 7): the editor keeps the concise relative form, the model
   // receives the absolute path. Runs BEFORE image-placeholder expansion —
   // a canonical placeholder contains no `@`, so strict placeholder
-  // matching is unaffected.
-  const canonical = expandFileMentionsForSubmit(text, deps.sessionCwd())
+  // matching is unaffected. The canonicalization itself is Host-owned
+  // (migration M1.10) — the deps carry the port-backed seam.
+  const canonical = await deps.canonicalizeMentions(text)
   const segments = expandImagePlaceholders(canonical, store)
   const hasImage = segments.some(segment => segment.type === 'image')
   if (!hasImage) {

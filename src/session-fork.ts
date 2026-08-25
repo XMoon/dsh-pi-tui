@@ -31,11 +31,6 @@ import { safeErrorMessage } from './error-boundary.ts'
 export interface ForkAgentHost {
   /** The live session's workspace (its header cwd), never a captured value. */
   sessionCwd(): string
-  /** Compose one preset (undefined = the deployment default). */
-  compose(presetId?: string): Promise<{
-    agentPreset?: string
-    setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void
-  }>
   /** The session lifecycle port `/new` and `/fork` create sessions
    * through: semantic requests only (no callbacks — the Direct adapter
    * resolves the preset composition internally). */
@@ -53,10 +48,16 @@ export interface ForkAgentHost {
  * the transition can acquire its open lock BEFORE the create publishes it
  * (review round 6: every fallible ownership operation happens before the
  * durable child exists).
+ *
+ * The preset rides the semantic create request as the CONCRETE preset id
+ * (migration M1.11): the Direct adapter composes the setup internally from
+ * that id — a composition/setup callback never crosses this seam. `undefined`
+ * = the deployment default (a rosterless deployment records no preset).
  * @param host - the fork host surface.
  * @param source - the session being forked from (never modified).
  * @param seed - the child's seed events (completed-turn prefix).
  * @param sessionId - the pre-generated child session id.
+ * @param presetId - the concrete preset id the child composes on.
  * @returns the created agent handle (NOT yet committed).
  */
 export async function createForkedAgent(
@@ -64,7 +65,7 @@ export async function createForkedAgent(
   source: Agent,
   seed: readonly SessionEvent[],
   sessionId: SessionId,
-  composition?: { agentPreset?: string; setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void },
+  presetId?: string,
 ): Promise<SessionHandle> {
   // Source-deterministic cwd, captured BEFORE the first await: a concurrent
   // surface switch between the compose await and the create must never mix
@@ -75,13 +76,6 @@ export async function createForkedAgent(
   const cwd = source.session.header.cwd || host.sessionCwd()
   // The child inherits the parent's recorded preset (official fork
   // semantics: forkComposition = composeAgent(resolveSessionPreset(source))).
-  // A caller may supply a PRE-RESOLVED composition; the preset ID rides the
-  // semantic create request (review round 23: the Direct adapter resolves
-  // the composition from that id — composeAgent is deterministic within a
-  // process run, so the create runs under the identical setup the caller
-  // resolved).
-  const resolved = composition ?? await host.compose(resolveSessionPreset(source.session))
-  const presetId = resolved.agentPreset
   return host.agents.create({
     sessionId: String(sessionId),
     meta: {
@@ -111,8 +105,18 @@ export function isRewindIdentityCurrent(live: RewindLiveIdentity, expected: Rewi
   return live.sessionId === expected.sessionId && live.generation === expected.generation
 }
 
-/** The commit host: the fork host plus the unified transition seam. */
+/** The commit host: the fork host plus the preset composition seam (the
+ * rewind flow's Direct-owned composition resolution) and the unified
+ * transition machinery. */
 export interface RewindCommitHost extends ForkAgentHost {
+  /** Compose one preset (undefined = the deployment default) — the
+   * rewind flow's Direct-owned ownership path: the composition's SETUP
+   * callback stays runner-side, only the resolved preset ID rides the
+   * semantic create (migration M1.11). */
+  compose(presetId?: string): Promise<{
+    agentPreset?: string
+    setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void
+  }>
   /** The live surface identity, re-read at every gate. */
   liveIdentity(): RewindLiveIdentity
   /**
@@ -205,9 +209,12 @@ export async function commitRewind(
   // Failures can only happen before the create; once it succeeds the child
   // IS the surface (no ghost, no rollback).
   const sessionId = SessionId(`session-${randomUUID()}`)
-  // The composition is resolved ONCE and rides the create (a rejected
-  // create is NEVER retried — the first DSH call may have left a hidden
-  // lifecycle, so the target is PINNED immediately).
+  // The composition is resolved ONCE and rides the create as the concrete
+  // preset ID (a rejected create is NEVER retried — the first DSH call may
+  // have left a hidden lifecycle, so the target is PINNED immediately).
+  // The composition's SETUP callback stays with the runner (Direct
+  // ownership); only the identity crosses into the semantic create
+  // (migration M1.11).
   const composition = await host.compose(resolveSessionPreset(source.session))
   const result = await host.transitionTo({
     target: {
@@ -217,7 +224,7 @@ export async function commitRewind(
       header: { cwd: source.session.header.cwd || host.sessionCwd() },
     },
     fresh: true,
-    create: () => createForkedAgent(host, source, seed, sessionId, composition),
+    create: () => createForkedAgent(host, source, seed, sessionId, composition.agentPreset),
   })
   if (!result.ok) return { kind: 'failed', message: result.message }
   // The transaction COMMITTED: restore the selected prompt (synchronous,

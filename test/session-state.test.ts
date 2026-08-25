@@ -18,6 +18,9 @@ import { createDiag } from '../src/diag.ts'
 import { currentPalette, darkColors, lightColors } from '../src/theme.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
+import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
+import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
 // CI=true — CI runners export CI=true, which would short-circuit the
@@ -60,25 +63,17 @@ function stubRunner(
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     tuiSettings: undefined,
     agents: {} as never,
-    sessions: { flush: async () => {} },
     sessionReader: {
       list: async () => [],
       search: async () => [],
       titles: async () => new Map(),
+      measureContext: () => undefined,
+      readExportData: async () => ({ kind: 'none' }),
     },
-    host: {
-      settings: () => ctx.get('settings'),
-      llm: () => ctx.get('llm'),
-      credentials: () => ctx.get('credentials'),
-      authorization: () => ctx.get('authorization'),
-      defaultModel: () => ctx.get('agentDefaultModel'),
-      presets: () => ctx.get('agentPresets'),
-      tools: () => ctx.get('tools'),
-      permission: () => ctx.get('permissionPresets'),
-      tokenMeter: () => ctx.get('tokenMeter'),
-      commands: () => ctx.get('commands'),
-      persistence: () => ctx.get('sessionPersistence'),
-    },
+    catalog: new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
+    config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
+    commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    hostFile: new DirectHostFilePort((sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
     interaction: {
       registerQuestionProvider: () => true,
       onApprovalRequest: () => {},
@@ -114,7 +109,6 @@ function stubRunner(
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
     get sessionGeneration() { return state.generation },
-    compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()

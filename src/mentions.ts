@@ -1,17 +1,17 @@
 /**
- * @-file mention completion for the editor: a consumer-side wrapper over the
- * fork's CombinedAutocompleteProvider (kimi FileMentionProvider parity, so
- * the vendored fork stays pristine — AGENTS.md decision 8). With `fd` on
- * PATH, `@` completion is delegated to the fork's fd-backed whole-tree fuzzy
- * search (respects .gitignore, fans out across the workspace); without fd, a
- * bounded recursive scanner ranks candidates by basename/path affinity so
- * `@` still completes from anywhere in the tree instead of only the current
- * directory. The literal `@path` value is what gets submitted (kimi
- * semantics: the model reads the file itself).
+ * @-file mention grammar and editor completion for the editor: the pure
+ * Client-local side of the `@`-mention surface (migration M1.10). The
+ * HOST filesystem operations (fd discovery, the recursive fallback scan,
+ * existence probes) live in `src/runtime/direct/host-file-direct.ts` —
+ * this module never assumes the Host filesystem IS the current Node
+ * process filesystem. The editor's MentionProvider consumes the
+ * `HostFilePort` seam; slash-command and path-argument completion keep
+ * the fork's CombinedAutocompleteProvider (client-local editor
+ * machinery).
  * @module @xmoon76/dsh-pi-tui/mentions
  */
 
-import { accessSync, constants as fsConstants, readdirSync, statSync } from 'node:fs'
+import { readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, win32 } from 'node:path'
 import {
@@ -57,11 +57,6 @@ function isCjkChar(char: string): boolean {
     || (code >= 0xf900 && code <= 0xfaff) // compatibility ideographs
     || (code >= 0xff00 && code <= 0xffef) // full-width forms
 }
-/** Bounded recursive scan (kimi MAX_FALLBACK_SCAN). */
-const MAX_FALLBACK_SCAN = 2000
-/** Suggestion cap for the fallback (kimi MAX_FALLBACK_SUGGESTIONS). */
-const MAX_FALLBACK_SUGGESTIONS = 50
-
 /**
  * The `@` mention prefix of the text before the cursor: `@query` or
  * `@"quoted query"`, or null when the cursor is not inside a mention.
@@ -163,6 +158,26 @@ export function findFileMentions(text: string): FileMentionOccurrence[] {
 }
 
 /**
+ * Resolve ONE raw mention path to the candidate absolute path: `~`
+ * expands through the homedir, an absolute path stays as-is, a relative
+ * path resolves against the session workspace. PURE — the existence
+ * probe is injected (migration M1.10).
+ * @param raw - the mention path (quotes stripped).
+ * @param sessionCwd - the session's working directory.
+ * @returns the candidate absolute path.
+ */
+export function resolveMentionCandidate(raw: string, sessionCwd: string): string {
+  if (raw.startsWith('~/')) return join(homedir(), raw.slice(2))
+  if (isAbsolute(raw)) return raw
+  return join(sessionCwd, raw)
+}
+
+/** The injected existence probe (Host-owned): the Direct adapter backs it
+ * with the Host filesystem; a Remote adapter backs it with the official
+ * fileReferences capability. */
+export type MentionExistence = (candidate: string) => boolean | Promise<boolean>
+
+/**
  * Send-time canonicalization of `@`-file mentions (the 2026-08-22 plan,
  * item 7): the EDITOR keeps showing the concise relative form the user
  * typed, but the MODEL-facing message carries the unambiguous absolute
@@ -172,32 +187,26 @@ export function findFileMentions(text: string): FileMentionOccurrence[] {
  * as-is; a path that does NOT exist is left VERBATIM (typos and non-path
  * `@` words are never mangled); symlinks are absolutized, never
  * realpath'd — the user's link path is the intent. Quoted mentions keep
- * their quotes in the rewritten text.
+ * their quotes in the rewritten text. The EXISTENCE probe is injected —
+ * this module never touches the filesystem itself (migration M1.10).
  * @param text - the draft text.
  * @param sessionCwd - the session's working directory (the resolution
  *   base for relative mentions).
+ * @param exists - the Host existence probe.
  * @returns the canonicalized text (unchanged when no mention resolves).
  */
-export function expandFileMentionsForSubmit(text: string, sessionCwd: string): string {
+export async function expandFileMentionsForSubmit(
+  text: string,
+  sessionCwd: string,
+  exists: MentionExistence,
+): Promise<string> {
   const mentions = findFileMentions(text)
   if (mentions.length === 0) return text
-  const exists = (candidate: string): boolean => {
-    try {
-      statSync(candidate)
-      return true
-    } catch {
-      return false
-    }
-  }
   let out = ''
   let cursor = 0
   for (const mention of mentions) {
-    const raw = mention.path
-    let candidate: string
-    if (raw.startsWith('~/')) candidate = join(homedir(), raw.slice(2))
-    else if (isAbsolute(raw)) candidate = raw
-    else candidate = join(sessionCwd, raw)
-    const rewritten = exists(candidate)
+    const candidate = resolveMentionCandidate(mention.path, sessionCwd)
+    const rewritten = await exists(candidate)
       ? (mention.quoted ? `@"${candidate}"` : `@${candidate}`)
       : text.slice(mention.start, mention.end)
     out += text.slice(cursor, mention.start) + rewritten
@@ -207,97 +216,6 @@ export function expandFileMentionsForSubmit(text: string, sessionCwd: string): s
   return out
 }
 
-/** Locate an executable `fd` on PATH (bare command names resolve through
- * PATH at spawn time; absolute/relative entries must exist and be X_OK). */
-export function resolveFdPath(): string | null {  const pathEntries = process.env.PATH?.split(':').filter(entry => entry !== '') ?? []
-  for (const dir of pathEntries) {
-    const candidate = join(dir, 'fd')
-    try {
-      accessSync(candidate, fsConstants.X_OK)
-      return candidate
-    } catch {
-      // Not here; keep scanning.
-    }
-  }
-  return null
-}
-
-/** One scanned candidate: relative display path + filesystem facts. */
-interface FsMentionCandidate {
-  readonly path: string
-  readonly absolutePath: string
-  readonly isDirectory: boolean
-}
-
-/** Recursively collect candidates under the workspace (bounded, `.git` skipped). */
-function collectFsMentionCandidates(
-  workDir: string,
-  signal: AbortSignal,
-): FsMentionCandidate[] {
-  const candidates: FsMentionCandidate[] = []
-  const stack: string[] = ['']
-  let scanned = 0
-  while (stack.length > 0 && scanned < MAX_FALLBACK_SCAN) {
-    if (signal.aborted) break
-    const relativeDir = stack.pop() ?? ''
-    const absoluteDir = relativeDir === '' ? workDir : join(workDir, relativeDir)
-    let entries
-    try {
-      entries = readdirSync(absoluteDir, { withFileTypes: true })
-    } catch {
-      continue
-    }
-    for (const entry of entries) {
-      if (signal.aborted || scanned >= MAX_FALLBACK_SCAN) break
-      if (entry.name === '.git') continue
-      const relativePath = relativeDir === '' ? entry.name : join(relativeDir, entry.name)
-      const absolutePath = join(absoluteDir, entry.name)
-      let isDirectory = entry.isDirectory()
-      if (!isDirectory && entry.isSymbolicLink()) {
-        try {
-          isDirectory = statSync(absolutePath).isDirectory()
-        } catch {
-          // Broken symlink or permission error — keep it as a file candidate.
-        }
-      }
-      scanned += 1
-      candidates.push({ path: relativePath, absolutePath, isDirectory })
-      if (isDirectory && !entry.isSymbolicLink()) {
-        stack.push(relativePath)
-      }
-    }
-  }
-  return candidates
-}
-
-/** Rank candidates against the query (kimi scoreCandidate semantics). */
-function scoreCandidate(candidate: FsMentionCandidate, lowerQuery: string): number {
-  if (lowerQuery === '') {
-    const depthPenalty = candidate.path.split('/').length - 1
-    return (candidate.isDirectory ? 120 : 100) - depthPenalty
-  }
-  const lowerPath = candidate.path.toLowerCase()
-  const lowerBase = basename(candidate.path).toLowerCase()
-  let score = 0
-  if (lowerBase === lowerQuery) score = 100
-  else if (lowerBase.startsWith(lowerQuery)) score = 80
-  else if (lowerBase.includes(lowerQuery)) score = 50
-  else if (lowerPath.includes(lowerQuery)) score = 30
-  if (candidate.isDirectory && score > 0) score += 10
-  return score
-}
-
-/** The completion item for one candidate: `@path` (quoted when it has
- * spaces), directories keep their trailing `/` so `@dir/` continues. */
-function toMentionItem(candidate: FsMentionCandidate): AutocompleteItem {
-  const valuePath = candidate.isDirectory ? `${candidate.path}/` : candidate.path
-  const value = valuePath.includes(' ') ? `@"${valuePath}"` : `@${valuePath}`
-  return {
-    value,
-    label: `${basename(candidate.path)}${candidate.isDirectory ? '/' : ''}`,
-    description: candidate.absolutePath,
-  }
-}
 
 /** Expand a leading `~` in one argument token (other tokens unchanged). */
 function expandHomeToken(token: string): string {
@@ -456,39 +374,23 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
   return items
 }
 
-/** The recursive fallback suggestion set for one `@` prefix. */
-function fsMentionSuggestions(workDir: string, atPrefix: string, signal: AbortSignal): AutocompleteSuggestions | null {
-  if (signal.aborted) return null
-  const query = atPrefix.slice(1)
-  const candidates = collectFsMentionCandidates(workDir, signal)
-  if (candidates.length === 0 || signal.aborted) return null
-  const lowerQuery = query.toLowerCase()
-  const ranked = candidates
-    .map(candidate => ({ candidate, score: scoreCandidate(candidate, lowerQuery) }))
-    .filter(entry => entry.score > 0)
-    .sort((a, b) => {
-      if (a.score !== b.score) return b.score - a.score
-      if (a.candidate.isDirectory !== b.candidate.isDirectory) {
-        return a.candidate.isDirectory ? -1 : 1
-      }
-      return a.candidate.path.localeCompare(b.candidate.path)
-    })
-    .slice(0, MAX_FALLBACK_SUGGESTIONS)
-    .map(entry => entry.candidate)
-  if (ranked.length === 0) return null
-  return { prefix: atPrefix, items: ranked.map(toMentionItem) }
-}
+/** The Host-file discovery seam the editor completion consumes (the
+ * `HostFilePort` subset — migration M1.10): `@` mentions complete against
+ * the HOST filesystem through the port, never the local fs. */
+export type HostReferencesSeam = import('./runtime/host-file-port.ts').HostFilePort
 
 /**
- * The editor's autocomplete provider: `@` mentions (fd-backed when fd is
- * available, recursive ranked fallback otherwise) plus the fork's usual
- * slash-command and path completion. applyCompletion always delegates to the
- * fork (its `@` branch already handles quoting and directory continuation).
+ * The editor's autocomplete provider: `@` mentions through the Host-file
+ * port (the Direct adapter runs the fd whole-tree fuzzy search or the
+ * bounded recursive fallback) plus the fork's usual slash-command and
+ * path completion (client-local editor machinery). applyCompletion always
+ * delegates to the fork (its `@` branch already handles quoting and
+ * directory continuation).
  */
 export class MentionProvider implements AutocompleteProvider {
   private readonly inner: CombinedAutocompleteProvider
   private readonly workDir: string
-  private readonly fdPath: string | null
+  private readonly fileReferences: HostReferencesSeam
   /** The slash commands whose argument completion is a PATH (the host
    * attaches `getArgumentCompletions`, e.g. `/image`): ONLY these tolerate
    * a trailing-space argument as a Tab file-completion site — every other
@@ -503,13 +405,15 @@ export class MentionProvider implements AutocompleteProvider {
   constructor(
     slashCommands: readonly SlashCommand[],
     workDir: string,
-    fdPath: string | null,
+    fileReferences: HostReferencesSeam,
     inputModeSource: () => EditorInputMode = () => 'prompt',
   ) {
     this.workDir = workDir
-    this.fdPath = fdPath
+    this.fileReferences = fileReferences
     this.inputModeSource = inputModeSource
-    this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, fdPath)
+    // The fork's fdPath is null: the `@` branch is intercepted below and
+    // routed through the port, so the fork never sees an `@` prefix here.
+    this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
     this.pathArgumentCommands = new Set(
       slashCommands
         .filter(command => command.getArgumentCompletions !== undefined)
@@ -569,14 +473,23 @@ export class MentionProvider implements AutocompleteProvider {
     const textBeforeCursor = currentLine.slice(0, cursorCol)
     const atPrefix = extractAtPrefix(textBeforeCursor)
     if (atPrefix !== null) {
-      if (this.fdPath !== null) {
-        try {
-          return await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
-        } catch {
-          // fd failed to spawn: keep `@` usable through the fallback.
-        }
+      // The Host-file discovery owns the fd/fallback decision (migration
+      // M1.10); an empty result is a null suggestion, exactly like the
+      // pre-migration fd and fallback paths.
+      const candidates = await this.fileReferences.listReferences(
+        { kind: 'workspace', cwd: this.workDir },
+        atPrefix,
+        { signal: options.signal },
+      )
+      if (candidates.length === 0) return null
+      return {
+        prefix: atPrefix,
+        items: candidates.map(candidate => ({
+          value: candidate.value,
+          label: candidate.label,
+          description: candidate.description,
+        })),
       }
-      return fsMentionSuggestions(this.workDir, atPrefix, options.signal)
     }
     // `!`/`!!` shell lines: command names, subcommands and `$VAR` names come
     // from the real-shell compgen bridge (docs/input-and-card-polish.md §1);

@@ -35,6 +35,9 @@ import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
+import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
+import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
 // ── event fixtures ─────────────────────────────────────────────────────────
 
@@ -363,13 +366,14 @@ function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent
 }
 
 test('C04: createForkedAgent records preset, source cwd, parent, seedLength, provider/model', async () => {
-  const rig = makeRig({ sessionCwd: '/other-cwd', composePreset: 'minimal' })
+  const rig = makeRig({ sessionCwd: '/other-cwd' })
   const seed = turn(0, 1, 'A')
-  // The source's recorded preset (header) resolves to 'minimal'; its header
-  // cwd is '/ws' — the child's cwd is the SOURCE's workspace (the live
-  // surface cwd '/other-cwd' only matters for a header without one).
-  const next = await createForkedAgent(rig.host, sourceAgent('session-parent', [], 'minimal'), seed, SessionId('session-child'))
-  assert.deepEqual(rig.resolved, ['minimal'])
+  // The concrete preset id rides the create (migration M1.11 — no
+  // composition fallback inside the helper); the source's header cwd is
+  // '/ws' — the child's cwd is the SOURCE's workspace (the live surface
+  // cwd '/other-cwd' only matters for a header without one).
+  const next = await createForkedAgent(rig.host, sourceAgent('session-parent', [], 'minimal'), seed, SessionId('session-child'), 'minimal')
+  assert.deepEqual(rig.resolved, [], 'the helper no longer composes — the preset id is caller-resolved')
   assert.equal(rig.created.length, 1)
   const call = rig.created[0]!
   assert.equal(call.meta.cwd, '/ws', 'the SOURCE workspace wins, never a live-surface value')
@@ -383,21 +387,18 @@ test('C04: createForkedAgent records preset, source cwd, parent, seedLength, pro
   assert.ok(call.sessionId.startsWith('session-'))
 })
 
-test('review P2: the cwd is captured BEFORE the compose await (no parent=A cwd=B mix)', async () => {
+test('review P2: the cwd is captured BEFORE the create await (no parent=A cwd=B mix)', async () => {
   let liveCwd = '/ws-a'
   const created: CreatedCall[] = []
   const rig = makeRig({ sessionCwd: '/ws-a' })
-  // The compose await is where a concurrent switch could land; the helper
+  // The create await is where a concurrent switch could land; the helper
   // must have already captured the cwd.
   const host: RewindCommitHost = {
     ...rig.host,
     sessionCwd: () => liveCwd,
-    compose: async () => {
-      liveCwd = '/ws-b' // a switch lands DURING the compose await
-      return { setup: () => {} }
-    },
     agents: {
       create: async (call) => {
+        liveCwd = '/ws-b' // a switch lands DURING the create await
         created.push({ sessionId: String(call.sessionId), meta: call.meta, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
         return { session: { id: String(call.sessionId) }, direct: { agent: { session: { id: String(call.sessionId) } }, ownerHandle: { dispose: async () => {} } } }
       },
@@ -618,25 +619,17 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     tuiSettings: undefined,
     agents: {} as never,
-    sessions: { flush: async () => {} },
     sessionReader: {
       list: async () => [],
       search: async () => [],
       titles: async () => new Map(),
+      measureContext: () => undefined,
+      readExportData: async () => ({ kind: 'none' }),
     },
-    host: {
-      settings: () => options.ctx.get('settings'),
-      llm: () => options.ctx.get('llm'),
-      credentials: () => options.ctx.get('credentials'),
-      authorization: () => options.ctx.get('authorization'),
-      defaultModel: () => options.ctx.get('agentDefaultModel'),
-      presets: () => options.ctx.get('agentPresets'),
-      tools: () => options.ctx.get('tools'),
-      permission: () => options.ctx.get('permissionPresets'),
-      tokenMeter: () => options.ctx.get('tokenMeter'),
-      commands: () => options.ctx.get('commands'),
-      persistence: () => options.ctx.get('sessionPersistence'),
-    },
+    catalog: new DirectCatalogPort(options.ctx as never, () => undefined),
+    config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
+    commandRegistry: options.ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    hostFile: new DirectHostFilePort((sessionId) => options.agent?.session.id === sessionId ? options.agent : undefined),
     interaction: {
       registerQuestionProvider: () => true,
       onApprovalRequest: () => {},
@@ -661,7 +654,6 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     get sessionGeneration() { return 0 },
     focusEnabled: () => false,
     setFocusMode: () => {},
-    compose: async () => ({ setup: () => {} }),
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -763,14 +755,20 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
   const rewinds: number[] = []
   const ensureCalls: string[] = []
   const base = stubRunner({ ctx, app, rewinds, ensureCalls })
-  let composes = 0
+  let resolves = 0
   let createPreset: string | undefined
   let sawRecover = false
   const runner: TuiCommandRunner = {
     ...base,
-    compose: async () => {
-      composes += 1
-      return { agentPreset: 'standard', setup: () => {} }
+    // The preset identity comes from the catalog port (migration M1.11):
+    // the command surface resolves the concrete id, the Direct session
+    // lifecycle composes the setup internally.
+    catalog: {
+      ...base.catalog!,
+      presets: {
+        ...base.catalog!.presets,
+        resolve: async () => { resolves += 1; return { id: 'standard' } },
+      },
     },
     agents: {
       create: async (opts: { agentPreset?: string }) => {
@@ -787,7 +785,7 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
   const def = commands.defs.find(entry => entry.name === 'new')
   assert.ok(def?.handler !== undefined, '/new handler missing')
   await (def!.handler as () => Promise<unknown>)()
-  assert.equal(composes, 1, 'the composition is resolved exactly once (for the create)')
+  assert.equal(resolves, 1, 'the preset id is resolved exactly once (for the create)')
   assert.equal(sawRecover, false, 'a rejected create is NEVER retried — no recovery step is passed')
   assert.equal(createPreset, 'standard', 'the semantic create request carries the resolved preset id')
   app.stop()
@@ -803,15 +801,18 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   const rewinds: number[] = []
   const ensureCalls: string[] = []
   const base = stubRunner({ ctx, app, rewinds, ensureCalls })
-  let composes = 0
+  let resolves = 0
   let createPreset: string | undefined
   let sawRecover = false
   const runner: TuiCommandRunner = {
     ...base,
     liveAgent: sourceAgent('session-source', turn(0, 1, 'A')),
-    compose: async () => {
-      composes += 1
-      return { agentPreset: 'minimal', setup: () => {} }
+    catalog: {
+      ...base.catalog!,
+      presets: {
+        ...base.catalog!.presets,
+        resolve: async () => { resolves += 1; return { id: 'minimal' } },
+      },
     },
     agents: {
       create: async (opts: { agentPreset?: string }) => {
@@ -828,7 +829,7 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   const def = commands.defs.find(entry => entry.name === 'fork')
   assert.ok(def?.handler !== undefined, '/fork handler missing')
   await (def!.handler as () => Promise<unknown>)()
-  assert.equal(composes, 1, 'the composition is resolved exactly once (for the create)')
+  assert.equal(resolves, 1, 'the preset id is resolved exactly once (for the create)')
   assert.equal(sawRecover, false, 'a rejected create is NEVER retried — no recovery step is passed')
   assert.equal(createPreset, 'minimal', 'the semantic create request carries the resolved preset id')
   app.stop()

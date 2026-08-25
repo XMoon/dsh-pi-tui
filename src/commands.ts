@@ -14,31 +14,28 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
-import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type { CommandInvocation, CommandResult, CommandDescriptor } from '@deepseek-ai/dsh-commands'
+import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
-import { dshHome } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { consumeDraftImages, pruneUnreferencedDrafts } from './image/submit.ts'
 import { readImageFile } from './image/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
-import { resolveFdPath, suggestPathArgument } from './mentions.ts'
+import { suggestPathArgument } from './mentions.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
@@ -58,6 +55,9 @@ import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
+import type { Catalog, ModelCatalog } from './runtime/catalog-port.ts'
+import type { ConfigPort, ProviderProfileConfig } from './runtime/config-port.ts'
+import type { HostFilePort } from './runtime/host-file-port.ts'
 import {
   credentialOptionsFor,
   deriveKeyRef,
@@ -65,17 +65,13 @@ import {
   resolveCredentialArg,
   ROUTE_PATTERN,
   PROTOCOL_CHOICES,
-  type ProviderCatalogLlm,
-  type ProviderCatalogSettings,
   type ProviderOption,
 } from './provider-catalog.ts'
 import {
   authorizationFailureText,
-  authorizationTargets,
   createAuthorizationInteraction,
   flowForRoute,
   mergeLoginTargets,
-  type AuthorizationServiceLike,
   type AuthorizationTarget,
   type LoginTarget,
 } from './authorization.ts'
@@ -88,12 +84,8 @@ import {
 } from './surface-catalog.ts'
 import {
   isUserInvocableSkill,
-  readHumanSkillCatalog,
-  resolveLiveSkillTarget,
   type HumanSkillCatalog,
   type HumanSkillSummary,
-  type SkillCatalogContext,
-  type SkillCatalogTarget,
 } from './skill-catalog.ts'
 
 /** A balanced completed-turn prefix for forking: the log up to (and including)
@@ -214,37 +206,25 @@ export function presetDisplayText(preset: {
 /** The TUI settings document surface (theme/footer/fullscreen/busyEnter/
  * localShellSandbox/homeEndKeys). The old `history` field moved to
  * $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
- * document anymore. */
-export interface TuiSettingsLike {
-  get(): { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string; focusMode: string }
-  replace(doc: { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string; focusMode: string }): unknown
-}
+ * document anymore. The type now lives on the config port (M1.9); the
+ * re-export keeps the public commands-surface name stable for tests. */
+export type { TuiSettingsLike } from './runtime/config-port.ts'
+import type { TuiSettingsLike } from './runtime/config-port.ts'
 
 
-/** The narrow Host-access surface commands consume (migration M1.7): every
- * Host service a command may read goes through this facade, never `ctx`
- * directly. The runner implements it over the dsh services; the return
- * types stay structural (the catalog/config ports tighten them later). */
-export interface CommandHostCapabilities {
-  settings(): Context['settings'] | undefined
-  llm(): Context['llm'] | undefined
-  credentials(): Context['credentials'] | undefined
-  authorization(): Context['authorization'] | undefined
-  defaultModel(): Context['agentDefaultModel'] | undefined
-  presets(): Context['agentPresets'] | undefined
-  tools(): Context['tools'] | undefined
-  permission(): Context['permissionPresets'] | undefined
-  tokenMeter(): Context['tokenMeter'] | undefined
-  commands(): Context['commands'] | undefined
-  persistence(): Context['sessionPersistence'] | undefined
+/** The minimal commands-registry surface the TUI command surface needs
+ * (migration M1.11): registration + listing. This is a runner ASSEMBLY
+ * dependency for the TUI's own registrations — never a Host backend
+ * capability (the /yolo permission switch no longer reaches a commands
+ * service; it goes through the config port). */
+export interface CommandRegistryLike {
+  register(definition: CommandDefinition): () => void
+  list(agent?: unknown): readonly CommandDescriptor[]
 }
+
 
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
-  /** The narrow Host-access facade (migration M1.7): commands read Host
-   * services through `host`, never `ctx` directly. `ctx` remains for the
-   * logger and the commands/change subscription only. */
-  readonly host: CommandHostCapabilities
   ctx: Context
   app: TuiApp
   /** The runner's diagnostics channel (stderr + $DSH_HOME/logs). */
@@ -267,16 +247,32 @@ export interface TuiCommandRunner {
     create(options: CreateSessionRequest): Promise<SessionHandle>
     resume(options: ResumeSessionRequest): Promise<SessionHandle>
   }
-  /** The sessions service, for the /exit flush. */
-  readonly sessions: { flush(session: Session): Promise<unknown> }
-  /** The session READ port (migration M1.3): /sessions, /resume, /search
-   * and the title batches go through the port, never ctx directly. */
+  /** The session READ port (migration M1.3): /sessions, /resume, /search,
+   * the title batches, the context measurement and the export read go
+   * through the port, never ctx directly. */
   readonly sessionReader: SessionReader
   /** The session WRITE port (migration M1.4): follow-up delivery, steer,
    * queue pull-back, cancel and title ops go through the port. */
   readonly sessionWriter: SessionWriter
   /** The interaction port (migration M1.6): approval/question authority. */
   readonly interaction: InteractionPort
+  /** The catalog port (migration M1.8): models/providers, presets and
+   * skills — commands read Host catalogs through semantic DTOs, never
+   * `ctx.llm` / `ctx.agentPresets` / `ctx.tools` service objects. */
+  readonly catalog: Catalog
+  /** The config port (migration M1.9): settings, provider profiles,
+   * credentials, authorization, permissions and the preset default —
+   * commands never touch the raw settings/credentials/authorization
+   * services. */
+  readonly config: ConfigPort
+  /** The Host-file port (migration M1.10): `@`-mention discovery and
+   * send-time canonicalization against the HOST filesystem — never the
+   * client's fs assumption. */
+  readonly hostFile: HostFilePort
+  /** The minimal commands registry for the TUI's OWN registrations
+   * (migration M1.11) — a runner assembly dependency, not a Host
+   * capability. */
+  readonly commandRegistry: CommandRegistryLike | undefined
   /** The ONE exit orchestration (flush with a hard timeout, cleanup, warn,
    * resume hint, process exit) — shared by Ctrl+C/Ctrl+D, /exit and /quit.
    * Command handlers must NEVER stop the app, flush or exit themselves. */
@@ -318,7 +314,6 @@ export interface TuiCommandRunner {
   /** The runner's monotonic session generation; bumped on every session
    * swap. Late async work must re-check it before committing state. */
   readonly sessionGeneration: number
-  compose(presetId?: string): Promise<{ agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }>
   switchSession(sessionId: string): Promise<string | undefined>
   /**
    * The unified session-transition transaction: the old session is flushed
@@ -539,51 +534,16 @@ export function extensionHealthRows(runner: TuiCommandRunner): { id: string; lab
   return rows
 }
 
-/** The structural llm model-discovery surface /login probes. */
-interface ProviderCatalogDiscovery {
-  discoverModels(
-    settingsNs: string,
-    request: { provider?: string; baseURL?: string; api?: string; apiKey?: string; signal?: AbortSignal },
-  ): Promise<readonly { id: string; name?: string }[]>
-}
-
-/** The structural settings write surface the add wizard persists through. */
-interface ProviderCatalogSettingsWrite {
-  mutate(ns: string, ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[]): Promise<unknown>
-}
-
-/** Read the llm-pi-ai adapter's `providers` dict from its settings section,
- * or undefined when the settings service or the section is absent. */
-function readLlmpiAiProviders(host: CommandHostCapabilities): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
-  const settings = host.settings()
-  if (settings === undefined) return undefined
-  try {
-    const section = settings.get(settingsNamespace('llm-pi-ai')) as
-      | { providers?: Record<string, { apiKeyEnv?: string } | undefined> }
-      | undefined
-    return section?.providers
-  } catch {
-    return undefined
-  }
-}
-
 /** Read the merged /login option list: the llm configurable-provider
  * directory when the llm service is present, the settings-only fallback
- * otherwise. */
-function readProviderOptions(host: CommandHostCapabilities): ProviderOption[] {
-  const llm = host.llm() as ProviderCatalogLlm | undefined
-  const settings = host.settings() as ProviderCatalogSettings | undefined
-  const readSection = (ns: string): unknown => {
-    if (settings === undefined) return undefined
+ * otherwise. The directory read and the section reads go through the
+ * semantic ports (migration M1.8/M1.9) — never the raw services. */
+function readProviderOptions(models: ModelCatalog, providers: ProviderProfileConfig): ProviderOption[] {
+  const readSection = (ns: string): unknown => providers.readSection(ns)
+  const entries = models.listConfigurableProviders()
+  if (entries !== undefined) {
     try {
-      return settings.get(ns)
-    } catch {
-      return undefined
-    }
-  }
-  if (llm !== undefined) {
-    try {
-      return providerOptionsFor(llm.listConfigurableProviders(), readSection)
+      return providerOptionsFor(entries, readSection)
     } catch {
       // A throwing directory read degrades to the settings-only fallback.
     }
@@ -592,7 +552,7 @@ function readProviderOptions(host: CommandHostCapabilities): ProviderOption[] {
   // llm-pi-ai route the section declares. The settings-only reader only
   // sees routes that NAME a credential (credentialOptionsFor skips keyless
   // profiles), so every fallback option names its reference.
-  const settingsOnly = credentialOptionsFor(readLlmpiAiProviders(host))
+  const settingsOnly = credentialOptionsFor(providers.readPiAiProviders())
   return settingsOnly.map((option, index) => index === 0 ? {
     ...option,
     route: 'deepseek-official',
@@ -677,14 +637,13 @@ function mergedTargetsSummary(merged: readonly LoginTarget[]): string {
  * which would switch the request path back to a reference that is not set).
  */
 async function runAuthorizationLogin(
-  ctx: Context,
   app: TuiApp,
   runner: TuiCommandRunner,
   target: AuthorizationTarget,
   options: readonly ProviderOption[],
 ): Promise<CommandResult> {
-  const authorization = runner.host.authorization() as AuthorizationServiceLike | undefined
-  if (authorization === undefined) return { kind: 'error', text: 'authorization service unavailable' }
+  const authorization = runner.config.authorization
+  if (!authorization.available()) return { kind: 'error', text: 'authorization service unavailable' }
   if (target.inFlight) return { kind: 'error', text: `sign-in already in progress for ${target.label}` }
   let method = target.methods[0]?.id
   if (method === undefined) return { kind: 'error', text: `no sign-in method available for ${target.label}` }
@@ -715,7 +674,7 @@ async function runAuthorizationLogin(
     close()
   }
   if (outcome.status === 'cancelled') return { kind: 'error', text: 'login cancelled' }
-  const profileNote = await provisionKeylessProfile(ctx, runner, target, options)
+  const profileNote = await provisionKeylessProfile(runner, target, options)
   return { kind: 'success', text: `signed in to ${target.label}${profileNote}` }
 }
 
@@ -730,7 +689,6 @@ async function runAuthorizationLogin(
  * @returns a user-facing note, or '' when nothing was provisioned.
  */
 async function provisionKeylessProfile(
-  ctx: Context,
   runner: TuiCommandRunner,
   target: AuthorizationTarget,
   options: readonly ProviderOption[],
@@ -738,12 +696,13 @@ async function provisionKeylessProfile(
   if (target.route === undefined) return ''
   const option = options.find(candidate => candidate.route === target.route)
   if (option === undefined || option.configured || option.declared || option.settingsNs === '') return ''
-  const settings = runner.host.settings() as ProviderCatalogSettingsWrite | undefined
-  if (settings === undefined) return ''
+  if (!runner.config.providers.available()) return ''
   try {
-    await settings.mutate(option.settingsNs, [
-      { op: 'set', path: [...option.settingsPath], value: {} },
-    ])
+    await runner.config.providers.writeKeylessProfile({
+      route: option.route,
+      settingsNs: option.settingsNs,
+      settingsPath: option.settingsPath,
+    })
     return ' — provider profile recorded'
   } catch (error) {
     runner.diag.warn('authorization', { key: target.key, note: 'profile write failed', error: safeErrorMessage(error) })
@@ -751,11 +710,9 @@ async function provisionKeylessProfile(
   }
 }
 
-/** The structural credentials surface /logout's picker needs. */
-interface LogoutCredentialsLike {
-  listRecords(): Promise<readonly { key: string; kind?: string }[]>
-  describe(ref: string): Promise<{ configured: boolean; source?: string }>
-}
+/** The credential surface /logout's picker needs — the config port's
+ * credentials sub-interface (presence-only reads). */
+type LogoutCredentialsLike = Pick<import('./runtime/config-port.ts').CredentialConfig, 'listRecords' | 'describeReference'>
 
 /** Value prefixes for the /logout picker rows (no collision with a ref). */
 const LOGOUT_REF_VALUE = '\u0000ref:'
@@ -777,7 +734,7 @@ async function logoutPickerRows(
     if (seenRefs.has(option.ref)) continue
     seenRefs.add(option.ref)
     try {
-      const info = await credentials.describe(option.ref)
+      const info = await credentials.describeReference(option.ref)
       if (info.configured) {
         rows.push({ value: LOGOUT_REF_VALUE + option.ref, label: `${option.label} (${option.ref})`, group: 'API keys' })
       }
@@ -821,9 +778,9 @@ async function askAddProvider(
   signal: AbortSignal,
   prefilledRoute?: string,
 ): Promise<AddProviderOutcome> {
-  const credentials = runner.host.credentials()
-  const settings = runner.host.settings() as ProviderCatalogSettingsWrite | undefined
-  if (credentials === undefined || settings === undefined) {
+  const credentials = runner.config.credentials
+  const providers = runner.config.providers
+  if (!credentials.available() || !providers.available()) {
     // The settings service and the llm-pi-ai namespace must exist to persist a
     // hand-declared profile; without them the add cannot complete. This is a
     // capability failure, not a user cancellation.
@@ -854,21 +811,18 @@ async function askAddProvider(
   // hint and falls back to hand entry.
   let discovered: readonly { id: string }[] = []
   let discoveryNote: string | undefined
-  const llm = runner.host.llm() as ProviderCatalogDiscovery | undefined
-  if (llm !== undefined) {
-    try {
-      discovered = await llm.discoverModels('llm-pi-ai', {
-        baseURL,
-        api,
-        ...key === '' ? {} : { apiKey: key },
-        signal,
-      })
-      if (discovered.length > 0) {
-        discoveryNote = `probed ${discovered.length} model${discovered.length > 1 ? 's' : ''}`
-      }
-    } catch {
-      discoveryNote = 'model probe failed — enter model ids by hand'
+  try {
+    discovered = await runner.catalog.models.discoverModels({
+      baseURL,
+      api,
+      ...key === '' ? {} : { apiKey: key },
+      signal,
+    })
+    if (discovered.length > 0) {
+      discoveryNote = `probed ${discovered.length} model${discovered.length > 1 ? 's' : ''}`
     }
+  } catch {
+    discoveryNote = 'model probe failed — enter model ids by hand'
   }
   const modelAnswers = await app.askQuestions([
     {
@@ -906,15 +860,13 @@ async function askAddProvider(
     ...key === '' ? {} : { apiKeyEnv: ref },
   }
   try {
-    await settings.mutate('llm-pi-ai', [
-      { op: 'set', path: ['providers', routeValue], value: profile },
-    ])
+    await providers.writeProfile(routeValue, profile)
   } catch (error) {
     return { kind: 'error', text: `could not add provider: ${safeErrorMessage(error)}` }
   }
   if (key !== '') {
     try {
-      await credentials.set(ref as CredentialRef, key)
+      await credentials.setReference(ref, key)
     } catch (error) {
       return { kind: 'error', text: `provider ${routeValue} added, but storing the key failed: ${safeErrorMessage(error)}` }
     }
@@ -969,10 +921,7 @@ export function registerTuiCommands(
   const { ctx, app } = runner
   const cwd = runner.cwd
   const signal = runner.signal
-  // `@`-file mentions use fd when it is on PATH (whole-tree fuzzy search);
-  // without it the MentionProvider falls back to a bounded recursive scan.
-  const fdPath = resolveFdPath()
-  const commands = runner.host.commands()
+  const commands = runner.commandRegistry
   const recordExtensionError = runner.recordExtensionError
   const clearExtensionError = runner.clearExtensionError
   // The commands service is part of the base layer; its absence means the
@@ -1056,7 +1005,9 @@ export function registerTuiCommands(
           : {}),
       })),
       runner.sessionCwd(),
-      fdPath,
+      // The Host-file port owns the `@`-mention discovery (migration
+      // M1.10) — the command surface never resolves fd itself.
+      runner.hostFile,
       extensionAutocomplete === undefined
         ? undefined
         : async (query) => {
@@ -1200,18 +1151,9 @@ export function registerTuiCommands(
       // The permission-presets service owns the composed preset table and the
       // persisted default for new sessions (settings namespace 'permission').
       // Both panel rows degrade gracefully when the service is absent.
-      const settings = runner.host.settings()
-      const permission = runner.host.permission()
-      const permissionNames: string[] = [...(permission?.names ?? [])]
-      let defaultPermission: string | undefined
-      if (settings !== undefined) {
-        try {
-          const doc = settings.get(settingsNamespace('permission')) as { defaultPreset?: string } | undefined
-          defaultPermission = doc?.defaultPreset
-        } catch {
-          // The namespace is absent until the presets service registers it.
-        }
-      }
+      const permissions = runner.config.permissions
+      const permissionNames: string[] = [...permissions.presetNames()]
+      const defaultPermission = permissions.defaultPreset()
       // Before the first session (deferred start) the session-scoped rows —
       // approval policy and the read-only session facts — do not exist yet;
       // everything process-wide stays available.
@@ -1349,9 +1291,8 @@ export function registerTuiCommands(
               runner.refreshStatus()
             }
           } else if (id === 'default-permission') {
-            const settings = runner.host.settings()
-            if (settings !== undefined && permissionNames.includes(value)) {
-              detach('permission default write', () => settings.mutate(settingsNamespace('permission'), [{ op: 'set', path: ['defaultPreset'], value }]) as Promise<unknown>, { notify: true })
+            if (permissionNames.includes(value)) {
+              detach('permission default write', () => runner.config.permissions.setDefaultPreset(value) as Promise<unknown>, { notify: true })
             }
           } else if (id === 'theme') {
             if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)
@@ -1634,15 +1575,6 @@ export function registerTuiCommands(
   /** The workspace the live session runs in; fallback to the TUI's cwd. */
   const sessionCwd = (agent: Agent): string => agent.session.header.cwd ?? cwd
 
-  // The skills registry the live agent actually sees — resolved through the
-  // single-point adapter (plan appendix B.1): its preset's scoped instance
-  // when the preset mounts one (the web surface's serviceFor path), else the
-  // host registry. The scope passed to lookups is the AGENT itself, exactly
-  // like the host apiproxy's presenterScopeFor — an agent context object
-  // does not identity-match the preset's standing mount.
-  const skillTarget = (agent: Agent): SkillCatalogTarget | undefined =>
-    resolveLiveSkillTarget(ctx as unknown as SkillCatalogContext, agent, sessionCwd(agent))
-
   /**
    * Split a skill invocation's trailing input into the skill name and its
    * arguments: the first whitespace-bounded token is the name (the public
@@ -1691,17 +1623,15 @@ export function registerTuiCommands(
    * never injected.
    */
   const loadSkill = async (agent: Agent, name: string, args = ''): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
-    const target = skillTarget(agent)
-    if (target === undefined) return { kind: 'error', text: 'skill service unavailable' }
-    const skill = await target.registry.get?.(name, { cwd: target.cwd, scope: target.scope })
-    if (skill === undefined) return { kind: 'error', text: 'unknown skill "' + name + '"' }
+    // The skill read goes through the catalog port (migration M1.8): the
+    // Direct adapter resolves the session's live skill target internally —
+    // the loaded definition is a detached DTO, never the registry object.
+    const resolved = await runner.catalog.skills.resolveSkill(agent.session.id, name)
+    if (resolved.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
+    if (resolved.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
+    if (resolved.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
+    const skill = resolved.skill
     if (!isUserInvocableSkill(skill)) return { kind: 'error', text: `skill "${name}" is not invocable by the user` }
-    // Hostile-field guard on the LOADED definition too: only string display
-    // fields may cross into the injected body (the adapter's conservative
-    // rule — malformed entries are refused, never coerced or thrown on).
-    if (typeof skill.name !== 'string' || skill.name === '' || typeof skill.description !== 'string') {
-      return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
-    }
     // Web parity (the dsh-tool-skill pre-step boundary): a user-explicit
     // skill invocation is a PLAIN user message whose leading `/name` line
     // the host recognizes — the user's own words (including any `/name args`
@@ -1778,9 +1708,9 @@ export function registerTuiCommands(
     // definition always does). A scoped shadow merely named `skill` without
     // a loader shape is treated as absent — the host's gesture listener
     // would not inject for it either, so the TUI's fallback must cover it.
-    const tools = runner.host.tools() as { get?(name: string, agent: Agent): { execute?: unknown; parameters?: unknown } | undefined } | undefined
-    const hostSkillLoader = tools?.get?.('skill', agent)
-    const hostLoadsSkillBody = hostSkillLoader !== undefined && typeof hostSkillLoader.execute === 'function'
+    // The probe is a SEMANTIC catalog operation now (migration M1.8) — the
+    // raw tools service never crosses into the command surface.
+    const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(agent.session.id)
     // Deliver the batch through the steer path (and unlike
     // agent.inject alone, which queues for the next pre-step WITHOUT waking
     // the driver): the ORIGINAL line is steered — a running turn takes it
@@ -1938,8 +1868,6 @@ export function registerTuiCommands(
     input: { hint: '<name>' },
     handler: async (invocation) => {
       const liveAgent = await requireAgent()
-      const target = skillTarget(liveAgent)
-      if (target === undefined) return { kind: 'error', text: 'skill service unavailable' }
       // `/skill <name> [args...]`: the first whitespace token is the skill
       // name, the remainder its arguments (forwarded verbatim on the
       // original line, web parity — never carved out or dropped). The
@@ -1948,9 +1876,11 @@ export function registerTuiCommands(
       const [name, ...args] = splitSkillLine(invocation.rawInput)
       if (name !== '') return loadSkill(liveAgent, name, args.join(' '))
       // No argument: pick from the catalog — the same validated, policy-
-      // filtered, sorted view the collector builds (readHumanSkillCatalog),
-      // so hostile or model-only entries never reach the picker.
-      const catalog = await readHumanSkillCatalog(target.registry, { cwd: target.cwd, scope: target.scope })
+      // filtered, sorted view the collector builds (the catalog port's
+      // live read), so hostile or model-only entries never reach the
+      // picker.
+      const catalog = await runner.catalog.skills.listHumanSkills(liveAgent.session.id)
+      if (catalog === undefined) return { kind: 'error', text: 'skill service unavailable' }
       if (catalog.skills.length === 0) return { kind: 'error', text: 'no skills available' }
       // SettingsList rows: Enter cycles the value, which fires onChange.
       app.openSettings(
@@ -2074,11 +2004,10 @@ export function registerTuiCommands(
     description: 'Switch the model (and reasoning effort) for this session',
     handler: async () => {
       const selected = runner.selected
-      const llm = runner.host.llm()
-      const defaultModel = runner.host.defaultModel()
-      if (llm === undefined || defaultModel === undefined) return { kind: 'error', text: 'model service unavailable' }
-      const providers = llm.listProviders()
-      const current = defaultModel.currentSelection()
+      const models = runner.catalog.models
+      if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
+      const providers = models.listProviders()
+      const current = models.currentSelection() ?? { provider: '', model: '' }
       /** Commit a selection (model, optional effort) and refresh the footer. */
       const apply = (next: ModelSelection): void => {
         // Persist and reflect with LATEST-WINS semantics: saves run
@@ -2088,7 +2017,7 @@ export function registerTuiCommands(
         // order completion must not regress the persistent state either;
         // the UI at least never lies about what is current).
         const previous = selected.current
-        runDetached('model selection save', () => defaultModel.saveSelection(next), {
+        runDetached('model selection save', () => models.saveSelection(next), {
           diag: runner.diag,
           notify: (message) => {
             if (selected.current === next) {
@@ -2113,8 +2042,8 @@ export function registerTuiCommands(
           label: provider.name,
           currentValue: current.provider === provider.id ? current.model : '',
           submenu: (value, done) => new ModelSubmenu(provider.id, current.model, selected.current?.reasoningEffort, {
-            listModels: (id) => llm.listModels(id),
-            resolveModelInfo: (id, modelId) => llm.resolveModelInfo(id, modelId),
+            listModels: (id) => models.listModels(id),
+            resolveModelInfo: (id, modelId) => models.resolveModelInfo(id, modelId),
             apply,
             requestRender: () => app.requestRender(),
             // An APPLIED selection (non-undefined) closes the WHOLE overlay
@@ -2151,11 +2080,13 @@ export function registerTuiCommands(
       // is synchronous, and a failure anywhere before the create leaves
       // the current session untouched (no published child to roll back).
       const sessionId = SessionId(`session-${randomUUID()}`)
-      // The composition and agent options are resolved ONCE and ride the
-      // create (a rejected create is NEVER retried — the first DSH call
-      // may have left a hidden lifecycle, so the target is PINNED
-      // immediately).
-      const composition = await runner.compose(runner.pendingPreset)
+      // The concrete preset id is resolved ONCE and rides the create (a
+      // rejected create is NEVER retried — the first DSH call may have left
+      // a hidden lifecycle, so the target is PINNED immediately). The preset
+      // COMPOSITION (setup callback) is resolved inside the Direct session
+      // lifecycle from this id — the command surface only ever sees the
+      // identity (migration M1.11).
+      const resolved = await runner.catalog.presets.resolve(runner.pendingPreset)
       const newOptions = {
         provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
         model: runner.liveAgent?.options.model ?? runner.selected.current?.model,
@@ -2165,11 +2096,11 @@ export function registerTuiCommands(
         fresh: true,
         create: () => runner.agents.create({
           sessionId: String(sessionId),
-          meta: metaOf(cwd, composition.agentPreset),
+          meta: metaOf(cwd, resolved.id),
           // Before the first session the process-wide selection stands in.
           provider: newOptions.provider,
           model: newOptions.model,
-          agentPreset: composition.agentPreset,
+          agentPreset: resolved.id,
         }),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
@@ -2209,11 +2140,16 @@ export function registerTuiCommands(
     description: 'Switch to danger-full-access (alias of /permission danger-full-access)',
     handler: async () => {
       const liveAgent = await requireAgent()
-      const commands = runner.host.commands()
-      if (commands === undefined) return { kind: 'error', text: 'commands service unavailable' }
-      const execution = await commands.execute(liveAgent, '/permission danger-full-access', [], signal)
-      if (execution === undefined) {
-        return { kind: 'error', text: '/permission unavailable (permission presets not composed)' }
+      // The permission switch is a CONFIG semantic operation (migration
+      // M1.9): the Direct adapter still executes the OFFICIAL command line
+      // (sandbox + live approval writer + the injected policy-change model
+      // message + the preset log) — the raw commands service never crosses
+      // into the command surface.
+      const outcome = await runner.config.permissions.applyPermissionPreset(liveAgent.session.id, 'danger-full-access', signal)
+      if (outcome.kind === 'unavailable') {
+        return { kind: 'error', text: outcome.cause === 'commands'
+          ? 'commands service unavailable'
+          : '/permission unavailable (permission presets not composed)' }
       }
       return { kind: 'success', text: 'danger-full-access — approvals off' }
     },
@@ -2234,27 +2170,24 @@ export function registerTuiCommands(
     description: 'Show or switch the session agent preset',
     input: { hint: '[status|<id>|default [<id>]]' },
     handler: async (invocation) => {
-      const presets = runner.host.presets()
-      if (presets === undefined) {
+      const presets = runner.catalog.presets
+      if (!presets.available()) {
         return { kind: 'error', text: 'agent presets unavailable in this deployment' }
       }
       const liveAgent = runner.liveAgent
-      const current = liveAgent === undefined
-        ? undefined
-        : presets.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session)
+      // The live composition is the runner's own read (Direct ownership);
+      // the roster catalog the command surface needs is the port's.
+      const current = runner.currentPreset()
       const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/)
       const verb = matched?.[1] ?? ''
       const rest = matched?.[2]?.trim() ?? ''
       if (verb === 'status') {
-        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${presets.defaultId}` }
+        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${presets.defaultId()}` }
       }
       if (verb === 'default') {
-        const settings = runner.host.settings()
-        if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
-        const ns = settingsNamespace('agent-presets')
+        if (!runner.config.presetDefault.available()) return { kind: 'error', text: 'settings service unavailable' }
         if (rest === '') {
-          const doc = settings.get(ns) as { default?: string } | undefined
-          return { kind: 'success', text: `default preset: ${doc?.default ?? presets.defaultId}` }
+          return { kind: 'success', text: `default preset: ${runner.config.presetDefault.get() ?? presets.defaultId()}` }
         }
         // The saved default only affects sessions created from now on. A
         // standing catalog refresh follows ONLY when no higher-precedence
@@ -2262,7 +2195,7 @@ export function registerTuiCommands(
         // new default — the masked case must not re-read a preset the next
         // session will not compose on.
         try {
-          await settings.mutate(ns, [{ op: 'set', path: ['default'], value: rest }])
+          await runner.config.presetDefault.set(rest)
         } catch (error) {
           return { kind: 'error', text: safeErrorMessage(error) }
         }
@@ -2285,6 +2218,10 @@ export function registerTuiCommands(
         Promise<{ kind: 'pending'; preset: string } | { kind: 'switched'; preset: string } | { kind: 'locked'; sessionId: string }> => {
         if (liveAgent === undefined) {
           const resolved = await presets.resolve(id)
+          // A roster that vanished between the availability check and the
+          // resolve is a hard failure (the old compose path threw too) —
+          // never a "preset undefined" success.
+          if (resolved.id === undefined) throw new Error('agent presets unavailable in this deployment')
           runner.pendingPreset = resolved.id
           // The sessionless catalog follows the choice through the STANDING
           // scope of the new preset (no Agent, no session — composition
@@ -2372,7 +2309,7 @@ export function registerTuiCommands(
             description: [
               display.description,
               preset.trust === 'system' ? 'system' : 'user',
-              preset.id === presets.defaultId ? 'default' : undefined,
+              preset.id === presets.defaultId() ? 'default' : undefined,
               preset.id === current ? '← current' : undefined,
               preset.broken,
             ].filter(Boolean).join(' · '),
@@ -2583,8 +2520,6 @@ export function registerTuiCommands(
     input: { hint: '[md|<path>]' },
     handler: async (invocation) => {
       const liveAgent = await requireAgent()
-      const persistence = runner.host.persistence()
-      if (persistence === undefined) return { kind: 'error', text: 'session persistence unavailable' }
       const arg = invocation.rawInput.trim()
       const shortId = liveAgent.session.id.replace(/^session-/, '').slice(0, 8)
       const markdown = arg === 'md'
@@ -2597,11 +2532,14 @@ export function registerTuiCommands(
           return { kind: 'success', text: `exported markdown transcript to ${target}` }
         }
         // The raw artifact is the backend's verbatim JSONL (decoded from
-        // its physical encoding) — a faithful, portable session log.
-        const raw = await persistence.readRaw(liveAgent.session.id)
-        if (raw === undefined) return { kind: 'error', text: 'no materialized session log to export' }
-        writeFileSync(target, raw.content)
-        return { kind: 'success', text: `exported ${raw.filename} to ${target}` }
+        // its physical encoding) — a faithful, portable session log. The
+        // log READ is a session-read semantic (migration M1.11); only the
+        // FILE WRITE below is client-local export behavior.
+        const raw = await runner.sessionReader.readExportData(liveAgent.session.id)
+        if (raw.kind === 'unavailable') return { kind: 'error', text: 'session persistence unavailable' }
+        if (raw.kind === 'none') return { kind: 'error', text: 'no materialized session log to export' }
+        writeFileSync(target, raw.data.content)
+        return { kind: 'success', text: `exported ${raw.data.filename} to ${target}` }
       } catch (error) {
         return { kind: 'error', text: safeErrorMessage(error) }
       }
@@ -2625,15 +2563,17 @@ export function registerTuiCommands(
       // no rollback attempt).
       const sessionId = SessionId(`session-${randomUUID()}`)
       const childCwd = source.session.header.cwd || runner.sessionCwd()
-      // The composition is resolved ONCE and rides the create (a rejected
-      // create is NEVER retried — the first DSH call may have left a
-      // hidden lifecycle, so the target is PINNED immediately).
-      const composition = await runner.compose(resolveSessionPreset(source.session))
+      // The concrete preset id is resolved ONCE and rides the create (a
+      // rejected create is NEVER retried — the first DSH call may have left
+      // a hidden lifecycle, so the target is PINNED immediately). The
+      // composition setup stays inside the Direct session lifecycle —
+      // the command surface only ever sees the identity (migration M1.11).
+      const resolved = await runner.catalog.presets.resolve(resolveSessionPreset(source.session))
       const forkOptions = { provider: source.options.provider, model: source.options.model }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
         fresh: true,
-        create: () => createForkedAgent(runner, source, seed, sessionId, composition),
+        create: () => createForkedAgent(runner, source, seed, sessionId, resolved.id),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
@@ -2665,15 +2605,10 @@ export function registerTuiCommands(
     handler: async () => {
       const liveAgent = await requireAgent()
       const stats = computeStats(liveAgent.session.events)
-      let contextTokens: number | undefined
-      const meter = runner.host.tokenMeter()
-      if (meter !== undefined) {
-        try {
-          contextTokens = meter.measure(liveAgent.session).totalTokens
-        } catch {
-          // Measurement is best-effort; the panel falls back to unmeasured.
-        }
-      }
+      // Best-effort context measurement through the session-read port
+      // (migration M1.11): unavailable/unmeasurable → the panel falls back
+      // to unmeasured — never a crash.
+      const contextTokens = runner.sessionReader.measureContext(liveAgent.session.id)
       app.openSettings(
         [
           {
@@ -2704,14 +2639,13 @@ export function registerTuiCommands(
     description: 'Sign in with a provider or set an API key — deepseek official or an llm-pi-ai provider route',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
-      const credentials = runner.host.credentials()
-      if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
+      const credentials = runner.config.credentials
+      if (!credentials.available()) return { kind: 'error', text: 'credentials service unavailable' }
       // The two credential planes (dsh 0.1.1-rc.1): reference targets from
       // the provider catalog, authorization flows from the seam. An absent
       // authorization service degrades to the reference-only surface.
-      const authorization = runner.host.authorization() as AuthorizationServiceLike | undefined
-      const options = readProviderOptions(runner.host)
-      const targets = authorizationTargets(authorization?.list() ?? [])
+      const targets = runner.config.authorization.listTargets()
+      const options = readProviderOptions(runner.catalog.models, runner.config.providers)
       const merged = mergeLoginTargets(options, targets)
       const arg = invocation.rawInput.trim()
       let route: string | undefined
@@ -2798,7 +2732,7 @@ export function registerTuiCommands(
         }
       }
       if (target !== undefined) {
-        return runAuthorizationLogin(ctx, app, runner, target, options)
+        return runAuthorizationLogin(app, runner, target, options)
       }
       if (route === undefined && ref === undefined) return { kind: 'error', text: 'no credential targets available' }
       const option = route === undefined ? undefined : options.find(candidate => candidate.route === route)
@@ -2810,7 +2744,7 @@ export function registerTuiCommands(
         ])
         const key = answers[0]?.custom ?? ''
         if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
-        await credentials.set(targetRef as CredentialRef, key)
+        await credentials.setReference(targetRef, key)
         return { kind: 'success', text: `API key ${targetRef} set` }
       } catch {
         return { kind: 'error', text: 'login cancelled' }
@@ -2823,11 +2757,10 @@ export function registerTuiCommands(
     description: 'Clear a stored credential — deepseek official or an llm-pi-ai provider route (API key or stored record)',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
-      const credentials = runner.host.credentials()
-      if (credentials === undefined) return { kind: 'error', text: 'credentials service unavailable' }
-      const authorization = runner.host.authorization() as AuthorizationServiceLike | undefined
-      const options = readProviderOptions(runner.host)
-      const targets = authorizationTargets(authorization?.list() ?? [])
+      const credentials = runner.config.credentials
+      if (!credentials.available()) return { kind: 'error', text: 'credentials service unavailable' }
+      const targets = runner.config.authorization.listTargets()
+      const options = readProviderOptions(runner.catalog.models, runner.config.providers)
       const arg = invocation.rawInput.trim()
       if (arg !== '') {
         // A configured/derived reference name takes the reference path
@@ -2844,7 +2777,7 @@ export function registerTuiCommands(
             await credentials.deleteRecord(flow.key)
             return { kind: 'success', text: `${flow.label} signed out locally — stored credential cleared` }
           }
-          await credentials.unset(resolved as CredentialRef)
+          await credentials.unsetReference(resolved)
           return { kind: 'success', text: `API key ${resolved} cleared` }
         }
         // A route naming a flow directly (no provider option for it).
@@ -2870,11 +2803,11 @@ export function registerTuiCommands(
       })
       if (picked === undefined) return { kind: 'error', text: 'logout cancelled' }
       if (picked.startsWith(LOGOUT_RECORD_VALUE)) {
-        await credentials.deleteRecord(picked.slice(LOGOUT_RECORD_VALUE.length) as CredentialKey)
+        await credentials.deleteRecord(picked.slice(LOGOUT_RECORD_VALUE.length))
         return { kind: 'success', text: `${picked.slice(LOGOUT_RECORD_VALUE.length)} signed out locally — stored credential cleared` }
       }
       const targetRef = picked.slice(LOGOUT_REF_VALUE.length)
-      await credentials.unset(targetRef as CredentialRef)
+      await credentials.unsetReference(targetRef)
       return { kind: 'success', text: `API key ${targetRef} cleared` }
     },
   })

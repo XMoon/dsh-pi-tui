@@ -7,9 +7,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { expandFileMentionsForSubmit } from '../src/mentions.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { consumeDraftImages, draftHasImages, prepareUserMessage, type PrepareInputDeps } from '../src/image/submit.ts'
 import { ImageAdmissionError, ModelImageUnsupportedError } from '../src/image/errors.ts'
@@ -47,6 +48,7 @@ function fakeAttachments(): AttachmentsLike & { callCount: () => number } {
 }
 
 function depsOf(overrides: Partial<PrepareInputDeps> = {}): PrepareInputDeps {
+  const sessionCwd = overrides.sessionCwd ?? (() => '/ws')
   return {
     attachments: fakeAttachments(),
     llm: {
@@ -55,7 +57,19 @@ function depsOf(overrides: Partial<PrepareInputDeps> = {}): PrepareInputDeps {
       },
     } as LlmLike,
     currentModel: () => ({ provider: 'provider', model: 'model' }),
-    sessionCwd: () => '/ws',
+    sessionCwd,
+    // The Host-owned canonicalization seam (migration M1.10): the pure
+    // mentions rewrite with a stat-backed existence probe over the
+    // session cwd (the Direct adapter wires the same probe).
+    canonicalizeMentions: async (text) =>
+      expandFileMentionsForSubmit(text, sessionCwd(), (candidate) => {
+        try {
+          statSync(candidate)
+          return true
+        } catch {
+          return false
+        }
+      }),
     ...overrides,
   }
 }

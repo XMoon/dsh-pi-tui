@@ -108,7 +108,7 @@ function fixtureWorkspace(): string {
 
 test('MentionProvider completes shell command words on ! lines', async () => {
   const root = fixtureWorkspace()
-  const provider = new MentionProvider([], root, null)
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const suggestions = await provider.getSuggestions(['!gi'], 0, 3, { signal: abort })
   assert.ok(suggestions !== null, 'command-name completion must run through the provider')
   assert.ok(suggestions.items.some(item => item.value === 'git'), 'git must be suggested')
@@ -116,7 +116,7 @@ test('MentionProvider completes shell command words on ! lines', async () => {
 
 test('MentionProvider still completes paths on ! lines (path positions reach the fork)', async () => {
   const root = fixtureWorkspace()
-  const provider = new MentionProvider([], root, null)
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const suggestions = await provider.getSuggestions(['!cat src/de'], 0, 11, { signal: abort })
   assert.ok(suggestions !== null, 'a path position on a ! line must reach the fork provider')
   assert.ok(suggestions.items.some(item => item.value.includes('deep-nested.ts')), `deep-nested.ts missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
@@ -124,7 +124,7 @@ test('MentionProvider still completes paths on ! lines (path positions reach the
 
 test('MentionProvider applies a shell item as a plain word replacement', async () => {
   const root = fixtureWorkspace()
-  const provider = new MentionProvider([], root, null)
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const applied = provider.applyCompletion(['!gi'], 0, 3, { value: 'git', label: 'git' }, 'gi')
   assert.deepEqual(applied, { lines: ['!git '], cursorLine: 0, cursorCol: 5 })
   const appliedVar = provider.applyCompletion(['!echo $HO'], 0, 9, { value: '$HOME', label: '$HOME' }, '$HO')
@@ -203,6 +203,7 @@ test('shouldTriggerFileCompletion allows Tab on a leading / in a shell mode', as
 // be cached, and the spawn/cache must be testable without real bash) ---
 
 import { resetCommandCacheForTest, setCompgenRunnerForTest, type CompgenRun } from '../src/shell-completion.ts'
+import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
 function fakeRunner(script: (expression: string, prefix: string) => CompgenRun): {
   calls: { expression: string; prefix: string }[]

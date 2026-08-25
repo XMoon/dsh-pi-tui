@@ -36,6 +36,24 @@ export interface SessionSearchHit {
   snippet: string
 }
 
+/** The raw materialized session log (the /export artifact). */
+export interface SessionExportData {
+  /** The physical log filename. */
+  filename: string
+  /** The verbatim JSONL content (decoded from its physical encoding). */
+  content: string
+}
+
+/** The outcome of one export read (/export): the raw log, or WHY it cannot
+ * be exported (the two failure texts are distinct — the persistence
+ * service may be absent, or the log simply not materialized). */
+export type ExportReadResult =
+  | { readonly kind: 'found'; readonly data: SessionExportData }
+  /** The persistence service is unavailable in this deployment. */
+  | { readonly kind: 'unavailable' }
+  /** The persistence service exists but holds no materialized log. */
+  | { readonly kind: 'none' }
+
 /** The session READ domain port. */
 export interface SessionReader {
   /** List persisted sessions newest-first, live-preferred (the session
@@ -48,4 +66,12 @@ export interface SessionReader {
   /** Load the latest titles for a batch of sessions, newest-first order
    * preserved (bounded, cached under the TUI home). */
   titles(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, string>>
+  /** Best-effort context-pressure measurement for one session (the
+   * /status context row). `undefined` = unmeasurable (service absent,
+   * session unknown, or a measurement failure — never a crash). */
+  measureContext(sessionId: string): number | undefined
+  /** The raw materialized session log for export (/export). The FILE WRITE
+   * stays a client-local export behavior — only the log READ is Host-owned
+   * (migration M1.11). */
+  readExportData(sessionId: string): Promise<ExportReadResult>
 }

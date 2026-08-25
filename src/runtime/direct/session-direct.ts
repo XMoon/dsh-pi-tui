@@ -16,7 +16,7 @@
 
 import { dshHome } from '../../diag.ts'
 import { loadSessionTitleBatch, type SessionPickerPersistence, type SessionQueryLike } from '../../sessions.ts'
-import type { SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
+import type { ExportReadResult, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -27,18 +27,34 @@ export interface HostContextLike {
 /** The structural `sessionPersistence` surface the reader needs. */
 export interface SessionPersistenceLike {
   list(): Promise<Array<{ id: string; createdAt: number; version: number; cwd?: string; agentPreset?: string; parentSession?: string; origin?: 'subagent' }>>
-  readRaw(id: string): Promise<{ content: string } | undefined>
+  readRaw(id: string): Promise<{ content: string; filename?: string } | undefined>
   /** The fallback title path's per-session event inspection. */
   inspect: SessionPickerPersistence['inspect']
+}
+
+/** The structural `tokenMeter` surface the reader needs. */
+export interface TokenMeterLike {
+  measure(session: unknown): { totalTokens: number }
+}
+
+/** A live agent as the reader resolves it (structural projection). */
+export interface LiveAgentLike {
+  readonly session: { readonly id: string }
 }
 
 /** The Direct backend's session reader: `ctx` services behind the semantic
  * `SessionReader` interface. */
 export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
+  private readonly agentFor: (sessionId: string) => unknown | undefined
 
-  constructor(ctx: HostContextLike) {
+  constructor(ctx: HostContextLike, agentFor?: (sessionId: string) => unknown | undefined) {
     this.ctx = ctx
+    this.agentFor = agentFor ?? (() => undefined)
+  }
+
+  private liveAgent(sessionId: string): LiveAgentLike | undefined {
+    return this.agentFor(sessionId) as LiveAgentLike | undefined
   }
 
   async list(currentSessionId: string | undefined): Promise<SessionSummary[] | undefined> {
@@ -105,5 +121,31 @@ export class DirectSessionReader implements SessionReader {
     const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
     const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
     return loadSessionTitleBatch(query, persistence, dshHome(process.env), rows, signal)
+  }
+
+  measureContext(sessionId: string): number | undefined {
+    const agent = this.liveAgent(sessionId)
+    if (agent === undefined) return undefined
+    const meter = this.ctx.get('tokenMeter') as TokenMeterLike | undefined
+    if (meter === undefined) return undefined
+    try {
+      return meter.measure(agent.session).totalTokens
+    } catch {
+      // Measurement is best-effort; the /status row falls back to unmeasured.
+      return undefined
+    }
+  }
+
+  async readExportData(sessionId: string): Promise<ExportReadResult> {
+    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
+    if (persistence === undefined) return { kind: 'unavailable' }
+    try {
+      const raw = await persistence.readRaw(sessionId)
+      if (raw === undefined) return { kind: 'none' }
+      return { kind: 'found', data: { filename: raw.filename ?? sessionId, content: raw.content } }
+    } catch {
+      // An unreadable log is an absent export, never a crash.
+      return { kind: 'none' }
+    }
   }
 }

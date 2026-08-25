@@ -64,9 +64,10 @@ export interface SubagentViewerSubmitDeps {
   /** Canonicalize the final user text BEFORE delivery (the main session's
    * `@`-file mention expansion — `@src/foo.ts` → the absolute path — must
    * apply to viewer follow-ups too, or the model would see the concise
-   * relative form it cannot resolve). The default passes the text through
-   * untouched; the runner wires the real expansion. */
-  canonicalizeText?(text: string): string
+   * relative form it cannot resolve). MAY be async (migration M1.10: the
+   * Host-file port's canonicalization); the default passes the text
+   * through untouched; the runner wires the port-backed expansion. */
+  canonicalizeText?(text: string): string | Promise<string>
 }
 
 /** Why a follow-up was NOT accepted (the child inbox never received it). */
@@ -157,8 +158,16 @@ export async function submitSubagentFollowup(
     //    never shared with the child). The text runs through the same
     //    canonicalization as the main session's submissions (`@`-file
     //    mention expansion), so the child sees exactly what the parent
-    //    would have sent.
-    const canonical = deps.canonicalizeText?.(request.text) ?? request.text
+    //    would have sent. The canonicalization MAY be async (migration
+    //    M1.10 — the Host-file port), so the exact live direct parent is
+    //    RE-CHECKED after the await: a switch while the mention resolution
+    //    was in flight must never deliver into a different parent's child
+    //    (the stale-safety rule of the async Host-file seam).
+    const canonical = await deps.canonicalizeText?.(request.text) ?? request.text
+    const parentNow = deps.currentParent()
+    if (parentNow === undefined || parentNow.session.id !== request.parentSessionId) {
+      return { kind: 'rejected', reason: { kind: 'parent-unavailable' } }
+    }
     const content = [{ type: 'text', text: canonical }] as const
     // 3. The ONE correct write path: the continuation manager owns the
     //    child's inbox (enqueue while running, wake while waiting, cold

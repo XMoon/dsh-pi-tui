@@ -32,8 +32,9 @@ export interface SubagentFollowupContext {
   /** Build the durable message source for the delivered message. */
   makeSource(): unknown
   /** Canonicalize the final user text BEFORE delivery (the main session's
-   * `@`-file mention expansion). The default passes text through. */
-  canonicalizeText?(text: string): string
+   * `@`-file mention expansion). MAY be async (migration M1.10 — the
+   * Host-file port); the default passes text through. */
+  canonicalizeText?(text: string): string | Promise<string>
 }
 
 /** The subagent domain port. */
