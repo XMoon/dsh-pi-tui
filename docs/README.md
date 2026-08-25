@@ -35,9 +35,9 @@ knows where the rest lives.
 
 Other documentation, and why it is not here:
 
-- Root `CHANGELOG.md` — the release history, maintained on every release
-  per the hard rule in `AGENTS.md` (Keep a Changelog 1.1.0 format), with
-  `CHANGELOG.zh-CN.md` kept in sync as the 简体中文 version.
+- Root `CHANGELOG.md` — the 简体中文 release history, maintained on every
+  release per the hard rule in `AGENTS.md` (Keep a Changelog 1.1.0 format),
+  with `CHANGELOG.en.md` kept in sync as the English version.
 - Root `AGENTS.md` — the contributor operating manual: naming, layout, key
   decisions, development loop, traps, and pointers into this directory.
 - `packages/pi-tui/AGENTS.md` — the vendored fork's divergence ledger: every
