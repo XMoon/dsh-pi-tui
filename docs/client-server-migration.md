@@ -10,7 +10,7 @@
 
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
-M1  IN PROGRESS    (semantic ports + Direct adapters, no behavior change — M1.1–M1.7 landed; M1.5 lifecycle contract reviewed to transport-neutral (serializable requests, SessionHandle); REMaining: catalog/config/host-file ports (Cut 5) + CommandHostCapabilities shrink)
+M1  IN PROGRESS    (semantic ports + Direct adapters, no behavior change — M1.1–M1.7 landed; M1.5 lifecycle contract transport-neutral with the DIRECT ownership escape (agent + ownerHandle, dispose preserved — P1 regression fixed); M1.4 SessionWriter identity-based (sessionId, steer stays Direct in the runner); REMaining: catalog/config/host-file ports (Cut 5) + CommandHostCapabilities shrink)
 M2  NOT STARTED   (experimental Remote backend against an existing DSH Host)
 M3  NOT STARTED   (experimental in-process wire: InProcessApiClient + ApiProxy)
 M4  NOT STARTED   (experimental local Host process / IPC split)

@@ -30,7 +30,8 @@
  */
 
 /** Create one fresh session (the /new and first-session paths). All fields
- * are serializable — never callbacks. */
+ * are serializable wire data — no callbacks, no Host types. The caller
+ * passes cancellation separately (client-local, never serialized). */
 export interface CreateSessionRequest {
   /** The pre-generated session identity (the TUI owns the id). */
   sessionId: string
@@ -59,15 +60,25 @@ export interface ResumeSessionRequest {
 }
 
 /** The lightweight outcome of a lifecycle operation — the cross-backend
- * session identity. Direct backends additionally carry the live in-process
- * agent through the Direct-only escape. */
+ * session identity. Direct backends additionally carry the ownership
+ * escape: the live agent AND the real `AgentHandle` (whose `dispose()` is
+ * the ownership capability — see docs/concurrency.md). Remote backends
+ * leave `direct` undefined — the client runtime owns the session there.
+ * The contract itself never types the Host objects. */
 export interface SessionHandle {
   readonly session: { readonly id: string }
-  /** DIRECT-ONLY escape: the live in-process agent object. Remote
-   * backends leave this undefined — the client runtime owns the session
-   * there. The runner (Direct mode) extracts it to drive its transition
-   * machinery; the contract itself never types the Host object. */
-  readonly directAgent?: unknown
+  /** DIRECT-ONLY ownership escape. The runner (Direct mode) extracts the
+   * live agent and the handle to drive its transition/retirement
+   * machinery; a Remote backend leaves it undefined. */
+  readonly direct?: {
+    /** The live in-process agent object. */
+    readonly agent: unknown
+    /** The real DSH `AgentHandle` (with `dispose()` — the ownership
+     * capability). MUST be preserved: the runner disposes it on
+     * retirement, and a lost handle pins the old lease (P1 regression
+     * class, fixed in M1.5 revision 2). */
+    readonly ownerHandle: unknown
+  }
 }
 
 /** The session LIFECYCLE domain port. */

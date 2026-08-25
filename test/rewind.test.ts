@@ -326,7 +326,7 @@ function makeRig(options: {
         }
         created.push(record)
         options.createHook?.(record)
-        return { session: { id: record.sessionId }, directAgent: { session: { id: record.sessionId } } }
+        return { session: { id: record.sessionId }, direct: { agent: { session: { id: record.sessionId } }, ownerHandle: { dispose: async () => {} } } }
       },
       resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
     },
@@ -399,7 +399,7 @@ test('review P2: the cwd is captured BEFORE the compose await (no parent=A cwd=B
     agents: {
       create: async (call) => {
         created.push({ sessionId: String(call.sessionId), meta: call.meta, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
-        return { session: { id: String(call.sessionId) }, directAgent: { session: { id: String(call.sessionId) } } }
+        return { session: { id: String(call.sessionId) }, direct: { agent: { session: { id: String(call.sessionId) } }, ownerHandle: { dispose: async () => {} } } }
       },
       resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
     },
@@ -644,7 +644,6 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     },
     sessionWriter: {
       followup: () => {},
-      steer: async () => 'ok' as const,
       dequeue: () => {},
       cancel: () => {},
       rename: () => true,

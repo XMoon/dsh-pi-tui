@@ -2442,7 +2442,7 @@ export function registerTuiCommands(
       // The session WRITE port (migration M1.4): the title service access
       // lives in the Direct adapter, never here.
       try {
-        if (!runner.sessionWriter.rename(liveAgent.session, name)) {
+        if (!runner.sessionWriter.rename(liveAgent.session.id, name)) {
           return { kind: 'error', text: 'session title service unavailable' }
         }
       } catch (error) {
@@ -2451,7 +2451,7 @@ export function registerTuiCommands(
       return { kind: 'success', text: `title set: ${name}` }
     }
     try {
-      const outcome = await runner.sessionWriter.refreshTitle(liveAgent.session, invocation.signal)
+      const outcome = await runner.sessionWriter.refreshTitle(liveAgent.session.id, invocation.signal)
       if (outcome.kind === 'unavailable') {
         return { kind: 'error', text: 'session title service unavailable' }
       }

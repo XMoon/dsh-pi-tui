@@ -76,7 +76,12 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       seed: request.seed as readonly SessionEvent[] | undefined,
       signal: request.signal,
     })
-    return { session: { id: String(handle.agent.session.id) }, directAgent: handle.agent }
+    // The ownership escape preserves BOTH the live agent and the real
+    // AgentHandle: `dispose()` is the ownership capability the runner
+    // needs at retirement (a lost handle previously pinned old leases —
+    // the P1 regression class). The semantic `session` identity stays
+    // transport-neutral.
+    return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
   }
 
   async resume(request: ResumeSessionRequest): Promise<SessionHandle> {
@@ -88,6 +93,6 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       agentOptions: { provider: request.provider, model: request.model },
       setup: composition.setup,
     })
-    return { session: { id: String(handle.agent.session.id) }, directAgent: handle.agent }
+    return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
   }
 }
