@@ -588,6 +588,12 @@ export class EditorSeatHolder {
               if (consumed) {
                 holder.clearEditorError(id)
                 holder.current.invalidate()
+                // A consumed key may have MUTATED the plugin's document:
+                // seat subscribers (EditorHost.subscribe observers, the
+                // continuable-viewer draft mirror) must observe the new
+                // text/cursor snapshot — a stale snapshot would merge an
+                // outdated draft on handoff/viewer exit and lose edits.
+                holder.notifyChanged()
               }
               return consumed
             } catch (error) {

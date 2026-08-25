@@ -1844,3 +1844,98 @@ test('the extension chain is NOT consulted on a continuation-line natural / trig
   }
   app.stop()
 })
+
+// ── review round: plugin-consumed input notifies seat subscribers ─────────
+
+test('a plugin editor consuming input notifies seat subscribers (fresh snapshot)', () => {
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => {
+      const h = {
+        text: '',
+        getText: () => h.text,
+        setText: (text: string) => { h.text = text },
+        setTextAndCursor: (text: string) => { h.text = text },
+        getCursor: () => 0,
+        setCursor: () => {},
+        focused: true,
+        borderColor: (text: string) => text,
+        invalidate: () => {},
+        addToHistory: () => {},
+        clearHistory: () => {},
+        component: new Text('host', 0, 0),
+      }
+      return h
+    },
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const snapshots: string[] = []
+  const plugin = pluginEditor()
+  // A plugin that CONSUMES the event and mutates its document.
+  plugin.handleInput = () => { plugin.setText('mutated'); return true }
+  holder.handoff({
+    id: 'plugin',
+    create: (host) => {
+      host.subscribe(snapshot => snapshots.push(snapshot.text))
+      return plugin
+    },
+  })
+  // Dispatch a semantic event through the seat's input channel.
+  const seat = holder.currentEditor() as { handleInput?(event: unknown): boolean }
+  assert.equal(typeof seat.handleInput, 'function', 'the plugin seat exposes its input channel')
+  seat.handleInput!({ kind: 'text', text: 'x' })
+  assert.deepEqual(snapshots, ['mutated'],
+    'a consumed key must push the FRESH document snapshot to seat subscribers — a stale snapshot would lose edits')
+  holder.dispose()
+})
+
+// ── review round: completion mode reads the VISIBLE seat, not the hidden host ──
+
+test('completion uses the VISIBLE seat mode — a hidden host shell mode never leaks', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const queries: { lines: readonly string[] }[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null, async (query) => {
+    queries.push({ lines: [...query.lines] })
+    return null
+  })
+  app.start()
+  await vt.waitForRender()
+  setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+  let handle: { dispose(): void } | undefined
+  try {
+    // The HOST enters shell mode, then a plugin editor takes the seat —
+    // the hidden host keeps its shell mode, but the VISIBLE editor is a
+    // prompt-semantics plugin.
+    vt.sendInput('!')
+    await vt.waitForRender()
+    const created: ReturnType<typeof pluginEditor>[] = []
+    handle = registry.register({
+      id: 'completion-plugin',
+      priority: 0,
+      create: () => {
+        const editor = pluginEditor()
+        editor.handleInput = () => false // decline: host fallback owns editing
+        created.push(editor)
+        return editor
+      },
+    }, 'plugin')
+    app.reconcileEditorNow()
+    await vt.waitForRender()
+    created[0]!.setText('ch')
+    vt.sendInput('\t')
+    await pollUntil(() => queries.length === 1, 'extension query through the plugin seat')
+    assert.deepEqual([...queries[0]!.lines], ['ch'],
+      'a prompt-semantics plugin seat must never get the hidden host\'s synthetic ! prefix')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  handle?.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
