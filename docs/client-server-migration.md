@@ -10,7 +10,7 @@
 
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
-M1  IN PROGRESS    (semantic ports + Direct adapters, no behavior change — M1.1–M1.7 landed; M1.5 lifecycle contract transport-neutral with the DIRECT ownership escape (agent + ownerHandle, dispose preserved — P1 regression fixed); M1.4 SessionWriter identity-based (sessionId, steer stays Direct in the runner); REMaining: catalog/config/host-file ports (Cut 5) + CommandHostCapabilities shrink)
+M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.11 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default) and host-file (`@`-mention discovery + send-time canonicalization); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched)
 M2  NOT STARTED   (experimental Remote backend against an existing DSH Host)
 M3  NOT STARTED   (experimental in-process wire: InProcessApiClient + ApiProxy)
 M4  NOT STARTED   (experimental local Host process / IPC split)
@@ -79,7 +79,7 @@ UX; `dsh-pi-tui attach <url>` is the explicit remote entry.
 | Extension Cordis ownership across the split | High | Stable API untouched; ClientContext from M3 |
 | Session lock removal before Host owns all writes | Critical | Deferred to M8 by rule |
 | Shell execution on the wrong machine | Critical | Locality hard rule; remote `!` fails closed |
-| `@file` resolving on the Client filesystem | High | Remote mode uses Host fileReferences |
+| `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
 | Credentials exposure beyond loopback | Critical | Attach limited to localhost/SSH until real auth |
 | Dual-stack semantic drift | Medium | Shared backend contract test matrix |
 | Upstream DSH contract changes | Medium | Structural/capability detection + compat matrix |
