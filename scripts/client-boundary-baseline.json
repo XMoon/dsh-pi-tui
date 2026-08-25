@@ -8,9 +8,7 @@
   "agentPresets",
   "agents",
   "attachments",
-  "authorization",
   "commands",
-  "credentials",
   "import:dsh-agent",
   "import:dsh-session",
   "jobs",
@@ -36,13 +34,29 @@
  "rewind.ts": [
   "import:dsh-session"
  ],
+ "runtime/direct/catalog-direct.ts": [
+  "agentDefaultModel",
+  "agentPresets",
+  "import:dsh-agent",
+  "llm",
+  "tools"
+ ],
+ "runtime/direct/config-direct.ts": [
+  "agentPresets",
+  "authorization",
+  "commands",
+  "credentials",
+  "permissionPresets",
+  "settings"
+ ],
  "runtime/direct/interaction-direct.ts": [
   "approval",
   "userQuestions"
  ],
  "runtime/direct/session-direct.ts": [
   "sessionPersistence",
-  "sessionQuery"
+  "sessionQuery",
+  "tokenMeter"
  ],
  "runtime/direct/session-lifecycle-direct.ts": [
   "agents",
