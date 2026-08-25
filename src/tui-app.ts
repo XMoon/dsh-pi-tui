@@ -131,9 +131,26 @@ export const EXPAND_RECENT_TURNS = 3
 /** Fullscreen Focus anchoring (plan §8.6): the collapsed Thought's header
  * lands one row below the viewport top so the previous context row stays
  * visible above it. Used on the COLLAPSE direction; the EXPAND direction
- * follows the end (plan supplement: the default view after expansion is
- * the latest content). */
+ * follows the end ONLY when the user was already following live output AND
+ * the expanded Thought is running (plan 2026-08-25: never steal a
+ * historical viewport). */
 export const FOCUS_ANCHOR_TOP_PADDING = 1
+
+/** The fullscreen viewport intent of one Focus disclosure transition (plan
+ * 2026-08-25 §8): the disclosure state (expanded/collapsed) and the
+ * viewport treatment are ORTHOGONAL — an expand must not automatically
+ * scroll to the end, and a collapse must not automatically anchor.
+ *
+ * - `'follow-end'`: update the layout, then scroll to the end and KEEP
+ *   following live output — ONLY for a running Thought when the user was
+ *   already following the end.
+ * - `'preserve'`: update the layout, keep (clamp) the pre-mutation
+ *   scrollTop and disable follow-end — the historical browsing default.
+ * - `'anchor-turn'`: update the layout, then anchor the turn's Thought
+ *   header in view with follow-end disabled (the collapse contract).
+ * - `undefined`: the caller owns the viewport (search jumps).
+ */
+export type FocusFullscreenViewportIntent = 'follow-end' | 'preserve' | 'anchor-turn'
 
 /** Whether a message is a Focus SECONDARY disclosure: a foldable process
  * card inside an expanded Thought that has its own compact/full two-state
@@ -3523,15 +3540,32 @@ export class TuiApp {
    * §16.1). Running turns are toggleable; turn/end never reverts the
    * choice. Closing is a COLLAPSE ALL: the turn's secondary expansions
    * are cleared with it (plan §6/§18), so reopening shows the process
-   * timeline compact again. In fullscreen the EXPAND direction follows
-   * the end (the user sees the latest content) and the COLLAPSE direction
-   * anchors the Thought header in view (plan supplement). */
+   * timeline compact again. In fullscreen the viewport policy is
+   * scroll-intent + running-ness (plan 2026-08-25): a SETTLED Thought
+   * expansion preserves the user's current position (never jumps to the
+   * tail); a RUNNING Thought expansion follows the end only when the user
+   * was already following live output; a collapse always anchors the
+   * Thought header in view (the PR #29 contract). */
   toggleFocusTurn(turn: number): void {
     if (this.focusExpandedTurns.has(turn)) {
-      this.collapseFocusTurn(turn, { anchorFullscreen: true })
+      this.collapseFocusTurn(turn, { fullscreenViewport: 'anchor-turn' })
       return
     }
-    this.setFocusTurnExpanded(turn, true, { anchorFullscreen: true })
+    // Snapshot the scroll intent BEFORE the disclosure mutation / rebuild
+    // (plan 2026-08-25 §23): after the layout changes the ScrollView no
+    // longer reports the user's pre-click position.
+    const scroll = this.fullscreenScroll
+    const previousScrollTop = scroll?.scrollTop ?? 0
+    const wasFollowingEnd = scroll?.isFollowingEnd === true
+    // Unknown activity state defaults to preserve — never steal the
+    // viewport on incomplete information (plan §4.3: `turnActivities.get`
+    // returning undefined is "cannot reliably judge running").
+    const activity = this.turnActivities.get(turn)
+    const shouldFollowEnd = wasFollowingEnd && activity !== undefined && !activity.completed
+    this.setFocusTurnExpanded(turn, true, {
+      fullscreenViewport: shouldFollowEnd ? 'follow-end' : 'preserve',
+      previousScrollTop,
+    })
   }
 
   /** Force one turn's Thought open (transcript-search jumps — plan §23:
@@ -3580,7 +3614,7 @@ export class TuiApp {
 
   /** The explicit user-facing Collapse All: clear the turn's secondary
    * expansions, then close the root Thought (plan §16/§18). */
-  private collapseFocusTurn(turn: number, options: { anchorFullscreen?: boolean } = {}): void {
+  private collapseFocusTurn(turn: number, options: { fullscreenViewport?: FocusFullscreenViewportIntent } = {}): void {
     this.clearFocusSecondaryExpansions(turn)
     this.setFocusTurnExpanded(turn, false, options)
   }
@@ -3628,15 +3662,32 @@ export class TuiApp {
 
   /** Ctrl+O Expand Recent (fullscreen + Focus): ONE mutation, ONE rebuild,
    * ONE viewport pass (plan §19) — mark the recent roots expanded,
-   * rebuild, then follow the fullscreen expand behavior (the end), exactly
-   * like the single-root click. Creates no secondary overrides and never
-   * writes thinkingExpanded (plan §4/§5). */
+   * rebuild, then apply the SAME scroll-intent policy as a single-root
+   * click (plan 2026-08-25 §14): follow the end ONLY when the user was
+   * already following live output AND the expanded set contains a running
+   * Thought — otherwise preserve the current viewport (never steal a
+   * historical browsing position). Creates no secondary overrides and
+   * never writes thinkingExpanded (plan §4/§5). */
   private expandRecentFullscreenFocusRoots(count: number): void {
     const recent = this.eligibleFocusRootTurns().slice(0, count)
     if (recent.length === 0) return
+    // Snapshot BEFORE the mutation / rebuild (plan §23): rebuilding with
+    // the roots expanded changes the content height, so the ScrollView no
+    // longer reports the user's pre-Ctrl+O position.
+    const scroll = this.fullscreenScroll
+    const previousScrollTop = scroll?.scrollTop ?? 0
+    const wasFollowingEnd = scroll?.isFollowingEnd === true
+    const containsRunning = recent.some(turn => {
+      const activity = this.turnActivities.get(turn)
+      return activity !== undefined && !activity.completed
+    })
     for (const turn of recent) this.focusExpandedTurns.add(turn)
     this.rebuildMessages()
-    this.applyFullscreenExpandViewport()
+    if (wasFollowingEnd && containsRunning) {
+      this.applyFullscreenFollowEndViewport()
+    } else {
+      this.applyFullscreenPreserveViewport(previousScrollTop)
+    }
     this.requestRender()
   }
 
@@ -3663,7 +3714,7 @@ export class TuiApp {
     this.clearFocusSecondaryExpansionsForTurns(expandedTurns)
     this.toolOutputExpanded = false
     this.rebuildMessages()
-    this.applyFullscreenCollapseAnchor(anchorTurn)
+    this.applyFullscreenFocusTurnAnchor(anchorTurn)
     this.requestRender()
   }
 
@@ -3710,18 +3761,24 @@ export class TuiApp {
   /**
    * The unified Focus disclosure transition (plan §8.4): every entry
    * point — header click, expanded-body click, search jumps — funnels
-   * through here. With `anchorFullscreen` (user clicks only, never the
-   * search path), the fullscreen viewport is adjusted AFTER the rebuild:
-   * the EXPAND direction follows the END (the default view after
-   * expansion is the latest content — the final answer or the newest
-   * process output — and the viewport keeps following as it grows), and
-   * the COLLAPSE direction anchors the turn's Thought header in view with
-   * follow-end disabled (plan supplement).
+   * through here. With a `fullscreenViewport` intent (user clicks only,
+   * never the search path), the fullscreen viewport is adjusted AFTER the
+   * rebuild — the intent is EXPLICIT (plan 2026-08-25 §8/§9): `'follow-end'`
+   * scrolls to the latest content and keeps following (running Thought +
+   * user already following), `'preserve'` keeps the pre-mutation scrollTop
+   * with follow-end disabled (settled / historical), `'anchor-turn'` brings
+   * the turn's Thought header into view with follow-end disabled (the
+   * collapse contract). Disclosure state never implies a viewport behavior.
    */
   private setFocusTurnExpanded(
     turn: number,
     expanded: boolean,
-    options: { anchorFullscreen?: boolean } = {},
+    options: {
+      fullscreenViewport?: FocusFullscreenViewportIntent
+      /** The scrollTop to restore under `'preserve'` — snapshot by the
+       * CALLER before the disclosure mutation (plan 2026-08-25 §23). */
+      previousScrollTop?: number
+    } = {},
   ): void {
     if (this.focusExpandedTurns.has(turn) === expanded) return
     if (expanded) this.focusExpandedTurns.add(turn)
@@ -3730,21 +3787,28 @@ export class TuiApp {
     // requests a render) → 3. re-measure the row map at the current width
     // (a thumbnail that just finished loading must not shift the anchor).
     this.rebuildMessages()
-    if (options.anchorFullscreen && this.fullscreenScroll !== undefined) {
-      if (expanded) {
-        this.applyFullscreenExpandViewport()
-      } else {
-        this.applyFullscreenCollapseAnchor(turn)
+    if (options.fullscreenViewport !== undefined && this.fullscreenScroll !== undefined) {
+      switch (options.fullscreenViewport) {
+        case 'follow-end':
+          this.applyFullscreenFollowEndViewport()
+          break
+        case 'preserve':
+          this.applyFullscreenPreserveViewport(options.previousScrollTop ?? 0)
+          break
+        case 'anchor-turn':
+          this.applyFullscreenFocusTurnAnchor(turn)
+          break
       }
     }
     this.requestRender()
   }
 
-  /** The fullscreen EXPAND viewport pass (plan supplement): re-measure the
-   * row map, feed the layout the NEW projected content height (a stale
-   * height would clamp the scroll), then follow the end — the default view
-   * after any expansion is the latest content. */
-  private applyFullscreenExpandViewport(): void {
+  /** The fullscreen FOLLOW-END viewport pass (plan 2026-08-25 §13): re-measure
+   * the row map, feed the layout the NEW projected content height (a stale
+   * height would clamp the scroll), then scroll to the end and keep
+   * following — the view for LIVE output only. Callers decide the intent;
+   * the method never assumes "expand ⇒ follow". */
+  private applyFullscreenFollowEndViewport(): void {
     if (this.fullscreenScroll === undefined) return
     this.refreshMessageRows()
     const width = this.terminal.columns
@@ -3754,14 +3818,33 @@ export class TuiApp {
     this.fullscreenScroll.scrollToEnd()
   }
 
-  /** The fullscreen COLLAPSE viewport pass (plan §8.7/§18): re-measure,
+  /** The fullscreen PRESERVE viewport pass (plan 2026-08-25 §11): re-measure,
+   * update the layout, then RESTORE the pre-mutation scrollTop (normal
+   * clamp against the new content height) with follow-end disabled — the
+   * historical-browsing default. Never scrolls to the end and never anchors
+   * a header; `scrollTo(…, { disableFollow: true })` is the SAME primitive
+   * the collapse anchor and manual scrolling already use, so no vendored
+   * ScrollView change is needed (plan §22). */
+  private applyFullscreenPreserveViewport(previousScrollTop: number): void {
+    if (this.fullscreenScroll === undefined) return
+    this.refreshMessageRows()
+    const width = this.terminal.columns
+    const contentHeight = this.messagesView.render(width).length
+    const viewportHeight = this.fullscreenScroll.viewportHeight
+    this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+    this.fullscreenScroll.scrollTo(previousScrollTop, { disableFollow: true })
+  }
+
+  /** The fullscreen ANCHOR viewport pass (plan §8.7/§18): re-measure,
    * update the layout, then anchor the given turn's Thought header
    * `FOCUS_ANCHOR_TOP_PADDING` rows below the viewport top (one row of
    * previous context stays visible) with follow-end disabled — the same
    * behavior for header clicks, blank-row clicks and Ctrl+O Collapse All.
    * `turn === undefined` keeps the current position (the layout is still
-   * updated and clamped against the shrunken content). */
-  private applyFullscreenCollapseAnchor(turn: number | undefined): void {
+   * updated and clamped against the shrunken content). Named for WHAT it
+   * does (anchor a Thought turn), not the collapse direction (plan
+   * 2026-08-25 §13). */
+  private applyFullscreenFocusTurnAnchor(turn: number | undefined): void {
     if (this.fullscreenScroll === undefined) return
     this.refreshMessageRows()
     const width = this.terminal.columns
@@ -4467,7 +4550,7 @@ export class TuiApp {
           }
           const owner = this.blankRowFocusCollapseOwner(entry, next)
           if (owner !== undefined) {
-            this.collapseFocusTurn(owner, { anchorFullscreen: true })
+            this.collapseFocusTurn(owner, { fullscreenViewport: 'anchor-turn' })
           }
           return
         }
@@ -4513,7 +4596,7 @@ export class TuiApp {
           // 3. outer disclosure: a NON-secondary process row (e.g. an
           // intermediate assistant) collapses the owner Thought — the
           // header stays anchored in view (plan §14 step 3).
-          this.collapseFocusTurn(entry.collapseFocusOwnerOnClick, { anchorFullscreen: true })
+          this.collapseFocusTurn(entry.collapseFocusOwnerOnClick, { fullscreenViewport: 'anchor-turn' })
           return
         }
         // 4. ordinary message toggle (the pre-Focus behavior).
