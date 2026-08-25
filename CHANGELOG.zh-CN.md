@@ -5,7 +5,27 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.3.3] - 2026-08-24
+## [Unreleased]
+
+### 变更
+
+- **Thinking 块是 disclosure,不再是 visibility。** `Alt+T` 不再隐藏或
+  显示推理内容——它是唯一的 bulk detail 拥有者:所有 Thinking 块一起
+  折叠(默认)或一起展开,Focus 开/关完全一致。只要模型产生过 reasoning
+  且当前 projection 包含该块,它就一定存在,永远不会悄悄消失。折叠卡片
+  现在是 `▸ Thinking` + 最新一行推理作为 preview + 拥有者提示
+  (regular 是 `alt+t`,fullscreen 是 `click`);展开卡片是 `▾ Thinking`
+  + 完整正文——旧的 shown/hidden × collapsed/expanded 混合模型已删除。
+  `/settings` 把该项改名为 `Thinking detail`(`collapsed` / `expanded`),
+  与 Alt+T 共享同一状态。`Ctrl+O` 现在只拥有 tool/system/compaction
+  的 detail,绝不触碰 Thinking(每种 disclosure 只有一个 bulk 拥有者);
+  fullscreen 下点击仍可单独切换单个 Thinking 卡片(per-card override),
+  `Alt+T` 重置所有 per-card override,搜索命中只 full-reveal 匹配的那
+  一块、不改变 bulk 偏好。该偏好跨越 Focus 与 fullscreen 切换保持不变;
+  离开 fullscreen 时清理陈旧的 per-card 点击状态,regular 永远只跟随
+  bulk。
+
+[0.3.3] - 2026-08-24
 
 ### 新增
 

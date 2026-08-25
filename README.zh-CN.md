@@ -331,11 +331,18 @@ SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属
   送入正在运行的回合;否则只发送草稿。空闲的 agent 会用全部内容开启
   新回合。
 - `Alt+↑` — 出队:把所有排队消息拉回编辑器草稿。
-- `Ctrl+O` — 展开/折叠最近回合的可折叠条目(thinking、工具卡片);
+- `Ctrl+O` — 展开/折叠最近回合的可折叠条目(工具、system 卡片);
   同一个主开关也展开本地 `!`/`!!` shell 卡片(默认折叠——见下文
   "本地 shell")。在 Focus 模式(常规表面)下它派生展开最近几个
   Thought 的完整过程;全屏 Focus 的二级卡片由鼠标控制,Ctrl+O 不会
-  展开它们。
+  展开它们。Thinking 的 detail 有自己的拥有者——见 `Alt+T`。
+- `Alt+T` — 折叠/展开所有 Thinking 块(折叠:最新一行推理作为
+  preview;展开:完整推理正文)。Thinking 块是 disclosure,不是
+  visibility:只要模型产生过 reasoning 且当前 projection 包含该块,
+  它就始终存在——Focus 开/关、两种表面完全一致。全屏下点击可在该
+  bulk 级别之上单独切换单个 Thinking 卡片;`Ctrl+O` 绝不触碰
+  Thinking detail(它只拥有 tool/system 卡片)。`/settings` 的
+  `Thinking detail` 与它共享同一状态。
 - `Alt+K` — 从实时视图快速清除**已结束**的本地 `!`/`!!` shell 卡片;
   **运行中**的卡片绝不会被清除,进程也不会被取消(那是 Esc 的职责)。
   见下文"本地 shell"。

@@ -373,11 +373,19 @@ the Advanced/Unstable roadmap).
   alone. An idle agent starts a fresh turn with everything.
 - `Alt+↑` — dequeue: pull every queued message back into the editor draft.
 - `Ctrl+O` — expand/collapse the most recent turns' collapsible entries
-  (thinking, tool cards). The same master switch expands the local
+  (tool and system cards). The same master switch expands the local
   `!`/`!!` shell cards (see Local shell below). In Focus Mode (regular
   surface) it derives a full reveal of the recent Thoughts; the
   fullscreen Focus secondary cards are mouse-owned and Ctrl+O does not
-  expand them.
+  expand them. Thinking detail has its own owner — see `Alt+T`.
+- `Alt+T` — collapse/expand every Thinking block (compact: the latest
+  reasoning line as a preview; full: the whole reasoning body). Thinking
+  blocks are disclosure, never visibility: a block stays present
+  whenever the model produced reasoning and the current projection
+  contains it, in Focus ON/OFF and both surfaces alike. In fullscreen a
+  click toggles a single Thinking card on top of this bulk level, and
+  `Ctrl+O` never touches Thinking detail (it owns only tool/system
+  cards). `/settings` → `Thinking detail` is the same state.
 - `Alt+K` — dismiss the SETTLED local `!`/`!!` shell cards from the live
   view; a RUNNING card is never dismissed and the process is not
   cancelled (Esc owns that). See Local shell below.

@@ -5,7 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.3] - 2026-08-24
+## [Unreleased]
+
+### Changed
+
+- **Thinking blocks are disclosure, not visibility.** `Alt+T` no longer
+  hides or shows reasoning — it is the one bulk detail owner: every
+  Thinking block collapses (default) or expands together, in Focus ON
+  and OFF alike. A block exists whenever the model produced reasoning
+  and the current projection contains it, so it can never silently
+  vanish. The compact card now reads `▸ Thinking` with the LATEST
+  reasoning line as the preview and the owner hint (`alt+t` in regular,
+  `click` in fullscreen); the expanded card is `▾ Thinking` with the
+  full body — the old shown/hidden × collapsed/expanded mix is gone.
+  `/settings` renamed the row to `Thinking detail` (`collapsed` /
+  `expanded`) and shares the exact state Alt+T toggles. `Ctrl+O` now
+  owns only tool/system/compaction detail and never touches Thinking
+  (each disclosure has exactly one bulk owner); in fullscreen a click
+  still toggles a single Thinking card as a per-card override, `Alt+T`
+  resets every per-card override, and a search hit full-reveals only
+  the matched block without changing the bulk preference. The
+  preference survives Focus and fullscreen switches; leaving fullscreen
+  clears stale per-card click states so regular always follows the bulk.
+
+[0.3.3] - 2026-08-24
 
 ### Added
 
