@@ -3394,7 +3394,7 @@ export class TuiApp {
    * START of every rebuild, so local-card push/replace/clear paths prune
    * too (a replaced running card must not linger in the cache).
    */
-  private pruneMessageComponents(): void {
+  private pruneMessageComponents(projectionExpanded: ReadonlySet<number>): void {
     // The FocusActivityComponent cache is pruned to the LIVE projected
     // blocks INDEPENDENTLY of the message cache: a turn that left the
     // window — or Focus turned off — must not keep a stale Thought
@@ -3402,7 +3402,7 @@ export class TuiApp {
     // either.
     if (this.focusActivityComponents.size > 0) {
       const liveTurns = new Set<number>()
-      for (const block of this.projectedBlocks()) {
+      for (const block of this.projectedBlocks(projectionExpanded)) {
         if (block.kind === 'activity') liveTurns.add(block.activity.turn)
       }
       for (const turn of this.focusActivityComponents.keys()) {
@@ -3452,8 +3452,8 @@ export class TuiApp {
     return union
   }
 
-  private projectedBlocks(): FocusProjectedBlock[] {
-    return projectFocus(this.messages, this.turnActivities, this.focusProjectionExpandedTurns(), this.focusModeEnabled)
+  private projectedBlocks(projectionExpanded: ReadonlySet<number>): FocusProjectedBlock[] {
+    return projectFocus(this.messages, this.turnActivities, projectionExpanded, this.focusModeEnabled)
   }
 
   /** Alt+T's hideThinking filter over one projected block. An EXPANDED
@@ -3514,14 +3514,15 @@ export class TuiApp {
   /** Rebuild the message component tree from the current transcript state. */
   private rebuildMessages(): void {
     // Every rebuild path (transcript updates AND local-card push/replace/
-    // clear) prunes the cache to the live set first.
-    this.pruneMessageComponents()
+    // clear) prunes the cache to the live set first. The derived
+    // projection set is computed ONCE per rebuild and shared by the
+    // pruning pass, the projection and every activity-component
+    // construction (review findings).
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    this.pruneMessageComponents(projectionExpanded)
     this.messagesView.clear()
     this.messagesView.addChild(this.welcomeCard)
     const boundary = this.expandBoundary()
-    // The derived projection set is computed ONCE per rebuild (never per
-    // activity block — review finding).
-    const projectionExpanded = this.focusProjectionExpandedTurns()
     // Row heights for mouse hit-testing: components render (and cache) at
     // the same width the frame pass uses, so the heights match the screen.
     const width = this.terminal.columns
@@ -3536,7 +3537,7 @@ export class TuiApp {
     // row is charged to the preceding block's height, keeping the fullscreen
     // click hit-testing aligned with the rendered layout.
     const blocks: FocusProjectedBlock[] = [
-      ...this.projectedBlocks().filter(block => !this.shouldHideThinkingBlock(block)),
+      ...this.projectedBlocks(projectionExpanded).filter(block => !this.shouldHideThinkingBlock(block)),
       ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
     ]
     blocks.forEach((block, index) => {
@@ -3691,7 +3692,7 @@ export class TuiApp {
     // activity block — review finding).
     const projectionExpanded = this.focusProjectionExpandedTurns()
     const blocks: FocusProjectedBlock[] = [
-      ...this.projectedBlocks().filter(block => !this.shouldHideThinkingBlock(block)),
+      ...this.projectedBlocks(projectionExpanded).filter(block => !this.shouldHideThinkingBlock(block)),
       ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
     ]
     const rows: Array<{
