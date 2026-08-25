@@ -58,10 +58,12 @@ function extractSection(file) {
     }
   }
 
-  const content = lines
-    .slice(start + 1, end)
-    .join('\n')
-    .trim()
+  const content = compactListContinuations(
+    lines
+      .slice(start + 1, end)
+      .join('\n')
+      .trim(),
+  )
 
   if (!content) {
     throw new Error(`Version ${version} is empty in ${file}`)
@@ -71,6 +73,42 @@ function extractSection(file) {
     heading,
     content,
   }
+}
+
+/**
+ * Fold a list item's wrapped continuation lines into single lines.
+ *
+ * The changelogs write each bullet as a wrapped paragraph (a `- ` line
+ * followed by 2-space-indented continuation lines). GitHub's file viewer
+ * folds those soft breaks, but its Release-body renderer turns them into
+ * hard `<br>` breaks, so an extracted release body shows arbitrary line
+ * breaks mid-sentence. Folding the continuations makes the Release body
+ * render as one paragraph per bullet, matching the changelog file view.
+ * Blank lines, headings, code fences and their contents are left alone.
+ */
+function compactListContinuations(content) {
+  const lines = content.split('\n')
+  const out = []
+  let inCodeFence = false
+
+  for (const line of lines) {
+    if (/^```/.test(line)) {
+      inCodeFence = !inCodeFence
+      out.push(line)
+      continue
+    }
+    if (inCodeFence) {
+      out.push(line)
+      continue
+    }
+    if (/^ {2}\S/.test(line) && /^\s*[-*]\s+\S/.test(out[out.length - 1] ?? '')) {
+      out[out.length - 1] = `${out[out.length - 1].trimEnd()} ${line.trimStart()}`
+      continue
+    }
+    out.push(line)
+  }
+
+  return out.join('\n')
 }
 
 const zh = extractSection('CHANGELOG.md')
