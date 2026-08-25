@@ -214,10 +214,11 @@ export interface KeymapSnapshot {
     readonly keys: readonly KeyId[]
     readonly scope: KeybindingScope
     readonly source: KeybindingSource
-    /** True when EVERY key of this binding is a `<leader>X` sequence (the
-     * action has no direct keys — display renders them with the leader
-     * prefix). Undefined/absent = direct keys. */
-    readonly leader?: boolean
+    /** The `<leader>X` completing keys of this action (M6), separate
+     * from the direct `keys`: an action can have BOTH (e.g.
+     * `['ctrl+z', '<leader>t']`). Display renders them with the leader
+     * prefix. Absent = no leader bindings. */
+    readonly leaderKeys?: readonly KeyId[]
   }[]
   readonly conflicts: readonly KeybindingConflict[]
 }

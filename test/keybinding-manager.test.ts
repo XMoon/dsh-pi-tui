@@ -94,7 +94,22 @@ test('a leader-only action appears in the snapshot with its leader sequence (rev
   })
   const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.session.new')
   assert.ok(binding !== undefined, 'the leader-only action must appear in the snapshot')
-  assert.equal(binding!.leader, true, 'the leader-only binding is flagged for display')
-  assert.deepEqual(binding!.keys, ['n'], 'the raw completing key is carried')
+  assert.deepEqual(binding!.keys, [], 'no direct keys')
+  assert.deepEqual(binding!.leaderKeys, ['n'], 'the raw completing key is carried')
   assert.equal(manager.keyHint('app.session.new'), 'Leader N', 'keyHint and snapshot agree')
+})
+
+test('mixed direct + leader keys both appear in the snapshot and the hint (review round)', () => {
+  // Review finding: an action configured as ['ctrl+z', '<leader>h'] showed
+  // only the direct key in /keybindings and keyHint — the leader sequence
+  // was silently dropped. Both must render, each with its own format.
+  const manager = managerWith({
+    leader: 'ctrl+x',
+    bindings: { 'app.history.search': ['ctrl+z', '<leader>h'] },
+  })
+  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.history.search')
+  assert.ok(binding !== undefined)
+  assert.deepEqual(binding!.keys, ['ctrl+z'], 'the direct key is carried')
+  assert.deepEqual(binding!.leaderKeys, ['h'], 'the leader completing key is carried separately')
+  assert.equal(manager.keyHint('app.history.search'), 'Ctrl+Z / Leader H', 'the hint shows both forms')
 })
