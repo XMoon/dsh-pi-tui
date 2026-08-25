@@ -848,6 +848,28 @@ test('P2c: fullscreen resize keeps the compact rows stable and the click map ali
   app.stop()
 })
 
+test('P2d: the compact card keeps a TRUE per-width reference-stable cache (width A → B → A)', async () => {
+  // The same component + same width must return the SAME array instance
+  // even after an intermediate width — the fork's per-frame processed-line
+  // reuse depends on it (review finding: a single last-width slot breaks
+  // the A → B → A sequence).
+  const { ThinkingCompactComponent } = await import('../src/tui-app.ts')
+  const component = new ThinkingCompactComponent(
+    { kind: 'thinking', turn: 0, text: 'a preview line' },
+    'alt+t',
+  )
+  const at100 = component.render(100)
+  const at8 = component.render(8)
+  assert.notEqual(at8, at100, 'different widths must build different rows')
+  const at100again = component.render(100)
+  assert.equal(at100again, at100, 'the same width must return the SAME array instance (reference-stable)')
+  // invalidate() drops the cache; a re-render rebuilds (fresh instance).
+  component.invalidate()
+  const afterInvalidate = component.render(100)
+  assert.notEqual(afterInvalidate, at100, 'invalidate() must drop the cached rows')
+  assert.equal(afterInvalidate.length, 3, 'the rebuilt rows keep the compact geometry')
+})
+
 test('P2: the compact Thinking card never wraps on a narrow terminal', async () => {
   // Every compact row must truncate to the terminal width — a wrapped
   // hint row would break the fixed three-row geometry (review finding).

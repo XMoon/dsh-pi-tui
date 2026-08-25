@@ -506,8 +506,11 @@ export class BulletedComponent implements Component {
 export class ThinkingCompactComponent implements Component {
   private readonly message: Extract<TranscriptMessage, { kind: 'thinking' }>
   private readonly hint: ExpandHint
-  private cached: string[] | undefined
-  private cachedWidth = -1
+  /** TRUE per-width cache: the same component + same width returns the
+   * same array instance even after intermediate widths (a single
+   * last-width slot would re-create the array on a width A → B → A
+   * sequence and break the reference-stable contract). */
+  private readonly cached = new Map<number, string[]>()
 
   constructor(message: Extract<TranscriptMessage, { kind: 'thinking' }>, hint: ExpandHint) {
     this.message = message
@@ -515,12 +518,12 @@ export class ThinkingCompactComponent implements Component {
   }
 
   invalidate(): void {
-    this.cached = undefined
-    this.cachedWidth = -1
+    this.cached.clear()
   }
 
   render(width: number): string[] {
-    if (this.cached !== undefined && this.cachedWidth === width) return this.cached
+    const existing = this.cached.get(width)
+    if (existing !== undefined) return existing
     const previewLine = latestLine(this.message.text)
     let lines: string[]
     if (previewLine === '') {
@@ -535,8 +538,7 @@ export class ThinkingCompactComponent implements Component {
         truncateToWidth(color.textDim(`  (${hintVerb} to expand)`), Math.max(1, width), '…'),
       ]
     }
-    this.cached = lines
-    this.cachedWidth = width
+    this.cached.set(width, lines)
     return lines
   }
 }
