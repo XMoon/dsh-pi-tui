@@ -262,8 +262,6 @@ export interface TuiCommandRunner {
    * /settings, /reload and the startup path; fail-soft on invalid custom
    * configs). */
   applyFooterSettings(doc: { footer: string; footerLayout?: unknown } | undefined): void
-  /** The sessions service, for the /exit flush. */
-  readonly sessions: { flush(session: Session): Promise<unknown> }
   /** The session READ port (migration M1.3): /sessions, /resume, /search,
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */

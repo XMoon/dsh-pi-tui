@@ -5699,7 +5699,6 @@ export function apply(ctx: Context, config: Config): void {
 // M2: apply the persisted footer mode + layout (shared by /settings,
       // /reload and the startup path).
       applyFooterSettings,
-      sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
       // The session READ port (migration M1.3): /sessions, /resume, /search,
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.
