@@ -248,11 +248,13 @@ export type FocusProjectedBlock =
      * Set ONLY on process rows that exist BECAUSE the owner Thought is
      * expanded (thinking / tool / system / intermediate-assistant /
      * compaction rows revealed by the disclosure). The fullscreen click
-     * handler collapses the owner turn when this is set — the user's own
-     * messages and the FINAL assistant are NOT marked, so clicking them
-     * never collapses the Thought (plan §8.8, review P2: the
-     * body-click-collapse scope is exactly the expanded process content,
-     * never the turn's persistent rows).
+     * handler routes by the NEAREST owner: a SECONDARY card (thinking /
+     * tool / system / compaction) toggles itself, and a NON-secondary
+     * process row (intermediate assistant) collapses the owner Thought.
+     * The user's own messages and the FINAL assistant are NOT marked, so
+     * clicking them never collapses the Thought (plan §8.8, review P2:
+     * the click scope is exactly the expanded process content, never the
+     * turn's persistent rows).
      */
     collapseFocusOwnerOnClick?: number
   }

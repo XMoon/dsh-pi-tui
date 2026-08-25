@@ -3250,7 +3250,8 @@ export class TuiApp {
 
   /** Reveal one search-matched message: open its owner Thought (Focus on)
    * and full-reveal the matched SECONDARY card, so the hit is visible
-   * even though the process timeline defaults to compact (plan §28). The
+   * even though the FULLSCREEN process timeline defaults to compact (plan
+   * §28 — regular mode full-reveals the whole process anyway). The
    * search caller owns the jump target — no anchor. */
   revealSearchMatch(message: TranscriptMessage): void {
     const turn = 'turn' in message ? message.turn : undefined
@@ -3267,8 +3268,9 @@ export class TuiApp {
   }
 
   /** Clear every secondary expansion of one turn (the root Collapse All
-   * reset — plan §16): reopening the Thought must show the process
-   * timeline compact, never the previous long outputs. */
+   * reset — plan §16): reopening the Thought never restores the previous
+   * long outputs — the FULLSCREEN timeline re-derives compact, while
+   * regular mode full-reveals the process anyway. */
   private clearFocusSecondaryExpansions(turn: number): void {
     for (const message of this.messages) {
       if (!('turn' in message)) continue
@@ -5529,11 +5531,12 @@ export class TuiApp {
    */
   private componentForMessage(message: TranscriptMessage, boundary: number): Component {
     // Focus-expanded turns reveal their process TIMELINE (plan §15.1 +
-    // the secondary-disclosure supplement): the foldable process cards
-    // (thinking / tool / system / compaction) default COMPACT inside an
-    // open Thought and only the per-card override full-reveals them.
-    // Collapsed Focus turns never reach this method: their process rows
-    // are absent from the projection.
+    // the secondary-disclosure supplement): in FULLSCREEN the foldable
+    // process cards default COMPACT inside an open Thought and only the
+    // per-card override full-reveals them; in REGULAR any expanded root
+    // full-reveals (no mouse, no dead compact cards). Collapsed Focus
+    // turns never reach this method: their process rows are absent from
+    // the projection.
     const expanded = this.effectiveMessageExpanded(message, boundary)
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
@@ -5600,9 +5603,9 @@ export class TuiApp {
       && this.isInsideExpandedFocus(message, boundary)
       && isFocusSecondaryDisclosure(message)
     return {
-      // The EFFECTIVE expansion (the secondary-disclosure rule) drives the
-      // renderer: inside an open Thought the foldable process cards default
-      // compact and only the per-card override full-reveals them.
+      // The EFFECTIVE expansion (the surface-adaptive rule) drives the
+      // renderer: fullscreen secondaries default compact (per-card
+      // override full-reveals), regular expanded roots full-reveal.
       component: rendered === undefined ? this.renderMessage(message, expanded, clickHint) : rendered.component,
       boundary,
       themeRev: this.themeRevision,
