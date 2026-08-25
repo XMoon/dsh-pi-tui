@@ -11,6 +11,19 @@
  * whitespace) is rejected — `sh -e` treats such a line as a syntax error, so
  * a split would silently drop the intended tail.
  *
+ * Supported shell grammar (the parsed script must stay within this subset):
+ *   - commands chained with `&&` (the split points), each otherwise passed
+ *     verbatim to `sh -c` for execution — the splitter does NOT interpret
+ *     the commands themselves;
+ *   - single- and double-quoted strings anywhere in the script (quotes are
+ *     tracked so `&&` inside them is not a separator);
+ *   - backslash escapes inside and outside quotes (`\&&` is a literal `&`);
+ *   - anything the command segment may contain (redirects, env assignments,
+ *     pipes, subshells, `node -e "..."`, ...) is preserved verbatim and
+ *     executed by `sh -c` unchanged.
+ * NOT supported (the splitter rejects them loudly): unterminated quotes,
+ * dangling `&&`, empty commands (consecutive `&&`), empty scripts.
+ *
  * Usage:
  *   node scripts/pre-push-stages.mjs <verify-script-name>
  *   # e.g. node scripts/pre-push-stages.mjs verify:prepush

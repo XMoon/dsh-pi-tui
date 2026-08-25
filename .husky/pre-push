@@ -24,8 +24,9 @@
 # Toggles:
 #   PUSH_GATE_VERBOSE=1   also stream every captured log line live with a
 #                         [HH:MM:SS] prefix, so a stuck stage shows its
-#                         raw tail as it happens.
-#   PUSH_GATE_QUIET=1     single summary line only (scripted pushes).
+#                         raw tail as it happens (requires QUIET=0).
+#   PUSH_GATE_QUIET=1     single summary line only (scripted pushes);
+#                         takes precedence over VERBOSE.
 #   PUSH_GATE_STAGES="..."  test/dry-run ONLY: override the stage list.
 #                         Ignored unless PUSH_GATE_TEST_MODE=1 is set, so
 #                         a stray env var can never shrink a real push's
@@ -121,14 +122,18 @@ fi
 # and echoes the next unread offset (total+1, or start when the log has
 # not grown) so callers can track position. Used by the poller loop and
 # by the final drain, so every line is streamed exactly once — nothing is
-# lost in the poll gap.
+# lost in the poll gap. In quiet mode the stream is suppressed entirely
+# (PUSH_GATE_QUIET promises a single summary line — no progress, no
+# stream).
 drain_log() {
   start=${1:-1}
   total=$(wc -l <"$LOG" 2>/dev/null || echo 0)
   if [ "$total" -ge "$start" ]; then
-    sed -n "${start},${total}p" "$LOG" | while IFS= read -r line; do
-      printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$line"
-    done >&2
+    if [ "$QUIET" -ne 1 ]; then
+      sed -n "${start},${total}p" "$LOG" | while IFS= read -r line; do
+        printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$line"
+      done >&2
+    fi
     next=$((total + 1))
   else
     next=$start
@@ -143,7 +148,9 @@ drain_log() {
 # delivered between iterations, not mid-drain), so the main shell's final
 # drain never re-reads lines the poller already emitted. The offset file
 # also lets the main shell drain the final partial poll window.
-if [ "$VERBOSE" -eq 1 ]; then
+# PUSH_GATE_QUIET takes precedence: quiet promises ONE summary line, so
+# the verbose stream (and its poller) is skipped entirely.
+if [ "$VERBOSE" -eq 1 ] && [ "$QUIET" -ne 1 ]; then
   LOG_OFFSET=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.offset")
   LOG_STOP=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.stop")
   (
@@ -183,7 +190,7 @@ done <<EOF
 $STAGES
 EOF
 
-if [ "$VERBOSE" -eq 1 ]; then
+if [ "$VERBOSE" -eq 1 ] && [ "$QUIET" -ne 1 ]; then
   # Cooperative shutdown: signal the poller to stop BETWEEN drain cycles
   # (it checks LOG_STOP before each drain and before each sleep), then
   # wait for it to finish its current cycle — the offset it persisted is
