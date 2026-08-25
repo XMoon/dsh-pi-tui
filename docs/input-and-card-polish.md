@@ -683,6 +683,20 @@ rounds (codex / gpt-5.6-luna):
   shell-semantic rule; the wire query keeps the line-0-only prefix).
   Regression test: the extension chain is never consulted on a
   continuation-line natural `/` trigger (Tab still consults it once).
+- **Round 20** (after a rebase; rounds 17/19 were stale pre-rebase diff
+  artifacts of main's own hook/runtime-migration commits): P1 — a plugin
+  editor CONSUMING input mutated its document without notifying seat
+  subscribers, so EditorHost.subscribe observers (the continuable-viewer
+  draft mirror) kept a stale snapshot and could merge an outdated draft
+  on handoff/viewer exit (FIXED: a consumed key now calls
+  `notifyChanged()` alongside `invalidate()`); P1 — the completion mode
+  adapters read the HIDDEN host editor's mode, so a stale shell mode
+  leaked into completion routing while a plugin editor occupied the seat
+  (FIXED: the MentionProvider mode source and the delegated provider's
+  getMode now read the VISIBLE seat via `seatInputMode()`). Regression
+  tests: a plugin-consumed key pushes the fresh snapshot to
+  subscribers; a prompt-semantics plugin seat never gets the hidden
+  host's synthetic prefix.
 
 The full-suite tests (2060+), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the

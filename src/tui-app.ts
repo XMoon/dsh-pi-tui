@@ -7708,7 +7708,7 @@ export class TuiApp {
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
   ): void {
-    const base = new MentionProvider([...commands], cwd, fdPath, () => this.editor.getInputMode())
+    const base = new MentionProvider([...commands], cwd, fdPath, () => this.seatInputMode())
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return
@@ -7717,7 +7717,10 @@ export class TuiApp {
     // plugin chain (M5 AutocompleteRegistry) is consulted only when the
     // host provider has nothing. applyCompletion always delegates to the
     // host provider (the fork's completion semantics own the editor).
-    const getMode = (): EditorInputMode => this.editor.getInputMode()
+    // The VISIBLE seat decides the mode: a replacement editor in the seat
+    // has no shell mode (prompt semantics) — the hidden host editor's
+    // stale mode must never leak into completion routing (round-20).
+    const getMode = (): EditorInputMode => this.seatInputMode()
     const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
       async getSuggestions(lines, cursorLine, cursorCol, options) {
         const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
