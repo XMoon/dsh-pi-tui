@@ -94,7 +94,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       deleteRecord: async () => {},
       describeReference: async () => ({ configured: false }),
       listRecords: async () => [],
-      onChanged: () => {},
+      onChanged: () => () => {},
     },
     authorization: {
       available: () => false,
