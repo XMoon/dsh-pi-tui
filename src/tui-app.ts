@@ -8525,8 +8525,13 @@ export class TuiApp {
       const project = cwd === '' ? undefined : cwd.split('/').filter(Boolean).at(-1)
       const branch = this.status.branch === undefined || this.status.branch === '' ? undefined : this.status.branch
       const composition: CompositionStatus = { ...current.composition, model }
+      // The owned fields are ALWAYS set — a disappearing permission (like
+      // a disappearing model/cwd/branch) must clear the stale fact, never
+      // keep the previous preset. The merged this.status carries the
+      // explicit `permission: undefined` (spread semantics), so the
+      // undefined check below IS the clear signal.
       const access: AccessStatus = this.status.permission === undefined
-        ? current.access
+        ? { ...current.access, permissionPreset: undefined }
         : {
             ...current.access,
             permissionPreset: {
@@ -9573,7 +9578,18 @@ export class TuiApp {
         options.onCancel()
       },
     })
-    handle = this.showOverlayOnHost(new Frame(panel, true), { width: 88, maxHeight: 30 })
+    handle = this.showOverlayOnHost(new Frame(panel, true), {
+      width: 88,
+      // The overlay's hard cut must never exceed the terminal: the panel
+      // budgets its content to rows-2 (Frame borders add 2), so the
+      // maxHeight must be at least the panel's full render + borders —
+      // a fixed 30 would slice the bottom border on tall terminals (a
+      // 40-row terminal renders 30 content rows + 2 borders = 32 > 30).
+      // Give the overlay the LIVE terminal height (the fork clamps to the
+      // available space anyway); the panel's own windowing keeps the
+      // content within rows-2.
+      maxHeight: this.terminal.rows,
+    })
     return () => handle?.hide()
   }
 
