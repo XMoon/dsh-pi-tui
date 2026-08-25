@@ -67,6 +67,14 @@ focused editor / pi-tui editor action
 non-capturing plugin keybindings
 ```
 
+**Fixed overlay-key precedence.** While a capturing overlay is open its
+NON-CONFIGURABLE keys (search close/next/previous, question/tasks flow
+keys) win by precedence — a configurable action (e.g. the search toggle)
+remapped to one of those keys is ECLIPSED inside the overlay (the
+binding still works outside it). The config parser warns on such a
+collision (`FIXED_OVERLAY_KEYS`); the overlay never resolves the
+configurable action first (plan §3.3).
+
 ## Key decisions
 
 1. **Enter stays with the fork editor.** `app.input.submit` is
@@ -188,6 +196,30 @@ accepted at round 4 with no open findings.
   (ambiguity-filtered) leader bindings.
 - Round 4 (accepted, none).
 
-Final gates: 1996 bundle tests, 985 fork tests, 11 docs tests,
-typecheck (fork + bundle), `check-host-keybindings` gate, `git diff
---check` — all green.
+The branch was then REBASED onto the current main (M1 migration ports,
+shell-editor-mode, thinking-disclosure unify, focus-v2, the
+README/CHANGELOG language flip) and re-reviewed:
+- Round 5 (needs-fixes): per-key rule ids (a conflict on ONE key of a
+  multi-key action now deactivates only that key); printable-leader keys
+  rejected.
+- Round 6 (needs-fixes): the monotonic keymap revision joins the
+  transcript cache identity (a remap refreshes already-rendered fold
+  hints; onInvalidate rebuilds messages); the leader machine propagates
+  the dispatch result (a declined action falls through, not consumed);
+  the configurable search toggle matches EFFECTIVE keys while the fixed
+  overlay keys keep their defaults; `space` is printable (rejected as
+  leader/direct binding); the settings namespace docs corrected to
+  `dsh-pi-tui` (not `pi-tui`); `/keybindings reset` notifies success
+  only after the write resolves; hot reload keeps last-known-good;
+  definitions.ts joins the gate scan (its `defaultKeys` are the source
+  of truth, its description strings must stay key-neutral); the
+  config-port documents `keybindings` as raw pass-through extension
+  data.
+- Round 7 (needs-fixes, 3 P2): the config.ts header example namespace
+  corrected to `dsh-pi-tui`; the fixed overlay-key precedence is
+  documented and the parser warns on a collision; `/keybindings reset`
+  honors the async write outcome.
+
+Final gates after the rebase: 2397 bundle tests, 985 fork tests, 11
+docs tests, typecheck (fork + bundle), `check-host-keybindings` gate,
+`git diff --check` — all green.

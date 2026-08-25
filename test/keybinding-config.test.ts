@@ -196,3 +196,17 @@ test('false disables a leader sequence for the same action', () => {
   assert.equal(parsed.diagnostics.length, 1)
   assert.ok(parsed.diagnostics[0]!.includes('declared more than once'))
 })
+
+test('a configurable action bound to a fixed overlay key warns (the overlay wins while open)', () => {
+  // Review finding: while a capturing overlay is open its non-configurable
+  // keys (search close/next/previous, question/tasks flows) win by
+  // precedence — a configurable action remapped to one of them is
+  // eclipsed inside the overlay. Warned, never dropped: the binding still
+  // works outside the overlay.
+  const parsed = parseUserKeybindings({ 'app.transcript.search': 'enter' })
+  assert.deepEqual(parsed.bindings, { 'app.transcript.search': 'enter' }, 'the binding is kept')
+  assert.ok(parsed.diagnostics.some(message => message.includes('non-configurable overlay owns')), `no precedence warning: ${parsed.diagnostics.join(' | ')}`)
+  // A non-colliding remap warns nothing.
+  const clean = parseUserKeybindings({ 'app.transcript.search': 'ctrl+x' })
+  assert.ok(!clean.diagnostics.some(message => message.includes('overlay owns')), `unexpected warning: ${clean.diagnostics.join(' | ')}`)
+})

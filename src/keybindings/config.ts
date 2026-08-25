@@ -1,10 +1,11 @@
 /**
  * User keybinding config parsing and validation (plan §12/§13/§14/§16).
  *
- * Settings shape (namespace `pi-tui`, field `keybindings`):
+ * Settings shape (namespace `dsh-pi-tui` — the TUI's own settings
+ * section, NOT the `pi-tui` profile name — field `keybindings`):
  *
  * ```yaml
- * pi-tui:
+ * dsh-pi-tui:
  *   keybindings:
  *     app.input.steer: ctrl+s
  *     app.permission.cycle: [shift+tab, ctrl+shift+p]
@@ -80,6 +81,17 @@ export function isPlainPrintableKey(key: KeyId): boolean {
  * send Ctrl+J as LF (Enter) and Ctrl+M as CR (Enter), so binding them is
  * a silent no-op on those terminals. Warned, not rejected. */
 const TERMINAL_UNRELIABLE_KEYS = new Set(['ctrl+j', 'ctrl+m'])
+
+/** The NON-CONFIGURABLE overlay/component default keys (plan §3.3 fixed
+ * overlay contracts: search close/next/previous, question/tasks flows).
+ * A configurable action bound to one of these keys is ECLIPSED while the
+ * overlay is open — the fixed key wins by precedence. Warned, not
+ * rejected (the binding still works outside the overlay). */
+const FIXED_OVERLAY_KEYS = new Set(
+  Object.values(APP_KEYBINDINGS)
+    .filter(definition => !definition.configurable)
+    .flatMap(definition => definition.defaultKeys),
+)
 
 /** The parsed, validated user configuration. */
 export interface ParsedUserKeybindings {
@@ -197,6 +209,14 @@ export function parseUserKeybindings(
       }
       if (TERMINAL_UNRELIABLE_KEYS.has(entry)) {
         diagnostics.push(`keybindings: "${actionId}" binds "${entry}", which legacy terminals report as Enter — the binding may not fire there`)
+      }
+      // Fixed overlay-key precedence (review finding): a configurable
+      // action bound to a non-configurable overlay's key is eclipsed
+      // while that overlay is open (e.g. the search toggle remapped to
+      // Enter collides with search.next). The binding still works
+      // outside the overlay; warned, never silently dropped.
+      if (FIXED_OVERLAY_KEYS.has(entry)) {
+        diagnostics.push(`keybindings: "${actionId}" binds "${entry}", which a non-configurable overlay owns while it is open — the overlay wins there`)
       }
       keys.push(entry)
     }
