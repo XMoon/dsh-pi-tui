@@ -8275,6 +8275,7 @@ export class TuiApp {
     commands: readonly SlashCommand[],
     cwd: string,
     fileReferences: import('./runtime/host-file-port.ts').HostFilePort = NO_FILE_REFERENCES,
+    scope: import('./runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', cwd },
     extensionSuggest?: (query: {
       lines: readonly string[]
       cursorLine: number
@@ -8283,7 +8284,7 @@ export class TuiApp {
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
   ): void {
-    const base = new MentionProvider([...commands], cwd, fileReferences, () => this.editor.getInputMode())
+    const base = new MentionProvider([...commands], cwd, fileReferences, () => this.editor.getInputMode(), scope)
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return

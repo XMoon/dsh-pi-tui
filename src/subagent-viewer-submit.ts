@@ -168,6 +168,12 @@ export async function submitSubagentFollowup(
     if (parentNow === undefined || parentNow.session.id !== request.parentSessionId) {
       return { kind: 'rejected', reason: { kind: 'parent-unavailable' } }
     }
+    // A signal aborted while the canonicalization was in flight is a
+    // CANCELLED delivery, checked BEFORE the write path: an
+    // implementation that does not synchronously reject an already-aborted
+    // signal must never accept the message while the UI already treats
+    // the send as stale (the draft is restored by the caller).
+    if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
     const content = [{ type: 'text', text: canonical }] as const
     // 3. The ONE correct write path: the continuation manager owns the
     //    child's inbox (enqueue while running, wake while waiting, cold

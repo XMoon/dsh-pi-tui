@@ -130,23 +130,45 @@ export class DirectModelCatalog implements ModelCatalog {
   }
 
   listProviders(): readonly ModelProviderSummary[] {
-    return this.llm()?.listProviders() ?? []
+    // Detached copies — the provider registry's array is Host-owned.
+    return (this.llm()?.listProviders() ?? []).map(provider => ({
+      id: provider.id,
+      name: provider.name,
+    }))
   }
 
   listModels(providerId: string): Promise<readonly ModelInfoSummary[]> {
     const llm = this.llm()
     if (llm === undefined) return Promise.resolve([])
-    return llm.listModels(providerId)
+    return llm.listModels(providerId).then(models => models.map(model => ({
+      id: model.id,
+      ...typeof model.name === 'string' ? { name: model.name } : {},
+    })))
   }
 
-  resolveModelInfo(providerId: string, modelId: string): Promise<ModelReasoningInfo> {
+  async resolveModelInfo(providerId: string, modelId: string): Promise<ModelReasoningInfo> {
     const llm = this.llm()
-    if (llm === undefined) return Promise.resolve({})
-    return llm.resolveModelInfo(providerId, modelId)
+    if (llm === undefined) return {}
+    const info = await llm.resolveModelInfo(providerId, modelId)
+    // Detached copy of the reasoning metadata.
+    const efforts = info.reasoning?.efforts
+    if (efforts === undefined) return {}
+    return { reasoning: { efforts: efforts.map(effort => ({
+      id: effort.id,
+      name: effort.name,
+      ...typeof effort.description === 'string' ? { description: effort.description } : {},
+    })) } }
   }
 
   currentSelection(): ModelSelectionDto | undefined {
-    return this.defaultModel()?.currentSelection()
+    const selection = this.defaultModel()?.currentSelection()
+    if (selection === undefined) return undefined
+    // Detached copy.
+    return {
+      provider: selection.provider,
+      model: selection.model,
+      ...typeof selection.reasoningEffort === 'string' ? { reasoningEffort: selection.reasoningEffort } : {},
+    }
   }
 
   saveSelection(selection: ModelSelectionDto): Promise<unknown> {
@@ -160,11 +182,22 @@ export class DirectModelCatalog implements ModelCatalog {
     if (llm === undefined) return Promise.resolve([])
     // The llm-pi-ai settings namespace is adapter-owned schema knowledge —
     // the wizard never names it (plan §6.3).
-    return llm.discoverModels('llm-pi-ai', request)
+    return llm.discoverModels('llm-pi-ai', request).then(models => models.map(model => ({
+      id: model.id,
+      ...typeof model.name === 'string' ? { name: model.name } : {},
+    })))
   }
 
   listConfigurableProviders(): readonly ProviderCatalogEntry[] | undefined {
-    return this.llm()?.listConfigurableProviders()
+    // Detached copies — the directory array (and its settingsPath) is
+    // Host-owned.
+    return this.llm()?.listConfigurableProviders().map(entry => ({
+      provider: entry.provider,
+      displayName: entry.displayName,
+      settingsNs: entry.settingsNs,
+      settingsPath: [...entry.settingsPath],
+      ...entry.declared === undefined ? {} : { declared: entry.declared },
+    }))
   }
 }
 
@@ -278,7 +311,24 @@ function toSkillDefinitionDto(skill: SkillSummaryLike): SkillDefinitionDto | und
     description: skill.description,
     ...typeof skill.content === 'string' ? { content: skill.content } : {},
     ...typeof skill.provider === 'string' ? { provider: skill.provider } : {},
-    ...skill.resourceBase === undefined ? {} : { resourceBase: skill.resourceBase },
-    ...skill.invocation === undefined ? {} : { invocation: skill.invocation },
+    ...skill.resourceBase === undefined ? {} : { resourceBase: detachedResourceBase(skill.resourceBase) },
+    ...skill.invocation === undefined ? {} : { invocation: detachedInvocation(skill.invocation) },
+  }
+}
+
+/** Detached copy of the opaque resource base (the consumer validates the
+ * shape; only a shallow object copy crosses — never the Host object). */
+function detachedResourceBase(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) return value
+  return { ...(value as Record<string, unknown>) }
+}
+
+/** Detached copy of the invocation policy flags. */
+function detachedInvocation(value: unknown): { modelInvocable?: unknown; userInvocable?: unknown } | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  return {
+    ...record.modelInvocable === undefined ? {} : { modelInvocable: record.modelInvocable },
+    ...record.userInvocable === undefined ? {} : { userInvocable: record.userInvocable },
   }
 }

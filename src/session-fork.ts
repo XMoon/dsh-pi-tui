@@ -214,8 +214,19 @@ export async function commitRewind(
   // have left a hidden lifecycle, so the target is PINNED immediately).
   // The composition's SETUP callback stays with the runner (Direct
   // ownership); only the identity crosses into the semantic create
-  // (migration M1.11).
-  const composition = await host.compose(resolveSessionPreset(source.session))
+  // (migration M1.11). The preflight compose here is the lock-ORDERING
+  // validation (the M1.5 contract): a broken/unknown preset must fail
+  // BEFORE the target lock is acquired — the Direct lifecycle's own
+  // compose from the same id is the authoritative setup, and composeAgent
+  // is deterministic within a process run, so the two resolutions cannot
+  // diverge. The preflight is classified like the seed failure: a compose
+  // rejection is a `failed` outcome, never an escape.
+  let composition: { agentPreset?: string }
+  try {
+    composition = await host.compose(resolveSessionPreset(source.session))
+  } catch (error) {
+    return { kind: 'failed', message: safeErrorMessage(error) }
+  }
   const result = await host.transitionTo({
     target: {
       id: String(sessionId),

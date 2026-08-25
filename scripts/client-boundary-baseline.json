@@ -46,6 +46,7 @@
   "authorization",
   "commands",
   "credentials",
+  "llm",
   "permissionPresets",
   "settings"
  ],

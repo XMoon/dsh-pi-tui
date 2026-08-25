@@ -119,6 +119,38 @@ test('the provider delegates slash-command completion to the inner provider', as
 
 // ── slash-command path-argument completion (`/image <path>`) ──────────────
 
+test('a late port result is dropped when the request was aborted; a port rejection degrades to null', async () => {
+  const root = fixtureWorkspace()
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const controller = new AbortController()
+  const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async (_scope, _query, options) => {
+      await gate
+      options?.signal?.throwIfAborted()
+      return [{ value: '@file-one.txt', label: 'file-one.txt', description: join(root, 'file-one.txt'), kind: 'file' }]
+    },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  const provider = new MentionProvider([], root, seam)
+  const pending = provider.getSuggestions(['@file'], 0, 5, { signal: controller.signal })
+  controller.abort() // the request is cancelled while discovery is in flight
+  release!()
+  assert.equal(await pending, null, 'an aborted request must never commit a late result')
+  const throwing: import('../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async () => { throw new Error('discovery exploded') },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  const resilient = new MentionProvider([], root, throwing)
+  assert.equal(
+    await resilient.getSuggestions(['@file'], 0, 5, { signal: abort }),
+    null,
+    'a discovery rejection degrades to no suggestions, never a crash',
+  )
+})
+
 test('suggestPathArgument completes a bare prefix in the cwd', () => {
   const root = fixtureWorkspace()
   const items = suggestPathArgument('fi', root)

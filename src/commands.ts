@@ -539,7 +539,10 @@ export function extensionHealthRows(runner: TuiCommandRunner): { id: string; lab
  * otherwise. The directory read and the section reads go through the
  * semantic ports (migration M1.8/M1.9) — never the raw services. */
 function readProviderOptions(models: ModelCatalog, providers: ProviderProfileConfig): ProviderOption[] {
-  const readSection = (ns: string): unknown => providers.readSection(ns)
+  // The section read is the adapter-owned llm-pi-ai read (no namespace
+  // knowledge in the command surface); the directory entries' sections
+  // are all served by the same adapter-owned section.
+  const readSection = (): unknown => providers.readSection()
   const entries = models.listConfigurableProviders()
   if (entries !== undefined) {
     try {
@@ -698,11 +701,10 @@ async function provisionKeylessProfile(
   if (option === undefined || option.configured || option.declared || option.settingsNs === '') return ''
   if (!runner.config.providers.available()) return ''
   try {
-    await runner.config.providers.writeKeylessProfile({
-      route: option.route,
-      settingsNs: option.settingsNs,
-      settingsPath: option.settingsPath,
-    })
+    // The adapter resolves the route's profile location internally —
+    // only the ROUTE crosses (migration M1.9: no settings schema in the
+    // command surface, and a hostile route writes nothing).
+    await runner.config.providers.writeKeylessProfile(option.route)
     return ' — provider profile recorded'
   } catch (error) {
     runner.diag.warn('authorization', { key: target.key, note: 'profile write failed', error: safeErrorMessage(error) })
@@ -1006,8 +1008,13 @@ export function registerTuiCommands(
       })),
       runner.sessionCwd(),
       // The Host-file port owns the `@`-mention discovery (migration
-      // M1.10) — the command surface never resolves fd itself.
+      // M1.10) — the command surface never resolves fd itself. The scope
+      // is the live SESSION when one exists (Host identity), the
+      // workspace cwd otherwise (sessionless cold completion).
       runner.hostFile,
+      runner.liveAgent === undefined
+        ? { kind: 'workspace', cwd: runner.sessionCwd() }
+        : { kind: 'session', sessionId: runner.liveAgent.session.id },
       extensionAutocomplete === undefined
         ? undefined
         : async (query) => {

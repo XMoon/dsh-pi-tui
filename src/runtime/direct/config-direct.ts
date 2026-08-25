@@ -31,7 +31,6 @@ import type {
   PermissionConfig,
   PresetDefaultConfig,
   ProviderProfileConfig,
-  ProviderProfileTarget,
   TuiSettingsConfig,
 } from '../config-port.ts'
 
@@ -114,27 +113,31 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     return this.settings() !== undefined
   }
 
-  readSection(ns: string): unknown {
+  readSection(): unknown {
     const settings = this.settings()
     if (settings === undefined) return undefined
-    try {
-      return settings.get(ns)
-    } catch {
-      return undefined
-    }
+    // The llm-pi-ai section is the ONLY provider-config section this
+    // adapter owns — a consumer never names a namespace (the no-schema-
+    // knowledge rule). The value is a DETACHED copy: the caller can never
+    // alias or mutate the Host's live document.
+    return detachedSection(settings.get(settingsNamespace('llm-pi-ai')))
   }
 
   readPiAiProviders(): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
-    const settings = this.settings()
-    if (settings === undefined) return undefined
-    try {
-      const section = settings.get(settingsNamespace('llm-pi-ai')) as
-        | { providers?: Record<string, { apiKeyEnv?: string } | undefined> }
-        | undefined
-      return section?.providers
-    } catch {
-      return undefined
+    const section = this.readSection() as
+      | { providers?: Record<string, { apiKeyEnv?: string } | undefined> }
+      | undefined
+    if (section === undefined) return undefined
+    const providers = section.providers
+    if (providers === undefined) return undefined
+    // Detached copy of the providers dict (route → apiKeyEnv only).
+    const out: Record<string, { apiKeyEnv?: string } | undefined> = {}
+    for (const [route, profile] of Object.entries(providers)) {
+      out[route] = profile === undefined || typeof profile !== 'object' || profile === null
+        ? profile
+        : { ...(typeof profile.apiKeyEnv === 'string' ? { apiKeyEnv: profile.apiKeyEnv } : {}) }
     }
+    return out
   }
 
   async writeProfile(route: string, profile: Record<string, unknown>): Promise<void> {
@@ -145,13 +148,45 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     ])
   }
 
-  async writeKeylessProfile(target: ProviderProfileTarget): Promise<void> {
+  async writeKeylessProfile(route: string): Promise<void> {
     const settings = this.settings()
-    if (settings === undefined) return
-    await settings.mutate(target.settingsNs, [
-      { op: 'set', path: [...target.settingsPath], value: {} },
+    if (settings === undefined) throw new Error('settings service unavailable')
+    // The route's profile location is resolved INTERNALLY: the provider
+    // directory entry when the llm service names one, else the
+    // conventional llm-pi-ai providers slot. A route the directory does
+    // not offer (and that is not the conventional fallback) writes
+    // nothing — an arbitrary namespace/path can never reach the mutate.
+    const entry = this.ctx.get('llm') as
+      | { listConfigurableProviders(): readonly ProviderCatalogEntryLike[] }
+      | undefined
+    const directoryEntry = entry?.listConfigurableProviders().find(candidate => candidate.provider === route)
+    const ns = directoryEntry?.settingsNs ?? 'llm-pi-ai'
+    const path = directoryEntry !== undefined && directoryEntry.settingsPath.length > 0
+      ? [...directoryEntry.settingsPath]
+      : ['providers', route]
+    await settings.mutate(ns, [
+      { op: 'set', path, value: {} },
     ])
   }
+}
+
+/** A JSON-safe DETACHED copy of one settings section (settings documents
+ * are zod-validated plain JSON; a hostile/uncloneable value degrades to
+ * undefined — never aliased, never thrown on). */
+function detachedSection(value: unknown): unknown {
+  try {
+    return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
+  } catch {
+    return undefined
+  }
+}
+
+/** The structural provider-directory entry shape (the catalog port's
+ * DTO — the adapter reads the llm service through the same shape). */
+interface ProviderCatalogEntryLike {
+  readonly provider: string
+  readonly settingsNs: string
+  readonly settingsPath: readonly string[]
 }
 
 /** The Direct credentials config (`ctx.credentials` + the credential
@@ -189,16 +224,24 @@ export class DirectCredentialConfig implements CredentialConfig {
     await credentials.deleteRecord(key as CredentialKey)
   }
 
-  describeReference(ref: string): Promise<{ configured: boolean; source?: string }> {
+  async describeReference(ref: string): Promise<{ configured: boolean; source?: string }> {
     const credentials = this.credentials()
-    if (credentials === undefined) return Promise.resolve({ configured: false })
-    return credentials.describe(ref)
+    if (credentials === undefined) return { configured: false }
+    const info = await credentials.describe(ref)
+    // Detached copy (the service record is Host-owned).
+    return { configured: info.configured, ...typeof info.source === 'string' ? { source: info.source } : {} }
   }
 
-  listRecords(): Promise<readonly { key: string; kind?: string }[]> {
+  async listRecords(): Promise<readonly { key: string; kind?: string }[]> {
     const credentials = this.credentials()
-    if (credentials === undefined) return Promise.resolve([])
-    return credentials.listRecords()
+    if (credentials === undefined) return []
+    const records = await credentials.listRecords()
+    // Detached copies (presence + kind only; a secret never leaves the
+    // credentials service, and the records are never aliased).
+    return records.map(record => ({
+      key: record.key,
+      ...typeof record.kind === 'string' ? { kind: record.kind } : {},
+    }))
   }
 
   onChanged(listener: () => void): void {
@@ -226,7 +269,10 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
 
   listTargets(): readonly AuthorizationTarget[] {
     const authorization = this.authorization()
+    // Detached copies — the method OBJECTS are cloned too (a shallow
+    // array copy would still alias the Host's method rows).
     return authorizationTargets(authorization?.list() ?? [])
+      .map(target => ({ ...target, methods: target.methods.map(method => ({ ...method })) }))
   }
 
   begin(request: {
@@ -261,7 +307,8 @@ export class DirectPermissionConfig implements PermissionConfig {
 
   presetNames(): readonly string[] {
     const permission = this.ctx.get('permissionPresets') as PermissionPresetsServiceLike | undefined
-    return permission?.names ?? []
+    // Detached copy (the service's table is Host-owned).
+    return [...(permission?.names ?? [])]
   }
 
   defaultPreset(): string | undefined {
@@ -293,6 +340,12 @@ export class DirectPermissionConfig implements PermissionConfig {
     if (commands === undefined) return { kind: 'unavailable', cause: 'commands' }
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return { kind: 'unavailable', cause: 'permission' }
+    // The preset id is validated against the composed table BEFORE it
+    // reaches the official command line: an id the deployment does not
+    // offer (or a hostile id with command-line metacharacters) is refused
+    // as unavailable — it can never be interpolated into an arbitrary
+    // /permission invocation.
+    if (!this.presetNames().includes(presetId)) return { kind: 'unavailable', cause: 'permission' }
     const execution = await commands.execute(agent, `/permission ${presetId}`, [], signal)
     if (execution === undefined) return { kind: 'unavailable', cause: 'permission' }
     return { kind: 'applied' }

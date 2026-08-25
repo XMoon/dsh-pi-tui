@@ -379,6 +379,12 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
  * the HOST filesystem through the port, never the local fs. */
 export type HostReferencesSeam = import('./runtime/host-file-port.ts').HostFilePort
 
+/** The completion scope of one MentionProvider instance: the runner
+ * resolves it at install time (the live SESSION when one exists, the
+ * workspace cwd otherwise) so the port is addressed by HOST identity —
+ * never by a client-side path assumption. */
+export type MentionScope = import('./runtime/host-file-port.ts').HostFileScope
+
 /**
  * The editor's autocomplete provider: `@` mentions through the Host-file
  * port (the Direct adapter runs the fd whole-tree fuzzy search or the
@@ -391,6 +397,7 @@ export class MentionProvider implements AutocompleteProvider {
   private readonly inner: CombinedAutocompleteProvider
   private readonly workDir: string
   private readonly fileReferences: HostReferencesSeam
+  private readonly scope: MentionScope
   /** The slash commands whose argument completion is a PATH (the host
    * attaches `getArgumentCompletions`, e.g. `/image`): ONLY these tolerate
    * a trailing-space argument as a Tab file-completion site — every other
@@ -407,10 +414,12 @@ export class MentionProvider implements AutocompleteProvider {
     workDir: string,
     fileReferences: HostReferencesSeam,
     inputModeSource: () => EditorInputMode = () => 'prompt',
+    scope: MentionScope = { kind: 'workspace', cwd: workDir },
   ) {
     this.workDir = workDir
     this.fileReferences = fileReferences
     this.inputModeSource = inputModeSource
+    this.scope = scope
     // The fork's fdPath is null: the `@` branch is intercepted below and
     // routed through the port, so the fork never sees an `@` prefix here.
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
@@ -475,13 +484,20 @@ export class MentionProvider implements AutocompleteProvider {
     if (atPrefix !== null) {
       // The Host-file discovery owns the fd/fallback decision (migration
       // M1.10); an empty result is a null suggestion, exactly like the
-      // pre-migration fd and fallback paths.
-      const candidates = await this.fileReferences.listReferences(
-        { kind: 'workspace', cwd: this.workDir },
-        atPrefix,
-        { signal: options.signal },
-      )
-      if (candidates.length === 0) return null
+      // pre-migration fd and fallback paths. The port is addressed by the
+      // runner-resolved SCOPE (session identity when live), never a
+      // client-side path assumption. A port rejection degrades to no
+      // suggestions (the editor must never crash on a discovery failure),
+      // and an aborted request is re-checked AFTER the await: a late
+      // result can never overwrite newer suggestions (the fork's own
+      // post-await abort check, applied to the port branch).
+      let candidates: readonly import('./runtime/host-file-port.ts').HostFileCandidate[]
+      try {
+        candidates = await this.fileReferences.listReferences(this.scope, atPrefix, { signal: options.signal })
+      } catch {
+        return null
+      }
+      if (options.signal.aborted || candidates.length === 0) return null
       return {
         prefix: atPrefix,
         items: candidates.map(candidate => ({
