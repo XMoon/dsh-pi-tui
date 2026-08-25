@@ -187,3 +187,36 @@ test('usage: no context window and no cache facts stay absent', () => {
   assert.equal(usage.context, undefined)
   assert.equal(usage.cacheHitPct, undefined)
 })
+
+test('usage: the context override wins over the measured window', () => {
+  // The runner passes the tokenMeter's measurement as the override: the
+  // derived context uses THAT (the stats window is the fallback).
+  const usage = usageFromStats(STATS, 50_000)
+  assert.deepEqual(usage.context, { usedTokens: 50000, windowTokens: 1_000_000, percent: 5 })
+})
+
+test('usage: zero/negative windows clamp and never divide by zero', () => {
+  const zero = usageFromStats({ ...STATS, contextWindow: 0 })
+  assert.equal(zero.context, undefined, 'a zero window must not fabricate a context bar')
+  const negative = usageFromStats({ ...STATS, contextWindow: -100 })
+  assert.equal(negative.context, undefined, 'a negative window must not fabricate a context bar')
+  // The override path clamps too: an over-100% measurement caps at 100.
+  const over = usageFromStats({ ...STATS, contextWindow: 10 }, 50_000)
+  assert.deepEqual(over.context, { usedTokens: 50000, windowTokens: 10, percent: 100 })
+})
+
+test('usage: cache-write-only data carries its own hit percentage', () => {
+  const usage = usageFromStats({ ...STATS, cacheReadTokens: 0, cacheWriteTokens: 500 })
+  assert.deepEqual(usage.tokens, { input: 2579, output: 5507, cacheRead: 0, cacheWrite: 500 })
+  assert.equal(usage.cacheHitPct, 91.9, 'the cache hit percent is the stats fact, independent of the read/write split')
+})
+
+test('activity: nonzero child counts ride the section', () => {
+  const status = deriveActivityStatus(
+    { working: false, compacting: false, applyingCompaction: false, approvalOpen: false, questionOpen: false },
+    false,
+    { queuedCount: 0, taskCount: 0, childAgentCount: 4, todoCount: 0 },
+  )
+  assert.equal(status.childAgentCount, 4)
+  assert.equal(status.taskCount, 0)
+})

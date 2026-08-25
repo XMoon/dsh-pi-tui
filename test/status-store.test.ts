@@ -46,9 +46,17 @@ test('same-value updates do not notify (no render storm)', () => {
   // Same section object again: no change.
   store.update({ workspace })
   assert.equal(notified, 1)
-  // A NEW object with equal content IS a change (identity semantics).
+  // A NEW object with equal CONTENT is also no change: the runner's
+  // derives and the app's projections mint fresh objects on every call,
+  // so an identical refresh must never churn the revision nor wake
+  // listeners/command refreshes (structural no-notify contract).
   store.update({ workspace: { cwd: '/a/b' } })
+  assert.equal(notified, 1)
+  assert.equal(store.revision(), 1)
+  // A genuinely different value IS a change.
+  store.update({ workspace: { cwd: '/x' } })
   assert.equal(notified, 2)
+  assert.equal(store.revision(), 2)
 })
 
 test('replace swaps the whole snapshot and notifies once', () => {

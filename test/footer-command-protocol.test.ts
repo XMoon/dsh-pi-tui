@@ -48,3 +48,37 @@ test('the payload never carries live objects or secrets', () => {
     assert.ok(!json.toLowerCase().includes(forbidden.toLowerCase()), `forbidden field leaked: ${forbidden}`)
   }
 })
+
+test('the payload is an EXACT allow-list: unknown snapshot fields never reach the command', () => {
+  // A hostile/legacy snapshot carrying sensitive extra fields: the
+  // protocol builder must project ONLY its declared keys — JSON.stringify
+  // of the input proves the allow-list byte-for-byte.
+  const snap = mutableSnapshot()
+  ;(snap as unknown as Record<string, unknown>).sessionEvents = [{ kind: 'user', text: 'secret prompt' }]
+  ;(snap as unknown as Record<string, unknown>).apiKeys = { provider: 'sk-secret' }
+  snap.workspace = { cwd: '/ws', branch: 'main' } as never
+  const input = buildCommandInput(snap, 80, 24)
+  const json = JSON.stringify(input)
+  const allowed = [
+    'schemaVersion', 'surface', 'width', 'height', 'fullscreen', 'focusedSeat',
+    'view', 'subject', 'composition', 'access', 'collaboration', 'plan',
+    'interaction', 'workspace', 'cwd', 'activity', 'usage', 'host',
+  ]
+  // Every declared key is present.
+  for (const key of allowed) assert.ok(json.includes(`"${key}"`), `allowed key missing: ${key}`)
+  // The injected sensitive fields are absent (no raw prompt, no secret).
+  assert.ok(!json.includes('secret prompt'), 'raw prompts must never reach the command')
+  assert.ok(!json.includes('sk-secret'), 'api keys must never reach the command')
+  assert.ok(!json.includes('sessionEvents'), 'session events must never reach the command')
+  assert.ok(!json.includes('apiKeys'), 'unknown snapshot fields must never reach the command')
+})
+
+test('tool arguments and environment dumps are absent from the allowed surface', () => {
+  const snap = mutableSnapshot()
+  // A snapshot whose workspace/usage are decorated with lookalike fields.
+  const input = buildCommandInput(snap, 100, 30)
+  const json = JSON.stringify(input)
+  for (const forbidden of ['toolArguments', 'env', 'argv', 'stdoutBuffer', 'promptText']) {
+    assert.ok(!json.toLowerCase().includes(forbidden.toLowerCase()), `forbidden field leaked: ${forbidden}`)
+  }
+})

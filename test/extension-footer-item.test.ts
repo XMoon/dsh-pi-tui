@@ -229,6 +229,16 @@ test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the
     await fiberA
     const keyA = canonicalKey(service, 'chrome.footer.item', 'quota')
     assert.ok(hostFooterIds(app).includes(keyA), `owner-a key missing: ${keyA}`)
+    // A PERSISTED layout references the canonical key (the plan's HMR
+    // recovery contract: the reference is kept across unload/reload and
+    // recovers when the plugin comes back).
+    app.setFooterLayout({
+      schemaVersion: 1,
+      rows: [{ left: [{ id: keyA }], right: [] }],
+    })
+    app.setStatus({})
+    await vt.waitForRender()
+    assert.ok(vt.getViewport().join('\n').includes('A'), 'the layout must render the live item first')
     await (fiberA as { dispose(): Promise<void> }).dispose()
     await settle()
     assert.ok(!hostFooterIds(app).includes(keyA), `the unloaded owner's key must disappear: ${keyA}`)
@@ -248,8 +258,9 @@ test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the
     await settle()
 
     // HMR RELOAD of the SAME plugin: the new fiber gets a new uid but the
-    // SAME name — the canonical key must be IDENTICAL so a persisted
-    // layout referencing ext:<owner>/<id> recovers automatically.
+    // SAME name — the canonical key must be IDENTICAL, and the PERSISTED
+    // layout (set above, still active) must recover automatically: the
+    // item renders again without any layout change.
     const fiberC = ctx.plugin({ name: 'quota-a', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as PiTuiExtensionServiceLike
       svc.register<FooterItemContribution>('chrome.footer.item', { id: 'quota' }, {
@@ -260,16 +271,12 @@ test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the
     const keyC = canonicalKey(service, 'chrome.footer.item', 'quota')
     assert.equal(keyC, keyA, 'a reloaded plugin must recover the SAME config key')
     assert.ok(hostFooterIds(app).includes(keyC), `the recovered key must be live: ${keyC}`)
-    // The layout reference resolves again: a persisted layout pointing at
-    // the recovered key renders the reloaded plugin's item.
-    app.setFooterLayout({
-      schemaVersion: 1,
-      rows: [{ left: [{ id: keyC }], right: [] }],
-    })
+    // The persisted layout still points at the key: the reloaded item
+    // renders WITHOUT touching the layout.
     app.setStatus({})
     await vt.waitForRender()
     const view = vt.getViewport().join('\n')
-    assert.ok(view.includes('A2'), `the recovered item must render:\n${view}`)
+    assert.ok(view.includes('A2'), `the recovered item must render in the persisted layout:\n${view}`)
     await (fiberC as { dispose(): Promise<void> }).dispose()
     await settle()
 

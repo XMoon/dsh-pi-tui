@@ -33,6 +33,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Terminal control characters (C0, DEL and C1): a layout is display
+ * decoration — ESC/OSC/CSI sequences must never reach the terminal through
+ * a prefix/suffix/separator (a project-supplied layout could otherwise
+ * inject title/clipboard/cursor/screen sequences). */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/
+
 /** Narrow a parse result onto the error arm (the ref type has no kind). */
 function isError<T>(value: T | FooterLayoutError): value is FooterLayoutError {
   return (value as FooterLayoutError).kind === 'error'
@@ -66,11 +72,17 @@ function parseItemRef(input: unknown, index: number): FooterItemRef | FooterLayo
     if (typeof input.prefix !== 'string' || input.prefix.length > MAX_PREFIX_SUFFIX_LENGTH) {
       return { kind: 'error', message: `item ${index}: prefix must be a string of at most ${MAX_PREFIX_SUFFIX_LENGTH} chars` }
     }
+    if (CONTROL_CHARS.test(input.prefix)) {
+      return { kind: 'error', message: `item ${index}: prefix must not contain terminal control characters` }
+    }
     ref.prefix = input.prefix
   }
   if (input.suffix !== undefined) {
     if (typeof input.suffix !== 'string' || input.suffix.length > MAX_PREFIX_SUFFIX_LENGTH) {
       return { kind: 'error', message: `item ${index}: suffix must be a string of at most ${MAX_PREFIX_SUFFIX_LENGTH} chars` }
+    }
+    if (CONTROL_CHARS.test(input.suffix)) {
+      return { kind: 'error', message: `item ${index}: suffix must not contain terminal control characters` }
     }
     ref.suffix = input.suffix
   }
@@ -86,8 +98,10 @@ function parseItemRef(input: unknown, index: number): FooterItemRef | FooterLayo
 
 function parseRow(input: unknown, index: number): FooterRowLayout | FooterLayoutError {
   if (!isRecord(input)) return { kind: 'error', message: `row ${index}: expected an object` }
-  const leftInput = input.left ?? []
-  const rightInput = input.right ?? []
+  // Only an ABSENT zone is omitted; an explicit null/non-array is a
+  // malformed document (fail-soft, never silently coerced).
+  const leftInput = input.left === undefined ? [] : input.left
+  const rightInput = input.right === undefined ? [] : input.right
   if (!Array.isArray(leftInput) || !Array.isArray(rightInput)) {
     return { kind: 'error', message: `row ${index}: left/right must be arrays` }
   }
@@ -116,6 +130,9 @@ function parseRow(input: unknown, index: number): FooterRowLayout | FooterLayout
     const text = input.separator.text
     if (typeof text !== 'string' || text.length > MAX_SEPARATOR_LENGTH) {
       return { kind: 'error', message: `row ${index}: separator text must be a string of at most ${MAX_SEPARATOR_LENGTH} chars` }
+    }
+    if (CONTROL_CHARS.test(text)) {
+      return { kind: 'error', message: `row ${index}: separator text must not contain terminal control characters` }
     }
     row.separator = { text }
     if (input.separator.tone !== undefined) {

@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseFooterCommandConfig, resolveTrustedFooterCommand } from '../src/footer/command-trust.ts'
+import { parseFooterCommandConfig, resolveTrustedFooterCommand, resolveUserLayerFooterMode } from '../src/footer/command-trust.ts'
 
 const NS = 'dsh-pi-tui'
 
@@ -69,4 +69,22 @@ test('bounds clamp: timeout ≤ 1000, interval ≥ 1000, rows 1..2', () => {
   assert.equal(defaults.timeoutMs, 300)
   assert.equal(defaults.refreshIntervalMs, 1000)
   assert.equal(defaults.maxRows, 1)
+})
+
+test('command MODE must be user-layer-owned: a project flipping footer: command never arms the user command', () => {
+  // The user layer declares the COMMAND but not the MODE: the merged
+  // value may say command (a project layer), but the user never opted in
+  // — the mode resolver reports no user-owned command mode.
+  const commandOnly = resolveUserLayerFooterMode([descriptor({ footerCommand: { schemaVersion: 1, command: 'x' } })], NS)
+  assert.equal(commandOnly, undefined)
+  // The user layer declares BOTH: the mode is user-owned (armed).
+  const armed = resolveUserLayerFooterMode([descriptor({ footer: 'command', footerCommand: { schemaVersion: 1, command: 'x' } })], NS)
+  assert.equal(armed, 'command')
+  // A different user-owned mode stays visible (a project footer: command
+  // cannot override it).
+  const custom = resolveUserLayerFooterMode([descriptor({ footer: 'custom' })], NS)
+  assert.equal(custom, 'custom')
+  // Absent descriptors / user sections report undefined.
+  assert.equal(resolveUserLayerFooterMode(undefined, NS), undefined)
+  assert.equal(resolveUserLayerFooterMode([descriptor(undefined)], NS), undefined)
 })

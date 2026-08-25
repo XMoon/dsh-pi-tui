@@ -144,6 +144,39 @@ function main() {
     check('fixture module loads from the packed package', load.status === 0 && load.stdout.includes('fixture-module-ok'),
       load.status === 0 ? '' : load.stderr.slice(0, 400))
 
+    // 4b. EXECUTE apply() through a minimal Cordis context: the fixture's
+    //     register calls (header badge, dock item, footer segment AND the
+    //     configurable footer item) must run against the PACKED service
+    //     surface — feature detection first, then the registrations land
+    //     on the service ledger. The packed extension service is exported
+    //     through the subpath.
+    const applyRun = run(process.execPath, ['--input-type=module', '-e', `
+      import { apply as fixtureApply, name, inject } from '${join(fixtureDir, 'src', 'index.ts').replaceAll('\\', '/')}'
+      import { PI_TUI_EXTENSIONS_SERVICE } from '@xmoon76/dsh-pi-tui/extensions'
+      if (inject[0] !== 'tuiStartup' || inject[1] !== PI_TUI_EXTENSIONS_SERVICE) throw new Error('bad inject')
+      // A minimal service stand-in: the fixture only reads api() and
+      // register(). Feature-detect the slots, then count registrations.
+      const registrations = []
+      const ctx = {
+        get: () => ({
+          api: () => ({ capabilities: new Set([
+            'slot.chrome.header.badge', 'slot.input.dock.item',
+            'slot.chrome.footer.status', 'slot.chrome.footer.item',
+          ]) }),
+          register: (slot, spec, value) => { registrations.push({ slot, spec, value }) },
+        }),
+      }
+      fixtureApply(ctx)
+      const slots = registrations.map(r => r.slot).sort().join(',')
+      if (slots !== 'chrome.footer.item,chrome.footer.status,input.dock.item,chrome.header.badge') {
+        throw new Error('bad registrations: ' + slots)
+      }
+      console.log('fixture-apply-ok')
+    `], { cwd: fixtureDir })
+    check('fixture apply() registers every slot through the packed public surface',
+      applyRun.status === 0 && applyRun.stdout.includes('fixture-apply-ok'),
+      applyRun.status === 0 ? '' : applyRun.stderr.slice(0, 400))
+
     // 5. The fixture resolves @xmoon76/dsh-pi-tui/extensions through the
     //    packed subpath (import resolution check).
     const subpath = run(process.execPath, ['--input-type=module', '-e', `

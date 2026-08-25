@@ -86,11 +86,17 @@ export class FooterComposer {
       if (line !== '') lines.push(line)
     }
     if (instruction !== undefined) lines.push(renderInstruction(instruction))
+    // The tail row's ROLE decides its cap: the stats/instruction line is
+    // always one physical row (the legacy line-2 contract) — even when an
+    // empty first row makes it the ONLY logical line, it must never wrap
+    // past the footer budget. A single STATUS row (compact preset, no
+    // instruction) keeps the budgeted wrap.
+    const tailIsInstruction = instruction !== undefined
+    const tailIsStats = !tailIsInstruction && layout.rows.length > 1
     const physical: string[] = []
     lines.forEach((line, index) => {
-      const isLast = index === lines.length - 1
-      if (isLast && lines.length > 1) {
-        // The last row (stats/instruction) caps to one physical row.
+      const isTail = index === lines.length - 1
+      if (isTail && (tailIsInstruction || tailIsStats)) {
         const wrapped = wrapTextWithAnsi(line, width)
         physical.push(wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, width) : wrapped[0]!)
         return

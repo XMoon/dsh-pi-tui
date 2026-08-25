@@ -26,10 +26,14 @@ export interface FooterConfiguratorOptions {
   /** The live snapshot getter (the preview follows streaming state). */
   readonly snapshot: () => StatusSnapshot
   readonly composer: FooterComposer
-  readonly editorEmpty: boolean
-  readonly extensionFooterText: string
-  /** The overlay's row budget (the content windows around the cursor). */
-  readonly maxVisible: number
+  /** LIVE getters, not captured values: the preview reflects the current
+   * editor emptiness and extension footer text even while the panel is
+   * open (a draft typed under the overlay, an extension segment update). */
+  readonly editorEmpty: () => boolean
+  readonly extensionFooterText: () => string
+  /** The overlay's row budget source: re-read at EVERY render so a
+   * terminal resize never leaves the panel clipped or oversized. */
+  readonly maxVisible: () => number
   readonly onSave: (layout: FooterLayoutV1) => void
   readonly onCancel: () => void
 }
@@ -40,9 +44,9 @@ export class FooterConfiguratorPanel implements Component {
   private readonly registry: FooterItemRegistry
   private readonly snapshot: () => StatusSnapshot
   private readonly composer: FooterComposer
-  private readonly editorEmpty: boolean
-  private readonly extensionFooterText: string
-  private readonly maxVisible: number
+  private readonly editorEmpty: () => boolean
+  private readonly extensionFooterText: () => string
+  private readonly maxVisible: () => number
   private readonly onSave: (layout: FooterLayoutV1) => void
   private readonly onCancel: () => void
   /** The fork dispatches input to the focused component's handleInput. */
@@ -148,16 +152,17 @@ export class FooterConfiguratorPanel implements Component {
       snapshot: this.snapshot(),
       layout: this.model.preview(),
       width,
-      context: { editorEmpty: this.editorEmpty, extensionFooterText: this.extensionFooterText },
+      context: { editorEmpty: this.editorEmpty(), extensionFooterText: this.extensionFooterText() },
     })
     for (const row of preview.split('\n')) lines.push(row)
     lines.push(rule)
     lines.push(color.textMuted('↑/↓ select · Space toggle · ←/→ move zone · Shift+↑/↓ reorder · Tab row / Shift+Tab zone · F format · Enter save · Esc cancel'))
     // The overlay clamps to its height budget: window the content around
     // the cursor so the active row is always visible (the plan's unified
-    // scrollport discipline).
+    // scrollport discipline). The budget is re-read EVERY render — a
+    // resize while the panel is open is picked up immediately.
     const cursorRow = this.cursorRow(state, lines)
-    const budget = Math.max(8, this.maxVisible)
+    const budget = Math.max(8, this.maxVisible())
     if (lines.length <= budget) return lines
     const top = Math.max(0, Math.min(cursorRow - Math.floor(budget / 2), lines.length - budget))
     return lines.slice(top, top + budget)
@@ -211,8 +216,8 @@ export class FooterConfiguratorPanel implements Component {
     if (def === undefined) return ''
     try {
       const segment = def.render(this.snapshot(), ref, 'preferred', {
-        editorEmpty: this.editorEmpty,
-        extensionFooterText: this.extensionFooterText,
+        editorEmpty: this.editorEmpty(),
+        extensionFooterText: this.extensionFooterText(),
       })
       if (segment === null) return color.textMuted('(unavailable)')
       const text = renderSpans(segment.spans)

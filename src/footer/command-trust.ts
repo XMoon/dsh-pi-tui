@@ -78,3 +78,23 @@ export function resolveTrustedFooterCommand(
   const raw = (user as Record<string, unknown>).footerCommand
   return parseFooterCommandConfig(raw)
 }
+
+/**
+ * Resolve the USER layer's declared footer mode. Command mode must be
+ * user-layer-owned as well: a project can flip the MERGED `footer:
+ * command`, but the gate never lets a project config silently trigger the
+ * user's command — the user layer must declare the command mode too.
+ * @returns the user layer's footer value, or undefined when absent.
+ */
+export function resolveUserLayerFooterMode(
+  descriptors: readonly SettingsDescriptorLike[] | undefined,
+  namespace: string,
+): string | undefined {
+  if (descriptors === undefined) return undefined
+  const descriptor = descriptors.find(entry => entry.ns === namespace)
+  if (descriptor === undefined) return undefined
+  const user = descriptor.user
+  if (typeof user !== 'object' || user === null) return undefined
+  const mode = (user as Record<string, unknown>).footer
+  return typeof mode === 'string' ? mode : undefined
+}

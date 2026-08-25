@@ -323,8 +323,12 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   vt.sendInput(' ')
   vt.sendInput('\r')
   // The write fails: the memory commit must NOT happen (the old layout
-  // stays) — the apply is deferred until the write succeeds.
-  await new Promise(resolve => setTimeout(resolve, 50))
+  // stays) — the apply is deferred until the write succeeds. Poll a
+  // bounded window for any (wrong) apply, then assert none happened.
+  const deadline = Date.now() + 300
+  while (applied.length === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
   assert.equal(applied.length, 0, 'a failed write must not apply the layout')
   assert.equal(app.getFooterMode(), 'default', 'the old layout must stay active')
   app.stop()

@@ -234,3 +234,81 @@ test('a throwing item is isolated (omitted, never crashes the composer)', () => 
   assert.ok(actual.includes('[deepseek/flash]'), `the surviving item must render:\n${actual}`)
   assert.ok(!actual.includes('boom'), `the throwing item must be omitted:\n${actual}`)
 })
+
+/** Deep-mutable build shape (the snapshot is deeply readonly). */
+type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
+
+test('independent golden vectors lock the composed output (wide/narrow/compact)', () => {
+  const snap = mainSnapshot()
+  // Hand-verified fixed vectors (independent of the legacyFooter oracle).
+  assert.equal(
+    composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
+      .replace(/\x1b\[[0-9;]*m/g, ''),
+    '[workspace-write]  [deepseek/flash]  x/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0 tok/s',
+  )
+  assert.equal(
+    composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
+      .replace(/\x1b\[[0-9;]*m/g, ''),
+    '[workspace-write]  [deepseek/flash]\nx/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0…',
+  )
+  assert.equal(
+    composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 20, context: CONTEXT })
+      .replace(/\x1b\[[0-9;]*m/g, ''),
+    '[workspace-write]\n[deepseek/flash]\nx/proj  main…\n↑1.2k ↓3.4k | LLM…',
+  )
+  assert.equal(
+    composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
+      .replace(/\x1b\[[0-9;]*m/g, ''),
+    '[workspace-write]  [deepseek/flash]  x/proj  main  [███░░░░░░░░░] 25%  t2/s5',
+  )
+  // The dim pass wraps EVERY physical row in the textDim SGR pair.
+  const ansi = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
+  assert.equal(ansi, '\x1b[38;2;136;136;136m\x1b[38;2;224;224;224m[workspace-write]\x1b[39m\x1b[38;2;136;136;136m  [deepseek/flash]  x/proj  main  \x1b[38;2;79;168;255m[███░░░░░░░░░]\x1b[39m\x1b[38;2;136;136;136m 25%  t2/s5\x1b[39m')
+})
+
+test('a stats row that becomes the ONLY logical line still caps to one physical row', () => {
+  // A 2-row layout whose FIRST row renders empty (every item unavailable,
+  // e.g. an unloaded extension item): the stats row must not wrap past
+  // one physical row (the legacy line-2 contract).
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.usage = {
+    tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
+    performance: { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 },
+    turns: 2,
+    steps: 5,
+  }
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [
+        { left: [{ id: 'ext:gone/unknown' }], right: [] },
+        { left: [{ id: 'stats-line' }], right: [] },
+      ],
+    },
+    width: 30,
+    context: CONTEXT,
+  })
+  const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = plain.split('\n')
+  assert.equal(lines.length, 1, `the stats row must cap to one physical row:\n${plain}`)
+  assert.ok(plain.includes('↑1.2k'), `the stats content must survive:\n${plain}`)
+  assert.ok(plain.includes('…'), `an overlong stats row must carry the cap marker:\n${plain}`)
+})
+
+test('the instruction as the ONLY logical line caps to one physical row', () => {
+  // A 1-row layout whose status row renders empty + the Ctrl+C
+  // instruction: the instruction (the tail role) caps to one row.
+  const snap = emptyStatusSnapshot()
+  const text = composer.render({
+    snapshot: snap,
+    layout: { schemaVersion: 1, rows: [{ left: [{ id: 'ext:gone/unknown' }], right: [] }] },
+    width: 30,
+    context: CONTEXT,
+    instruction: { id: 'ctrl-c-exit', text: [{ text: 'Press Ctrl+C again to exit — this hint is deliberately long' }], priority: 100 },
+  })
+  const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = plain.split('\n')
+  assert.equal(lines.length, 1, `the instruction must cap to one physical row:\n${plain}`)
+  assert.ok(plain.includes('Press Ctrl+C'), `the hint must survive:\n${plain}`)
+})
