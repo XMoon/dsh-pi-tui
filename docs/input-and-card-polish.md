@@ -697,6 +697,20 @@ rounds (codex / gpt-5.6-luna):
   tests: a plugin-consumed key pushes the fresh snapshot to
   subscribers; a prompt-semantics plugin seat never gets the hidden
   host's synthetic prefix.
+- **Round 21**: P1 — the ADVANCED editor controls' `setEditorText`
+  wrote the draft RAW through the seat, so replacing a shell-mode draft
+  with plain text left the stale `!`/`!!` mode active and the
+  replacement submitted as a shell command (FIXED: the advanced setter
+  now routes through `setSeatSerializedInput` — the host editor decodes
+  serialized input, a plugin editor gets the raw text); P2 — the
+  async-polling test helpers were flagged AGAIN as fixed-delay polling
+  (BY DESIGN, re-confirmed: `waitForRender` itself — the repository's
+  established async-test helper — is a 20ms-delay flush, and the
+  same waitForDropdownRow poll-until-deadline shape ships in
+  tui-editor.test.ts; poll-until-deadline with a condition check is the
+  repository's async-UI pattern, never a timing assertion). Regression
+  test: advanced controls replace a shell-mode draft through the wire
+  boundary (plain text clears the mode; serialized text re-enters it).
 
 The full-suite tests (2060+), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the

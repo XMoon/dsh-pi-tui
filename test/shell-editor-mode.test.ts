@@ -1939,3 +1939,30 @@ test('completion uses the VISIBLE seat mode — a hidden host shell mode never l
   app.reconcileEditorNow()
   app.stop()
 })
+
+// ── review round: advanced editor controls honor the shell boundary ───────
+
+test('advanced editor controls replace a shell-mode draft through the wire boundary', async () => {
+  const { vt, app, submitted } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('pwd')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  // A plugin replaces the draft with PLAIN text: the serialized decode
+  // must clear the shell mode, so the replacement submits as prose.
+  app.advancedEditorControls().setEditorText('plain prose')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'prompt', 'a raw replacement must not keep the stale shell mode')
+  assert.equal(app.seatTextForTest(), 'plain prose')
+  vt.sendInput('\r')
+  assert.deepEqual(submitted, ['plain prose'], 'the replacement submits as plain text, never as a shell command')
+  // Replacing with a SERIALIZED draft re-enters the shell mode.
+  app.advancedEditorControls().setEditorText('!pwd')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context', 'a serialized replacement decodes into the shell mode')
+  assert.equal(app.seatTextForTest(), 'pwd')
+  vt.sendInput('\r')
+  assert.deepEqual(submitted, ['plain prose', '!pwd'])
+  app.stop()
+})
