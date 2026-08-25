@@ -122,3 +122,22 @@ test('pre-push hook: quiet mode prints only the summary line', () => {
   assert.equal(lines.length, 1, out)
   assert.match(lines[0], /pre-push verification passed/)
 })
+
+test('pre-push hook: QUIET takes precedence over VERBOSE (P3) — one summary line, no stream', () => {
+  const stage = tmpScript('#!/bin/sh\necho "quiet-stream-line"\n')
+  try {
+    const { code, out } = runHook(FEAT, {
+      PUSH_GATE_QUIET: '1',
+      PUSH_GATE_VERBOSE: '1',
+      PUSH_GATE_TEST_MODE: '1',
+      PUSH_GATE_STAGES: stage.path,
+    })
+    assert.equal(code, 0, out)
+    const lines = out.trim().split('\n')
+    assert.equal(lines.length, 1, `QUIET+VERBOSE must still be one line, got ${lines.length}:\n${out}`)
+    assert.match(lines[0], /pre-push verification passed/)
+    assert.ok(!out.includes('quiet-stream-line'), `verbose stream must be suppressed under QUIET:\n${out}`)
+  } finally {
+    stage.cleanup()
+  }
+})
