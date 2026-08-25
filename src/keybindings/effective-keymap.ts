@@ -242,6 +242,15 @@ export class EffectiveKeymap {
     return [...keys]
   }
 
+  /** Every ACTIVE key across all rules (conflict detection: the leader
+   * prefix must not collide with an active direct key — PR review
+   * finding). */
+  activeKeys(): KeyId[] {
+    const keys = new Set<KeyId>()
+    for (const rule of this.activeRules) keys.add(rule.key)
+    return [...keys]
+  }
+
   /** The primary (first) effective key of one action, or undefined. */
   primaryKeyFor(action: string): KeyId | undefined {
     const keys = this.keysFor(action)

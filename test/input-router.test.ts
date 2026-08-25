@@ -18,9 +18,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { InputRouter } from '../src/input-router.ts'
-import { RESERVED_HOST_KEYS } from '../src/keybinding-registry.ts'
 import type { NormalizedKey, TuiAction } from '../src/extension/public-types.ts'
 
+/** The default context: NO host action resolves anything (the effective
+ * keymap is empty) — so no key is runtime-reserved. Tests that need the
+ * OLD reserved behavior pass `hostResolves` explicitly. */
 function context(overrides: Partial<Parameters<InputRouter['route']>[1]> = {}): Parameters<InputRouter['route']>[1] {
   return {
     questionActive: false,
@@ -28,12 +30,13 @@ function context(overrides: Partial<Parameters<InputRouter['route']>[1]> = {}): 
     viewerInputMode: 'none',
     hasOverlay: false,
     searchActive: false,
+    hostResolves: () => false,
     ...overrides,
   }
 }
 
 function router(): InputRouter {
-  return new InputRouter(RESERVED_HOST_KEYS)
+  return new InputRouter()
 }
 
 function noBindings(): (key: NormalizedKey) => TuiAction | undefined {
@@ -94,11 +97,21 @@ test('InputRouter: the interactive (continuable) viewer keeps the editor live as
   // bindings LAST in the ladder — but its route is NOT viewer-editor.
   const chord = r.route('\x1b\x18', interactive, () => 'open-search' as TuiAction)
   assert.equal(chord.kind, 'plugin-action')
-  // Reserved keys stay consumed (the HOST consumes Enter and the parent
-  // chords BEFORE the router — see the TuiApp-level tests).
-  assert.equal(r.route('\r', interactive, noBindings()).kind, 'consumed')
-  assert.equal(r.route('\x1b[13;5u', interactive, noBindings()).kind, 'consumed')
-  assert.equal(r.route('\x1b[115;5u', interactive, noBindings()).kind, 'consumed')
+  // Active host keys stay consumed (the HOST consumes Enter and the
+  // parent chords — the TuiApp ladder runs BEFORE the router, and the
+  // router's action-driven reservation reports them consumed so a plugin
+  // can never claim them). In the unit context the host actions are
+  // explicit via hostResolves.
+  const withHost = context({
+    viewerInputMode: 'continuable',
+    hostResolves: (data) => data === '\r' || data === '\x1b[13;5u' || data === '\x1b[115;5u',
+  })
+  assert.equal(r.route('\r', withHost, noBindings()).kind, 'consumed')
+  assert.equal(r.route('\x1b[13;5u', withHost, noBindings()).kind, 'consumed')
+  assert.equal(r.route('\x1b[115;5u', withHost, noBindings()).kind, 'consumed')
+  // With NO active host action the same keys are NOT reserved — they
+  // route to the child editor (the remapped-away case).
+  assert.equal(r.route('\r', interactive, noBindings()).kind, 'viewer-editor')
 })
 
 test('InputRouter: a replacement editor inside the interactive viewer still routes editor-first', () => {
@@ -113,29 +126,50 @@ test('InputRouter: a replacement editor inside the interactive viewer still rout
   assert.equal(bindingCalls, 0, 'plugin bindings are not consulted before the editor route')
 })
 
-test('InputRouter: Ctrl+F transcript search is reserved from plugin bindings', () => {
+test('InputRouter: a key an ACTIVE host action binds is reserved from plugin bindings', () => {
   const r = router()
-  assert.equal(r.route('\x06', context(), () => 'open-search').kind, 'consumed')
+  // Ctrl+F with app.transcript.search active: the host ladder owns it —
+  // the router reports consumed so a plugin can never claim it.
+  const withHost = context({ hostResolves: (data) => data === '\x06' })
+  assert.equal(r.route('\x06', withHost, () => 'open-search').kind, 'consumed')
+  // The same key with NO active host action is NOT reserved — it falls
+  // through (the remapped-away old key case).
+  assert.equal(r.route('\x06', context(), () => 'open-search' as TuiAction).kind, 'plugin-action')
 })
 
-test('InputRouter: Ctrl+R input-history search is reserved from plugin bindings', () => {
+test('InputRouter: Ctrl+R is runtime-reserved only while a host action binds it', () => {
   const r = router()
+  const withHost = context({ hostResolves: (data) => data === '\x12' })
   // Legacy Ctrl+R is \x12; kitty/modifyOtherKeys reports ctrl+r too.
-  assert.equal(r.route('\x12', context(), () => 'open-search').kind, 'consumed')
-  // The key stays consumed under an overlay (the overlay owns it) and in
-  // the read-only viewer (the viewer locks everything except Esc/Ctrl+O).
+  assert.equal(r.route('\x12', withHost, () => 'open-search').kind, 'consumed')
+  // Under an overlay the overlay owns the key regardless.
   assert.equal(r.route('\x12', context({ hasOverlay: true }), () => 'open-search').kind, 'consumed')
+  // No host action → not reserved → plugin/editor path.
+  assert.equal(r.route('\x12', context(), () => 'open-search' as TuiAction).kind, 'plugin-action')
 })
 
-test('InputRouter: reserved host lifecycle keys never reach a plugin binding', () => {
+test('InputRouter: a remapped-away legacy host key falls through (action-driven reservation)', () => {
   const r = router()
-  // Ctrl+C is reserved: the host ladder handles it; the router reports the
-  // route as consumed BEFORE the plugin stage (the plugin can never claim
-  // it — the M5 registry already rejects registration).
-  const result = r.route('\x03', context(), () => 'open-search' as TuiAction)
+  // The PR review repro: app.clipboard.pasteMedia was remapped from
+  // Ctrl+V to Ctrl+P. Ctrl+V is NO LONGER an active host action — the
+  // router must NOT swallow it; it falls through to the editor/plugin.
+  const noHostForV = context({ hostResolves: () => false })
+  // The plugin can claim Ctrl+V now (it is not runtime-reserved).
+  assert.equal(r.route('\x16', noHostForV, () => 'open-search' as TuiAction).kind, 'plugin-action')
+  // With the host action STILL live on Ctrl+V, it stays consumed.
+  const hostOnV = context({ hostResolves: (data) => data === '\x16' })
+  assert.equal(r.route('\x16', hostOnV, () => 'open-search' as TuiAction).kind, 'consumed')
+})
+
+test('InputRouter: a reserved host lifecycle key never reaches a plugin binding when active', () => {
+  const r = router()
+  // Ctrl+C with the exit action active: consumed before the plugin stage.
+  const withExit = context({ hostResolves: (data) => data === '\x03' })
+  const result = r.route('\x03', withExit, () => 'open-search' as TuiAction)
   assert.equal(result.kind, 'consumed')
-  // Enter is reserved too.
-  const enter = r.route('\r', context(), () => 'open-search' as TuiAction)
+  // Enter with submit active: consumed (the host/editor owns it).
+  const withSubmit = context({ hostResolves: (data) => data === '\r' })
+  const enter = r.route('\r', withSubmit, () => 'open-search' as TuiAction)
   assert.equal(enter.kind, 'consumed')
 })
 
@@ -340,7 +374,7 @@ test('TuiApp: an untracked keybinding error is not reported under the key name',
   app.stop()
 })
 
-test('TuiApp: Enter / Ctrl+J / Ctrl+Enter never fire a plugin binding (round-1 P1)', async () => {
+test('TuiApp: active host lifecycle keys never fire a plugin binding (action-driven)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
   const vt = new VirtualTerminal(80, 24)
@@ -351,26 +385,62 @@ test('TuiApp: Enter / Ctrl+J / Ctrl+Enter never fire a plugin binding (round-1 P
     onExtensionAction: (action) => { actions.push(action) },
   }, {
     // A resolver that would claim EVERY key — the router must stop the
-    // reserved ones before it is consulted.
+    // ACTIVE host lifecycle ones before it is consulted.
     pluginActionFor: (key) => `open-search` as const,
   })
   app.start()
   await vt.waitForRender()
-  // Plain Enter (reserved): must NOT fire — the editor consumes it.
+  // Plain Enter: the editor consumes it (tui.input.submit) — never a
+  // plugin binding.
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.deepEqual(actions, [], 'Enter must never fire a plugin binding')
-  // Ctrl+J with no tasks (the host handler falls through): the reserved
-  // gate must still stop it.
-  vt.sendInput('\x1b[106;5u') // kitty ctrl+j — check normalization
-  await vt.waitForRender()
-  // Ctrl+Enter without an onQueueSubmit handler: reserved, must not fire.
+  // Ctrl+Enter (app.input.queue): an ACTIVE host action in the default
+  // keymap — consumed by the host ladder, never a plugin binding.
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
   await vt.waitForRender()
-  // Ctrl+O (reserved host fold toggle). Kitty ctrl+o = modifier 5.
+  // Ctrl+O (app.transcript.toggleExpand): ACTIVE host action — never a
+  // plugin binding. Kitty ctrl+o = modifier 5.
   vt.sendInput('\x1b[111;5u')
   await vt.waitForRender()
-  assert.deepEqual(actions, [], 'reserved keys must never fire a plugin binding')
+  assert.deepEqual(actions, [], 'active host lifecycle keys must never fire a plugin binding')
+  app.stop()
+})
+
+test('TuiApp: a key with NO active host action falls through to a plugin binding (remapped-away)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const actions: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onExtensionAction: (action) => { actions.push(action) },
+  }, {
+    // The PR review repro: a plugin binds Ctrl+V — legal AFTER the host
+    // remapped app.clipboard.pasteMedia away from Ctrl+V (action-driven
+    // reservation: no host action binds Ctrl+V anymore, so the plugin
+    // may claim it). With the DEFAULT keymap Ctrl+V IS a host action, so
+    // this plugin binding must NOT fire — verify both sides.
+    pluginActionFor: (key) => key.key === 'v' && key.ctrl ? 'open-search' as const : undefined,
+  })
+  app.start()
+  await vt.waitForRender()
+  // Default keymap: Ctrl+V is app.clipboard.pasteMedia (ACTIVE host
+  // action) — the host ladder consumes it, the plugin never sees it.
+  vt.sendInput('\x16')
+  await vt.waitForRender()
+  assert.deepEqual(actions, [], 'an active host action key must not reach a plugin binding')
+  // Remap pasteMedia away from Ctrl+V: now NOT reserved — but the host
+  // ladder also does not consume it, so with the HOST EDITOR in the seat
+  // the key reaches the editor (the plugin binding is consulted only for
+  // keys the editor declines; Ctrl+V is editor-owned copy). The key is
+  // never SWALLOWED: it reaches the editor instead of being dropped.
+  const { parseUserKeybindings } = await import('../src/keybindings/config.ts')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.clipboard.pasteMedia': 'ctrl+p' }))
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.length > 0, 'the surface keeps rendering after the remap')
   app.stop()
 })
 

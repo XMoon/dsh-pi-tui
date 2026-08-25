@@ -267,3 +267,99 @@ test('the read-only viewer lets a REMAPPED fold key reach the host fold (effecti
   assert.equal(app.isToolOutputExpanded(), !before, 'the old ctrl+o must stay inert inside the viewer')
   app.stop()
 })
+
+test('app.input.submit remap: the NEW key submits and Enter no longer does (PR review)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
+  await vt.waitForRender()
+  app.setDraft('hello')
+  await vt.waitForRender()
+  vt.sendInput('\x18') // ctrl+x — the remapped submit key
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['hello'], 'the remapped key must submit')
+  app.setDraft('again')
+  await vt.waitForRender()
+  vt.sendInput('\r') // Enter — must NOT submit anymore
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['hello'], 'Enter must no longer submit after the remap')
+  assert.equal(app.getDraft(), 'again', 'the draft survives a now-inert Enter')
+  app.stop()
+})
+
+test('app.input.submit disabled: Enter never submits (PR review)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
+  await vt.waitForRender()
+  app.setDraft('keep me')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [], 'a disabled submit must never fire')
+  assert.equal(app.getDraft(), 'keep me', 'the draft is untouched by the inert Enter')
+  app.stop()
+})
+
+test('leader key colliding with an active host key: disabled with a diagnostic (PR review)', () => {
+  const manager = new HostKeybindingManager()
+  // leader: ctrl+f collides with app.transcript.search's default ctrl+f.
+  manager.setUserConfiguration(parseUserKeybindings({ leader: 'ctrl+f', bindings: { 'app.tasks.open': '<leader>t' } }))
+  assert.equal(manager.leaderMachine(), undefined, 'the colliding leader must be disabled')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('leader key') && message.includes('active host key')),
+    `no collision diagnostic: ${manager.diagnosticsList().join(' | ')}`)
+  // A non-colliding leader still works.
+  manager.setUserConfiguration(parseUserKeybindings({ leader: 'ctrl+x', bindings: { 'app.tasks.open': '<leader>t' } }))
+  assert.ok(manager.leaderMachine() !== undefined, 'a non-colliding leader stays active')
+  assert.ok(!manager.diagnosticsList().some(message => message.includes('active host key')))
+})
+
+test('pasteMedia remapped: the OLD key is not swallowed by a stale reservation (PR review)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const pasted: number[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onClipboardPaste: () => { pasted.push(1) },
+  })
+  app.start()
+  await vt.waitForRender()
+  // Default: Ctrl+V fires pasteMedia.
+  vt.sendInput('\x16')
+  await vt.waitForRender()
+  assert.equal(pasted.length, 1, 'the default Ctrl+V must paste')
+  // Remap pasteMedia to Ctrl+P: Ctrl+V is no longer an ACTIVE host key —
+  // it must fall through to the editor (NOT be swallowed as a stale
+  // reservation, and NOT paste).
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.clipboard.pasteMedia': 'ctrl+p' }))
+  await vt.waitForRender()
+  vt.sendInput('\x16') // ctrl+v — old key
+  await vt.waitForRender()
+  assert.equal(pasted.length, 1, 'the remapped-away Ctrl+V must not paste')
+  vt.sendInput('\x10') // ctrl+p — the new paste key
+  await vt.waitForRender()
+  assert.equal(pasted.length, 2, 'the remapped Ctrl+P must paste')
+  app.stop()
+})
+
+test('exit multi-key binding: the footer hint advertises the Ctrl+C chord specifically (PR review)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.exit.request': ['ctrl+x', 'ctrl+c'] }))
+  await vt.waitForRender()
+  // Arm the Ctrl+C exit chord: the footer must advertise Ctrl+C (the
+  // chord's own key), never the generic primary (Ctrl+X).
+  app.setDraft('draft')
+  await vt.waitForRender()
+  vt.sendInput('\x03') // ctrl+c — first press clears the draft + arms
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Ctrl+C'), `the armed exit hint must name Ctrl+C:\n${view}`)
+  assert.ok(!view.includes('Press Ctrl+X'), `the hint must not name the generic primary:\n${view}`)
+  app.stop()
+})

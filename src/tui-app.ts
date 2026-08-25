@@ -126,7 +126,6 @@ import {
   RUNNING_PREVIEW_LINES,
   SETTLED_PREVIEW_VISUAL_ROWS,
 } from './local-shell-card.ts'
-import { RESERVED_HOST_KEYS } from './keybinding-registry.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
@@ -2038,7 +2037,7 @@ export class TuiApp {
     this.unstableInputsLive = options.unstableInputsLive
     this.unstableInputsRevision = options.unstableInputsRevision
     this.unstableFailSafeRelease = options.unstableFailSafeRelease
-    this.inputRouter = new InputRouter(RESERVED_HOST_KEYS)
+    this.inputRouter = new InputRouter()
     // The keybinding manager (M0–M6): the app ALWAYS builds it (the
     // runner configures it afterwards through keybindingsManager() — user
     // overrides, safe mode, plugin rules), so the surface callbacks
@@ -2073,6 +2072,19 @@ export class TuiApp {
         // search) must fall through like a direct key — the completing
         // key is NOT consumed by the sequence (review finding).
         return this.dispatchResolvedAction(action as AppKeybindingId, '')
+      },
+      // A user remap/disable of app.input.submit must REALLY move/remove
+      // the editor's submission: the fork editor routes the submit key
+      // through its OWN tui.input.submit binding, so we sync the
+      // effective keys there (review finding — the editor path was
+      // previously physical-only and ignored user config). Empty = the
+      // action is disabled (no key submits; plain Enter becomes inert).
+      onEditorSubmitSync: (keys) => {
+        const kb = getKeybindings()
+        kb.setUserBindings({
+          ...kb.getUserBindings(),
+          'tui.input.submit': keys.length === 0 ? [] : keys.length === 1 ? keys[0]! : [...keys],
+        })
       },
     })
     this.actionDispatcher = new AppActionDispatcher(this.buildActionHost())
@@ -2506,7 +2518,7 @@ export class TuiApp {
       }
       return { consume: true }
     }
-    if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+    if (this.isSubmitKey(data)) {
       this.submitDraft(false)
       return { consume: true }
     }
@@ -2640,7 +2652,7 @@ export class TuiApp {
         if (!matchesKey(data, 'escape') && !this.keybindings.matches(data, 'app.transcript.toggleExpand')) {
           return { consume: true }
         }
-      } else if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+      } else if (this.isSubmitKey(data)) {
         this.submitSubagentDraft()
         return { consume: true }
       } else if (this.viewerParentLockedKey(data)) {
@@ -2697,7 +2709,7 @@ export class TuiApp {
     // owns it — so this seam stays physical: it is the focused-editor
     // contract, not a host shortcut.)
     if (this.seatEditor().handleInput !== undefined
-      && matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
+      && this.isSubmitKey(data)) {
       this.editorSeatHolder.handleHostFallbackInput(data)
       return { consume: true }
     }
@@ -2835,6 +2847,17 @@ export class TuiApp {
    * cancel, the shell-mode exit pass-through, and the idle double-Esc
    * cancel/rewind. Returns undefined when the key must fall through
    * (autocomplete open, replacement editor). */
+  /** Whether one raw input is the EFFECTIVE submit key (app.input.submit —
+   * a user remap moves submission to the new key; Shift+Enter stays the
+   * newline, never a submit). The fork editor owns the actual submit
+   * semantics (paste-burst / backslash-newline); this check drives the
+   * HOST-owned seams that must mirror it: the continuable viewer's child
+   * submit and the replacement-editor Enter forward. */
+  private isSubmitKey(data: string): boolean {
+    if (matchesKey(data, 'shift+enter')) return false
+    return this.keybindings.editorSubmitKeysFor().some(key => matchesKey(data, key))
+  }
+
   private handleEscapeKey(data: string): TuiInputListenerResult | undefined {
     // Overlays (pickers, settings) own Esc while they are up.
     if (this.activeScreen.hasOverlayEntries) return undefined
@@ -3161,6 +3184,12 @@ export class TuiApp {
       // pass-through, the search overlay ownership) consult the EFFECTIVE
       // keymap, so a user remap stays authoritative (review finding).
       matchesEffective: (action: string, data: string) => this.keybindings.matches(data, action as unknown as AppKeybindingId),
+      // The runtime reservation is ACTION-driven: a key is reserved for
+      // the host ONLY while an active host action binds it. A remapped-
+      // away old key (e.g. Ctrl+V after pasteMedia moved to Ctrl+P) is
+      // NOT reserved and falls through to the editor/plugin (PR review
+      // finding — no static physical-key swallowing).
+      hostResolves: (data) => this.keybindings.resolve(data, this.keybindingContext()) !== undefined,
       editorReplacement: this.seatEditor().handleInput !== undefined,
       // P1-06: the focused EDITOR owns its keys. The fork dispatches to
       // app-level listeners BEFORE the focused component, so the router
@@ -8561,7 +8590,13 @@ export class TuiApp {
     // (the same line-2 slot — the leader is an explicit interaction too).
     const leader = this.keybindings.leaderMachine()
     const line2 = this.ctrlCExitArmed
-      ? `Press ${this.keybindings.keyHint('app.exit.request')} again to exit`
+      // The clear-then-exit chord is Ctrl+C-SPECIFIC (only a second
+      // Ctrl+C exits; a second Ctrl+X — or any other exit key — exits
+      // immediately instead). The armed hint must therefore name Ctrl+C
+      // literally, never the action's primary key (PR review finding:
+      // keyHint('app.exit.request') could say "Press Ctrl+X again" for a
+      // ['ctrl+x', 'ctrl+c'] binding, which is semantically wrong).
+      ? 'Press Ctrl+C again to exit'
       : leader !== undefined && leader.pending
         ? this.leaderHint(leader)
         : this.footerPreset === 'compact' ? '' : this.status.statsLine

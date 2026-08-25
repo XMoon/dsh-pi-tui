@@ -90,6 +90,14 @@ export interface InputRouterContext {
    * router's hard-coded physical keys for the read-only viewer fold
    * pass-through and the search overlay must follow a user remap). */
   readonly matchesEffective?: (action: string, data: string) => boolean
+  /** Whether the HOST keymap currently binds one raw input to an ACTIVE
+   * host action (the app supplies this from its effective keymap). The
+   * router reserves a key for the host ONLY when a host action is live
+   * for it — a remapped-away old key (e.g. Ctrl+V after pasteMedia moved
+   * to Ctrl+P) is NOT reserved and falls through to the editor/plugin
+   * (PR review finding — the runtime reservation is action-driven, never
+   * a static physical-key list). */
+  readonly hostResolves?: (data: string) => boolean
   /** Whether a replacement editor must receive an editor-routed key before
    * plugin bindings are considered. TuiApp flips this off only after the
    * replacement editor explicitly declines the key. */
@@ -128,17 +136,12 @@ export type InputRouteResult =
  * surface state — it only decides.
  */
 export class InputRouter {
-  /**
-   * The reserved lifecycle keys handled BEFORE plugins (the same
-   * inventory the M5 KeybindingRegistry rejects — plan §11.3). Routing
-   * for these stays in TuiApp's host paths; the router just needs to
-   * know they exist so a plugin binding for them is never consulted.
-   */
-  private readonly reservedKeys: readonly NormalizedKey[]
-
-  constructor(reservedKeys: readonly NormalizedKey[]) {
-    this.reservedKeys = reservedKeys
-  }
+  /** The keybinding registry rejection of reserved host keys stays with
+   * the REGISTRY (RESERVED_HOST_KEYS — Stable v1 plugin compatibility
+   * guard). The ROUTER's runtime reservation is ACTION-driven via
+   * {@link InputRouterContext.hostResolves} — never a static physical-key
+   * list (PR review finding). */
+  constructor() {}
 
   /**
    * Normalize raw terminal input into the public {@link NormalizedKey}
@@ -173,14 +176,19 @@ export class InputRouter {
     // Capturing flows own everything.
     if (ctx.questionActive) return { kind: 'consumed' }
     if (ctx.approvalActive) return { kind: 'consumed' }
-    // Read-only (one-shot) viewer: only Esc + Ctrl+O pass through (host
-    // paths); the router treats everything else as consumed while locked.
+    // Read-only (one-shot) viewer: ONLY Esc and the fold key pass through
+    // — to the HOST paths (viewer-exit, fold-toggle). The router reports
+    // them consumed (never a plugin binding, never the editor); every
+    // other key is consumed while locked. The fold key resolves the
+    // EFFECTIVE keymap (a remap stays authoritative — review finding).
     // An INTERACTIVE (continuable) viewer keeps the editor live — the
     // router's editor routes below become `viewer-editor` (the host has
     // already consumed Enter and the parent-owned chords).
-    if (ctx.viewerInputMode === 'readonly'
-      && !matchesKey(data, 'escape')
-      && !(ctx.matchesEffective?.(TUI_ACTION_FOLD, data) ?? matchesKey(data, 'ctrl+o'))) {
+    if (ctx.viewerInputMode === 'readonly') {
+      if (matchesKey(data, 'escape')) return { kind: 'consumed' }
+      if (ctx.matchesEffective?.(TUI_ACTION_FOLD, data) ?? matchesKey(data, 'ctrl+o')) {
+        return { kind: 'consumed' }
+      }
       return { kind: 'consumed' }
     }
     // The transcript-search overlay owns its keys. The toggle follows the
@@ -205,8 +213,17 @@ export class InputRouter {
     // set so a plugin can never claim them — but the ROUTING itself stays
     // in TuiApp (its host paths hold the state). The router only reports
     // which reserved key this is (if any), so TuiApp runs its path.
+    //
+    // EFFECTIVE-ACTION BASED (PR review finding): the reservation follows
+    // the LIVE keymap, never a static physical-key list. A key that NO
+    // host action currently binds (e.g. Ctrl+V after app.clipboard.
+    // pasteMedia was remapped to Ctrl+P) is NOT reserved — it falls
+    // through to the editor/plugin instead of being swallowed by a stale
+    // physical reservation. The plugin-registration guard
+    // (RESERVED_HOST_KEYS) keeps the Stable v1 compatibility rejection;
+    // the RUNTIME swallowing here is purely action-driven.
     const normalized = this.normalize(data)
-    if (normalized !== undefined && this.isReserved(normalized)) {
+    if (normalized !== undefined && ctx.hostResolves?.(data) === true) {
       return { kind: 'consumed' }
     }
     // A replacement editor is probed by TuiApp before this final plugin
@@ -235,12 +252,6 @@ export class InputRouter {
     return ctx.viewerInputMode === 'continuable' ? { kind: 'viewer-editor' } : { kind: 'editor' }
   }
 
-  /** Whether a normalized key is reserved by the host lifecycle. */
-  private isReserved(key: NormalizedKey): boolean {
-    return this.reservedKeys.some(reserved =>
-      reserved.key === key.key && reserved.ctrl === key.ctrl && reserved.alt === key.alt
-        && reserved.shift === key.shift && reserved.super === key.super)
-  }
 }
 
 /** Convert a fork key-id string (`ctrl+shift+f`, `up`, `alt+up`) into the

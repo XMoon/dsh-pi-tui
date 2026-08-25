@@ -72,6 +72,10 @@ const ALLOWLIST = [
   "} else if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {",
   // The approval dialog's own keys (a capturing overlay component).
   "else if (matchesKey(data, 'ctrl+c')) this.settleApproval(pending, 'cancelled')",
+  // The effective-submit mirror (PR review): the host-owned seams exclude
+  // Shift+Enter (the fork editor's newline) from the submit-key check —
+  // an editor-level key, not a Host action.
+  "if (matchesKey(data, 'shift+enter')) return false",
 ]
 
 /** The sanctioned hard-coded key labels in user-facing strings: fork
@@ -85,6 +89,11 @@ const STRING_ALLOWLIST = [
   // that owns y/n/Esc/Ctrl+C while it is up — never resolved by the
   // keymap).
   '[esc/ctrl+c] cancel',
+  // The armed Ctrl+C exit-chord hint: the clear-then-exit chord is
+  // Ctrl+C-SPECIFIC (a second Ctrl+C exits; another exit key exits
+  // immediately), so the copy names Ctrl+C literally — the semantics are
+  // key-specific, the sanctioned convention (PR review finding).
+  'Press Ctrl+C again to exit',
 ]
 
 let failures = 0
