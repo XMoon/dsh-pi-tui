@@ -466,3 +466,30 @@ test('a leader-only submit override: Enter does NOT submit (PR review P1)', asyn
   assert.deepEqual(submitted, ['via leader'], 'the leader sequence must submit')
   app.stop()
 })
+
+test('safe mode restores the default Enter submit even after a user disable (PR review P1)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
+  app.start()
+  // User disables submit, then SAFE MODE is enabled: the builtin default
+  // must win — Enter submits again.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
+  app.keybindingsManager().setSafeMode(true)
+  await vt.waitForRender()
+  app.setDraft('safe mode')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['safe mode'], 'safe mode must restore the default Enter submit')
+  app.stop()
+})
+
+test('leader: enter collides with the editor-owned submit key — leader disabled (PR review P1)', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({ leader: 'enter', bindings: { 'app.tasks.open': '<leader>t' } }))
+  assert.equal(manager.leaderMachine(), undefined, 'a leader key that collides with the editor submit must be disabled')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('leader key') && message.includes('active host key')),
+    `no collision diagnostic: ${manager.diagnosticsList().join(' | ')}`)
+  assert.deepEqual(manager.editorSubmitKeysFor(), ['enter'], 'the editor submit key stays intact')
+})

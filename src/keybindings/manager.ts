@@ -172,8 +172,14 @@ export class HostKeybindingManager {
     // that only collides with a DISABLED action's key is fine (no active
     // rule).
     const leaderKey = effectiveLeaderConfig?.key
+    // Collision with BOTH the host keymap's active keys AND the
+    // EDITOR-OWNED submit keys (hostResolved:false actions — the fork
+    // editor's tui.input.submit owns them; the keymap does not list them,
+    // so e.g. `leader: enter` would silently swallow Enter — PR review
+    // finding).
     const leaderCollision = leaderKey !== undefined
       ? this.keymap.activeKeys().some(key => key === leaderKey)
+        || this.editorSubmitKeysFor().some(key => key === leaderKey)
       : false
     if (leaderCollision && leaderKey !== undefined) {
       this.diagnostics.push(
@@ -215,13 +221,13 @@ export class HostKeybindingManager {
     if (this.isDisabled('app.input.submit')) return []
     const keys = this.keymap.keysFor('app.input.submit')
     if (keys.length > 0) return keys
-    // A LEADER-ONLY submit override (`app.input.submit: <leader>s`) has
-    // NO direct keys: Enter must NOT submit (only the leader sequence
-    // does) — do NOT fall back to the builtin 'enter' (PR review
-    // finding). The override lives in leaderBindings (the parser never
-    // puts `<leader>X` into the direct bindings map).
-    const hasSubmitOverride = this.userBindings['app.input.submit'] !== undefined
-      || this.leaderBindings.some(binding => binding.action === 'app.input.submit')
+    // SAFE MODE (PR review finding): the raw user overrides are IGNORED —
+    // a previously remapped/disabled submit must not keep Enter inert
+    // under DSH_PI_TUI_SAFE_KEYBINDINGS=1; the builtin default ('enter')
+    // is restored.
+    const hasSubmitOverride = !this.safeMode && (
+      this.userBindings['app.input.submit'] !== undefined
+      || this.leaderBindings.some(binding => binding.action === 'app.input.submit'))
     if (hasSubmitOverride) return []
     // The builtin submit rule is hostResolved: false (the host ladder
     // never consumes it), so keysFor() is EMPTY by default — fall back to
