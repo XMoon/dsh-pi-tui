@@ -101,11 +101,11 @@ test('providers writeKeylessProfile writes an EMPTY profile at the adapter-resol
       ],
     },
   }).providers
-  await providers.writeKeylessProfile('acme')
+  assert.deepEqual(await providers.writeKeylessProfile('acme'), { kind: 'written' })
   assert.deepEqual(writes, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
   // The conventional fallback slot when the llm directory is absent.
   const writes2: Array<{ ns: string; ops: unknown }> = []
-  await port({ settings: settings({}, writes2) }).providers.writeKeylessProfile('acme')
+  assert.deepEqual(await port({ settings: settings({}, writes2) }).providers.writeKeylessProfile('acme'), { kind: 'written' })
   assert.deepEqual(writes2, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
 })
 
@@ -133,7 +133,7 @@ test('providers writeKeylessProfile refuses a hostile directory entry (namespace
       ],
     },
   }).providers
-  await providers.writeKeylessProfile('acme')
+  assert.deepEqual(await providers.writeKeylessProfile('acme'), { kind: 'skipped', reason: 'hostile or malformed directory entry for acme' })
   assert.deepEqual(writes, [], 'hostile directory metadata can never reach a mutate')
   const writes2: Array<{ ns: string; ops: unknown }> = []
   const providers2 = port({
@@ -144,7 +144,7 @@ test('providers writeKeylessProfile refuses a hostile directory entry (namespace
       ],
     },
   }).providers
-  await providers2.writeKeylessProfile('acme')
+  assert.deepEqual(await providers2.writeKeylessProfile('acme'), { kind: 'skipped', reason: 'hostile or malformed directory entry for acme' })
   assert.deepEqual(writes2, [], 'a path whose leaf is NOT the route is refused')
 })
 
@@ -154,7 +154,7 @@ test('providers writeKeylessProfile writes NOTHING when the route vanished from 
     settings: settings({}, writes),
     llm: { listConfigurableProviders: () => [] },
   }).providers
-  await providers.writeKeylessProfile('acme')
+  assert.deepEqual(await providers.writeKeylessProfile('acme'), { kind: 'skipped', reason: 'no configurable-provider entry for acme' })
   assert.deepEqual(writes, [], 'a directory race must never fall back to a guessed slot')
 })
 
@@ -247,19 +247,56 @@ test('authorization listTargets maps the seam entries to detached targets', () =
   assert.equal(targets[1]!.route, undefined, 'foreign scopes carry no route')
 })
 
-test('authorization begins one flow and degrades when absent', async () => {
+test('authorization begins one flow as an EVENT surface and degrades when absent', async () => {
   const begins: string[] = []
+  const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
   const authorization = port({
     authorization: {
       list: () => [],
-      begin: async (request: { key: string }) => { begins.push(request.key); return { status: 'authorized' } },
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        begins.push(request.key)
+        // The adapter bridges the upstream interaction into detached
+        // events: a notice, then a prompt awaiting the human's answer.
+        request.interaction.notify({ message: 'progress' })
+        const answer = await request.interaction.prompt({ kind: 'text', message: 'enter' })
+        return { status: answer === 'typed' ? 'authorized' as const : 'cancelled' as const }
+      },
     },
   }).authorization
-  assert.deepEqual(await authorization.begin({ key: 'llm-pi-ai/openai', interaction: {} as never }), { status: 'authorized' })
-  assert.deepEqual(begins, ['llm-pi-ai/openai'])
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai' })
+  assert.equal(started.kind, 'started')
+  assert.equal(begins.length, 1)
+  await settle()
+  // Answer the bridged prompt with the REAL attempt/prompt ids the
+  // adapter emitted (the upstream flow awaits the answer).
+  const promptEvent = events.find(event => event.kind === 'prompt')
+  assert.ok(promptEvent !== undefined && promptEvent.kind === 'prompt')
+  const attemptId = promptEvent.attemptId
+  const promptId = promptEvent.promptId
+  await authorization.respond(attemptId, promptId, 'typed')
+  await settle()
+  off()
+  assert.ok(events.some(event => event.kind === 'notice' && event.notice.message === 'progress'), 'the notice flows as an event')
+  assert.ok(events.some(event => event.kind === 'prompt' && event.prompt.kind === 'text'), 'the prompt flows as an event')
+  assert.ok(events.some(event => event.kind === 'settled' && event.status === 'authorized'), 'the settlement flows as an event')
   assert.equal(port({}).authorization.available(), false)
   assert.deepEqual(port({}).authorization.listTargets(), [])
+  assert.deepEqual(await port({}).authorization.begin({ key: 'x' }), { kind: 'unavailable' })
+  assert.deepEqual(await authorization.cancel('attempt-1'), undefined)
 })
+
+/** Flush the microtask queue (the event bridge is promise-based). */
+async function settle(): Promise<void> {
+  await new Promise<void>((resolve) => { resolve() })
+  await new Promise<void>((resolve) => { resolve() })
+}
 
 // ── permissions ───────────────────────────────────────────────────────────
 

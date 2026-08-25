@@ -110,6 +110,7 @@ import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, refuseByTransitionFence, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import {
   resolveSubagentSettleTarget,
+  viewerCanonicalizeScope,
   type SubagentFollowupOutcome,
   type SubagentFollowupReject,
   type SubagentParentLike,
@@ -4207,8 +4208,15 @@ export function apply(ctx: Context, config: Config): void {
           makeSource: () => ({ kind: 'user' }),
           // Same `@`-file mention canonicalization as the main session's
           // submissions (the editor keeps `@src/foo.ts`, the child model
-          // receives the absolute path).
-          canonicalizeText: (text) => backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: liveAgent?.session.id ?? '' }, text),
+          // receives the absolute path). The scope is the VIEWED CHILD's
+          // workspace when the viewer knows it (the child may have been
+          // born in another directory — canonicalizing against the parent
+          // cwd would rewrite the child's mentions to the wrong tree);
+          // an unknown cold-child cwd falls back to the live parent.
+          canonicalizeText: (text) => backend.hostFile.canonicalizeMentions(
+            viewerCanonicalizeScope(viewing?.cwd, liveAgent?.session.id),
+            text,
+          ),
         }), {
           diag,
           sessionId: () => liveAgent?.session.id,

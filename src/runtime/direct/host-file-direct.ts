@@ -41,13 +41,12 @@ export interface LiveAgentLike {
  * + filesystem facts). */
 interface FsMentionCandidate {
   readonly path: string
-  readonly absolutePath: string
   readonly isDirectory: boolean
 }
 
-/** The recursive scan bounds (kimi MAX_FALLBACK_SCAN / SUGGESTIONS). */
+/** The recursive scan bound (kimi MAX_FALLBACK_SCAN — discovery is
+ * bounded, the CLIENT ranks and slices the returned set). */
 const MAX_FALLBACK_SCAN = 2000
-const MAX_FALLBACK_SUGGESTIONS = 50
 
 /** Locate an executable `fd` on the HOST PATH (bare command names resolve
  * through PATH at spawn time; absolute/relative entries must exist and be
@@ -106,10 +105,11 @@ export class DirectHostFilePort implements HostFilePort {
     const signal = options?.signal
     if (this.fdPath !== null) {
       try {
-        // The fork's fd-backed whole-tree fuzzy search with the SAME item
-        // shapes the editor produced before the migration: delegate the
-        // query as the fork's synthetic `@` line so ranking, capping and
-        // quoting stay byte-identical.
+        // The fork's fd-backed whole-tree fuzzy search: the DISCOVERY seam
+        // (which Host files exist that match the query) — the returned
+        // items are mapped to path-only DTOs; ALL presentation (ranking,
+        // quoting, labels, descriptions, directory continuation) is client
+        // policy in the editor's mention provider.
         const provider = new CombinedAutocompleteProvider([], workDir, this.fdPath)
         const result = await provider.getSuggestions([query], 0, query.length, { signal: signal ?? new AbortController().signal })
         // The fork's own post-await abort check covers ITS internal
@@ -117,13 +117,22 @@ export class DirectHostFilePort implements HostFilePort {
         // (a result that settled after the request was cancelled is never
         // served — review finding).
         if (signal?.aborted === true) return []
-        if (result !== null) return result.items.map(toCandidate)
-        return []
+        if (result === null) return []
+        return result.items.map(forkItemToCandidate)
       } catch {
         // fd failed to spawn: keep `@` usable through the fallback.
       }
     }
-    return fsMentionSuggestions(workDir, query, signal).map(toCandidate)
+    // The bounded recursive fallback: DISCOVERY only — which files exist
+    // under the workspace (`.git` skipped, pre-migration behavior). The
+    // client ranks, quotes and slices this set; the adapter never
+    // constructs presentation.
+    const collected = collectFsMentionCandidates(workDir, signal)
+    if (signal?.aborted === true) return []
+    return collected.map(candidate => ({
+      path: candidate.path,
+      kind: candidate.isDirectory ? 'directory' : 'file',
+    }))
   }
 
   async resolveReference(
@@ -160,17 +169,21 @@ function exists(candidate: string): boolean {
   }
 }
 
-/** Map one discovery item onto the detached candidate DTO. */
-function toCandidate(item: { value: string; label?: string; description?: string }): HostFileCandidate {
+/** Map one fork discovery item onto the detached PATH-ONLY candidate DTO
+ * (the fork's presentation fields value/label/description never cross the
+ * port — the client rebuilds them from the path). */
+function forkItemToCandidate(item: { value: string; label?: string; description?: string }): HostFileCandidate {
   const label = item.label ?? ''
-  const value = item.value
-  const isDirectory = label.endsWith('/') || value.endsWith('/')
-  return {
-    value,
-    label,
-    description: item.description ?? '',
-    kind: isDirectory ? 'directory' : 'file',
+  const isDirectory = label.endsWith('/') || item.value.endsWith('/')
+  // The fork's description carries the display path; fall back to the
+  // value stripped of the `@` prefix and any quoting.
+  let path = item.description ?? ''
+  if (path === '') {
+    path = item.value.replace(/^@/, '')
+    if (path.startsWith('"') && path.endsWith('"')) path = path.slice(1, -1)
   }
+  if (path.endsWith('/')) path = path.slice(0, -1)
+  return { path, kind: isDirectory ? 'directory' : 'file' }
 }
 
 /** Recursively collect candidates under the workspace (bounded, `.git`
@@ -210,76 +223,11 @@ function collectFsMentionCandidates(
         }
       }
       scanned += 1
-      candidates.push({ path: relativePath, absolutePath, isDirectory })
+      candidates.push({ path: relativePath, isDirectory })
       if (isDirectory && !entry.isSymbolicLink()) {
         stack.push(relativePath)
       }
     }
   }
   return candidates
-}
-
-/** Rank candidates against the query (the pre-migration scoring). */
-function scoreCandidate(candidate: FsMentionCandidate, lowerQuery: string): number {
-  if (lowerQuery === '') {
-    const depthPenalty = candidate.path.split('/').length - 1
-    return (candidate.isDirectory ? 120 : 100) - depthPenalty
-  }
-  const lowerPath = candidate.path.toLowerCase()
-  const lowerBase = basename(candidate.path).toLowerCase()
-  let score = 0
-  if (lowerBase === lowerQuery) score = 100
-  else if (lowerBase.startsWith(lowerQuery)) score = 80
-  else if (lowerBase.includes(lowerQuery)) score = 50
-  else if (lowerPath.includes(lowerQuery)) score = 30
-  if (candidate.isDirectory && score > 0) score += 10
-  return score
-}
-
-/** The completion item for one candidate: `@path` (quoted when it has
- * spaces), directories keep their trailing `/` so `@dir/` continues. The
- * QUOTED form (`@"…"`) forces the quoted value regardless of spaces —
- * the fork's quoted-prefix parity. */
-function toMentionCandidate(candidate: FsMentionCandidate, quoted: boolean): HostFileCandidate {
-  const valuePath = candidate.isDirectory ? `${candidate.path}/` : candidate.path
-  const value = quoted || valuePath.includes(' ') ? `@"${valuePath}"` : `@${valuePath}`
-  return {
-    value,
-    label: `${basename(candidate.path)}${candidate.isDirectory ? '/' : ''}`,
-    description: candidate.absolutePath,
-    kind: candidate.isDirectory ? 'directory' : 'file',
-  }
-}
-
-/** The bounded recursive fallback suggestion set for one `@` prefix. The
- * prefix may be the BARE form (`@foo`) or the QUOTED form (`@"my file`);
- * the quoted form searches the inner text and produces quoted values. */
-function fsMentionSuggestions(
-  workDir: string,
-  atPrefix: string,
-  signal?: AbortSignal,
-): readonly HostFileCandidate[] {
-  const aborted = (): boolean => signal?.aborted === true
-  if (aborted()) return []
-  const quoted = atPrefix.startsWith('@"')
-  const inner = quoted ? atPrefix.slice(2) : atPrefix.slice(1)
-  // An unclosed quoted prefix has no trailing quote; a CLOSED one keeps
-  // it in the completion prefix (the fork's quoted-prefix grammar) — strip
-  // it for the search, the values stay quoted either way.
-  const query = inner.endsWith('"') ? inner.slice(0, -1) : inner
-  const candidates = collectFsMentionCandidates(workDir, signal)
-  if (candidates.length === 0 || aborted()) return []
-  const lowerQuery = query.toLowerCase()
-  return candidates
-    .map(candidate => ({ candidate, score: scoreCandidate(candidate, lowerQuery) }))
-    .filter(entry => entry.score > 0)
-    .sort((a, b) => {
-      if (a.score !== b.score) return b.score - a.score
-      if (a.candidate.isDirectory !== b.candidate.isDirectory) {
-        return a.candidate.isDirectory ? -1 : 1
-      }
-      return a.candidate.path.localeCompare(b.candidate.path)
-    })
-    .slice(0, MAX_FALLBACK_SUGGESTIONS)
-    .map(entry => toMentionCandidate(entry.candidate, quoted))
 }

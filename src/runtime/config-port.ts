@@ -22,7 +22,6 @@
  * @module @xmoon76/dsh-pi-tui/runtime/config-port
  */
 
-import type { AuthorizationInteraction } from '@deepseek-ai/dsh-authorization'
 import type { AuthorizationTarget } from '../authorization.ts'
 import type { ProviderOption } from '../provider-catalog.ts'
 
@@ -75,10 +74,11 @@ export interface ProviderProfileConfig {
   /** After a successful authorization: write a MINIMAL keyless profile for
    * a catalog route (never an apiKeyEnv — provider-native auth keeps the
    * request path off an unset reference). The adapter resolves the
-   * route's profile location internally from the CURRENT directory; a
-   * hostile route (or a route that vanished from the directory) writes
-   * nothing. */
-  writeKeylessProfile(route: string): Promise<void>
+   * route's profile location internally from the CURRENT directory. The
+   * outcome is EXPLICIT: a hostile route (or a route that vanished from
+   * the directory) is a `skipped` result with the reason — a caller can
+   * never present a non-write as a success. */
+  writeKeylessProfile(route: string): Promise<{ kind: 'written' } | { kind: 'skipped'; reason: string }>
 }
 
 /** The credentials sub-domain: API-key references and stored credential
@@ -108,23 +108,56 @@ export interface CredentialConfig {
  * same DTO the authorization.ts helpers consume). */
 export type AuthorizationFlowTarget = AuthorizationTarget
 
+/** A detached authorization notice (the message, and the page/code the
+ * human must act on — never a secret). */
+export interface AuthorizationNoticeEvent {
+  message: string
+  url?: string
+  code?: string
+}
+
+/** A detached authorization prompt: the QUESTION the human must answer.
+ * `select` answers with the chosen option's id. No callback, no signal —
+ * the answer rides `respond`, and a flow withdrawing a prompt arrives as
+ * a `prompt-withdrawn` event. */
+export type AuthorizationPromptEvent =
+  | { kind: 'text'; message: string; placeholder?: string }
+  | { kind: 'secret'; message: string; placeholder?: string }
+  | { kind: 'select'; message: string; options: readonly { id: string; label: string; description?: string }[] }
+
+/** One attempt event as the consumer sees it (detached DTOs only — a
+ * Remote adapter replays the same shapes from the wire). */
+export type AuthorizationFlowEvent =
+  | { kind: 'notice'; attemptId: string; notice: AuthorizationNoticeEvent }
+  | { kind: 'prompt'; attemptId: string; promptId: string; prompt: AuthorizationPromptEvent }
+  | { kind: 'prompt-withdrawn'; attemptId: string; promptId: string }
+  | { kind: 'settled'; attemptId: string; status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }
+
 /** The authorization sub-domain: provider sign-in flows. The seam owns
- * the protocol/lifecycle; this port exposes the targets and the flow
- * start. The `interaction` is a CALLER-OWNED UI surface (never
- * serialized); a Remote adapter records the flow as an M2 gap until the
- * official wire capability exists. */
+ * the protocol/lifecycle; this port exposes the targets and an
+ * EVENT-DRIVEN attempt surface — the TUI never hands the Host a
+ * callback-bearing interaction (transport rule: only data, identities,
+ * methods and events cross the boundary). */
 export interface AuthorizationConfig {
   /** Whether the authorization service is available in this deployment. */
   available(): boolean
   /** The registered flows as detached targets. */
   listTargets(): readonly AuthorizationFlowTarget[]
-  /** Start one flow. */
+  /** Start one flow. The attempt's notices/prompts/settlement arrive on
+   * the event subscription; `respond`/`cancel` answer it. */
   begin(request: {
     key: string
     method?: string
-    interaction: AuthorizationInteraction
     signal?: AbortSignal
-  }): Promise<{ status: 'authorized' | 'cancelled' }>
+  }): Promise<{ kind: 'started'; attemptId: string } | { kind: 'unavailable' }>
+  /** Subscribe to attempt events (a LOCAL listener — never a wire
+   * callback); returns the unsubscribe. */
+  onEvent(listener: (event: AuthorizationFlowEvent) => void): () => void
+  /** Answer the pending prompt of an attempt (null = the human declined).
+   */
+  respond(attemptId: string, promptId: string, answer: string | null): Promise<void>
+  /** Withdraw one whole attempt (a Cancel action). */
+  cancel(attemptId: string): Promise<void>
 }
 
 /** The permission sub-domain: permission preset names, the persisted

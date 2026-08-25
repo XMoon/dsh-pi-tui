@@ -131,6 +131,23 @@ export function resolveSubagentSettleTarget(
 }
 
 /**
+ * The Host-file scope one viewer follow-up canonicalizes against: the
+ * VIEWED CHILD's workspace when the viewer knows it (the child may have
+ * been born in another directory — rewriting its mentions against the
+ * PARENT cwd would resolve them to the wrong tree), the live parent
+ * session otherwise (an unknown cold-child cwd). Pure so the race is
+ * unit-testable (review finding: parent cwd ≠ child cwd).
+ */
+export function viewerCanonicalizeScope(
+  viewingCwd: string | undefined,
+  liveParentSessionId: string | undefined,
+): { kind: 'workspace'; cwd: string } | { kind: 'session'; sessionId: string } {
+  return viewingCwd !== undefined && viewingCwd !== ''
+    ? { kind: 'workspace', cwd: viewingCwd }
+    : { kind: 'session', sessionId: liveParentSessionId ?? '' }
+}
+
+/**
  * Deliver one viewer follow-up to a continuable child, or classify why it
  * could not be delivered. Never throws for a classified rejection; an
  * unexpected throw surfaces as `{ kind: 'error' }`.

@@ -19,21 +19,20 @@
  * @module @xmoon76/dsh-pi-tui/authorization
  */
 
-import {
-  AuthorizationDeclinedError,
-  type AuthorizationEntry,
-  type AuthorizationInteraction,
-  type AuthorizationNotice,
-  type AuthorizationPrompt,
-} from '@deepseek-ai/dsh-authorization'
+import type { AuthorizationEntry, AuthorizationNotice } from '@deepseek-ai/dsh-authorization'
 import {
   credentialKeyId,
   credentialKeyScope,
   type CredentialKey,
 } from '@deepseek-ai/dsh-credentials'
-import { cancellationError } from './detached.ts'
 import type { ProviderOption } from './provider-catalog.ts'
 import type { TuiApp } from './tui-app.ts'
+import type {
+  AuthorizationConfig,
+  AuthorizationFlowEvent,
+  AuthorizationNoticeEvent,
+  AuthorizationPromptEvent,
+} from './runtime/config-port.ts'
 
 /** The record scope every llm-pi-ai provider flow writes under (matches
  * `@deepseek-ai/dsh-llm-pi-ai`'s RECORD_SCOPE — the TUI addresses flows by
@@ -78,7 +77,16 @@ export interface AuthorizationServiceLike {
   begin(request: {
     key: CredentialKey
     method?: string
-    interaction: AuthorizationInteraction
+    interaction: {
+      notify(notice: AuthorizationNotice): void
+      prompt(prompt: {
+        kind: 'text' | 'secret' | 'select'
+        message: string
+        placeholder?: string
+        options?: readonly { id: string; label: string; description?: string }[]
+        signal?: AbortSignal
+      }): Promise<string>
+    }
     signal?: AbortSignal
   }): Promise<{ status: 'authorized' | 'cancelled' }>
   cancel(key: CredentialKey): void
@@ -195,27 +203,45 @@ export interface AuthorizationSurface {
 }
 
 /**
- * Build the interaction half of one authorization attempt. One instance per
- * attempt: the notice panel is reused across progress notices, and
- * `close()` hides it when the attempt settles (the caller's finally).
+ * Build the client half of one authorization attempt. One instance per
+ * attempt: it consumes the port's detached EVENTS and answers through
+ * `respond`/`cancel` — the TUI never hands the Host a callback-bearing
+ * interaction (transport rule; migration M1.9).
  *
- * Prompt mapping:
+ * Prompt mapping (client-local, unchanged from the interaction era):
  * - `text` and `secret` go through the question flow's free-text row;
  *   `secret` is rendered masked (the real value never leaves the input's
  *   memory and is never logged, put in history, or shown anywhere else);
- * - `select` goes through the picker and returns the chosen option's `id`,
- *   never its label;
- * - the user closing the question is a decline → `AuthorizationDeclinedError`;
- * - the prompt's OWN signal withdrawing it is NOT a decline: the rejection
- *   is passed through as-is so the flow can tell a refusal from a race.
+ * - `select` goes through the picker and answers with the chosen option's
+ *   `id`, never its label;
+ * - the user closing the question is a decline (answered as `null`);
+ * - a flow WITHDRAWING a prompt arrives as a `prompt-withdrawn` event:
+ *   the open UI closes and the prompt is NOT answered (the adapter
+ *   already rejected its pending bridge — a refusal, never a decline).
  */
-export function createAuthorizationInteraction(app: AuthorizationSurface): {
-  interaction: AuthorizationInteraction
-  close: () => void
+export function createAuthorizationFlow(
+  app: AuthorizationSurface,
+  port: Pick<AuthorizationConfig, 'respond' | 'cancel'>,
+): {
+  /** Feed one attempt event (the runner forwards the subscription). */
+  onEvent(event: AuthorizationFlowEvent): void
+  /** The attempt outcome, resolved on the `settled` event. */
+  outcome: Promise<{ status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }>
+  /** Close the notice panel and any open prompt UI (attempt settled). */
+  close(): void
 } {
   let noticeHandle: (() => void) | undefined
   let noticeBody = ''
-  const showNotice = (notice: AuthorizationNotice): void => {
+  /** The prompt UI currently open: closed by a withdrawal or settle. A
+   * `text`/`secret` prompt closes through its own AbortController; a
+   * `select` prompt through the picker handle. */
+  let openPrompt: { withdraw(): void } | undefined
+  /** Resolve the attempt outcome when the `settled` event arrives. */
+  let settle: (outcome: { status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }) => void
+  const outcome = new Promise<{ status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }>((resolve) => {
+    settle = resolve
+  })
+  const showNotice = (notice: AuthorizationNoticeEvent): void => {
     noticeBody = formatAuthorizationNotice(notice)
     if (noticeHandle === undefined) {
       noticeHandle = app.openOutputViewer({
@@ -227,92 +253,118 @@ export function createAuthorizationInteraction(app: AuthorizationSurface): {
     }
   }
   const close = (): void => {
+    openPrompt?.withdraw()
+    openPrompt = undefined
     noticeHandle?.()
     noticeHandle = undefined
   }
-  const interaction: AuthorizationInteraction = {
-    notify: (notice) => { showNotice(notice) },
-    prompt: async (prompt: AuthorizationPrompt) => {
-      if (prompt.kind === 'select') {
-        // The picker is a plain promise with no built-in abort: race it
-        // against the prompt's own signal so a withdrawn prompt closes the
-        // picker and rejects with a NON-decline cancellation (the flow
-        // decides what to do next — a user closing the picker is the only
-        // decline).
-        const signal = prompt.signal
-        const picked = await new Promise<string>((resolve, reject) => {
-          if (signal?.aborted === true) {
-            reject(cancellationError('authorization prompt withdrawn'))
-            return
-          }
-          let settled = false
-          let handle: { close?: () => void } | undefined
-          const cleanup = (): void => {
-            if (signal !== undefined) signal.removeEventListener('abort', onAbort)
-          }
-          const onAbort = (): void => {
+  /** Present one prompt event and answer it through the port. */
+  const presentPrompt = (event: {
+    attemptId: string
+    promptId: string
+    prompt: AuthorizationPromptEvent
+  }): void => {
+    const { attemptId, promptId, prompt } = event
+    const finish = (answer: string | null): void => {
+      if (openPrompt === undefined) return // already withdrawn or settled
+      openPrompt = undefined
+      // The answer rides `respond` (null = the human declined); a
+      // rejection is dropped — the attempt stays alive.
+      port.respond(attemptId, promptId, answer).then(undefined, () => {})
+    }
+    if (prompt.kind === 'select') {
+      const picker = new Promise<string | null>((resolve) => {
+        let settled = false
+        let handle: { close?: () => void } | undefined
+        openPrompt = {
+          withdraw: () => {
             if (settled) return
             settled = true
-            cleanup()
             handle?.close?.()
-            reject(cancellationError('authorization prompt withdrawn'))
-          }
-          if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true })
-          handle = app.openPicker(
-            prompt.options.map(option => ({
-              value: option.id,
-              label: option.label,
-              ...(option.description !== undefined && option.description !== ''
-                ? { description: option.description }
-                : {}),
-            })),
-            (value) => {
-              if (settled) return
-              settled = true
-              cleanup()
-              resolve(value)
-            },
-            () => {
-              if (settled) return
-              settled = true
-              cleanup()
-              reject(new AuthorizationDeclinedError())
-            },
-            { header: prompt.message, enableSearch: true },
-          )
-          // The signal may have fired SYNCHRONOUSLY while openPicker ran
-          // (before `handle` was assigned) — settle already happened, so
-          // close the now-known handle here instead of in onAbort.
-          if (settled) handle?.close?.()
-        })
-        return picked
-      }
-      try {
-        const answers = await app.askQuestions(
-          [{
-            id: 'answer',
-            question: prompt.message,
-            ...(prompt.placeholder !== undefined && prompt.placeholder !== ''
-              ? { placeholder: prompt.placeholder }
+            resolve(null) // dropped: the withdrawn prompt is never answered
+          },
+        }
+        handle = app.openPicker(
+          prompt.options.map(option => ({
+            value: option.id,
+            label: option.label,
+            ...(option.description !== undefined && option.description !== ''
+              ? { description: option.description }
               : {}),
-            ...(prompt.kind === 'secret' ? { masked: true } : {}),
-          }],
-          prompt.signal,
+          })),
+          (value) => {
+            if (settled) return
+            settled = true
+            resolve(value)
+          },
+          () => {
+            if (settled) return
+            settled = true
+            resolve(null)
+          },
+          { header: prompt.message, enableSearch: true },
         )
-        const text = answers[0]?.custom ?? ''
-        // An empty typed answer counts as skipped (Web semantics) — for an
-        // authorization prompt that IS a decline.
-        if (text === '') throw new AuthorizationDeclinedError()
-        return text
-      } catch (error) {
-        // The prompt's own signal withdrew it: NOT a decline. askQuestions
-        // closes the question on abort; the flow decides what to do next.
-        if (prompt.signal?.aborted === true) throw error
-        throw new AuthorizationDeclinedError()
+        // The withdrawal may have fired SYNCHRONOUSLY while openPicker ran
+        // (before `handle` was assigned) — settle already happened, so
+        // close the now-known handle here instead of in the withdrawer.
+        if (settled) handle?.close?.()
+      })
+      picker.then((picked) => finish(picked), () => {})
+      return
+    }
+    // text / secret: the question flow's free-text row, closable through
+    // an AbortController the withdrawal aborts.
+    const controller = new AbortController()
+    openPrompt = {
+      withdraw: () => { controller.abort() },
+    }
+    app.askQuestions(
+      [{
+        id: 'answer',
+        question: prompt.message,
+        ...(prompt.placeholder !== undefined && prompt.placeholder !== ''
+          ? { placeholder: prompt.placeholder }
+          : {}),
+        ...(prompt.kind === 'secret' ? { masked: true } : {}),
+      }],
+      controller.signal,
+    ).then((answers) => {
+      const text = answers[0]?.custom ?? ''
+      // An empty typed answer counts as skipped (Web semantics) — for an
+      // authorization prompt that IS a decline.
+      finish(text === '' ? null : text)
+    }, () => {
+      // The question was closed (the user, or the withdrawal abort): a
+      // user close is a decline; a withdrawal must NOT answer.
+      if (controller.signal.aborted) return
+      finish(null)
+    })
+  }
+  return {
+    onEvent: (event) => {
+      switch (event.kind) {
+        case 'notice':
+          showNotice(event.notice)
+          break
+        case 'prompt':
+          presentPrompt(event)
+          break
+        case 'prompt-withdrawn':
+          // The flow withdrew this prompt: close its UI, never answer.
+          if (openPrompt !== undefined) {
+            openPrompt.withdraw()
+            openPrompt = undefined
+          }
+          break
+        case 'settled':
+          settle({ status: event.status, code: event.code, message: event.message })
+          close()
+          break
       }
     },
+    outcome,
+    close,
   }
-  return { interaction, close }
 }
 
 /** The user-facing text for one authorization attempt failure, mapping the

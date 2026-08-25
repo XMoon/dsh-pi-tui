@@ -35,6 +35,7 @@ import type {
   ModelProviderSummary,
   PresetCatalog,
   PresetRosterEntry,
+  ProviderDirectoryEntry,
   SkillCatalogCapability,
   SkillDefinitionDto,
   SkillDefinitionResult,
@@ -188,14 +189,13 @@ export class DirectModelCatalog implements ModelCatalog {
     })))
   }
 
-  listConfigurableProviders(): readonly ProviderCatalogEntry[] | undefined {
-    // Detached copies — the directory array (and its settingsPath) is
-    // Host-owned.
+  listConfigurableProviders(): readonly ProviderDirectoryEntry[] | undefined {
+    // Detached SEMANTIC copies — the provider id/display name/declared
+    // state only; the settings namespace/path layout never crosses the
+    // catalog contract (the config adapter owns the Host schema, M1.9).
     return this.llm()?.listConfigurableProviders().map(entry => ({
-      provider: entry.provider,
+      id: entry.provider,
       displayName: entry.displayName,
-      settingsNs: entry.settingsNs,
-      settingsPath: [...entry.settingsPath],
       ...entry.declared === undefined ? {} : { declared: entry.declared },
     }))
   }

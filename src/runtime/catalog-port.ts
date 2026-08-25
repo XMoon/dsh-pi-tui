@@ -21,7 +21,6 @@
  * @module @xmoon76/dsh-pi-tui/runtime/catalog-port
  */
 
-import type { ProviderCatalogEntry } from '../provider-catalog.ts'
 import type { HumanSkillCatalog } from '../skill-catalog.ts'
 import type { StandingSkillRead } from '../skill-catalog-refresh.ts'
 
@@ -85,8 +84,20 @@ export interface ModelCatalog {
   discoverModels(request: ModelDiscoveryRequest): Promise<readonly ModelInfoSummary[]>
   /** The configurable-provider directory the /login merge reads
    *  (`llm.listConfigurableProviders()`); undefined = the llm service is
-   *  absent (the merge falls back to the settings-only reader). */
-  listConfigurableProviders(): readonly ProviderCatalogEntry[] | undefined
+   *  absent (the merge falls back to the settings-only reader). The DTO is
+   *  SEMANTIC — the settings namespace/path layout (WHERE a profile
+   *  lives) is config schema knowledge, owned by the config adapter
+   *  (migration M1.9), never a shared catalog concern. */
+  listConfigurableProviders(): readonly ProviderDirectoryEntry[] | undefined
+}
+
+/** One configurable-provider directory row (detached semantic DTO —
+ * never a settings namespace/path: the catalog consumer only asks WHICH
+ * providers exist; the config adapter owns the Host schema layout). */
+export interface ProviderDirectoryEntry {
+  readonly id: string
+  readonly displayName: string
+  readonly declared?: boolean
 }
 
 /** One roster row of the `/preset` picker (detached display metadata). */

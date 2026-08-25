@@ -56,30 +56,32 @@ test('resolveFdPath finds an executable fd on PATH and returns null otherwise', 
   }
 })
 
-test('the fallback completes @ mentions from anywhere in the tree', async () => {
+test('the fallback discovers paths from anywhere in the tree (path-only DTOs)', async () => {
   const root = fixtureWorkspace()
   const port = fallbackPort(root)
   const file = await port.listReferences({ kind: 'workspace', cwd: root }, '@file')
-  assert.ok(file.some(item => item.value === '@file-one.txt'), `file-one missing:\n${JSON.stringify(file)}`)
-  assert.ok(file.some(item => item.value === '@file-two.ts'), `file-two missing:\n${JSON.stringify(file)}`)
+  assert.ok(file.some(item => item.path === 'file-one.txt' && item.kind === 'file'),
+    `file-one missing:\n${JSON.stringify(file)}`)
+  assert.ok(file.some(item => item.path === 'file-two.ts' && item.kind === 'file'),
+    `file-two missing:\n${JSON.stringify(file)}`)
   const nested = await port.listReferences({ kind: 'workspace', cwd: root }, '@nested')
-  assert.ok(nested.some(item => item.value === '@src/deep-nested.ts'), `nested file missing:\n${JSON.stringify(nested)}`)
+  assert.ok(nested.some(item => item.path === 'src/deep-nested.ts' && item.kind === 'file'),
+    `nested file missing:\n${JSON.stringify(nested)}`)
   const dirs = await port.listReferences({ kind: 'workspace', cwd: root }, '@src')
-  assert.ok(dirs.some(item => item.value === '@src/' && item.label === 'src/' && item.kind === 'directory'),
+  assert.ok(dirs.some(item => item.path === 'src' && item.kind === 'directory'),
     `directory item missing:\n${JSON.stringify(dirs)}`)
-  assert.deepEqual(await port.listReferences({ kind: 'workspace', cwd: root }, '@zzz-nope'), [])
 })
 
-test('the fallback quotes mention values that contain spaces', async () => {
+test('the fallback returns RAW paths — quoting and filtering are client-side', async () => {
   const root = fixtureWorkspace()
-  const result = await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@my')
-  assert.ok(result.some(item => item.value === '@"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(result)}`)
-})
-
-test('the fallback completes the QUOTED @ form with quoted values', async () => {
-  const root = fixtureWorkspace()
-  const result = await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@"my')
-  assert.ok(result.some(item => item.value === '@"my file.txt"'), `quoted values must stay quoted:\n${JSON.stringify(result)}`)
+  const port = fallbackPort(root)
+  // The port answers "which Host files exist": no `@`, no quotes, no
+  // trailing slash, no query filtering (the client ranks and presents).
+  const result = await port.listReferences({ kind: 'workspace', cwd: root }, '@my')
+  assert.ok(result.some(item => item.path === 'my file.txt' && item.kind === 'file'),
+    `the spaced path flows through raw:\n${JSON.stringify(result)}`)
+  assert.ok(result.every(item => !item.path.startsWith('@') && !item.path.includes('"') && !item.path.endsWith('/')),
+    `paths must be bare:\n${JSON.stringify(result.map(item => item.path))}`)
 })
 
 test('resolveReference honors an already-aborted request (fail closed, no filesystem access)', async () => {
@@ -106,7 +108,7 @@ test('the session scope resolves through the live-agent resolver; unresolvable s
   const root = fixtureWorkspace()
   const port = fallbackPort(root)
   const viaSession = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, '@file')
-  assert.ok(viaSession.some(item => item.value === '@file-one.txt'), 'the session cwd drives discovery')
+  assert.ok(viaSession.some(item => item.path === 'file-one.txt'), 'the session cwd drives discovery')
   assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 'session-other' }, '@file'), [])
   assert.deepEqual(await port.resolveReference({ kind: 'session', sessionId: 'session-other' }, 'file-one.txt'), { kind: 'missing' })
   assert.equal(await port.canonicalizeMentions({ kind: 'session', sessionId: 'session-other' }, '@file-one.txt'), '@file-one.txt')
@@ -152,14 +154,12 @@ test('canonicalizeMentions absolutizes a symlink without realpath-ing it', async
   assert.equal(out, `see @${link}`, 'the LINK path is the intent, never the realpath')
 })
 
-test('candidates are detached plain DTOs (value/label/description/kind)', async () => {
+test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileReferenceCandidate shape)', async () => {
   const root = fixtureWorkspace()
   const [item] = await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file')
   assert.ok(item !== undefined)
-  assert.deepEqual(Object.keys(item).sort(), ['description', 'kind', 'label', 'value'])
-  assert.equal(typeof item.value, 'string')
-  assert.equal(typeof item.label, 'string')
-  assert.equal(typeof item.description, 'string')
+  assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
+  assert.equal(typeof item.path, 'string')
   assert.ok(item.kind === 'file' || item.kind === 'directory')
 })
 
@@ -176,27 +176,27 @@ function fakeFd(body: string): string {
   return script
 }
 
-test('the fd branch delegates to the fork fuzzy search and returns its candidates', async () => {
+test('the fd branch delegates to the fork fuzzy search and returns path-only candidates', async () => {
   const root = fixtureWorkspace()
   const port = new DirectHostFilePort(() => undefined, fakeFd(
     `printf 'file-one.txt\\nfile-two.ts\\nsrc/\\nsrc/deep-nested.ts\\n'`))
   const scope = { kind: 'workspace', cwd: root } as const
   const hits = await port.listReferences(scope, '@file')
-  const values = hits.map(candidate => candidate.value)
-  assert.ok(values.includes('@file-one.txt') || values.includes('@file-two.ts'),
-    `the fd candidates flow through as DTOs:\n${JSON.stringify(values)}`)
+  const paths = hits.map(candidate => candidate.path)
+  assert.ok(paths.includes('file-one.txt') || paths.includes('file-two.ts'),
+    `the fd candidates flow through as path-only DTOs:\n${JSON.stringify(paths)}`)
   const [item] = hits
   assert.ok(item !== undefined)
-  assert.deepEqual(Object.keys(item).sort(), ['description', 'kind', 'label', 'value'])
+  assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
 })
 
-test('the fd branch maps the QUOTED prefix to quoted values', async () => {
+test('the fd branch returns RAW paths — quoting is client-side', async () => {
   const root = fixtureWorkspace()
   const port = new DirectHostFilePort(() => undefined, fakeFd(
     `printf 'my file.txt\\nsrc/\\nsrc/deep-nested.ts\\n'`))
   const hits = await port.listReferences({ kind: 'workspace', cwd: root } as const, '@"my file')
-  assert.ok(hits.some(candidate => candidate.value === '@"my file.txt"'),
-    `a spaced fd candidate must come back quoted:\n${JSON.stringify(hits.map(h => h.value))}`)
+  assert.ok(hits.some(candidate => candidate.path === 'my file.txt' && candidate.kind === 'file'),
+    `a spaced fd candidate must flow through as a RAW path:\n${JSON.stringify(hits.map(h => h.path))}`)
 })
 
 test('an abort mid-fd-query fails closed (the port re-checks AFTER the await)', async () => {

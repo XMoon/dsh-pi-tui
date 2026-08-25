@@ -426,6 +426,80 @@ const NO_HOST_REFERENCES: HostReferencesSeam = {
   canonicalizeMentions: async (_scope, text) => text,
 }
 
+/** The client-side suggestion cap (kimi MAX_FALLBACK_SUGGESTIONS): the
+ * port returns the DISCOVERY set (bounded by the host scan), the client
+ * ranks and slices it — presentation never crosses the contract. */
+const MAX_MENTION_SUGGESTIONS = 50
+
+/** Rank one path-only candidate against the query (the pre-migration
+ * scoring, moved client-side: the port answers "which Host files exist",
+ * ranking is TUI presentation policy). */
+function scoreMentionCandidate(candidate: {
+  path: string
+  kind: 'file' | 'directory'
+}, lowerQuery: string): number {
+  if (lowerQuery === '') {
+    const depthPenalty = candidate.path.split('/').length - 1
+    return (candidate.kind === 'directory' ? 120 : 100) - depthPenalty
+  }
+  const lowerPath = candidate.path.toLowerCase()
+  const lowerBase = basename(candidate.path).toLowerCase()
+  let score = 0
+  if (lowerBase === lowerQuery) score = 100
+  else if (lowerBase.startsWith(lowerQuery)) score = 80
+  else if (lowerBase.includes(lowerQuery)) score = 50
+  else if (lowerPath.includes(lowerQuery)) score = 30
+  if (candidate.kind === 'directory' && score > 0) score += 10
+  return score
+}
+
+/** Present one path-only candidate as a completion item: the `@`-insertion
+ * value (quoted when it has spaces — the QUOTED prefix `@"…` forces the
+ * quoted value regardless), directories keep their trailing `/` so
+ * `@dir/` continues, the label is the basename, the description is the
+ * user-facing path. PURE client policy (review boundary: the Host owns
+ * discovery, the TUI owns presentation). */
+function presentMentionCandidate(candidate: {
+  path: string
+  kind: 'file' | 'directory'
+}, quoted: boolean): AutocompleteItem {
+  const valuePath = candidate.kind === 'directory' ? `${candidate.path}/` : candidate.path
+  const value = quoted || valuePath.includes(' ') ? `@"${valuePath}"` : `@${valuePath}`
+  return {
+    value,
+    label: `${basename(candidate.path)}${candidate.kind === 'directory' ? '/' : ''}`,
+    description: candidate.path,
+  }
+}
+
+/** Rank, slice and present the port's path-only discovery set for one
+ * `@` prefix (bare or quoted): the client owns ranking, quoting, the
+ * `@`-insertion value, labels, descriptions and directory continuation. */
+function presentMentionCandidates(
+  candidates: readonly import('./runtime/host-file-port.ts').HostFileCandidate[],
+  atPrefix: string,
+): AutocompleteItem[] {
+  const quoted = atPrefix.startsWith('@"')
+  const inner = quoted ? atPrefix.slice(2) : atPrefix.slice(1)
+  // An unclosed quoted prefix has no trailing quote; a CLOSED one keeps
+  // it in the completion prefix (the fork's quoted-prefix grammar) — strip
+  // it for the search, the values stay quoted either way.
+  const query = inner.endsWith('"') ? inner.slice(0, -1) : inner
+  const lowerQuery = query.toLowerCase()
+  return candidates
+    .map(candidate => ({ candidate, score: scoreMentionCandidate(candidate, lowerQuery) }))
+    .filter(entry => entry.score > 0)
+    .sort((a, b) => {
+      if (a.score !== b.score) return b.score - a.score
+      if (a.candidate.kind !== b.candidate.kind) {
+        return a.candidate.kind === 'directory' ? -1 : 1
+      }
+      return a.candidate.path.localeCompare(b.candidate.path)
+    })
+    .slice(0, MAX_MENTION_SUGGESTIONS)
+    .map(entry => presentMentionCandidate(entry.candidate, quoted))
+}
+
 /** The completion scope of one MentionProvider instance: the runner
  * resolves it at install time (the live SESSION when one exists, the
  * workspace cwd otherwise) so the port is addressed by HOST identity —
@@ -566,14 +640,13 @@ export class MentionProvider implements AutocompleteProvider {
       }
       if (options.signal.aborted || candidates.length === 0) return null
       if (!sameMentionScope(scope, this.scopeOf())) return null
-      return {
-        prefix: atPrefix,
-        items: candidates.map(candidate => ({
-          value: candidate.value,
-          label: candidate.label,
-          description: candidate.description,
-        })),
-      }
+      // The client owns ALL presentation: ranking, quoting, the
+      // `@`-insertion value, labels, descriptions and directory
+      // continuation — the port answered "which Host files exist" as
+      // path-only DTOs (review boundary).
+      const items = presentMentionCandidates(candidates, atPrefix)
+      if (items.length === 0) return null
+      return { prefix: atPrefix, items }
     }
     // `!`/`!!` shell lines: command names, subcommands and `$VAR` names come
     // from the real-shell compgen bridge (docs/input-and-card-polish.md §1);
