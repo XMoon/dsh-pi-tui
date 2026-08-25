@@ -2097,3 +2097,70 @@ test('a replacement plugin Tab runs the shell completion grammar of the wire doc
   app.reconcileEditorNow()
   app.stop()
 })
+
+test('a text change after a declined Tab cancels the stale dropdown (no stale accept)', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'stale-dropdown-plugin',
+    priority: 0,
+    create: () => {
+      const editor = pluginEditor()
+      editor.handleInput = () => false // decline: the host fallback owns every key
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  const plugin = created[0]!
+  // Variable completion (`$VAR`) is NOT cached (unlike the command list),
+  // so the refresh after the text change really consults the stub: call 1
+  // resolves immediately (the first dropdown), call 2 stays PENDING while
+  // the user edits — the window where a stale accept could land.
+  let compgenCalls = 0
+  let resolveRefresh: ((run: { ok: boolean; lines: string[] }) => void) | undefined
+  const refresh = new Promise<{ ok: boolean; lines: string[] }>((resolve) => { resolveRefresh = resolve })
+  setCompgenRunnerForTest((_cwd, expression) => {
+    compgenCalls += 1
+    if (compgenCalls === 1) return Promise.resolve({ ok: true, lines: ['git', 'gist'] })
+    return refresh
+  })
+  try {
+    // Tab 1: the shell dropdown opens for `$g` (hidden host editor).
+    plugin.setText('!echo $g')
+    plugin.setCursor(plugin.getText().length)
+    vt.sendInput('\t')
+    await pollUntil(() => compgenCalls === 1, 'the first variable completion request ran')
+    await vt.waitForRender()
+    // The user edits the value: the staged document differs from the
+    // dropdown's context, so the fallback must cancel the stale dropdown
+    // (the fork's own refresh is async — a Tab before it resolves would
+    // accept an OLD candidate into the NEW text).
+    vt.sendInput('s')
+    await vt.waitForRender()
+    // Tab 2 must NOT accept the stale item: the document stays `!echo $gs`
+    // (pre-fix this became the corrupted `!echo $g$git `).
+    vt.sendInput('\t')
+    await vt.waitForRender()
+    assert.equal(plugin.getText(), '!echo $gs', 'a stale dropdown must never accept into the edited document')
+    // The pending refresh resolves with the FRESH candidates; the next Tab
+    // accepts through the NEW dropdown into the plugin wire document.
+    resolveRefresh!({ ok: true, lines: ['gist', 'gist'] })
+    await vt.waitForRender()
+    vt.sendInput('\t')
+    await pollUntil(() => plugin.getText() === '!echo $gist ',
+      'the fresh completion applies into the plugin wire document')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})

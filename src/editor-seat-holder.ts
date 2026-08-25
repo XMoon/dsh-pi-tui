@@ -23,6 +23,7 @@
  */
 
 import type { Component } from '@xmoon76/pi-tui'
+import { matchesKey } from '@xmoon76/pi-tui'
 import type { EditorHost, EditorSnapshot, ExtensionEditor } from './extension/public-types.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { editorModeFromHistoryEntry, serializeEditorInput, shellPrefixForMode } from './editor-input-mode.ts'
@@ -111,6 +112,9 @@ export interface HostEditorAdapter {
   setTextAndCursor(text: string, cursor: number): void
   /** Forward one declined replacement-editor key through the host editor. */
   handleInput?(data: string): void
+  /** Close the host editor's autocomplete dropdown / pending request (the
+   * stale-context guard — see handleHostFallbackInput). */
+  cancelAutocomplete?(): void
   /** Temporarily suppress the host adapter's normal change callback. */
   runWithoutChange?<T>(task: () => T): T
   readonly focused: boolean
@@ -652,8 +656,33 @@ export class EditorSeatHolder {
           // mode state and VANISH from the plugin (the shell-editor-mode
           // representation boundary).
           const decoded = editorModeFromHistoryEntry(wireText)
-          host.setTextAndCursor(decoded.text, Math.max(0, wireCursor - (wireText.length - decoded.text.length)))
+          const stagedCursor = Math.max(0, wireCursor - (wireText.length - decoded.text.length))
+          // STALE-AUTOCOMPLETE GUARD (review round 24): setTextAndCursor
+          // deliberately preserves the host's autocomplete state, so an
+          // EARLIER declined Tab's dropdown survives into this key. Its
+          // candidates belong to the document BEFORE this key — the
+          // fork's own refresh (updateAutocomplete) is async, and a Tab
+          // landing before it resolves would ACCEPT a stale candidate
+          // into the new text. Cancel the dropdown/request when either:
+          // - the staged document differs from the host's current
+          //   text/cursor (a programmatic plugin change — even Tab would
+          //   apply the old selection against the new document), or
+          // - the forwarded key is NOT the dropdown's own interaction
+          //   (Tab = accept, Enter = confirm, Up/Down = selection): a
+          //   mutation or cursor move invalidates the selection the
+          //   moment the key runs.
+          // An UNCHANGED document with a Tab/Enter/arrow keeps the
+          // dropdown (the Tab+Tab accept stays synchronous).
+          const contextBefore = { text: host.getText(), cursor: host.getCursor?.() ?? 0 }
+          const stagedDiffers = contextBefore.text !== decoded.text || contextBefore.cursor !== stagedCursor
+          const dropdownInteraction = matchesKey(data, 'tab') || matchesKey(data, 'enter')
+            || matchesKey(data, 'up') || matchesKey(data, 'down')
+          host.setTextAndCursor(decoded.text, stagedCursor)
           host.setInputMode?.(decoded.mode)
+          if (host.cancelAutocomplete !== undefined
+            && (stagedDiffers || (!dropdownInteraction && host.isShowingAutocomplete?.() === true))) {
+            host.cancelAutocomplete()
+          }
           host.handleInput!(data)
           const mode = host.getInputMode?.() ?? 'prompt'
           const prefix = shellPrefixForMode(mode)
@@ -661,8 +690,17 @@ export class EditorSeatHolder {
           current.setCursor((host.getCursor?.() ?? 0) + prefix.length)
         } else {
           // Legacy raw fallback: the host document stays raw (no mode),
-          // so wire and host coordinates are the same bytes.
+          // so wire and host coordinates are the same bytes. Same stale
+          // dropdown guard (see above).
+          const contextBefore = { text: host.getText(), cursor: host.getCursor?.() ?? 0 }
+          const stagedDiffers = contextBefore.text !== wireText || contextBefore.cursor !== wireCursor
+          const dropdownInteraction = matchesKey(data, 'tab') || matchesKey(data, 'enter')
+            || matchesKey(data, 'up') || matchesKey(data, 'down')
           host.setTextAndCursor(wireText, wireCursor)
+          if (host.cancelAutocomplete !== undefined
+            && (stagedDiffers || (!dropdownInteraction && host.isShowingAutocomplete?.() === true))) {
+            host.cancelAutocomplete()
+          }
           host.handleInput!(data)
           current.setText(host.getText())
           current.setCursor(host.getCursor?.() ?? 0)
