@@ -981,10 +981,11 @@ export function registerTuiCommands(
             if (result === null) return null
             return { items: [...result.items], prefix: result.prefix }
           },
-      // The completion scope is the live SESSION when one exists (Host
-      // identity), the workspace cwd otherwise (sessionless cold
-      // completion).
-      runner.liveAgent === undefined
+      // The completion scope is resolved at SUGGESTION time from the LIVE
+      // agent (session identity when one exists — even mid-transition —
+      // the workspace cwd otherwise): a session switch or first create is
+      // picked up immediately, never requiring a reinstall.
+      () => runner.liveAgent === undefined
         ? { kind: 'workspace', cwd: runner.sessionCwd() }
         : { kind: 'session', sessionId: runner.liveAgent.session.id },
     )

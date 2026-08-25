@@ -102,8 +102,9 @@ export function extractAtPrefix(text: string): string | null {
   }
   const token = text.slice(tokenStart)
   if (token.startsWith('@')) return token
-  // ...or a CJK-glued `@` INSIDE the token (`看看@foo`): the LAST such
-  // `@` is the mention start (a CJK sentence glues the mention to the
+  // ...or a CJK-glued `@` INSIDE the token (the character right before the
+  // `@` is a CJK code point, e.g. `\u770b\u770b@foo`): the LAST such `@`
+  // is the mention start (a CJK sentence glues the mention to the
   // previous character — the same rule findFileMentions applies).
   for (let index = token.length - 1; index >= 1; index -= 1) {
     if (token[index] === '@' && isCjkChar(token[index - 1] ?? '')) return token.slice(index)
@@ -443,7 +444,12 @@ export class MentionProvider implements AutocompleteProvider {
   private readonly inner: CombinedAutocompleteProvider
   private readonly workDir: string
   private readonly fileReferences: HostReferencesSeam
-  private readonly scope: MentionScope
+  /** The completion scope, resolved at SUGGESTION time (never captured at
+   * install): a live source keeps `@` completion on the CURRENT session
+   * after a switch or first create, even if the runner never reinstalls
+   * the provider (the coordinator does reinstall per transition, but the
+   * provider must not DEPEND on that). */
+  private readonly scopeOf: () => MentionScope
   /** The slash commands whose argument completion is a PATH (the host
    * attaches `getArgumentCompletions`, e.g. `/image`): ONLY these tolerate
    * a trailing-space argument as a Tab file-completion site — every other
@@ -460,12 +466,12 @@ export class MentionProvider implements AutocompleteProvider {
     workDir: string,
     fileReferences: HostReferencesSeam | null,
     inputModeSource: () => EditorInputMode = () => 'prompt',
-    scope: MentionScope = { kind: 'workspace', cwd: workDir },
+    scope: MentionScope | (() => MentionScope) = { kind: 'workspace', cwd: workDir },
   ) {
     this.workDir = workDir
     this.fileReferences = fileReferences ?? NO_HOST_REFERENCES
     this.inputModeSource = inputModeSource
-    this.scope = scope
+    this.scopeOf = typeof scope === 'function' ? scope : () => scope
     // The fork's fdPath is null: the `@` branch is intercepted below and
     // routed through the port, so the fork never sees an `@` prefix here.
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
@@ -539,7 +545,7 @@ export class MentionProvider implements AutocompleteProvider {
       // post-await abort check, applied to the port branch).
       let candidates: readonly import('./runtime/host-file-port.ts').HostFileCandidate[]
       try {
-        candidates = await this.fileReferences.listReferences(this.scope, atPrefix, { signal: options.signal })
+        candidates = await this.fileReferences.listReferences(this.scopeOf(), atPrefix, { signal: options.signal })
       } catch {
         return null
       }
