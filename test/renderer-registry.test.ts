@@ -442,7 +442,7 @@ test('TuiApp: the tool snapshot arguments/result are deeply frozen (round-1 P4)'
 })
 
 test('TuiApp: a plugin-rendered component renders inside the transcript gutter (host-applied width)', async () => {
-  // The right-gutter contract (2026-08-26 plan §8.8): the gutter is
+  // The right-gutter contract (plan §8.8): the gutter is
   // applied by the HOST outside the plugin component — a plugin renderer
   // must never need to know the terminal gutter exists. The probe
   // component's long unbroken line wraps at the transcript content width
@@ -493,5 +493,42 @@ test('TuiApp: a plugin-rendered component renders inside the transcript gutter (
   assert.equal(rows.length, 4, `the plugin line must re-wrap at the widened content width (320 chars / 98):\n${rows.join('\n')}`)
   assert.equal(visibleWidth(rows[0]!), transcriptContentWidth(100),
     `the first plugin row must fill exactly the 98-col content width:\n${rows[0]}`)
+  app.stop()
+})
+
+test('TuiApp: a resize does NOT re-run plugin renderers for unchanged content (width cache scoping)', async () => {
+  // Review finding: the width cache identity must be scoped to the
+  // width-BAKING host builds (folded system/compaction/tool cards).
+  // Plugin components are render-time width-aware (compiled views wrap
+  // per frame), so a terminal resize must not invalidate them — the
+  // renderer-cache contract ("renderers never run for unchanged
+  // content") survives resizes. A content change still re-runs.
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  let calls = 0
+  registry.registerMessageRenderer({
+    id: 'counter', kind: 'assistant',
+    render: () => {
+      calls += 1
+      return { kind: 'text', spans: [{ text: 'CUSTOM' }] }
+    },
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'first' }])
+  await vt.waitForRender()
+  assert.equal(calls, 1, 'the renderer must run exactly once for one message')
+  // Resize 80 -> 100: the width change must NOT re-run the plugin
+  // renderer (the compiled view re-wraps at render time).
+  vt.resize(100, 24)
+  await vt.waitForRender()
+  assert.equal(calls, 1, 'a resize must NOT re-run the plugin renderer for unchanged content')
+  // A content change legitimately re-runs the renderer.
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'changed' }])
+  await vt.waitForRender()
+  assert.equal(calls, 2, 'a content change must re-run the renderer')
   app.stop()
 })

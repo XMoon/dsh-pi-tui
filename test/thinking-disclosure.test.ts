@@ -767,7 +767,7 @@ test('P2a: a wide → narrow resize re-derives the compact Thinking rows (no sta
   lines = vt.getViewport()
   // At 8 terminal cols the transcript content width is 6, so the title
   // truncates to `▸ Thi…` — locate by the truncated prefix, never the
-  // full word (the right-gutter contract, 2026-08-26 plan).
+  // full word (the right-gutter contract).
   start = lines.findIndex(line => line.includes('Thi'))
   assert.ok(start >= 0, `thinking block missing after resize:\n${lines.join('\n')}`)
   const block = lines.slice(start, start + 3)
@@ -902,7 +902,7 @@ test('P2: the compact Thinking card never wraps on a narrow terminal', async () 
 })
 
 test('P2e: the compact card survives the 100 → 8 → 100 resize matrix inside the transcript gutter', async () => {
-  // The right-gutter contract's resize matrix (2026-08-26 plan §8.2):
+  // The right-gutter contract's resize matrix (plan §8.2):
   // the same cached component must narrow to the 6-col content width and
   // widen back to the full preview — the per-width cache keeps the fixed
   // three-row geometry at every stop.

@@ -433,7 +433,7 @@ class MarqueeFilterAdapter implements Component {
 }
 
 /**
- * The transcript surface's RIGHT GUTTER (the 2026-08-26 width contract):
+ * The transcript surface's RIGHT GUTTER (the transcript right-gutter width contract):
  * every transcript block renders this many cells short of the terminal
  * edge, so content never visually collides with the right boundary. The
  * gutter is a property of the TRANSCRIPT surface only — the editor,
@@ -1399,11 +1399,15 @@ interface MessageComponentEntry {
   component: Component
   /** The fold boundary the component was built at (Ctrl+O / windowing). */
   boundary: number
-  /** The transcript CONTENT width the component was built at: folded rows
-   * truncate at build time, so a terminal width change must rebuild them
-   * at the new width — a stale bake would wrap at the new paint width
-   * (the right-gutter contract's resize matrix). */
-  width: number
+  /** The transcript content width a width-BAKING build truncated its
+   * folded rows at — set ONLY when the host build bakes width into the
+   * component (folded system/compaction/tool cards; see
+   * {@link TuiApp.bakesFoldedWidth}). Undefined for render-time
+   * width-aware builds (markdown, bubbles, Thinking compact, plugin
+   * views), which re-derive every frame and must NOT invalidate the
+   * renderer cache on a resize. A stale bake would wrap at the new paint
+   * width (the right-gutter resize matrix). */
+  builtWidth?: number
   /** The theme revision at build time (colors are baked into the ANSI). */
   themeRev: number
   /** Whether the entry renders expanded (boundary + click override). */
@@ -3814,12 +3818,17 @@ export class TuiApp {
       // The host-owned transcript gutter applies at THIS boundary: every
       // block — host card or plugin-rendered component — renders inside
       // the transcript content width, so no renderer needs to know the
-      // terminal gutter exists (the 2026-08-26 width contract).
+      // terminal gutter exists (the transcript right-gutter contract).
       this.messagesView.addChild(new TranscriptGutterComponent(component))
       // The max-tokens truncated marker rides under the final assistant
       // (plan §13.8): one muted row, charged to the message's hit region.
+      // It is TRUNCATED to the content width at build time and wrapped in
+      // the gutter boundary, so it is exactly ONE row on any terminal —
+      // a wrap here would add invisible rows the hit-map does not count
+      // and shift every click below it (review finding).
       if (truncatedMarker) {
-        this.messagesView.addChild(new Text(color.textMuted('  (output may be truncated)'), 0, 0))
+        const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
+        this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
       }
       const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
       rows.push({
@@ -5953,15 +5962,18 @@ export class TuiApp {
       return built.component
     }
     // Staleness: fold boundary, theme revision, expansion, the full-reveal
-    // flag, the click-hint owner, the WIDTH the folded rows baked at (a
-    // resize re-bakes the truncations at the new content width — a stale
-    // bake would wrap at the new paint width), the RENDERER identity
-    // (registry revision changed → the winner may differ), or the
-    // message's own content. The registry revision comparison is the CHEAP
-    // gate (plan §23): renderer functions run only inside buildMessage,
-    // never for unchanged content.
+    // flag, the click-hint owner, the WIDTH a width-BAKING build truncated
+    // its folds at (a resize re-bakes ONLY those entries at the new
+    // content width — render-time width-aware builds and plugin views
+    // stay cached, so a resize never re-runs a plugin renderer for
+    // unchanged content), the RENDERER identity (registry revision
+    // changed → the winner may differ), or the message's own content. The
+    // registry revision comparison is the CHEAP gate (plan §23): renderer
+    // functions run only inside buildMessage, never for unchanged content.
     const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
-    if (entry.boundary !== boundary || entry.width !== width || entry.themeRev !== this.themeRevision
+    if (entry.boundary !== boundary
+      || (entry.builtWidth !== undefined && entry.builtWidth !== width)
+      || entry.themeRev !== this.themeRevision
       || entry.expanded !== state.expanded
       || entry.fullReveal !== state.fullReveal
       || entry.expandHint !== state.expandHint
@@ -5980,7 +5992,7 @@ export class TuiApp {
       const rebuilt = this.buildMessage(message, boundary, state, width)
       entry.component = rebuilt.component
       entry.boundary = rebuilt.boundary
-      entry.width = rebuilt.width
+      entry.builtWidth = rebuilt.builtWidth
       entry.themeRev = rebuilt.themeRev
       entry.expanded = rebuilt.expanded
       entry.fullReveal = rebuilt.fullReveal
@@ -5990,6 +6002,23 @@ export class TuiApp {
       this.captureComponentState(entry, message)
     }
     return entry.component
+  }
+
+  /**
+   * Whether a HOST build bakes width-dependent truncation into the
+   * component at build time — the FOLDED system / compaction / tool
+   * cards (their preview rows truncate to the content width once, so a
+   * terminal resize must rebuild them at the new width). Render-time
+   * width-aware builds (assistant/user markdown and bubbles, Thinking
+   * compact with its per-width cache, expanded card bodies) re-derive
+   * every frame and are deliberately excluded: keying them by width
+   * would invalidate the whole message cache on every resize and re-run
+   * plugin renderers for unchanged content (the renderer-cache
+   * contract, plan §23).
+   */
+  private bakesFoldedWidth(message: TranscriptMessage, expanded: boolean): boolean {
+    if (expanded) return false
+    return message.kind === 'system' || message.kind === 'compaction' || message.kind === 'tool'
   }
 
   /**
@@ -6009,15 +6038,20 @@ export class TuiApp {
   ): MessageComponentEntry {
     const registry = this.renderers
     const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, state.expanded)
+    // The width-baking flag is a HOST-build property: plugin components
+    // never bake width (compiled views wrap at render time), so a resize
+    // must not invalidate them — the renderer-cache contract (renderers
+    // never run for unchanged content) survives resizes.
+    const hostBuilt = rendered === undefined
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
       // renderer: fullscreen secondaries default compact (per-card
       // override full-reveals), regular expanded roots full-reveal.
-      component: rendered === undefined
+      component: hostBuilt
         ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
         : rendered.component,
       boundary,
-      width,
+      builtWidth: hostBuilt && this.bakesFoldedWidth(message, state.expanded) ? width : undefined,
       themeRev: this.themeRevision,
       expanded: state.expanded,
       fullReveal: state.fullReveal,
