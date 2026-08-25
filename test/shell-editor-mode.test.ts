@@ -1600,3 +1600,48 @@ test('a Stable extension suggestion applies through the wire adapter symmetrical
   assert.equal(app.seatTextForTest(), '/zzz-no-such-dir/', 'the extension apply lands in the bare body without a doubled slash')
   app.stop()
 })
+
+// ── review round: capability-gated mode setter in the fallback ────────────
+
+test('a host adapter with setSerializedInput but WITHOUT setInputMode falls back to the raw path (declined ! preserved)', () => {
+  const host = {
+    text: '',
+    cursor: 0,
+    getText: () => host.text,
+    setText: (text: string) => { host.text = text },
+    setTextAndCursor: (text: string, cursor: number) => { host.text = text; host.cursor = cursor },
+    getCursor: () => host.cursor,
+    setCursor: (offset: number) => { host.cursor = offset },
+    // Decodes like the real adapter, but deliberately NO setInputMode —
+    // the wire round-trip must not silently discard the decoded mode.
+    setSerializedInput: (text: string) => {
+      host.text = text.startsWith('!!') ? text.slice(2) : text.startsWith('!') ? text.slice(1) : text
+    },
+    handleInput: (data: string) => {
+      if (data === '\x7f') host.text = host.text.slice(0, -1)
+      else if (data.length === 1 && data.charCodeAt(0) >= 32) host.text += data
+    },
+    focused: true,
+    borderColor: (text: string) => text,
+    invalidate: () => {},
+    addToHistory: () => {},
+    clearHistory: () => {},
+    component: new Text('host', 0, 0),
+  }
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => host,
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const plugin = pluginEditor()
+  plugin.handleInput = () => false
+  holder.handoff({ id: 'plugin', create: () => plugin })
+  // A declined `!` must be preserved in the plugin document even when the
+  // adapter is only half-capable (the raw path keeps the bytes).
+  holder.handleHostFallbackInput('!')
+  assert.equal(plugin.getText(), '!', 'a declined ! must not vanish with a partial adapter')
+  holder.dispose()
+})

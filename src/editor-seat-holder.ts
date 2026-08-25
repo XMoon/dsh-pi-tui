@@ -249,7 +249,13 @@ export class EditorSeatHolder {
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getInputMode: () => editor.getInputMode?.() ?? 'prompt',
-      setInputMode: (mode) => editor.setInputMode?.(mode),
+      // Only expose the mode setter when the underlying adapter implements
+      // it — a silently no-op wrapper would make the fallback's capability
+      // check pass while the decoded mode is discarded (same rule as the
+      // setSerializedInput gate below).
+      setInputMode: editor.setInputMode === undefined
+        ? undefined
+        : (mode) => editor.setInputMode!(mode),
       // Only expose the serialized-input setter when the underlying
       // adapter implements it: a wrapper that silently no-ops would make
       // the handoff's capability check pass and DROP the transferred
@@ -625,7 +631,12 @@ export class EditorSeatHolder {
         return task()
       }
       run(() => {
-        if (host.setSerializedInput !== undefined) {
+        // The wire round-trip needs the FULL capability pair: the decode
+        // (setSerializedInput) AND the mode sync (setInputMode). An
+        // adapter with only one of them falls back to the raw path — a
+        // silently discarded mode would serialize with a stale prefix and
+        // DROP the declined shell input.
+        if (host.setSerializedInput !== undefined && host.setInputMode !== undefined) {
           // The plugin document IS the wire form, the host document is
           // mode + body: decode the staged draft (through the narrow
           // setTextAndCursor seam — no undo/autocomplete side effects —
