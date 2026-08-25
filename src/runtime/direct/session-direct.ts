@@ -16,6 +16,7 @@
 
 import { dshHome } from '../../diag.ts'
 import { loadSessionTitleBatch, type SessionPickerPersistence, type SessionQueryLike } from '../../sessions.ts'
+import { safeErrorMessage } from '../../error-boundary.ts'
 import type { ExportReadResult, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -143,9 +144,10 @@ export class DirectSessionReader implements SessionReader {
       const raw = await persistence.readRaw(sessionId)
       if (raw === undefined) return { kind: 'none' }
       return { kind: 'found', data: { filename: raw.filename ?? sessionId, content: raw.content } }
-    } catch {
-      // An unreadable log is an absent export, never a crash.
-      return { kind: 'none' }
+    } catch (error) {
+      // A REJECTED read (corrupt log, validation, I/O) is a real failure
+      // with a diagnostic — never misclassified as 'no materialized log'.
+      return { kind: 'error', message: safeErrorMessage(error) }
     }
   }
 }

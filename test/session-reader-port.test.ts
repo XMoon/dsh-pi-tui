@@ -105,3 +105,15 @@ test('titles delegates to the title batch loader through the query engine', asyn
   const titles = await reader.titles([{ id: 'session-a', createdAt: 100, live: false }])
   assert.equal(titles.get('session-a'), 'title-of-session-a')
 })
+
+test('readExportData preserves a REJECTED log read as an error with the diagnostic', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: {
+      list: async () => [],
+      readRaw: async () => { throw new Error('corrupt zstd frame') },
+    },
+  }))
+  const result = await reader.readExportData('session-broken')
+  assert.equal(result.kind, 'error', 'a corrupt log is a REAL failure, never "no materialized log"')
+  if (result.kind === 'error') assert.ok(result.message.includes('corrupt zstd frame'))
+})
