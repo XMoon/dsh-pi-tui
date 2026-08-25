@@ -567,10 +567,34 @@ all fixed in follow-up commits:
    exactly as before the feature. Regression test asserts the wire lines
    in shell-context / shell-local / prompt.
 
-All six fixes landed with regression tests; 2055/2055 full-suite tests,
-typecheck, `git diff --check` and the pre-push gate (pack + all smokes)
-clean; the vendored fork and the public extension surface remain
-unchanged.
+All six fixes landed with regression tests, followed by two more review
+rounds (codex / gpt-5.6-luna):
+
+- **Round 10** (on the PR-review fixes): P1 — residual input before the
+  opening marker / after the closing marker was forwarded straight to the
+  base editor, bypassing the shell-mode interceptions, and split opening
+  markers were not buffered (FIXED: residuals re-enter the full
+  interception chain — a leading `!` in the same chunk enters the shell
+  mode before the paste lands, trailing keys append as ordinary input —
+  and a trailing `\x1b[20`/`\x1b[200`/`\x1b[201` prefix is stitched onto
+  the next chunk, with a complete `~`-terminated marker never mistaken
+  for a split prefix); P2 — the autocomplete reopen ran before the paste
+  landed (FIXED: it now runs after the normalized paste and residuals).
+- **Round 11**: P1 — the marker tail buffering missed the `\x1b[` /
+  `\x1b[2` split boundaries (FIXED: every proper prefix of the markers is
+  buffered; a LONE `\x1b` tail is deliberately NOT buffered — it IS the
+  complete Esc key, and real terminals write a paste marker atomically);
+  P2 — per-segment recursion could overflow the stack on a chunk with
+  many paste segments (FIXED: the paste drain is iterative); P1 — the
+  Stable-extension wire adapter and the provider's virtual prefix applied
+  the prefix to the CURSOR line instead of LINE 0, breaking multiline
+  drafts (FIXED: the wire document carries the prefix on line 0 only, and
+  only a first-line cursor shifts by it); P2 — this review record went
+  stale (updated here).
+
+2060/2060 full-suite tests, typecheck, `git diff --check` and the pre-push
+gate (pack + all smokes) clean; the vendored fork and the public
+extension surface remain unchanged.
 
 ---
 

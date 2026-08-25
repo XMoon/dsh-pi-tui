@@ -222,27 +222,9 @@ export class TuiEditor extends Editor {
     // A bracketed-paste marker split across input chunks (real terminals
     // keep markers whole, but a chunk boundary must not lose them):
     // stitch a buffered marker prefix onto this chunk, and buffer a
-    // trailing `\x1b[20` / `\x1b[200` / `\x1b[201` prefix for the next
-    // one. A stitched sequence that never forms a real marker flows
-    // through the normal chain (upstream behavior for split CSI).
-    if (this.pendingPasteMarker !== null) {
-      data = this.pendingPasteMarker + data
-      this.pendingPasteMarker = null
-    }
-    // A COMPLETE marker ends with `~` — `\x1b[200~`/`\x1b[201~` also end
-    // with the 5-char prefixes `\x1b[200`/`\x1b[201`, so the tail check
-    // must exclude a trailing `~` first (a complete closing marker is
-    // never a split prefix). The tail lengths are the FULL prefix byte
-    // counts (`\x1b` is one char): `\x1b[20` = 4, `\x1b[200`/`\x1b[201` = 5.
-    let markerTail = 0
-    if (!data.endsWith('~')) {
-      if (data.endsWith('\x1b[201') || data.endsWith('\x1b[200')) markerTail = 5
-      else if (data.endsWith('\x1b[20')) markerTail = 4
-    }
-    if (markerTail > 0) {
-      this.pendingPasteMarker = data.slice(-markerTail)
-      data = data.slice(0, -markerTail)
-    }
+    // trailing prefix for the next one.
+    data = this.stitchPendingPasteMarker(data)
+    data = this.bufferTrailingPasteMarker(data)
     // Esc + autocomplete activity: close WITHOUT re-triggering (kimi
     // parity — otherwise Esc would immediately reopen the list). This
     // keeps its priority over the shell-mode Esc exit below.
@@ -306,20 +288,69 @@ export class TuiEditor extends Editor {
     // the fork's paste-registry path because the stripped content is
     // re-wrapped as a bracketed paste below.
     if (this.pasteCapture !== null || data.includes('\x1b[200~')) {
-      const residuals = this.capturePaste(data)
-      // Residual input (trailing keys after the closing marker) goes
-      // through the FULL interception chain — never straight into the
-      // base document. The autocomplete reopen runs AFTER the normalized
-      // paste and the residuals landed, so a pasted `@dir/` reopens like
-      // ordinary input.
-      for (const residual of residuals) {
-        if (residual !== '') this.handleInput(residual)
-      }
+      // Drain paste chunks ITERATIVELY: one input chunk may carry many
+      // complete paste segments — recursion per segment would overflow
+      // the stack. The autocomplete reopen runs AFTER the normalized
+      // pastes and the residual input landed, so a pasted `@dir/` reopens
+      // like ordinary input.
+      this.processPasteChunks(data)
       this.reopenAutocompleteAfterInput()
       return
     }
     if (data !== '') super.handleInput(data)
     this.reopenAutocompleteAfterInput()
+  }
+
+  /** Stitch a buffered paste-marker prefix onto this chunk. */
+  private stitchPendingPasteMarker(data: string): string {
+    if (this.pendingPasteMarker !== null) {
+      data = this.pendingPasteMarker + data
+      this.pendingPasteMarker = null
+    }
+    return data
+  }
+
+  /** Buffer a trailing paste-marker prefix for the next chunk: any
+   * suffix that is a proper prefix of `\x1b[200~` / `\x1b[201~` — except
+   * a LONE `\x1b`, which IS the complete Esc key (buffering it would
+   * delay every Esc press; real terminals write a paste marker
+   * atomically, so a split after the first byte is not observable in
+   * practice). A complete `~`-terminated marker is never a split prefix.
+   * The tail lengths are FULL byte counts (`\x1b` is one char). A
+   * stitched sequence that never forms a real marker flows through the
+   * normal chain (upstream behavior for split CSI). */
+  private bufferTrailingPasteMarker(data: string): string {
+    if (data.endsWith('~')) return data
+    let markerTail = 0
+    if (data.endsWith('\x1b[201') || data.endsWith('\x1b[200')) markerTail = 5
+    else if (data.endsWith('\x1b[20')) markerTail = 4
+    else if (data.endsWith('\x1b[2')) markerTail = 3
+    else if (data.endsWith('\x1b[')) markerTail = 2
+    if (markerTail === 0) return data
+    this.pendingPasteMarker = data.slice(-markerTail)
+    return data.slice(0, -markerTail)
+  }
+
+  /** Drain one input chunk that contains paste markers ITERATIVELY. Each
+   * iteration re-runs the marker stitch/tail buffering, then feeds the
+   * chunk to {@link capturePaste}; the residual (trailing keys or the
+   * next paste segment) becomes the next iteration. An ordinary residual
+   * (no marker) goes through the full interception chain — exactly one
+   * level, since it cannot re-enter the paste branch without a marker. */
+  private processPasteChunks(initial: string): void {
+    let chunk = initial
+    for (;;) {
+      chunk = this.stitchPendingPasteMarker(chunk)
+      chunk = this.bufferTrailingPasteMarker(chunk)
+      if (this.pasteCapture === null && !chunk.includes('\x1b[200~')) {
+        if (chunk !== '') this.handleInput(chunk)
+        return
+      }
+      const residuals = this.capturePaste(chunk)
+      const residual = residuals.length > 0 ? residuals[0]! : ''
+      if (residual === '') return
+      chunk = residual
+    }
   }
 
   /** Accumulate one raw bracketed-paste chunk; on the closing marker,

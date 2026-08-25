@@ -21,6 +21,7 @@ import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.
 import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
 import { createDiag } from '../src/diag.ts'
 import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../src/shell-completion.ts'
+import { MentionProvider } from '../src/mentions.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** The owned-task entry the runner wires in production (real runOwned,
@@ -29,6 +30,9 @@ const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
 const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void => {
   runOwned(label, task, { ...options, diag })
 }
+
+/** A never-aborted signal for direct provider calls. */
+const abort = new AbortController().signal
 
 /** A throwaway workspace (completion fixtures live under the cwd). */
 function fixtureWorkspace(): string {
@@ -1344,4 +1348,104 @@ test('a pasted @dir/ path reopens the mention dropdown like ordinary input', asy
   await waitForDropdownRow(vt, 'deep.ts', 'mention dropdown after a pasted @dir/')
   assert.equal(app.seatTextForTest(), '@src/')
   app.stop()
+})
+
+// ── review round: split markers at every boundary; iterative drain ────────
+
+test('a paste marker split at ANY prefix boundary is stitched back together', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  // The marker `\x1b[200~` split after `\x1b[` / `\x1b[2` / `\x1b[20` /
+  // `\x1b[200` — each boundary gets its own two-chunk paste with the
+  // matching second half. (A lone `\x1b` tail is NOT buffered: it IS the
+  // complete Esc key; real terminals write a paste marker atomically.)
+  const boundaries: [string, string][] = [
+    ['\x1b[', '200~'],
+    ['\x1b[2', '00~'],
+    ['\x1b[20', '0~'],
+    ['\x1b[200', '~'],
+  ]
+  for (const [index, [head, tail]] of boundaries.entries()) {
+    app.setEditorText('')
+    await vt.waitForRender()
+    vt.sendInput(head)
+    await vt.waitForRender()
+    vt.sendInput(`${tail}!git status ${index}\x1b[201~`)
+    await vt.waitForRender()
+    assert.equal(app.inputModeForTest(), 'shell-context', `split after ${JSON.stringify(head)} must open the paste`)
+    assert.equal(app.seatTextForTest(), `git status ${index}`)
+  }
+  // The closing marker split after `\x1b[201`.
+  app.setEditorText('')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[200~!git status final\x1b[201')
+  await vt.waitForRender()
+  vt.sendInput('~')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  assert.equal(app.seatTextForTest(), 'git status final')
+  app.stop()
+})
+
+test('a chunk with MANY paste segments drains iteratively (no stack overflow)', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  const segments = Array.from({ length: 200 }, (_, index) => `\x1b[200~git ${index}\x1b[201~`)
+  vt.sendInput(segments.join(''))
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), Array.from({ length: 200 }, (_, index) => `git ${index}`).join(''),
+    'every segment lands, in order — the drain is iterative, never a stack overflow')
+  app.stop()
+})
+
+// ── review round: multiline wire adaptation ───────────────────────────────
+
+test('the Stable autocomplete extension query keeps the wire document on MULTILINE drafts', async () => {
+  const queries: { lines: readonly string[]; cursorLine: number; cursorCol: number }[] = []
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.setCommandCompletions([], fixtureWorkspace(), null, async (query) => {
+    queries.push({ lines: [...query.lines], cursorLine: query.cursorLine, cursorCol: query.cursorCol })
+    return null
+  })
+  app.start()
+  await vt.waitForRender()
+  setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+  try {
+    // A multiline shell draft: wire line 0 carries the prefix, later
+    // lines are ordinary text.
+    vt.sendInput('!')
+    vt.sendInput('git status')
+    vt.sendInput('\n')
+    vt.sendInput('more')
+    await vt.waitForRender()
+    vt.sendInput('\t')
+    await pollUntil(() => queries.length === 1, 'multiline shell query on line 1')
+    assert.deepEqual([...queries[0]!.lines], ['!git status', 'more'],
+      'line 0 carries the wire prefix, later lines stay plain')
+    assert.equal(queries[0]!.cursorLine, 1)
+    assert.equal(queries[0]!.cursorCol, 4, 'a non-first-line cursor never shifts by the prefix')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  app.stop()
+})
+
+test('MentionProvider completes a multiline shell draft with the wire line-0 prefix only', async () => {
+  const root = fixtureWorkspace()
+  let mode: 'prompt' | 'shell-context' | 'shell-local' = 'shell-context'
+  const source = (): 'prompt' | 'shell-context' | 'shell-local' => mode
+  const provider = new MentionProvider([], root, null, source)
+  // Cursor on line 0: the virtual prefix applies.
+  const first = await provider.getSuggestions(['gi', 'more'], 0, 2, { signal: abort })
+  assert.ok(first !== null && first.items.some(item => item.value === 'git'), 'line 0 completes as a shell command')
+  // Cursor on line 1: the wire document has NO prefix there — plain path
+  // completion semantics (a non-`!` line is not a shell line).
+  const second = await provider.getSuggestions(['git', 'more'], 1, 4, { signal: abort, force: true })
+  assert.equal(second, null, 'a later body line never gets a synthetic prefix')
+  // applyCompletion on a later line must not strip anything either: the
+  // inner provider's plain word replacement (no shell trailing space).
+  const applied = provider.applyCompletion(['git', 'more'], 1, 4, { value: 'x', label: 'x' }, 'more')
+  assert.deepEqual(applied, { lines: ['git', 'x'], cursorLine: 1, cursorCol: 1 })
 })

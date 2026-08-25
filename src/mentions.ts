@@ -517,9 +517,11 @@ export class MentionProvider implements AutocompleteProvider {
     )
   }
 
-  /** The virtual serialized line for a shell-mode editor position: the
-   * synthetic `!` / `!!` prefix plus the shifted cursor column. Null in
-   * prompt mode. */
+  /** The virtual serialized line for a shell-mode editor position on the
+   * FIRST document line: the synthetic `!` / `!!` prefix plus the shifted
+   * cursor column. Null in prompt mode or on a LATER line — the wire
+   * document carries the prefix on line 0 only, so a body continuation
+   * line completes as ordinary text (paths), exactly like the wire. */
   private virtualShellLine(
     line: string,
     cursorCol: number,
@@ -528,6 +530,17 @@ export class MentionProvider implements AutocompleteProvider {
     if (mode === 'prompt') return null
     const prefix = shellPrefixForMode(mode)
     return { line: prefix + line, cursorCol: cursorCol + prefix.length, prefixLength: prefix.length }
+  }
+
+  /** The virtual shell line ONLY for the first document line (see
+   * {@link virtualShellLine}); later lines complete without a prefix. */
+  private virtualShellContext(
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+  ): { line: string; cursorCol: number; prefixLength: number } | null {
+    if (cursorLine !== 0) return null
+    return this.virtualShellLine(lines[0] ?? '', cursorCol)
   }
 
   async getSuggestions(
@@ -553,9 +566,10 @@ export class MentionProvider implements AutocompleteProvider {
     // from the real-shell compgen bridge (docs/input-and-card-polish.md §1);
     // path positions fall through to the fork's fd completion below. In a
     // shell MODE the buffer holds the bare body, so the shell grammar
-    // receives the VIRTUAL serialized line (the synthetic prefix); in
-    // prompt mode the line is parsed as-is (a literal `!` draft).
-    const virtual = this.virtualShellLine(currentLine, cursorCol)
+    // receives the VIRTUAL serialized line (the synthetic prefix — line 0
+    // only, matching the wire document); in prompt mode the line is
+    // parsed as-is (a literal `!` draft).
+    const virtual = this.virtualShellContext(lines, cursorLine, cursorCol)
     const shellLine = virtual ?? { line: currentLine, cursorCol, prefixLength: 0 }
     const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
     if (shellContext !== undefined) {
@@ -595,7 +609,7 @@ export class MentionProvider implements AutocompleteProvider {
     // itself operates on the REAL line: the completion prefix sits after
     // the synthetic `!`, so it is identical in both forms and no prefix
     // stripping is needed — the synthetic prefix never enters the buffer.
-    const virtual = this.virtualShellLine(currentLine, cursorCol)
+    const virtual = this.virtualShellContext(lines, cursorLine, cursorCol)
     const shellLine = virtual ?? { line: currentLine, cursorCol, prefixLength: 0 }
     if (shellCompletionContext(shellLine.line, shellLine.cursorCol) !== undefined) {
       const before = currentLine.slice(0, cursorCol - prefix.length)
@@ -637,10 +651,12 @@ export class MentionProvider implements AutocompleteProvider {
     // In a shell MODE a leading `/` is a PATH, never a slash command: the
     // fork's bare-slash-command block (`/usr/lo` has no space) must not
     // swallow Tab. The VIRTUAL serialized line keeps the fork's own
-    // judgment on the line the shell dispatch would see.
-    const virtual = this.virtualShellLine(currentLine, cursorCol)
+    // judgment on the line the shell dispatch would see — the wire
+    // document carries the prefix on LINE 0 only, so a body continuation
+    // line keeps the fork's plain judgment.
+    const virtual = this.virtualShellContext(lines, cursorLine, cursorCol)
     if (virtual !== null) {
-      const virtualLines = lines.map((line, index) => index === cursorLine ? virtual.line : line)
+      const virtualLines = lines.map((line, index) => index === 0 ? virtual.line : line)
       return this.inner.shouldTriggerFileCompletion?.(virtualLines, cursorLine, virtual.cursorCol) ?? true
     }
     return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true
