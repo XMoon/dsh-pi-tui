@@ -4374,8 +4374,8 @@ export function apply(ctx: Context, config: Config): void {
     // and its child row — because the two records have no cross-reference
     // to dedup; the viewable child row is the more useful one. The children
     // half enriches asynchronously: listChildren may read persistence for
-    // cold children, so the picker opens on the jobs half and setItems
-    // merges the rest in.
+    // cold children, so the picker opens on the CURRENT state and setItems
+    // merges the fresh listing in.
     //
     // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
     // the merged list + search is the single command-side entry, with
@@ -4398,7 +4398,22 @@ export function apply(ctx: Context, config: Config): void {
       // identity source is the RUNNER-level `taskBrowserRows` (kept fresh
       // by every coordinator commit), so the select/action paths below
       // never contradict a runtime refresh that already repainted.
-      taskBrowserRows = buildTaskRows(jobSnapshots, [])
+      //
+      // FIRST FRAME: seed from the coordinator's CURRENT state instead of
+      // flashing a jobs-only list — refreshRuntime() is synchronous, never
+      // touches persistence, reuses the cached catalog and re-reads the
+      // current jobs + registry statuses (activeTaskBrowser is not set
+      // yet, so it only seeds taskBrowserRows + the badge). The badge and
+      // the panel therefore agree from the first frame, and a FAILED fresh
+      // listing below cannot leave a panel that contradicts the badge.
+      // Without the runtime (no subagents service) the jobs-only fallback
+      // applies.
+      const runtime = taskRuntime
+      if (runtime !== undefined) {
+        runtime.refreshRuntime()
+      } else {
+        taskBrowserRows = buildTaskRows(jobSnapshots, [])
+      }
       const selectRow = (value: string): void => {
         const row = taskBrowserRows.find(candidate => candidate.value === value)
         if (row === undefined) return
@@ -4428,11 +4443,13 @@ export function apply(ctx: Context, config: Config): void {
       }
       const actionRow = (value: string, action: 'interrupt'): void => {
         const row = taskBrowserRows.find(candidate => candidate.value === value)
-        // ONLY continuable children are interruptible: `subagents.interrupt`
-        // on a one-shot id is an accepted no-op, so firing it for a
-        // one-shot row would be a fake action (the panel already hides the
-        // verb, this is the runner-side guard).
-        if (row === undefined || row.kind !== 'subagent' || row.mode !== 'continuable') return
+        // The EXECUTION gate is the SAME predicate as the panel's
+        // advertisement gate (`isSubagentRowInterruptible`): only a
+        // continuable child with a LIVE running driver may fire the stop
+        // verb — a one-shot id is an accepted no-op (a fake action) and an
+        // idle continuable has no driver to stop. One predicate for both
+        // layers, so a panel change can never release an idle interrupt.
+        if (row === undefined || row.kind !== 'subagent' || !isSubagentRowInterruptible(row)) return
         const service = ctx.get('subagents')
         if (service === undefined || liveAgent === undefined) {
           app.notify('subagent service unavailable', 'error')
@@ -4461,8 +4478,9 @@ export function apply(ctx: Context, config: Config): void {
       // The open triggers a CATALOG refresh (membership may have drifted
       // since the last listing): the coordinator fences it against a
       // session switch and commits through the ACTIVE handle — a browser
-      // closed while the listing is in flight is never repainted.
-      const runtime = taskRuntime
+      // closed while the listing is in flight is never repainted. The
+      // body above is synchronous, so the `runtime` captured for the
+      // first-frame seed is still the current coordinator.
       if (runtime !== undefined) {
         runOwned('task browser descendants', () => runtime.refreshCatalog(), {
           diag,
