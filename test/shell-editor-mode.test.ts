@@ -1449,3 +1449,42 @@ test('MentionProvider completes a multiline shell draft with the wire line-0 pre
   const applied = provider.applyCompletion(['git', 'more'], 1, 4, { value: 'x', label: 'x' }, 'more')
   assert.deepEqual(applied, { lines: ['git', 'x'], cursorLine: 1, cursorCol: 1 })
 })
+
+// ── review round: Ctrl+C clears the shell mode with the body ──────────────
+
+test('Ctrl+C clears BOTH the shell body and the mode (prompt returns)', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('pwd')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  vt.sendInput('\x03') // ctrl+c: first press clears
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '', 'the body clears')
+  assert.equal(app.inputModeForTest(), 'prompt', 'the shell mode clears with the body — no stale `! ` prompt')
+  app.stop()
+})
+
+test('Ctrl+C on a BARE ! (empty body, shell mode) clears the mode and arms the exit window', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let exits = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => { exits += 1 },
+  })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('!')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  vt.sendInput('\x03') // ctrl+c: the serialized draft is non-empty (the `!` prefix)
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'prompt', 'the first press clears the bare shell mode')
+  assert.equal(exits, 0, 'the first press only arms the exit window')
+  vt.sendInput('\x03') // second press within the window: exit
+  await vt.waitForRender()
+  assert.equal(exits, 1, 'the second press exits')
+  app.stop()
+})
