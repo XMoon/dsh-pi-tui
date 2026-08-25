@@ -15,6 +15,7 @@ import {
 } from '@xmoon76/dsh-pi-tui/extensions'
 import type {
   DockItem,
+  FooterItemContribution,
   FooterSegment,
   HeaderBadge,
   StyledSpan,
@@ -51,5 +52,19 @@ export function apply(ctx: Context): void {
     order: 500,
   }, {
     spans: [{ text: 'fixture-segment', tone: 'textDim' }],
+  })
+
+  // The M4 configurable footer item slot: a plugin contributes an item
+  // users show/hide/reorder in /footer. Feature-detected like every slot.
+  if (!service.api().capabilities.has('slot.chrome.footer.item')) return
+  service.register<FooterItemContribution>('chrome.footer.item', {
+    id: 'fixture-item',
+    order: 500,
+    description: 'Packed-fixture footer item.',
+  }, {
+    label: 'fixture item',
+    defaultZone: 'right',
+    importance: 50,
+    segment: { spans: [{ text: 'fixture-item', tone: 'textDim' }], minWidth: 8 },
   })
 }

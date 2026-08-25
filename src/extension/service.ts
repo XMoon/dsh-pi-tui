@@ -22,7 +22,7 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { ExtensionLedger } from './internal/ledger.ts'
 import { InvalidateBatcher } from './internal/batcher.ts'
-import { isSlotName, slotSemantic } from './slot-map.ts'
+import { isSlotName, slotNames, slotSemantic } from './slot-map.ts'
 import type { PiTuiApiInfo, PiTuiCapability, PiTuiSlotName, RegistrationHandle, RegistrationSpec, SurfaceStateValues } from './public-types.ts'
 import type {
   AdvancedConfirmOptions,
@@ -323,6 +323,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     'slot.chrome.header.badge',
     'slot.input.dock.item',
     'slot.chrome.footer.status',
+    'slot.chrome.footer.item',
     'slot.input.widget',
     'advanced.input.capture',
     'advanced.ui.interactive',
@@ -762,9 +763,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
 
   register<T>(slot: string, spec: RegistrationSpec, contribution: T): RegistrationHandle<T> {
     if (!isSlotName(slot)) {
-      throw new Error(
-        `unknown extension slot "${slot}" (known: ${['chrome.header.badge', 'input.dock.item', 'chrome.footer.status', 'input.widget.above', 'input.widget.below'].join(', ')})`,
-      )
+      throw new Error(`unknown extension slot "${slot}" (known: ${slotNames().join(', ')})`)
     }
     // P1-2 lifetime model: a registration is bound to the CALLER's fiber,
     // NEVER to the current surface attachment. A stale service handle's
@@ -773,16 +772,21 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // ledger is the service-lifetime registry and the SurfaceHost merely
     // consumes it (a dispose stops consuming, never removes).
     // `this.ctx` is the CALLER's context (Cordis Service tracing); its fiber
-    // owns this registration's lifetime. The ledger keys ownership by the
-    // fiber UID (unique per fiber — anonymous sibling plugins share the
-    // inherited display name 'root', so the NAME would conflate them); the
-    // display name rides along for diagnostics. The fiber-bound effect
-    // disposer performs the cleanup on unload. `this.ctx.fiber.effect()`
-    // throws INACTIVE_EFFECT when the caller fiber is already disposed —
-    // the registration must then be rolled back so the (slot, id) pair is
-    // not blocked by a ghost.
+    // owns this registration's lifetime. The OWNER is the fiber's stable
+    // plugin identity (the nearest named ancestor's display name — 'root'
+    // for anonymous plugins): the chrome.footer.item canonical config key
+    // `ext:<owner>/<id>` is PERSISTED in user layouts, so it must survive
+    // HMR — a reloaded plugin gets a NEW fiber (new uid) but the SAME name,
+    // and the layout reference recovers. Anonymous plugins share 'root';
+    // the ledger's (slot, id) uniqueness already rejects two live
+    // registrations of the same id regardless of owner, so the name-based
+    // owner never conflates LIVE records — it only makes the persisted key
+    // stable. The fiber-bound effect disposer performs the cleanup on
+    // unload. `this.ctx.fiber.effect()` throws INACTIVE_EFFECT when the
+    // caller fiber is already disposed — the registration must then be
+    // rolled back so the (slot, id) pair is not blocked by a ghost.
     const caller = this.ctx
-    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const owner = caller.fiber.name
     const handle = this.ledger.register<T>(slot, spec, contribution, owner)
     let dispose: () => void
     try {

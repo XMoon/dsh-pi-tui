@@ -291,6 +291,7 @@ const agentPresetItem: FooterItemDefinition = {
   formats: ['badge', 'compact'],
   defaultFormat: 'badge',
   render(snapshot: StatusSnapshot, ref) {
+    if (snapshot.view.subject.kind !== 'main') return null
     const preset = snapshot.composition.agentPreset
     if (preset === undefined) return null
     const text = ref.format === 'compact' && preset.shortLabel !== undefined
@@ -310,6 +311,7 @@ const reasoningItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot) {
+    if (snapshot.view.subject.kind !== 'main') return null
     const effort = snapshot.composition.model?.reasoningEffort
     if (effort === undefined) return null
     return { spans: [{ text: `@${effort}`, tone: 'textMuted' }] }
@@ -326,6 +328,7 @@ const sandboxModeItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot) {
+    if (snapshot.view.subject.kind !== 'main') return null
     const mode = snapshot.access.sandbox?.mode
     if (mode === undefined) return null
     const tone = mode === 'danger-full-access' ? 'warning' : mode === 'read-only' ? 'textMuted' : 'text'
@@ -343,6 +346,7 @@ const approvalPolicyItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot) {
+    if (snapshot.view.subject.kind !== 'main') return null
     const policy = snapshot.access.approval?.policy
     if (policy === undefined) return null
     return { spans: [{ text: policy, tone: policy === 'never' ? 'warning' : 'text' }] }
@@ -405,6 +409,7 @@ const runStateItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot) {
+    if (snapshot.view.subject.kind !== 'main') return null
     const phase = snapshot.activity.phase
     if (phase === 'idle') return null
     const tone = phase === 'working' ? 'primary' : 'warning'
@@ -422,6 +427,7 @@ const queueItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot) {
+    if (snapshot.view.subject.kind !== 'main') return null
     const count = snapshot.activity.queuedCount
     if (count <= 0) return null
     return { spans: [{ text: `${count} queued`, tone: 'textDim' }] }
@@ -438,6 +444,7 @@ const agentsItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot) {
+    if (snapshot.view.subject.kind !== 'main') return null
     const count = snapshot.activity.childAgentCount
     if (count <= 0) return null
     return { spans: [{ text: `${count} agents`, tone: 'textDim' }] }
@@ -454,6 +461,7 @@ const todoItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot) {
+    if (snapshot.view.subject.kind !== 'main') return null
     const count = snapshot.activity.todoCount
     if (count <= 0) return null
     return { spans: [{ text: `${count} todo`, tone: 'textDim' }] }

@@ -903,6 +903,8 @@ export interface SubagentViewerSubmit {
 export interface SubagentViewerFooter {
   /** The child's durable creation label. */
   readonly label: string
+  /** The viewed child session's durable id (the display-subject key). */
+  readonly childSessionId: string
   /** Catalog classification (the viewer's interactivity). */
   readonly mode: 'one-shot' | 'continuable'
   /** Store snapshot activity (running / inactive). */
@@ -5453,15 +5455,21 @@ export class TuiApp {
    * shows the VIEWED child's own identity (label/mode/activity/turns/
    * stats) instead of the parent session's status. Pass `undefined` to
    * restore the parent footer. The runner sets it on viewer open,
-   * refreshes it as the child's own events fold, and clears it on exit. */
+   * refreshes it as the child's own events fold, and clears it on exit.
+   * The DISPLAY SUBJECT (view section) is projected HERE, before the
+   * paint — the very first frame after entering (or leaving) the viewer
+   * must already show the new subject, never the old one. */
   setViewerFooter(footer: SubagentViewerFooter | undefined): void {
     this.viewerFooter = footer
     // M1: the display subject's facts follow the viewer (the layout never
     // changes — only the data source). The child's structured usage rides
     // the footer payload; turns/steps and the child workspace always
-    // project.
+    // project; the view section switches the subject.
     if (footer === undefined) {
-      this.projectStatus({ usage: this.usageFromStatus() })
+      this.projectStatus({
+        usage: this.usageFromStatus(),
+        view: { subject: { kind: 'main' } },
+      })
     } else {
       const current = this.statusStore.snapshot().usage
       this.projectStatus({
@@ -5478,6 +5486,12 @@ export class TuiApp {
           cwd: footer.cwd,
           ...footer.cwd === '' ? {} : { project: footer.cwd.split('/').filter(Boolean).at(-1) ?? footer.cwd },
         },
+        view: resolveDisplaySubject({
+          childSessionId: footer.childSessionId,
+          label: footer.label,
+          mode: footer.mode,
+          activity: footer.activity,
+        }),
       })
     }
     this.renderFooter()

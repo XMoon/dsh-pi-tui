@@ -23,7 +23,7 @@ import type {
   RegistrationHandle,
   RegistrationSpec,
 } from '../public-types.ts'
-import { isSlotName, slotSemantic } from '../slot-map.ts'
+import { isSlotName, slotNames, slotSemantic } from '../slot-map.ts'
 import { ExtensionHealth } from './health.ts'
 
 /** A registration's live bookkeeping. */
@@ -138,7 +138,7 @@ export class ExtensionLedger {
     owner: string,
   ): RegistrationHandle<T> {
     if (!isSlotName(slot)) {
-      throw new Error(`unknown extension slot "${slot}" (known: chrome.header.badge, input.dock.item, chrome.footer.status)`)
+      throw new Error(`unknown extension slot "${slot}" (known: ${slotNames().join(', ')})`)
     }
     const key = registryKey(slot, spec.id)
     if (this.registrations.has(key)) {

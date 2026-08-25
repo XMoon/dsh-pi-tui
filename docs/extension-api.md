@@ -185,10 +185,14 @@ quota.replace({
 })
 ```
 
-The item's config identity is the canonical key `ext:<owner>/<id>` (the
-fiber identity — stable across HMR). A layout referencing an unloaded
-plugin's item keeps the reference (the item is skipped at render) and
-recovers automatically when the plugin reloads. The legacy
+The item's config identity is the canonical key `ext:<owner>/<id>` where
+the owner is the registering plugin fiber's stable name (the nearest named
+ancestor's display name; anonymous plugins share `root`) — stable across
+HMR, because a reloaded plugin gets a NEW fiber (new uid) but the same
+name. A layout referencing an unloaded plugin's item keeps the reference
+(the item is skipped at render) and recovers automatically when the plugin
+reloads. The ledger's (slot, id) uniqueness still rejects two LIVE
+registrations of the same id regardless of owner. The legacy
 `chrome.footer.status` slot is unchanged: its segments aggregate into the
 single `ext:*` item (show/hide as a whole, no per-segment ordering).
 

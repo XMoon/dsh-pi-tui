@@ -101,6 +101,44 @@ test('returning to the main subject restores the parent footer', () => {
   assert.ok(text.includes('[EXT]'), `extension segments must return:\n${text}`)
 })
 
+test('the FIRST frame after entering the viewer already shows the child subject', async () => {
+  // The runner mounts the viewer by calling setViewerMode (view section)
+  // and setViewerFooter (usage/workspace + paint). The paint must never
+  // precede the subject switch: the app projects the view section BEFORE
+  // its own renderFooter, so even a bare setViewerFooter (no runner
+  // ordering to rely on) shows the child on the very first frame.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3 })
+  await vt.waitForRender()
+  const before = vt.getViewport().join('\n')
+  assert.ok(before.includes('p/m'), `the parent footer must be painted first:\n${before}`)
+  app.setViewerFooter({
+    label: 'research',
+    childSessionId: 'child-1',
+    mode: 'one-shot',
+    activity: 'running',
+    cwd: '/child-ws',
+    turns: 5,
+    steps: 9,
+    usage: undefined,
+    statsLine: '',
+  })
+  // NO extra refresh: this is the first frame after the viewer opens.
+  await vt.waitForRender()
+  const first = vt.getViewport().join('\n')
+  assert.ok(first.includes('[subagent · one-shot]'), `the first frame must show the child identity:\n${first}`)
+  assert.ok(first.includes('child-ws'), `the first frame must show the child workspace:\n${first}`)
+  assert.ok(!first.includes('p/m'), `the parent model must not leak into the first frame:\n${first}`)
+  assert.ok(!first.includes('parent-ws'), `the parent cwd must not leak into the first frame:\n${first}`)
+  app.setViewerFooter(undefined)
+  await vt.waitForRender()
+  const after = vt.getViewport().join('\n')
+  assert.ok(after.includes('p/m'), `leaving the viewer must restore the parent footer immediately:\n${after}`)
+  app.stop()
+})
+
 test('a legacy parent setStatus while viewing never clobbers the child workspace', async () => {
   // The runner's refreshStatus projects the DISPLAY SUBJECT (the viewed
   // child) into the store BEFORE the legacy setStatus call repaints the
@@ -115,6 +153,7 @@ test('a legacy parent setStatus while viewing never clobbers the child workspace
   app.setViewerFooter({
     mode: 'one-shot',
     label: 'child',
+    childSessionId: 'child-1',
     activity: 'inactive',
     cwd: '/child-ws',
     turns: 5,
