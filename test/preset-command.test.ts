@@ -604,3 +604,30 @@ test('/reload with a live agent refreshes the AGENT target, never the standing p
   assert.equal(t.refreshes[0]?.target.kind, 'agent', 'a live session must refresh the agent target')
   t.app.stop()
 })
+
+test('/keybindings reset awaits the settings write and reports its real outcome', async () => {
+  // Review finding: the reset must not report success before the async
+  // persistence write resolves — a failed write is an error result.
+  let replaced = 0
+  const failing: TuiSettingsLike = {
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    replace: async () => { replaced += 1; throw new Error('write refused') },
+  }
+  let t = setup({ tuiSettings: failing })
+  const failed = await t.runCommand('keybindings', 'reset')
+  assert.equal((failed as { kind: string }).kind, 'error', 'a failed write must report an error result')
+  assert.ok((failed as { text: string }).text.includes('failed'), `error text missing: ${JSON.stringify(failed)}`)
+  assert.equal(replaced, 1, 'the write must be attempted')
+  t.app.stop()
+
+  let okReplaced = 0
+  const ok: TuiSettingsLike = {
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    replace: async () => { okReplaced += 1 },
+  }
+  t = setup({ tuiSettings: ok })
+  const succeeded = await t.runCommand('keybindings', 'reset')
+  assert.equal((succeeded as { kind: string }).kind, 'success', 'a resolved write must report success')
+  assert.equal(okReplaced, 1)
+  t.app.stop()
+})

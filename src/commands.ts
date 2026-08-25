@@ -2957,21 +2957,21 @@ export function registerTuiCommands(
         if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
         const doc = { ...settings.get() } as Record<string, unknown>
         delete doc.keybindings
-        // Owned persistence: the success notify fires only after the
-        // write RESOLVES (a false "reset to defaults" on a failed write
-        // would lie — review finding). runOwned records the failure
-        // diagnostics and onError notifies.
-        runOwned('keybindings reset', () => settings.replace(doc as unknown as import('./runtime/config-port.ts').TuiSettingsDoc), {
-          diag: runner.diag,
-          sessionId: () => runner.liveAgent?.session.id,
-          onResult: () => {
+        // Await the persistence write: the command result reflects the
+        // ACTUAL outcome (a failed write must not report success — review
+        // finding). The handler may return a Promise<CommandResult>.
+        return (async (): Promise<CommandResult> => {
+          try {
+            await settings.replace(doc as unknown as import('./runtime/config-port.ts').TuiSettingsDoc)
             app.notify('Keybindings reset to defaults.', 'info')
-          },
-          onError: (error: unknown) => {
-            app.notify(`keybindings reset failed: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        return { kind: 'success', text: 'Keybindings reset to defaults.' }
+            return { kind: 'success', text: 'Keybindings reset to defaults.' }
+          } catch (error: unknown) {
+            const message = safeErrorMessage(error)
+            runner.diag.warn('keybindings', { error: message })
+            app.notify(`keybindings reset failed: ${message}`, 'error')
+            return { kind: 'error', text: `keybindings reset failed: ${message}` }
+          }
+        })()
       }
       // The full effective table, grouped by category (plan §19).
       const snapshot = keybindings.snapshot()
