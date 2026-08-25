@@ -2367,6 +2367,11 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // The keybinding manager dies FIRST: every later teardown callback
+    // (approval settles, extension/editor disposal) could rebuild the
+    // keymap and schedule rendering — the disposed manager makes those
+    // rebuilds inert (PR review finding).
+    this.keybindings.dispose()
     // Restore the fork's global submit binding to the builtin default:
     // the fork keybindings are PROCESS-GLOBAL, and a disposed surface
     // must not leak its remap/disable into a LATER TuiApp instance (PR
@@ -2436,12 +2441,6 @@ export class TuiApp {
     // subscribe, invalidate) becomes inert; a late plugin callback can no
     // longer mutate the seat or dispatch a real submission.
     this.editorSeatHolder.dispose()
-    // The keybinding manager's final disposal: a PENDING leader timeout
-    // must never fire after the surface is gone (its onStateChange →
-    // renderFooter would schedule work against the stopped app — PR
-    // review finding). The manager's dispose also latches the disposed
-    // flag, making the leader machine inert.
-    this.keybindings.dispose()
   }
 
   /** The surface generation (M0): stable across start/stop/fullscreen/

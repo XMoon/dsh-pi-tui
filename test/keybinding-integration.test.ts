@@ -429,11 +429,40 @@ test('disposing the app with an armed leader prefix clears the pending timer (PR
   await vt.waitForRender()
   assert.ok(app.keybindingsManager().leaderMachine()?.pending === true, 'the leader must be pending')
   // Dispose with the leader armed: the manager's dispose clears the
-  // timeout, so nothing fires against the stopped app afterwards.
+  // timeout, so nothing fires against the stopped app afterwards. The
+  // assertion is DETERMINISTIC (the repo's race-test rule — no fixed
+  // sleeps): flushing the microtask queue lets any (incorrectly) pending
+  // continuation land, and the disposed leader machine is gone.
   app.dispose()
-  // Let any (incorrectly) pending macrotask land: nothing must throw and
-  // the leader must be gone.
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await Promise.resolve()
+  await Promise.resolve()
   assert.equal(app.keybindingsManager().leaderMachine(), undefined, 'the leader machine is gone after dispose')
   assert.equal(tasksOpened, 0, 'no action may fire after dispose')
+})
+
+test('a leader-only submit override: Enter does NOT submit (PR review P1)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
+  app.start()
+  // app.input.submit: <leader>s — NO direct keys. Enter must not submit;
+  // only the leader sequence does.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.submit': '<leader>s' },
+  }))
+  await vt.waitForRender()
+  app.setDraft('via leader')
+  await vt.waitForRender()
+  vt.sendInput('\r') // Enter — must NOT submit (the override removed it)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [], 'Enter must not submit under a leader-only submit override')
+  assert.equal(app.getDraft(), 'via leader', 'the draft survives the inert Enter')
+  // The leader sequence DOES submit.
+  vt.sendInput('\x18') // leader
+  await vt.waitForRender()
+  vt.sendInput('s') // completing key
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['via leader'], 'the leader sequence must submit')
+  app.stop()
 })
