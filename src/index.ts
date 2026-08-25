@@ -5525,6 +5525,9 @@ export function apply(ctx: Context, config: Config): void {
     const setFocusMode = (enabled: boolean): void => {
       focusState.enabled = enabled
       app.setFocusMode(enabled)
+      // The footer's focus-mode item reads the store: repaint it right
+      // away (no session event is guaranteed to follow an idle toggle).
+      refreshStatus()
       const settings = tuiSettings
       if (settings !== undefined) {
         runDetached('settings focus write', () => settings.replace({ ...settings.get(), focusMode: enabled ? 'on' : 'off' }) as Promise<unknown>, {
