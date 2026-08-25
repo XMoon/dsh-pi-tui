@@ -514,3 +514,24 @@ test('a repeated attach on the SAME host is idempotent (round-3 finding 1)', asy
     'a repeated attach must not leak a sink; the caller-owned registration stays live (P1-2)')
   app.stop()
 })
+
+test('an EXPLICIT stale permission clears the extension snapshot (no stale badge)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  app.refreshChrome()
+  app.setStatus({ model: 'm1', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: 'workspace-write' })
+  await settle()
+  assert.equal(host.state().session.permission, 'workspace-write', 'the permission must be set first')
+  // The runner's refreshStatus passes permission: undefined when the
+  // permission service/agent is unavailable — the extension snapshot must
+  // CLEAR the permission, never keep the stale value.
+  app.setStatus({ model: 'm1', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  await settle()
+  assert.equal(host.state().session.permission, undefined, 'a cleared permission must not stay in the extension snapshot')
+  app.stop()
+})

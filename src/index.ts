@@ -2440,8 +2440,13 @@ export function apply(ctx: Context, config: Config): void {
         turns: stats.turns,
         steps: stats.steps,
         statsLine: formatStats(stats),
+        // EXPLICITLY clear the permission when the service/agent is
+        // unavailable: the legacy merge keeps the old value otherwise,
+        // and syncExtensionState would publish a STALE permission to the
+        // extension snapshot (a state transition where the permission
+        // preset service or the live agent is momentarily gone).
         ...permission === undefined || liveAgent === undefined
-          ? {}
+          ? { permission: undefined }
           : { permission: permission.current(liveAgent.session.events) },
         ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
       })
