@@ -716,17 +716,15 @@ test('pre-bind OVERFLOW drops non-terminal events but NEVER drops the terminal s
   const flow = createAuthorizationFlow(surface, { respond: async () => {}, cancel: async () => {} })
   // Flood beyond the buffer limit with non-terminal events: the buffer
   // stays bounded (non-terminal overflow is dropped), and the attempt's
-  // SETTLED event — landing after the limit — still resolves the outcome.
+  // SETTLED event — landing after the limit — is preserved and applied
+  // at bind (the outcome resolves, never hangs).
   for (let i = 0; i < 200; i += 1) {
     flow.onEvent({ kind: 'notice', attemptId: 'flooded', notice: { message: `n${i}` } })
   }
   flow.onEvent({ kind: 'settled', attemptId: 'flooded', status: 'authorized' })
-  const outcome = await Promise.race([
-    flow.outcome,
-    new Promise<null>((resolve) => { setTimeout(() => resolve(null), 100) }),
-  ])
-  assert.ok(outcome !== null, 'the flooded flow settles (never hangs)')
-  assert.equal(outcome!.status, 'authorized', 'the terminal settled event is preserved past the buffer limit')
+  flow.bind('flooded')
+  await settle()
+  assert.equal((await flow.outcome).status, 'authorized', 'the terminal settled event is preserved past the buffer limit')
 })
 
 test('pre-bind overflow still resolves when the terminal SETTLED event lands beyond the limit', async () => {
@@ -743,12 +741,33 @@ test('pre-bind overflow still resolves when the terminal SETTLED event lands bey
     flow.onEvent({ kind: 'notice', attemptId: 'late-settle', notice: { message: `n${i}` } })
   }
   flow.onEvent({ kind: 'settled', attemptId: 'late-settle', status: 'authorized' })
-  const outcome = await Promise.race([
-    flow.outcome,
-    new Promise<null>((resolve) => { setTimeout(() => resolve(null), 100) }),
-  ])
-  assert.ok(outcome !== null, 'the terminal settled event resolves the outcome (never hangs)')
-  assert.equal(outcome!.status, 'authorized')
+  flow.bind('late-settle')
+  await settle()
+  assert.equal((await flow.outcome).status, 'authorized')
+})
+
+test('ANOTHER attempt\'s pre-bind SETTLED event never settles this flow (attempt isolation)', async () => {
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'mine' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const answered: Array<string | null> = []
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  // A concurrent login's prompt AND terminal settle arrive BEFORE this
+  // flow is bound: neither may settle this flow or answer its prompt.
+  flow.onEvent({ kind: 'prompt', attemptId: 'other-attempt', promptId: 'po', prompt: { kind: 'text', message: 'other' } })
+  flow.onEvent({ kind: 'settled', attemptId: 'other-attempt', status: 'authorized' })
+  flow.bind('attempt-a')
+  await settle()
+  assert.deepEqual(answered, [], 'another attempt\'s pre-bind prompt is never answered')
+  // This flow's own attempt still works after the bind.
+  flow.onEvent({ kind: 'prompt', attemptId: 'attempt-a', promptId: 'pa', prompt: { kind: 'text', message: 'mine' } })
+  await settle()
+  assert.deepEqual(answered, ['mine'], 'the bound attempt\'s prompt is answered after the foreign settle')
 })
 
 test('bind() is ONE-SHOT: rebinding to another attempt is refused', async () => {
