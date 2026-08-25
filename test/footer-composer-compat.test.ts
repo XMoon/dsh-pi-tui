@@ -312,3 +312,28 @@ test('the instruction as the ONLY logical line caps to one physical row', () => 
   assert.equal(lines.length, 1, `the instruction must cap to one physical row:\n${plain}`)
   assert.ok(plain.includes('Press Ctrl+C'), `the hint must survive:\n${plain}`)
 })
+
+test('an EMPTY stats row does not cap the status row as if it were the stats tail', () => {
+  // A 2-row layout whose STATS row renders empty (no usage facts): the
+  // FIRST (status) row is the only line and is NOT the stats row — it
+  // must keep the budgeted wrap, not be force-capped to one physical row.
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
+  snap.access.permissionPreset = { id: 'workspace-write', label: 'workspace-write', matched: true }
+  snap.workspace = { cwd: '/very/long/path/that/wraps/a/lot', branch: 'main' }
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [
+        { left: [{ id: 'permission-preset' }, { id: 'model' }, { id: 'cwd' }], right: [] },
+        { left: [{ id: 'stats-line' }], right: [] },
+      ],
+    },
+    width: 40,
+    context: CONTEXT,
+  })
+  const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = plain.split('\n')
+  assert.ok(lines.length > 1, `the status row must keep its budgeted wrap:\n${plain}`)
+})

@@ -59,6 +59,11 @@ function parseItemRef(input: unknown, index: number): FooterItemRef | FooterLayo
     importance?: number
   } = { id }
   if (input.format !== undefined) {
+    // An unknown format string is accepted (never a parse failure): the
+    // parser is registry-agnostic (extension items declare their own
+    // formats), and every item DEGRADES to its default formatter for an
+    // unknown format at render time (probed: no item throws). A typo'd
+    // format therefore shows the item's default rendering, never a crash.
     if (typeof input.format !== 'string') return { kind: 'error', message: `item ${index}: format must be a string` }
     ref.format = input.format
   }

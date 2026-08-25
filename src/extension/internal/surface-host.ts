@@ -303,24 +303,34 @@ export class SurfaceHost {
     for (const record of snapshot.records) {
       if (SurfaceHost.footerItemKey(record.owner, record.id) !== id) continue
       const contribution = record.value
+      // Malformed runtime data (a plugin replace() with a broken shape)
+      // must DEGRADE, never throw: the composer isolates render throws,
+      // but `segment.spans` is read outside the item's render — guard the
+      // shape here so a live replace() cannot break the whole footer.
+      if (contribution === null || typeof contribution !== 'object') return undefined
+      const rawSegment = contribution.segment as unknown
+      const rawSpans = rawSegment !== null && typeof rawSegment === 'object'
+        && (rawSegment as { spans?: unknown }).spans
+      const spans = Array.isArray(rawSpans)
+        ? rawSpans.filter((span): span is { text: unknown; tone?: unknown; emphasis?: unknown } =>
+            span !== null && typeof span === 'object' && typeof (span as { text?: unknown }).text === 'string')
+        : []
+      const label = typeof contribution.label === 'string' ? contribution.label : record.id
+      const description = typeof contribution.description === 'string' ? contribution.description : undefined
       return {
         id,
-        label: contribution.label,
-        ...contribution.description === undefined ? {} : { description: contribution.description },
-        defaultZone: contribution.defaultZone ?? 'left',
-        defaultImportance: contribution.importance ?? 0,
-        ...contribution.minWidth === undefined ? {} : { minWidth: contribution.minWidth },
+        label: sanitizeSpanText(label),
+        ...description === undefined ? {} : { description: sanitizeSpanText(description) },
+        defaultZone: contribution.defaultZone === 'right' ? 'right' : 'left',
+        defaultImportance: typeof contribution.importance === 'number' ? contribution.importance : 0,
+        ...typeof contribution.minWidth === 'number' ? { minWidth: contribution.minWidth } : {},
         formats: ['segment'],
         defaultFormat: 'segment',
         // Extension spans are PLAIN DATA (the Stable contract): strip any
         // terminal control from the segment text at the boundary — the
         // composer renders the result verbatim.
         render: () => ({
-          ...contribution.segment as unknown as import('../../footer/types.ts').FooterSegment,
-          spans: (contribution.segment.spans ?? []).map(span => ({
-            ...span,
-            text: sanitizeSpanText(span.text),
-          })),
+          spans: spans.map(span => ({ ...span as object, text: sanitizeSpanText(span.text as string) })),
         }),
       }
     }

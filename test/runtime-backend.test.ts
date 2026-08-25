@@ -81,6 +81,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   }
   const config = {
     tuiSettings: undefined,
+    footerCommandTrust: {
+      userFooterMode: undefined,
+      command: undefined,
+    },
     providers: {
       available: () => true,
       listCredentialOptions: () => [],

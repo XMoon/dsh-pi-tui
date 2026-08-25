@@ -336,3 +336,32 @@ test("a configurable footer item span text is SANITIZED (no terminal control rea
     }
   }
 })
+
+test('a malformed item contribution degrades gracefully (never breaks the footer)', async () => {
+  const ctx = new Context()
+  try {
+    const { service } = await mountTree(ctx)
+    const { vt, app } = attachApp(service)
+    // Null segment, non-array spans, non-string text: the M4 boundary must
+    // produce a safe (empty) definition — the footer keeps rendering.
+    service.register<FooterItemContribution>('chrome.footer.item', { id: 'broken', order: 100 }, { label: 42 as unknown as string, segment: null as unknown as FooterItemContribution['segment'] })
+    await settle()
+    await vt.waitForRender()
+    const key = canonicalKey(service, 'chrome.footer.item', 'broken')
+    app.setFooterLayout({
+      schemaVersion: 1,
+      rows: [{ left: [{ id: 'model' }], right: [{ id: key }] }],
+    })
+    app.setStatus({ model: 'm', cwd: 'c' })
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(view.includes('m'), `the footer must keep rendering:\n${view}`)
+    // The broken item renders NOTHING (its empty segment is skipped) —
+    // graceful degradation, never a crash or a corrupted footer.
+    app.stop()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})

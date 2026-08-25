@@ -95,7 +95,6 @@ import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/ty
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
-import { resolveTrustedFooterCommand, resolveUserLayerFooterMode, type SettingsDescriptorLike } from './footer/command-trust.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -2432,7 +2431,10 @@ export function apply(ctx: Context, config: Config): void {
       statusStore.update(patch)
       app.setStatus({
         model: modelLabel(),
-        cwd: shortCwd(liveCwd),
+        // The FULL cwd lands in the structured workspace section (the
+        // footer cwd ITEM shortens for display itself); the legacy
+        // display value (tail segments) is derived from it.
+        cwd: liveCwd,
         branch: gitBranch(liveCwd),
         goal: goalText,
         turns: stats.turns,
@@ -4947,12 +4949,12 @@ export function apply(ctx: Context, config: Config): void {
         // settings descriptor (never the merged/project value), AND the
         // command MODE must be user-layer-owned — a project flipping the
         // merged `footer: command` must never silently trigger the user's
-        // command (plan §17.4).
-        const settingsService = ctx.get('settings')
-        const descriptors = settingsService?.describe?.() as readonly SettingsDescriptorLike[] | undefined
-        const namespace = settingsNamespace('dsh-pi-tui') as unknown as string
-        const config = resolveTrustedFooterCommand(descriptors, namespace)
-        const userMode = resolveUserLayerFooterMode(descriptors, namespace)
+        // command (plan §17.4). The trust read goes through the CONFIG
+        // PORT (the adapter owns the settings descriptor access — a
+        // Remote adapter replays the same facts from the wire).
+        const trust = backend.config.footerCommandTrust
+        const config = trust.command
+        const userMode = trust.userFooterMode
         if (config === undefined || userMode !== 'command') {
           disableFooterCommand()
           if (!footerWarningShown) {

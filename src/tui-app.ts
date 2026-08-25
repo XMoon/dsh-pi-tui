@@ -4646,6 +4646,9 @@ export class TuiApp {
     this.busy = busy
     this.projectActivity()
     this.renderFooter()
+    // The extension surface snapshot reports the busy flag (the activity
+    // phase is a projection of it) — keep it live.
+    this.syncExtensionState()
   }
 
   /**
@@ -4666,6 +4669,7 @@ export class TuiApp {
     this.projectActivity()
     this.renderFooter()
     this.requestRender()
+    this.syncExtensionState()
   }
 
   /** Compatibility wrapper for the pre-phase boolean API: active maps to
@@ -5468,6 +5472,11 @@ export class TuiApp {
     // the footer payload; turns/steps and the child workspace always
     // project; the view section switches the subject.
     if (footer === undefined) {
+      // Usage and the display subject return to main here; the parent's
+      // WORKSPACE (cwd/project/branch) is restored by the runner's
+      // refreshStatus in the SAME synchronous tick after this call (the
+      // exit path never yields between them), so no intermediate frame
+      // with the child workspace ever paints.
       this.projectStatus({
         usage: this.usageFromStatus(),
         view: { subject: { kind: 'main' } },
@@ -8413,7 +8422,12 @@ export class TuiApp {
     host.updateSession({
       planMode: this.planMode,
       viewerMode: this.viewerMode !== undefined,
-      busy: this.working.isActive(),
+      // The BUSY flag is the machine fact the runner pushes (setBusy), NOT
+      // the working-row indicator (which compaction also drives): the
+      // extension snapshot must report the same busy truth the runner
+      // sees. `working.isActive()` conflates compaction with busy, so the
+      // dedicated field is used.
+      busy: this.busy,
       turns: this.status.turns,
       steps: this.status.steps,
       ...this.status.model === '' ? {} : { model: this.status.model },
@@ -8500,6 +8514,9 @@ export class TuiApp {
     if (this.viewerFooter === undefined) {
       const current = this.statusStore.snapshot()
       const model = modelFromLabel(this.status.model)
+      // The full cwd lands in the STRUCTURED workspace section (the
+      // footer cwd item shortens for display); the project is the last
+      // path segment of the FULL path.
       const cwd = this.status.cwd
       const project = cwd === '' ? undefined : cwd.split('/').filter(Boolean).at(-1)
       const branch = this.status.branch === undefined || this.status.branch === '' ? undefined : this.status.branch

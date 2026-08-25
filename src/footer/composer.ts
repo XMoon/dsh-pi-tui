@@ -81,22 +81,30 @@ export class FooterComposer {
       ? layout.rows
       : layout.rows.length > 1 ? layout.rows.slice(0, -1) : layout.rows
     const lines: string[] = []
-    for (const row of statusRows) {
-      const line = this.renderRow(row, snapshot, context, width)
-      if (line !== '') lines.push(line)
-    }
-    if (instruction !== undefined) lines.push(renderInstruction(instruction))
     // The tail row's ROLE decides its cap: the stats/instruction line is
     // always one physical row (the legacy line-2 contract) — even when an
-    // empty first row makes it the ONLY logical line, it must never wrap
-    // past the footer budget. A single STATUS row (compact preset, no
-    // instruction) keeps the budgeted wrap.
-    const tailIsInstruction = instruction !== undefined
-    const tailIsStats = !tailIsInstruction && layout.rows.length > 1
+    // empty sibling row makes it the ONLY logical line, it must never wrap
+    // past the footer budget. A STATUS row (compact preset, or an empty
+    // stats row) keeps the budgeted wrap. The role travels WITH each
+    // emitted line — a layout whose stats row renders empty must not
+    // misclassify the status row as the capped tail.
+    const rowRoles: Array<'status' | 'stats' | 'instruction'> = []
+    statusRows.forEach((row, index) => {
+      const line = this.renderRow(row, snapshot, context, width)
+      if (line !== '') {
+        rowRoles.push(index === statusRows.length - 1 && statusRows.length > 1 ? 'stats' : 'status')
+        lines.push(line)
+      }
+    })
+    if (instruction !== undefined) {
+      lines.push(renderInstruction(instruction))
+      rowRoles.push('instruction')
+    }
     const physical: string[] = []
     lines.forEach((line, index) => {
       const isTail = index === lines.length - 1
-      if (isTail && (tailIsInstruction || tailIsStats)) {
+      const role = rowRoles[index]
+      if (isTail && role !== undefined && role !== 'status') {
         const wrapped = wrapTextWithAnsi(line, width)
         physical.push(wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, width) : wrapped[0]!)
         return

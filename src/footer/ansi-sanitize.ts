@@ -16,7 +16,7 @@ const KEEP = String.raw`\x1b\[[0-9;:]*m|\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)`
  * or a lone ESC (the group is optional — a truncated sequence consumes
  * just the ESC, never the next character) or a C0 control (except
  * tab/newline/CR, which are legal layout whitespace). */
-const STRIP = String.raw`\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[P^_X][^\x07\x1b]*(?:\x07|\x1b\\))?|[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]`
+const STRIP = String.raw`\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[P^_X][^\x07\x1b]*(?:\x07|\x1b\\))?|[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f-\u009f]`
 
 const SANITIZE = new RegExp(`(${KEEP})|(${STRIP})`, 'g')
 

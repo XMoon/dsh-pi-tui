@@ -107,6 +107,11 @@ test('coalescing: requests within the interval produce ONE spawn', async () => {
   assert.equal(spawns, 1, `the first start must produce one result, saw ${spawns}`)
   // Within a window far shorter than the 1000ms interval, no second start
   // may appear (the two later requests coalesced, they never overlap).
+  // The assertion is STRUCTURAL: the interval is 1000ms, so a second
+  // spawn before ~1s would violate the coalescing contract; a 150ms
+  // observation window is far enough inside it that scheduling jitter
+  // cannot produce a false pass OR a false fail (a second start would
+  // need the timer to fire ~6x early).
   await new Promise(resolve => setTimeout(resolve, 150))
   assert.equal(spawns, 1, `no second spawn within the interval, saw ${spawns}`)
   runner.dispose()
@@ -135,8 +140,10 @@ test('requests within the interval NEVER overlap a running child (coalescing gua
   runner.requestRefresh()
   // A second request lands INSIDE the interval (the first child is still
   // in flight): it must COALESCE — never a second spawn, never a kill of
-  // the running child. Give the spawn a moment to start, then fire.
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // the running child. Let the child's spawn settle (microtask turn), then
+  // fire the second request while it is clearly still running (~150ms
+  // child vs a few-ms settle).
+  await Promise.resolve()
   runner.requestRefresh()
   // Wait for the first child's completion EVENT (bounded poll).
   const deadline = Date.now() + 5000

@@ -37,6 +37,7 @@ import {
 } from '../../provider-catalog.ts'
 import { cancellationError } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
+import { parseFooterCommandConfig } from '../../footer/command-trust.ts'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
@@ -44,6 +45,7 @@ import type {
   ConfigPort,
   CredentialConfig,
   CredentialProviderOption,
+  FooterCommandTrust,
   PermissionConfig,
   PresetDefaultConfig,
   ProviderProfileConfig,
@@ -91,6 +93,7 @@ export interface AgentPresetsServiceLike {
  * `ConfigPort` interfaces. */
 export class DirectConfigPort implements ConfigPort {
   readonly tuiSettings: TuiSettingsConfig | undefined
+  readonly footerCommandTrust: FooterCommandTrust
   readonly providers: ProviderProfileConfig
   readonly credentials: CredentialConfig
   readonly authorization: AuthorizationConfig
@@ -103,11 +106,52 @@ export class DirectConfigPort implements ConfigPort {
     agentFor: (sessionId: string) => unknown | undefined,
   ) {
     this.tuiSettings = tuiSettings
+    this.footerCommandTrust = new DirectFooterCommandTrust(ctx)
     this.providers = new DirectProviderProfileConfig(ctx)
     this.credentials = new DirectCredentialConfig(ctx)
     this.authorization = new DirectAuthorizationConfig(ctx)
     this.permissions = new DirectPermissionConfig(ctx, agentFor)
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
+  }
+}
+
+/** The settings descriptor's shape the trust read needs (structural). */
+interface SettingsDescriptorLike {
+  readonly ns: string
+  readonly user?: unknown
+}
+
+/** The Direct M5 footer-command trust read: the USER layer of the
+ * dsh-pi-tui settings descriptor decides BOTH the command mode and the
+ * command (plan §17.4 — a project layer can never silently trigger the
+ * user's command). The adapter owns the descriptor access; a Remote
+ * adapter replays the same facts from the wire. */
+class DirectFooterCommandTrust implements FooterCommandTrust {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  get userFooterMode(): string | undefined {
+    const descriptor = this.descriptor()
+    const user = descriptor?.user
+    if (typeof user !== 'object' || user === null) return undefined
+    const mode = (user as Record<string, unknown>).footer
+    return typeof mode === 'string' ? mode : undefined
+  }
+
+  get command() {
+    const descriptor = this.descriptor()
+    const user = descriptor?.user
+    if (typeof user !== 'object' || user === null) return undefined
+    return parseFooterCommandConfig((user as Record<string, unknown>).footerCommand)
+  }
+
+  private descriptor(): SettingsDescriptorLike | undefined {
+    const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
+    const descriptors = settings?.describe?.()
+    return descriptors?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
   }
 }
 

@@ -48,3 +48,13 @@ test('a truncated OSC payload consumes just the ESC (the payload is not reliably
   const out = sanitizeCommandOutput('a\x1b]52;clipboard')
   assert.equal(out, 'a]52;clipboard')
 })
+
+test('bare C1 controls (0x80-0x9F) are stripped, including C1 CSI/OSC lead bytes', () => {
+  // 0x9B is the C1 CSI lead byte, 0x9D the OSC lead — even WITHOUT the
+  // ESC prefix they must never reach the terminal (many terminals accept
+  // them as 8-bit controls). The payload TEXT between them is plain data
+  // and survives; every control byte itself is removed.
+  const out = sanitizeCommandOutput('a\u009b2;3Hb\u009dc\u009d52;clipboard\u009c')
+  assert.equal(out, 'a2;3Hbc52;clipboard')
+  assert.ok(!/[\u0080-\u009f]/.test(out), `no C1 byte may survive:\n${JSON.stringify(out)}`)
+})
