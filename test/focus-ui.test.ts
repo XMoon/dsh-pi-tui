@@ -1806,24 +1806,58 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   const echoY = findRow(view, 'Bash echo done')
   assert.ok(echoY >= 0, `the second tool card missing after resize:\n${view.join('\n')}`)
   assert.equal(view[echoY - 1].trim(), '', `the clicked row must still be the interior blank after resize:\n${view.join('\n')}`)
-  // The stale-frame guard (plan §23.8): between the resize and the next
-  // frame-driving rebuild, the ON-SCREEN frame still shows the OLD layout
-  // — the blank-row collapse (the one destructive click) drops THIS click
-  // and re-measures the map — never a mis-collapse.
+  // The frame painted at the new size (the paint probe stamped it), so
+  // the interior blank above the second tool card collapses the Thought
+  // with the header anchored — no stale frame involved.
   click(vt, 3, echoY)
-  await vt.waitForRender()
-  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'the stale-frame blank click must be dropped')
-  const primed = vt.getViewport()
-  assert.ok(!primed.join('\n').includes('🐋 Thought'), `the Thought must stay expanded after the dropped click:\n${primed.join('\n')}`)
-  // The next blank click resolves against the fresh regions: collapses
-  // with the header anchored.
-  const echoY2 = findRow(primed, 'Bash echo done')
-  assert.ok(echoY2 >= 0, `the second tool card missing after the prime:\n${primed.join('\n')}`)
-  assert.equal(primed[echoY2 - 1].trim(), '', 'the primed click row must be blank')
-  click(vt, 3, echoY2)
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('🐋 Thought'), `the blank-row collapse must work after resize:\n${after}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a blank-row click BEFORE the first paint after a resize is dropped — rebuilds do not re-arm it (round-4 P1)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply(offscreenThoughtTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand the root, then full-reveal the long Bash card.
+  let y = findRow(vt.getViewport(), '🐋 Thought')
+  assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  const bashY = findRow(view, 'Bash seq 1 120')
+  assert.ok(bashY >= 0, `Bash card missing:\n${view.join('\n')}`)
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const preEchoY = findRow(view, 'Bash echo done')
+  assert.ok(preEchoY >= 0, `second tool card missing:\n${view.join('\n')}`)
+  // Resize AND rebuild in the SAME tick, then click before ANY paint at
+  // the new size: the on-screen frame still shows the old geometry — the
+  // destructive blank click is dropped (a rebuild only SCHEDULES the
+  // paint; it must not re-arm the guard).
+  vt.resize(60, 40)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  click(vt, 3, preEchoY) // the OLD frame's blank position
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'the pre-paint blank click must be dropped')
+  // After the paint at the new size, the next blank click resolves.
+  view = vt.getViewport()
+  const echoY = findRow(view, 'Bash echo done')
+  assert.ok(echoY >= 0, `second tool card missing after the paint:\n${view.join('\n')}`)
+  assert.equal(view[echoY - 1].trim(), '', 'the clicked row must be blank')
+  click(vt, 3, echoY)
+  await vt.waitForRender()
+  const after = vt.getViewport().join('\n')
+  assert.ok(after.includes('🐋 Thought'), `the post-paint blank click must collapse:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -1856,7 +1890,14 @@ test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message
   // the override stays PARKED on turn 1's old message objects.
   app.setTranscript(windowMessages(folder.messages(), 1), folder.turnActivities())
   await vt.waitForRender()
-  // Ctrl+O = Collapse All (turn 1's root is still in the disclosure set).
+  // Ctrl+O #1 with NOTHING expanded IN VIEW expands the visible recent
+  // root (turn 2) — the parked turn-1 root stays parked.
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const afterExpand = [...app.focusExpandedTurnsForTest()]
+  assert.ok(afterExpand.includes(2), `Ctrl+O must expand the visible root first (got ${JSON.stringify(afterExpand)})`)
+  // Ctrl+O #2: a visible expanded root exists → Collapse All — and the
+  // bulk fold must ALSO clear the PARKED override (the round-1 contract).
   vt.sendInput('\x0f')
   await vt.waitForRender()
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Collapse All cleared the roots')
@@ -2036,6 +2077,69 @@ test('the collapsed header block trailing spacer stays a no-op — never expands
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'the collapsed block blank must not expand the Thought')
   const after = vt.getViewport().join('\n')
   assert.ok(!after.includes('🐳'), `no expansion may happen:\n${after}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('Ctrl+O with a PARKED expansion on a windowed-away root still expands the visible recent roots (round-4 P1)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand turn 1 by API — the viewport only shows the most recent
+  // collapsed headers, so clicking would hit the wrong turn.
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'precondition: turn 1 expanded')
+  // Window turn 1 away: its expansion stays PARKED in the disclosure set
+  // while the projection no longer shows it.
+  app.setTranscript(windowMessages(folder.messages(), 2), folder.turnActivities())
+  await vt.waitForRender()
+  // Ctrl+O with NOTHING expanded IN VIEW: expand the visible recent
+  // roots — the parked turn-1 root must not force Collapse All.
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = [...app.focusExpandedTurnsForTest()].sort((a, b) => a - b)
+  assert.ok(expanded.includes(4) && expanded.includes(5),
+    `Ctrl+O must expand the visible recent roots (got ${JSON.stringify(expanded)})`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('local shell cards stay folded in fullscreen Focus even with the Ctrl+O master on (round-4 P1)', async () => {
+  const vt = new VirtualTerminal(100, 60)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const long = Array.from({ length: 30 }, (_, i) => `shell line ${i}`).join('\n')
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'ls -la', result: long, status: 'ok',
+  })
+  // Regular: Ctrl+O turns the shell master ON and the card expands.
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), true, 'precondition: master ON')
+  assert.ok(vt.getViewport().join('\n').includes('shell line 0'), 'precondition: the card is expanded in regular')
+  // Switch to fullscreen Focus: Ctrl+O owns the Thought roots there, so
+  // the shell card keeps its folded state (the documented contract).
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('shell line 0'), `the shell card must be folded in fullscreen Focus:\n${joined}`)
+  assert.ok(joined.includes('shell line 29'), `the folded tail must still show:\n${joined}`)
+  // The MOUSE can still full-reveal it (the per-card override wins).
+  const shellY = findRow(vt.getViewport(), 'ls -la')
+  assert.ok(shellY >= 0, `shell card row missing:\n${joined}`)
+  click(vt, 10, shellY + 1)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('shell line 0'), `a mouse click must full-reveal the shell card:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })

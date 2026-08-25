@@ -1778,18 +1778,29 @@ export class TuiApp {
      * zero-row blocks, mirroring the rendered layout exactly. */
     hasTrailingSpacer: boolean
   }> = []
-  /** The terminal geometry the row map was built at by the last
-   * FRAME-DRIVING rebuild (rebuildMessages — the click-path re-measure in
-   * refreshMessageRows deliberately does NOT update it). The blank-row
-   * collapse — the one destructive fullscreen click — uses it as a
-   * stale-frame guard (plan §23.8): between a terminal resize and the
-   * next rebuild the on-screen frame still shows the OLD layout, so the
-   * first blank-row click after a geometry change is dropped (the map is
-   * re-measured and re-stamped for the next one) instead of resolving
-   * against regions the user never saw. Concrete-row clicks keep their
-   * historical immediate behavior. */
-  private rowMapTermColumns = 0
-  private rowMapTermRows = 0
+  /** The terminal geometry of the LAST PAINTED frame (fullscreen only):
+   * a zero-row probe rides the fullscreen layout root, and the fork
+   * renders every layout child on EVERY frame, so these fields record
+   * the geometry the screen actually shows — the paint-accurate
+   * stale-frame reference for the destructive blank-row click (plan
+   * §23.8; the question frame records its own render geometry the same
+   * way). A click whose terminal geometry differs from the last paint
+   * resolves against a frame the user never saw and is dropped —
+   * regardless of rebuilds, which only SCHEDULE the paint. */
+  private lastPaintColumns = 0
+  private lastPaintRows = 0
+  /** The zero-row paint probe: mounted in the fullscreen layout root, so
+   * every fork frame (all layout children render per frame) re-stamps
+   * `lastPaintColumns`/`lastPaintRows` at the geometry the frame is
+   * drawn with. */
+  private readonly paintProbe: Component = {
+    render: (width: number): string[] => {
+      this.lastPaintColumns = width
+      this.lastPaintRows = this.terminal.rows
+      return []
+    },
+    invalidate: () => {},
+  }
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
@@ -3198,6 +3209,10 @@ export class TuiApp {
         scrollbar: 'auto',
       })
       const root = new VStack([
+        // The zero-row paint probe rides the layout root: every frame
+        // re-stamps the geometry the screen is actually drawn at (the
+        // stale-click guard's reference — see paintProbe).
+        { component: this.paintProbe, shrink: 0 },
         { component: this.header, shrink: 0 },
         // grow is a stack-entry option: the transcript pane takes all the
         // height the pinned rows leave behind.
@@ -3495,16 +3510,27 @@ export class TuiApp {
   }
 
   /** Fullscreen + Focus Ctrl+O: the Thought-root bulk disclosure (plan
-   * §3/§20). Any expanded root → Collapse All; none → expand the most
-   * recent `EXPAND_RECENT_TURNS` eligible roots. Never touches
+   * §3/§20). Any VISIBLE expanded root → Collapse All; none → expand the
+   * most recent `EXPAND_RECENT_TURNS` eligible roots. Never touches
    * thinkingExpanded (Alt+T owns it) and never full-reveals secondaries
    * (mouse-owned). */
   private toggleFullscreenFocusRoots(): void {
-    if (this.focusExpandedTurns.size > 0) {
+    if (this.hasVisibleExpandedFocusRoots()) {
       this.collapseAllFullscreenFocusRoots()
       return
     }
     this.expandRecentFullscreenFocusRoots(EXPAND_RECENT_TURNS)
+  }
+
+  /** Whether ANY expanded Focus root is currently PROJECTED (visible):
+   * a parked expansion on a windowed-away turn must not force the bulk
+   * fold — the Ctrl+O state machine follows what the user SEES (plan
+   * §22: "any expanded Thought" = an expanded Thought in view). */
+  private hasVisibleExpandedFocusRoots(): boolean {
+    for (const turn of this.eligibleFocusRootTurns()) {
+      if (this.focusExpandedTurns.has(turn)) return true
+    }
+    return false
   }
 
   /** The eligible Focus roots for Ctrl+O bulk expansion: turns with a
@@ -3918,11 +3944,6 @@ export class TuiApp {
       this.messagesView.addChild(new Text(line, 0, 0))
     }
     this.messageRows = rows
-    // The frame-driving rebuild re-stamps the row-map geometry: the next
-    // render paints this exact map, so the blank-row stale-frame guard
-    // (see rowMapTermColumns) has a fresh reference.
-    this.rowMapTermColumns = width
-    this.rowMapTermRows = this.terminal.rows
     this.renderTodoPanel()
     this.requestRender()
   }
@@ -4303,19 +4324,15 @@ export class TuiApp {
         // / the final assistant follows) is unclaimed → no-op (plan
         // §14/§16). Overlays were already handled above.
         if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
-          // Stale-frame guard (plan §23.8, the question-frame class): a
-          // terminal resize between the last frame-driving rebuild and the
-          // next repaint leaves the ON-SCREEN frame at the OLD geometry —
-          // the click's coordinates belong to a layout the user never saw.
-          // The blank-row collapse is the one destructive fullscreen click,
-          // so only it waits: re-measure the map for the CURRENT geometry,
-          // re-stamp the reference and drop THIS click (the fresh regions
-          // serve the next one). Concrete-row clicks keep their historical
-          // immediate behavior.
-          if (this.terminal.columns !== this.rowMapTermColumns || this.terminal.rows !== this.rowMapTermRows) {
-            this.refreshMessageRows()
-            this.rowMapTermColumns = this.terminal.columns
-            this.rowMapTermRows = this.terminal.rows
+          // Paint-accurate stale-frame guard (plan §23.8): the blank-row
+          // collapse is the one destructive fullscreen click, so it only
+          // fires against a frame the user actually SEES — the paint
+          // probe (see paintProbe) stamps the geometry at every fork
+          // paint. A click while the terminal reports a size no frame
+          // has been drawn at yet (resize → rebuild → click in the same
+          // tick included) is dropped; the re-measure above already
+          // rebuilt the map for the next one.
+          if (this.terminal.columns !== this.lastPaintColumns || this.terminal.rows !== this.lastPaintRows) {
             return
           }
           // The interior test follows the VISUAL sequence: zero-height
@@ -6038,6 +6055,13 @@ export class TuiApp {
    * Thinking detail (plan §2.4/§18). */
   private existingMessageExpandedRule(message: TranscriptMessage, boundary: number): boolean {
     if (isLocalShellCard(message)) {
+      // In FULLSCREEN Focus the Ctrl+O master is NOT consulted (Ctrl+O
+      // owns the Thought-root bulk there — documented): a local card
+      // keeps its folded state unless the MOUSE full-revealed it (the
+      // per-card override still wins).
+      if (this.fullscreen !== undefined && this.focusModeEnabled) {
+        return this.expandedOverride.get(message) === true
+      }
       return this.toolOutputExpanded || this.expandedOverride.get(message) === true
     }
     return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
