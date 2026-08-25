@@ -768,8 +768,33 @@ rounds (codex / gpt-5.6-luna):
 - **Round 26 (fresh)**: accepted, no findings — the full 9-file sweep
   re-confirmed host execution mode, the stale-dropdown guard, the
   test-sync fix and every prior-round invariant.
+- **PR review round 5** (human, replacement-editor rejection path): P1 —
+  a SYNCHRONOUS rejection restore is clobbered by the fallback tail. The
+  fork clears the host editor BEFORE `onSubmit`; a synchronous rejection
+  (the runner's divergence-guard shape: `onSubmit` calls
+  `setEditorText(text)` and returns) rewrites the VISIBLE plugin seat
+  while the fallback dispatch is still on the stack — and the fallback
+  tail then unconditionally synced the hidden host's post-submit EMPTY
+  state back into the plugin (`!!pwd` restored → `''`). FIXED: the seat
+  holder keeps a monotonic `changeRevision` bumped by every
+  `notifyChanged`; the fallback records it before the dispatch and
+  syncs back only when nothing external rewrote the seat during it (a
+  text comparison cannot distinguish "never touched" from "explicitly
+  rewritten with the same text" — the epoch can). The successful-submit
+  path is unchanged: `runWithoutChange` suppresses the fork's onChange,
+  so an accepted submit never bumps the revision and the plugin seat is
+  cleared as before. Regression tests: a synchronous rejection restore
+  survives the fallback (`!!pwd` stays `!!pwd`, wire form submitted);
+  accepted-control asserts a successful submit clears the plugin
+  document (the epoch guard must not break the clear).
+- **Round 27**: accepted, no findings — the full 9-file sweep
+  re-confirmed the sync-restore epoch (successful submits still clear
+  the seat; rejection restores survive; the tail's own notifyChanged
+  sits AFTER the check so it cannot suppress a legitimate sync-back;
+  the viewer draft mirror only records snapshots and never rewrites the
+  seat) and every prior-round invariant.
 
-The full-suite tests (2137), typecheck, `git diff --check` and the
+The full-suite tests (2138), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the
 public extension surface remain unchanged.
 
