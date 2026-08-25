@@ -17,7 +17,9 @@
  *     the commands themselves;
  *   - single- and double-quoted strings anywhere in the script (quotes are
  *     tracked so `&&` inside them is not a separator);
- *   - backslash escapes inside and outside quotes (`\&&` is a literal `&`);
+ *   - backslash escapes inside and outside quotes: an escaped `&&` is NOT
+ *     treated as a separator (it stays inside the current stage, whose
+ *     shell semantics are then preserved unchanged by `sh -c`);
  *   - anything the command segment may contain (redirects, env assignments,
  *     pipes, subshells, `node -e "..."`, ...) is preserved verbatim and
  *     executed by `sh -c` unchanged.
