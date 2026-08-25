@@ -219,23 +219,32 @@ test('the preview editor-empty getter is LIVE: a draft typed under the panel upd
   app.stop()
 })
 
-test('the configurator budget never exceeds a very short terminal (resize-safe floor)', async () => {
-  // A 6-row terminal: the old Math.max(8, rows-2) floor produced an
-  // 8-row content window PLUS Frame borders — overflowing the viewport.
-  const vt = new VirtualTerminal(100, 6)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
-    model,
-    registry: app.getFooterItemRegistry(),
-    onSave: () => {},
-    onCancel: () => {},
+for (const rows of [3, 4, 6]) {
+  test(`the configurator fits a ${rows}-row terminal (Frame bottom border visible, no hard cut)`, async () => {
+    // Very short terminals: the budget must leave room for the Frame's
+    // two border rows AND the overlay's maxHeight must not hard-cut the
+    // bottom border. The viewport ALWAYS reports `rows` lines, so the
+    // meaningful assertion is that the Frame's bottom border (╰) is
+    // actually rendered on the last content row.
+    const vt = new VirtualTerminal(100, rows)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
+    app.openFooterConfigurator({
+      model,
+      registry: app.getFooterItemRegistry(),
+      onSave: () => {},
+      onCancel: () => {},
+    })
+    await vt.waitForRender()
+    const view = vt.getViewport()
+    const lastNonEmpty = [...view].reverse().find(line => line.trim() !== '')
+    assert.ok(lastNonEmpty !== undefined && lastNonEmpty.includes('╰'),
+      `the Frame bottom border must be visible on a ${rows}-row terminal:\n${view.join('\n')}`)
+    // The top border must be visible too (nothing hard-cut above).
+    const firstNonEmpty = view.find(line => line.trim() !== '')
+    assert.ok(firstNonEmpty !== undefined && firstNonEmpty.includes('╭'),
+      `the Frame top border must be visible on a ${rows}-row terminal:\n${view.join('\n')}`)
+    app.stop()
   })
-  await vt.waitForRender()
-  const view = vt.getViewport()
-  // The panel content must be windowed to the terminal (no overflow past
-  // the last row); every rendered row is within the viewport.
-  assert.ok(view.length <= 6, `the panel must fit a 6-row terminal:\n${view.join('\n')}`)
-  app.stop()
-})
+}

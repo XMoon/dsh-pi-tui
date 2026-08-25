@@ -162,11 +162,10 @@ export class FooterConfiguratorPanel implements Component {
     // scrollport discipline). The budget is re-read EVERY render — a
     // resize while the panel is open is picked up immediately.
     const cursorRow = this.cursorRow(state, lines)
-    // The budget is re-read EVERY render (resize-safe); the floor stays
-    // BELOW the caller's terminal-height bound so a very short terminal
-    // never overflows (the maxVisible getter already clamps to the live
-    // rows; 3 is the minimum readable window).
-    const budget = Math.max(3, this.maxVisible())
+    // The budget is re-read EVERY render (resize-safe); the caller's
+    // getter already leaves room for the Frame's border rows, so the
+    // windowing floor is 1 — a very short terminal never overflows.
+    const budget = Math.max(1, this.maxVisible())
     if (lines.length <= budget) return lines
     const top = Math.max(0, Math.min(cursorRow - Math.floor(budget / 2), lines.length - budget))
     return lines.slice(top, top + budget)
