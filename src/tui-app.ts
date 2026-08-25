@@ -1466,15 +1466,6 @@ interface MessageComponentEntry {
   rendererRevision?: number
 }
 
-/** The unavailable Host-file seam (migration M1.10): the setCommandCompletions
- * default for surfaces the runner did not wire — `@` completion degrades to
- * nothing, never to a local-fs assumption. */
-const NO_FILE_REFERENCES: import('./runtime/host-file-port.ts').HostFilePort = {
-  listReferences: async () => [],
-  resolveReference: async () => ({ kind: 'missing' }),
-  canonicalizeMentions: async (_scope, text) => text,
-}
-
 export class TuiApp {
   private readonly terminal: Terminal
   /** The extension surface host (M2), when the runner attached one. */
@@ -8265,17 +8256,19 @@ export class TuiApp {
    * `@`-file mentions through the Host-file port (migration M1.10 — the
    * Direct adapter runs the fd whole-tree fuzzy search or the bounded
    * recursive fallback; the editor never touches the filesystem). The
-   * default seam is UNAVAILABLE (no `@` completion) — the runner always
-   * wires the real port; tests that never exercise `@` may omit it.
+   * default seam is UNAVAILABLE (`null`, the pre-migration `fdPath: null`
+   * convention — no `@` completion); the runner always wires the real
+   * port; tests that never exercise `@` may omit it.
    * @param extensionSuggest - M5: consulted AFTER the host provider returns
    *   null (the plugin autocomplete chain). Receives the same editor
    *   position; returns suggestions or null.
+   * @param scope - M1.10: the Host identity the port is addressed by (the
+   *   live SESSION when one exists, the workspace cwd otherwise).
    */
   setCommandCompletions(
     commands: readonly SlashCommand[],
     cwd: string,
-    fileReferences: import('./runtime/host-file-port.ts').HostFilePort = NO_FILE_REFERENCES,
-    scope: import('./runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', cwd },
+    fileReferences: import('./runtime/host-file-port.ts').HostFilePort | null = null,
     extensionSuggest?: (query: {
       lines: readonly string[]
       cursorLine: number
@@ -8283,6 +8276,7 @@ export class TuiApp {
       signal: AbortSignal
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
+    scope: import('./runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', cwd },
   ): void {
     const base = new MentionProvider([...commands], cwd, fileReferences, () => this.editor.getInputMode(), scope)
     if (extensionSuggest === undefined) {

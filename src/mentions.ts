@@ -416,6 +416,15 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
  * the HOST filesystem through the port, never the local fs. */
 export type HostReferencesSeam = import('./runtime/host-file-port.ts').HostFilePort
 
+/** The unavailable seam (migration M1.10): a `null` constructor argument
+ * (the pre-migration `fdPath: null` convention) means NO `@` completion —
+ * discovery degrades to nothing, never to a local-fs assumption. */
+const NO_HOST_REFERENCES: HostReferencesSeam = {
+  listReferences: async () => [],
+  resolveReference: async () => ({ kind: 'missing' }),
+  canonicalizeMentions: async (_scope, text) => text,
+}
+
 /** The completion scope of one MentionProvider instance: the runner
  * resolves it at install time (the live SESSION when one exists, the
  * workspace cwd otherwise) so the port is addressed by HOST identity —
@@ -449,12 +458,12 @@ export class MentionProvider implements AutocompleteProvider {
   constructor(
     slashCommands: readonly SlashCommand[],
     workDir: string,
-    fileReferences: HostReferencesSeam,
+    fileReferences: HostReferencesSeam | null,
     inputModeSource: () => EditorInputMode = () => 'prompt',
     scope: MentionScope = { kind: 'workspace', cwd: workDir },
   ) {
     this.workDir = workDir
-    this.fileReferences = fileReferences
+    this.fileReferences = fileReferences ?? NO_HOST_REFERENCES
     this.inputModeSource = inputModeSource
     this.scope = scope
     // The fork's fdPath is null: the `@` branch is intercepted below and
