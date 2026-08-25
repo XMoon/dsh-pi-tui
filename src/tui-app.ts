@@ -2628,8 +2628,14 @@ export class TuiApp {
       // footer hint for EXACTLY the exit window (armCtrlCExit), and the
       // exit path disarms it — the hint never outlives the window.
       const text = this.seatEditor().getText()
-      if (text !== '') {
+      // A shell-mode draft is non-empty in its SERIALIZED form: the
+      // first press clears BOTH the body and the mode — an empty `! ` /
+      // `!!` editor would otherwise show a cleared body under a stale
+      // shell prompt, and the next Ctrl+C would exit instead of
+      // completing the pre-mode clear contract.
+      if (text !== '' || this.seatInputMode() !== 'prompt') {
         this.seatEditor().setText('')
+        this.resetEditorMode()
         this.editorSeatHolder.notifyChanged()
         this.armCtrlCExit()
         // The key is CONSUMED at the app level, so the fork's input path

@@ -591,10 +591,16 @@ rounds (codex / gpt-5.6-luna):
   drafts (FIXED: the wire document carries the prefix on line 0 only, and
   only a first-line cursor shifts by it); P2 — this review record went
   stale (updated here).
+- **Round 12**: P1 — Ctrl+C cleared only the shell body, leaving a stale
+  `!` / `!!` prompt on the now-empty editor (FIXED: the first Ctrl+C
+  clears the body AND resets the mode to `prompt`, treating the
+  serialized draft as non-empty — a bare `!` also clears back to the
+  prompt before the exit window arms); P2 — the recorded test count went
+  stale again (updated here).
 
-2060/2060 full-suite tests, typecheck, `git diff --check` and the pre-push
-gate (pack + all smokes) clean; the vendored fork and the public
-extension surface remain unchanged.
+The full-suite tests (2060+), typecheck, `git diff --check` and the
+pre-push gate (pack + all smokes) all pass; the vendored fork and the
+public extension surface remain unchanged.
 
 ---
 
