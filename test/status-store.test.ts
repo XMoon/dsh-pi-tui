@@ -96,3 +96,37 @@ test('replace with an identical snapshot does not notify (same identity discipli
   store.replace(snapshotWith({ interaction: { focusMode: false } }))
   assert.equal(notified, 2)
 })
+
+test('the TuiApp setStatus projection MERGES into the current sections (runner-derived facts survive)', async () => {
+  // Drive the projection through the app's setStatus: the legacy fields
+  // only own model/permission/cwd/branch — the runner-derived facts must
+  // survive a legacy update.
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  // Seed the store with runner-derived facts (what refreshStatus projects).
+  app.getFooterItemRegistry() // touch nothing
+  const store = (app as unknown as { statusStore: StatusStore }).statusStore
+  store.update({
+    composition: {
+      agentPreset: { id: 'code', label: 'PTC mode' },
+      model: { provider: 'deepseek', id: 'flash', displayName: 'flash' },
+    },
+    access: {
+      permissionPreset: { id: 'workspace-write', label: 'workspace-write', matched: true },
+      sandbox: { mode: 'workspace-write' },
+      approval: { policy: 'ask' },
+    },
+    workspace: { cwd: '/full/path', project: 'space4', branch: 'main' },
+  })
+  // A legacy setStatus update arrives (the runner's setStatus call).
+  app.setStatus({ model: 'deepseek/flash', cwd: '/full/path', branch: 'main' })
+  const snapshot = store.snapshot()
+  assert.deepEqual(snapshot.composition.agentPreset, { id: 'code', label: 'PTC mode' }, 'agentPreset must survive')
+  assert.equal(snapshot.access.sandbox?.mode, 'workspace-write', 'sandbox must survive')
+  assert.equal(snapshot.access.approval?.policy, 'ask', 'approval must survive')
+  assert.equal(snapshot.workspace.project, 'space4', 'workspace project must survive')
+  app.stop()
+})
