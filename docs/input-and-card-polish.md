@@ -628,6 +628,24 @@ rounds (codex / gpt-5.6-luna):
   a partial adapter falls back to the raw path, so a declined `!` is
   never dropped). Regression test: a partial adapter preserves a
   declined `!` in the plugin document.
+- **Round 15**: P1 — `getDraft()` returned the bare body while
+  `setDraft()` decoded the wire form, so read-merge-restore callers (the
+  runner's restore paths, the dequeue merge, the steer action) silently
+  lost the shell mode (FIXED: `getDraft()` now returns the WIRE form —
+  the symmetric counterpart of `setDraft()` — and `submitDraft` consumes
+  it directly without re-serializing); P1 — a Stable extension may return
+  a completion prefix computed on the WIRE line it received (e.g. `!ch`),
+  and applying it on the bare body corrupted the result (FIXED: the
+  delegated apply normalizes a wire-prefixed prefix back to bare
+  coordinates — line 0 in a shell mode only — before the host apply, so
+  the synthetic prefix is never doubled or stripped twice); P2 — the
+  async-polling test helpers were flagged as fixed-delay polling
+  (BY DESIGN: the poll-until-deadline helpers are the repository's
+  established async-UI pattern — the same waitForDropdownRow shape used
+  across tui-editor/rendering tests — with a bounded deadline and a
+  condition check, never a fixed-delay assertion). Regression tests:
+  getDraft/setDraft wire symmetry incl. merge-restore round-trips, and a
+  wire-prefixed extension prefix applying cleanly.
 
 The full-suite tests (2060+), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the

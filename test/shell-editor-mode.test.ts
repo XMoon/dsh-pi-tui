@@ -1645,3 +1645,59 @@ test('a host adapter with setSerializedInput but WITHOUT setInputMode falls back
   assert.equal(plugin.getText(), '!', 'a declined ! must not vanish with a partial adapter')
   holder.dispose()
 })
+
+// ── review round: getDraft/setDraft wire symmetry ─────────────────────────
+
+test('getDraft returns the WIRE form, symmetric with setDraft (shell mode survives read/merge/restore)', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  app.setDraft('!pwd')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  assert.equal(app.seatTextForTest(), 'pwd')
+  assert.equal(app.getDraft(), '!pwd', 'getDraft must read back the wire form — never the bare body')
+  // A read → merge → restore round-trip keeps the shell mode: the merged
+  // wire text decodes back into shell mode + body.
+  const merged = `${app.getDraft()}\n\nhello`
+  app.setDraft(merged)
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the restored merged draft keeps the shell mode')
+  assert.equal(app.seatTextForTest(), 'pwd\n\nhello')
+  assert.equal(app.getDraft(), '!pwd\n\nhello')
+  // Prompt-mode drafts stay byte-identical (the wire form IS the body).
+  app.setDraft('plain text')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'plain text')
+  app.stop()
+})
+
+// ── review round: wire-prefixed extension prefixes ────────────────────────
+
+test('a Stable extension prefix computed on the WIRE line applies without corruption', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.setCommandCompletions([], fixtureWorkspace(), null, async () => ({
+    // The plugin computed this prefix on the WIRE line `!ch` — it
+    // legitimately includes the synthetic `!`.
+    items: [{ value: 'checkout', label: 'checkout' }],
+    prefix: '!ch',
+  }))
+  app.start()
+  await vt.waitForRender()
+  // Force the host provider to return null (a failed compgen run) so the
+  // plugin chain is consulted. ONE item is auto-applied by the fork on
+  // the first forced Tab — the exact path that must not corrupt.
+  setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+  try {
+    vt.sendInput('!')
+    vt.sendInput('ch')
+    vt.sendInput('\t')
+    await vt.waitForRender()
+    assert.equal(app.seatTextForTest(), 'checkout ', 'a wire-prefixed extension prefix must apply cleanly')
+    assert.ok(!app.seatTextForTest().startsWith('heckout'), 'the prefix must never be doubled or stripped twice')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  app.stop()
+})
