@@ -1234,3 +1234,93 @@ test('fullscreen Focus expand/collapse: the expanded Bash card keeps the multili
   app.setFullscreen(false)
   app.stop()
 })
+
+test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disclosure sequence and a resize (40 → 16)', async () => {
+  // The right-gutter contract's blocker test (2026-08-26 plan §8.3): with
+  // the transcript content 2 cells narrower than the terminal, every click
+  // must still hit the SAME visual block — collapsed Thought → thinking
+  // secondary → resize → secondary again → root collapse — with no
+  // one-row drift anywhere in the sequence.
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'run the flow' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'alpha reasoning\nalpha latest' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('c1') },
+      },
+    }, T0 + 4, 4),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'the final answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 5, 5),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 6, 6),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // 1. The collapsed Thought header: a click expands the process timeline.
+  let lines = vt.getViewport()
+  let y = findRow(lines, '🐋 Thought')
+  assert.ok(y >= 0, `Thought header missing:\n${lines.join('\n')}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('▸ Thinking'), `the process timeline must appear under the expanded Thought:\n${view}`)
+  assert.ok(view.includes('(click to expand)'), `the Thinking secondary must be compact with the click hint:\n${view}`)
+  // 2. Click the Thinking secondary → the FULL reasoning body renders.
+  lines = vt.getViewport()
+  let ty = findRow(lines, '▸ Thinking')
+  assert.ok(ty >= 0, `Thinking secondary missing:\n${lines.join('\n')}`)
+  click(vt, 3, ty + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('alpha reasoning'), `the secondary click must reveal the full reasoning body:\n${view}`)
+  assert.ok(!view.includes('(click to expand)'), `the expanded secondary must drop the click hint:\n${view}`)
+  // 3. Resize 40 → 16: the hit map re-derives; clicking the SAME block
+  // (now 14 content cols) collapses the secondary again. A DIFFERENT
+  // cell than the previous click — the alt screen treats a fast repeat
+  // at the same cell as a double-click word selection (the established
+  // fullscreen-click convention).
+  vt.resize(16, 24)
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  ty = lines.findIndex(line => line.includes('▸ Thinking') || line.includes('Thin'))
+  assert.ok(ty >= 0, `secondary missing after resize:\n${lines.join('\n')}`)
+  click(vt, 14, ty + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  // At 14 content cols the compact hint truncates ('(click to e…'), so
+  // the COMPACT MARKER (▸) and the missing full body prove the collapse.
+  assert.ok(view.includes('▸ Thinking'), `the post-resize click must collapse the secondary back:\n${view}`)
+  assert.ok(!view.includes('alpha reasoning'), `the collapsed secondary must hide the full body:\n${view}`)
+  // 4. Click the Thought header again → the whole process collapses; the
+  // click map must still land on the root, never a stray row.
+  lines = vt.getViewport()
+  y = findRow(lines, '🐳 Thought')
+  assert.ok(y >= 0, `expanded Thought header missing:\n${lines.join('\n')}`)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🐋 Thought'), `the root collapse must land on the Thought:\n${view}`)
+  assert.ok(!view.includes('▸ Thinking'), `the collapsed root must hide the process timeline:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
