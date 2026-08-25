@@ -150,6 +150,31 @@ test('providers refuse a keyless write for the deepseek official BUILTIN (no pro
   assert.deepEqual(writes2, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
 })
 
+test('providers never advertise a keyless slot for an INVALID route (the flag agrees with the write refusal)', async () => {
+  // A hostile directory entry with a route that fails the provider-route
+  // pattern: the write would refuse it, so the DTO must not advertise a
+  // writable slot (one shared rule drives both).
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    settings: settings({}, writes),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: '../escape', displayName: 'Esc', settingsNs: 'llm-pi-ai', settingsPath: ['providers', '../escape'] },
+      ],
+    },
+  }).providers
+  assert.equal(providers.listCredentialOptions().find(option => option.route === '../escape')?.canProvisionProfile, false)
+  await assert.rejects(() => providers.writeKeylessProfile('../escape'), /invalid provider route/)
+  assert.deepEqual(writes, [])
+  // The settings-only fallback too: a hostile providers dict key fails the
+  // same rule — never advertised as writable.
+  const writes2: Array<{ ns: string; ops: unknown }> = []
+  const fallback = port({
+    settings: settings({ 'llm-pi-ai': { providers: { '../escape': { apiKeyEnv: 'X' } } } }, writes2),
+  }).providers
+  assert.equal(fallback.listCredentialOptions().find(option => option.route === '../escape')?.canProvisionProfile, false)
+})
+
 test('providers writeKeylessProfile refuses when the settings service is absent (never a silent no-op)', async () => {
   await assert.rejects(() => port({}).providers.writeKeylessProfile('acme'), /settings service unavailable/)
 })
