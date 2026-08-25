@@ -363,3 +363,22 @@ test('exit multi-key binding: the footer hint advertises the Ctrl+C chord specif
   assert.ok(!view.includes('Press Ctrl+X'), `the hint must not name the generic primary:\n${view}`)
   app.stop()
 })
+
+test('a remapped submit key keeps the editor backslash-newline semantics (PR review P1)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
+  await vt.waitForRender()
+  // A trailing backslash should insert a NEWLINE, not submit (the fork
+  // editor's backslash-Enter workaround) — the remapped key must route
+  // through the editor, never the host submitDraft.
+  app.setDraft('line\\')
+  await vt.waitForRender()
+  vt.sendInput('\x18') // ctrl+x — the remapped submit
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [], 'a trailing backslash must not submit through the remapped key')
+  assert.ok(app.getDraft().includes('line'), `the draft must gain a newline, not submit:\n${JSON.stringify(app.getDraft())}`)
+  app.stop()
+})
