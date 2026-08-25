@@ -23,7 +23,7 @@ function createMachine(
   const activated: string[] = []
   let stateChanges = 0
   const machine = new LeaderStateMachine(config, bindings, {
-    onActivate: (action) => activated.push(action),
+    onActivate: (action) => { activated.push(action); return true },
     onStateChange: () => { stateChanges += 1 },
   })
   // The counter is exposed as a GETTER — a by-value copy would freeze at 0
@@ -50,8 +50,24 @@ test('a completing key activates the bound action', () => {
   const { machine, activated } = createMachine()
   machine.feed('\x18') // leader
   const result = machine.feed('t')
-  assert.deepEqual(result, { kind: 'activated', action: 'app.tasks.open' })
+  assert.deepEqual(result, { kind: 'activated', action: 'app.tasks.open', consumed: true })
   assert.deepEqual(activated, ['app.tasks.open'])
+  assert.equal(machine.pending, false)
+})
+
+test('a DECLINED action activation reports consumed: false (the key falls through)', () => {
+  // Review finding: the leader machine must not unconditionally consume a
+  // completing key when the dispatched action DECLINES (e.g. pasteMedia
+  // without a clipboard handler) — the app only consumes when
+  // onActivate returns true, mirroring the direct-key resolver contract.
+  const bindings: LeaderBinding[] = [{ action: 'app.clipboard.pasteMedia', key: 'p' }]
+  const machine = new LeaderStateMachine(CONFIG, bindings, {
+    onActivate: () => false,
+    onStateChange: () => {},
+  })
+  machine.feed('\x18') // leader
+  const result = machine.feed('p')
+  assert.deepEqual(result, { kind: 'activated', action: 'app.clipboard.pasteMedia', consumed: false })
   assert.equal(machine.pending, false)
 })
 

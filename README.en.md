@@ -192,10 +192,10 @@ Use `/help` inside the TUI for the current command and keybinding list.
 Host shortcuts are semantic actions (`app.*`) resolved through a
 context-aware keymap — the UI (footer hints, `/help`, `/keybindings`)
 always shows the EFFECTIVE keys, so a remap updates every hint. Configure
-them in the `pi-tui` settings namespace (hot-reloaded, no restart):
+them in the `dsh-pi-tui` settings namespace (hot-reloaded, no restart):
 
 ```yaml
-pi-tui:
+dsh-pi-tui:
   keybindings:
     app.input.steer: ctrl+s          # one key
     app.permission.cycle: [shift+tab, ctrl+shift+p]   # several keys

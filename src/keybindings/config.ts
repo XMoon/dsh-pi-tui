@@ -64,9 +64,15 @@ export function isValidKeyId(value: string): value is KeyId {
 }
 
 /** Whether a key is a plain printable (plan §14: a direct user binding of
- * a plain printable to a Host action would swallow typing). */
+ * a plain printable to a Host action would swallow typing). Unmodified
+ * single characters (32–126) AND the `space` key name (the fork alias for
+ * the spacebar, which types char 32 — a bare `space` binding would swallow
+ * every space the user types) are printable; everything with a modifier,
+ * a named editing key (enter/tab/escape/arrows/f-keys) or a multi-char
+ * sequence is not. */
 export function isPlainPrintableKey(key: KeyId): boolean {
   if (key.includes('+')) return false
+  if (key === 'space') return true
   return key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) <= 126
 }
 

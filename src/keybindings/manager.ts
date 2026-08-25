@@ -43,7 +43,7 @@ export interface HostKeybindingManagerOptions {
   /** Called when the leader pending state changes (which-key hint). */
   readonly onLeaderStateChange?: () => void
   /** Called when a leader sequence completes (the app dispatches). */
-  readonly onLeaderActivate?: (action: string) => void
+  readonly onLeaderActivate?: (action: string) => boolean
   /** The leader timeout in ms (defaults to the config default). */
   readonly leaderTimeoutMs?: number
 }
@@ -52,7 +52,7 @@ export interface HostKeybindingManagerOptions {
 export class HostKeybindingManager {
   private readonly onInvalidate: () => void
   private readonly onLeaderStateChange: () => void
-  private readonly onLeaderActivate: (action: string) => void
+  private readonly onLeaderActivate: (action: string) => boolean
   private readonly leaderTimeoutMs: number
 
   private userBindings: UserKeybindingsConfig = {}
@@ -66,13 +66,21 @@ export class HostKeybindingManager {
   private diagnostics: string[] = []
 
   private keymap: EffectiveKeymap
+  /**
+   * MONOTONIC rebuild counter (never restarts): the EffectiveKeymap's own
+   * revision resets to 1 on every instance (buildKeymap creates a NEW
+   * keymap per rebuild), so consumers keying caches on the keymap
+   * revision (the transcript fold-hint cache) must read THIS — a remap,
+   * safe-mode flip or plugin sync must invalidate them (review finding).
+   */
+  private revisionCounter = 0
   private leader: LeaderStateMachine | undefined
   private disposed = false
 
   constructor(options: HostKeybindingManagerOptions = {}) {
     this.onInvalidate = options.onInvalidate ?? (() => {})
     this.onLeaderStateChange = options.onLeaderStateChange ?? (() => {})
-    this.onLeaderActivate = options.onLeaderActivate ?? (() => {})
+    this.onLeaderActivate = options.onLeaderActivate ?? (() => true)
     this.leaderTimeoutMs = options.leaderTimeoutMs ?? 1500
     this.keymap = this.buildKeymap()
   }
@@ -96,6 +104,7 @@ export class HostKeybindingManager {
   private rebuild(): void {
     if (this.disposed) return
     this.diagnostics = []
+    this.revisionCounter += 1
     // Safe mode (plan §17) ignores the user configuration ENTIRELY —
     // including the leader key and its sequences (a leader sequence is a
     // user override; safe mode must restore the builtin surface).
@@ -269,9 +278,11 @@ export class HostKeybindingManager {
     return [...this.diagnostics]
   }
 
-  /** The current keymap revision. */
+  /** The current keymap revision — MONOTONIC across rebuilds (see
+   * {@link revisionCounter}); every effective-key change bumps it, so caches
+   * keyed on it (transcript fold hints) rebuild exactly when the keys do. */
   revision(): number {
-    return this.keymap.snapshot().revision
+    return this.revisionCounter
   }
 
   // ── Leader (M6) ────────────────────────────────────────────────────────

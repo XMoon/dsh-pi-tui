@@ -103,12 +103,12 @@ non-capturing plugin keybindings
 
 ## User configuration
 
-Settings namespace `pi-tui`, field `keybindings` (the schema deliberately
+Settings namespace `dsh-pi-tui` (the TUI's own settings section — NOT the `pi-tui` profile name), field `keybindings` (the schema deliberately
 does NOT declare the field — schemastery's `z.object` keeps unknown keys,
 and the parser owns the validation):
 
 ```yaml
-pi-tui:
+dsh-pi-tui:
   keybindings:
     app.input.steer: ctrl+s
     app.permission.cycle: [shift+tab, ctrl+shift+p]
