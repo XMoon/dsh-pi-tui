@@ -409,9 +409,18 @@ export function createAuthorizationFlow(
     onEvent: (event) => {
       if (closed) return
       if (boundAttemptId === undefined) {
-        // Bounded fail-closed: a wedged begin must not grow the buffer
-        // without limit (and stale pre-bind events are dropped on close).
-        if (buffered.length < BUFFER_LIMIT) buffered.push(event)
+        // Bounded with TERMINAL-EVENT PRESERVATION: a wedged begin must
+        // not grow the buffer without limit, but the attempt's SETTLED
+        // event is never dropped — the outcome must resolve even if the
+        // settlement lands beyond the buffer limit (a silent drop would
+        // hang the login forever). Non-terminal overflow events are
+        // dropped (fail-closed: the buffer stays bounded).
+        if (event.kind === 'settled') {
+          settle({ status: event.status, code: event.code, message: event.message })
+          close()
+        } else if (buffered.length < BUFFER_LIMIT) {
+          buffered.push(event)
+        }
         return
       }
       if (event.attemptId !== boundAttemptId) return

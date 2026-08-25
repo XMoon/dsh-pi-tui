@@ -352,6 +352,9 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     attemptId: string
     resolve: (answer: string) => void
     reject: (error: unknown) => void
+    /** Remove the prompt's abort listener (every settlement path runs it
+     * so a resolved prompt never leaks its listener). */
+    cleanup: () => void
   }>()
   /** attemptId → the upstream attempt's withdraw controller + the observed
    * settlement promise (held so the flow is never a floating promise). */
@@ -410,6 +413,17 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       },
       prompt: (prompt) => this.bridgePrompt(attemptId, prompt),
     }
+    // The CALLER's signal (the runner's teardown) aborts the attempt the
+    // same way cancel() does: reject the pending prompt bridges and emit
+    // their withdrawals IMMEDIATELY — a provider that ignores its abort
+    // signal must never leave the client's prompt UI open (or the command
+    // hanging on the outcome) until some settlement that never comes.
+    const withdrawOnCallerAbort = (): void => {
+      this.rejectAttemptPrompts(attemptId)
+    }
+    if (request.signal !== undefined) {
+      request.signal.addEventListener('abort', withdrawOnCallerAbort, { once: true })
+    }
     const flow = authorization.begin({ key, method: request.method, interaction, signal })
     // The attempt runs detached: its settlement is an EVENT, never a
     // return value. The settlement promise is HELD in the attempts map
@@ -440,6 +454,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     const pending = this.pendingPrompts.get(promptId)
     if (pending === undefined || pending.attemptId !== attemptId) return Promise.resolve()
     this.pendingPrompts.delete(promptId)
+    pending.cleanup()
     if (answer === null) {
       // The human declined the prompt: the seam's decline taxonomy, not a
       // withdrawal (the flow distinguishes the two).
@@ -466,7 +481,18 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
   private bridgePrompt(attemptId: string, prompt: AuthorizationPrompt): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const promptId = randomUUID()
-      this.pendingPrompts.set(promptId, { attemptId, resolve, reject })
+      // The pending entry carries the abort-listener REMOVAL so every
+      // settlement path (respond, cancel, attempt settle, withdrawal)
+      // cleans up after itself — a resolved prompt must never leave its
+      // abort listener registered (a leak per prompt, review finding).
+      let removeAbortListener: (() => void) | undefined
+      const pending = {
+        attemptId,
+        resolve,
+        reject,
+        cleanup: (): void => { removeAbortListener?.() },
+      }
+      this.pendingPrompts.set(promptId, pending)
       const event: AuthorizationPromptEvent = prompt.kind === 'select'
         ? {
             kind: 'select',
@@ -494,8 +520,9 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       // the bridge even registered) must take the SAME path immediately —
       // never leave the pending promise unresolved.
       const withdraw = (): void => {
-        const pending = this.pendingPrompts.get(promptId)
-        if (pending === undefined || pending.attemptId !== attemptId) return
+        removeAbortListener?.()
+        const existing = this.pendingPrompts.get(promptId)
+        if (existing === undefined || existing !== pending) return
         this.pendingPrompts.delete(promptId)
         reject(cancellationError('authorization prompt withdrawn'))
         this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
@@ -504,7 +531,11 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
         withdraw()
         return
       }
-      prompt.signal?.addEventListener('abort', withdraw, { once: true })
+      if (prompt.signal !== undefined) {
+        const signal = prompt.signal
+        removeAbortListener = () => { signal.removeEventListener('abort', withdraw) }
+        signal.addEventListener('abort', withdraw, { once: true })
+      }
     })
   }
 
@@ -512,6 +543,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     for (const [promptId, pending] of this.pendingPrompts) {
       if (pending.attemptId !== attemptId) continue
       this.pendingPrompts.delete(promptId)
+      pending.cleanup()
       pending.reject(cancellationError('authorization attempt settled'))
       // The client UI must close EVEN IF the upstream flow never settles
       // (a cancel aborts the controller, but a flow that ignores its

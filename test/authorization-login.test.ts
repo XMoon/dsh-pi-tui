@@ -103,6 +103,10 @@ function fakeAuthorization(options: {
   /** begin() THROWS SYNCHRONOUSLY (never a promise) — the port must be
    *  robust to a wire backend failing before the first await. */
   syncBeginThrow?: boolean
+  /** begin() drives ONE text prompt and then NEVER settles (a wedged
+   *  provider that ignores its abort signal) — the runner abort must
+   *  still close the prompt UI and settle the login. */
+  drivePromptAndHang?: boolean
 } = {}) {
   const begins: { key: string; method?: string; signal?: AbortSignal; interaction: unknown }[] = []
   const flows = options.flows ?? [
@@ -124,11 +128,21 @@ function fakeAuthorization(options: {
       },
       begin: options.syncBeginThrow === true
         ? () => { throw new Error('wire exploded') }
-        : async (request: { key: string; method?: string; interaction: unknown; signal?: AbortSignal }) => {
-            begins.push(request)
-            if (options.beginError !== undefined) throw options.beginError
-            return options.beginResult ?? { status: 'authorized' }
-          },
+        : options.drivePromptAndHang === true
+          ? async (request: { key: string; method?: string; interaction: unknown; signal?: AbortSignal }) => {
+              begins.push(request)
+              const interaction = request.interaction as {
+                notify: (n: unknown) => void
+                prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+              }
+              await interaction.prompt({ kind: 'text', message: 'enter' })
+              return await new Promise<{ status: 'authorized' }>(() => {}) // never settles
+            }
+          : async (request: { key: string; method?: string; interaction: unknown; signal?: AbortSignal }) => {
+              begins.push(request)
+              if (options.beginError !== undefined) throw options.beginError
+              return options.beginResult ?? { status: 'authorized' }
+            },
       cancel: () => {},
     },
   }
@@ -239,6 +253,7 @@ function setup(options: {
   begin?: { status: 'authorized' | 'cancelled' }
   beginError?: Error & { code?: string }
   syncBeginThrow?: boolean
+  drivePromptAndHang?: boolean
   pick?: (items: readonly { value: string; label?: string; group?: string }[]) => string
 } = {}) {
   const ctx = new Context()
@@ -266,6 +281,7 @@ function setup(options: {
     beginResult: options.begin,
     beginError: options.beginError,
     syncBeginThrow: options.syncBeginThrow,
+    drivePromptAndHang: options.drivePromptAndHang,
   })
   ctx.provide('authorization', authorization.service as never)
   const runner = stubRunner(ctx, app)
@@ -691,6 +707,50 @@ test('the pre-bind buffer is BOUNDED and dropped on close (a wedged begin cannot
   assert.deepEqual(answered, [], 'no event after close is ever presented or answered')
 })
 
+test('pre-bind OVERFLOW drops non-terminal events but NEVER drops the terminal settle (bounded + no hang)', async () => {
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'x' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, { respond: async () => {}, cancel: async () => {} })
+  // Flood beyond the buffer limit with non-terminal events: the buffer
+  // stays bounded (non-terminal overflow is dropped), and the attempt's
+  // SETTLED event — landing after the limit — still resolves the outcome.
+  for (let i = 0; i < 200; i += 1) {
+    flow.onEvent({ kind: 'notice', attemptId: 'flooded', notice: { message: `n${i}` } })
+  }
+  flow.onEvent({ kind: 'settled', attemptId: 'flooded', status: 'authorized' })
+  const outcome = await Promise.race([
+    flow.outcome,
+    new Promise<null>((resolve) => { setTimeout(() => resolve(null), 100) }),
+  ])
+  assert.ok(outcome !== null, 'the flooded flow settles (never hangs)')
+  assert.equal(outcome!.status, 'authorized', 'the terminal settled event is preserved past the buffer limit')
+})
+
+test('pre-bind overflow still resolves when the terminal SETTLED event lands beyond the limit', async () => {
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'x' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, { respond: async () => {}, cancel: async () => {} })
+  // 40 notices flood the 32-slot buffer, then the attempt's SETTLED event
+  // arrives: the outcome must resolve (the terminal event is never
+  // silently dropped).
+  for (let i = 0; i < 40; i += 1) {
+    flow.onEvent({ kind: 'notice', attemptId: 'late-settle', notice: { message: `n${i}` } })
+  }
+  flow.onEvent({ kind: 'settled', attemptId: 'late-settle', status: 'authorized' })
+  const outcome = await Promise.race([
+    flow.outcome,
+    new Promise<null>((resolve) => { setTimeout(() => resolve(null), 100) }),
+  ])
+  assert.ok(outcome !== null, 'the terminal settled event resolves the outcome (never hangs)')
+  assert.equal(outcome!.status, 'authorized')
+})
+
 test('bind() is ONE-SHOT: rebinding to another attempt is refused', async () => {
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
@@ -844,6 +904,35 @@ test('/login aborted mid-attempt reports login cancelled', async () => {
   t.runner.signal = AbortSignal.abort()
   const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
   assert.equal(result.text, 'login cancelled')
+  t.app.stop()
+})
+
+test('/login runner abort with an ACTIVE prompt closes the UI and settles (a wedged provider never settles)', async () => {
+  // The provider drives a prompt and then IGNORES its abort signal (never
+  // settles). The runner abort must still: reject the pending bridge
+  // immediately, emit prompt-withdrawn so the question UI closes, and
+  // settle the command as 'login cancelled' — never hang on the outcome.
+  const t = setup({ drivePromptAndHang: true })
+  const controller = new AbortController()
+  t.runner.signal = controller.signal
+  let questionAborted = 0
+  let releaseQuestion: (() => void) | undefined
+  const questionGate = new Promise<void>((resolve) => { releaseQuestion = resolve })
+  t.app.askQuestions = (async (_questions: unknown, signal?: AbortSignal) => {
+    signal?.addEventListener('abort', () => { questionAborted += 1 })
+    await questionGate
+    return [{ id: 'answer', selected: [], custom: 'typed-late' }]
+  }) as never
+  const pending = t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
+  // Let the prompt open (the question UI is waiting on the gate).
+  await settle()
+  await settle()
+  assert.equal(questionAborted, 0, 'the question is open before the abort')
+  controller.abort() // runner teardown while the prompt UI is open
+  const result = await pending
+  assert.equal(result.text, 'login cancelled', 'the runner abort settles the login')
+  assert.equal(questionAborted, 1, 'the open question UI closed on the abort')
+  releaseQuestion!()
   t.app.stop()
 })
 
