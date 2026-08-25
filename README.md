@@ -456,7 +456,9 @@ is COLLAPSED by default so a long log cannot fill the TUI: a running card
 shows the newest 5 lines, a settled card at most 20 visual rows (long
 lines wrap and count as several), each with an honest hidden-line marker.
 `Ctrl+O` (the same master switch as the recent-turn fold) expands the card
-to the retained buffer — live while the command still streams; `Alt+K`
+to the retained buffer — live while the command still streams — except in
+fullscreen Focus, where Ctrl+O owns the Thought-root bulk and the shell
+cards keep their folded state; `Alt+K`
 quick-dismisses the SETTLED cards (a running card is never dismissed, the
 process is not cancelled, and an already-submitted `!` context payload is
 untouched).
