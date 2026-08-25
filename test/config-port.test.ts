@@ -133,6 +133,23 @@ test('providers reject malformed routes before writing a settings path', async (
   assert.deepEqual(writes, [])
 })
 
+test('providers refuse a keyless write for the deepseek official BUILTIN (no profile slot, even in the settings-only fallback)', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({ settings: settings({}, writes) }).providers
+  // Without the llm service the conventional slot would otherwise accept
+  // ANY route — the builtin must be refused explicitly so the write
+  // outcome always agrees with the option DTO's canProvisionProfile.
+  assert.deepEqual(await providers.writeKeylessProfile('deepseek-official'), {
+    kind: 'skipped',
+    reason: 'the deepseek official builtin has no provider-profile slot',
+  })
+  assert.deepEqual(writes, [], 'the builtin never reaches a settings mutate')
+  // A real route keeps the conventional fallback write.
+  const writes2: Array<{ ns: string; ops: unknown }> = []
+  assert.deepEqual(await port({ settings: settings({}, writes2) }).providers.writeKeylessProfile('acme'), { kind: 'written' })
+  assert.deepEqual(writes2, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
+})
+
 test('providers writeKeylessProfile refuses when the settings service is absent (never a silent no-op)', async () => {
   await assert.rejects(() => port({}).providers.writeKeylessProfile('acme'), /settings service unavailable/)
 })

@@ -253,6 +253,17 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     // route, but a malformed/hostile provider directory must never turn this
     // write into a path-injection primitive.
     if (!PROVIDER_ROUTE_PATTERN.test(route)) throw new Error('invalid provider route')
+    // The deepseek official BUILTIN has no provider-profile slot (it is
+    // the adapter itself, never a configured provider): a keyless write
+    // for it is refused EXPLICITLY before any path resolution — without
+    // the llm service the conventional fallback would otherwise write
+    // `providers.deepseek-official`, contradicting the option DTO's
+    // canProvisionProfile: false (and the command surface). The refusal
+    // covers both backends uniformly (a directory can never offer the
+    // builtin either).
+    if (route === 'deepseek-official') {
+      return { kind: 'skipped', reason: 'the deepseek official builtin has no provider-profile slot' }
+    }
     // The route's profile location is resolved INTERNALLY from the
     // CURRENT directory: with the llm service present, the entry's own
     // section/path is used VERBATIM (a consumer never names a namespace);
