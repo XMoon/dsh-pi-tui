@@ -2067,9 +2067,13 @@ test('a replacement plugin Tab runs the shell completion grammar of the wire doc
     vt.sendInput('\t')
     await pollUntil(() => compgenCalls === 1, 'the shell compgen ran through the plugin seat')
     // The dropdown opens asynchronously inside the hidden host editor;
-    // the second Tab applies its selection synchronously and the fallback
-    // syncs the completed command back into the plugin wire document.
-    await new Promise(resolve => setTimeout(resolve, 50))
+    // waitForRender (the repository's settle helper: nextTick + 20ms
+    // flush) drains the completion microtask chain AND the render
+    // pipeline, so the second Tab deterministically hits an OPEN
+    // dropdown — no fixed-delay race. It then applies its selection
+    // synchronously and the fallback syncs the completed command back
+    // into the plugin wire document.
+    await vt.waitForRender()
     vt.sendInput('\t')
     await pollUntil(() => plugin.getText() === '!git ',
       'the shell completion applies into the plugin wire document')
