@@ -23,13 +23,13 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
   doc — including preset description YAML and the context-injection label
   (both crept in as Chinese once); scan `src/` and `config/` for CJK before
   committing. i18n is deferred.
-- **README bilingual sync (hard rule).** `README.md` (English) and
-  `README.zh-CN.md` (简体中文) must stay in sync: every change to the English
-  README must be mirrored in the Chinese one in the same commit, and vice
-  versa — including wording, structure and links. Each README carries a
-  language switcher at the top linking to the other. This rule is one of
-  two exceptions to "English only" (README.zh-CN.md is intentionally
-  Chinese; the changelog pair below is the other).
+- **README bilingual sync (hard rule).** `README.md` (简体中文, the npm
+  landing page) and `README.en.md` (English) must stay in sync: every change
+  to one README must be mirrored in the other in the same commit — including
+  wording, structure and links. Each README carries a language switcher at
+  the top linking to the other. This rule is one of two exceptions to
+  "English only" (README.md is intentionally Chinese; the changelog pair
+  below is the other).
 - **No near-synonym command names.** `/session` was renamed to `/status`
   after colliding with `/sessions`; before adding a command, check the
   existing set and the official dsh command set for confusion risk.
@@ -47,15 +47,14 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
   entries into the new version section; afterwards, start a fresh
   `[Unreleased]` for the next cycle. Semantic-versioning rules apply: any
   breaking change is a major bump.
-- **Changelog bilingual sync (hard rule).** `CHANGELOG.md` (English) and
-  `CHANGELOG.zh-CN.md` (简体中文) must stay in sync, exactly like the
-  README pair: every release update to the English changelog must be
-  mirrored in the Chinese one in the same commit (same sections, same
+- **Changelog bilingual sync (hard rule).** `CHANGELOG.md` (简体中文) and
+  `CHANGELOG.en.md` (English) must stay in sync, exactly like the
+  README pair: every release update to the Chinese changelog must be
+  mirrored in the English one in the same commit (same sections, same
   entries, same dates and links), and vice versa. This is the second
-  sanctioned exception to "English only" (CHANGELOG.zh-CN.md is
-  intentionally Chinese). The root READMEs carry changelog links at the
-  top, each pointing at its own language version — keep those in sync
-  too.
+  sanctioned exception to "English only" (CHANGELOG.md is intentionally
+  Chinese). The root READMEs carry changelog links listing both
+  changelogs — keep those in sync too.
 - **Reference, don't copy.** pi/kimi-code are appearance references; behavior
   is implemented in dsh-pi-tui itself.
 
@@ -527,10 +526,10 @@ The rules below must never be broken; the full contracts live in `docs/`.
 
 ## Docs
 
-- README.md — install and run instructions for humans.
-- CHANGELOG.md — release history (Keep a Changelog 1.1.0; see Working rules).
-- CHANGELOG.zh-CN.md — 简体中文 release history, kept in sync with
-  CHANGELOG.md on every release (see Working rules).
+- README.md — 简体中文 install and run instructions for humans (the npm
+  landing page), with README.en.md kept in sync (see Working rules).
+- CHANGELOG.md — 简体中文 release history (Keep a Changelog 1.1.0; see
+  Working rules), with CHANGELOG.en.md kept in sync.
 - docs/README.md — index of the docs and how they evolve.
 - docs/client-server-migration.md — the server/client migration source of truth (phase status, backend default, rollback state).
 - docs/client-server-coupling.md — the migration coupling allowlist (baseline + no-new-debt).

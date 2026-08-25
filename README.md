@@ -1,533 +1,442 @@
 # dsh-pi-tui
 
-English | [简体中文](README.zh-CN.md)
+[English](README.en.md) | 简体中文
 
-Release history: [CHANGELOG.md](CHANGELOG.md) · [简体中文更新日志](CHANGELOG.zh-CN.md)
+[![npm](https://img.shields.io/npm/v/@xmoon76/dsh-pi-tui.svg)](https://www.npmjs.com/package/@xmoon76/dsh-pi-tui)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A third-party TUI mode for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui).
+基于 Pi TUI 的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 终端前端。
 
-Run `dsh --profile pi-tui` for a terminal UI instead of the browser GUI (`dsh --profile web`) or one-shot mode (`dsh --profile headless`).
-
-> **Status: working.** The TUI covers the main session loop — input → session events,
-> approvals, commands, session switching and full-text search — plus presets, skills,
-> model/settings menus, and slash commands. Rendering and input routing are verified
-> by headless tests (`@xterm/headless`) with no TTY or model connection needed.
-
-## Screenshot
-
-![dsh-pi-tui running in a terminal](https://raw.githubusercontent.com/XMoon/dsh-pi-tui/main/docs/dsh-pi-tui.png)
-
-## Layout
-
-The full repository layout lives in [AGENTS.md](AGENTS.md) (the contributor
-operating manual). In one line: the **repository root is the published
-`@xmoon76/dsh-pi-tui` bundle** (the only published package — its manifest
-declares `dsh.bundle.patch` and the `exports` point at the built `dist/`),
-and `packages/pi-tui/` is the vendored `@moonshot-ai/pi-tui` fork (rescoped
-to `@xmoon76/pi-tui`, private, never published — its divergence ledger lives
-in `packages/pi-tui/AGENTS.md`), bundled into the root package's build
-output.
-
-## Prerequisites
-
-- A DeepSeek Harness installation with profiles support (`dsh` on your `PATH`),
-  version `0.1.1-rc.1` or later on the same compat line (the TUI consumes the
-  split credential events and the `ctx.authorization` seam of that release).
-- Node >= 22.19 (`^22.19.0 || >=24`, same range as dsh). Running from source
-  needs Node with native TypeScript support (>= 23.6) or the tsx ESM hook
-  (`node --import tsx/esm`, how dsh's own source launch works).
-- [pnpm](https://pnpm.io) only when installing from source.
-
-## Install
-
-`dsh plugin` runs pnpm inside the target profile's directory, so the usual
-pnpm verbs (`add`, `remove`, `update`, `list`) all work.
-
-### Option A — from the npm registry (recommended)
-
-The published package is self-contained: the vendored pi-tui fork is bundled
-into its build output, so `@xmoon76/dsh-pi-tui` is the only package you install
-(`@xmoon76/pi-tui` stays private in this repo, like kimi-code keeps
-`@moonshot-ai/pi-tui` private):
+`dsh-pi-tui` 作为独立的 dsh bundle 安装到 profile 中，提供流式对话、工具调用、会话管理、Subagent、历史搜索、Shell、审批与设置等终端交互。模型、工具、Session、权限、Skills、Plan、Goal、Subagent 等运行时能力仍由 DeepSeek Harness 提供。
 
 ```sh
-# install the bundle into the pi-tui profile (creates the profile if needed)
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
-
-# run it
 dsh --profile pi-tui
 ```
 
-Any dependency whose manifest declares `dsh.bundle` joins the profile's layer
-stack automatically — no manual `cordis.patch.yml` wiring.
+![dsh-pi-tui](docs/dsh-pi-tui.png)
 
-### Option B — from source
+## 功能
 
-Build artifacts are not committed (`dist/` for both packages is gitignored and
-the package `exports` point at the built files), so build before installing
-from a clone:
+### 对话与工具
+
+* 流式 Markdown 输出
+* Thinking 折叠与展开
+* Tool Call 卡片及运行状态
+* Tool / System 详情折叠
+* Transcript 全文搜索
+* 长会话历史折叠
+* Context、Token、模型和运行状态显示
+* Approval 与 `ask_user_question` 交互
+* Plan Review
+* Todo / Goal 状态展示
+
+`Ctrl+O` 控制工具和系统详情，`Alt+T` 单独控制 Thinking。
+
+### Focus Mode
+
+`/focus` 可以把运行中的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块。
+
+需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。Focus 只影响界面投影，不修改 Session 中保存的事件。
+
+### Session
+
+支持 DSH 持久化 Session，包括：
+
+* 新建和恢复 Session
+* Session 切换
+* 重命名
+* Fork
+* Rewind
+* Session lineage
+* Transcript 导出
+
+使用：
+
+```text
+/sessions
+/fork
+/rewind
+```
+
+空闲且编辑器为空时也可以快速按两次 `Esc` 打开 Rewind。
+
+Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应 Prompt 放回编辑器。原 Session 不会被修改。
+
+### 输入历史
+
+`Ctrl+R` 打开输入历史搜索。
+
+支持三个范围：
+
+* Current session
+* Current directory
+* All directories
+
+历史结果包含 Prompt、工作目录、时间和 Session 信息。选中历史后只恢复到编辑器，不会立即发送。
+
+普通的 `↑` / `↓` 仍用于快速浏览最近输入。
+
+### Subagent 与后台任务
+
+`/tasks` 提供当前 Session 的任务浏览器。
+
+Subagent 按完整 lineage 显示，包括嵌套创建的 descendant：
+
+```text
+main
+├─ subagent A
+│  └─ subagent B
+└─ subagent C
+```
+
+浏览器会区分：
+
+* `continuable`
+* `one-shot`
+* running / inactive
+* nested descendant
+* 后台 Job
+
+已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
+
+对于当前 Session 的直接 `continuable` Child，可以进入交互式 Viewer，并直接向该 Subagent 发送后续消息。Child 使用自己的 Transcript、Draft 和运行状态，不会修改主 Session 的输入。
+
+更深层的 nested Subagent 默认以只读方式查看。
+
+### Shell
+
+编辑器支持两种 Shell 模式：
+
+```text
+! git status
+```
+
+执行本地命令，并把输出提交到当前 Session。
+
+```text
+!! git status
+```
+
+只在本地执行，输出不会进入模型上下文。
+
+`!` / `!!` 是独立的编辑器模式，而不是普通文本前缀。进入 Shell 模式后 Prompt 和补全行为会同步切换。
+
+Shell 卡片默认只显示有限的输出预览，`Ctrl+O` 可以展开完整保留内容。
+
+### 文件引用与图片
+
+输入 `@` 可以搜索和补全工作区文件：
+
+```text
+@src/index.ts
+@"path with spaces/file.ts"
+```
+
+能够解析的相对路径会在提交时转换为明确的文件路径。
+
+支持通过 `Ctrl+V` 添加剪贴板图片，并使用 DSH Attachment 能力保存到 Session。
+
+### 模型与运行设置
+
+TUI 使用 DSH 提供的模型和设置服务。
+
+常用入口：
+
+```text
+/model
+/settings
+/login
+/permission
+/plan
+/goal
+/compact
+```
+
+模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。
+
+其他插件注册到 `ctx.commands` 的 Slash Command 也会被自动发现。
+
+## 常用按键
+
+| 按键            | 功能                     |
+| ------------- | ---------------------- |
+| `Enter`       | 提交输入                   |
+| `Ctrl+Enter`  | Agent 忙碌时把草稿入队(与 Enter 相反) |
+| `Shift+Enter` | 换行                     |
+| `Esc`         | 取消当前交互 / 中断运行          |
+| `Esc Esc`     | 空闲时打开 Rewind           |
+| `Ctrl+C`      | 中断 / 清空当前输入            |
+| `Ctrl+D`      | 退出 TUI(等同 `/exit`)    |
+| `Ctrl+S`      | Steer:把草稿发给正在运行的回合     |
+| `Ctrl+T`      | 切换 Todo 面板              |
+| `Ctrl+R`      | 搜索输入历史                 |
+| `Ctrl+F`      | 搜索 Transcript          |
+| `Ctrl+O`      | 展开 / 折叠工具和系统详情         |
+| `Alt+T`       | 展开 / 折叠 Thinking       |
+| `Ctrl+G`      | 使用 `$VISUAL`/`$EDITOR` 编辑输入 |
+| `Ctrl+V`      | 粘贴图片                   |
+| `Tab`         | 补全斜杠命令与文件路径           |
+| `@`           | 文件补全                   |
+| `!`           | 进入 Shell 模式            |
+| `!!`          | 进入 Local-only Shell 模式 |
+
+完整按键和命令以 TUI 中的 `/help` 为准。
+
+## 安装
+
+### 环境要求
+
+* DeepSeek Harness
+* Node.js `^22.19.0 || >=24`
+
+项目当前跟随 DeepSeek Harness `0.1.1-rc.x` 版本线开发。
+
+### npm
+
+推荐使用单独的 `pi-tui` profile：
+
+```sh
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh --profile pi-tui
+```
+
+恢复已有 Session：
+
+```sh
+dsh --profile pi-tui --session <session-id>
+```
+
+安装包已经包含运行所需的 Pi TUI fork，不需要额外安装内部的 TUI package。
+
+### 更新
+
+```sh
+dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
+```
+
+查看已安装插件：
+
+```sh
+dsh plugin --profile pi-tui -- list
+```
+
+卸载：
+
+```sh
+dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
+```
+
+## 从源码运行
 
 ```sh
 git clone https://github.com/XMoon/dsh-pi-tui
 cd dsh-pi-tui
-pnpm install
-pnpm build        # pi-tui tsdown (packages/pi-tui/dist/) + root tsdown (dist/, bundles pi-tui)
 
-# file: — the bundle is copied into the profile at add time; rebuild + re-add
-# to refresh (see "Update / uninstall" below)
+pnpm install
+pnpm build
+```
+
+使用 `file:` 安装：
+
+```sh
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD
-
-# link: — a live symlink instead; `pnpm build` output is picked up directly
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@link:$PWD
 ```
 
-### Verify the install
+`file:` 会在安装时复制当前构建结果。修改源码后需要重新 build 并重新 add。
+
+持续开发可以使用 `link:`：
 
 ```sh
-dsh plugin --profile pi-tui -- list          # @xmoon76/dsh-pi-tui present
-dsh --profile pi-tui                         # TUI starts instead of the web GUI
+dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD
+dsh --profile pi-tui-dev
 ```
 
-### Update / uninstall
+之后重新执行：
 
 ```sh
-# registry installs:
-dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
-# file: source installs copy at add time — rebuild + re-add to refresh
-# (link: installs track the repo live and need only `pnpm build`):
-pnpm build && dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD
-
-dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
+pnpm build
 ```
 
-## Development
+即可让开发 Profile 使用新的构建结果。
+
+## DeepSeek Harness 集成
+
+`dsh-pi-tui` 只实现终端交互层。
+
+以下能力由 DeepSeek Harness 提供：
+
+* Agent Loop
+* LLM / Provider
+* Session Persistence
+* Tools
+* Skills
+* Approval
+* Permission Presets
+* Plan Mode
+* Goal
+* Jobs
+* Subagents
+* Credentials
+* Settings
+
+因此 TUI 不需要维护独立的模型配置、Session 格式或 Agent Runtime。
+
+它可以和其他 DSH Surface 使用同一套运行时数据：
 
 ```sh
-pnpm install
-pnpm build        # pi-tui tsdown (packages/pi-tui/dist/) + root tsdown (dist/, bundles pi-tui)
-pnpm test         # pi-tui's own suite (node --test) + dsh-pi-tui headless tests
-pnpm typecheck
-node --expose-gc scripts/bench.mts   # performance baseline (optional)
+dsh --profile web
+dsh --profile headless
+dsh --profile pi-tui
 ```
 
-Tests drive the UI through `@xterm/headless` (see `test/virtual-terminal.ts`),
-so rendering and input routing are verified without a TTY or a model connection.
+## Extension API
 
-### Development history (dogfooding)
+除作为 TUI 使用外，`dsh-pi-tui` 还提供版本化的 Extension API，供其他 Cordis / DSH 插件扩展终端界面。
 
-This project started development on the browser surface (`dsh --profile web`) and
-switched to building itself with itself: since August 15 2026, all fixes and
-features are developed inside this TUI, the same way this README and the
-codebase are maintained. The dev loop runs on a dedicated `pi-tui-dev` profile
-installed with Option B's `link:` specifier
-(`dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD`)
-— a live symlink, so `pnpm build` is picked up without re-adding — while the
-`pi-tui` profile stays on the published registry package for real use.
+目前分为三个入口：
 
-## Extensions (early, stabilizing)
+| Entry                                     | 用途           | 稳定性      |
+| ----------------------------------------- | ------------ | -------- |
+| `@xmoon76/dsh-pi-tui/extensions`          | 常规扩展         | Stable   |
+| `@xmoon76/dsh-pi-tui/extensions/advanced` | 高级交互能力       | Advanced |
+| `@xmoon76/dsh-pi-tui/extensions/unstable` | Low-level 能力 | Unstable |
 
-Since `0.2.0` the bundle ships a small, versioned extension surface so a
-third-party Cordis plugin can contribute chrome without touching the TUI
-internals. It is **early and stabilizing**: the capabilities below are the
-current set; the API version (`1`) is bumped only on breaking changes, and
-plugins must **feature-detect** capabilities instead of parsing the package
-version.
+可扩展的内容包括：
 
-All extension plugins remain standard DeepSeek Harness / Cordis plugins using
-`name`, `inject`, and `apply(ctx)` against the single `piTuiExtensions`
-service; the tiers are capability facades over that one service, not separate
-plugin systems or runtimes.
+* Header / Footer
+* Input Widget
+* Slash Command
+* Theme
+* Setting
+* Autocomplete
+* Keybinding
+* Message Renderer
+* Tool Renderer
+* Overlay
+* Interactive UI
+* Editor Control
+* Replacement Editor
 
-The extension surface ships three tiers: a plugin imports ONLY the
-public entry — never the stable entry's internals (`TuiApp`,
-`TuiMainScreen`, `TuiAltScreen`) nor repository-relative paths.
+插件只需要依赖公开入口，不需要 import `TuiApp`、`TuiMainScreen` 等内部实现。
 
-| Tier | Entry | Contract |
-|---|---|---|
-| Stable | `@xmoon76/dsh-pi-tui/extensions` | compatibility-oriented; additive-first; existing semantics never silently change; removal requires a planned breaking change |
-| Advanced | `@xmoon76/dsh-pi-tui/extensions/advanced` | experimental; minor releases may break; a migration note is required; no long-term shims |
-| Unstable | `@xmoon76/dsh-pi-tui/extensions/unstable` | NO compatibility guarantee; implementation may change anytime |
-
-All tiers reuse the SAME shared extension runtime: caller-fiber ownership,
-surface lifecycle, invalidation, capability discovery. Do not fork a second
-ownership/lifecycle model per tier. The tiers have grown since Phase 1:
-
-- **Advanced** (`ADVANCED_API_LEVEL = 1`, Phase 2 + Phase 4): normalized
-  input capture, focused interactive surfaces (interactive managed
-  overlays), advanced editor control, the imperative UI broker
-  (select/confirm/input/notify), custom interactive UI and the host-state
-  facade (theme/title/working/tools-expanded) — still Host-mediated,
-  never raw terminal bytes. Author guide: `docs/extension-advanced.md`;
-  Pi capability reference: `docs/extension-capability-matrix.md`.
-- **Unstable** (`UNSTABLE_API_LEVEL = 1`, Phase 3): raw input
-  interception (observe/consume/rewrite, exclusive raw ownership), the
-  Host emergency fail-safe (triple-Esc), and a selected low-level surface
-  seam — NO compatibility guarantee; a broken plugin can disrupt Host
-  behavior. Author guide: `docs/extension-unstable.md`.
-- **Real-plugin validation (Phase 5):** the tier selection is proven by
-  real consumers in `examples/plugins/` — a
-  production-class vim modal editor (Advanced editor SDK), a
-  questionnaire form (Advanced imperative UI broker) and an interactive
-  shell (Unstable raw seam). The "which tier should I use?" decision
-  tree: `docs/plugin-authoring.md`.
-
-A plugin imports only the public entry:
+简单示例：
 
 ```ts
-import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '@xmoon76/dsh-pi-tui/extensions'
+import {
+  PI_TUI_EXTENSIONS_SERVICE,
+  type PiTuiExtensionService,
+} from '@xmoon76/dsh-pi-tui/extensions'
 
 export const name = 'my-plugin'
 export const inject = ['tuiStartup', PI_TUI_EXTENSIONS_SERVICE]
 
 export function apply(ctx: Context): void {
-  const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService
-  if (!service.api().capabilities.has('slot.chrome.header.badge')) return
-  service.register<{ text: string; tone?: 'info' | 'warning' | 'error' | 'success' }>(
+  const service = ctx.get(
+    PI_TUI_EXTENSIONS_SERVICE,
+  ) as PiTuiExtensionService
+
+  if (!service.api().capabilities.has('slot.chrome.header.badge')) {
+    return
+  }
+
+  service.register(
     'chrome.header.badge',
-    { id: 'my-badge', order: 100, description: 'A header badge from my plugin.' },
-    { text: 'my-badge', tone: 'info' },
+    {
+      id: 'my-badge',
+      order: 100,
+    },
+    {
+      text: 'my-plugin',
+      tone: 'info',
+    },
   )
 }
 ```
 
-Current extension points (v1):
+详细文档：
 
-| Slot | Semantics | Contribution |
-|---|---|---|
-| `chrome.header.badge` | list | a short `[badge]` after the host title |
-| `input.dock.item` | list | a dock line above the todo panel |
-| `chrome.footer.status` | list | a footer segment (host owns width/truncation) |
-| `input.widget.above` / `input.widget.below` | list | a bounded widget around the editor (M4 component kit) |
+* [Extension API](docs/extension-api.md)
+* [Extension tiers](docs/extension-tiers.md)
+* [Advanced API](docs/extension-advanced.md)
+* [Unstable API](docs/extension-unstable.md)
+* [Plugin authoring](docs/plugin-authoring.md)
+* [Capability matrix](docs/extension-capability-matrix.md)
 
-Contributions are **plain data**, not render functions: a plugin supplies
-`HeaderBadge` / `DockItem` / `FooterSegment` / `InputWidget` values (text +
-semantic tone spans, or a structured `ExtensionView` tree for widgets) and
-the host owns rendering, ANSI compilation, width budgets and truncation.
-There is deliberately no `render(context)` callback in v1 — plugins never
-hold a rendering context, so a contribution can never capture or mutate
-host internals.
-
-Since `0.2.0` the widget slots (`input.widget.above` / `input.widget.below`)
-accept a bounded component kit: `ExtensionView` is a structured view tree
-(`text` / `markdown` / `spacer` / `stack` / `frame` / `rows` views with
-semantic style tokens) that the host compiles into private components. A
-plugin can add helper rows above or below the editor — for example a status
-widget or a quick-reference line — without touching the root layout, the
-editor, or focus. The host owns the row budgets: under height pressure the
-lowest-importance widgets collapse first, and the editor always survives.
-
-```ts
-service.register<InputWidget>('input.widget.below', {
-  id: 'my-widget',
-  order: 100,
-}, {
-  view: {
-    kind: 'text',
-    spans: [{ text: 'my-plugin ready', tone: 'success' }],
-  },
-})
-```
-
-Since M5 the extension surface also covers registries (plan §10):
-
-- `registerCommand(contribution)` — slash-command OWNERSHIP metadata
-  (`execution: 'local' | 'submission'`): a plugin-declared local command
-  always executes directly (never steered by the busy-Enter preference);
-  a submission command flows through the session policy. Actual execution
-  stays in the host's commands service; `/name args...` keeps
-  `rawInput` verbatim. Name conflicts are reported, never guessed.
-- `registerTheme(contribution)` — a named semantic palette selectable
-  from the /settings theme picker; the owner's unload falls back to the
-  built-in palette (a selected plugin theme never dangles).
-- `registerSetting(contribution)` — a settings row appended to the
-  /settings panel (label + current value + choices + optional rejection);
-  the host owns the panel.
-- `registerAutocomplete(contribution)` — an autocomplete provider
-  consulted after the host's own provider returns null (deterministic
-  order, per-provider isolation, latest-only commit).
-- `registerKeybinding(contribution)` — normalized-key → semantic-action
-  binding, routed by the host's InputRouter (M6). A plugin declares a key
-  with the public `NormalizedKey` shape (key + ctrl/alt/shift/super) and
-  a semantic action from the host's list (`submit-draft`, `queue-draft`,
-  `steer-draft`, `cancel-activity`, `open-search`, `toggle-fullscreen`,
-  `cycle-permission`). The host normalizes ALL terminal input (Kitty
-  CSI-u, modifyOtherKeys, legacy sequences) — a plugin never sees raw
-  escape data. Reserved host lifecycle keys (Ctrl+C/D/S/F/O/T/G/J,
-  Ctrl+Enter, Enter, Esc) cannot be claimed; plain printable keys never
-  fire a binding (typing always wins); bindings are non-capturing and
-  fire LAST in the precedence ladder (after questions, approvals,
-  overlays and the editor). The action executes through the host's own
-  paths — submission/session safety is never bypassed.
-- `registerMessageRenderer(contribution)` — a TRANSCRIPT message renderer
-  (M7, chain slot): receives a semantic `MessagePresentationSnapshot`
-  (immutable; never the mutable message or the container) and returns an
-  `ExtensionView` or `undefined` (abdicate → the next renderer → the host
-  fallback). Kind-scoped renderers apply to one message kind.
-- `registerToolRenderer(contribution)` — a TOOL card renderer (M7, keyed
-  slot): presents the card for ONE tool name from a
-  `ToolPresentationSnapshot` (callId, toolName, status, arguments,
-  result, expanded); the winner (lowest priority) abdicates to the next
-  renderer, then the host fallback. A priority tie on the same tool name
-  is an explicit error.
-  Renderers never stall the transcript: a throwing renderer is isolated
-  and the chain continues, and the message cache embeds the renderer
-  identity + registry revision, so an HMR/unload rebuilds exactly the
-  affected components.
-- `showOverlay(view, options)` — a MANAGED overlay lease (M8): the plugin
-  supplies an `ExtensionView` + sizing hints; the host mounts it through
-  its overlay broker (modal stacking, focus, fullscreen migration). The
-  returned lease is generation-scoped (the surface's final dispose closes
-  every still-owned lease), close() is idempotent, and hide()/show()
-  toggle visibility without closing. A plugin can never mount a raw
-  component or steal focus — the host owns the terminal and the overlay
-  stack.
-The [extension API v1 author guide](docs/extension-api.md) records the
-import rules, the full surface table, the lifecycle/render contracts, the
-M11 deprecation policy and the stability contract.
-
-The M10 acceptance fixture (plan §15): the repo ships a vim-mode fixture
-(`test/fixtures/vim-plugin/`) that validates the editor-extension seam — the
-packed public SDK is consumable by a third-party Cordis plugin, its
-replacement editor receives SEMANTIC `EditorInputEvent`s (never raw terminal
-bytes), and editor `create()`/`dispose()` work — importing ONLY
-`@xmoon76/dsh-pi-tui/extensions`. It is NOT a production Vim and NOT a
-Stable-API completeness proof: modal-mode behavior (insert/normal) is not
-part of the Stable contract, and the other public surfaces (commands,
-themes, settings, autocomplete, keybindings, renderers, overlays, widgets)
-have their own dedicated tests. Its CI gate forbids `@xmoon76/pi-tui`,
-`src/tui-app` and repository-relative internal paths: if a STABLE plugin
-ever needs a private import, the SDK is missing a capability (there is no
-`unsafeGetTuiApp()` escape hatch).
-
-- `registerEditor(contribution)` — the EDITOR SDK (M9, plan §14):
-  single-winner by priority (a tie is an explicit error); the winner
-  occupies the editor seat through the host's ATOMIC handoff (create →
-  transfer draft/cursor → mount → focus → dispose old). A creation throw
-  keeps the current editor working; winner unload restores the next
-  winner / the host default editor WITH the draft preserved. The plugin
-  editor receives an `EditorHost` (surfaceId, generation, getSnapshot,
-  replaceText, dispatch of semantic actions submit/queue-submit/steer/
-  open-external-editor, subscribe, invalidate) — but the host still owns
-  busy-Enter, Ctrl+Enter, local-command classification, paste protection,
-  approval/question capture, session guard/lock, external editor and
-  exit: a plugin editor can never bypass those.
-
-Lifecycle is host-owned: registrations are disposed when the plugin's Cordis
-fiber unloads (HMR, disable), regular and fullscreen both refresh, and
-`handle.invalidate()/replace()` re-render through the active screen. The
-`@xmoon76/dsh-pi-tui/builtins` entry is the Loader-only first-party
-contributor (version badge, turn/step counters, todo-summary dock item) —
-not a stable third-party SDK. Raw terminal access, pre-host input
-interception and full input ownership are NOT part of the Stable tier (see
-the Advanced/Unstable roadmap).
-
-## Slash commands (selection)
-
-- `/sessions [query]` — open the session picker: search-as-you-type over
-  session ids, titles, and workspaces, rows grouped by workspace with live
-  `filtered/total` counts, and titles loaded in the background as they are
-  read. Enter switches to the selected session.
-- `/search <query>` — full-text search over persisted session logs, then
-  switch to a hit.
-- `/title [title]` — with an argument, set the current session's title
-  (pins it against automatic generation; titles appear in the `/sessions`
-  picker); **without an argument, regenerate the title from the
-  conversation — this overwrites the current title, including one you
-  pinned earlier** (`/rename` is an alias).
-- `/tasks` — the merged task browser: background jobs AND subagents in one
-  searchable list (type to filter rows by kind/label/status — `subagent`,
-  `bash`, `failed`…). Subagent rows show their mode as part of the label
-  (`subagent · <label> · continuable` / `… · one-shot`) — you know before
-  Enter whether the viewer will be interactive — and the durable descendant
-  tree renders as indented rows (`├─` per depth), so a subagent's subagent
-  is visible here without entering its parent. `Enter` opens the detail
-  (child viewer for a subagent — nested rows read-only — status viewer for
-  a job), `i` interrupts the selected subagent. `/subagents` is an alias.
-- `/yolo` — switch to `danger-full-access` (alias of `/permission danger-full-access`).
-- `/status` — show the current session's stats and identity (turn counts,
-  token usage, workspace, installed dsh version).
-- `/rewind` — fork this conversation from an earlier user turn: the picker
-  lists every completed user prompt (newest first), and choosing one creates
-  a new child session whose history ends right before that turn, then
-  restores the selected prompt into the editor for editing. The original
-  session is never modified and stays reachable through `/sessions`;
-  **workspace and external side effects (files, shell, APIs) are not
-  reverted.** The same picker opens with `Esc Esc` on an empty editor.
-- `/preset`, `/model`, `/settings`, `/export`, `/fork` — see
-  `dsh --profile pi-tui`'s command autocomplete (`/` + Tab).
-
-## Keybindings (selection)
-
-- `Esc Esc` — conversation rewind (on an empty editor while idle): open the
-  rewind picker and fork from an earlier user turn. One `Esc` while the
-  agent is busy still cancels the active turn/tool/shell command; with a
-  non-empty draft the double-Esc keeps its historical cancel behavior.
-- `Ctrl+F` — toggle transcript search (the `/search <query>` overlay; a
-  second press closes it).
-- `Shift+Tab` — cycle the permission preset (read-only → workspace-write →
-  danger-full-access); the footer's mode slot badges every preset
-  (`[workspace-write]` / `[read-only]` / `[custom]`, with `[yolo]` flagging
-  the no-approval mode).
-- `Ctrl+S` — steer: with queued messages, sends the whole queue (plus the
-  draft, if any) into the running turn at once; otherwise sends the draft
-  alone. An idle agent starts a fresh turn with everything.
-- `Alt+↑` — dequeue: pull every queued message back into the editor draft.
-- `Ctrl+O` — expand/collapse the most recent turns' collapsible entries
-  (tool and system cards). The same master switch expands the local
-  `!`/`!!` shell cards (see Local shell below). In Focus Mode (regular
-  surface) it derives a full reveal of the recent Thoughts; the
-  fullscreen Focus secondary cards are mouse-owned and Ctrl+O does not
-  expand them. Thinking detail has its own owner — see `Alt+T`.
-- `Alt+T` — collapse/expand every Thinking block (compact: the latest
-  reasoning line as a preview; full: the whole reasoning body). Thinking
-  blocks are disclosure, never visibility: a block stays present
-  whenever the model produced reasoning and the current projection
-  contains it, in Focus ON/OFF and both surfaces alike. In fullscreen a
-  click toggles a single Thinking card on top of this bulk level, and
-  `Ctrl+O` never touches Thinking detail (it owns only tool/system
-  cards). `/settings` → `Thinking detail` is the same state.
-- `Alt+K` — dismiss the SETTLED local `!`/`!!` shell cards from the live
-  view; a RUNNING card is never dismissed and the process is not
-  cancelled (Esc owns that). See Local shell below.
-- `Ctrl+T` — toggle the full todo list (in fullscreen, clicking the panel
-  expands it to the full list and back); the dock above the editor always
-  shows the todo summary and background tasks, and queued input renders
-  between them.
-- `@` — file/folder mentions in the editor: `@` + Tab completes files from the
-  whole workspace (fd-backed when `fd` is on PATH, with a built-in recursive
-  fallback otherwise). The literal `@path` is submitted and the model reads
-  the file itself. With background work running, an empty editor's `↓` opens
-  the same merged task browser as `/tasks`:
-  - **subagent rows** (the durable descendant tree, labeled with their
-    catalog mode: `continuable` or `one-shot`, indented by depth with a
-    `├─` connector — a subagent's subagent is visible right here, in
-    stable pre-order) — `Enter` opens the child's viewer:
-    a **direct (depth-1) continuable** child's viewer is **interactive**
-    — type a follow-up and press Enter, and it is delivered as the
-    child's NEXT turn through `ctx.subagents.followup` (FIFO — a running
-    child is never interrupted or steered; an inactive child cold-resumes
-    automatically), while `Esc` returns to your session. A **one-shot**
-    child's viewer stays **read-only**, and so does any **nested
-    (depth > 1)** descendant — even a continuable one (`<mode> · nested ·
-    read-only from this parent`, the real mode always shown): the root
-    may only continue its own direct children. A FINISHED one-shot child stays in the
-    browser — `inactive` is live-store presence, not an outcome — and
-    Enter opens its persisted transcript. While a viewer is open the
-    footer switches to the CHILD's own identity (`[subagent ·
-    continuable]` badge, label, activity, cwd, the child's own
-    turns/steps/stats) and returns to your session's on exit. `i`
-    interrupts the selected child. They never register job records, so
-    this browser is their only glanceable home.
-  - **job rows** (bash and one-shot subagent jobs) — `Enter` shows the status
-    viewer only: a bash job's output read cursor belongs to the model's
-    `job_output`, and a one-shot subagent job record carries no child session
-    id, so a subagent job's transcript is reached through `/tasks` by picking
-    the child by its label.
-  The footer badge shows `[N tasks running · M agents · ↓ view]` while any
-  background work is live. The queue pane above the editor shows pending
-  input: user messages as `❯` rows, everything else (job notices, subagent
-  reports, injected instructions) as `⏳` notices that fold into a
-  `+N more` line beyond five — and disappear once the agent has received
-  them.
-
-## Launch options
-
-The TUI's startup row adds `--preset <id>` — the agent preset a fresh
-session starts on (falls back to `$DSH_PI_TUI_PRESET`, then the saved
-settings default). It exists because `/preset` only applies to a blank (not
-yet created) session, so launch-time selection is the other half of choosing
-a preset. All other flags are the dsh runner's own (`--session <id>`, …).
-
-## Session lifecycle
-
-Opening the TUI with no `--session` creates **no session at all**: the first
-user message (text, slash command, `Ctrl+S` steer, or `!` shell) starts it
-lazily. `--session <id>` still resumes immediately, and a local `!!` command
-runs without needing a session.
-
-## Local shell (`!` / `!!`)
-
-`! command` runs the command locally and submits the completed command +
-output to the session as an ordinary user message; `!! command` runs purely
-locally — the card is the only record (never sent to the model). The card
-is COLLAPSED by default so a long log cannot fill the TUI: a running card
-shows the newest 5 lines, a settled card at most 20 visual rows (long
-lines wrap and count as several), each with an honest hidden-line marker.
-`Ctrl+O` (the same master switch as the recent-turn fold) expands the card
-to the retained buffer — live while the command still streams; `Alt+K`
-quick-dismisses the SETTLED cards (a running card is never dismissed, the
-process is not cancelled, and an already-submitted `!` context payload is
-untouched).
-
-## Verified in the P0 spike
-
-- Vendored pi-tui: the fork's own suite passes under `node --test` (run it as
-  the sync gate after every re-vendor; the count is deliberately not copied here —
-  `packages/pi-tui/package.json` is the single source of version facts).
-- `TuiApp` renders, accepts editor input, and handles Ctrl+C on a headless xterm.
-- The whole import chain (pi-tui, tui-app, `@deepseek-ai/dsh-cmdline`, commander)
-  loads under the tsx ESM hook — the dsh source-launch contract.
-- Native modifier-key addons are optional: on Linux the loader returns `undefined`
-  without attempting a load, and the non-TTY stdin path is guarded.
-
-## Diagnostic log
-
-The TUI writes its own diagnostics to stderr and a log file (`ctx.logger` is
-invisible in this process — no exporter):
-
-- Default file: `$DSH_HOME/logs/pi-tui-<pid>.log` (default `~/.dsh/logs/`);
-- Line format: `[tui] <ISO time> <level> <message> k=v ...`;
-- Default level `info`: key lifecycle events only (boot/resume/switch/exit,
-  divergence-guard warnings, errors); `debug` additionally logs every guard
-  check before a send.
-
-Configuration (environment variables):
-
-| Variable | Meaning | Default |
-|---|---|---|
-| `DSH_PI_TUI_LOG` | Log file path; `off` disables file logging | `$DSH_HOME/logs/pi-tui-<pid>.log` |
-| `DSH_PI_TUI_LOG_LEVEL` | `debug` / `info` / `warn` / `error` | `info` |
-
-Troubleshooting example:
+## 开发
 
 ```sh
-DSH_PI_TUI_LOG_LEVEL=debug dsh --profile pi-tui
-tail -f ~/.dsh/logs/pi-tui-*.log
+pnpm install
+pnpm build
+pnpm typecheck
+pnpm test
 ```
 
-## Safety & operational notes
+测试包括 Pi TUI fork、自身 TUI 行为以及 Extension API 的 fixture / smoke test。
 
-- **One surface per session.** dsh has no cross-process session coordination:
-  a session open in TWO dsh processes (TUI + web, or two TUIs) can corrupt its
-  log. The TUI refuses to open a session already held by another live dsh
-  process (an `owner.lock` file next to the log, with a pid/starttime probe
-  for stale locks left by crashes — so the second surface is stopped at
-  OPEN time, not after the damage). For writes, the TUI detects the other
-  writer and blocks the send; the SAME action pressed again (Enter for a
-  submit, Ctrl+S for a steer, unchanged draft) forces through — an edited
-  draft, a swapped key, a new file revision, or a session switch invalidates
-  the force. Never run two surfaces on one session (full contract:
-  `docs/concurrency.md`).
-- **Session repair.** `node_modules/@xmoon76/dsh-pi-tui/scripts/repair-session.mjs`
-  repairs corrupted logs (`--scan` lists damage read-only; `--yes` applies with
-  a mandatory backup). A torn (truncated) tail is truncated at the last
-  complete frame and reported with exact byte accounting; references to a
-  duplicated seq are never auto-resolved — the repair refuses and asks for
-  `--duplicate-reference=first|last|segment`. Repaired logs are re-verified
-  with the dsh reader's own layout checks before the backup is considered
-  redundant. (Full repair contract, incl. the frame-layout constraint:
-  `docs/repair-session.md`.)
-- **Exit.** `/exit` (alias `/quit`) flushes the session with a 10s hard
-  timeout: a hung provider cannot trap the TUI. If the flush fails or times
-  out, the terminal prints a warning (the tail may not be persisted) and the
-  process still exits.
-- **Performance.** `scripts/bench.mts` (non-default) measures ingest,
-  projection, cold/warm rebuilds, streaming frames, theme switches, and heap;
-  the saved baseline lives in `docs/perf-baseline.md`. Unchanged transcript
-  messages reuse their rendered components, so the warm per-frame rebuild
-  does not grow with history.
+终端渲染和输入路由使用 `@xterm/headless` 做自动化验证，因此大部分 UI 测试不依赖真实 TTY 或模型连接。
+
+性能基线：
+
+```sh
+node --expose-gc scripts/bench.mts
+```
+
+项目日常开发使用单独的 `pi-tui-dev` Profile 进行自测：
+
+```sh
+dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD
+dsh --profile pi-tui-dev
+```
+
+## 项目结构
+
+仓库根目录是发布到 npm 的 `@xmoon76/dsh-pi-tui` bundle。
+
+Pi TUI fork 位于：
+
+```text
+packages/pi-tui/
+```
+
+它作为内部依赖参与构建，并随根 package 一起打包，不单独要求用户安装。
+
+具体的 upstream 来源、版本和本地差异以：
+
+```text
+packages/pi-tui/package.json
+packages/pi-tui/AGENTS.md
+```
+
+为准。
+
+贡献者相关的仓库结构和开发约定见 [AGENTS.md](AGENTS.md)。
+
+## 文档
+
+| 文档                                                     | 内容                           |
+| ------------------------------------------------------ | ---------------------------- |
+| [docs/README.md](docs/README.md)                       | 文档索引                         |
+| [docs/architecture.md](docs/architecture.md)           | 架构和模块职责                      |
+| [docs/input-history.md](docs/input-history.md)         | 输入历史                         |
+| [docs/surface-decisions.md](docs/surface-decisions.md) | TUI 交互设计决策                   |
+| [docs/concurrency.md](docs/concurrency.md)             | Session 并发                   |
+| [docs/failure-model.md](docs/failure-model.md)         | Async failure / cancellation |
+| [docs/perf-baseline.md](docs/perf-baseline.md)         | 性能基线                         |
+| [docs/extension-api.md](docs/extension-api.md)         | Extension API                |
+| [AGENTS.md](AGENTS.md)                                 | Contributor operating manual |
+
+## Changelog
+
+中文：
+
+[CHANGELOG.md](CHANGELOG.md)
+
+English:
+
+[CHANGELOG.en.md](CHANGELOG.en.md)
 
 ## License
 
-MIT. `packages/pi-tui` retains its upstream MIT license and authorship
-(Copyright (c) 2025 Mario Zechner; Moonshot AI fork).
+[MIT](LICENSE)
+
