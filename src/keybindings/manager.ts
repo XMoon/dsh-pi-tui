@@ -114,11 +114,18 @@ export class HostKeybindingManager {
     const effectiveLeaderBindings = this.safeMode
       ? []
       : this.leaderBindings.filter(binding => this.userBindings[binding.action] !== false)
-    // Leader bindings: a duplicate completing key is ambiguous — neither
-    // fires (plan §6 M6: ambiguous prefix is a diagnostic). A binding
-    // whose action the user DISABLED (false) never fires either.
+    // Leader bindings: a duplicate completing key across DIFFERENT
+    // actions is ambiguous — neither fires (plan §6 M6: ambiguous prefix
+    // is a diagnostic). Identical (action, key) pairs are DEDUPED first
+    // (e.g. `<leader>h` listed twice for ONE action is not ambiguous —
+    // review finding). A binding whose action the user DISABLED (false)
+    // never fires either.
+    const seenPairs = new Set<string>()
     const byKey = new Map<KeyId, LeaderBinding[]>()
     for (const binding of effectiveLeaderBindings) {
+      const pair = `${binding.action}\u0000${binding.key}`
+      if (seenPairs.has(pair)) continue
+      seenPairs.add(pair)
       const list = byKey.get(binding.key) ?? []
       list.push(binding)
       byKey.set(binding.key, list)
@@ -239,7 +246,18 @@ export class HostKeybindingManager {
     if (this.isDisabled(action)) return ''
     const direct = this.keysFor(action).map(formatKeyId)
     const leader = this.leaderKeysFor(action).map(formatLeaderSequence)
-    return [...direct, ...leader].join(' / ')
+    if (direct.length > 0 || leader.length > 0) {
+      return [...direct, ...leader].join(' / ')
+    }
+    // Capturing-scope actions (search close/next/previous, question/tasks
+    // flows) are excluded from the HOST keymap, so keysFor() is empty —
+    // fall back to their defaults for display (review finding: /help
+    // showed '—' for Enter submission and the fixed overlay controls).
+    const definition = APP_KEYBINDINGS[action]
+    if (definition !== undefined && definition.defaultKeys.length > 0) {
+      return definition.defaultKeys.map(formatKeyId).join(' / ')
+    }
+    return ''
   }
 
   /** The primary effective key of one action, or undefined. */

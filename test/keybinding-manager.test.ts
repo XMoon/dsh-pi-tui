@@ -129,3 +129,41 @@ test('keysLabelFor shows ALL direct and leader keys (the /help source)', () => {
   const disabled = managerWith({ 'app.history.search': false })
   assert.equal(disabled.keysLabelFor('app.history.search'), '')
 })
+
+test('keysLabelFor falls back to an overlay action default (the /help source)', () => {
+  // Review finding: capturing-scope actions (search close/next/previous,
+  // question/tasks flows) are excluded from the HOST keymap, so keysFor()
+  // is empty and keysLabelFor must render their defaults — /help showed
+  // '—' for Enter submission and the fixed overlay controls.
+  const manager = managerWith({})
+  assert.equal(manager.keysLabelFor('app.input.submit'), 'Enter', 'submit keeps its default label')
+  assert.equal(manager.keysLabelFor('app.transcript.search.close'), 'Esc')
+  assert.equal(manager.keysLabelFor('app.transcript.search.next'), 'Enter')
+  assert.equal(manager.keysLabelFor('app.transcript.search.previous'), 'Shift+Enter')
+  // Disabled actions still advertise nothing.
+  const disabled = managerWith({ 'app.input.submit': false })
+  assert.equal(disabled.keysLabelFor('app.input.submit'), '')
+})
+
+test('duplicate leader bindings of the SAME action are not ambiguous (review round)', () => {
+  // Review finding: ['<leader>h', '<leader>h'] on ONE action grouped two
+  // entries under the same completing key and was flagged ambiguous —
+  // neither fired. Identical (action, key) pairs are deduped first.
+  const manager = managerWith({
+    leader: 'ctrl+x',
+    bindings: { 'app.history.search': ['<leader>h', '<leader>h'] },
+  })
+  assert.ok(!manager.diagnosticsList().some(message => message.includes('ambiguous')), `no ambiguity expected: ${manager.diagnosticsList().join(' | ')}`)
+  assert.deepEqual(manager.leaderKeysFor('app.history.search'), ['h'], 'the deduped binding fires')
+  assert.equal(manager.keyHint('app.history.search'), 'Ctrl+R / Leader H', 'the default direct key plus the deduped leader')
+  // Two DIFFERENT actions on the same completing key are still ambiguous.
+  const ambiguous = managerWith({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.history.search': '<leader>h',
+      'app.session.new': '<leader>h',
+    },
+  })
+  assert.ok(ambiguous.diagnosticsList().some(message => message.includes('ambiguous')), 'cross-action same-key stays ambiguous')
+  assert.deepEqual(ambiguous.leaderKeysFor('app.history.search'), [], 'ambiguous actions advertise no leader key')
+})

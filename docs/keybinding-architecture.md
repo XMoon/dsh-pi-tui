@@ -234,7 +234,13 @@ README/CHANGELOG language flip) and re-reviewed:
   `keysLabelFor()` — ALL direct keys and ALL leader sequences of an
   action, one shared effective-label source (a mixed action no longer
   shows only its direct keys).
+- Round 11 (needs-fixes): `keysLabelFor()` falls back to an overlay
+  action's DEFAULTS when it has no host-keymap keys (search
+  close/next/previous, question/tasks flows — `/help` no longer shows
+  '—' for them); duplicate `<leader>X` entries of the SAME action are
+  deduped before ambiguity detection (only cross-action same-key pairs
+  are ambiguous).
 
-Final gates after the rebase: 2403 bundle tests, 985 fork tests, 11
+Final gates after the rebase: 2405 bundle tests, 985 fork tests, 11
 docs tests, typecheck (fork + bundle), `check-host-keybindings` gate,
 `git diff --check` — all green.
