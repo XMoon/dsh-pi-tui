@@ -133,18 +133,26 @@ function parseRow(input: unknown, index: number): FooterRowLayout | FooterLayout
   if (input.separator !== undefined) {
     if (!isRecord(input.separator)) return { kind: 'error', message: `row ${index}: separator must be an object` }
     const text = input.separator.text
-    if (typeof text !== 'string' || text.length > MAX_SEPARATOR_LENGTH) {
+    // A separator object WITHOUT a text string is treated as ABSENT: the
+    // settings service coerces a missing optional object field to `{}`
+    // (schemastery), so a persisted separator-less row comes back as
+    // `separator: {}` — rejecting it would silently discard every
+    // configurator-built layout without a separator on reload (§15.7).
+    if (text === undefined) {
+      // No separator — the row stays as built.
+    } else if (typeof text !== 'string' || text.length > MAX_SEPARATOR_LENGTH) {
       return { kind: 'error', message: `row ${index}: separator text must be a string of at most ${MAX_SEPARATOR_LENGTH} chars` }
-    }
-    if (CONTROL_CHARS.test(text)) {
-      return { kind: 'error', message: `row ${index}: separator text must not contain terminal control characters` }
-    }
-    row.separator = { text }
-    if (input.separator.tone !== undefined) {
-      if (typeof input.separator.tone !== 'string' || !TONES.has(input.separator.tone)) {
-        return { kind: 'error', message: `row ${index}: unknown separator tone "${String(input.separator.tone)}"` }
+    } else {
+      if (CONTROL_CHARS.test(text)) {
+        return { kind: 'error', message: `row ${index}: separator text must not contain terminal control characters` }
       }
-      row.separator.tone = input.separator.tone as FooterTone
+      row.separator = { text }
+      if (input.separator.tone !== undefined) {
+        if (typeof input.separator.tone !== 'string' || !TONES.has(input.separator.tone)) {
+          return { kind: 'error', message: `row ${index}: unknown separator tone "${String(input.separator.tone)}"` }
+        }
+        row.separator.tone = input.separator.tone as FooterTone
+      }
     }
   }
   return row as FooterRowLayout

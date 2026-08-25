@@ -73,3 +73,24 @@ test('unknown item ids are NOT a validation error (skipped at render)', () => {
   })
   assert.ok(isFooterLayout(parsed), `unknown ids must parse (render-time skip): ${JSON.stringify(parsed)}`)
 })
+
+test('a separator-less layout survives the settings-service round-trip (schemastery coerces absent object fields to {})', () => {
+  // The configurator's default output has NO separator; the dsh settings
+  // service coerces a missing optional object field to {} on resolve, so
+  // the persisted row comes back as separator: {}. The parser must treat
+  // that as "no separator", not a validation failure — otherwise every
+  // separator-less custom layout silently reverts to default on reload.
+  const parsed = parseFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'model' }], right: [{ id: 'focus-mode' }], separator: {} }],
+  })
+  assert.ok(isFooterLayout(parsed), `the coerced separator must parse:\n${JSON.stringify(parsed)}`)
+  assert.equal(parsed.rows[0]!.separator, undefined, 'the coerced separator must be dropped, not stored')
+  // A separator WITH text still parses normally.
+  const withSep = parseFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'model' }], right: [], separator: { text: ' │ ', tone: 'textDim' } }],
+  })
+  assert.ok(isFooterLayout(withSep))
+  assert.equal(withSep.rows[0]!.separator?.text, ' │ ')
+})
