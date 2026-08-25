@@ -219,13 +219,14 @@ test('the preview editor-empty getter is LIVE: a draft typed under the panel upd
   app.stop()
 })
 
-for (const rows of [3, 4, 6]) {
-  test(`the configurator fits a ${rows}-row terminal (Frame bottom border visible, no hard cut)`, async () => {
-    // Very short terminals: the budget must leave room for the Frame's
-    // two border rows AND the overlay's maxHeight must not hard-cut the
-    // bottom border. The viewport ALWAYS reports `rows` lines, so the
-    // meaningful assertion is that the Frame's bottom border (╰) is
-    // actually rendered on the last content row.
+for (const rows of [3, 4, 6, 40]) {
+  test(`the configurator fits a ${rows}-row terminal (Frame borders visible, no hard cut)`, async () => {
+    // Very short AND very tall terminals: the budget must leave room for
+    // the Frame's two border rows AND the overlay's maxHeight must never
+    // hard-cut the bottom border (a fixed maxHeight=30 sliced the border
+    // on a 40-row terminal whose 30 content rows + 2 borders exceeded
+    // it). The viewport ALWAYS reports `rows` lines, so the meaningful
+    // assertion is that the Frame's borders are actually rendered.
     const vt = new VirtualTerminal(100, rows)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
@@ -241,9 +242,10 @@ for (const rows of [3, 4, 6]) {
     const lastNonEmpty = [...view].reverse().find(line => line.trim() !== '')
     assert.ok(lastNonEmpty !== undefined && lastNonEmpty.includes('╰'),
       `the Frame bottom border must be visible on a ${rows}-row terminal:\n${view.join('\n')}`)
-    // The top border must be visible too (nothing hard-cut above).
-    const firstNonEmpty = view.find(line => line.trim() !== '')
-    assert.ok(firstNonEmpty !== undefined && firstNonEmpty.includes('╭'),
+    // The top border must be visible too (nothing hard-cut above). The
+    // Frame is vertically CENTERED, so the ╭ row is not necessarily the
+    // first non-empty row — search the whole viewport for it.
+    assert.ok(view.some(line => line.includes('╭')),
       `the Frame top border must be visible on a ${rows}-row terminal:\n${view.join('\n')}`)
     app.stop()
   })

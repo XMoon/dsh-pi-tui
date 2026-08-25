@@ -158,6 +158,13 @@ test('setStatus clears stale owned facts: a gone model, a changed cwd re-derives
   // The branch empties: the old branch must be cleared.
   app.setStatus({ model: 'm', cwd: '/x/y/z', branch: '' })
   assert.equal(store.snapshot().workspace.branch, undefined, 'an emptied branch must be cleared')
+  // A permission set then cleared: the old preset must be cleared (the
+  // owned-fields contract — a disappearing permission must not leave a
+  // stale [yolo]/[workspace-write] badge behind).
+  app.setStatus({ model: 'm', cwd: '/x/y/z', permission: 'danger-full-access' })
+  assert.equal(store.snapshot().access.permissionPreset?.id, 'danger-full-access')
+  app.setStatus({ model: 'm', cwd: '/x/y/z', permission: undefined })
+  assert.equal(store.snapshot().access.permissionPreset, undefined, 'a gone permission must be cleared')
   app.stop()
 })
 
