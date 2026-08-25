@@ -269,6 +269,40 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   fallback (`skill` maps to the read variant with the `Load skill` title
   on both paths). The fold stores raw call facts only — presentation
   strings never enter the TranscriptFolder.
+- **Thinking is hidden by default in Focus**: an expanded Thought reveals
+  the non-thinking process; Alt+T is the Focus category toggle
+  (`focusThinkingVisible`, default false, reset on entering Focus, kept
+  across session switches, never cleared by Root Collapse All). The
+  ordinary `hideThinking` preference stays untouched — `/settings`
+  Thinking keeps controlling only the ordinary transcript.
+
+## Focus is surface-adaptive
+
+Two surfaces, two consistent detail paths — no mouse hit-map in regular
+mode (only `TuiAltScreen` wires `onCellClick`):
+
+- **Regular (fullscreen OFF) — keyboard-driven**:
+  - Ctrl+O is the Focus detail master: it toggles a DERIVED reveal of the
+    recent `EXPAND_RECENT_TURNS` Focus Thoughts (root open == non-Thinking
+    process full). The derived state is NEVER written into
+    `focusExpandedTurns`, so switching to fullscreen drops it
+    (deterministic: `toolOutputExpanded` and `focusExpandedTurns` stay
+    orthogonal).
+  - Alt+T shows/hides Thinking (full when visible — regular has no
+    secondary click).
+  - There are no `▸ Bash` affordances in regular mode — nothing to click.
+- **Fullscreen — mouse-driven fine inspection**:
+  - The Thought is click-disclosed; an expanded Thought shows COMPACT
+    secondary cards (Thinking included only after Alt+T), and a click
+    full-reveals one card (attachment > secondary > outer Thought).
+  - Ctrl+O does not pierce the fullscreen Focus state.
+  - The fold hint reads `(click to expand)` for fullscreen secondary
+    cards, `(ctrl+o to expand)` everywhere else.
+  - Root Collapse All clears the turn's per-card expansions but never the
+    Focus Thinking category preference.
+- **Switching surfaces** re-derives the projection: entering fullscreen
+  drops the Ctrl+O-derived reveal (manual disclosures only); returning to
+  regular restores it while the master is ON.
 
 ## Selected-row marquee
 

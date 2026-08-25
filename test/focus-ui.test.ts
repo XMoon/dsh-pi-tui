@@ -108,7 +108,7 @@ test('Focus ON running: the Thought card is collapsed with previews, the process
   app.stop()
 })
 
-test('clicking the Thought header expands a RUNNING turn and reveals the live process', async () => {
+test('clicking the Thought header expands a RUNNING turn: process visible, Thinking hidden by default', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   folder.apply(runningTurn(0))
@@ -125,10 +125,11 @@ test('clicking the Thought header expands a RUNNING turn and reveals the live pr
   view = vt.getViewport()
   const joined = view.join('\n')
   assert.ok(joined.includes('🐳 Thought'), `expanded symbol missing after click:\n${joined}`)
-  // The open Thought reveals the full process rows (thinking card with the
-  // whale bullet, tool card with its header).
-  assert.ok(joined.includes('locating the transcript path'), `expanded reasoning must appear:\n${joined}`)
+  // The open Thought reveals the process timeline: the tool card is
+  // visible (compact) — and the Thinking category is HIDDEN by default
+  // (the Focus surface shows process, not reasoning, until Alt+T).
   assert.ok(joined.includes('Read src/transcript.ts [running]'), `expanded tool card must appear:\n${joined}`)
+  assert.ok(!joined.includes('locating the transcript path'), `Thinking must be hidden by default in Focus:\n${joined}`)
   // The WorkingIndicator is untouched by the expansion.
   assert.ok(joined.includes('Working...'), `WorkingIndicator must stay while expanded:\n${joined}`)
   app.setFullscreen(false)
@@ -146,6 +147,16 @@ test('new events stream into the RUNNING expansion', async () => {
   const y = findRow(vt.getViewport(), '🐋 Thought')
   assert.ok(y >= 0)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  // Alt+T reveals the Thinking category (default hidden), then the
+  // compact Thinking secondary is clicked into full so the reasoning is
+  // the live surface.
+  app.toggleFocusThinkingVisible()
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  const ty = findRow(view, 'locating the transcript path')
+  assert.ok(ty >= 0, `Thinking secondary missing after Alt+T:\n${view.join('\n')}`)
+  click(vt, 10, ty + 1)
   await vt.waitForRender()
   // The turn keeps running: a second tool call + reasoning land live.
   folder.apply([
@@ -417,29 +428,37 @@ test('boot restore: a persisted Focus ON applies to the app BEFORE the first fra
   app.stop()
 })
 
-test('Alt+T (hideThinking) cannot hide thinking inside an EXPANDED Thought; Focus OFF restores it', async () => {
+test('Alt+T is surface-aware: Focus visibility in Focus, hideThinking outside (review contract)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   folder.apply(runningTurn(0))
   app.setFocusMode(true)
-  app.toggleThinkingHidden() // Alt+T: hideThinking = true
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // Collapsed: thinking stays hidden (the process rows are absent anyway).
-  assert.ok(!vt.getViewport().join('\n').includes('🐳'), 'collapsed stays hidden under Alt+T')
-  // Expand: the user asked for the full turn — thinking must appear even
-  // though hideThinking is on (plan §15.1; review fix).
+  // Focus ON: Alt+T drives the FOCUS Thinking visibility, and the
+  // ordinary hideThinking preference is untouched by it.
   let y = findRow(vt.getViewport(), '🐋 Thought')
   click(vt, 3, y + 1)
   await vt.waitForRender()
-  const expanded = vt.getViewport().join('\n')
-  assert.ok(expanded.includes('🐳'), `an expanded Thought must reveal thinking under Alt+T:\n${expanded}`)
-  // Focus OFF: the plain Alt+T semantics come back (thinking hidden again).
+  assert.ok(!vt.getViewport().join('\n').includes('locating the transcript path'),
+    'Focus expanded must hide Thinking by default')
+  app.toggleFocusThinkingVisible() // Alt+T
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('locating the transcript path'),
+    'Alt+T must reveal Thinking inside the Focus timeline')
+  assert.equal(app.isThinkingHidden(), false, 'the ordinary hideThinking preference must stay untouched')
+  // Focus OFF: the ordinary hideThinking preference comes back into play
+  // (still shown — the Focus toggle never wrote it).
   app.setFocusMode(false)
   await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('locating the transcript path'),
+    'Focus OFF must restore the ordinary thinking visibility')
+  // Ordinary Alt+T now hides thinking (the pre-Focus behavior).
+  app.toggleThinkingHidden()
+  await vt.waitForRender()
   const restored = vt.getViewport().join('\n')
-  assert.ok(!restored.includes('locating the transcript path'), `Focus OFF must restore hideThinking:\n${restored}`)
+  assert.ok(!restored.includes('locating the transcript path'), `ordinary Alt+T must hide thinking:\n${restored}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -521,8 +540,13 @@ test('a RUNNING turn supports live secondary disclosures (plan §41)', async () 
   click(vt, 3, y + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  // The Thinking secondary is COMPACT (the latest reasoning line visible).
-  assert.ok(view.join('\n').includes('locating the transcript path'), 'the compact Thinking preview must be visible')
+  // Thinking is hidden by default in Focus: Alt+T reveals the Thinking
+  // category, then the compact Thinking secondary is click-disclosed.
+  assert.ok(!view.join('\n').includes('locating the transcript path'), 'Thinking must be hidden by default')
+  app.toggleFocusThinkingVisible()
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('locating the transcript path'), 'the compact Thinking preview must be visible after Alt+T')
   // Click the compact Thinking card: full reveal.
   const ty = findRow(view, 'locating the transcript path')
   click(vt, 10, ty + 1)
@@ -546,7 +570,7 @@ test('a RUNNING turn supports live secondary disclosures (plan §41)', async () 
   const after = view.join('\n')
   assert.ok(after.includes('🐳 Thought'), 'the root must stay open')
   // The compact card carries the expand hint; the full one does not.
-  assert.ok(after.includes('(ctrl+o to expand)'), `the secondary must fold back to compact:\n${after}`)
+  assert.ok(after.includes('(click to expand)'), `the secondary must fold back to compact (click hint):\n${after}`)
   assert.ok(after.includes('Working...'), 'the WorkingIndicator must stay')
   app.setFullscreen(false)
   app.stop()
@@ -560,10 +584,12 @@ test('turn/end keeps the root and the secondary open; the final appears outside 
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // Expand the root, then the Thinking secondary.
+  // Expand the root, reveal Thinking (Alt+T), then the Thinking secondary.
   let view = vt.getViewport()
   let y = findRow(view, '🐋 Thought')
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.toggleFocusThinkingVisible()
   await vt.waitForRender()
   view = vt.getViewport()
   const ty = findRow(view, 'locating the transcript path')
@@ -594,55 +620,64 @@ test('Ctrl+O cannot force the secondaries full inside an expanded Thought (plan 
   // Focus collapsed: no process leak.
   let joined = vt.getViewport().join('\n')
   assert.ok(!joined.includes('🐳'), 'Ctrl+O must not leak collapsed process rows')
-  // Expand the root: the secondaries stay COMPACT even with Ctrl+O on
-  // (the compact Thinking card carries the expand hint; the full one does
-  // not).
+  // Expand the root: the secondaries stay COMPACT even with Ctrl+O on —
+  // and Thinking is hidden by default (Alt+T reveals the category, still
+  // compact: the fullscreen click hint marks the click-owned card).
   const y = findRow(vt.getViewport(), '🐋 Thought')
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.toggleFocusThinkingVisible()
+  await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('🐳 Thought'), 'the root must expand')
-  assert.ok(joined.includes('(ctrl+o to expand)'), 'the Thinking secondary must stay compact under Ctrl+O')
+  assert.ok(joined.includes('(click to expand)'), 'the Thinking secondary must stay compact under Ctrl+O (click hint)')
   // Focus OFF restores the Ctrl+O semantics (the recent-turn boundary
   // expands the thinking card — no hint).
   app.setFocusMode(false)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
-  assert.ok(!joined.includes('(ctrl+o to expand)'), 'Focus OFF must restore the Ctrl+O expansion')
+  assert.ok(!joined.includes('(click to expand)'), 'Focus OFF must restore the Ctrl+O expansion')
   app.setFullscreen(false)
   app.stop()
 })
 
-test('Alt+T: the Thinking secondary stays visible COMPACT inside an expanded Thought (plan §45)', async () => {
+test('Alt+T: Focus Thinking is hidden by default, then COMPACT, then click-full (plan §45)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   folder.apply(runningTurn(0))
   app.setFocusMode(true)
-  app.toggleThinkingHidden() // Alt+T: hideThinking = true
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // Expand the root: the Thinking secondary is COMPACT but visible.
+  // Expand the root: Thinking is ABSENT by default (the Focus category
+  // preference, independent of the ordinary hideThinking state).
   let view = vt.getViewport()
-  const y = findRow(view, '🐋 Thought')
+  let y = findRow(view, '🐋 Thought')
   click(vt, 3, y + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  const joined = view.join('\n')
-  assert.ok(joined.includes('locating the transcript path'), 'the compact Thinking row must stay visible under Alt+T')
-  assert.ok(joined.includes('(ctrl+o to expand)'), 'the Thinking secondary must be COMPACT under Alt+T')
+  let joined = view.join('\n')
+  assert.ok(!joined.includes('locating the transcript path'), 'Thinking must be hidden by default in Focus')
+  // Alt+T reveals the Thinking category as a COMPACT secondary.
+  app.toggleFocusThinkingVisible()
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(joined.includes('locating the transcript path'), 'the compact Thinking row must appear after Alt+T')
+  assert.ok(joined.includes('(click to expand)'), 'the Thinking secondary must be COMPACT (click hint)')
   // Click it: the full reasoning appears (the hint disappears).
   const ty = findRow(view, 'locating the transcript path')
   click(vt, 10, ty + 1)
   await vt.waitForRender()
   const full = vt.getViewport().join('\n')
   assert.ok(full.includes('locating the transcript path'), 'the full reasoning must appear')
-  assert.ok(!full.includes('(ctrl+o to expand)'), 'the full reasoning must not carry the compact hint')
-  // Focus OFF: the old hideThinking behavior returns.
-  app.setFocusMode(false)
+  assert.ok(!full.includes('(click to expand)'), 'the full reasoning must not carry the compact hint')
+  // Alt+T again: the whole Thinking block disappears (category off).
+  app.toggleFocusThinkingVisible()
   await vt.waitForRender()
-  const restored = vt.getViewport().join('\n')
-  assert.ok(!restored.includes('locating the transcript path'), 'Focus OFF must restore hideThinking')
+  const hidden = vt.getViewport().join('\n')
+  assert.ok(!hidden.includes('locating the transcript path'), 'Alt+T must remove the Thinking block entirely')
+  assert.ok(hidden.includes('🐳 Thought'), 'the root and the rest of the timeline must stay')
   app.setFullscreen(false)
   app.stop()
 })
@@ -655,30 +690,35 @@ test('a session switch clears the secondary expansions with the other overrides 
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // Expand the root + the Thinking secondary.
+  // Expand the root, reveal Thinking (Alt+T), then the Thinking secondary.
   let view = vt.getViewport()
   let y = findRow(view, '🐋 Thought')
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.toggleFocusThinkingVisible()
   await vt.waitForRender()
   view = vt.getViewport()
   const ty = findRow(view, 'locating the transcript path')
   click(vt, 10, ty + 1)
   await vt.waitForRender()
-  // Session switch: the secondary overrides are cleared with the rest.
+  // Session switch: the secondary overrides are cleared with the rest
+  // (the FOCUS Thinking visibility preference is a runtime category
+  // preference and survives — plan §19).
   app.clearSessionOverrides()
   show(app, folder)
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
   assert.ok(joined.includes('🐋 Thought'), 'the switch must re-collapse the turn')
-  // Reopen: the secondary is compact again.
+  // Reopen: the Thinking secondary is compact again (the per-card
+  // override was cleared; the category is still visible).
   y = findRow(view, '🐋 Thought')
   click(vt, 3, y + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   const reopened = view.join('\n')
   assert.ok(reopened.includes('🐳 Thought'), 'the root must reopen')
-  assert.ok(reopened.includes('(ctrl+o to expand)'), 'the secondary must be compact after the switch')
+  assert.ok(reopened.includes('(click to expand)'), 'the secondary must be compact after the switch')
   app.setFullscreen(false)
   app.stop()
 })
@@ -738,5 +778,65 @@ test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Tho
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('probe true'), `the plugin renderer must see the full state:\n${view}`)
   app.setFullscreen(false)
+  app.stop()
+})
+
+test('regular mode: Ctrl+O is the Focus detail master (review contract)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  // Regular + Focus + Ctrl+O OFF: compact card, no process rows.
+  let view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.ok(joined.includes('🐋 Thought'), 'regular Focus starts compact')
+  assert.ok(!joined.includes('Read src/transcript.ts [running]'), 'no process rows while compact')
+  // Ctrl+O ON: the recent Focus Thought full-reveals (the keyboard
+  // master); Thinking stays hidden by default.
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'Ctrl+O must expand the recent Focus Thought')
+  assert.ok(joined.includes('Read src/transcript.ts [running]'), 'the tool card must be revealed')
+  assert.ok(!joined.includes('locating the transcript path'), 'Thinking stays hidden in the regular detail mode')
+  // Alt+T: the full Thinking appears (regular has no secondary click).
+  app.toggleFocusThinkingVisible()
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('locating the transcript path'), 'Alt+T must reveal the Thinking in regular detail mode')
+  // Ctrl+O OFF: back to compact.
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐋 Thought'), 'Ctrl+O must collapse the recent Focus Thoughts')
+  assert.ok(!joined.includes('Read src/transcript.ts [running]'), 'the process must hide again')
+  app.stop()
+})
+
+test('switching to fullscreen drops the Ctrl+O-derived reveal; back to regular it returns (plan §16)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  app.setToolOutputExpanded(true) // regular Ctrl+O master ON
+  show(app, folder)
+  await vt.waitForRender()
+  // Regular: the derived reveal is active.
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'regular Ctrl+O reveals the recent Thought')
+  // Enter fullscreen: the derived state must NOT carry over — the manual
+  // disclosures (focusExpandedTurns) are the only fullscreen state.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐋 Thought'), 'fullscreen must not inherit the Ctrl+O-derived reveal')
+  // Back to regular: the keyboard master is still ON — the reveal returns.
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'regular must restore the Ctrl+O full detail')
   app.stop()
 })
