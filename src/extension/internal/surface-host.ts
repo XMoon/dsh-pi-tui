@@ -17,6 +17,7 @@
  */
 
 import type { Text } from '@xmoon76/pi-tui'
+import { sanitizeSpanText } from './slot-outlet.ts'
 import type { FooterItemContribution, PiTuiCapability, SurfaceSnapshot, SurfaceStateValues } from '../public-types.ts'
 import type { ExtensionLedger } from './ledger.ts'
 import { InvalidateBatcher } from './batcher.ts'
@@ -311,7 +312,16 @@ export class SurfaceHost {
         ...contribution.minWidth === undefined ? {} : { minWidth: contribution.minWidth },
         formats: ['segment'],
         defaultFormat: 'segment',
-        render: () => contribution.segment as unknown as import('../../footer/types.ts').FooterSegment,
+        // Extension spans are PLAIN DATA (the Stable contract): strip any
+        // terminal control from the segment text at the boundary — the
+        // composer renders the result verbatim.
+        render: () => ({
+          ...contribution.segment as unknown as import('../../footer/types.ts').FooterSegment,
+          spans: (contribution.segment.spans ?? []).map(span => ({
+            ...span,
+            text: sanitizeSpanText(span.text),
+          })),
+        }),
       }
     }
     return undefined

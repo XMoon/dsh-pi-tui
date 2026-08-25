@@ -1434,8 +1434,14 @@ export function registerTuiCommands(
                     ? DEFAULT_FOOTER_LAYOUT
                     : doc.footerLayout
                   : doc.footerLayout
-                runner.applyFooterSettings({ footer: value, footerLayout: nextLayout })
-                detach('settings footer write', () => settings.replace({ ...doc, footer: value, footerLayout: nextLayout }) as Promise<unknown>, { notify: true })
+                // PERSIST FIRST (the configurator's discipline): the app
+                // applies only from the successful write — a failed
+                // settings write must not leave the live layout ahead of
+                // the document (the next reload would silently revert).
+                detach('settings footer write', async () => {
+                  await settings.replace({ ...doc, footer: value, footerLayout: nextLayout })
+                  runner.applyFooterSettings({ footer: value, footerLayout: nextLayout })
+                }, { notify: true })
               } else {
                 runner.applyFooterSettings({ footer: value })
               }

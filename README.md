@@ -239,6 +239,20 @@ footerCommand:
 仓库/项目提供的 `footerCommand` 永远不会被执行——命令模式被禁用并
 回退到原生布局。失败(空输出、非零退出、超时)自动回退到原生布局。
 
+### 扩展 Footer 条目
+
+插件可以通过 Stable 扩展 API(`@xmoon76/dsh-pi-tui/extensions`)贡献
+**可配置的 Footer 条目**:在 `chrome.footer.item` 槽位注册一个
+`FooterItemContribution`——包含 label 与纯数据 `segment`(带样式的
+span;Host 会剥离任何终端控制序列,插件永远不能直接给终端上样式)。
+用户可在 `/footer` 中像内置条目一样开关、排序、左右放置。注册前请
+先 feature-detect `slot.chrome.footer.item` 能力(该能力在任何 surface
+存在之前就已声明)。条目的配置身份是规范键 `ext:<owner>/<id>`,其中
+owner 是插件的稳定名称——**跨 HMR 稳定**:引用已卸载插件条目的布局
+保留引用,插件重载后自动恢复。旧的 `chrome.footer.status` 槽位不变:
+其 segment 聚合为单一的 `ext:*` 条目。完整作者指南:
+[docs/extension-api.md](docs/extension-api.md)。
+
 ## 常用按键
 
 | 按键            | 功能                     |

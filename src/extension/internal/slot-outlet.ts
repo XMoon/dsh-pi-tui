@@ -248,7 +248,10 @@ export class FooterSegmentOutlet {
       try {
         const segment = record.value as { spans?: readonly StyledSpan[]; importance?: number; minWidth?: number }
         if (compact && (segment.importance ?? 0) < 0) continue
-        const rendered = renderSpans(segment.spans ?? [])
+        // Extension spans are PLAIN DATA (the Stable contract): strip any
+        // terminal control the plugin smuggled in before the host renders.
+        const spans = (segment.spans ?? []).map(span => ({ ...span, text: sanitizeSpanText(span.text) }))
+        const rendered = renderSpans(spans)
         if (rendered !== '') segments.push({
           text: rendered,
           importance: segment.importance ?? 0,

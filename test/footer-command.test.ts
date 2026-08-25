@@ -11,6 +11,9 @@ import { Context } from '@deepseek-ai/cordis'
 import { TuiApp } from '../src/tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
+import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
+import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A fake commands service capturing registrations. */
@@ -80,9 +83,9 @@ test('/footer is sessionless and opens the configurator; Enter saves and persist
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
-    catalog: {} as never,
-    config: {} as never,
-    hostFile: {} as never,
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
     cwd: '/ws',
     sessionCwd: () => '/ws',
@@ -169,9 +172,9 @@ test('/footer Esc cancels without writing', async () => {
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
-    catalog: {} as never,
-    config: {} as never,
-    hostFile: {} as never,
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
@@ -233,9 +236,9 @@ test('/footer starts from the persisted custom layout when active', async () => 
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
-    catalog: {} as never,
-    config: {} as never,
-    hostFile: {} as never,
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
@@ -298,9 +301,9 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
-    catalog: {} as never,
-    config: {} as never,
-    hostFile: {} as never,
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
@@ -340,6 +343,79 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   assert.equal(applied.length, 0, 'a failed write must not apply the layout')
+  assert.equal(app.getFooterMode(), 'default', 'the old layout must stay active')
+  app.stop()
+})
+
+test('/settings footer change is PERSIST-FIRST: a failed write keeps the old layout', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const commands = fakeCommands()
+  ctx.provide('commands', commands.service as never)
+  const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
+  const failingSettings: TuiSettingsLike = {
+    get: () => ({ theme: 'auto', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+    replace: () => { throw new Error('write failed') },
+  }
+  const applied: Array<{ footer: string }> = []
+  const runner: TuiCommandRunner = {
+    ctx,
+    app,
+    diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
+    get liveAgent() { return undefined },
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    tuiSettings: failingSettings,
+    agents: {} as never,
+    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
+    commandRegistry: ctx.get('commands') as never,
+    cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
+    copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    get sessionGeneration() { return 0 },
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    get pendingPreset() { return undefined },
+    set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
+    applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
+  }
+  registerTuiCommands(runner)
+  const def = commands.defs.find(entry => entry.name === 'settings')
+  assert.ok(def?.handler !== undefined, 'settings handler missing')
+  // Open the REAL /settings picker (the registered handler builds the
+  // rows and wires the persist-first footer branch into onChange).
+  await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  // The FIRST row is the footer Status line (default): Enter cycles it to
+  // compact → the handler runs the persist-first branch → the WRITE
+  // throws → applyFooterSettings must NEVER run.
+  vt.sendInput('\r')
+  const deadline = Date.now() + 400
+  while (applied.length === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.equal(applied.length, 0, 'a failed settings write must not apply the footer layout')
   assert.equal(app.getFooterMode(), 'default', 'the old layout must stay active')
   app.stop()
 })
