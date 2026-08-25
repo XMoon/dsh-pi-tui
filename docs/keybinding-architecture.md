@@ -254,6 +254,30 @@ README/CHANGELOG language flip) and re-reviewed:
   changed files, verified the keybinding feature coexists with the
   focus viewport-anchoring logic in src/tui-app.ts, re-checked every
   prior-round fix survived both rebases, and accepted with no findings.
+- PR #34 review (REQUEST CHANGES, 2 P1 + 1 P2 + 2 followups): ALL
+  fixed —
+  1. `app.input.submit` is now REALLY configurable: the effective
+     submit keys sync into the fork editor's `tui.input.submit` binding
+     (`onEditorSubmitSync`), so a remap MOVES submission to the new key
+     and `false` makes Enter inert; the host-owned seams (continuable
+     viewer submit, replacement-editor forward) mirror the effective
+     submit key via `isSubmitKey`.
+  2. The InputRouter's runtime reservation is ACTION-driven
+     (`hostResolves` — a key is reserved only while an ACTIVE host
+     action binds it); `RESERVED_HOST_KEYS` remains ONLY the
+     plugin-registration compatibility guard. A remapped-away old key
+     (Ctrl+V after pasteMedia moved to Ctrl+P) falls through to the
+     editor/plugin instead of being swallowed.
+  3. The leader PREFIX key is collision-checked against all ACTIVE
+     host keys at rebuild: a collision (e.g. `leader: ctrl+f` vs
+     app.transcript.search) fail-soft DISABLES the leader machine with
+     a diagnostic — never a silent shadow.
+  4. Conditional affordances documented as ADDITIVE (a user binding of
+     app.tasks.open adds a trigger; only `false` removes the ↓
+     affordance) — README/README.en/architecture doc.
+  5. The armed exit-chord footer hint names Ctrl+C literally (the
+     clear-then-exit chord is Ctrl+C-specific) — never the action's
+     primary key.
 
 Final gates after the second rebase: 2413 bundle tests (incl. the
 focus-viewport-policy suite), 985 fork tests, 11 docs tests, typecheck
