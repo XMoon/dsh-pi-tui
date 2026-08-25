@@ -34,6 +34,8 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     list: async () => [],
     search: async () => [],
     titles: async () => new Map(),
+    measureContext: () => undefined,
+    readExportData: async () => ({ kind: 'none' as const }),
   }
   const sessionWriter = {
     followup: () => {},
@@ -52,19 +54,88 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     onApprovalRequest: () => {},
     setApprovalPolicy: () => true,
   }
-  const backend = createDirectBackend(subagent, sessionReader, sessionWriter, sessionLifecycle, interaction)
+  const catalog = {
+    models: {
+      available: () => true,
+      listProviders: () => [],
+      listModels: async () => [],
+      resolveModelInfo: async () => ({}),
+      currentSelection: () => undefined,
+      saveSelection: async () => {},
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+    presets: {
+      available: () => false,
+      list: async () => [],
+      resolve: async () => ({}),
+      defaultId: () => undefined,
+    },
+    skills: {
+      standing: async () => ({ catalog: { skills: [], complete: true } }),
+      listHumanSkills: async () => undefined,
+      resolveSkill: async () => ({ kind: 'unavailable' as const }),
+      hostLoadsSkillBody: () => false,
+      onSkillsChange: () => {},
+    },
+  }
+  const config = {
+    tuiSettings: undefined,
+    providers: {
+      available: () => true,
+      readSection: () => undefined,
+      readPiAiProviders: () => undefined,
+      writeProfile: async () => {},
+      writeKeylessProfile: async () => {},
+    },
+    credentials: {
+      available: () => true,
+      setReference: async () => {},
+      unsetReference: async () => {},
+      deleteRecord: async () => {},
+      describeReference: async () => ({ configured: false }),
+      listRecords: async () => [],
+      onChanged: () => {},
+    },
+    authorization: {
+      available: () => false,
+      listTargets: () => [],
+      begin: async () => ({ status: 'cancelled' as const }),
+    },
+    permissions: {
+      presetNames: () => [],
+      defaultPreset: () => undefined,
+      setDefaultPreset: async () => {},
+      applyPermissionPreset: async () => ({ kind: 'applied' as const }),
+    },
+    presetDefault: {
+      available: () => true,
+      get: () => undefined,
+      set: async () => {},
+    },
+  }
+  const hostFile = {
+    listReferences: async () => [],
+    resolveReference: async () => ({ kind: 'missing' as const }),
+    canonicalizeMentions: async (_scope: unknown, text: string) => text,
+  }
+  const backend = createDirectBackend(subagent, sessionReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
   assert.equal(backend.sessionWriter, sessionWriter)
   assert.equal(backend.sessionLifecycle, sessionLifecycle)
   assert.equal(backend.interaction, interaction)
-  // Truthful advertisement: the backend serves ONLY the implemented ports
-  // (catalog/config/host-file have no port yet — never advertised).
+  assert.equal(backend.catalog, catalog)
+  assert.equal(backend.config, config)
+  assert.equal(backend.hostFile, hostFile)
+  // Truthful advertisement: the backend serves EXACTLY the implemented
+  // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {
     assert.ok(backend.capabilities.has(capability), `direct serves ${capability}`)
   }
-  for (const capability of ['catalog', 'config', 'host-file'] as const) {
+  for (const capability of CAPABILITIES) {
+    if (DIRECT_IMPLEMENTED_CAPABILITIES.includes(capability)) continue
     assert.ok(!backend.capabilities.has(capability), `direct does NOT advertise ${capability} (no port yet)`)
   }
 })

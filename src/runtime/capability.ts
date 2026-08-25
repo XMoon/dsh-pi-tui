@@ -32,12 +32,14 @@ export type Capability = (typeof CAPABILITIES)[number]
 export type CapabilitySet = ReadonlySet<Capability>
 
 /** The capabilities the Direct backend ACTUALLY serves today: one port per
- * entry, nothing more. `catalog` / `config` / `host-file` join when their
- * ports land (M1 leftover — never advertise what is not served). */
+ * entry, nothing more — never advertise what is not served. */
 export const DIRECT_IMPLEMENTED_CAPABILITIES: readonly Capability[] = [
   'session-read',
   'session-write',
   'session-lifecycle',
   'subagent',
   'interaction',
+  'catalog',
+  'config',
+  'host-file',
 ]

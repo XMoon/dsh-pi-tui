@@ -1466,6 +1466,15 @@ interface MessageComponentEntry {
   rendererRevision?: number
 }
 
+/** The unavailable Host-file seam (migration M1.10): the setCommandCompletions
+ * default for surfaces the runner did not wire — `@` completion degrades to
+ * nothing, never to a local-fs assumption. */
+const NO_FILE_REFERENCES: import('./runtime/host-file-port.ts').HostFilePort = {
+  listReferences: async () => [],
+  resolveReference: async () => ({ kind: 'missing' }),
+  canonicalizeMentions: async (_scope, text) => text,
+}
+
 export class TuiApp {
   private readonly terminal: Terminal
   /** The extension surface host (M2), when the runner attached one. */
@@ -8253,8 +8262,11 @@ export class TuiApp {
 
   /**
    * Install slash-command + file-path autocompletion on the editor, plus
-   * `@`-file mentions (fd-backed when `fdPath` is provided; a bounded
-   * recursive fallback otherwise — see mentions.ts).
+   * `@`-file mentions through the Host-file port (migration M1.10 — the
+   * Direct adapter runs the fd whole-tree fuzzy search or the bounded
+   * recursive fallback; the editor never touches the filesystem). The
+   * default seam is UNAVAILABLE (no `@` completion) — the runner always
+   * wires the real port; tests that never exercise `@` may omit it.
    * @param extensionSuggest - M5: consulted AFTER the host provider returns
    *   null (the plugin autocomplete chain). Receives the same editor
    *   position; returns suggestions or null.
@@ -8262,7 +8274,7 @@ export class TuiApp {
   setCommandCompletions(
     commands: readonly SlashCommand[],
     cwd: string,
-    fdPath: string | null = null,
+    fileReferences: import('./runtime/host-file-port.ts').HostFilePort = NO_FILE_REFERENCES,
     extensionSuggest?: (query: {
       lines: readonly string[]
       cursorLine: number
@@ -8271,7 +8283,7 @@ export class TuiApp {
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
   ): void {
-    const base = new MentionProvider([...commands], cwd, fdPath, () => this.editor.getInputMode())
+    const base = new MentionProvider([...commands], cwd, fileReferences, () => this.editor.getInputMode())
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return

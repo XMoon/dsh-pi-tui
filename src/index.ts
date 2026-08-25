@@ -108,7 +108,6 @@ import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
 import { mergeDraft, refuseByTransitionFence, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
-import { expandFileMentionsForSubmit } from './mentions.ts'
 import {
   resolveSubagentSettleTarget,
   type SubagentFollowupOutcome,
@@ -122,6 +121,9 @@ import { DirectSessionReader } from './runtime/direct/session-direct.ts'
 import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
 import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
+import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
+import { DirectConfigPort } from './runtime/direct/config-direct.ts'
+import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
 import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
@@ -136,7 +138,6 @@ import {
 import {
   readHumanSkillCatalog,
   resolveColdSkillTarget,
-  subscribeSkillsChange,
   type HumanSkillCatalog,
   type SkillCatalogContext,
 } from './skill-catalog.ts'
@@ -188,20 +189,6 @@ export interface Config {
 export const Config: z<Config> = z.object({
   sessionId: z.string(),
 })
-
-/**
- * Wire the credential surface refresh to the dsh 0.1.1-rc.1 credential
- * events. The rc.1 release split the credential update event into the
- * reference half and the durable-record half; both change what the footer
- * model row and the welcome card show (a /login /logout, an external
- * .credentials.yaml edit, or an authorization flow committing a record), so
- * they share one best-effort callback. The callback must not read secrets
- * or mutate providers — it only re-reads describe-level state.
- */
-export function registerCredentialSurfaceRefresh(ctx: Context, refresh: () => void): void {
-  ctx.on('credentials/reference-updated', refresh)
-  ctx.on('credentials/record-updated', refresh)
-}
 
 /** The launcher's bounded exit request; the TUI asks for it on Ctrl+C. */
 interface AppExit {
@@ -1452,10 +1439,13 @@ export function apply(ctx: Context, config: Config): void {
     // the Direct session lifecycle can resolve preset compositions.
     const backend = createDirectBackend(
       new DirectSubagentPort(ctx),
-      new DirectSessionReader(ctx),
+      new DirectSessionReader(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectCatalogPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectConfigPort(ctx, tuiSettings as unknown as import('./runtime/config-port.ts').TuiSettingsConfig | undefined, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
     )
 
     // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
@@ -3056,6 +3046,9 @@ export function apply(ctx: Context, config: Config): void {
     const submitDeps: PrepareInputDeps = {
       attachments: ctx.get('attachments') as PrepareInputDeps['attachments'],
       llm: ctx.get('llm') as PrepareInputDeps['llm'],
+      // Send-time `@`-file canonicalization through the Host-file port
+      // (migration M1.10): the live session's workspace is the scope.
+      canonicalizeMentions: (text) => backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: liveAgent?.session.id ?? '' }, text),
       sessionCwd: () => sessionCwd(),
       currentModel: () => {
         // The AUTHORITATIVE model for the next step is the mutable
@@ -4212,7 +4205,7 @@ export function apply(ctx: Context, config: Config): void {
           // Same `@`-file mention canonicalization as the main session's
           // submissions (the editor keeps `@src/foo.ts`, the child model
           // receives the absolute path).
-          canonicalizeText: (text) => expandFileMentionsForSubmit(text, sessionCwd()),
+          canonicalizeText: (text) => backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: liveAgent?.session.id ?? '' }, text),
         }), {
           diag,
           sessionId: () => liveAgent?.session.id,
@@ -5158,7 +5151,7 @@ export function apply(ctx: Context, config: Config): void {
       })
     })
     /** Subscribe to the dsh-skill invalidation notification once, through
-     * the single-point adapter (plan appendix B.1). The event carries no
+     * the catalog capability (migration M1.8). The event carries no
      * scope or cwd, so the refresh target follows the CURRENT ownership; an
      * unavailable or throwing subscription degrades to no subscription —
      * owner switches and /reload still refresh. The flag is set only after
@@ -5167,7 +5160,7 @@ export function apply(ctx: Context, config: Config): void {
     const subscribeSkillsChangeEvents = (): void => {
       if (skillsChangeSubscribed) return
       try {
-        subscribeSkillsChange(ctx as never, () => skillsChangeGate.notify())
+        backend.catalog.skills.onSkillsChange(() => skillsChangeGate.notify())
         skillsChangeSubscribed = true
       } catch (error) {
         diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
@@ -5314,30 +5307,28 @@ export function apply(ctx: Context, config: Config): void {
         create: (options) => backend.sessionLifecycle.create(options),
         resume: (options) => backend.sessionLifecycle.resume(options),
       },
-      sessions: { flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]) },
-      // The narrow Host-access facade (migration M1.7): commands read Host
-      // services through `host`, never ctx directly.
-      host: {
-        settings: () => ctx.get('settings'),
-        llm: () => ctx.get('llm'),
-        credentials: () => ctx.get('credentials'),
-        authorization: () => ctx.get('authorization'),
-        defaultModel: () => ctx.get('agentDefaultModel'),
-        presets: () => ctx.get('agentPresets'),
-        tools: () => ctx.get('tools'),
-        permission: () => ctx.get('permissionPresets'),
-        tokenMeter: () => ctx.get('tokenMeter'),
-        commands: () => ctx.get('commands'),
-        persistence: () => ctx.get('sessionPersistence'),
-      },
-      // The session READ port (migration M1.3): /sessions, /resume, /search
-      // and the title batches go through the port, never ctx directly.
+      // The session READ port (migration M1.3): /sessions, /resume, /search,
+      // the title batches, the context measurement and the export read go
+      // through the port, never ctx directly.
       sessionReader: backend.sessionReader,
       // The session WRITE port (migration M1.4): follow-up delivery, steer,
       // queue pull-back, cancel and title ops go through the port.
       sessionWriter: backend.sessionWriter,
       // The interaction port (migration M1.6): approval/question authority.
       interaction: backend.interaction,
+      // The catalog port (migration M1.8): models/providers, presets and
+      // skills — commands read Host catalogs through semantic DTOs.
+      catalog: backend.catalog,
+      // The config port (migration M1.9): settings, provider profiles,
+      // credentials, authorization, permissions and the preset default.
+      config: backend.config,
+      // The Host-file port (migration M1.10): `@`-mention discovery and
+      // send-time canonicalization against the Host filesystem.
+      hostFile: backend.hostFile,
+      // The minimal commands registry for the TUI's OWN registrations
+      // (migration M1.11) — the runner assembly dependency, never a Host
+      // capability exposed to command handlers.
+      commandRegistry: ctx.get('commands') as import('./commands.ts').CommandRegistryLike | undefined,
       cwd,
       imageStore: draftImages,
       // Issue #7: /copy shares the fullscreen selection's clipboard policy.
@@ -5377,7 +5368,6 @@ export function apply(ctx: Context, config: Config): void {
       sessionCwd,
       signal,
       get sessionGeneration() { return sessionGeneration },
-      compose,
       /** Focus Mode surface (plan §32.1): the /focus and /settings commands
        * read the runtime state and mutate it through the ONE setter. */
       focusEnabled: () => focusState.enabled,
@@ -5434,20 +5424,13 @@ export function apply(ctx: Context, config: Config): void {
         catalogCoordinator = new CatalogRefreshCoordinator({
           readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, ctx as unknown as SurfaceCatalogContext),
           // The sessionless (preset) target reads the STANDING skill catalog
-          // — the capability-gated cold path (standing key → global →
-          // degraded global with a notice), never an Agent probe: probes
-          // emit durable session events in this deployment (see
+          // through the catalog capability (migration M1.8) — the
+          // capability-gated cold path (standing key → global → degraded
+          // global with a notice), never an Agent probe: probes emit
+          // durable session events in this deployment (see
           // docs/surface-catalog.md).
-          readStanding: async (presetId, readSignal) => {
-            const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
-            if (target.target === undefined) throw new Error('skill service unavailable')
-            const catalog = await readHumanSkillCatalog(target.target.registry, {
-              cwd: target.target.cwd,
-              scope: target.target.scope,
-              signal: readSignal,
-            })
-            return { catalog, ...target.degraded === undefined ? {} : { notice: target.degraded } }
-          },
+          readStanding: (presetId, readSignal) =>
+            backend.catalog.skills.standing(presetId, process.cwd(), readSignal),
           installSnapshot: (next) => installed.installSnapshot(next),
           enterCatalogTransition: () => installed.enterTransition(),
         }, lifecycleController.signal, diag)
@@ -5723,7 +5706,9 @@ export function apply(ctx: Context, config: Config): void {
       }
     })
     const refreshCredentialSurface = (): void => { refreshStatus(); updateWelcomeCard() }
-    registerCredentialSurfaceRefresh(ctx, refreshCredentialSurface)
+    // The credential event wiring is the config port's (migration M1.9):
+    // reference- and record-updated both change the same surface.
+    backend.config.credentials.onChanged(refreshCredentialSurface)
     // Initial plan badge, busy indicator, and auto title from the log (a
     // resumed session may be persisted mid-turn). Without a session the
     // surfaces stay at their idle defaults.

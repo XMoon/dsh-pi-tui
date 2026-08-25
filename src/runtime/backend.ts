@@ -16,6 +16,9 @@ import type { SessionReader } from './session-reader-port.ts'
 import type { SessionWriter } from './session-writer-port.ts'
 import type { SessionLifecycle } from './session-lifecycle-port.ts'
 import type { InteractionPort } from './interaction-port.ts'
+import type { Catalog } from './catalog-port.ts'
+import type { ConfigPort } from './config-port.ts'
+import type { HostFilePort } from './host-file-port.ts'
 
 /** The transport backends the TUI can run on. `direct` is the only one
  * today; the migration adds opt-in backends milestone by milestone. */
@@ -36,6 +39,14 @@ export interface Backend {
   readonly sessionLifecycle: SessionLifecycle
   /** The interaction domain port (M1.6). */
   readonly interaction: InteractionPort
+  /** The catalog domain port (M1.8): models/providers, presets, skills. */
+  readonly catalog: Catalog
+  /** The config domain port (M1.9): settings, provider profiles,
+   * credentials, authorization, permissions, preset default. */
+  readonly config: ConfigPort
+  /** The Host-file domain port (M1.10): `@`-reference discovery and
+   * canonicalization against the Host filesystem. */
+  readonly hostFile: HostFilePort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -47,6 +58,9 @@ export function createDirectBackend(
   sessionWriter: SessionWriter,
   sessionLifecycle: SessionLifecycle,
   interaction: InteractionPort,
+  catalog: Catalog,
+  config: ConfigPort,
+  hostFile: HostFilePort,
 ): Backend {
   return {
     kind: 'direct',
@@ -56,5 +70,8 @@ export function createDirectBackend(
     sessionWriter,
     sessionLifecycle,
     interaction,
+    catalog,
+    config,
+    hostFile,
   }
 }

@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { TuiApp } from '../src/tui-app.ts'
 import { suggestPathArgument } from '../src/mentions.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
 /** A throwaway workspace with one directory + a file inside it. */
 function fixtureWorkspace(): string {
@@ -41,7 +42,7 @@ function startApp(cwd: string): { vt: VirtualTerminal; app: TuiApp; cancels: num
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   })
-  app.setCommandCompletions([], cwd, null)
+  app.setCommandCompletions([], cwd, new DirectHostFilePort(() => undefined, null))
   app.start()
   return { vt, app, get cancels() { return cancels } }
 }
@@ -58,7 +59,7 @@ function startImageApp(cwd: string): { vt: VirtualTerminal; app: TuiApp } {
   app.setCommandCompletions(
     [{ name: 'image', description: 'Attach an image file', getArgumentCompletions: (arg) => suggestPathArgument(arg, cwd) }],
     cwd,
-    null,
+    new DirectHostFilePort(() => undefined, null),
   )
   app.start()
   return { vt, app }
