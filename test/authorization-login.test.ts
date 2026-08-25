@@ -956,15 +956,14 @@ test('/login passes the runner signal into begin (the flow withdraws with it)', 
   await t.run(t.login, 'anthropic')
   const received = t.authorization.begins[0]!.signal
   assert.ok(received !== undefined, 'the attempt receives the runner signal')
-  // The Direct adapter composes the caller signal with its own withdraw
-  // controller (and the attempt finalizes the controller on settle), so
-  // the object crossing is NOT the runner's own — the SEMANTIC is what
-  // matters: aborting the runner signal aborts the attempt's signal too.
-  const probe = new AbortController()
-  const composed = AbortSignal.any([controller.signal, probe.signal])
-  assert.equal(composed.aborted, false)
-  controller.abort()
-  assert.equal(composed.aborted, true, 'aborting the runner signal aborts the attempt signal')
+  // The Direct adapter COMPOSES the caller signal with its own withdraw
+  // controller (AbortSignal.any): the object crossing is NOT the runner's
+  // own, and it aborts WITH the runner signal. After the attempt settled
+  // the adapter also finalizes its controller, so the received composite
+  // is aborted — the signal really is the attempt's signal, not a
+  // standalone probe (review finding).
+  assert.notEqual(received, controller.signal, 'the attempt signal is a composite, never the runner signal itself')
+  assert.equal(received.aborted, true, 'the received attempt signal reflects the runner abort + finalization')
   t.app.stop()
 })
 
