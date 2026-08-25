@@ -116,7 +116,7 @@ import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
 import { TuiEditor } from './tui-editor.ts'
-import { serializeEditorInput, type EditorInputMode } from './editor-input-mode.ts'
+import { serializeEditorInput, shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
@@ -2865,7 +2865,13 @@ export class TuiApp {
     if (open === undefined || this.externalEditorInFlight || this.disposed) return
     this.externalEditorInFlight = true
     try {
-      const draft = this.seatEditor().getText()
+      // The external editor round-trips the WIRE form: the $EDITOR sees
+      // the same document the shell dispatch would (a shell-mode draft
+      // opens as `!pwd`, never the bare body), and the saved text comes
+      // back through the decode — the user can switch `! ↔ !! ↔ prompt`
+      // in $EDITOR and the mode follows. A plugin editor (no mode) keeps
+      // identity.
+      const draft = this.serializeSeatDraft(this.seatEditor().getText())
       this.stop()
       try {
         const next = await open(draft)
@@ -2873,7 +2879,7 @@ export class TuiApp {
         // No redundant editor update when the editor saved the draft
         // unchanged (an update would bump history/undo and repaint).
         if (next !== '' && next !== draft) {
-          this.seatEditor().setText(next)
+          this.setSeatSerializedInput(next)
           this.editorSeatHolder.notifyChanged()
         }
       } finally {
@@ -4376,7 +4382,12 @@ export class TuiApp {
       this.setSeatSerializedInput(this.subagentDrafts.get(mode.childSessionId) ?? '')
     } else {
       this.clearViewerPlaceholder()
-      seat.setText(`viewing subagent: ${mode.label} — ${viewerAccessHint(mode.mode, resolveViewerAccess(mode.mode, mode.access))} · Esc returns`)
+      // The one-shot placeholder bar is PLAIN text: route it through the
+      // serialized-input setter so the host editor returns to PROMPT
+      // mode — a stale shell mode from the pre-viewer draft must not
+      // render as `! viewing subagent: …` (the preserved main draft is
+      // serialized, so the exit restores the original mode).
+      this.setSeatSerializedInput(`viewing subagent: ${mode.label} — ${viewerAccessHint(mode.mode, resolveViewerAccess(mode.mode, mode.access))} · Esc returns`)
     }
     seat.invalidate()
     this.editorSeatHolder.notifyChanged()
@@ -7694,11 +7705,30 @@ export class TuiApp {
     // plugin chain (M5 AutocompleteRegistry) is consulted only when the
     // host provider has nothing. applyCompletion always delegates to the
     // host provider (the fork's completion semantics own the editor).
+    const getMode = (): EditorInputMode => this.editor.getInputMode()
     const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
       async getSuggestions(lines, cursorLine, cursorCol, options) {
         const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
         if (host !== null) return host
-        return extensionSuggest({ lines, cursorLine, cursorCol, signal: options.signal, force: options.force })
+        // M5 Stable-compatibility adapter: the plugin chain's query is
+        // the WIRE document — the same lines the host exposed BEFORE the
+        // shell-editor-mode feature. A shell-mode body is re-prefixed
+        // (`git che` → `!git che`, cursor shifted), so a third-party
+        // plugin keeps parsing shell lines exactly as before and can
+        // still tell a shell line from plain prose; the query shape is
+        // unchanged (no new fields, no semantic drift).
+        const mode = getMode()
+        const prefix = shellPrefixForMode(mode)
+        const wireLines = mode === 'prompt'
+          ? lines
+          : lines.map((line, index) => index === cursorLine ? prefix + line : line)
+        return extensionSuggest({
+          lines: wireLines,
+          cursorLine,
+          cursorCol: cursorCol + (mode === 'prompt' ? 0 : prefix.length),
+          signal: options.signal,
+          force: options.force,
+        })
       },
       applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
         base.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
