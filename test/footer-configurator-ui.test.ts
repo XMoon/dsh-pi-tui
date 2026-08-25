@@ -182,3 +182,39 @@ test('the preview context is LIVE: an extension segment update while open shows 
   assert.ok(second.includes('fresh-segment'), `the live getter must show the update:\n${second}`)
   app.stop()
 })
+
+test('the preview editor-empty getter is LIVE: a draft typed under the panel updates the hint', async () => {
+  let editorEmpty = true
+  const { FooterConfiguratorPanel } = await import('../src/footer/configurator.ts')
+  const { FooterComposer } = await import('../src/footer/composer.ts')
+  const { createBuiltinFooterRegistry } = await import('../src/footer/builtin-items.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const model = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'tasks' }], right: [] }],
+  }, app.getFooterItemRegistry())
+  const panel = new FooterConfiguratorPanel({
+    model,
+    registry: app.getFooterItemRegistry(),
+    snapshot: () => {
+      const snap = (app as unknown as { statusStore: { snapshot(): { activity?: { taskCount: number } } & Record<string, unknown> } }).statusStore.snapshot() as { activity?: { taskCount: number } } & Record<string, unknown>
+      return { ...snap, view: { subject: { kind: 'main' } }, activity: { taskCount: 1 } } as never
+    },
+    composer: new FooterComposer(createBuiltinFooterRegistry()),
+    editorEmpty: () => editorEmpty,
+    extensionFooterText: () => '',
+    maxVisible: () => 100,
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  // The tasks badge advertises the ↓ browser ONLY while the editor is
+  // empty (prompt mode) — the editor-empty getter must be LIVE.
+  const first = panel.render(100).join('\n')
+  assert.ok(first.includes('↓ view'), `the empty-editor hint must show:\n${first}`)
+  editorEmpty = false
+  const second = panel.render(100).join('\n')
+  assert.ok(!second.includes('↓ view'), `a non-empty editor must drop the hint:\n${second}`)
+  app.stop()
+})

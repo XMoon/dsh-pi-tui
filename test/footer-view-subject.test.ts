@@ -177,3 +177,44 @@ test('a legacy parent setStatus while viewing never clobbers the child workspace
   assert.ok(restored.includes('parent-ws'), `the parent workspace must return:\n${restored}`)
   app.stop()
 })
+
+test('absent child usage never leaks the PARENT token figures into the child stats line', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  // Paint the parent's usage facts first (real token figures).
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3 })
+  app.setStatus({ turns: 2, steps: 3, statsLine: 'up 9999' })
+  ;(app as unknown as { statusStore: { snapshot(): { usage: { tokens: { input: number } } } } }).statusStore
+  await vt.waitForRender()
+  // Enter the viewer WITHOUT structured usage: the child's stats line must
+  // not show the parent's token figures (a fresh/empty surface instead).
+  app.setViewerFooter({
+    label: 'child',
+    childSessionId: 'child-1',
+    mode: 'one-shot',
+    activity: 'inactive',
+    cwd: '/child-ws',
+    turns: 5,
+    steps: 9,
+    usage: undefined,
+    statsLine: 'child line',
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('9999'), `the parent token figures must not leak:\n${view}`)
+  assert.ok(view.includes('↑0 ↓0'), `the child stats line shows its OWN zeroed facts (never the parent's):\n${view}`)
+  // The child's own turns/steps still show via the viewer identity.
+  assert.ok(view.includes('child-ws'), `the child workspace must show:\n${view}`)
+  assert.ok(view.includes('t5/s9'), `the child counters must show:\n${view}`)
+  // Leaving the viewer restores the parent surface; the app-level
+  // restore + the runner's refreshStatus (a setStatus here plays it)
+  // bring the parent workspace back.
+  app.setViewerFooter(undefined)
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', branch: 'main', turns: 2, steps: 3, statsLine: 'x' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('parent-ws'), `the parent workspace must return:\n${view}`)
+  assert.ok(!view.includes('child-ws'), `the child workspace must clear:\n${view}`)
+  app.stop()
+})
