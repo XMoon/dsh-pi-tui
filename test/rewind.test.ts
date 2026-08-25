@@ -451,12 +451,13 @@ test('review: the preflight and the Direct lifecycle compose the SAME concrete i
   // The M1.5 lock-ordering preflight composes the source's recorded
   // preset BEFORE the target lock is acquired; the Direct lifecycle then
   // composes AGAIN from the id the semantic create carries. The second
-  // resolution must receive the PREFLIGHT's resolved id — a roster that
-  // would change between the two awaits can never make the create
-  // re-resolve the SOURCE's alias to a different id.
+  // resolution must receive AND resolve the PREFLIGHT's concrete id — a
+  // roster that would change between the two awaits can never make the
+  // create re-resolve the SOURCE's alias to a different id.
   const rig = makeRig()
   const preflightIds: Array<string | undefined> = []
   const lifecycleIds: Array<string | undefined> = []
+  const lifecycleResults: Array<string | undefined> = []
   // Deterministic roster: the alias 'minimal' resolves ONCE to the
   // concrete id 'concrete-minimal'; a concrete id resolves to itself
   // (composeAgent/presets.resolve semantics).
@@ -473,7 +474,8 @@ test('review: the preflight and the Direct lifecycle compose the SAME concrete i
     // The Direct lifecycle (migration M1.11): the adapter composes
     // internally from the request's preset id before creating.
     lifecycleIds.push(call.agentPreset)
-    await runnerCompose(call.agentPreset)
+    const composition = await runnerCompose(call.agentPreset)
+    lifecycleResults.push(composition.agentPreset)
     return baseCreate(call)
   }
   const events = [...turn(0, 1, 'A'), ...turn(4, 2, 'B')]
@@ -490,7 +492,50 @@ test('review: the preflight and the Direct lifecycle compose the SAME concrete i
     'concrete-minimal',
     'the lifecycle composes the PREFLIGHT-resolved id, never the source alias',
   )
+  assert.equal(
+    lifecycleResults[0],
+    'concrete-minimal',
+    'the lifecycle\'s own resolution of the concrete id is stable (resolves to itself)',
+  )
   assert.equal(rig.created[0]!.meta.agentPreset, 'concrete-minimal', 'the semantic create carries the resolved id')
+})
+
+test('review: a HOSTILE second resolution cannot change the mounted preset (the create rides the preflight id)', async () => {
+  // The drift repro, adversarial: the roster returns a DIFFERENT id on
+  // every compose call. The runner captures the preflight result ONCE
+  // and the semantic create carries THAT id — a hostile re-resolution
+  // after the preflight can only ever see the preflight's own output,
+  // never the source alias, so the mounted preset stays the first
+  // resolution.
+  const rig = makeRig()
+  const lifecycleIds: Array<string | undefined> = []
+  const lifecycleResults: Array<string | undefined> = []
+  // Every call resolves to a NEW id (a roster that is actively drifting).
+  let counter = 0
+  const hostileCompose = async (presetId?: string): Promise<{ agentPreset?: string; setup: () => void }> => {
+    counter += 1
+    return { agentPreset: presetId === undefined ? `hostile-${counter}` : presetId, setup: () => {} }
+  }
+  rig.host.compose = hostileCompose
+  const baseCreate = rig.host.agents.create
+  rig.host.agents.create = async (call) => {
+    lifecycleIds.push(call.agentPreset)
+    const composition = await hostileCompose(call.agentPreset)
+    lifecycleResults.push(composition.agentPreset)
+    return baseCreate(call)
+  }
+  const events = [...turn(0, 1, 'A'), ...turn(4, 2, 'B')]
+  const candidates = collectRewindCandidates(events)
+  // No recorded preset on the source: the preflight resolves the DEFAULT.
+  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, {
+    sessionId: 'session-source',
+    generation: 1,
+  })
+  assert.equal(outcome.kind, 'rewound')
+  const preflightResult = rig.created[0]!.meta.agentPreset
+  assert.equal(preflightResult, 'hostile-1', 'the create carries the FIRST preflight resolution')
+  assert.equal(lifecycleIds[0], 'hostile-1', 'the lifecycle composes the preflight id, never the source alias')
+  assert.equal(lifecycleResults[0], 'hostile-1', 'the hostile roster still maps the concrete id to itself')
 })
 
 test('I03: rewinding to the FIRST turn seeds an empty child', async () => {
