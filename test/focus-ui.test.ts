@@ -841,23 +841,28 @@ test('switching to fullscreen drops the Ctrl+O-derived reveal; back to regular i
   app.stop()
 })
 
-test('a manually revealed turn keeps its secondaries compact under regular Ctrl+O (review finding)', async () => {
+test('regular mode: a manually revealed turn full-reveals its process (no dead compact cards)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   folder.apply(runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   await vt.waitForRender()
-  // Manually expand the turn (the search-reveal path), reveal the
-  // Thinking category, then turn the Ctrl+O master ON — the turn is ALSO
-  // inside the recent boundary, but only DERIVED turns full-reveal.
+  // Manually expand the turn (the search-reveal path).
   app.expandFocusTurn(1)
-  app.toggleFocusThinkingVisible()
-  app.setToolOutputExpanded(true)
   await vt.waitForRender()
-  const joined = vt.getViewport().join('\n')
-  assert.ok(joined.includes('🐳 Thought'), 'the manual reveal keeps the Thought open')
-  assert.ok(joined.includes('(ctrl+o to expand)'),
-    `a MANUAL turn must stay compact under Ctrl+O (only DERIVED turns full-reveal):\n${joined}`)
+  // Regular has no mouse: ANY expanded Focus root full-reveals its
+  // non-Thinking process — never a dead `(ctrl+o to expand)` card that
+  // Ctrl+O cannot open.
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'the manual reveal opens the Thought')
+  assert.ok(joined.includes('Read src/transcript.ts [running]'), 'the tool card must be revealed')
+  assert.ok(!joined.includes('(ctrl+o to expand)'), 'no compact secondary affordance in regular mode')
+  // Alt+T: the FULL Thinking appears (regular has no compact state).
+  app.toggleFocusThinkingVisible()
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('locating the transcript path'), 'Alt+T reveals the Thinking')
+  assert.ok(!joined.includes('(ctrl+o to expand)'), 'the revealed Thinking is FULL, never compact')
   app.stop()
 })
