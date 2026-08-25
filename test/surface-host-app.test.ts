@@ -535,3 +535,18 @@ test('an EXPLICIT stale permission clears the extension snapshot (no stale badge
   assert.equal(host.state().session.permission, undefined, 'a cleared permission must not stay in the extension snapshot')
   app.stop()
 })
+
+test('runner permission projection clears on service/agent absence (runner-level guard)', async () => {
+  // The runner's refreshStatus decides the permission via the pure
+  // deriveRunnerPermission: a missing permission service OR a missing
+  // live agent must yield EXPLICIT undefined (never the stale value) —
+  // that explicit undefined is what clears the extension snapshot.
+  const { deriveRunnerPermission } = await import('../src/index.ts')
+  const agent = { session: { events: [{ kind: 'session/created' }] } }
+  const presets = { current: (events: unknown) => (events as unknown[]).length > 0 ? 'workspace-write' : undefined }
+  assert.equal(deriveRunnerPermission(presets, agent as never), 'workspace-write')
+  assert.equal(deriveRunnerPermission(undefined, agent as never), undefined,
+    'a missing permission service must yield undefined (clear)')
+  assert.equal(deriveRunnerPermission(presets, undefined), undefined,
+    'a missing live agent must yield undefined (clear)')
+})
