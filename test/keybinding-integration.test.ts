@@ -629,16 +629,22 @@ test('closing a viewer with Esc disarms the main-session double-Esc window (PR r
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onSingleEscape: () => { singleEscapes += 1; return true },
+    // P3 test fix: the FIRST main-session Esc must NOT consume (return
+    // false) so handleEscapeKey actually ARMS the double-Esc window
+    // (lastEscapeAt = now); the viewer-close Esc consumes (returns true).
+    // With the old always-true callback the "arm" was a fake — the window
+    // was never armed, making the disarm assertion vacuous.
+    onSingleEscape: () => { singleEscapes += 1; return singleEscapes === 1 ? false : true },
     onCancel: () => { cancels += 1 },
     onRewind: () => { rewinds += 1 },
   })
   app.start()
-  // Arm a double-Esc window in the main session (first Esc while idle —
-  // the runner's single-Esc handler runs and arms the window).
+  // Arm a double-Esc window in the main session: the first Esc returns
+  // false (not consumed) → handleEscapeKey arms the window.
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.equal(singleEscapes, 1, 'the main-session Esc armed the single-Esc path')
+  assert.equal(singleEscapes, 1, 'the main-session Esc ran the single-Esc path')
+  assert.equal(cancels, 0)
   // Open the read-only viewer, then close it with Esc — the consumed
   // close must DISARM the pending window.
   app.setViewerMode({
@@ -653,11 +659,45 @@ test('closing a viewer with Esc disarms the main-session double-Esc window (PR r
   await vt.waitForRender()
   assert.equal(singleEscapes, 2, 'the viewer-close Esc ran the viewer close path')
   // Back in the main session: a single Esc must NOT read as the second
-  // consecutive Esc (no cancel/rewind).
+  // consecutive Esc (no cancel/rewind). If the disarm were missing, this
+  // Esc would be within the window and trigger onCancel.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(singleEscapes, 3, 'the main-session Esc runs the single-Esc path again')
   assert.equal(cancels, 0, 'the disarmed main-session Esc must not cancel')
   assert.equal(rewinds, 0, 'the disarmed main-session Esc must not rewind')
   app.stop()
+})
+
+test('a SHADOWED leader-only submit restores the builtin Enter (PR review P1)', () => {
+  const manager = new HostKeybindingManager()
+  // leader: ctrl+f collides with app.transcript.search — the leader is
+  // shadowed, so the <leader>s submit sequence can never fire. The
+  // builtin Enter must be restored (fail-soft), NOT disabled alongside
+  // the dead leader.
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+f',
+    bindings: { 'app.input.submit': '<leader>s' },
+  }))
+  assert.equal(manager.leaderMachine(), undefined, 'the colliding leader is disabled')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('active host key')))
+  assert.deepEqual(manager.editorSubmitKeysFor(), ['enter'], 'the dead leader-only submit restores Enter')
+  assert.equal(manager.keyHint('app.input.submit'), 'Enter', 'the UI advertises the restored Enter')
+})
+
+test('an AMBIGUOUS leader-only submit restores the builtin Enter (PR review P1)', () => {
+  const manager = new HostKeybindingManager()
+  // Two actions bound to the same completing key <leader>s: ambiguous —
+  // neither fires. The submit sequence is dead, so Enter must be restored.
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.input.submit': '<leader>s',
+      'app.session.new': '<leader>s',
+    },
+  }))
+  assert.equal(manager.leaderMachine()?.leaderBindings.length ?? 0, 0, 'the ambiguous sequence is dropped')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('ambiguous leader sequence')))
+  assert.deepEqual(manager.editorSubmitKeysFor(), ['enter'], 'the ambiguous leader-only submit restores Enter')
+  assert.equal(manager.keyHint('app.input.submit'), 'Enter', 'the UI advertises the restored Enter')
 })

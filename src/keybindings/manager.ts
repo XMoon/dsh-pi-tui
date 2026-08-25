@@ -231,9 +231,15 @@ export class HostKeybindingManager {
     // a previously remapped/disabled submit must not keep Enter inert
     // under DSH_PI_TUI_SAFE_KEYBINDINGS=1; the builtin default ('enter')
     // is restored.
+    // A leader-only submit override counts ONLY when the sequence is
+    // EFFECTIVE (not raw leaderBindings): if the leader was shadowed by a
+    // prefix collision or the completing key was ambiguous (both
+    // disabled), the sequence cannot fire — fail-soft back to the
+    // builtin Enter (PR review finding: a dead leader-only submit must
+    // not disable Enter entirely).
     const hasSubmitOverride = !this.safeMode && (
       this.userBindings['app.input.submit'] !== undefined
-      || this.leaderBindings.some(binding => binding.action === 'app.input.submit'))
+      || this.effectiveLeaderBindings.some(binding => binding.action === 'app.input.submit'))
     if (hasSubmitOverride) return []
     // The builtin submit rule is hostResolved: false (the host ladder
     // never consumes it), so keysFor() is EMPTY by default — fall back to
