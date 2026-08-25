@@ -687,15 +687,30 @@ export class EditorSeatHolder {
             && (stagedDiffers || (!dropdownInteraction && host.isShowingAutocomplete?.() === true))) {
             host.cancelAutocomplete()
           }
+          // SYNC-RESTORE GUARD (review round 27): the fork clears the
+          // host editor BEFORE onSubmit fires, and onSubmit may
+          // SYNCHRONOUSLY restore the draft through the wire boundary
+          // (the runner's rejection paths call setEditorText(text) and
+          // return) — that restore lands in the VISIBLE seat while this
+          // dispatch is still on the stack. The sync-back below would
+          // then clobber it with the post-submit EMPTY host state. The
+          // seat's change revision distinguishes "nothing external
+          // touched the seat" (sync back) from "the seat was explicitly
+          // rewritten during the dispatch" (skip — the restore is
+          // authoritative), even when the restored text equals the
+          // pre-dispatch document.
+          const revisionBeforeDispatch = this.changeRevision
           host.handleInput!(data)
           const mode = host.getInputMode?.() ?? 'prompt'
           const prefix = shellPrefixForMode(mode)
-          current.setText(prefix + host.getText())
-          current.setCursor((host.getCursor?.() ?? 0) + prefix.length)
+          if (this.changeRevision === revisionBeforeDispatch) {
+            current.setText(prefix + host.getText())
+            current.setCursor((host.getCursor?.() ?? 0) + prefix.length)
+          }
         } else {
           // Legacy raw fallback: the host document stays raw (no mode),
           // so wire and host coordinates are the same bytes. Same stale
-          // dropdown guard (see above).
+          // dropdown guard and sync-restore guard (see above).
           const contextBefore = { text: host.getText(), cursor: host.getCursor?.() ?? 0 }
           const stagedDiffers = contextBefore.text !== wireText || contextBefore.cursor !== wireCursor
           const dropdownInteraction = matchesKey(data, 'tab') || matchesKey(data, 'enter')
@@ -706,9 +721,12 @@ export class EditorSeatHolder {
             && (stagedDiffers || (!dropdownInteraction && host.isShowingAutocomplete?.() === true))) {
             host.cancelAutocomplete()
           }
+          const revisionBeforeDispatch = this.changeRevision
           host.handleInput!(data)
-          current.setText(host.getText())
-          current.setCursor(host.getCursor?.() ?? 0)
+          if (this.changeRevision === revisionBeforeDispatch) {
+            current.setText(host.getText())
+            current.setCursor(host.getCursor?.() ?? 0)
+          }
         }
       })
       // The host adapter may invoke the normal host onChange for a mutation,
@@ -754,6 +772,14 @@ export class EditorSeatHolder {
     }
   }
 
+  /** Monotonic seat-mutation epoch (review round 27): EVERY notifyChanged
+   * bumps it, so an external path that rewrote the visible seat DURING a
+   * fallback dispatch (a synchronous rejection restore through
+   * setEditorText) is distinguishable from the fallback's own sync-back —
+   * even when the restored text equals the pre-dispatch document, a text
+   * comparison cannot tell "never touched" from "explicitly rewritten
+   * with the same text", the epoch can. */
+  private changeRevision = 0
   /** Change listeners (host-driven notifications). */
   private readonly changeListeners = new Set<ChangeSubscription>()
 
@@ -761,6 +787,7 @@ export class EditorSeatHolder {
    * with the CURRENT snapshot (bounded — the fork's editor onChange). */
   notifyChanged(): void {
     if (this.disposed) return
+    this.changeRevision += 1
     const replacementId = this.current.id === 'host' ? undefined : this.current.id
     const snapshot = this.snapshotOf(replacementId ?? '')
     // P2-02: per-listener isolation — a throwing plugin listener must
