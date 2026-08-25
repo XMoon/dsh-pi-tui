@@ -253,14 +253,34 @@ export class HostKeybindingManager {
   /** The immutable read model (diagnostics + /keybindings). The
    * capturing-scope actions (search overlay, question/tasks flows) are not
    * in the host keymap; their defaults are merged in for display. A
-   * DISABLED action is never advertised (review round 2). */
+   * DISABLED action is never advertised (review round 2). Leader-only
+   * actions (no default keys, only `<leader>X` bindings) are merged in
+   * with their leader sequences (review finding: they were advertised by
+   * keyHint but absent from the table). */
   snapshot(): KeymapSnapshot {
     const snapshot = this.keymap.snapshot()
     const present = new Set(snapshot.bindings.map(binding => binding.action))
+    const leaderKeys = new Map<string, KeyId[]>()
+    for (const binding of this.effectiveLeaderBindings) {
+      const list = leaderKeys.get(binding.action) ?? []
+      list.push(binding.key)
+      leaderKeys.set(binding.action, list)
+    }
     const merged = [...snapshot.bindings]
     for (const [id, definition] of Object.entries(APP_KEYBINDINGS)) {
       if (present.has(id)) continue
       if (this.isDisabled(id as AppKeybindingId)) continue
+      const leader = leaderKeys.get(id)
+      if (leader !== undefined) {
+        merged.push({
+          action: id,
+          keys: leader,
+          scope: definition.scope,
+          source: 'user',
+          leader: true,
+        })
+        continue
+      }
       if (definition.defaultKeys.length === 0) continue
       merged.push({
         action: id,

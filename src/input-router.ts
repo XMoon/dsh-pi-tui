@@ -85,11 +85,23 @@ export interface InputRouterContext {
    * probe (default: the plugin binding wins, matching pre-P1-06
    * behavior for surfaces without a seat editor). */
   readonly editorAccepts?: (data: string) => boolean
+  /** Whether one raw input matches the EFFECTIVE keys of a semantic
+   * action (the app supplies this from its keymap — review finding: the
+   * router's hard-coded physical keys for the read-only viewer fold
+   * pass-through and the search overlay must follow a user remap). */
+  readonly matchesEffective?: (action: string, data: string) => boolean
   /** Whether a replacement editor must receive an editor-routed key before
    * plugin bindings are considered. TuiApp flips this off only after the
    * replacement editor explicitly declines the key. */
   readonly editorReplacement?: boolean
 }
+
+/** The semantic actions the router's physical-key seams consult the
+ * EFFECTIVE keymap for (review finding). The ids are the user-orchestrable
+ * action strings (src/keybindings/definitions.ts); the router keeps them
+ * as plain constants so it never imports the keybindings module. */
+const TUI_ACTION_FOLD = 'app.transcript.toggleExpand'
+const TUI_ACTION_SEARCH = 'app.transcript.search'
 
 /** The outcome of one input event. */
 export type InputRouteResult =
@@ -166,13 +178,19 @@ export class InputRouter {
     // An INTERACTIVE (continuable) viewer keeps the editor live — the
     // router's editor routes below become `viewer-editor` (the host has
     // already consumed Enter and the parent-owned chords).
-    if (ctx.viewerInputMode === 'readonly' && !matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
+    if (ctx.viewerInputMode === 'readonly'
+      && !matchesKey(data, 'escape')
+      && !(ctx.matchesEffective?.(TUI_ACTION_FOLD, data) ?? matchesKey(data, 'ctrl+o'))) {
       return { kind: 'consumed' }
     }
-    // The transcript-search overlay owns its keys.
+    // The transcript-search overlay owns its keys. The toggle follows the
+    // EFFECTIVE key (a remap of the configurable app.transcript.search
+    // still closes/owns the overlay); the fixed close/next/previous stay
+    // physical (non-configurable overlay contracts).
     if (ctx.searchActive) {
       if (matchesKey(data, 'escape') || matchesKey(data, 'enter')
-        || matchesKey(data, 'shift+enter') || matchesKey(data, 'ctrl+f')) {
+        || matchesKey(data, 'shift+enter')
+        || (ctx.matchesEffective?.(TUI_ACTION_SEARCH, data) ?? matchesKey(data, 'ctrl+f'))) {
         return { kind: 'consumed' }
       }
       return { kind: 'editor' }

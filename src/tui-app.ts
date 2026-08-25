@@ -2633,7 +2633,11 @@ export class TuiApp {
     if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
       const viewer = this.viewerMode
       if (!isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
-        if (!matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {
+        // Esc is a fixed lifecycle key (never user-configurable); the
+        // FOLD pass-through resolves the EFFECTIVE fold key (a remap of
+        // app.transcript.toggleExpand must still let the viewed
+        // transcript fold — review finding).
+        if (!matchesKey(data, 'escape') && !this.keybindings.matches(data, 'app.transcript.toggleExpand')) {
           return { consume: true }
         }
       } else if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {
@@ -2642,7 +2646,7 @@ export class TuiApp {
       } else if (this.viewerParentLockedKey(data)) {
         return { consume: true }
       }
-      // Esc (exit) and Ctrl+O (fold) fall through to the host ladder.
+      // Esc (exit) and the effective fold key fall through to the host ladder.
     }
     // Transcript search owns these keys while its overlay is up; everything
     // else falls through to the focused search input. The close/next/
@@ -3153,6 +3157,10 @@ export class TuiApp {
         : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
       hasOverlay: this.activeScreen.hasOverlayEntries,
       searchActive: this.searchOverlay !== undefined,
+      // The router's physical-key seams (the read-only viewer fold
+      // pass-through, the search overlay ownership) consult the EFFECTIVE
+      // keymap, so a user remap stays authoritative (review finding).
+      matchesEffective: (action: string, data: string) => this.keybindings.matches(data, action as unknown as AppKeybindingId),
       editorReplacement: this.seatEditor().handleInput !== undefined,
       // P1-06: the focused EDITOR owns its keys. The fork dispatches to
       // app-level listeners BEFORE the focused component, so the router

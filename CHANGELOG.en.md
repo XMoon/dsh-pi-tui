@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Keybindings are now user-orchestrable.** Every Host shortcut is a
   semantic action (`app.*`) resolved through a context-aware keymap, so
   the UI (footer hints, `/help`, `/keybindings`) always shows the
-  EFFECTIVE keys. Configure overrides in the `pi-tui` settings namespace
+  EFFECTIVE keys. Configure overrides in the `dsh-pi-tui` settings namespace
   (`keybindings` field, hot-reloaded — no restart): a string for one
   key, an array for several, `false` to disable an action's keys, and a
   `leader` key plus `<leader>X` sequences for multi-key bindings (M6).
