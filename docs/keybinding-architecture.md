@@ -278,8 +278,28 @@ README/CHANGELOG language flip) and re-reviewed:
   5. The armed exit-chord footer hint names Ctrl+C literally (the
      clear-then-exit chord is Ctrl+C-specific) — never the action's
      primary key.
+- PR review rounds 2–6 (openai-codex / gpt-5.6-luna): six more
+  review-fix rounds reached acceptance —
+  - direct submit keys stay with the fork editor (the host ladder never
+    consumes a DIRECT submit key — backslash-newline/paste-burst
+    semantics preserved);
+  - the fork's PROCESS-GLOBAL submit binding is restored per TuiApp
+    instance (constructor sync + dispose restore — no cross-instance
+    leakage);
+  - the keybinding manager dies FIRST in TuiApp.dispose (armed-leader
+    timers and teardown-time rebuilds are inert), with dispose guards on
+    the mutators;
+  - a leader-ONLY submit override removes Enter (no builtin fallback);
+  - safe mode restores the builtin Enter submit (raw overrides ignored);
+  - the leader-prefix collision check includes the editor-owned submit
+    key (`leader: enter` is caught);
+  - HOST/PLUGIN rule layering: the runtime reservation
+    (`hostResolves`), the editor submit sync (`hostKeysFor`) and the
+    leader-prefix collision (`hostActiveKeys`) all exclude PLUGIN rules
+    — a plugin binding is additive and never a Host action.
+  Final round: accepted, no findings.
 
-Final gates after the second rebase: 2413 bundle tests (incl. the
+Final gates after the PR review rounds: 2429 bundle tests (incl. the
 focus-viewport-policy suite), 985 fork tests, 11 docs tests, typecheck
 (fork + bundle), `check-host-keybindings` gate, `git diff --check` —
 all green.
