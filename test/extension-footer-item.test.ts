@@ -375,17 +375,21 @@ test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subag
       label: 'API quota',
       segment: { spans: [{ text: 'quota 82%', tone: 'success' }], minWidth: 8 },
     })
+    // A legacy chrome.footer.status segment (the ext:* bridge) for the
+    // consistency assertion (both hide while viewing).
+    service.register<{ spans: Array<{ text: string }> }>('chrome.footer.status', { id: 'legacy-seg', order: 100 }, { spans: [{ text: '[LEGACY]' }] })
     await settle()
     await vt.waitForRender()
     const key = canonicalKey(service, 'chrome.footer.item', 'quota')
     app.setFooterLayout({
       schemaVersion: 1,
-      rows: [{ left: [{ id: key }, { id: 'cwd' }], right: [] }],
+      rows: [{ left: [{ id: key }, { id: 'cwd' }, { id: 'ext:*' }], right: [] }],
     })
     app.setStatus({ model: 'm', cwd: 'c' })
     await vt.waitForRender()
     let view = vt.getViewport().join('\n')
     assert.ok(view.includes('quota 82%'), `the item must render on the main subject:\n${view}`)
+    assert.ok(view.includes('[LEGACY]'), `the legacy segment must render on the main subject:\n${view}`)
     // Enter the subagent viewer: the data source switches to the CHILD,
     // and a static plugin contribution (which has no snapshot access to
     // self-gate) must not describe the viewed child.
@@ -403,6 +407,7 @@ test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subag
     await vt.waitForRender()
     view = vt.getViewport().join('\n')
     assert.ok(!view.includes('quota 82%'), `the M4 item must not render while viewing:\n${view}`)
+    assert.ok(!view.includes('[LEGACY]'), `the legacy ext:* bridge must hide while viewing too:\n${view}`)
     assert.ok(view.includes('child-ws'), `the child workspace must show:\n${view}`)
     // Leaving the viewer restores it.
     app.setViewerFooter(undefined)
@@ -428,6 +433,15 @@ test('a chrome.footer.item registration id containing "/" is rejected (canonical
       /must not contain "\/"/,
       'a slash in the registration id must be rejected',
     )
+    // The check is SCOPED to chrome.footer.item: other slots keep their
+    // own id semantics (slash ids remain valid — their keys are not
+    // parsed as owner/id).
+    const legacy = service.register<{ spans: Array<{ text: string }> }>('chrome.footer.status', { id: 'legacy/seg', order: 100 }, { spans: [{ text: 'x' }] })
+    await settle()
+    legacy.dispose()
+    const widget = service.register('input.dock.item', { id: 'dock/item', order: 100 }, { label: [{ text: 'x' }] })
+    await settle()
+    widget.dispose()
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

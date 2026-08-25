@@ -37,7 +37,7 @@ import {
 } from '../../provider-catalog.ts'
 import { cancellationError } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { parseFooterCommandConfig } from '../../footer/command-trust.ts'
+import { resolveTrustedFooterCommand, resolveUserLayerFooterMode } from '../../footer/command-trust.ts'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
@@ -135,17 +135,14 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
 
   get userFooterMode(): string | undefined {
     const descriptor = this.descriptor()
-    const user = descriptor?.user
-    if (typeof user !== 'object' || user === null) return undefined
-    const mode = (user as Record<string, unknown>).footer
-    return typeof mode === 'string' ? mode : undefined
+    if (descriptor === undefined) return undefined
+    return resolveUserLayerFooterMode([descriptor], settingsNamespace('dsh-pi-tui'))
   }
 
   get command() {
     const descriptor = this.descriptor()
-    const user = descriptor?.user
-    if (typeof user !== 'object' || user === null) return undefined
-    return parseFooterCommandConfig((user as Record<string, unknown>).footerCommand)
+    if (descriptor === undefined) return undefined
+    return resolveTrustedFooterCommand([descriptor], settingsNamespace('dsh-pi-tui'))
   }
 
   private descriptor(): SettingsDescriptorLike | undefined {
