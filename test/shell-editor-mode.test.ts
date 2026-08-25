@@ -1745,3 +1745,62 @@ test('an incomplete CSI tail buffers without loss and stitches a split sequence'
   assert.equal(app.seatTextForTest(), '', 'a stitched split CSI is handled as the key, never as text')
   app.stop()
 })
+
+// ── PR review round 3: multiline shell continuation lines are shell-owned ─
+
+test('a continuation-line /u in shell-context is a PATH (no slash commands, no doubled slash)', async () => {
+  const { vt, app } = startApp(fixtureWorkspace(), {
+    commands: [{ name: 'image', description: 'Attach an image file' }],
+  })
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('git status')
+  vt.sendInput('\n') // continuation line
+  vt.sendInput('/u')
+  await vt.waitForRender()
+  // Natural typing on line 1 must NOT open the slash-command list.
+  await waitForNoDropdownRow(vt, 'image', 'no slash commands on a shell continuation line')
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  // Tab completes the PATH on line 1.
+  vt.sendInput('\t')
+  await waitForDropdownRow(vt, 'usr', 'path completion for /u on line 1')
+  vt.sendInput('\t') // accept /usr/
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'git status\n/usr/',
+    'the accepted path must not double the slash on a continuation line')
+  app.stop()
+})
+
+test('a continuation-line /u in shell-local is a PATH (no slash commands, no doubled slash)', async () => {
+  const { vt, app } = startApp(fixtureWorkspace(), {
+    commands: [{ name: 'image', description: 'Attach an image file' }],
+  })
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('!')
+  vt.sendInput('git status')
+  vt.sendInput('\n')
+  vt.sendInput('/u')
+  await vt.waitForRender()
+  await waitForNoDropdownRow(vt, 'image', 'no slash commands on a shell-local continuation line')
+  assert.equal(app.inputModeForTest(), 'shell-local')
+  vt.sendInput('\t')
+  await waitForDropdownRow(vt, 'usr', 'path completion for /u on line 1 in shell-local')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'git status\n/usr/', 'shell-local accepts the path without a doubled slash')
+  app.stop()
+})
+
+test('provider-level: a continuation-line /u applies as a path on any shell line', async () => {
+  const root = fixtureWorkspace()
+  const provider = new MentionProvider([], root, null, () => 'shell-context' as const)
+  const applied = provider.applyCompletion(['git status', '/u'], 1, 2, { value: '/usr/', label: 'usr' }, '/u')
+  assert.deepEqual(applied, { lines: ['git status', '/usr/'], cursorLine: 1, cursorCol: 5 },
+    'the synthetic prefix never enters a continuation line and the slash is never doubled')
+  // shouldTriggerFileCompletion allows Tab on the continuation line.
+  assert.equal(provider.shouldTriggerFileCompletion(['git status', '/u'], 1, 2), true)
+  // Natural triggers on the continuation line stay quiet (path semantics).
+  const natural = await provider.getSuggestions(['git status', '/u'], 1, 2, { signal: abort })
+  assert.equal(natural, null)
+})
