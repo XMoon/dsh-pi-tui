@@ -292,6 +292,85 @@ test('authorization begins one flow as an EVENT surface and degrades when absent
   assert.deepEqual(await authorization.cancel('attempt-1'), undefined)
 })
 
+test('authorization bridges an ALREADY-ABORTED prompt signal as a non-decline withdrawal', async () => {
+  // The flow may withdraw a prompt before the bridge even registers (its
+  // signal already aborted): the bridge must reject its pending promise
+  // and surface prompt-withdrawn IMMEDIATELY — never leave the promise
+  // unresolved until some later abort event (which never comes).
+  const controller = new AbortController()
+  controller.abort(new Error('losing race'))
+  const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        try {
+          await request.interaction.prompt({ kind: 'text', message: 'enter', signal: controller.signal })
+          return { status: 'authorized' as const }
+        } catch (error) {
+          // The bridge rejection is a NON-decline cancellation.
+          assert.notEqual((error as { name?: string }).name, 'AuthorizationDeclinedError')
+          return { status: 'cancelled' as const }
+        }
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai' })
+  assert.equal(started.kind, 'started')
+  await settle()
+  off()
+  const withdrawn = events.find(event => event.kind === 'prompt-withdrawn')
+  assert.ok(withdrawn !== undefined, 'the already-aborted prompt surfaces prompt-withdrawn')
+  assert.ok(events.some(event => event.kind === 'settled' && event.status === 'cancelled'), 'the withdrawal settles the attempt')
+})
+
+test('authorization cancel() rejects pending prompt bridges IMMEDIATELY', async () => {
+  // A cancel must not leave the client's prompt UI hanging until the
+  // upstream settles: the pending bridge promise rejects right away.
+  const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  let promptSettled = false
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        // The upstream flow awaits the prompt forever (it never honors
+        // its signal); only the bridge rejection releases it.
+        try {
+          await request.interaction.prompt({ kind: 'text', message: 'enter' })
+          promptSettled = true
+          return { status: 'authorized' as const }
+        } catch {
+          promptSettled = true
+          return { status: 'cancelled' as const }
+        }
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai' })
+  assert.equal(started.kind, 'started')
+  await settle()
+  const promptEvent = events.find(event => event.kind === 'prompt')
+  assert.ok(promptEvent !== undefined && promptEvent.kind === 'prompt')
+  await authorization.cancel(promptEvent.attemptId)
+  await settle()
+  off()
+  assert.equal(promptSettled, true, 'cancel rejects the pending bridge immediately (the upstream await releases)')
+})
+
 /** Flush the microtask queue (the event bridge is promise-based). */
 async function settle(): Promise<void> {
   await new Promise<void>((resolve) => { resolve() })

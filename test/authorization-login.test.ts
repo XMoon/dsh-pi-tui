@@ -96,7 +96,14 @@ type FakeFlow = { key: string; label: string; methods: { id: string; label: stri
 
 /** A fake authorization service recording begin calls; the test drives the
  *  outcome and errors. */
-function fakeAuthorization(options: { flows?: FakeFlow[]; beginResult?: { status: 'authorized' | 'cancelled' }; beginError?: Error & { code?: string } } = {}) {
+function fakeAuthorization(options: {
+  flows?: FakeFlow[]
+  beginResult?: { status: 'authorized' | 'cancelled' }
+  beginError?: Error & { code?: string }
+  /** begin() THROWS SYNCHRONOUSLY (never a promise) — the port must be
+   *  robust to a wire backend failing before the first await. */
+  syncBeginThrow?: boolean
+} = {}) {
   const begins: { key: string; method?: string; signal?: AbortSignal; interaction: unknown }[] = []
   const flows = options.flows ?? [
     { key: 'llm-pi-ai/anthropic', label: 'Anthropic', methods: [{ id: 'oauth', label: 'OAuth' }] },
@@ -115,11 +122,13 @@ function fakeAuthorization(options: { flows?: FakeFlow[]; beginResult?: { status
         const flow = flows.find(candidate => candidate.key === key)
         return flow === undefined ? undefined : { key: flow.key, label: flow.label, methods: flow.methods, inFlight: false }
       },
-      begin: async (request: { key: string; method?: string; interaction: unknown; signal?: AbortSignal }) => {
-        begins.push(request)
-        if (options.beginError !== undefined) throw options.beginError
-        return options.beginResult ?? { status: 'authorized' }
-      },
+      begin: options.syncBeginThrow === true
+        ? () => { throw new Error('wire exploded') }
+        : async (request: { key: string; method?: string; interaction: unknown; signal?: AbortSignal }) => {
+            begins.push(request)
+            if (options.beginError !== undefined) throw options.beginError
+            return options.beginResult ?? { status: 'authorized' }
+          },
       cancel: () => {},
     },
   }
@@ -229,6 +238,7 @@ function setup(options: {
   records?: { key: string; kind?: string }[]
   begin?: { status: 'authorized' | 'cancelled' }
   beginError?: Error & { code?: string }
+  syncBeginThrow?: boolean
   pick?: (items: readonly { value: string; label?: string; group?: string }[]) => string
 } = {}) {
   const ctx = new Context()
@@ -255,6 +265,7 @@ function setup(options: {
     flows: options.flows,
     beginResult: options.begin,
     beginError: options.beginError,
+    syncBeginThrow: options.syncBeginThrow,
   })
   ctx.provide('authorization', authorization.service as never)
   const runner = stubRunner(ctx, app)
@@ -270,7 +281,7 @@ function setup(options: {
   assert.ok(logout?.handler !== undefined, 'logout handler missing')
   const run = async <T>(def: { handler?: unknown }, rawInput: string): Promise<T> =>
     (def!.handler as (inv: CommandInvocation) => Promise<T>)(invoke(rawInput))
-  return { app, credentials, settings, authorization, runner, run, login, logout }
+  return { ctx, app, credentials, settings, authorization, runner, run, login, logout }
 }
 
 function flow(key: string, label: string, methods: { id: string; label: string }[], inFlight = false) {
@@ -372,8 +383,11 @@ test('notices reuse one durable panel and refresh its body; close hides it', () 
     openPicker: () => ({ close: () => {} }),
   }
   const flow = createAuthorizationFlow(surface, { respond: async () => {}, cancel: async () => {} })
+  flow.bind('a')
   flow.onEvent({ kind: 'notice', attemptId: 'a', notice: { message: 'first progress' } })
+  flow.bind('a')
   flow.onEvent({ kind: 'notice', attemptId: 'a', notice: { message: 'Open this page', url: 'https://example.com' } })
+  flow.bind('a')
   flow.onEvent({ kind: 'notice', attemptId: 'a', notice: { message: 'Code time', code: '12-34' } })
   assert.equal(opened.length, 1, 'one durable panel per attempt')
   assert.ok(opened[0]!.includes('first progress'))
@@ -398,6 +412,7 @@ test('a text prompt answers the typed text through the port', async () => {
     respond: async (_attemptId, promptId, answer) => { answered.push({ promptId, answer }) },
     cancel: async () => {},
   })
+  flow.bind('a')
   flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'Enter the code', placeholder: 'ABCD' } })
   await settle()
   assert.deepEqual(answered, [{ promptId: 'p1', answer: 'the-code' }])
@@ -420,6 +435,7 @@ test('a secret prompt is masked and answers the value', async () => {
     respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
     cancel: async () => {},
   })
+  flow.bind('a')
   flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'secret', message: 'Paste the API key' } })
   await settle()
   assert.deepEqual(answered, ['sk-test-secret'])
@@ -441,6 +457,7 @@ test('a select prompt answers the option id, not its label', async () => {
     respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
     cancel: async () => {},
   })
+  flow.bind('a')
   flow.onEvent({
     kind: 'prompt',
     attemptId: 'a',
@@ -469,6 +486,7 @@ test('the user cancelling a prompt is a decline (answered null)', async () => {
     respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
     cancel: async () => {},
   })
+  flow.bind('a')
   flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'enter' } })
   await settle()
   assert.deepEqual(answered, [null], 'a user cancel must answer null (a decline)')
@@ -485,6 +503,7 @@ test('an empty typed answer is a decline, not an empty string', async () => {
     respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
     cancel: async () => {},
   })
+  flow.bind('a')
   flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'enter' } })
   await settle()
   assert.deepEqual(answered, [null], 'an empty typed answer is a decline')
@@ -505,10 +524,12 @@ test('a prompt withdrawn by the flow is NOT answered (not a decline)', async () 
     respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
     cancel: async () => {},
   })
+  flow.bind('a')
   flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'enter' } })
   // The flow withdraws the losing prompt BEFORE the question settles: the
   // open UI closes and the prompt is never answered (a refusal, not a
   // decline — the adapter already rejected its pending bridge).
+  flow.bind('a')
   flow.onEvent({ kind: 'prompt-withdrawn', attemptId: 'a', promptId: 'p1' })
   await settle()
   assert.deepEqual(answered, [], 'a withdrawn prompt must not be answered')
@@ -529,12 +550,14 @@ test('a select prompt withdrawn by the flow closes the picker, non-decline', asy
     respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
     cancel: async () => {},
   })
+  flow.bind('a')
   flow.onEvent({
     kind: 'prompt',
     attemptId: 'a',
     promptId: 'p1',
     prompt: { kind: 'select', message: 'How?', options: [{ id: 'oauth', label: 'OAuth' }] },
   })
+  flow.bind('a')
   flow.onEvent({ kind: 'prompt-withdrawn', attemptId: 'a', promptId: 'p1' })
   await settle()
   assert.equal(closed, 1, 'the open picker must be closed on withdrawal')
@@ -555,6 +578,7 @@ test('the user cancelling a select prompt is a decline', async () => {
     respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
     cancel: async () => {},
   })
+  flow.bind('a')
   flow.onEvent({
     kind: 'prompt',
     attemptId: 'a',
@@ -563,6 +587,85 @@ test('the user cancelling a select prompt is a decline', async () => {
   })
   await settle()
   assert.deepEqual(answered, [null], 'a user closing the picker is a decline')
+})
+
+// ── §17.10 flow scoping (attempt + prompt identity) ────────────────────────
+
+test('a bound flow IGNORES another attempt\'s events (concurrent logins cannot cross)', async () => {
+  const answered: Array<string | null> = []
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'mine' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  flow.bind('attempt-a')
+  // Another login's prompt and settlement must never reach this flow.
+  flow.onEvent({ kind: 'prompt', attemptId: 'attempt-b', promptId: 'pb', prompt: { kind: 'text', message: 'other' } })
+  flow.onEvent({ kind: 'settled', attemptId: 'attempt-b', status: 'authorized' })
+  await settle()
+  assert.deepEqual(answered, [], 'another attempt\'s prompt is never answered')
+  // This attempt's own events still flow.
+  flow.onEvent({ kind: 'prompt', attemptId: 'attempt-a', promptId: 'pa', prompt: { kind: 'text', message: 'mine' } })
+  await settle()
+  assert.deepEqual(answered, ['mine'], 'the bound attempt\'s prompt is answered')
+})
+
+test('events buffered BEFORE the bind replay only for the bound attempt', async () => {
+  const answered: Array<string | null> = []
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [{ id: 'answer', selected: [], custom: 'early' }],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  // The runner subscribes BEFORE begin: events can arrive before the
+  // attempt id is known. They must be buffered and replayed for the
+  // matching attempt only.
+  flow.onEvent({ kind: 'prompt', attemptId: 'other-attempt', promptId: 'po', prompt: { kind: 'text', message: 'other' } })
+  flow.onEvent({ kind: 'prompt', attemptId: 'attempt-x', promptId: 'px', prompt: { kind: 'text', message: 'early' } })
+  flow.bind('attempt-x')
+  await settle()
+  assert.deepEqual(answered, ['early'], 'the pre-bind event of the bound attempt replays; the other attempt is dropped')
+})
+
+test('withdrawing ONE prompt closes only ITS UI (prompt-scoped handles)', async () => {
+  let closedP1 = 0
+  let closedP2 = 0
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [],
+    openPicker: (items, onSelect, onCancel, options) => {
+      // The picker records WHICH prompt it is by its header.
+      const header = options?.header ?? ''
+      return { close: () => { if (header === 'p1-header') closedP1 += 1; else closedP2 += 1 } }
+    },
+  }
+  const flow = createAuthorizationFlow(surface, { respond: async () => {}, cancel: async () => {} })
+  flow.bind('a')
+  flow.onEvent({
+    kind: 'prompt',
+    attemptId: 'a',
+    promptId: 'p1',
+    prompt: { kind: 'select', message: 'p1-header', options: [{ id: 'x', label: 'X' }] },
+  })
+  flow.onEvent({
+    kind: 'prompt',
+    attemptId: 'a',
+    promptId: 'p2',
+    prompt: { kind: 'select', message: 'p2-header', options: [{ id: 'y', label: 'Y' }] },
+  })
+  // Withdraw p1: p2's UI must stay open.
+  flow.onEvent({ kind: 'prompt-withdrawn', attemptId: 'a', promptId: 'p1' })
+  await settle()
+  assert.equal(closedP1, 1, 'the withdrawn prompt\'s UI closes')
+  assert.equal(closedP2, 0, 'the other prompt\'s UI stays open')
 })
 
 // ── §17.6 method selection ─────────────────────────────────────────────────
@@ -702,6 +805,18 @@ test('/login aborted mid-attempt reports login cancelled', async () => {
   t.runner.signal = AbortSignal.abort()
   const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
   assert.equal(result.text, 'login cancelled')
+  t.app.stop()
+})
+
+test('a SYNCHRONOUS begin throw still unsubscribes and closes the flow UI', async () => {
+  // The port contract may reject begin() synchronously (a wire backend
+  // failing before the first await): the command must not leak the event
+  // listener or the notice/prompt UI handles — the try/finally cleanup
+  // runs on every path, and the error surfaces as stable copy.
+  const t = setup({ syncBeginThrow: true })
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
+  assert.equal(result.kind, 'error')
+  assert.ok(result.text?.includes('sign-in failed'), result.text)
   t.app.stop()
 })
 
