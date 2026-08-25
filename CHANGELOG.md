@@ -161,11 +161,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Focus Mode is surface-adaptive.** Regular mode is keyboard-driven:
   Ctrl+O derives a full reveal of the recent Focus Thoughts (never
   written into the manual disclosures), Thinking is hidden by default
-  and Alt+T shows it, and any expanded Thought root full-reveals its
-  process. Fullscreen is mouse-driven: expanding a Thought FOLLOWS THE
-  END (the latest content stays in view), collapsing anchors the header;
-  the process timeline shows COMPACT secondary cards and a click
-  full-reveals one card (attachment > secondary > outer Thought), with
+  and Alt+T shows it (SUPERSEDED by the 2026-08-25 unified disclosure
+  model — Thinking is compact by default and Alt+T picks the detail
+  level; blocks are never hidden), and any expanded Thought root
+  full-reveals its process. Fullscreen is mouse-driven: expanding a
+  Thought FOLLOWS THE END (the latest content stays in view), collapsing
+  anchors the header; the process timeline shows COMPACT secondary cards
+  and a click full-reveals one card (attachment > secondary > outer
+  Thought), with
   `(click to expand)` hints. The fullscreen per-card clicks never leak
   into the keyboard surface and vice versa.
 - **Esc never destroys your queue again.** Interrupting the agent (one

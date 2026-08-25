@@ -127,8 +127,10 @@
   `!!` 仍然是纯本地。
 - **Focus 模式现在是 surface-adaptive 的。** 常规模式完全由键盘驱动:
   Ctrl+O 派生展开最近几个 Focus Thought 的完整过程(绝不写入手工
-  disclosure 状态),Thinking 默认隐藏、Alt+T 显示,任何已展开的
-  Thought 根都会完整展开其过程。全屏模式由鼠标驱动:展开 Thought 时
+  disclosure 状态),Thinking 默认隐藏、Alt+T 显示(已被 2026-08-25
+  的统一 disclosure 模型取代——Thinking 默认紧凑,Alt+T 只选 detail
+  级别,块永远不会被隐藏),任何已展开的 Thought 根都会完整展开其
+  过程。全屏模式由鼠标驱动:展开 Thought 时
   视口**跟随末尾**(最新内容保持在视野内),收起时锚定头部;过程时间线
   显示**紧凑**的二级卡片,点击单个卡片完整展开(attachment > secondary
   > outer Thought),折叠提示为 `(click to expand)`。全屏的逐卡点击
