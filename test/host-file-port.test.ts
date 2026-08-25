@@ -76,6 +76,22 @@ test('the fallback quotes mention values that contain spaces', async () => {
   assert.ok(result.some(item => item.value === '@"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(result)}`)
 })
 
+test('the fallback completes the QUOTED @ form with quoted values', async () => {
+  const root = fixtureWorkspace()
+  const result = await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@"my')
+  assert.ok(result.some(item => item.value === '@"my file.txt"'), `quoted values must stay quoted:\n${JSON.stringify(result)}`)
+})
+
+test('resolveReference honors an already-aborted request (fail closed, no filesystem access)', async () => {
+  const root = fixtureWorkspace()
+  const controller = new AbortController()
+  controller.abort()
+  assert.deepEqual(
+    await fallbackPort(root).resolveReference({ kind: 'workspace', cwd: root }, 'file-one.txt', { signal: controller.signal }),
+    { kind: 'missing' },
+  )
+})
+
 test('an abort mid-scan cancels the fallback discovery', async () => {
   const root = fixtureWorkspace()
   const controller = new AbortController()

@@ -124,8 +124,11 @@ export class DirectHostFilePort implements HostFilePort {
   async resolveReference(
     scope: HostFileScope,
     path: string,
-    _options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal },
   ): Promise<HostFileResolveResult> {
+    // An already-aborted request is a cancelled probe: fail closed before
+    // any filesystem access (the caller never consumes a cancelled result).
+    if (options?.signal?.aborted === true) return { kind: 'missing' }
     const cwd = this.scopeCwd(scope)
     if (cwd === undefined) return { kind: 'missing' }
     const candidate = resolveMentionCandidate(path, cwd)
@@ -229,10 +232,12 @@ function scoreCandidate(candidate: FsMentionCandidate, lowerQuery: string): numb
 }
 
 /** The completion item for one candidate: `@path` (quoted when it has
- * spaces), directories keep their trailing `/` so `@dir/` continues. */
-function toMentionCandidate(candidate: FsMentionCandidate): HostFileCandidate {
+ * spaces), directories keep their trailing `/` so `@dir/` continues. The
+ * QUOTED form (`@"…"`) forces the quoted value regardless of spaces —
+ * the fork's quoted-prefix parity. */
+function toMentionCandidate(candidate: FsMentionCandidate, quoted: boolean): HostFileCandidate {
   const valuePath = candidate.isDirectory ? `${candidate.path}/` : candidate.path
-  const value = valuePath.includes(' ') ? `@"${valuePath}"` : `@${valuePath}`
+  const value = quoted || valuePath.includes(' ') ? `@"${valuePath}"` : `@${valuePath}`
   return {
     value,
     label: `${basename(candidate.path)}${candidate.isDirectory ? '/' : ''}`,
@@ -241,7 +246,9 @@ function toMentionCandidate(candidate: FsMentionCandidate): HostFileCandidate {
   }
 }
 
-/** The bounded recursive fallback suggestion set for one `@` prefix. */
+/** The bounded recursive fallback suggestion set for one `@` prefix. The
+ * prefix may be the BARE form (`@foo`) or the QUOTED form (`@"my file`);
+ * the quoted form searches the inner text and produces quoted values. */
 function fsMentionSuggestions(
   workDir: string,
   atPrefix: string,
@@ -249,7 +256,12 @@ function fsMentionSuggestions(
 ): readonly HostFileCandidate[] {
   const aborted = (): boolean => signal?.aborted === true
   if (aborted()) return []
-  const query = atPrefix.slice(1)
+  const quoted = atPrefix.startsWith('@"')
+  const inner = quoted ? atPrefix.slice(2) : atPrefix.slice(1)
+  // An unclosed quoted prefix has no trailing quote; a CLOSED one keeps
+  // it in the completion prefix (the fork's quoted-prefix grammar) — strip
+  // it for the search, the values stay quoted either way.
+  const query = inner.endsWith('"') ? inner.slice(0, -1) : inner
   const candidates = collectFsMentionCandidates(workDir, signal)
   if (candidates.length === 0 || aborted()) return []
   const lowerQuery = query.toLowerCase()
@@ -264,5 +276,5 @@ function fsMentionSuggestions(
       return a.candidate.path.localeCompare(b.candidate.path)
     })
     .slice(0, MAX_FALLBACK_SUGGESTIONS)
-    .map(entry => toMentionCandidate(entry.candidate))
+    .map(entry => toMentionCandidate(entry.candidate, quoted))
 }

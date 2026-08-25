@@ -51,9 +51,16 @@ test('extractAtPrefix finds @ tokens at token boundaries only', () => {
   assert.equal(extractAtPrefix('plain text'), null)
   // `=` splits tokens, so `key=@x` starts a fresh mention (kimi semantics).
   assert.equal(extractAtPrefix('a=@x'), '@x')
-  // Quoted mentions (`@"my file`) are NOT a bare @ token: the wrapper
-  // delegates those to the fork's quoted-prefix completion (kimi parity).
-  assert.equal(extractAtPrefix('see @"my file'), null)
+  // Quoted mentions (`@"my file`) complete through the Host-file port
+  // with the fork's quoted-prefix grammar (migration M1.10 parity).
+  assert.equal(extractAtPrefix('see @"my file'), '@"my file')
+  assert.equal(extractAtPrefix('@"closed" then @next'), '@next', 'a CLOSED quote is not an open quoted prefix')
+  // CJK-glued mentions complete too (the findFileMentions grammar: a CJK
+  // sentence glues the mention to the previous character).
+  assert.equal(extractAtPrefix('看看@src/foo'), '@src/foo')
+  assert.equal(extractAtPrefix('看@'), '@')
+  assert.equal(extractAtPrefix('a@b.c'), null, 'an ASCII word never starts a mention (email parity)')
+  assert.equal(extractAtPrefix('see @fi more'), null, 'the cursor is past the @ token')
 })
 
 test('resolveFdPath finds an executable fd on PATH and returns null otherwise', () => {
@@ -93,6 +100,24 @@ test('the fallback completes @ mentions from anywhere in the tree', async () => 
   // No matches: null.
   const none = await provider.getSuggestions(['@zzz-nope'], 0, 9, { signal: abort })
   assert.equal(none, null, 'no match must return null')
+})
+
+test('the provider completes the QUOTED @ form through the port (quoted values)', async () => {
+  const root = fixtureWorkspace()
+  const provider = new MentionProvider([], root, fallbackSeam())
+  const result = await provider.getSuggestions(['@"my'], 0, 4, { signal: abort })
+  assert.ok(result !== null, `@"my must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, '@"my')
+  assert.ok(result.items.some(item => item.value === '@"my file.txt"'), `quoted value must stay quoted:\n${JSON.stringify(result.items)}`)
+})
+
+test('the provider completes a CJK-glued @ mention (the findFileMentions grammar)', async () => {
+  const root = fixtureWorkspace()
+  const provider = new MentionProvider([], root, fallbackSeam())
+  const result = await provider.getSuggestions(['看看@file'], 0, 7, { signal: abort })
+  assert.ok(result !== null, `看看@file must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, '@file')
+  assert.ok(result.items.some(item => item.value === '@file-one.txt'), `CJK-glued completion missing:\n${JSON.stringify(result.items)}`)
 })
 
 test('the fallback quotes mention values that contain spaces', async () => {

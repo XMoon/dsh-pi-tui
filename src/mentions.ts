@@ -57,12 +57,42 @@ function isCjkChar(char: string): boolean {
     || (code >= 0xf900 && code <= 0xfaff) // compatibility ideographs
     || (code >= 0xff00 && code <= 0xffef) // full-width forms
 }
+/** The position of an UNCLOSED `"` (null when every quote is closed):
+ * the completion cursor sits inside a quoted token exactly when a quote
+ * is open at the end of the text. */
+function findUnclosedQuote(text: string): number | null {
+  let inQuotes = false
+  let quoteStart = -1
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === '"') {
+      inQuotes = !inQuotes
+      if (inQuotes) quoteStart = index
+    }
+  }
+  return inQuotes ? quoteStart : null
+}
+
 /**
- * The `@` mention prefix of the text before the cursor: `@query` or
- * `@"quoted query"`, or null when the cursor is not inside a mention.
+ * The `@` mention prefix of the text before the cursor: `@query`,
+ * `@"quoted query"` (the unclosed quoted form), or null when the cursor
+ * is not inside a mention. The token grammar mirrors `findFileMentions`:
+ * `@` must sit at a token boundary — start-of-text, after a delimiter, or
+ * glued to CJK text (a CJK sentence can glue the mention to the previous
+ * character) — so emails (`a@b.com`) and `pkg@1.0.0` are never mentions.
  * @param text - the line content before the cursor.
  */
 export function extractAtPrefix(text: string): string | null {
+  // Quoted form: an unclosed `"` immediately after an `@` whose own
+  // position is a valid token start (`@"my file` while typing inside the
+  // quotes). The fork's quoted-prefix grammar, aligned to the mention
+  // grammar (CJK-glued `@"` included).
+  const quoteStart = findUnclosedQuote(text)
+  if (quoteStart !== null && text[quoteStart - 1] === '@') {
+    const at = quoteStart - 1
+    const before = at === 0 ? '' : text[at - 1] ?? ''
+    if (before === '' || PATH_DELIMITERS.has(before) || isCjkChar(before)) return text.slice(at)
+  }
+  // Bare form: the current token (after the last delimiter)...
   let tokenStart = 0
   for (let index = text.length - 1; index >= 0; index -= 1) {
     if (PATH_DELIMITERS.has(text[index] ?? '')) {
@@ -70,8 +100,15 @@ export function extractAtPrefix(text: string): string | null {
       break
     }
   }
-  if (text[tokenStart] !== '@') return null
-  return text.slice(tokenStart)
+  const token = text.slice(tokenStart)
+  if (token.startsWith('@')) return token
+  // ...or a CJK-glued `@` INSIDE the token (`看看@foo`): the LAST such
+  // `@` is the mention start (a CJK sentence glues the mention to the
+  // previous character — the same rule findFileMentions applies).
+  for (let index = token.length - 1; index >= 1; index -= 1) {
+    if (token[index] === '@' && isCjkChar(token[index - 1] ?? '')) return token.slice(index)
+  }
+  return null
 }
 
 /** One `@`-mention token found in a draft. */

@@ -121,6 +121,33 @@ test('providers writeKeylessProfile refuses when the settings service is absent 
   await assert.rejects(() => port({}).providers.writeKeylessProfile('acme'), /settings service unavailable/)
 })
 
+test('providers writeKeylessProfile refuses a hostile directory entry (namespace/path redirect)', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    settings: settings({}, writes),
+    llm: {
+      listConfigurableProviders: () => [
+        // A malformed/hostile directory entry redirecting the write
+        // outside the adapter-owned provider-config schema.
+        { provider: 'acme', displayName: 'acme', settingsNs: 'any-namespace', settingsPath: ['evil', 'path'] },
+      ],
+    },
+  }).providers
+  await providers.writeKeylessProfile('acme')
+  assert.deepEqual(writes, [], 'hostile directory metadata can never reach a mutate')
+  const writes2: Array<{ ns: string; ops: unknown }> = []
+  const providers2 = port({
+    settings: settings({}, writes2),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'OTHER-ROUTE'] },
+      ],
+    },
+  }).providers
+  await providers2.writeKeylessProfile('acme')
+  assert.deepEqual(writes2, [], 'a path whose leaf is NOT the route is refused')
+})
+
 test('providers writeKeylessProfile writes NOTHING when the route vanished from the directory', async () => {
   const writes: Array<{ ns: string; ops: unknown }> = []
   const providers = port({

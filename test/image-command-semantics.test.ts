@@ -78,3 +78,10 @@ test('normalizeSkillInvocation rewrites /skill <name> <args> to /<name> <args> (
   assert.equal(normalizeSkillInvocation('/help me'), undefined, 'non-skill commands untouched')
   assert.equal(normalizeSkillInvocation('plain prompt'), undefined)
 })
+
+test('normalizeSkillInvocation preserves the argument text VERBATIM (trailing whitespace included)', () => {
+  // The skill-invocation contract: the user's words travel as the
+  // original text — only the command-name separator is normalized.
+  assert.equal(normalizeSkillInvocation('/skill grilling foo bar   '), '/grilling foo bar   ')
+  assert.equal(normalizeSkillInvocation('/skill grilling   spaced  args '), '/grilling spaced  args ')
+})
