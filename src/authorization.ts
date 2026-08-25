@@ -25,13 +25,13 @@ import {
   credentialKeyScope,
   type CredentialKey,
 } from '@deepseek-ai/dsh-credentials'
-import type { ProviderOption } from './provider-catalog.ts'
 import type { TuiApp } from './tui-app.ts'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
   AuthorizationNoticeEvent,
   AuthorizationPromptEvent,
+  CredentialProviderOption,
 } from './runtime/config-port.ts'
 
 /** The record scope every llm-pi-ai provider flow writes under (matches
@@ -126,7 +126,7 @@ export function flowForRoute(targets: readonly AuthorizationTarget[], route: str
  * the llm directory does not expose) are appended as standalone targets.
  */
 export function mergeLoginTargets(
-  options: readonly ProviderOption[],
+  options: readonly CredentialProviderOption[],
   targets: readonly AuthorizationTarget[],
 ): LoginTarget[] {
   const flowByRoute = new Map<string, AuthorizationTarget>()

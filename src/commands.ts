@@ -56,7 +56,7 @@ import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
-import type { ConfigPort } from './runtime/config-port.ts'
+import type { ConfigPort, CredentialProviderOption } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
 import {
   credentialOptionsFor,
@@ -65,7 +65,6 @@ import {
   resolveCredentialArg,
   ROUTE_PATTERN,
   PROTOCOL_CHOICES,
-  type ProviderOption,
 } from './provider-catalog.ts'
 import {
   authorizationFailureText,
@@ -602,7 +601,7 @@ async function runAuthorizationLogin(
   app: TuiApp,
   runner: TuiCommandRunner,
   target: AuthorizationTarget,
-  options: readonly ProviderOption[],
+  options: readonly CredentialProviderOption[],
 ): Promise<CommandResult> {
   const authorization = runner.config.authorization
   if (!authorization.available()) return { kind: 'error', text: 'authorization service unavailable' }
@@ -697,11 +696,15 @@ async function runAuthorizationLogin(
 async function provisionKeylessProfile(
   runner: TuiCommandRunner,
   target: AuthorizationTarget,
-  options: readonly ProviderOption[],
+  options: readonly CredentialProviderOption[],
 ): Promise<string> {
   if (target.route === undefined) return ''
   const option = options.find(candidate => candidate.route === target.route)
-  if (option === undefined || option.configured || option.declared || option.settingsNs === '') return ''
+  // The option's SEMANTIC flag decides whether a keyless write could ever
+  // be accepted (a writable slot exists) — the schema facts behind it
+  // (namespace/path) stay inside the adapter; a Remote adapter computes
+  // the same flag from the wire.
+  if (option === undefined || option.configured || option.declared || !option.canProvisionProfile) return ''
   if (!runner.config.providers.available()) return ''
   try {
     // The adapter resolves the route's profile location internally —
@@ -732,7 +735,7 @@ const LOGOUT_RECORD_VALUE = '\u0000record:'
  * record row must say what signing out actually clears). */
 async function logoutPickerRows(
   credentials: LogoutCredentialsLike,
-  options: readonly ProviderOption[],
+  options: readonly CredentialProviderOption[],
   targets: readonly AuthorizationTarget[],
 ): Promise<PickerItem[]> {
   const rows: PickerItem[] = []

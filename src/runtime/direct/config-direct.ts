@@ -43,6 +43,7 @@ import type {
   AuthorizationPromptEvent,
   ConfigPort,
   CredentialConfig,
+  CredentialProviderOption,
   PermissionConfig,
   PresetDefaultConfig,
   ProviderProfileConfig,
@@ -115,6 +116,35 @@ export class DirectConfigPort implements ConfigPort {
  * namespace or path). */
 const PROVIDER_ROUTE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 
+/** The ONE adapter-owned rule for where a keyless profile may live: the
+ * conventional llm-pi-ai `providers.<route>` slot. Shared by the option
+ * DTO's `canProvisionProfile` flag and the write-time validation — the
+ * flag can never advertise a slot the write would refuse (and vice
+ * versa). A non-conventional entry (a route whose profile lives in its
+ * OWN section, or a hostile/malformed one) is not keyless-writable. */
+function isKeylessProfileSlot(ns: string, path: readonly string[], route: string): boolean {
+  return ns === settingsNamespace('llm-pi-ai')
+    && path.length === 2 && path[0] === 'providers' && path[1] === route
+}
+
+/** Map one adapter-internal merged option onto the port's CLIENT DTO:
+ * the Host schema facts (`settingsNs`/`settingsPath`) collapse into the
+ * semantic `canProvisionProfile` flag — only the flag crosses the port.
+ * Exported for the contract tests (the merge tests consume the client
+ * DTO, exactly like the command surface does). */
+export function credentialOptionOf(option: ProviderOption): CredentialProviderOption {
+  return {
+    route: option.route,
+    label: option.label,
+    ref: option.ref,
+    configured: option.configured,
+    declared: option.declared,
+    namesCredential: option.namesCredential,
+    group: option.group,
+    canProvisionProfile: isKeylessProfileSlot(option.settingsNs, option.settingsPath, option.route),
+  }
+}
+
 export class DirectProviderProfileConfig implements ProviderProfileConfig {
   private readonly ctx: HostContextLike
 
@@ -168,16 +198,20 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     return out
   }
 
-  /** The merged /login option list: the llm configurable-provider
-   * directory over its PER-ENTRY sections when the llm service is
-   * present, the settings-only fallback otherwise. The pure merge stays
-   * in provider-catalog.ts; this adapter only wires the section reads. */
-  listCredentialOptions(): readonly ProviderOption[] {
+  /** The merged /login option list as the port's CLIENT DTOs: the llm
+   * configurable-provider directory over its PER-ENTRY sections when the
+   * llm service is present, the settings-only fallback otherwise. The
+   * pure merge stays in provider-catalog.ts; this adapter only wires the
+   * section reads and maps the schema facts onto the semantic
+   * `canProvisionProfile` flag (never a namespace or path across the
+   * port). */
+  listCredentialOptions(): readonly CredentialProviderOption[] {
     const readSection = (ns: string): unknown => this.readSectionInternal(ns)
     const llm = this.llm()
     if (llm !== undefined) {
       try {
         return providerOptionsFor(llm.listConfigurableProviders(), readSection)
+          .map(option => credentialOptionOf(option))
       } catch {
         // A throwing directory read degrades to the settings-only fallback.
       }
@@ -190,8 +224,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
       declared: false,
       namesCredential: true,
       group: 'configured' as const,
-      settingsNs: '',
-      settingsPath: [],
+      canProvisionProfile: false,
     } : {
       ...option,
       route: option.label,
@@ -199,8 +232,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
       declared: false,
       namesCredential: true,
       group: 'configured' as const,
-      settingsNs: 'llm-pi-ai',
-      settingsPath: ['providers', option.label],
+      canProvisionProfile: true,
     })
   }
 
@@ -245,10 +277,11 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     // provider-config schema before it reaches a mutate: the entry must
     // live in the llm-pi-ai section and its path must be the providers
     // slot OF THE ROUTE — a hostile/malformed directory entry can never
-    // redirect the write to an arbitrary namespace or path.
+    // redirect the write to an arbitrary namespace or path. The SAME rule
+    // drives the option DTO's canProvisionProfile flag, so the flag can
+    // never advertise a slot the write would refuse.
     const path = [...directoryEntry.settingsPath]
-    const validLayout = directoryEntry.settingsNs === settingsNamespace('llm-pi-ai')
-      && path.length === 2 && path[0] === 'providers' && path[1] === route
+    const validLayout = isKeylessProfileSlot(directoryEntry.settingsNs, path, route)
     if (!validLayout) {
       return { kind: 'skipped', reason: `hostile or malformed directory entry for ${route}` }
     }
