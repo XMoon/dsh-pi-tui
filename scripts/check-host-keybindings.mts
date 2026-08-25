@@ -37,8 +37,10 @@ const SCANNED_STRING_FILES = ['src/index.ts', 'src/commands.ts', 'src/tui-app.ts
 /** The chord pattern: a matchesKey call with a ctrl/alt/shift modifier. */
 const CHORD_PATTERN = /matchesKey\(\s*data\s*,\s*'(?:ctrl|alt|shift)\+/
 
-/** A chord label inside a quoted string literal (user-facing text). */
-const STRING_CHORD_PATTERN = /'(?:[^'\\]|\\.)*?(?:Ctrl|Alt|Shift)\+/
+/** A chord label inside a quoted string literal (user-facing text).
+ * Matches BOTH casing styles ('Ctrl+O' and 'ctrl+o' — the fold hints
+ * used the lowercase form and slipped past the gate once). */
+const STRING_CHORD_PATTERN = /'(?:[^'\\]|\\.)*?(?:(?:Ctrl|Alt|Shift)|(?:ctrl|alt|shift))\+/
 
 /** The sanctioned seams (matched by trimmed line content). */
 const ALLOWLIST = [
@@ -60,11 +62,16 @@ const ALLOWLIST = [
 ]
 
 /** The sanctioned hard-coded key labels in user-facing strings: fork
- * editor-level keys that do not follow the Host keymap. */
+ * editor-level keys and capturing-overlay fixed keys that do not follow
+ * the Host keymap. */
 const STRING_ALLOWLIST = [
   // The Home/End settings row describes the fork EDITOR's Ctrl+Home/End —
   // an editor-level key, not a Host action (does not follow the keymap).
   'Ctrl+Home/End',
+  // The approval dialog's own fixed keys (a capturing overlay component
+  // that owns y/n/Esc/Ctrl+C while it is up — never resolved by the
+  // keymap).
+  '[esc/ctrl+c] cancel',
 ]
 
 let failures = 0
@@ -88,9 +95,11 @@ for (const file of SCANNED_STRING_FILES) {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!
     // Skip comment-only lines (comments are covered by the convention in
-    // docs/keybinding-architecture.md, not by this mechanical check).
+    // docs/keybinding-architecture.md, not by this mechanical check) and
+    // matchesKey CALLS (key-matching code, not user-facing copy).
     const trimmed = line.trim()
     if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    if (line.includes('matchesKey(')) continue
     if (!STRING_CHORD_PATTERN.test(line)) continue
     if (STRING_ALLOWLIST.some(label => line.includes(label))) continue
     failures += 1

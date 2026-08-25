@@ -603,7 +603,11 @@ export class BulletedComponent implements Component {
  */
 export class ThinkingCompactComponent implements Component {
   private readonly message: Extract<TranscriptMessage, { kind: 'thinking' }>
-  private readonly hint: ExpandHint
+  /** The rendered fold-hint verb ('alt+t' → the EFFECTIVE thinking key,
+   * 'ctrl+o' → the EFFECTIVE expand key, 'click' for the click-owned
+   * fullscreen secondaries): resolved by the host at build time so a user
+   * remap updates the copy without invalidating the per-width cache. */
+  private readonly hint: string
   private readonly iconStyle: IconStyle
   /** TRUE per-width cache: the same component + same width returns the
    * same array instance even after intermediate widths (a single
@@ -611,7 +615,7 @@ export class ThinkingCompactComponent implements Component {
    * sequence and break the reference-stable contract). */
   private readonly cached = new Map<number, string[]>()
 
-  constructor(message: Extract<TranscriptMessage, { kind: 'thinking' }>, hint: ExpandHint, iconStyle: IconStyle = 'emoji') {
+  constructor(message: Extract<TranscriptMessage, { kind: 'thinking' }>, hint: string, iconStyle: IconStyle = 'emoji') {
     this.message = message
     this.hint = hint
     this.iconStyle = iconStyle
@@ -632,7 +636,7 @@ export class ThinkingCompactComponent implements Component {
       // replay edge): the bare title — never a fake "No reasoning" row.
       lines = [truncateToWidth(title, Math.max(1, width), '…')]
     } else {
-      const hintVerb = this.hint ?? 'ctrl+o'
+      const hintVerb = this.hint || 'the expand key'
       lines = [
         truncateToWidth(title, Math.max(1, width), '…'),
         truncateToWidth(color.textDimItalic(`  ${previewLine}`), Math.max(1, width), '…'),
@@ -1482,10 +1486,12 @@ interface MessageComponentEntry {
    * OR any REGULAR expanded root. Part of the cache identity — a
    * Focus toggle must rebuild the diff presentation. */
   fullReveal: boolean
-  /** The fold-hint owner: click (fullscreen mouse-owned), ctrl+o (the
+/** The fold-hint owner: click (fullscreen mouse-owned), ctrl+o (the
    * keyboard master), alt+t (the Thinking bulk owner) or undefined
    * (regular Focus secondaries are always full). Part of the cache
-   * identity — a surface switch must not reuse the old hint. */
+   * identity — a surface switch must not reuse the old hint. The RENDERED
+   * hint resolves the EFFECTIVE key through the keymap (a remap updates
+   * the copy; the identity field stays semantic). */
   expandHint: ExpandHint
   /** The values the component was built from, for O(1) staleness checks:
    * text-bearing kinds compare the CURRENT text object — an unchanged
@@ -6817,7 +6823,7 @@ export class TuiApp {
       // output), wrapping normally per the Text/Markdown policy; the
       // compact preview is never repeated next to the full body.
       if (!expanded) {
-        return new ThinkingCompactComponent(message, expandHint, this.iconStyle)
+        return new ThinkingCompactComponent(message, this.expandHint(expandHint), this.iconStyle)
       }
       const head = color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`)
       const body = message.text === '' ? '' : message.text.split('\n').map(line => `  ${line}`).join('\n')
@@ -6868,7 +6874,7 @@ export class TuiApp {
           // contract), so the baked line fits the paint width exactly and
           // the row can never wrap.
           row.addChild(new Text(truncateToWidth(
-            color.textMuted(`${icon}Context injection ${message.label}${summary} (${expandHint ?? 'ctrl+o'} to expand)`),
+            color.textMuted(`${icon}Context injection ${message.label}${summary} (${this.expandHint(expandHint)} to expand)`),
             width,
             '…',
           ), 0, 0))
@@ -6878,7 +6884,7 @@ export class TuiApp {
       const unwrapped = systemContextBody(message.text)?.join('\n') ?? message.text
       const text = expanded
         ? `${color.textMuted('§')} ${color.textDim(unwrapped)}`
-        : color.textMuted(`§ ${truncateToWidth(preview(unwrapped, 2), Math.max(1, width - 22), '…')} (${expandHint ?? 'ctrl+o'} to expand)`)
+        : color.textMuted(`§ ${truncateToWidth(preview(unwrapped, 2), Math.max(1, width - 22), '…')} (${this.expandHint(expandHint)} to expand)`)
       return new Text(text, 0, 0)
     }
     if (message.kind === 'summary') {
@@ -6912,7 +6918,7 @@ export class TuiApp {
       } else {
         const summary = counts === '' ? '' : counts
         card.addChild(new Text(truncateToWidth(
-          color.textDim(`${summary}${summary === '' ? '' : ' '}(${expandHint ?? 'ctrl+o'} to expand)`),
+          color.textDim(`${summary}${summary === '' ? '' : ' '}(${this.expandHint(expandHint)} to expand)`),
           width,
           '…',
         ), 0, 0))
@@ -7045,7 +7051,7 @@ export class TuiApp {
           rows.push(`${indent}${' '.repeat(visibleWidth(prompt))}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
         }
         if (commandLines.length > FOLDED_COMMAND_LINES) {
-          rows.push(color.textDim(`${indent}… ${commandLines.length - FOLDED_COMMAND_LINES} more command lines (${expandHint ?? 'ctrl+o'} to expand)`))
+          rows.push(color.textDim(`${indent}… ${commandLines.length - FOLDED_COMMAND_LINES} more command lines (${this.expandHint(expandHint)} to expand)`))
         }
         // The result preview gets its own row so the command never shares a
         // line with output (kimi ShellExecution layout).
@@ -7056,7 +7062,7 @@ export class TuiApp {
         rows.push(truncateToWidth(`${headWithPreview}`, width, '…'))
         for (const line of renderDiffView(callPreview.diffs, this.workspaceRoot, {
           maxLines: FOLDED_DIFF_LINES,
-          expandHint: `${expandHint ?? 'ctrl+o'} to expand`,
+          expandHint: `${this.expandHint(expandHint)} to expand`,
         })) {
           rows.push(`  ${line}`)
         }
@@ -8178,7 +8184,7 @@ export class TuiApp {
     }
     const hasSteerable = userRows.length > 0
     const hint = hasSteerable
-      ? 'ctrl+s to steer all · alt+↑ to edit all'
+      ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to edit all`
       : 'notices deliver after the current task · /tasks to view'
     lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, width - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
@@ -8524,6 +8530,21 @@ export class TuiApp {
     const completions = leader.leaderBindings
       .map(binding => `${formatKeyId(binding.key)}: ${APP_KEYBINDINGS[binding.action]?.description ?? binding.action}`)
     return `Leader: waiting for key — ${completions.join(' · ')} (Esc cancels)`
+  }
+
+  /** The fold-hint verb of one collapsible card: 'click' for the
+   * click-expandable owners, else the EFFECTIVE key of the owning action
+   * ('alt+t' → the Thinking bulk owner, 'ctrl+o' → the expand master; a
+   * user remap updates every `to expand` hint; a disabled action falls
+   * back to a neutral phrase instead of a stale default). */
+  private expandHint(hint: ExpandHint): string {
+    if (hint === 'click') return 'click'
+    if (hint === 'alt+t') {
+      const thinking = this.keybindings.keyHint('app.transcript.toggleThinking')
+      return thinking === '' ? 'the thinking key' : thinking.toLowerCase()
+    }
+    const expand = this.keybindings.keyHint('app.transcript.toggleExpand')
+    return expand === '' ? 'the expand key' : expand.toLowerCase()
   }
 
   /** The shared footer layout (plan §14): line 1 wraps with the host row

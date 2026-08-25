@@ -348,7 +348,7 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   assert.ok(view.includes('❯ follow up on the audit'), `followup row missing:\n${view}`)
   assert.ok(view.includes('❯ steer a correction'), `steer row missing:\n${view}`)
   assert.ok(view.includes('ctrl+s to steer all'), `steer-all hint missing:\n${view}`)
-  assert.ok(view.includes('alt+↑ to edit all'), `hint row missing:\n${view}`)
+  assert.ok(view.includes('alt+up to edit all'), `hint row missing:\n${view}`)
   app.setQueueItems([])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
