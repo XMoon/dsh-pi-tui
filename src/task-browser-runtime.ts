@@ -79,6 +79,11 @@ export class TaskBrowserRuntime {
   /** The last committed rows (the row-identity source for the open
    * browser's select path — see {@link rows}). */
   private lastRows: TaskBrowserRow[] = []
+  /** Monotonic catalog-request epoch: only the LATEST refresh may cache
+   * and commit, so overlapping listings of the same session can never
+   * commit out of order (an older response never overwrites newer
+   * membership). */
+  private epoch = 0
 
   constructor(hooks: TaskBrowserRuntimeHooks) {
     this.hooks = hooks
@@ -101,16 +106,22 @@ export class TaskBrowserRuntime {
   }
 
   /** A CATALOG refresh: re-list the descendants, then — if the session
-   * key is still current (generation fence) — cache and commit. Runtime
-   * statuses are projected from the Agent registry AT COMMIT, so a stale
-   * catalog response can never flip an already-idle child back to
-   * `running` (plan §7.3). No live session: no-op (the runner clears the
-   * badge itself). */
+   * key is still current AND this is still the LATEST refresh (the epoch
+   * fence) — cache and commit. Runtime statuses are projected from the
+   * Agent registry AT COMMIT, so a stale catalog response can never flip
+   * an already-idle child back to `running` (plan §7.3). The epoch
+   * orders OVERLAPPING refreshes of the same session: the initial
+   * listing and an open-browser listing may be in flight together, and
+   * an older response must never overwrite the newer membership/tree
+   * catalog (a superseded response neither caches nor commits). No live
+   * session: no-op (the runner clears the badge itself). */
   async refreshCatalog(): Promise<void> {
     const key = this.hooks.currentKey()
     if (key === undefined) return
+    const requestEpoch = ++this.epoch
     const entries = await this.hooks.listDescendants()
     if (this.hooks.currentKey() !== key) return
+    if (requestEpoch !== this.epoch) return
     this.catalog = [...entries]
     this.apply(entries)
   }
@@ -127,8 +138,11 @@ export class TaskBrowserRuntime {
 
   /** Drop the cached catalog (session switch): the next catalog refresh
    * re-reads from the new root, and stale-session status flips find no
-   * membership. */
+   * membership. The epoch is bumped too, so a listing still in flight
+   * from the old session can never commit even if its key check were
+   * somehow satisfied. */
   reset(): void {
+    this.epoch += 1
     this.catalog = []
     this.lastRows = []
   }
