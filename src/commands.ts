@@ -29,7 +29,7 @@ import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { iconStyleOf } from './icons.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
 import { APP_KEYBINDINGS } from './keybindings/definitions.ts'
-import { formatKeyId, formatKeyList } from './keybindings/hints.ts'
+import { formatKeyId, formatKeyList, formatLeaderSequence } from './keybindings/hints.ts'
 import type { AppKeybindingId } from './keybindings/types.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
@@ -2982,7 +2982,7 @@ export function registerTuiCommands(
         const list = categories.get(category) ?? []
         list.push({
           id: `kb-${binding.action}`,
-          label: binding.keys.length === 0 ? '—' : binding.keys.map(formatKeyId).join(' / '),
+          label: binding.keys.length === 0 ? '—' : binding.keys.map(key => binding.leader === true ? formatLeaderSequence(key as never) : formatKeyId(key)).join(' / '),
           description: `${binding.action} — ${definition?.description ?? ''} (${binding.scope}, ${binding.source})`,
           currentValue: '',
         })

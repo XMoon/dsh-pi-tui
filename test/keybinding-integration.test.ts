@@ -239,3 +239,31 @@ test('a disabled action no longer fires', async () => {
   assert.deepEqual(steered, [], 'a disabled action must not fire')
   app.stop()
 })
+
+test('the read-only viewer lets a REMAPPED fold key reach the host fold (effective keymap)', async () => {
+  // Review finding: the read-only viewer guard hard-coded Ctrl+O as the
+  // fold pass-through — a remap of app.transcript.toggleExpand would be
+  // consumed as an inert key. The pass-through now resolves the EFFECTIVE
+  // fold key, so the remapped chord reaches the host fold path and the
+  // OLD key is consumed as inert instead.
+  const { vt, app } = startApp({}, managerWith({ 'app.transcript.toggleExpand': 'ctrl+x' }))
+  const before = app.isToolOutputExpanded()
+  app.setViewerMode({
+    parentSessionId: 'session-main',
+    childSessionId: 'session-child',
+    label: 'child',
+    mode: 'one-shot',
+    activity: 'inactive',
+  })
+  await vt.waitForRender()
+  // ctrl+x (the remapped fold key) passes through the read-only viewer and
+  // reaches the host ladder: the fold master flips.
+  vt.sendInput('\x18') // ctrl+x
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), !before, 'the remapped fold key must reach the host fold path')
+  // ctrl+o is no longer the fold key: consumed as inert (no second flip).
+  vt.sendInput('\x0f') // ctrl+o
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), !before, 'the old ctrl+o must stay inert inside the viewer')
+  app.stop()
+})

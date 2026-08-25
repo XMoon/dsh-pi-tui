@@ -214,6 +214,10 @@ export interface KeymapSnapshot {
     readonly keys: readonly KeyId[]
     readonly scope: KeybindingScope
     readonly source: KeybindingSource
+    /** True when EVERY key of this binding is a `<leader>X` sequence (the
+     * action has no direct keys — display renders them with the leader
+     * prefix). Undefined/absent = direct keys. */
+    readonly leader?: boolean
   }[]
   readonly conflicts: readonly KeybindingConflict[]
 }

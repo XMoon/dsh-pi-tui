@@ -219,6 +219,12 @@ README/CHANGELOG language flip) and re-reviewed:
   corrected to `dsh-pi-tui`; the fixed overlay-key precedence is
   documented and the parser warns on a collision; `/keybindings reset`
   honors the async write outcome.
+- Round 8 (needs-fixes): the read-only viewer fold pass-through and the
+  search-overlay ownership resolve the EFFECTIVE keymap (a remap of
+  `app.transcript.toggleExpand` / `app.transcript.search` stays
+  authoritative — the router consults `matchesEffective`); leader-only
+  actions appear in the `/keybindings` snapshot with the `leader` flag;
+  the changelog namespace examples corrected to `dsh-pi-tui`.
 
 Final gates after the rebase: 2397 bundle tests, 985 fork tests, 11
 docs tests, typecheck (fork + bundle), `check-host-keybindings` gate,

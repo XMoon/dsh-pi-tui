@@ -21,7 +21,7 @@
   与图片 attachment marker 均不受影响。
 - **快捷键现在可用户编排。** 每个 Host 快捷键都是语义 action
   (`app.*`),通过 context-aware keymap 解析,因此 UI(页脚提示、
-  `/help`、`/keybindings`)始终显示**生效**的按键。在 `pi-tui`
+  `/help`、`/keybindings`)始终显示**生效**的按键。在 `dsh-pi-tui`
   settings 命名空间的 `keybindings` 字段配置覆盖(热加载,无需重启):
   字符串表示单个按键,数组表示多个按键,`false` 禁用某 action 的
   按键,`leader` 键加 `<leader>X` 序列支持多键绑定(M6)。普通可打印键

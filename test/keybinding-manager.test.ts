@@ -82,3 +82,19 @@ test('matches() reflects a remap of a configurable action; matchesDefault() stay
   assert.ok(manager.matchesDefault('\r', 'app.transcript.search.next'), 'the fixed overlay keys keep their defaults')
   assert.ok(manager.matchesDefault('\x1b[13;2u', 'app.transcript.search.previous'), 'the fixed overlay keys keep their defaults')
 })
+
+test('a leader-only action appears in the snapshot with its leader sequence (review round)', () => {
+  // Review finding: an action with NO default keys configured only as
+  // `<leader>X` (e.g. app.session.new) was advertised by keyHint but
+  // absent from the /keybindings table. The snapshot now includes it with
+  // the leader flag so the table renders `Leader N`.
+  const manager = managerWith({
+    leader: 'ctrl+x',
+    bindings: { 'app.session.new': '<leader>n' },
+  })
+  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.session.new')
+  assert.ok(binding !== undefined, 'the leader-only action must appear in the snapshot')
+  assert.equal(binding!.leader, true, 'the leader-only binding is flagged for display')
+  assert.deepEqual(binding!.keys, ['n'], 'the raw completing key is carried')
+  assert.equal(manager.keyHint('app.session.new'), 'Leader N', 'keyHint and snapshot agree')
+})
