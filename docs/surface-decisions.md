@@ -204,9 +204,25 @@ read the DURABLE descendant catalog, not the live-child list:
   re-sorts a row above its parent (a running grandchild stays under its
   inactive parent). The "first running subagent" rule is a CURSOR policy
   (`TaskBrowserHandle.setItems(items, preferredValue)`), never a sort.
-- **A finished one-shot child stays reachable.** `inactive` is live-store
-  presence, never an outcome; Enter opens its persisted transcript
-  read-only. No activity filter exists in `buildTaskRows`.
+- **A finished one-shot child stays reachable.** `inactive` is never an
+  outcome; Enter opens its persisted transcript read-only. No activity
+  filter exists in `buildTaskRows`.
+- **Runtime activity is projected, never read from the catalog.**
+  `listDescendants().activity` is live-STORE presence, not driver
+  activity: an idle continuable child stays live in the session store and
+  would otherwise read as `running` forever. Every child row's
+  `running` / `inactive` is re-projected from the Agent registry
+  (`ctx.agents.get(id)?.status === 'running'`) AT COMMIT TIME by the
+  `TaskBrowserRuntime` coordinator (`projectSubagentActivity`), so a slow
+  catalog response can never overwrite a newer runtime state. The
+  coordinator splits CATALOG refreshes (subagent lifecycle events, the
+  subagent tool call, jobs changes — the only paths that re-list) from
+  RUNTIME-only refreshes (`agent/status` — the cached catalog is reused,
+  membership/tree/mode never move). The runner's `agent/status` handler
+  is membership-gated: only flips of children in the cached catalog
+  refresh the surface, so the MAIN agent's own per-turn flips never
+  repaint. A session switch closes the open browser and drops the cached
+  catalog (the fence key = session generation + id).
 - **Jobs are a separate flat group**, sorted by their own registry
   ordering; the background one-shot duplication (job row + child row with
   no cross-reference) is contract, locked in by test.
@@ -220,8 +236,16 @@ read the DURABLE descendant catalog, not the live-child list:
   there is no fallback to the main session as a nested direct parent, and
   no `ctx.agents.get(childId).followup(...)` bypass.
 - **The footer badge counts RUNNING descendants at every depth** (the user
-  cares that a deep agent is still working); durable inactive children
-  never keep the badge armed.
+  cares that a deep agent is still working), where RUNNING means the
+  registry-projected driver state — durable idle children never keep the
+  badge armed.
+- **`has children` is not rendered.** The tree connector already
+  expresses parenthood, so the extra detail line duplicated the
+  structure; the `hasChildren` data fact stays on the row for future
+  fold/disclosure work.
+- **The interrupt verb is advertised only for a continuable row whose
+  driver is running right now**: an idle continuable has no driver to
+  stop, so the UI must not advertise (or fire) a dead stop.
 
 ## Focus fullscreen disclosure
 

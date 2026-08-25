@@ -37,7 +37,6 @@ const subagent = (overrides: Partial<TaskPanelItem> = {}): TaskPanelItem => ({
   value: 'agent:child-1',
   label: 'subagent · research',
   status: 'running',
-  detail: 'has children',
   group: 'subagents',
   interruptible: true,
   ...overrides,
