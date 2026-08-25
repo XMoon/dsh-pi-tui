@@ -624,28 +624,44 @@ async function runAuthorizationLogin(
   // The client flow driver renders notices and prompts and answers them
   // through the port (never a callback across the contract). The
   // subscription is registered BEFORE begin so no early event (a settled
-  // outcome can land in the same microtask turn) is ever missed.
+  // outcome can land in the same microtask turn) is ever missed; the
+  // flow is BOUND to the attempt id once begin returns, so a concurrent
+  // login's events can never be consumed by this flow. The whole attempt
+  // is wrapped in try/finally: a throwing begin (or any failure) still
+  // unsubscribes and closes the UI — no leaked listener or panel.
   const flow = createAuthorizationFlow(app, authorization)
   const off = authorization.onEvent(flow.onEvent)
-  const started = await authorization.begin({ key: target.key, method, signal: runner.signal })
-  if (started.kind !== 'started') {
+  try {
+    let started: { kind: 'started'; attemptId: string } | { kind: 'unavailable' }
+    try {
+      started = await authorization.begin({ key: target.key, method, signal: runner.signal })
+    } catch (error) {
+      // A begin that REJECTED (or threw synchronously) before any attempt
+      // existed is a failed login, not a crash: map it like any other
+      // attempt failure. The finally below still unsubscribes and closes
+      // the flow UI — no leaked listener or panel.
+      if (runner.signal.aborted) return { kind: 'error', text: 'login cancelled' }
+      return { kind: 'error', text: authorizationFailureText(error, safeErrorMessage(error)) }
+    }
+    if (started.kind !== 'started') {
+      return { kind: 'error', text: 'authorization service unavailable' }
+    }
+    flow.bind(started.attemptId)
+    const outcome = await flow.outcome
+    if (outcome.status === 'cancelled' || runner.signal.aborted) return { kind: 'error', text: 'login cancelled' }
+    if (outcome.status === 'failed') {
+      if (outcome.code === 'NOT_COMMITTED') {
+        // A provider flow bug/abnormality: worth a diagnostic line.
+        runner.diag.error('authorization', { key: target.key, error: outcome.message })
+      }
+      return { kind: 'error', text: authorizationFailureText({ code: outcome.code }, outcome.message ?? 'login failed') }
+    }
+    const profileNote = await provisionKeylessProfile(runner, target, options)
+    return { kind: 'success', text: `signed in to ${target.label}${profileNote}` }
+  } finally {
     off()
     flow.close()
-    return { kind: 'error', text: 'authorization service unavailable' }
   }
-  const outcome = await flow.outcome
-  off()
-  flow.close()
-  if (outcome.status === 'cancelled' || runner.signal.aborted) return { kind: 'error', text: 'login cancelled' }
-  if (outcome.status === 'failed') {
-    if (outcome.code === 'NOT_COMMITTED') {
-      // A provider flow bug/abnormality: worth a diagnostic line.
-      runner.diag.error('authorization', { key: target.key, error: outcome.message })
-    }
-    return { kind: 'error', text: authorizationFailureText({ code: outcome.code }, outcome.message ?? 'login failed') }
-  }
-  const profileNote = await provisionKeylessProfile(runner, target, options)
-  return { kind: 'success', text: `signed in to ${target.label}${profileNote}` }
 }
 
 /**

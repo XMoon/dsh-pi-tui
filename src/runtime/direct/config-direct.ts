@@ -445,6 +445,11 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
   cancel(attemptId: string): Promise<void> {
     const attempt = this.attempts.get(attemptId)
     if (attempt === undefined) return Promise.resolve()
+    // Withdraw the attempt: reject the pending prompt bridges IMMEDIATELY
+    // (never wait on the upstream settlement — a flow that does not honor
+    // its signal must not leave the client's prompt UI hanging), then
+    // abort the upstream controller.
+    this.rejectAttemptPrompts(attemptId)
     attempt.controller.abort()
     return Promise.resolve()
   }
@@ -477,14 +482,21 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       // The flow may withdraw a prompt on its own (its signal): the
       // withdrawal is NOT a decline — surface it as an event so the
       // consumer closes the prompt UI, and reject with a non-decline
-      // cancellation.
-      prompt.signal?.addEventListener('abort', () => {
+      // cancellation. An ALREADY-aborted signal (the flow withdrew before
+      // the bridge even registered) must take the SAME path immediately —
+      // never leave the pending promise unresolved.
+      const withdraw = (): void => {
         const pending = this.pendingPrompts.get(promptId)
         if (pending === undefined || pending.attemptId !== attemptId) return
         this.pendingPrompts.delete(promptId)
         reject(cancellationError('authorization prompt withdrawn'))
         this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
-      }, { once: true })
+      }
+      if (prompt.signal?.aborted === true) {
+        withdraw()
+        return
+      }
+      prompt.signal?.addEventListener('abort', withdraw, { once: true })
     })
   }
 

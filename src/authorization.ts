@@ -208,6 +208,13 @@ export interface AuthorizationSurface {
  * `respond`/`cancel` — the TUI never hands the Host a callback-bearing
  * interaction (transport rule; migration M1.9).
  *
+ * The flow is ATTEMPT-SCOPED: `bind(attemptId)` (called after the runner's
+ * `begin` returns) locks the flow to one attempt — events for ANY other
+ * attempt are ignored, so two concurrent logins can never consume each
+ * other's prompts or settlements. Events that arrive between the
+ * subscription (registered BEFORE begin, so no early event is missed) and
+ * the bind are buffered and replayed for the matching attempt only.
+ *
  * Prompt mapping (client-local, unchanged from the interaction era):
  * - `text` and `secret` go through the question flow's free-text row;
  *   `secret` is rendered masked (the real value never leaves the input's
@@ -218,11 +225,17 @@ export interface AuthorizationSurface {
  * - a flow WITHDRAWING a prompt arrives as a `prompt-withdrawn` event:
  *   the open UI closes and the prompt is NOT answered (the adapter
  *   already rejected its pending bridge — a refusal, never a decline).
+ * The open prompt UI is tracked PER PROMPT ID, so a withdrawal of one
+ * prompt can never close another prompt's UI.
  */
 export function createAuthorizationFlow(
   app: AuthorizationSurface,
   port: Pick<AuthorizationConfig, 'respond' | 'cancel'>,
 ): {
+  /** Lock the flow to one attempt id (the runner calls it after begin).
+   * Events received before the bind are buffered and replayed for the
+   * matching attempt only; all other attempts' events are ignored. */
+  bind(attemptId: string): void
   /** Feed one attempt event (the runner forwards the subscription). */
   onEvent(event: AuthorizationFlowEvent): void
   /** The attempt outcome, resolved on the `settled` event. */
@@ -232,10 +245,13 @@ export function createAuthorizationFlow(
 } {
   let noticeHandle: (() => void) | undefined
   let noticeBody = ''
-  /** The prompt UI currently open: closed by a withdrawal or settle. A
-   * `text`/`secret` prompt closes through its own AbortController; a
-   * `select` prompt through the picker handle. */
-  let openPrompt: { withdraw(): void } | undefined
+  /** The prompt UI open per PROMPT id (a withdrawal closes exactly the
+   * prompt it names; answers settle exactly the prompt they answer). */
+  const openPrompts = new Map<string, { withdraw(): void }>()
+  /** Events received before `bind` (the subscription starts before the
+   * attempt id is known — the runner subscribes before begin). */
+  const buffered: AuthorizationFlowEvent[] = []
+  let boundAttemptId: string | undefined
   /** Resolve the attempt outcome when the `settled` event arrives. */
   let settle: (outcome: { status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }) => void
   const outcome = new Promise<{ status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }>((resolve) => {
@@ -253,8 +269,8 @@ export function createAuthorizationFlow(
     }
   }
   const close = (): void => {
-    openPrompt?.withdraw()
-    openPrompt = undefined
+    for (const open of openPrompts.values()) open.withdraw()
+    openPrompts.clear()
     noticeHandle?.()
     noticeHandle = undefined
   }
@@ -266,8 +282,9 @@ export function createAuthorizationFlow(
   }): void => {
     const { attemptId, promptId, prompt } = event
     const finish = (answer: string | null): void => {
-      if (openPrompt === undefined) return // already withdrawn or settled
-      openPrompt = undefined
+      const open = openPrompts.get(promptId)
+      if (open === undefined) return // already withdrawn or settled
+      openPrompts.delete(promptId)
       // The answer rides `respond` (null = the human declined); a
       // rejection is dropped — the attempt stays alive.
       port.respond(attemptId, promptId, answer).then(undefined, () => {})
@@ -276,14 +293,14 @@ export function createAuthorizationFlow(
       const picker = new Promise<string | null>((resolve) => {
         let settled = false
         let handle: { close?: () => void } | undefined
-        openPrompt = {
+        openPrompts.set(promptId, {
           withdraw: () => {
             if (settled) return
             settled = true
             handle?.close?.()
             resolve(null) // dropped: the withdrawn prompt is never answered
           },
-        }
+        })
         handle = app.openPicker(
           prompt.options.map(option => ({
             value: option.id,
@@ -315,9 +332,9 @@ export function createAuthorizationFlow(
     // text / secret: the question flow's free-text row, closable through
     // an AbortController the withdrawal aborts.
     const controller = new AbortController()
-    openPrompt = {
+    openPrompts.set(promptId, {
       withdraw: () => { controller.abort() },
-    }
+    })
     app.askQuestions(
       [{
         id: 'answer',
@@ -340,27 +357,48 @@ export function createAuthorizationFlow(
       finish(null)
     })
   }
-  return {
-    onEvent: (event) => {
-      switch (event.kind) {
-        case 'notice':
-          showNotice(event.notice)
-          break
-        case 'prompt':
-          presentPrompt(event)
-          break
-        case 'prompt-withdrawn':
-          // The flow withdrew this prompt: close its UI, never answer.
-          if (openPrompt !== undefined) {
-            openPrompt.withdraw()
-            openPrompt = undefined
-          }
-          break
-        case 'settled':
-          settle({ status: event.status, code: event.code, message: event.message })
-          close()
-          break
+  /** Handle one event of the BOUND attempt (the switch). */
+  const handle = (event: AuthorizationFlowEvent): void => {
+    switch (event.kind) {
+      case 'notice':
+        showNotice(event.notice)
+        break
+      case 'prompt':
+        presentPrompt(event)
+        break
+      case 'prompt-withdrawn': {
+        // The flow withdrew this prompt: close ITS UI, never answer.
+        const open = openPrompts.get(event.promptId)
+        if (open !== undefined) {
+          openPrompts.delete(event.promptId)
+          open.withdraw()
+        }
+        break
       }
+      case 'settled':
+        settle({ status: event.status, code: event.code, message: event.message })
+        close()
+        break
+    }
+  }
+  return {
+    bind: (attemptId) => {
+      boundAttemptId = attemptId
+      // Replay the events that arrived before the attempt id was known
+      // (the runner subscribes before begin so no early event is missed);
+      // events of ANY other attempt are dropped.
+      for (const event of buffered) {
+        if (event.attemptId === attemptId) handle(event)
+      }
+      buffered.length = 0
+    },
+    onEvent: (event) => {
+      if (boundAttemptId === undefined) {
+        buffered.push(event)
+        return
+      }
+      if (event.attemptId !== boundAttemptId) return
+      handle(event)
     },
     outcome,
     close,
