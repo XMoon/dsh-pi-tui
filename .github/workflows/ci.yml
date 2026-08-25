@@ -257,6 +257,63 @@ jobs:
         run: pnpm audit --prod --audit-level high
 
   # ---------------------------------------------------------------------------
+  # Extract the bilingual release notes for the tag from the changelogs.
+  #
+  # This is a SEPARATE job (not folded into the GitHub Release job) so that a
+  # changelog problem fails BEFORE npm publish: the publish gate below depends
+  # on it. The script verifies, in one pass:
+  #
+  #   - tag == package.json version
+  #   - CHANGELOG.md has a ## [<version>] section
+  #   - CHANGELOG.en.md has the same section
+  #   - the two section headings (version + date) match exactly
+  #
+  # The notes body is the human-written changelog verbatim, never a commit
+  # message dump or AI summary.
+  # ---------------------------------------------------------------------------
+  release-metadata:
+    name: Prepare release metadata
+
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Extract release notes
+        run: |
+          set -euo pipefail
+
+          node scripts/release-notes.mjs \
+            "$GITHUB_REF_NAME" \
+            release-notes.md
+
+          echo 'Release notes:'
+          cat release-notes.md
+
+      - name: Upload release metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-pi-tui-release-notes
+          path: release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
   # Publish the EXACT artifact produced by build-and-pack.
   #
   # Requirements on npmjs.com Trusted Publisher:
@@ -278,6 +335,7 @@ jobs:
       - build-and-pack
       - compat-smoke
       - security-audit
+      - release-metadata
 
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -355,3 +413,123 @@ jobs:
 
       - name: Publish to npm
         run: npm publish "./${{ steps.package.outputs.tarball }}" --access public
+
+  # ---------------------------------------------------------------------------
+  # Create the GitHub Release AFTER npm publish succeeded, so a visible
+  # Release always means the same version is already on npm.
+  #
+  # The assets are the SAME artifact chain as npm: the tarball produced by
+  # build-and-pack, smoke-tested by compat-smoke and published by publish —
+  # never a rebuild. A SHA256 file rides along for download verification.
+  #
+  # The job is re-runnable: an existing release is edited in place and assets
+  # are uploaded with --clobber.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    needs:
+      - publish
+      - build-and-pack
+      - release-metadata
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-tarball
+          path: release-assets
+
+      - name: Download release notes
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-release-notes
+          path: release-metadata
+
+      - name: Prepare release assets
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t TARBALLS < <(
+            find release-assets -maxdepth 1 -type f \
+              -name 'xmoon76-dsh-pi-tui-*.tgz' \
+              -print \
+              | sort
+          )
+
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            printf '%s\n' "${TARBALLS[@]}" >&2
+            exit 1
+          fi
+
+          TARBALL="${TARBALLS[0]}"
+          BASENAME="$(basename "$TARBALL")"
+          CHECKSUM="${TARBALL}.sha256"
+
+          (
+            cd "$(dirname "$TARBALL")"
+            sha256sum "$BASENAME" > "${BASENAME}.sha256"
+          )
+
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+
+          echo "Release assets:"
+          ls -lh "$TARBALL" "$CHECKSUM"
+          cat "$CHECKSUM"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          TARBALL: ${{ steps.assets.outputs.tarball }}
+          CHECKSUM: ${{ steps.assets.outputs.checksum }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${TAG#v}"
+
+          CREATE_ARGS=()
+
+          # SemVer prerelease, e.g. 0.4.0-rc.1
+          if [[ "$VERSION" == *-* ]]; then
+            CREATE_ARGS+=(--prerelease)
+          fi
+
+          if gh release view "$TAG" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
+          then
+            echo "Updating existing release $TAG"
+
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "dsh-pi-tui $TAG" \
+              --notes-file release-metadata/release-notes.md
+          else
+            echo "Creating release $TAG"
+
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "dsh-pi-tui $TAG" \
+              --notes-file release-metadata/release-notes.md \
+              "${CREATE_ARGS[@]}"
+          fi
+
+          gh release upload "$TAG" \
+            "$TARBALL" \
+            "$CHECKSUM" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

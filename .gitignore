@@ -3,6 +3,7 @@ dist/
 packages/pi-tui/dist/
 *.log
 *.tgz
+release-notes.md
 .DS_Store
 temp/
 *.local.md
