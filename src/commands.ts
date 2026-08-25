@@ -2891,7 +2891,7 @@ export function registerTuiCommands(
         { id: 'k-queue', label: keysLabel('app.input.queue'), description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
         { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Quit the TUI (flushes the session)', currentValue: '' },
         { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
-        { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: 'Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is Alt+T', currentValue: '' },
+        { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
         { id: 'k-todo', label: keysLabel('app.todo.toggle'), description: 'Toggle the todo panel', currentValue: '' },
         { id: 'k-think', label: keysLabel('app.transcript.toggleThinking'), description: 'Collapse/expand thinking blocks (detail level — blocks stay visible)', currentValue: '' },
         { id: 'k-steer', label: keysLabel('app.input.steer'), description: 'Steer the running turn with the draft', currentValue: '' },
@@ -2957,7 +2957,7 @@ export function registerTuiCommands(
         if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
         const doc = { ...settings.get() } as Record<string, unknown>
         delete doc.keybindings
-        detach('keybindings reset', () => settings.replace(doc), { notify: true })
+        detach('keybindings reset', () => settings.replace(doc as unknown as import('./runtime/config-port.ts').TuiSettingsDoc), { notify: true })
         app.notify('Keybindings reset to defaults.', 'info')
         return { kind: 'success', text: 'Keybindings reset to defaults.' }
       }

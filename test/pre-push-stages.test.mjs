@@ -102,31 +102,33 @@ test('pre-push-stages: missing verify: prefix is rejected', () => {
   })
 })
 
-test('pre-push-stages: current verify:prepush derives to the expected 7 stages', () => {
+test('pre-push-stages: current verify:prepush derives to the expected 8 stages', () => {
   const r = spawnSync(process.execPath, [STAGES_SCRIPT, 'verify:prepush'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(r.status, 0)
   const stages = r.stdout.trim().split('\n')
-  assert.equal(stages.length, 7)
+  assert.equal(stages.length, 8)
   assert.deepEqual(stages, [
     'pnpm typecheck:fork',
     'pnpm test:fork',
     'pnpm test:docs',
     'node scripts/naming-gate.mjs',
     'pnpm gate:boundary',
+    'pnpm gate:keybindings',
     'pnpm audit --prod --audit-level high',
     'pnpm pack:release',
   ])
 })
 
-test('pre-push-stages: current verify:prepush:nofork derives to 5 stages', () => {
+test('pre-push-stages: current verify:prepush:nofork derives to 6 stages', () => {
   const r = spawnSync(process.execPath, [STAGES_SCRIPT, 'verify:prepush:nofork'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(r.status, 0)
   const stages = r.stdout.trim().split('\n')
-  assert.equal(stages.length, 5)
+  assert.equal(stages.length, 6)
   assert.deepEqual(stages, [
     'pnpm test:docs',
     'node scripts/naming-gate.mjs',
     'pnpm gate:boundary',
+    'pnpm gate:keybindings',
     'pnpm audit --prod --audit-level high',
     'pnpm pack:release',
   ])

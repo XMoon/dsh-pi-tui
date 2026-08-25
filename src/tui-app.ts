@@ -1458,7 +1458,7 @@ function deepFreeze(value: unknown): unknown {
  * `undefined` — a card that is ALWAYS expanded (regular Focus
  * non-Thinking secondaries, no hint needed). Each disclosure has exactly
  * one bulk owner: Ctrl+O never touches Thinking. */
-type ExpandHint = 'click' | 'ctrl+o' | 'alt+t' | undefined
+type ExpandHint = 'click' | 'fold' | 'thinking' | undefined
 
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
@@ -6492,15 +6492,17 @@ export class TuiApp {
     const insideFocusSecondary = 'turn' in message
       && this.isInsideExpandedFocus(message, boundary)
       && isFocusSecondaryDisclosure(message)
-    // The fold-hint owner (plan §12): Thinking is Alt+T-owned in regular
-    // and click-owned in fullscreen; fullscreen Focus SECONDARY cards are
-    // click-owned; every other fold is Ctrl+O-owned. A regular Focus
-    // non-Thinking secondary is ALWAYS full — no hint.
+    // The fold-hint OWNER (plan §12): Thinking is thinking-owned in
+    // regular and click-owned in fullscreen; fullscreen Focus SECONDARY
+    // cards are click-owned; every other fold is fold-owned. A regular
+    // Focus non-Thinking secondary is ALWAYS full — no hint. The owner is
+    // SEMANTIC (never a physical key — the rendered copy resolves the
+    // EFFECTIVE key through the keymap).
     const expandHint: ExpandHint = message.kind === 'thinking'
-      ? (this.fullscreen !== undefined ? 'click' : 'alt+t')
+      ? (this.fullscreen !== undefined ? 'click' : 'thinking')
       : insideFocusSecondary
         ? (this.fullscreen !== undefined ? 'click' : undefined)
-        : 'ctrl+o'
+        : 'fold'
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
     // per-card override AND for any REGULAR Focus expanded root (the
     // surface contract — no mouse, so a capped diff would be unreadable);
@@ -7205,7 +7207,7 @@ export class TuiApp {
       rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
     }
     if (preview.hidden > 0) {
-      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running, preview.partial, this.expandHint(false))}`))
+      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running, preview.partial, this.expandHint('fold'))}`))
     }
     card.addChild(new Text(rows.join('\n'), 0, 0))
   }
@@ -8534,12 +8536,12 @@ export class TuiApp {
 
   /** The fold-hint verb of one collapsible card: 'click' for the
    * click-expandable owners, else the EFFECTIVE key of the owning action
-   * ('alt+t' → the Thinking bulk owner, 'ctrl+o' → the expand master; a
+   * ('thinking' → the Thinking bulk owner, 'fold' → the expand master; a
    * user remap updates every `to expand` hint; a disabled action falls
    * back to a neutral phrase instead of a stale default). */
   private expandHint(hint: ExpandHint): string {
     if (hint === 'click') return 'click'
-    if (hint === 'alt+t') {
+    if (hint === 'thinking') {
       const thinking = this.keybindings.keyHint('app.transcript.toggleThinking')
       return thinking === '' ? 'the thinking key' : thinking.toLowerCase()
     }
