@@ -35,9 +35,12 @@ test('thinking and tool entries render folded by default', async () => {
   const { vt, app } = startApp()
   app.setTranscript(transcript)
   const view = await viewport(vt)
-  assert.ok(view.includes('🐳'), `folded thinking marker missing:\n${view}`)
-  assert.ok(view.includes('ctrl+o to'), `expand hint missing:\n${view}`)
-  assert.ok(!view.includes('Line three'), `thinking body leaked:\n${view}`)
+  assert.ok(view.includes('▸ Thinking'), `folded thinking title missing:\n${view}`)
+  assert.ok(view.includes('alt+t to'), `expand hint missing:\n${view}`)
+  // The compact card shows ONLY the latest reasoning line (the preview) —
+  // the earlier body lines must not leak.
+  assert.ok(view.includes('Line three'), `latest-line preview missing:\n${view}`)
+  assert.ok(!view.includes('Line two'), `thinking body leaked:\n${view}`)
   assert.ok(view.includes('Bash ls [ok]'), `tool header missing:\n${view}`)
   assert.ok(!view.includes('more.txt'), `tool result leaked:\n${view}`)
 })
@@ -91,18 +94,24 @@ test('folded edit and write cards render a few diff lines by default', async () 
   assert.ok(view.includes('more changes hidden (ctrl+o to expand)'), `write cap marker missing:\n${view}`)
 })
 
-test('ctrl+o expands the recent turns collapsible entries', async () => {
+test('ctrl+o expands the recent turns collapsible entries but NOT thinking', async () => {
   const { vt, app } = startApp()
   app.setTranscript(transcript)
   await viewport(vt)
   vt.sendInput('\x0f') // ctrl+o
   const view = await viewport(vt)
-  assert.ok(view.includes('Line three'), `thinking body missing after expand:\n${view}`)
   assert.ok(view.includes('more.txt'), `tool result missing after expand:\n${view}`)
+  // Thinking has its own disclosure owner: Ctrl+O must NOT expand it.
+  assert.ok(!view.includes('Line two'), `thinking body must stay folded under Ctrl+O:\n${view}`)
+  assert.ok(view.includes('alt+t to'), 'the compact Thinking hint stays under Ctrl+O')
   // Toggle back collapses again.
   vt.sendInput('\x0f')
   const collapsed = await viewport(vt)
-  assert.ok(!collapsed.includes('Line three'), `still expanded after toggle:\n${collapsed}`)
+  assert.ok(!collapsed.includes('more.txt'), `still expanded after toggle:\n${collapsed}`)
+  // Alt+T expands Thinking (its own bulk owner).
+  vt.sendInput('\x1bt')
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('Line two'), `Alt+T must expand the thinking body:\n${expanded}`)
 })
 
 test('older turns stay folded when recent ones expand', async () => {
@@ -111,14 +120,17 @@ test('older turns stay folded when recent ones expand', async () => {
     { kind: 'tool', turn: 0, name: 'fs', args: '', result: 'oldest result body\nline two\nline three\nhidden-line-4', status: 'ok' },
     { kind: 'tool', turn: 1, name: 'fs', args: '', result: 'older result body', status: 'ok' },
     { kind: 'tool', turn: 2, name: 'fs', args: '', result: 'old result body', status: 'ok' },
-    { kind: 'thinking', turn: 3, text: 'recent thinking body' },
+    { kind: 'thinking', turn: 3, text: 'recent thinking body\nrecent reasoning detail' },
     { kind: 'tool', turn: 3, name: 'bash', args: '', result: 'recent result body', status: 'ok' },
   ]
   app.setTranscript(older)
   await viewport(vt)
   vt.sendInput('\x0f')
   const view = await viewport(vt)
-  assert.ok(view.includes('recent thinking body'), `recent thinking not expanded:\n${view}`)
+  // The recent TOOL expands; the recent THINKING stays compact (only its
+  // latest-line preview) — Ctrl+O is not its disclosure owner.
+  assert.ok(view.includes('recent reasoning detail'), `recent thinking preview missing:\n${view}`)
+  assert.ok(!view.includes('recent thinking body'), `recent thinking must NOT expand under Ctrl+O:\n${view}`)
   assert.ok(view.includes('recent result body'), `recent tool not expanded:\n${view}`)
   assert.ok(!view.includes('hidden-line-4'), `old turn leaked expanded:\n${view}`)
 })
@@ -151,25 +163,26 @@ test('kitty-protocol Ctrl+O fires once per press (release/repeat do not toggle)'
 })
 
 
-test('running thinking folds to the latest line and settles to the first line', async () => {
+test('compact thinking preview always follows the latest line (running and settled)', async () => {
   const { vt, app } = startApp()
-  // While the step streams, the folded row follows the LATEST reasoning line.
+  // While the step streams, the compact preview follows the LATEST line.
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'first line\nsecond line\nlatest line', running: true }])
   const running = await viewport(vt)
   assert.ok(running.includes('latest line'), `latest line missing while running:\n${running}`)
   assert.ok(!running.includes('first line'), `stale first line shown while running:\n${running}`)
-  // Once settled (assistant/message or turn/end), the row shows the FIRST line.
+  // Once settled the preview KEEPS the latest line (the unified contract:
+  // the newest thought expresses the current direction — plan §4.1).
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'first line\nsecond line\nlatest line' }])
   const settled = await viewport(vt)
-  assert.ok(settled.includes('first line'), `first line missing after settle:\n${settled}`)
-  assert.ok(!settled.includes('latest line'), `latest line still shown after settle:\n${settled}`)
+  assert.ok(settled.includes('latest line'), `latest line missing after settle:\n${settled}`)
+  assert.ok(!settled.includes('first line'), `a stale first line must not replace the preview:\n${settled}`)
 })
 
-test('folded thinking holds exactly two content rows plus a hint and never wraps', async () => {
+test('compact thinking holds the title, the latest preview and the hint in exactly three rows and never wraps', async () => {
   const vt = new VirtualTerminal(40, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
-  // Three long lines: running shows the LAST two (truncated), settled the first two.
+  // Three long lines: the compact card shows the LATEST line (truncated).
   app.setTranscript([{
     kind: 'thinking', turn: 0,
     text: `${'a'.repeat(90)}\n${'b'.repeat(90)}\n${'c'.repeat(90)}`,
@@ -177,42 +190,42 @@ test('folded thinking holds exactly two content rows plus a hint and never wraps
   }])
   await vt.waitForRender()
   let lines = vt.getViewport()
-  let start = lines.findIndex(line => line.includes('🐳'))
+  let start = lines.findIndex(line => line.includes('▸ Thinking'))
   assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
   let block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `running block must be exactly 3 rows:\n${block.join('\n')}`)
   for (const line of block) {
     assert.ok(visibleWidth(line) <= 40, `folded row exceeds 40 cols: ${JSON.stringify(line)}`)
   }
-  assert.ok(block[0]!.includes('bbb'), `latest reasoning missing on row 1:\n${block[0]}`)
-  assert.ok(block[1]!.includes('ccc'), `latest reasoning missing on row 2:\n${block[1]}`)
-  assert.ok(block[2]!.includes('ctrl+o'), `hint row missing:\n${block[2]}`)
-  // Settled: same three-row geometry, first two lines, hint keeps its height.
+  assert.ok(block[1]!.includes('ccc'), `latest reasoning missing on the preview row:\n${block[1]}`)
+  assert.ok(!block[1]!.includes('aaa'), `a stale first line must not leak into the preview:\n${block[1]}`)
+  assert.ok(block[2]!.includes('alt+t'), `hint row missing:\n${block[2]}`)
+  // Settled: the same three-row geometry, still the latest line.
   app.setTranscript([{
     kind: 'thinking', turn: 0,
     text: `${'a'.repeat(90)}\n${'b'.repeat(90)}\n${'c'.repeat(90)}`,
   }])
   await vt.waitForRender()
   lines = vt.getViewport()
-  start = lines.findIndex(line => line.includes('🐳'))
+  start = lines.findIndex(line => line.includes('▸ Thinking'))
   block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `settled block must be exactly 3 rows:\n${block.join('\n')}`)
-  assert.ok(block[0]!.includes('aaa'), `first line missing after settle:\n${block[0]}`)
-  assert.ok(!block[0]!.includes('ccc'), `latest line leaked after settle:\n${block[0]}`)
-  assert.ok(block[2]!.includes('1 more'), `remaining hint missing:\n${block[2]}`)
+  assert.ok(block[1]!.includes('ccc'), `latest line missing after settle:\n${block[1]}`)
+  assert.ok(!block[1]!.includes('aaa'), `a stale first line must not leak after settle:\n${block[1]}`)
+  assert.ok(block[2]!.includes('alt+t'), `hint row missing after settle:\n${block[2]}`)
   app.stop()
 })
 
-test('folded thinking keeps its three-row height even with little content', async () => {
+test('thinking keeps its three-row height even with little content', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'only one line' }])
   const view = await viewport(vt)
   const lines = view.split('\n')
-  const start = lines.findIndex(line => line.includes('🐳'))
+  const start = lines.findIndex(line => line.includes('▸ Thinking'))
   assert.ok(start >= 0, `thinking block missing:\n${view}`)
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `short block must stay 3 rows:\n${block.join('\n')}`)
-  assert.ok(block[2]!.includes('ctrl+o'), `hint row missing:\n${block[2]}`)
+  assert.ok(block[2]!.includes('alt+t'), `hint row missing:\n${block[2]}`)
 })
 
 test('renderTranscriptMarkdown projects image blocks (review finding 4)', () => {

@@ -25,7 +25,7 @@ Pi API copy.
 | `theme` / `getAllThemes` / `getTheme` / `setTheme` | theme registry (`registerTheme` + `advanced.host` theme query/select) | Stable/Advanced | M5/Phase 4 |
 | `getToolsExpanded` / `setToolsExpanded` | `advanced.host.setToolsExpanded` | Advanced | Phase 4 |
 | `setStatus` / `setWorkingMessage` / `setWorkingVisible` / `setWorkingIndicator` | `advanced.host.setWorkingMessage` (working override) | Advanced | Phase 4 |
-| `setHiddenThinkingLabel` | thinking fold (`alt+t` host verb) — no plugin override yet | — | deferred |
+| `setThinkingDetail` | thinking detail (`alt+t` host verb, the unified disclosure model) — no plugin override yet | — | deferred |
 | `setTitle` | `advanced.host.setTitle` (title override) | Advanced | Phase 4 |
 | `onTerminalInput` | `unstable.input.captureRaw` (raw input interception) | Unstable | Phase 3 |
 

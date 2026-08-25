@@ -1271,6 +1271,15 @@ function deepFreeze(value: unknown): unknown {
   return Object.freeze(value)
 }
 
+/** The fold-hint owner of one collapsible card (the thinking-disclosure
+ * redesign, plan §12): `click` — fullscreen mouse-owned secondary cards
+ * (Thinking included); `ctrl+o` — the ordinary keyboard master
+ * (tool/system/compaction); `alt+t` — the Thinking bulk owner (regular);
+ * `undefined` — a card that is ALWAYS expanded (regular Focus
+ * non-Thinking secondaries, no hint needed). Each disclosure has exactly
+ * one bulk owner: Ctrl+O never touches Thinking. */
+type ExpandHint = 'click' | 'ctrl+o' | 'alt+t' | undefined
+
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
@@ -1281,13 +1290,14 @@ interface MessageComponentEntry {
   /** Whether the entry renders expanded (boundary + click override). */
   expanded: boolean
   /** The full-reveal flag (tool bodies / large diffs): per-card override
-   * OR any REGULAR Focus expanded root. Part of the cache identity — a
+   * OR any REGULAR expanded root. Part of the cache identity — a
    * Focus toggle must rebuild the diff presentation. */
   fullReveal: boolean
-  /** The fold-hint owner: click-owned fullscreen secondaries read
-   * `(click to expand)`, everything else `(ctrl+o to expand)`. Part of
-   * the cache identity — a surface switch must not reuse the old hint. */
-  clickHint: boolean
+  /** The fold-hint owner: click (fullscreen mouse-owned), ctrl+o (the
+   * keyboard master), alt+t (the Thinking bulk owner) or undefined
+   * (regular Focus secondaries are always full). Part of the cache
+   * identity — a surface switch must not reuse the old hint. */
+  expandHint: ExpandHint
   /** The values the component was built from, for O(1) staleness checks:
    * text-bearing kinds compare the CURRENT text object — an unchanged
    * message keeps the same string instance, so the check is O(1) and
@@ -1375,15 +1385,14 @@ export class TuiApp {
    * focusExpandedTurns). Fullscreen Focus disclosures are mouse-owned:
    * Ctrl+O does not pierce them. */
   private toolOutputExpanded = false
-  /** Alt+T: hide thinking entries entirely (they stay in the log). */
-  private hideThinking = false
-  /** Focus Mode's OWN Thinking visibility (Alt+T while Focus is on):
-   * whether Thinking participates in the Focus timeline. DEFAULT HIDDEN —
-   * an expanded Thought reveals the non-thinking process; Alt+T shows the
-   * reasoning. Independent of the ordinary `hideThinking` preference (the
-   * two surfaces never pollute each other). Reset to hidden whenever Focus
-   * turns ON; kept across session switches (a runtime UI preference). */
-  private focusThinkingVisible = false
+  /** Alt+T: the ONE Thinking disclosure preference — whether Thinking
+   * blocks render FULL (true) or COMPACT with a preview (false). Thinking
+   * is never hidden: a block exists whenever the model produced reasoning
+   * and the current projection contains it. Shared by Focus ON/OFF and
+   * both surfaces; never reset by Focus, fullscreen or session switches
+   * (a runtime UI preference, plan §5.3). Per-message overrides (fullscreen
+   * clicks, search reveals) layer on top of this bulk default. */
+  private thinkingExpanded = false
   /** The latest todo/write snapshot; rendered as a panel when visible. */
   private todoItems: readonly TodoItem[] = []
   /** Ctrl+T: whether the todo panel between transcript and editor is shown. */
@@ -2495,15 +2504,11 @@ export class TuiApp {
       return { consume: true }
     }
     if (matchesKey(data, 'alt+t')) {
-      // Hide/show thinking entries independently of the Ctrl+O fold. In
-      // Focus Mode the toggle drives the FOCUS Thinking visibility
-      // (default hidden — whether Thinking participates in the timeline);
-      // otherwise the ordinary hideThinking preference.
-      if (this.focusModeEnabled) {
-        this.toggleFocusThinkingVisible()
-      } else {
-        this.toggleThinkingHidden()
-      }
+      // Alt+T = the Thinking DETAIL bulk owner (never hide/show): every
+      // Thinking block collapses or expands together, Focus ON/OFF and
+      // both surfaces alike. Per-message overrides are cleared first so
+      // the result is predictable (plan §9).
+      this.toggleThinkingExpanded()
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+s')) {
@@ -3051,6 +3056,13 @@ export class TuiApp {
       this.fullscreen = undefined
       this.fullscreenScroll = undefined
       this.tui.start()
+      // Regular never re-reads a fullscreen per-card state: drop the
+      // Thinking overrides a fullscreen click (or a search reveal)
+      // created, so returning to fullscreen later starts from the bulk
+      // preference again (plan §6.2's preferred cleanup — the regular
+      // surface's only Thinking state is the bulk preference; search
+      // reveals set fresh overrides as needed).
+      this.clearThinkingExpansionOverrides()
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
       // the terminal buffer. Force a full repaint so the regular surface
@@ -3233,10 +3245,10 @@ export class TuiApp {
   setFocusMode(enabled: boolean): void {
     if (this.focusModeEnabled === enabled) return
     this.focusModeEnabled = enabled
-    // Entering Focus resets the Focus Thinking visibility to the default
-    // (hidden): the user opted into the Focus surface, not the ordinary
-    // hideThinking preference. Leaving Focus never touches hideThinking.
-    if (enabled) this.focusThinkingVisible = false
+    // Focus is a transcript PROJECTION, never a Thinking preference
+    // owner: switching Focus ON/OFF leaves the shared thinkingExpanded
+    // bulk preference untouched (plan §17). The rebuild re-derives the
+    // projection for the new mode.
     this.rebuildMessages()
     this.requestRender()
   }
@@ -3268,8 +3280,11 @@ export class TuiApp {
   /** Reveal one search-matched message: open its owner Thought (Focus on)
    * and full-reveal the matched SECONDARY card, so the hit is visible
    * even though the FULLSCREEN process timeline defaults to compact (plan
-   * §28 — regular mode full-reveals the whole process anyway). The
-   * search caller owns the jump target — no anchor. */
+   * §28 — regular mode full-reveals the whole process anyway). A hit
+   * inside Thinking full-reveals ONLY that block via its per-message
+   * override — the thinkingExpanded bulk preference is never touched by
+   * search (plan §14). The search caller owns the jump target — no
+   * anchor. */
   revealSearchMatch(message: TranscriptMessage): void {
     const turn = 'turn' in message ? message.turn : undefined
     if (turn !== undefined && this.focusModeEnabled) {
@@ -3277,9 +3292,6 @@ export class TuiApp {
     }
     if (isFocusSecondaryDisclosure(message)) {
       this.expandedOverride.set(message, true)
-      // A hit inside Thinking must also reveal the Thinking category
-      // (default hidden) or the matched reasoning would stay invisible.
-      if (message.kind === 'thinking') this.focusThinkingVisible = true
     }
     this.rebuildMessages()
   }
@@ -3475,18 +3487,6 @@ export class TuiApp {
     return projectFocus(this.messages, this.turnActivities, projectionExpanded, this.focusModeEnabled)
   }
 
-  /** Whether one projected Thinking block is hidden: the Focus category
-   * preference (focusThinkingVisible — default hidden, Alt+T shows it)
-   * while Focus is on; the ordinary hideThinking preference otherwise.
-   * Root projection and Thinking visibility are DECOUPLED — a collapsed
-   * Focus turn hides its process via projectFocus's outer gate, and an
-   * expanded turn shows Thinking only when the user asked for it. */
-  private shouldHideThinkingBlock(block: FocusProjectedBlock): boolean {
-    if (block.kind !== 'message' || block.message.kind !== 'thinking') return false
-    if (this.focusModeEnabled) return !this.focusThinkingVisible
-    return this.hideThinking
-  }
-
   /** The precomputed Focus Tool-line display for one activity: presenter-
    * first, static fallback second (plan §38/§9.4). The FocusActivityComponent
    * stays a pure renderer — the presentation bridge lives here. */
@@ -3549,7 +3549,7 @@ export class TuiApp {
     // row is charged to the preceding block's height, keeping the fullscreen
     // click hit-testing aligned with the rendered layout.
     const blocks: FocusProjectedBlock[] = [
-      ...this.projectedBlocks(projectionExpanded).filter(block => !this.shouldHideThinkingBlock(block)),
+      ...this.projectedBlocks(projectionExpanded),
       ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
     ]
     blocks.forEach((block, index) => {
@@ -3704,7 +3704,7 @@ export class TuiApp {
     // activity block — review finding).
     const projectionExpanded = this.focusProjectionExpandedTurns()
     const blocks: FocusProjectedBlock[] = [
-      ...this.projectedBlocks(projectionExpanded).filter(block => !this.shouldHideThinkingBlock(block)),
+      ...this.projectedBlocks(projectionExpanded),
       ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
     ]
     const rows: Array<{
@@ -4027,10 +4027,22 @@ export class TuiApp {
 
   /** Toggle one collapsible message's individual expansion (mouse click).
    * The same foldable set as the render rule (plan §32 — never two
-   * different sets): thinking / tool / system / compaction. */
+   * different sets): thinking / tool / system / compaction. A THINKING
+   * click flips the card's EFFECTIVE state, not just the override: under
+   * a bulk-full preference a click collapses only that card (override
+   * false), under a bulk-compact preference it expands only that card
+   * (override true) — the per-card override always expresses the
+   * opposite of the effective state (plan §3.5/E4). */
   private toggleMessageExpanded(message: TranscriptMessage): void {
     if (!isFocusSecondaryDisclosure(message)) return
-    if (this.expandedOverride.get(message) === true) {
+    if (message.kind === 'thinking') {
+      if (this.effectiveThinkingExpanded(message)) {
+        if (this.thinkingExpanded) this.expandedOverride.set(message, false)
+        else this.expandedOverride.delete(message)
+      } else {
+        this.expandedOverride.set(message, true)
+      }
+    } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
     } else {
       this.expandedOverride.set(message, true)
@@ -4427,7 +4439,7 @@ export class TuiApp {
       || matchesKey(data, 'ctrl+d')          // exit
       || matchesKey(data, 'ctrl+g')          // external editor (main draft)
       || matchesKey(data, 'ctrl+t')          // todo panel
-      || matchesKey(data, 'alt+t')           // thinking fold
+      || matchesKey(data, 'alt+t')           // thinking detail bulk toggle
       || matchesKey(data, 'ctrl+v')          // clipboard image intake (main draft store)
   }
 
@@ -5501,15 +5513,34 @@ export class TuiApp {
     return Number.isFinite(boundary) && turn >= boundary
   }
 
+  /** The effective expansion of one Thinking block (the unified disclosure
+   * model, plan §6/§7): the per-message override wins when present — in
+   * FULLSCREEN that is a click or a search reveal; in REGULAR it is only
+   * ever a search reveal, because entering regular clears every
+   * fullscreen click override (see setFullscreen), so a stale per-card
+   * state can never surface there. Otherwise the shared bulk preference.
+   * Focus ON/OFF is irrelevant: there is exactly one Thinking detail
+   * state for the whole app. */
+  private effectiveThinkingExpanded(message: Extract<TranscriptMessage, { kind: 'thinking' }>): boolean {
+    const override = this.expandedOverride.get(message)
+    if (override !== undefined) return override
+    return this.thinkingExpanded
+  }
+
   /** The effective expansion of one foldable message (plan §9/§33),
-   * SURFACE-ADAPTIVE: inside an expanded Focus Thought a SECONDARY card
-   * is compact unless its per-card override says otherwise in FULLSCREEN
-   * (the mouse fine-inspection mode), while in REGULAR ANY expanded root
-   * — Ctrl+O-derived or manually revealed — full-reveals its
-   * non-Thinking process (no mouse, so no dead compact affordances) and
-   * Thinking follows Alt+T (hidden or full). Every other context keeps
-   * the existing rule. */
+   * SURFACE-ADAPTIVE: Thinking is its OWN disclosure — a compact/full
+   * detail level controlled by Alt+T (bulk) plus per-card overrides
+   * (fullscreen clicks, search reveals); Ctrl+O never touches it. Inside
+   * an expanded Focus Thought a NON-Thinking SECONDARY card is compact
+   * unless its per-card override says otherwise in FULLSCREEN (the mouse
+   * fine-inspection mode), while in REGULAR ANY expanded root —
+   * Ctrl+O-derived or manually revealed — full-reveals its non-Thinking
+   * process (no mouse, so no dead compact affordances). Every other
+   * context keeps the existing rule. */
   private effectiveMessageExpanded(message: TranscriptMessage, boundary: number): boolean {
+    if (message.kind === 'thinking') {
+      return this.effectiveThinkingExpanded(message)
+    }
     if ('turn' in message && this.isInsideExpandedFocus(message, boundary) && isFocusSecondaryDisclosure(message)) {
       if (this.fullscreen !== undefined) {
         // Fullscreen: explicit secondary disclosure only.
@@ -5517,10 +5548,10 @@ export class TuiApp {
       }
       // Regular: no mouse, so no compact secondary affordance — ANY
       // expanded Focus root (Ctrl+O-derived OR manually revealed /
-      // search / viewer restore) full-reveals its non-Thinking process,
-      // and Thinking (when visible via Alt+T) renders FULL. There is
-      // never a dead `(ctrl+o to expand)` card that Ctrl+O cannot open.
-      return message.kind !== 'thinking' || this.focusThinkingVisible
+      // search / viewer restore) full-reveals its non-Thinking process.
+      // There is never a dead `(ctrl+o to expand)` card that Ctrl+O
+      // cannot open.
+      return true
     }
     return this.existingMessageExpandedRule(message, boundary)
   }
@@ -5528,12 +5559,14 @@ export class TuiApp {
   /** The pre-secondary expansion rule: LOCAL `!`/`!!` shell cards read the
    * master Ctrl+O switch (never the unbounded turn marker — a long log
    * would fill the TUI); every other foldable card reads the recent-turn
-   * boundary or its per-card override. */
+   * boundary or its per-card override. Thinking is NOT in the foldable
+   * set here: Ctrl+O owns tool/system/compaction detail, Alt+T owns
+   * Thinking detail (plan §2.4/§18). */
   private existingMessageExpandedRule(message: TranscriptMessage, boundary: number): boolean {
     if (isLocalShellCard(message)) {
       return this.toolOutputExpanded || this.expandedOverride.get(message) === true
     }
-    return (message.kind === 'thinking' || message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
+    return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
       && (message.turn >= boundary || this.expandedOverride.get(message) === true)
   }
 
@@ -5549,30 +5582,37 @@ export class TuiApp {
    */
   /** The surface-adaptive render state of one foldable message: the
    * effective expansion, the full-reveal flag (tool bodies / large
-   * diffs) and the fold-hint owner (click vs ctrl+o). Computed ONCE per
-   * componentForMessage call and PART OF THE RENDER-CACHE IDENTITY — a
-   * Focus toggle or a surface switch must rebuild the component when any
-   * of these change, even when the message content and the boundary are
-   * unchanged (review finding: fullReveal/clickHint were not cached, so
-   * `Ctrl+O ON → /focus on` reused the capped diff component). */
+   * diffs) and the fold-hint owner (click / ctrl+o / alt+t). Computed
+   * ONCE per componentForMessage call and PART OF THE RENDER-CACHE
+   * IDENTITY — a Focus toggle or a surface switch must rebuild the
+   * component when any of these change, even when the message content
+   * and the boundary are unchanged (review finding: fullReveal and the
+   * fold-hint owner were not cached, so `Ctrl+O ON → /focus on` reused
+   * the capped diff component). */
   private messageRenderState(
     message: TranscriptMessage,
     boundary: number,
-  ): { expanded: boolean; fullReveal: boolean; clickHint: boolean } {
+  ): { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint } {
     const expanded = this.effectiveMessageExpanded(message, boundary)
     const insideFocusSecondary = 'turn' in message
       && this.isInsideExpandedFocus(message, boundary)
       && isFocusSecondaryDisclosure(message)
-    // Fullscreen SECONDARY cards are click-owned: their fold hint reads
-    // `click to expand`; every other fold is keyboard-owned.
-    const clickHint = this.fullscreen !== undefined && insideFocusSecondary
+    // The fold-hint owner (plan §12): Thinking is Alt+T-owned in regular
+    // and click-owned in fullscreen; fullscreen Focus SECONDARY cards are
+    // click-owned; every other fold is Ctrl+O-owned. A regular Focus
+    // non-Thinking secondary is ALWAYS full — no hint.
+    const expandHint: ExpandHint = message.kind === 'thinking'
+      ? (this.fullscreen !== undefined ? 'click' : 'alt+t')
+      : insideFocusSecondary
+        ? (this.fullscreen !== undefined ? 'click' : undefined)
+        : 'ctrl+o'
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
     // per-card override AND for any REGULAR Focus expanded root (the
     // surface contract — no mouse, so a capped diff would be unreadable);
     // fullscreen keeps the per-card override semantics.
     const fullReveal = this.expandedOverride.get(message) === true
       || (this.fullscreen === undefined && insideFocusSecondary)
-    return { expanded, fullReveal, clickHint }
+    return { expanded, fullReveal, expandHint }
   }
 
   private componentForMessage(message: TranscriptMessage, boundary: number): Component {
@@ -5603,7 +5643,7 @@ export class TuiApp {
     if (entry.boundary !== boundary || entry.themeRev !== this.themeRevision
       || entry.expanded !== state.expanded
       || entry.fullReveal !== state.fullReveal
-      || entry.clickHint !== state.clickHint
+      || entry.expandHint !== state.expandHint
       || rendererRevisionChanged
       || this.componentStale(entry, message)) {
       // Dispose the OLD component (a thumbnail's loader subscription) so a
@@ -5622,7 +5662,7 @@ export class TuiApp {
       entry.themeRev = rebuilt.themeRev
       entry.expanded = rebuilt.expanded
       entry.fullReveal = rebuilt.fullReveal
-      entry.clickHint = rebuilt.clickHint
+      entry.expandHint = rebuilt.expandHint
       entry.rendererId = rebuilt.rendererId
       entry.rendererRevision = rebuilt.rendererRevision
       this.captureComponentState(entry, message)
@@ -5642,7 +5682,7 @@ export class TuiApp {
   private buildMessage(
     message: TranscriptMessage,
     boundary: number,
-    state: { expanded: boolean; fullReveal: boolean; clickHint: boolean },
+    state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint },
   ): MessageComponentEntry {
     const registry = this.renderers
     const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, state.expanded)
@@ -5651,13 +5691,13 @@ export class TuiApp {
       // renderer: fullscreen secondaries default compact (per-card
       // override full-reveals), regular expanded roots full-reveal.
       component: rendered === undefined
-        ? this.renderMessage(message, state.expanded, state.clickHint, state.fullReveal)
+        ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal)
         : rendered.component,
       boundary,
       themeRev: this.themeRevision,
       expanded: state.expanded,
       fullReveal: state.fullReveal,
-      clickHint: state.clickHint,
+      expandHint: state.expandHint,
       rendererId: rendered?.rendererId,
       rendererRevision: registry === undefined ? undefined : registry.snapshot().revision,
     }
@@ -5806,7 +5846,7 @@ export class TuiApp {
     return container
   }
 
-  private renderMessage(message: TranscriptMessage, expanded: boolean, clickHint: boolean, fullReveal: boolean): Component {
+  private renderMessage(message: TranscriptMessage, expanded: boolean, expandHint: ExpandHint, fullReveal: boolean): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
       // `--dsw-specific-bubble` background block) with a brand-blue ❯ —
@@ -5836,35 +5876,33 @@ export class TuiApp {
       return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), `${color.primary('🐋')}  `)
     }
     if (message.kind === 'thinking') {
-      if (expanded) {
-        // Expanded thinking stays dim+italic so reasoning never reads like
-        // the assistant's actual output (web parity: a distinct style).
-        return new Text(color.textDimItalic(`🐳  ${message.text}`), 0, 0)
+      // The unified Thinking disclosure card (plan §4/§13): a title row
+      // with the ▸/▾ disclosure marker, then either the COMPACT preview —
+      // the LATEST reasoning line (the streaming summary: the newest
+      // thought expresses the current direction) truncated to the width,
+      // plus the owner hint — or the FULL reasoning body (dim+italic so
+      // reasoning never reads like the assistant's actual output; the
+      // compact preview is never repeated next to the full body). An
+      // empty entry renders the bare title — never a fake "No reasoning"
+      // row (plan §13.3). The compact geometry (title + preview + hint)
+      // is height-stable while reasoning streams.
+      const head = color.textDim(`${expanded ? '▾' : '▸'} Thinking`)
+      const previewLine = latestLine(message.text)
+      if (!expanded && previewLine === '') {
+        // An existing block with no text yet (a very short streaming /
+        // replay edge): the bare title — never a fake "No reasoning" row
+        // (plan §13.3).
+        return new Text(head, 0, 0)
       }
-      // Folded: exactly two content rows plus the expand hint, so the block's
-      // height is stable while reasoning streams (no per-frame jump). While a
-      // step streams the rows follow the LATEST reasoning lines (the Web's
-      // running summary); once settled they show the FIRST lines (settled
-      // summary). Every row truncates to the terminal width, so a folded
-      // block never wraps.
-      const lines = message.text.split('\n').filter(line => line !== '')
-      const shown = message.running === true ? lines.slice(-2) : lines.slice(0, 2)
-      const prefix = '🐳  '
-      const prefixWidth = visibleWidth(prefix)
-      const contentWidth = Math.max(1, this.terminal.columns - prefixWidth)
-      const rows = Array.from({ length: 2 }, (_, index) => {
-        const text = shown[index] ?? ''
-        const body = text === '' ? '' : truncateToWidth(text, contentWidth, '…')
-        const pad = index === 0 ? prefix : ' '.repeat(prefixWidth)
-        return color.textDimItalic(pad + body)
-      })
-      const remaining = lines.length - 2
-      const hintVerb = clickHint ? 'click' : 'ctrl+o'
-      const hint = remaining > 0
-        ? `... (${remaining} more lines, ${hintVerb} to expand)`
-        : `(${hintVerb} to expand)`
-      rows.push(color.textDim(`${' '.repeat(prefixWidth)}${truncateToWidth(hint, contentWidth, '…')}`))
-      return new Text(rows.join('\n'), 0, 0)
+      const hintVerb = expandHint ?? 'ctrl+o'
+      if (!expanded) {
+        const rows = [head]
+        rows.push(color.textDimItalic(`  ${truncateToWidth(previewLine, Math.max(1, this.terminal.columns - 2), '…')}`))
+        rows.push(color.textDim(`  (${hintVerb} to expand)`))
+        return new Text(rows.join('\n'), 0, 0)
+      }
+      const body = message.text === '' ? '' : message.text.split('\n').map(line => `  ${line}`).join('\n')
+      return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
     }
     if (message.kind === 'system') {
       // Labeled entries are context injections: the row names the producer
@@ -5904,7 +5942,7 @@ export class TuiApp {
           // Folded rows truncate to one line: a long label/summary must not
           // wrap the context row (same rule as folded thinking).
           row.addChild(new Text(truncateToWidth(
-            color.textMuted(`${emoji}  Context injection ${message.label}${summary} (${clickHint ? 'click' : 'ctrl+o'} to expand)`),
+            color.textMuted(`${emoji}  Context injection ${message.label}${summary} (${expandHint ?? 'ctrl+o'} to expand)`),
             this.terminal.columns,
             '…',
           ), 0, 0))
@@ -5914,7 +5952,7 @@ export class TuiApp {
       const unwrapped = systemContextBody(message.text)?.join('\n') ?? message.text
       const text = expanded
         ? `${color.textMuted('§')} ${color.textDim(unwrapped)}`
-        : color.textMuted(`§ ${truncateToWidth(preview(unwrapped, 2), Math.max(1, this.terminal.columns - 22), '…')} (${clickHint ? 'click' : 'ctrl+o'} to expand)`)
+        : color.textMuted(`§ ${truncateToWidth(preview(unwrapped, 2), Math.max(1, this.terminal.columns - 22), '…')} (${expandHint ?? 'ctrl+o'} to expand)`)
       return new Text(text, 0, 0)
     }
     if (message.kind === 'summary') {
@@ -5945,7 +5983,7 @@ export class TuiApp {
       } else {
         const summary = counts === '' ? '' : counts
         card.addChild(new Text(truncateToWidth(
-          color.textDim(`${summary}${summary === '' ? '' : ' '}(${clickHint ? 'click' : 'ctrl+o'} to expand)`),
+          color.textDim(`${summary}${summary === '' ? '' : ' '}(${expandHint ?? 'ctrl+o'} to expand)`),
           this.terminal.columns,
           '…',
         ), 0, 0))
@@ -6075,7 +6113,7 @@ export class TuiApp {
           rows.push(`${indent}${' '.repeat(visibleWidth(prompt))}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
         }
         if (commandLines.length > FOLDED_COMMAND_LINES) {
-          rows.push(color.textDim(`${indent}… ${commandLines.length - FOLDED_COMMAND_LINES} more command lines (${clickHint ? 'click' : 'ctrl+o'} to expand)`))
+          rows.push(color.textDim(`${indent}… ${commandLines.length - FOLDED_COMMAND_LINES} more command lines (${expandHint ?? 'ctrl+o'} to expand)`))
         }
         // The result preview gets its own row so the command never shares a
         // line with output (kimi ShellExecution layout).
@@ -6086,7 +6124,7 @@ export class TuiApp {
         rows.push(truncateToWidth(`${headWithPreview}`, this.terminal.columns, '…'))
         for (const line of renderDiffView(callPreview.diffs, this.workspaceRoot, {
           maxLines: FOLDED_DIFF_LINES,
-          expandHint: `${clickHint ? 'click' : 'ctrl+o'} to expand`,
+          expandHint: `${expandHint ?? 'ctrl+o'} to expand`,
         })) {
           rows.push(`  ${line}`)
         }
@@ -6925,21 +6963,43 @@ export class TuiApp {
     this.todoPanel.setText([border, title, ...lines].join('\n'))
   }
 
-  /** Hide/show thinking entries (ordinary mode); the fold state is
-   * untouched. */
-  toggleThinkingHidden(): boolean {
-    this.hideThinking = !this.hideThinking
-    this.rebuildMessages()
-    return this.hideThinking
+  /** Whether Thinking blocks currently render FULL (true) or COMPACT with
+   * a preview (false). The single Thinking disclosure preference — shared
+   * by Focus ON/OFF and both surfaces (plan §5.2). */
+  isThinkingExpanded(): boolean {
+    return this.thinkingExpanded
   }
 
-  /** Focus Mode's Thinking visibility toggle (Alt+T while Focus is on):
-   * whether Thinking participates in the Focus timeline. Default hidden;
-   * independent of the ordinary hideThinking preference. */
-  toggleFocusThinkingVisible(): boolean {
-    this.focusThinkingVisible = !this.focusThinkingVisible
+  /** Set the Thinking detail bulk preference directly (the declarative
+   * surface — `/settings` uses this; Alt+T uses the toggle). */
+  setThinkingExpanded(expanded: boolean): void {
+    if (this.thinkingExpanded === expanded) return
+    this.thinkingExpanded = expanded
     this.rebuildMessages()
-    return this.focusThinkingVisible
+  }
+
+  /** Drop every per-message Thinking override. Alt+T calls this FIRST so
+   * the bulk toggle is never partially counteracted by stale per-card
+   * states (plan §9): the user asked for ALL Thinking at one detail
+   * level, so old click/search overrides must not survive. Also used by
+   * the fullscreen → regular transition (plan §6.2's preferred cleanup:
+   * regular must never re-read a fullscreen click state). */
+  private clearThinkingExpansionOverrides(): void {
+    for (const message of this.messages) {
+      if (message.kind !== 'thinking') continue
+      this.expandedOverride.delete(message)
+    }
+  }
+
+  /** Alt+T: bulk collapse/expand every Thinking block (the disclosure
+   * owner). Clears per-message overrides first so the outcome is
+   * predictable: Alt+T expand → ALL Thinking full; Alt+T collapse →
+   * ALL Thinking compact (plan §9). */
+  toggleThinkingExpanded(): boolean {
+    this.clearThinkingExpansionOverrides()
+    this.thinkingExpanded = !this.thinkingExpanded
+    this.rebuildMessages()
+    return this.thinkingExpanded
   }
 
   /** The todo summary line text (`☑ N active · first`), or '' when the
@@ -7012,11 +7072,6 @@ export class TuiApp {
     this.renderGoalLine()
     this.renderWidgets()
     this.requestRender()
-  }
-
-  /** Whether thinking entries are currently hidden. */
-  isThinkingHidden(): boolean {
-    return this.hideThinking
   }
 
   /** Rebuild the header from base + session title + plan badge + extension

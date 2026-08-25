@@ -41,7 +41,7 @@ interface BindingRecord {
  * expand, Ctrl+T todo panel, Ctrl+G external editor, Ctrl+R input-history
  * search, Ctrl+V clipboard image intake, Ctrl+Enter queue,
  * Enter submit, Esc cancel, Shift+Tab permission cycle, Alt+Up dequeue,
- * Alt+T thinking toggle). Every
+ * Alt+T thinking detail toggle). Every
  * reserved binding here must match a host `matchesKey(data, ...)` call;
  * when a new host lifecycle key lands, extend THIS list in the same
  * commit.
@@ -66,7 +66,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'escape', ctrl: false, alt: false, shift: false, super: false }, // Esc cancel
   { key: 'tab', ctrl: false, alt: false, shift: true, super: false },   // Shift+Tab permission cycle
   { key: 'up', ctrl: false, alt: true, shift: false, super: false },    // Alt+Up dequeue
-  { key: 't', ctrl: false, alt: true, shift: false, super: false },     // Alt+T thinking toggle
+  { key: 't', ctrl: false, alt: true, shift: false, super: false },     // Alt+T thinking detail toggle
   { key: 'k', ctrl: false, alt: true, shift: false, super: false },     // Alt+K dismiss settled local shell cards
 ]
 

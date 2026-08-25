@@ -77,18 +77,23 @@ test('ctrl+t toggles the todo panel with markers', async () => {
   assert.ok(!view.includes('Todo'), `panel still visible:\n${view}`)
 })
 
-test('alt+t hides thinking entries', async () => {
+test('alt+t toggles thinking detail (compact preview ↔ full body; never hidden)', async () => {
   const { vt, app } = startApp()
-  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'secret reasoning' }])
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'first thought\nsecret reasoning' }])
   let view = await viewport(vt)
-  assert.ok(view.includes('secret reasoning'), `thinking missing:\n${view}`)
+  assert.ok(view.includes('secret reasoning'), `compact preview missing:\n${view}`)
+  assert.ok(view.includes('(alt+t to expand)'), `compact hint missing:\n${view}`)
+  assert.ok(!view.includes('first thought'), `full body leaked while compact:\n${view}`)
   vt.sendInput('\x1bt') // alt+t
   view = await viewport(vt)
-  assert.ok(!view.includes('secret reasoning'), `thinking not hidden:\n${view}`)
-  assert.equal(app.isThinkingHidden(), true)
+  assert.ok(view.includes('first thought'), `thinking not expanded:\n${view}`)
+  assert.ok(!view.includes('(alt+t to expand)'), `expanded block must drop the compact hint:\n${view}`)
+  assert.equal(app.isThinkingExpanded(), true)
   vt.sendInput('\x1bt')
   view = await viewport(vt)
-  assert.ok(view.includes('secret reasoning'), `thinking not restored:\n${view}`)
+  assert.ok(view.includes('secret reasoning'), `compact preview must return:\n${view}`)
+  assert.ok(view.includes('(alt+t to expand)'), `compact hint must return:\n${view}`)
+  assert.ok(!view.includes('first thought'), `compact must never show the full body:\n${view}`)
 })
 
 test('askQuestions collects a single selection', async () => {
@@ -1803,7 +1808,7 @@ test('fullscreen mouse click toggles one card independently of the global fold',
   let view = await viewport(vt)
   assert.ok(view.includes('\nb'), `clicked card body missing:\n${view}`)
   assert.ok(view.includes('Bash ls [ok]'), `clicked card header missing:\n${view}`)
-  assert.ok(!view.includes('\nthree'), `thinking must stay folded after the click:\n${view}`)
+  assert.ok(!view.includes('\n  one'), `thinking must stay folded after the click:\n${view}`)
   assert.ok(!view.includes('\n/ws'), `second tool card must stay folded:\n${view}`)
   // Clicking the same row again collapses just that card. The second click
   // waits past the alt screen's double-click window (a fast repeat selects
@@ -1813,12 +1818,17 @@ test('fullscreen mouse click toggles one card independently of the global fold',
   vt.sendInput('\x1b[<0;10;8m')
   view = await viewport(vt)
   assert.ok(!view.includes('\nb'), `card must collapse again:\n${view}`)
-  // The keyboard Ctrl+O still expands everything, mouse state or not.
+  // The keyboard Ctrl+O still expands every non-Thinking card, mouse state
+  // or not — Thinking stays Alt+T-owned.
   vt.sendInput('\x0f')
   view = await viewport(vt)
-  assert.ok(view.includes('\nthree'), `global expand must show thinking:\n${view}`)
   assert.ok(view.includes('\nc'), `global expand must show the tool body:\n${view}`)
   assert.ok(view.includes('\n/ws'), `global expand must show the second card:\n${view}`)
+  assert.ok(!view.includes('\n  one'), `Ctrl+O must NOT expand Thinking (Alt+T owns it):\n${view}`)
+  // Alt+T expands Thinking (the full body appears).
+  vt.sendInput('\x1bt')
+  view = await viewport(vt)
+  assert.ok(view.includes('\n  one'), `Alt+T must expand the thinking block:\n${view}`)
   app.setFullscreen(false)
 })
 
@@ -1830,18 +1840,18 @@ test('fullscreen click on a thinking row expands it; wheel, right button, and dr
     { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
   ])
   await viewport(vt)
-  // Rows: header(1) + thinking(2) + tool(3). Click the thinking row.
+  // Rows: header(1) + thinking(2) + tool(3). Click the thinking title row.
   vt.sendInput('\x1b[<0;5;2M')
   vt.sendInput('\x1b[<0;5;2m')
   let view = await viewport(vt)
-  assert.ok(view.includes('\nline two'), `thinking body missing after click:\n${view}`)
+  assert.ok(view.includes('\n  line two'), `thinking body missing after click:\n${view}`)
   assert.ok(!view.includes('\nb'), `tool card must stay folded:\n${view}`)
   // A drag (press + moved release) must not toggle either card.
   vt.sendInput('\x1b[<0;5;2M')
   vt.sendInput('\x1b[<0;20;2m')
   await viewport(vt)
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('\nline two'), `a drag must not collapse the card:\n${view}`)
+  assert.ok(view.includes('\n  line two'), `a drag must not collapse the card:\n${view}`)
   assert.ok(!view.includes('\nb'), `a drag must not expand the tool card:\n${view}`)
   // A wheel scroll and a right-button press/release must not toggle anything.
   vt.sendInput('\x1b[<64;5;2M')
@@ -1849,7 +1859,7 @@ test('fullscreen click on a thinking row expands it; wheel, right button, and dr
   vt.sendInput('\x1b[<2;5;2m')
   await viewport(vt)
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('\nline two'), `wheel/right must not collapse the card:\n${view}`)
+  assert.ok(view.includes('\n  line two'), `wheel/right must not collapse the card:\n${view}`)
   assert.ok(!view.includes('\nb'), `wheel/right must not expand the tool card:\n${view}`)
   app.setFullscreen(false)
 })
