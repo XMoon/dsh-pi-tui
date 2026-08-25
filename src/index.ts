@@ -2373,23 +2373,13 @@ export function apply(ctx: Context, config: Config): void {
       // folds).
       const permission = ctx.get('permissionPresets')
       const liveCwd = sessionCwd()
-      app.setStatus({
-        model: modelLabel(),
-        cwd: shortCwd(liveCwd),
-        branch: gitBranch(liveCwd),
-        goal: goalText,
-        turns: stats.turns,
-        steps: stats.steps,
-        statsLine: formatStats(stats),
-        ...permission === undefined || liveAgent === undefined
-          ? {}
-          : { permission: permission.current(liveAgent.session.events) },
-        ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
-      })
-      // M0: project the DSH-derived facts into the unified status store.
-      // The DISPLAY SUBJECT's facts feed the sections — while the subagent
-      // viewer is open that is the viewed child's own fold and workspace,
-      // so the footer layout never changes, only the data source.
+      // M0: project the DSH-derived facts into the unified status store
+      // FIRST — the footer paints the store (setStatus below repaints it),
+      // so the derived sections must be committed before the paint or the
+      // footer always shows the previous cycle's facts. The DISPLAY
+      // SUBJECT's facts feed the sections — while the subagent viewer is
+      // open that is the viewed child's own fold and workspace, so the
+      // footer layout never changes, only the data source.
       const events = liveAgent?.session.events ?? []
       const displayCwd = viewing?.cwd ?? liveCwd
       statusStore.update({
@@ -2408,6 +2398,19 @@ export function apply(ctx: Context, config: Config): void {
         workspace: deriveWorkspaceStatus(displayCwd),
         usage: usageFromStats(viewing?.stats.snapshot() ?? stats, contextTokens),
         host: deriveHostStatus(),
+      })
+      app.setStatus({
+        model: modelLabel(),
+        cwd: shortCwd(liveCwd),
+        branch: gitBranch(liveCwd),
+        goal: goalText,
+        turns: stats.turns,
+        steps: stats.steps,
+        statsLine: formatStats(stats),
+        ...permission === undefined || liveAgent === undefined
+          ? {}
+          : { permission: permission.current(liveAgent.session.events) },
+        ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
       })
     }
 

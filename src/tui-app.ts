@@ -4641,6 +4641,7 @@ export class TuiApp {
   setBusy(busy: boolean): void {
     this.busy = busy
     this.projectActivity()
+    this.renderFooter()
   }
 
   /**
@@ -4659,6 +4660,7 @@ export class TuiApp {
     this.compactionPhase = phase
     this.reconcileWorkingRow()
     this.projectActivity()
+    this.renderFooter()
     this.requestRender()
   }
 
@@ -4807,6 +4809,7 @@ export class TuiApp {
     this.workingActive = active
     this.reconcileWorkingRow()
     this.projectActivity()
+    this.renderFooter()
     this.requestRender()
     this.syncExtensionState()
   }
@@ -8473,38 +8476,45 @@ export class TuiApp {
     // them). The owned fields are ALWAYS set — a disappearing model, an
     // empty cwd (which clears the derived project) or an emptied branch
     // must not leave a stale fact behind.
-    const current = this.statusStore.snapshot()
-    const model = modelFromLabel(this.status.model)
-    const cwd = this.status.cwd
-    const project = cwd === '' ? undefined : cwd.split('/').filter(Boolean).at(-1)
-    const branch = this.status.branch === undefined || this.status.branch === '' ? undefined : this.status.branch
-    const composition: CompositionStatus = { ...current.composition, model }
-    const access: AccessStatus = this.status.permission === undefined
-      ? current.access
-      : {
-          ...current.access,
-          permissionPreset: {
-            id: this.status.permission,
-            label: this.status.permission,
-            matched: this.status.permission !== 'custom',
-          },
-        }
-    const workspace: WorkspaceStatus = {
-      ...current.workspace,
-      cwd,
-      project,
-      branch,
+    // While the subagent viewer is open the DISPLAY SUBJECT is the viewed
+    // CHILD: the runner projects its workspace/usage and setViewerFooter
+    // owns the view section, so a legacy parent-status update must not
+    // clobber the child's facts (the composer's data-source items follow
+    // the display subject; the parent-only items gate on view.subject).
+    if (this.viewerFooter === undefined) {
+      const current = this.statusStore.snapshot()
+      const model = modelFromLabel(this.status.model)
+      const cwd = this.status.cwd
+      const project = cwd === '' ? undefined : cwd.split('/').filter(Boolean).at(-1)
+      const branch = this.status.branch === undefined || this.status.branch === '' ? undefined : this.status.branch
+      const composition: CompositionStatus = { ...current.composition, model }
+      const access: AccessStatus = this.status.permission === undefined
+        ? current.access
+        : {
+            ...current.access,
+            permissionPreset: {
+              id: this.status.permission,
+              label: this.status.permission,
+              matched: this.status.permission !== 'custom',
+            },
+          }
+      const workspace: WorkspaceStatus = {
+        ...current.workspace,
+        cwd,
+        project,
+        branch,
+      }
+      const usage = this.usageFromStatus()
+      // Only project the sections whose CONTENT changed — a same-value
+      // setStatus must not churn the store's revision (its no-notify
+      // contract) nor the command runner's refresh.
+      const patch: { composition?: CompositionStatus; access?: AccessStatus; workspace?: WorkspaceStatus; usage?: UsageStatus } = {}
+      if (!plainSectionEqual(current.composition, composition)) patch.composition = composition
+      if (!plainSectionEqual(current.access, access)) patch.access = access
+      if (!plainSectionEqual(current.workspace, workspace)) patch.workspace = workspace
+      if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
+      this.projectStatus(patch)
     }
-    const usage = this.usageFromStatus()
-    // Only project the sections whose CONTENT changed — a same-value
-    // setStatus must not churn the store's revision (its no-notify
-    // contract) nor the command runner's refresh.
-    const patch: { composition?: CompositionStatus; access?: AccessStatus; workspace?: WorkspaceStatus; usage?: UsageStatus } = {}
-    if (!plainSectionEqual(current.composition, composition)) patch.composition = composition
-    if (!plainSectionEqual(current.access, access)) patch.access = access
-    if (!plainSectionEqual(current.workspace, workspace)) patch.workspace = workspace
-    if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
-    this.projectStatus(patch)
     this.renderFooter()
     this.renderDock()
     this.renderGoalLine()
@@ -8937,7 +8947,11 @@ export class TuiApp {
    * composer renders the active layout (default/compact) against the
    * snapshot, and the Host instruction surface owns the Ctrl+C exit hint.
    * The TuiApp no longer derives permission/plan/viewer/usage — the items
-   * do, from the snapshot. */
+   * do, from the snapshot. An empty surface (every item unavailable, e.g.
+   * an unloaded extension item) renders zero rows: the fork's Text emits
+   * nothing and the layout reflows, overpainting the freed rows with the
+   * transcript — no stale footer content survives (guarded by the
+   * emptied-footer layout test). */
   private renderFooter(): void {
     const width = Math.max(1, this.terminal.columns)
     // M6 keybindings: a pending leader sequence shows the which-key hint in

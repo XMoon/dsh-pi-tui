@@ -220,3 +220,62 @@ test('the compact phase re-renders items at the compact density before dropping'
   assert.ok(plain.includes('25%'), `the compact context form must survive:\n${plain}`)
   assert.ok(plain.includes('focus'), `the right zone must survive:\n${plain}`)
 })
+
+test('the activity setters repaint the run-state item (no status refresh needed)', async () => {
+  const { vt, app } = startApp()
+  // A custom layout with the run-state item in view.
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  app.setStatus({})
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('working'), `idle must not badge working:\n${view}`)
+  // The activity setter projects the store AND repaints the footer — a
+  // direct caller (no runner refresh in between) must see the phase.
+  app.setWorking(true)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `setWorking must repaint the run state:\n${view}`)
+  app.setWorking(false)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('working'), `idle must restore after setWorking(false):\n${view}`)
+  app.stop()
+})
+
+test('an emptied footer surface reflows with no stale content', async () => {
+  const { vt, app } = startApp()
+  // Fill the transcript so the fullscreen scroll pane overflows, then
+  // paint the two-row default footer.
+  const messages = Array.from({ length: 25 }, (_, i) => ({
+    kind: 'user' as const,
+    turn: i,
+    text: `message ${i} with a reasonably long line to consume width`,
+  }))
+  app.setTranscript(messages, new Map())
+  app.setStatus({ model: 'p/m', cwd: '/ws', turns: 2, steps: 3 })
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('t2/s3'), `the default footer must be painted in fullscreen:\n${view}`)
+  const before = vt.getViewport().join('\n')
+  // Switch to a custom layout whose ONLY item is unavailable (an
+  // unloaded extension item): the composer renders an empty surface. The
+  // old footer rows must not stay behind — the layout reflows and the
+  // transcript takes the freed rows (earlier messages become visible).
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'ext:gone/unknown' }], right: [] }],
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('t2/s3'), `the emptied footer must clear its rows:\n${view}`)
+  assert.ok(!view.includes('p/m'), `the emptied footer must clear its rows:\n${view}`)
+  const visibleNow = view
+  const revealed = messages.map(m => m.text).filter(text => !before.includes(text) && visibleNow.includes(text))
+  assert.ok(revealed.length >= 1, `the reflow must reveal earlier transcript rows:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
