@@ -54,12 +54,11 @@
   "files": [
     "dist",
     "config",
-    "scripts",
+    "scripts/repair-session.mjs",
+    "scripts/repair-core.mjs",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
-    "CHANGELOG.md",
-    "CHANGELOG.en.md",
     "LICENSE"
   ],
   "publishConfig": {
