@@ -5612,11 +5612,17 @@ export class TuiApp {
       && 'turn' in message
       && this.isInsideExpandedFocus(message, boundary)
       && isFocusSecondaryDisclosure(message)
+    // The FULL-REVEAL flag for tool bodies (large diffs): true for the
+    // per-card override AND for any REGULAR Focus expanded root (the
+    // surface contract — no mouse, so a capped diff would be unreadable);
+    // fullscreen keeps the per-card override semantics.
+    const fullReveal = this.expandedOverride.get(message) === true
+      || (this.fullscreen === undefined && 'turn' in message && this.isInsideExpandedFocus(message, boundary) && isFocusSecondaryDisclosure(message))
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
       // renderer: fullscreen secondaries default compact (per-card
       // override full-reveals), regular expanded roots full-reveal.
-      component: rendered === undefined ? this.renderMessage(message, expanded, clickHint) : rendered.component,
+      component: rendered === undefined ? this.renderMessage(message, expanded, clickHint, fullReveal) : rendered.component,
       boundary,
       themeRev: this.themeRevision,
       expanded,
@@ -5768,7 +5774,7 @@ export class TuiApp {
     return container
   }
 
-  private renderMessage(message: TranscriptMessage, expanded: boolean, clickHint: boolean): Component {
+  private renderMessage(message: TranscriptMessage, expanded: boolean, clickHint: boolean, fullReveal: boolean): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
       // `--dsw-specific-bubble` background block) with a brand-blue ❯ —
@@ -5934,14 +5940,12 @@ export class TuiApp {
     const localShell = isLocalShellCard(message)
     if (expanded) {
       card.addChild(new Text(head, 0, 0))
-      // An explicitly expanded card (mouse click, or an open Focus Thought)
-      // renders diff bodies in full; the default recent-turn view caps
-      // them (kimi parity).
-      // The third flag is EXPLICIT expansion (the per-card override — the
-      // secondary disclosure inside an open Thought): a big diff caps in
-      // the default view even when the recent-turn boundary expands the
-      // card; only an explicit reveal renders it in full.
-      this.renderToolBody(card, message, this.expandedOverride.get(message) === true)
+      // An explicitly expanded card renders diff bodies in full; the
+      // default recent-turn view caps them (kimi parity). The flag is
+      // the FULL REVEAL: the per-card override (the fullscreen secondary
+      // disclosure) or any REGULAR Focus expanded root — a capped diff in
+      // regular mode would have no mouse affordance to open it.
+      this.renderToolBody(card, message, fullReveal)
     } else {
       // Folded cards render 2–3 rows instead of one cramped line: the header
       // row, then the call preview (bash `$ command` / edit-write diff —

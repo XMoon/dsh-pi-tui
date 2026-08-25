@@ -927,3 +927,45 @@ test('regular search reveal of a NON-recent root full-reveals its process (no de
   assert.ok(!joined.includes('(ctrl+o to expand)'), 'no dead compact secondary affordance')
   app.stop()
 })
+
+test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const newLines = Array.from({ length: 30 }, (_, i) => `new ${i}`).join('\n')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/big.ts',
+        diffs: [{ path: 'src/big.ts', oldText: null, newText: newLines }],
+        locations: [],
+      }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: CallId('cdiff'),
+      name: 'edit',
+      arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }),
+    }, T0 + 1, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  // Ctrl+O OFF: the collapsed turn's process is absent.
+  let joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('new 15'), 'no process rows while compact')
+  // Ctrl+O ON: the derived root full-reveals — the large diff renders in
+  // FULL (regular has no mouse affordance to open a capped body).
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐳 Thought'), 'the derived root must expand')
+  assert.ok(joined.includes('new 15'), 'the regular Focus expanded root must render the diff in FULL')
+  assert.ok(!joined.includes('more changes hidden'), 'no cap footer in the regular Focus reveal')
+  app.stop()
+})
