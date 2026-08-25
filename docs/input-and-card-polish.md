@@ -527,6 +527,51 @@ tests, typecheck, `git diff --check`, and the pre-push gate (pack + all
 smokes) clean; the vendored fork and the public extension surface are
 unchanged.
 
+**PR review round** (human, item-by-item against the plan) — six findings,
+all fixed in follow-up commits:
+
+1. The external editor (`Ctrl+G`) now round-trips the WIRE form:
+   `launchExternalEditor` serializes the draft (`!pwd`, never the bare
+   body) and decodes the saved text through `setSeatSerializedInput`, so
+   `! ↔ !! ↔ prompt` switches made in `$EDITOR` follow (a plugin editor
+   keeps identity). Regression tests: shell-mode round-trip, prompt draft
+   edited into a shell line.
+2. **Paste normalization moved BEFORE the base document** (the undo
+   invariant): bracketed paste is captured at the raw layer, the
+   empty-prompt `!` / `!!` prefix is stripped pre-insert, and the
+   normalized content is re-wrapped as a bracketed paste for the fork's
+   full `handlePaste` path (text normalization, large-paste registry,
+   atomic undo). Undoing a normalized paste can never resurrect a raw
+   `!!` in the document — the shell-editor-mode invariant holds, and
+   large (>10 lines / >1000 chars) shell pastes enter the shell mode
+   through the paste registry. Regression tests: undo after a normalized
+   paste, large-paste registry.
+3. **Handoff cursor coordinates unified on the WIRE document**: a host
+   shell-mode cursor shifts by the mode prefix, a host prompt-mode
+   literal `!` is a document character (never shifted), a plugin cursor
+   IS the wire cursor, the decoding host restore shifts by the actually
+   stripped prefix, and a legacy raw restore keeps the wire cursor (the
+   `!` stays in the text). Regression tests for all four conversions.
+4. **A mode transition cancels the open autocomplete**: `setInputMode`
+   closes the dropdown (the completion grammar changed — a prompt-mode
+   file list must not accept suggestions into a shell body). Regression
+   tests in both directions (`!` entry, Backspace step-back).
+5. **One-shot viewers reset the host editor to prompt mode**: the
+   read-only placeholder bar routes through `setSeatSerializedInput`, so
+   a stale shell mode never renders as `! viewing subagent: …`, and the
+   preserved serialized main draft restores the shell mode on exit.
+6. **Stable autocomplete extension compatibility**: the M5 plugin-chain
+   query is adapted back to the WIRE document — a shell-mode body is
+   re-prefixed (`git che` → `!git che`, cursor shifted) with the query
+   shape unchanged, so a third-party plugin keeps parsing shell lines
+   exactly as before the feature. Regression test asserts the wire lines
+   in shell-context / shell-local / prompt.
+
+All six fixes landed with regression tests; 2055/2055 full-suite tests,
+typecheck, `git diff --check` and the pre-push gate (pack + all smokes)
+clean; the vendored fork and the public extension surface remain
+unchanged.
+
 ---
 
 ## Review record

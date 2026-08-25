@@ -271,28 +271,26 @@ export class EditorSeatHolder {
   }
 
   /**
-   * The WIRE form of one occupant's draft: mode + body serialized (the
-   * host editor's shell mode prefixes the body; a plugin editor has no
-   * mode — its text IS the wire form). Handoffs transfer this form so a
-   * shell-mode draft round-trips through a plugin editor with its mode,
-   * and a plugin draft that starts with `!` decodes back into the shell
-   * mode the user intended. The prefix length lets the caller shift the
-   * flat cursor offset between the two representations: for the host it
-   * is the mode's prefix; for a plugin it is derived from the TEXT
-   * itself (a plugin draft may begin with `!` / `!!` even though the
-   * plugin has no mode).
+   * The WIRE form + cursor of one occupant's draft, expressed in ONE
+   * coordinate system (the wire document — what the shell dispatch and a
+   * plugin editor's document both mean):
+   * - host shell mode: mode prefix + body, cursor shifted by the prefix;
+   * - host prompt mode: the body IS the wire document (a literal `!` in
+   *   prompt text is a document character, never a synthetic prefix);
+   * - plugin editor: its document IS the wire form, cursor unchanged.
+   * Each handoff target converts back: a plugin keeps the wire cursor;
+   * the host DECODE shifts it by the actually stripped prefix; a legacy
+   * raw restore keeps it (the `!` remains in the text).
    */
-  private wireDraftOf(seat: SeatEditor): { text: string; prefixLength: number } {
+  private wireCursorOf(seat: SeatEditor): { wireText: string; wireCursor: number } {
     const mode = seat.getInputMode?.() ?? 'prompt'
     if (mode !== 'prompt') {
       return {
-        text: serializeEditorInput(mode, seat.getText()),
-        prefixLength: shellPrefixForMode(mode).length,
+        wireText: serializeEditorInput(mode, seat.getText()),
+        wireCursor: seat.getCursor() + shellPrefixForMode(mode).length,
       }
     }
-    const text = seat.getText()
-    const decoded = editorModeFromHistoryEntry(text)
-    return { text, prefixLength: text.length - decoded.text.length }
+    return { wireText: seat.getText(), wireCursor: seat.getCursor() }
   }
 
   /** The current seat snapshot (Phase 2: the ADVANCED editor controls
@@ -341,24 +339,29 @@ export class EditorSeatHolder {
       // remains available and the handoff stays atomic.
       let host: SeatEditor
       try {
-        // The handoff transfers the WIRE form (mode + body serialized):
-        // a plugin editor's document IS the wire form (its submissions
-        // are raw), so a shell-mode host draft round-trips through the
-        // plugin with its mode, and a plugin draft that happens to start
-        // with `!` decodes back into the shell mode the user intended.
-        // The cursor offset shifts by the synthetic prefix length.
-        const wire = this.wireDraftOf(previous)
-        const cursor = previous.getCursor()
+        // The handoff transfers the WIRE form + cursor (one coordinate
+        // system): a plugin editor's document IS the wire form (its
+        // submissions are raw), so a shell-mode host draft round-trips
+        // through the plugin with its mode, and a plugin draft that
+        // happens to start with `!` decodes back into the shell mode the
+        // user intended.
+        const wire = this.wireCursorOf(previous)
         host = this.adaptHost()
         if (host.setSerializedInput !== undefined) {
-          host.setSerializedInput(wire.text)
+          host.setSerializedInput(wire.wireText)
+          // The decode strips the wire prefix (if any): the host cursor
+          // shifts back by the ACTUALLY stripped length.
+          const decoded = editorModeFromHistoryEntry(wire.wireText)
+          host.setCursor(Math.max(0, wire.wireCursor - (wire.wireText.length - decoded.text.length)))
         } else {
-          host.setText(wire.text)
+          // Legacy raw restore keeps the `!` in the document: the cursor
+          // stays in wire coordinates (no shift). Restore both draft and
+          // cursor through the host adapter — older structural adapters
+          // may still implement setCursor as a no-op, but the vendored
+          // fork's adapter preserves the active cursor as well.
+          host.setText(wire.wireText)
+          host.setCursor(Math.max(0, wire.wireCursor))
         }
-        // Restore both draft and cursor through the host adapter. Older
-        // structural adapters may still implement setCursor as a no-op, but
-        // the vendored fork's adapter preserves the active cursor as well.
-        host.setCursor(Math.max(0, cursor - wire.prefixLength))
       } catch (error) {
         this.reportHostError(error)
         return
@@ -415,14 +418,14 @@ export class EditorSeatHolder {
     // extends to EVERY post-create step, never a leak).
     try {
       if (this.disposed || !lease.active) throw new Error('editor seat disposed during handoff')
-      // The handoff transfers the WIRE form (see the host-restore branch):
-      // the plugin's document is the wire form, so a shell-mode host draft
-      // keeps its mode across the round-trip. The cursor offset shifts by
-      // the synthetic prefix length.
-      const wire = this.wireDraftOf(previous)
-      const cursor = previous.getCursor()
-      created.setText(wire.text)
-      created.setCursor?.(cursor + wire.prefixLength)
+      // The handoff transfers the WIRE form + cursor (see the
+      // host-restore branch): the plugin's document is the wire form, so
+      // a shell-mode host draft keeps its mode across the round-trip and
+      // the cursor stays in wire coordinates (a host prompt-mode literal
+      // `!` is a document character — never shifted).
+      const wire = this.wireCursorOf(previous)
+      created.setText(wire.wireText)
+      created.setCursor?.(wire.wireCursor)
     } catch (error) {
       try {
         created.dispose()

@@ -126,13 +126,11 @@ export class TuiEditor extends Editor {
   private placeholderText = ''
   /** The current input mode: `!` / `!!` are state, never document text. */
   private inputMode: EditorInputMode = 'prompt'
-  /** Whether a bracketed paste began in an EMPTY PROMPT (the
-   * paste-normalization gate): only a paste that lands in an empty
-   * PROMPT-mode editor is reinterpreted as a shell line. A paste into an
-   * already-shell-mode editor is BODY text — its leading `!` is literal
-   * (the serialization adds the mode's own prefix, so the wire form
-   * matches what the user would have typed before the mode feature). */
-  private pasteStartPromptEmpty: boolean | null = null
+  /** An in-flight bracketed paste captured at the RAW layer: whether it
+   * began in an EMPTY PROMPT (the normalization gate) and the content
+   * accumulated so far. While set, every input chunk belongs to the
+   * paste and is buffered here — never passed to the base editor. */
+  private pasteCapture: { promptEmpty: boolean; buffer: string } | null = null
 
   constructor(tui: TUI, theme: EditorTheme) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -170,10 +168,15 @@ export class TuiEditor extends Editor {
 
   /** Switch the input mode. A real change fires onChange (the host's
    * viewer-draft mirror and seat subscribers must observe the wire form
-   * changing even when the body text did not). */
+   * changing even when the body text did not) and CANCELS any open
+   * autocomplete: a mode change swaps the completion grammar, and a
+   * dropdown built for the old mode's context must not survive (a
+   * prompt-mode file list would otherwise accept suggestions into a
+   * shell body). */
   setInputMode(mode: EditorInputMode): void {
     if (this.inputMode === mode) return
     this.inputMode = mode
+    ;(this as unknown as AutocompleteInternals).cancelAutocomplete()
     this.onChange?.(this.getText())
     this.tui.requestRender()
   }
@@ -219,13 +222,6 @@ export class TuiEditor extends Editor {
       ;(this as unknown as AutocompleteInternals).cancelAutocomplete()
       return
     }
-    // Track whether a bracketed paste began in an EMPTY PROMPT: a paste
-    // that lands there and starts with `!` / `!!` is normalized into a
-    // shell-mode entry (kimi parity — typed-key interception does not
-    // cover bracketed paste). A paste into a non-empty editor, or into an
-    // already-shell-mode editor, is never reinterpreted — its `!` is
-    // ordinary body text.
-    if (data.includes('\x1b[200~')) this.pasteStartPromptEmpty = this.inputMode === 'prompt' && this.getText() === ''
     // Esc on an EMPTY shell body cancels the whole shell mode (the app
     // passes Esc through only in this state — see the app's escape
     // branch). The autocomplete branch above already won when the
@@ -273,22 +269,63 @@ export class TuiEditor extends Editor {
         return
       }
     }
-    super.handleInput(data)
-    // Paste normalization runs AFTER the base pipeline applied the paste
-    // (the fork's handlePaste is private): one synchronous pass, so no
-    // intermediate `❯ !!git status` frame is ever visible.
-    if (data.includes('\x1b[201~')) {
-      const startedPromptEmpty = this.pasteStartPromptEmpty
-      this.pasteStartPromptEmpty = null
-      if (startedPromptEmpty === true) {
-        const { mode, text } = editorModeFromHistoryEntry(this.getText())
-        if (mode !== 'prompt') {
-          this.setInputMode(mode)
-          this.setText(text)
-        }
-      }
+    // Bracketed paste: captured at the RAW layer BEFORE the base editor
+    // sees it. The prefix normalization therefore happens PRE-INSERT —
+    // the base editor's undo snapshots contain the NORMALIZED body, so
+    // undoing a normalized paste can never resurrect a raw `!!` in the
+    // document (the shell-editor-mode invariant: prefixes are state,
+    // never document text). Large pastes (>10 lines / >1000 chars) keep
+    // the fork's paste-registry path because the stripped content is
+    // re-wrapped as a bracketed paste below.
+    if (this.pasteCapture !== null || data.includes('\x1b[200~')) {
+      this.capturePaste(data)
+      this.reopenAutocompleteAfterInput()
+      return
     }
+    super.handleInput(data)
     this.reopenAutocompleteAfterInput()
+  }
+
+  /** Accumulate one raw bracketed-paste chunk; on the closing marker,
+   * normalize (empty-prompt `!` / `!!` prefix → shell mode, prefix
+   * stripped) and hand the stripped content to the base editor as a
+   * re-wrapped bracketed paste, so the fork's full handlePaste path
+   * (text normalization, large-paste registry, atomic undo) applies. A
+   * paste into a non-empty editor, or into an already-shell-mode editor,
+   * is never reinterpreted — its `!` is ordinary body text. */
+  private capturePaste(data: string): void {
+    if (this.pasteCapture === null) {
+      const start = data.indexOf('\x1b[200~')
+      const before = data.slice(0, start)
+      if (before !== '') {
+        // Defense: content before the opening marker (real terminals do
+        // not interleave, but a chunk boundary must not eat input).
+        super.handleInput(before)
+      }
+      this.pasteCapture = { promptEmpty: this.inputMode === 'prompt' && this.getText() === '', buffer: '' }
+      data = data.slice(start + '\x1b[200~'.length)
+    }
+    const end = data.indexOf('\x1b[201~')
+    if (end === -1) {
+      this.pasteCapture.buffer += data
+      return
+    }
+    this.pasteCapture.buffer += data.slice(0, end)
+    const capture = this.pasteCapture
+    this.pasteCapture = null
+    let content = capture.buffer
+    let mode: EditorInputMode = 'prompt'
+    if (capture.promptEmpty && content.startsWith('!!')) {
+      mode = 'shell-local'
+      content = content.slice(2)
+    } else if (capture.promptEmpty && content.startsWith('!')) {
+      mode = 'shell-context'
+      content = content.slice(1)
+    }
+    if (mode !== 'prompt') this.setInputMode(mode)
+    const remaining = data.slice(end + '\x1b[201~'.length)
+    if (content !== '') super.handleInput(`\x1b[200~${content}\x1b[201~`)
+    if (remaining !== '') super.handleInput(remaining)
   }
 
   /** Reopen `@dir/` mention completion right after a key closed it (e.g.

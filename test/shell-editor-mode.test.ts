@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
@@ -18,11 +18,30 @@ import { EditorRegistry } from '../src/editor-registry.ts'
 import { EditorSeatHolder } from '../src/editor-seat-holder.ts'
 import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.ts'
+import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
+import { createDiag } from '../src/diag.ts'
+import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../src/shell-completion.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** The owned-task entry the runner wires in production (real runOwned,
+ * silent capture diag). */
+const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void => {
+  runOwned(label, task, { ...options, diag })
+}
 
 /** A throwaway workspace (completion fixtures live under the cwd). */
 function fixtureWorkspace(): string {
   return mkdtempSync(join(tmpdir(), 'dsh-shell-mode-'))
+}
+
+/** A workspace with one file (Tab completion dropdowns need candidates). */
+function fixtureWithFiles(): string {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-shell-mode-files-'))
+  writeFileSync(join(root, 'notes.txt'), 'x')
+  mkdirSync(join(root, 'src'))
+  writeFileSync(join(root, 'src', 'deep.ts'), 'x')
+  return root
 }
 
 function startApp(
@@ -58,6 +77,29 @@ function continuableViewer(): SubagentViewerTarget {
     label: 'research',
     mode: 'continuable',
     activity: 'inactive',
+  }
+}
+
+/** A one-shot (read-only) subagent viewer target. */
+function oneShotViewer(): SubagentViewerTarget {
+  return {
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    label: 'research',
+    mode: 'one-shot',
+    activity: 'running',
+  }
+}
+
+/** Poll until the predicate is true (asserts on failure). */
+async function pollUntil(predicate: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 3000
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() > deadline) {
+      assert.fail(`${label}: condition never became true`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
 
@@ -809,7 +851,7 @@ test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async () => 
   app.stop()
 })
 
-test('a plugin-to-host restore shifts the cursor by the wire prefix in the TEXT', () => {
+test('a legacy host restore keeps the cursor in WIRE coordinates (raw ! stays in the text)', () => {
   const host = {
     text: '',
     cursor: 0,
@@ -841,7 +883,85 @@ test('a plugin-to-host restore shifts the cursor by the wire prefix in the TEXT'
   plugin.setCursor(3)
   holder.handoff(undefined)
   assert.equal(host.text, '!pwd', 'the wire draft survives the restore')
-  assert.equal(host.cursor, 2, 'the cursor shifts back by the text-derived prefix length')
+  assert.equal(host.cursor, 3,
+    'a legacy RAW restore keeps the `!` in the document — the cursor stays in wire coordinates')
+  holder.dispose()
+})
+
+test('a decoding host restore shifts the cursor by the actually stripped prefix', () => {
+  const host = {
+    text: '',
+    cursor: 0,
+    getText: () => host.text,
+    setText: (text: string) => { host.text = text },
+    setTextAndCursor: (text: string, cursor: number) => { host.text = text; host.cursor = cursor },
+    getCursor: () => host.cursor,
+    setCursor: (offset: number) => { host.cursor = offset },
+    focused: true,
+    borderColor: (text: string) => text,
+    invalidate: () => {},
+    addToHistory: () => {},
+    clearHistory: () => {},
+    // A full adapter decodes the wire form (mode + body).
+    setSerializedInput: (text: string) => {
+      host.text = text.startsWith('!!') ? text.slice(2) : text.startsWith('!') ? text.slice(1) : text
+    },
+    component: new Text('host', 0, 0),
+  }
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => host,
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const plugin = pluginEditor()
+  holder.handoff({ id: 'plugin', create: () => plugin })
+  plugin.setText('!pwd')
+  plugin.setCursor(3)
+  holder.handoff(undefined)
+  assert.equal(host.text, 'pwd', 'the decode strips the wire prefix')
+  assert.equal(host.cursor, 2, 'the cursor shifts back by the actually stripped prefix')
+  holder.dispose()
+})
+
+test('a host prompt-mode literal ! is a document character (never shifted on handoff)', () => {
+  const host = {
+    text: '!literal',
+    cursor: 4,
+    getText: () => host.text,
+    setText: (text: string) => { host.text = text },
+    setTextAndCursor: (text: string, cursor: number) => { host.text = text; host.cursor = cursor },
+    getCursor: () => host.cursor,
+    setCursor: (offset: number) => { host.cursor = offset },
+    focused: true,
+    borderColor: (text: string) => text,
+    invalidate: () => {},
+    addToHistory: () => {},
+    clearHistory: () => {},
+    getInputMode: () => 'prompt' as const,
+    component: new Text('host', 0, 0),
+  }
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => host,
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const created: ReturnType<typeof pluginEditor>[] = []
+  holder.handoff({
+    id: 'plugin',
+    create: () => {
+      const editor = pluginEditor()
+      created.push(editor)
+      return editor
+    },
+  })
+  assert.equal(created[0]!.getText(), '!literal', 'a prompt-mode draft transfers verbatim')
+  assert.equal(created[0]!.cursor, 4, 'a prompt-mode literal ! is a document character — the cursor never shifts')
   holder.dispose()
 })
 
@@ -961,5 +1081,201 @@ test('a consumed onSingleEscape disarms the pending double-Esc window', async ()
   vt.sendInput('\x1b') // not consumed again → must ARM, never cancel
   await vt.waitForRender()
   assert.equal(cancels, 0, 'a consumed onSingleEscape must disarm the stale window')
+  app.stop()
+})
+
+// ── PR review round: external editor wire boundary ─────────────────────────
+
+test('the external editor round-trips the WIRE form (shell modes switchable in $EDITOR)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  let seenDraft = ''
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    openExternalEditor: async (draft) => { seenDraft = draft; return '!!pwd' },
+    runOwned: owned,
+  })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('pwd')
+  await vt.waitForRender()
+  vt.sendInput('\x07') // ctrl+g
+  await pollUntil(() => seenDraft !== '', 'external editor round-trip')
+  assert.equal(seenDraft, '!pwd', 'the $EDITOR sees the WIRE form, never the bare body')
+  // The user switched `!` → `!!` in $EDITOR: the decode follows.
+  assert.equal(app.inputModeForTest(), 'shell-local', 'the saved wire form decodes back into the mode')
+  assert.equal(app.seatTextForTest(), 'pwd')
+  vt.sendInput('\r')
+  assert.deepEqual(submitted, ['!!pwd'], 'the edited wire form submits with its new mode')
+  app.stop()
+})
+
+test('a prompt-mode draft edited into a shell line in $EDITOR comes back as shell mode', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    openExternalEditor: async () => '!pwd',
+    runOwned: owned,
+  })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('hello')
+  await vt.waitForRender()
+  vt.sendInput('\x07') // ctrl+g → $EDITOR rewrites the draft into a shell line
+  await pollUntil(() => app.seatTextForTest() !== 'hello', 'external editor round-trip')
+  assert.equal(app.inputModeForTest(), 'shell-context', 'a ! line written in $EDITOR enters shell mode')
+  assert.equal(app.seatTextForTest(), 'pwd')
+  vt.sendInput('\r')
+  assert.deepEqual(submitted, ['!pwd'], 'the shell line submits as a shell command')
+  app.stop()
+})
+
+// ── PR review round: paste/undo invariant ─────────────────────────────────
+
+test('undo after a normalized paste never resurrects the raw prefix in the document', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('\x1b[200~!!git status\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-local')
+  assert.equal(app.seatTextForTest(), 'git status')
+  // Ctrl+-: the base editor's undo snapshots contain the NORMALIZED body
+  // (the prefix was stripped before insertion), so undo restores the
+  // pre-paste document — never `shell-local + "!!git status"`.
+  vt.sendInput('\x1f')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '', 'undo restores the pre-paste document')
+  assert.ok(!app.seatTextForTest().includes('!!'), 'the raw prefix must never re-enter the document')
+  app.stop()
+})
+
+test('a large shell paste (>10 lines) enters the shell mode through the paste registry', async () => {
+  const { vt, app, submitted } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  const lines = Array.from({ length: 12 }, (_, index) => `git log ${index}`)
+  vt.sendInput(`\x1b[200~!!${lines.join('\n')}\x1b[201~`)
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-local', 'a large !! paste enters shell-local BEFORE the registry marker')
+  const body = app.seatTextForTest()
+  assert.ok(!body.startsWith('!!'), 'the raw prefix must not survive in the document')
+  assert.ok(body.startsWith('[paste #'), `large pastes keep the fork registry marker:\n${body}`)
+  vt.sendInput('\r')
+  assert.equal(submitted.length, 1)
+  assert.ok(submitted[0]!.startsWith('!!'), 'the submitted wire form keeps the shell prefix')
+  assert.ok(submitted[0]!.includes('git log 0'), 'the expanded paste body is the stripped command text')
+  assert.ok(!submitted[0]!.includes('\n!!'), 'no raw prefix survives inside the expanded body')
+  app.stop()
+})
+
+// ── PR review round: mode transitions cancel the open dropdown ────────────
+
+test('a prompt-mode dropdown closes when ! enters shell mode', async () => {
+  const { vt, app } = startApp(fixtureWithFiles())
+  await vt.waitForRender()
+  vt.sendInput('\t') // prompt-mode Tab: cwd file completion
+  await waitForDropdownRow(vt, 'notes.txt', 'file completion in prompt mode')
+  vt.sendInput('!')
+  await vt.waitForRender()
+  await waitForNoDropdownRow(vt, 'notes.txt', 'dropdown after entering shell mode')
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the mode still transitions')
+  app.stop()
+})
+
+test('a shell-mode dropdown closes when Backspace returns to the prompt', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  // Deterministic command list (the empty-prefix list is capped at 50 and
+  // locale-sorted — a fixed fake keeps the dropdown content stable).
+  setCompgenRunnerForTest((_cwd, expression) => Promise.resolve({
+    ok: true,
+    lines: expression.includes('compgen -A command') ? ['git', 'gist', 'grep'] : [],
+  }))
+  try {
+    vt.sendInput('!')
+    await vt.waitForRender()
+    vt.sendInput('\t') // shell Tab with an empty prefix: the command list
+    await waitForDropdownRow(vt, 'git', 'shell command dropdown')
+    vt.sendInput('\x7f') // backspace on the empty shell body
+    await vt.waitForRender()
+    await waitForNoDropdownRow(vt, 'git', 'dropdown after the mode step-back')
+    assert.equal(app.inputModeForTest(), 'prompt', 'the mode steps back to the prompt')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  app.stop()
+})
+
+// ── PR review round: one-shot viewer mode ─────────────────────────────────
+
+test('a one-shot viewer resets the host editor to prompt mode and restores the shell draft on exit', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('git status')
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context')
+  app.setViewerMode(oneShotViewer())
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'prompt', 'the read-only placeholder bar must not inherit the shell mode')
+  assert.ok(app.seatTextForTest().includes('viewing subagent'), 'the placeholder bar shows')
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the preserved serialized main draft restores the shell mode')
+  assert.equal(app.seatTextForTest(), 'git status')
+  app.stop()
+})
+
+// ── PR review round: Stable autocomplete query keeps the wire document ────
+
+test('the Stable autocomplete extension query keeps the WIRE document in shell modes', async () => {
+  const queries: { lines: readonly string[]; cursorCol: number }[] = []
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.setCommandCompletions([], fixtureWorkspace(), null, async (query) => {
+    queries.push({ lines: [...query.lines], cursorCol: query.cursorCol })
+    return null
+  })
+  app.start()
+  await vt.waitForRender()
+  // Force the host provider to return null (a failed compgen run), so the
+  // plugin chain is consulted.
+  setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+  try {
+    // shell-context: the plugin must see the WIRE line `!gi`, never `gi`.
+    vt.sendInput('!')
+    vt.sendInput('gi')
+    vt.sendInput('\t')
+    await pollUntil(() => queries.length === 1, 'extension query in shell-context')
+    assert.deepEqual([...queries[0]!.lines], ['!gi'], 'a shell-context body reaches the plugin as the wire line')
+    assert.equal(queries[0]!.cursorCol, 3, 'the cursor shifts by the synthetic prefix')
+    // shell-local: `!!gi`.
+    app.setEditorText('')
+    await vt.waitForRender()
+    vt.sendInput('!')
+    vt.sendInput('!')
+    vt.sendInput('gi')
+    vt.sendInput('\t')
+    await pollUntil(() => queries.length === 2, 'shell query in shell-local')
+    assert.deepEqual([...queries[1]!.lines], ['!!gi'])
+    assert.equal(queries[1]!.cursorCol, 4)
+    // prompt mode: the body is the wire document as-is.
+    app.setEditorText('')
+    await vt.waitForRender()
+    vt.sendInput('gi')
+    vt.sendInput('\t')
+    await pollUntil(() => queries.length === 3, 'prompt-mode query')
+    assert.deepEqual([...queries[2]!.lines], ['gi'])
+    assert.equal(queries[2]!.cursorCol, 2)
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
   app.stop()
 })
