@@ -430,18 +430,24 @@ gitignored):
 - Output never goes silent: every stage prints a timestamped progress
   line (`start` / `ok` + elapsed / `FAIL` + elapsed) as it runs, so a long
   push always shows WHICH stage is live (the ≈2 min full chain, the
-  ≈1:45 nofork chain, or the ≈10–15 s typecheck). Verbose mode
-  (`PUSH_GATE_VERBOSE=1`) also streams every captured log line live with
-  a `[HH:MM:SS]` prefix, making a stuck stage show its raw tail as it
-  happens; `PUSH_GATE_QUIET=1` restores a single summary line for
-  scripted pushes. Success prints one summary line with the elapsed time
-  (logs discarded); failure prints the failed stage, the last 60 log
-  lines and retains the full log + progress timeline paths.
+  ≈1:45 nofork chain, or the ≈10–15 s typecheck). The stage list is NOT
+  hard-coded: the hook derives it from the selected package.json script
+  via `scripts/pre-push-stages.mjs` (top-level `&&` split, quote-aware),
+  so `verify:prepush` / `verify:prepush:nofork` remain the single source
+  of truth — adding, removing or reordering a stage in those scripts is
+  picked up automatically, and a dangling `&&` fails the hook loudly.
+  Verbose mode (`PUSH_GATE_VERBOSE=1`) also streams every captured log
+  line live with a `[HH:MM:SS]` prefix (a polling subshell with a final
+  drain after the last stage, so the final < poll-interval output is not
+  lost), making a stuck stage show its raw tail as it happens;
+  `PUSH_GATE_QUIET=1` restores a single summary line for scripted
+  pushes. Success prints one summary line with the elapsed time (logs
+  discarded); failure prints the failed stage, the last 60 log lines and
+  retains the full log + progress timeline paths. `PUSH_GATE_STAGES`
+  (test/dry-run only) is ignored unless `PUSH_GATE_TEST_MODE=1` is set,
+  so a stray env var can never shrink a real push's gate.
   Run `pnpm run verify:prepush` manually for the unabridged reference
-  run. Stages are hard-coded in the hook (with a drift guard that fails
-  loudly when a stage disappears from the package.json `verify:*`
-  scripts); `verify:prepush` / `verify:prepush:nofork` remain the single
-  source of truth.
+  run.
 - Escape hatch: `git push --no-verify` (then rely on CI).
 
 ## Reusable flow (worth repeating for the next capability)
