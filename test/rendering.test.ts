@@ -3251,7 +3251,7 @@ test('resultTextLines flattens blocks with the Web resultText semantics', () => 
   assert.deepEqual(resultTextLines([]), [])
 })
 
-// ── The transcript right gutter (2026-08-26 width contract) ───────────────
+// ── The transcript right gutter (transcript right-gutter width contract) ───────────────
 
 test('transcriptContentWidth reserves the right gutter and never goes negative', () => {
   assert.equal(TRANSCRIPT_RIGHT_GUTTER, 2)

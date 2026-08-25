@@ -8,12 +8,12 @@ visually collides with the terminal boundary. The gutter is a property of
 the **transcript surface only** — the editor, footer, welcome card,
 overlays, pickers and other chrome keep the full terminal width.
 
-This is the 2026-08-26 width-contract fix: 0.3.4's disclosure / Focus /
-Thinking rework made more components truncate to the FULL terminal width
-(compact Thinking's fixed-row geometry, folded tool rows, the user bubble's
-full-row background), which made the "text touches the right edge" look
-prominent. The fix deliberately is NOT a global padding change and never
-touches the vendored fork.
+This width contract fixes the 0.3.4 disclosure / Focus /
+Thinking rework, which made more components truncate to the FULL terminal
+width (compact Thinking's fixed-row geometry, folded tool rows, the user
+bubble's full-row background) and made the "text touches the right edge"
+look prominent. The fix deliberately is NOT a global padding change and
+never touches the vendored fork.
 
 ## The contract
 
@@ -57,11 +57,20 @@ TUI terminal width
   shell previews) truncate at the transcript content width at build time,
   so the baked lines fit the paint width exactly and never wrap into a
   second row.
-- The message component cache carries the build width (`MessageComponentEntry.width`):
-  a terminal width change rebuilds the width-baked folds at the new content
-  width (the resize latch in `syncSurfaceGeometry`), so a stale truncation
-  never wraps at the new paint width and the one-line fold contract
-  survives the resize matrix.
+- The max-tokens truncated marker is truncated to the content width and
+  wrapped in the gutter boundary too: it is exactly ONE row on any
+  terminal. Its row is charged to the message's hit height (+1) — a wrap
+  would add framebuffer rows the hit-map does not count and shift every
+  click below it.
+- The width cache identity is SCOPED: `MessageComponentEntry.builtWidth`
+  is recorded only for width-BAKING host builds (folded
+  system/compaction/tool cards). A terminal width change rebuilds those
+  entries at the new content width (the resize latch in
+  `syncSurfaceGeometry`), so a stale truncation never wraps at the new
+  paint width — while render-time width-aware builds (markdown, bubbles,
+  Thinking compact, PLUGIN views) stay cached: a resize never re-runs a
+  plugin renderer for unchanged content (the renderer-cache contract,
+  plan §23).
 - Narrow terminals: existing fixed-row geometry tests must assert
   `visibleWidth(row) <= transcriptContentWidth(terminalWidth)`, never
   `<= terminalWidth - 2` (that is ≤ 0 at 1–2 cells) and never a hardcoded

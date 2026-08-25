@@ -11,8 +11,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder } from '../src/transcript.ts'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import type { ToolPresenter } from '../src/present.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -1236,7 +1237,7 @@ test('fullscreen Focus expand/collapse: the expanded Bash card keeps the multili
 })
 
 test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disclosure sequence and a resize (40 → 16)', async () => {
-  // The right-gutter contract's blocker test (2026-08-26 plan §8.3): with
+  // The right-gutter contract's blocker test (plan §8.3): with
   // the transcript content 2 cells narrower than the terminal, every click
   // must still hit the SAME visual block — collapsed Thought → thinking
   // secondary → resize → secondary again → root collapse — with no
@@ -1321,6 +1322,88 @@ test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disc
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('🐋 Thought'), `the root collapse must land on the Thought:\n${view}`)
   assert.ok(!view.includes('▸ Thinking'), `the collapsed root must hide the process timeline:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the truncated marker stays ONE row inside the gutter: a click below it still hits its block at 16 columns', async () => {
+  // Review finding: the max-tokens marker row is charged to the message's
+  // hit height (+1), but an unwrapped full-width marker wrapped to two
+  // rows at narrow terminals while the hit-map counted one — every click
+  // below it drifted a row. The marker must truncate to the transcript
+  // content width (14 at 16 cols) and the NEXT turn's Thought header must
+  // still expand when clicked.
+  const vt = new VirtualTerminal(16, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    // Turn 1: a max-tokens turn whose final carries the truncated marker.
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'first run' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'Useful partial conclusion.' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 2, 2),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'max-tokens' } }, T0 + 3, 3),
+    // Turn 2: a settled turn whose (collapsed) Thought header renders
+    // BELOW the marker — the hit-map drift target.
+    eventAt('turn/start', { turn: 2 }, T0 + 4, 4),
+    eventAt('user/message', {
+      id: MessageId('u2'), role: 'user',
+      content: [{ type: 'text', text: 'second run' }],
+      source: { kind: 'user' },
+    }, T0 + 5, 5),
+    eventAt('tool/call', { turn: 2, step: 0, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('r2'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: CallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: CallId('c2') },
+      },
+    }, T0 + 7, 7),
+    eventAt('assistant/message', {
+      turn: 2, step: 1,
+      message: {
+        id: MessageId('a2'), role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 8, 8),
+    eventAt('turn/end', { turn: 2, reason: { kind: 'completed' } }, T0 + 9, 9),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let lines = vt.getViewport()
+  const marker = lines.findIndex(line => line.includes('output may'))
+  assert.ok(marker >= 0, `truncated marker missing:\n${lines.join('\n')}`)
+  // ONE row inside the 14-col content width — never a wrapped second line
+  // (a wrapped marker would add a framebuffer row the hit-map does not
+  // count and shift every click below it).
+  assert.ok(visibleWidth(lines[marker]!) <= transcriptContentWidth(16),
+    `the marker must fit the 14-col content width: ${JSON.stringify(lines[marker])}`)
+  assert.ok(!lines[marker + 1]!.includes('truncated'),
+    `the marker must be exactly ONE row:\n${lines.join('\n')}`)
+  // Click turn 2's Thought header (BELOW the marker): the hit-map must
+  // land on the Thought — a one-row drift would hit turn 2's user row
+  // above it and leave the Thought collapsed.
+  const thoughtY = lines.findIndex(line => line.includes('🐋 Thought'))
+  assert.ok(thoughtY > marker, `turn-2 Thought header missing below the marker:\n${lines.join('\n')}`)
+  click(vt, 3, thoughtY + 1)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🐳 Thought'), `the post-marker click must expand turn 2 (no row drift):\n${view}`)
   app.setFullscreen(false)
   app.stop()
 })
