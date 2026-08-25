@@ -9557,11 +9557,12 @@ export class TuiApp {
       editorEmpty: () => this.editor.getText().trim() === '',
       extensionFooterText: () => this.extensionHost?.footerText() ?? '',
       maxVisible: () => {
-        // The budget is bounded by the LIVE terminal height (never a
-        // floor that could exceed a very short terminal: the Frame adds
-        // borders, so the content budget must leave room for them).
+        // The budget is bounded by the LIVE terminal height MINUS the
+        // Frame's two border rows — a floor above rows-2 would overflow
+        // very short terminals (the Frame never clamps). 1 is the
+        // absolute minimum (a 3-row terminal still shows the title).
         const rows = Math.max(1, this.terminal.rows - 2)
-        return Math.max(3, Math.min(30, rows))
+        return Math.min(30, rows)
       },
       onSave: (layout) => {
         handle?.hide()
