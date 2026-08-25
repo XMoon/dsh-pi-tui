@@ -24,6 +24,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 function writerStub(): SessionWriter {
   return {
     followup: () => {},
+    steer: () => {},
     dequeue: () => {},
     cancel: (sessionId, cause, options) => {
       ;(stubAgents.get(sessionId) as { cancel(c: unknown, o: unknown): void }).cancel(cause, options)

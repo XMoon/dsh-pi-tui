@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectSessionLifecycle, type HostContextLike } from '../src/runtime/direct/session-lifecycle-direct.ts'
-import type { CreateSessionRequest, ResumeSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
+import { ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
 
 function host(agents: unknown): HostContextLike {
   return { get: (name) => (name === 'agents' ? agents : undefined) }
@@ -103,4 +103,41 @@ test('P1 regression: the ownership escape preserves the real AgentHandle so the 
   assert.equal(disposed, 1, 'the original AgentHandle.dispose() is called exactly once')
   // The live agent is the same object the runner drives:
   assert.equal((handle.direct!.agent as { session: { id: string } }).session.id, 'session-a')
+})
+
+test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a SECOND transition disposes the FIRST exactly once', async () => {
+  // The exact chain that broke: transition A→B stores liveHandle from the
+  // SessionHandle, then transition B→C disposes the OLD liveHandle. If the
+  // commit had stored the SessionHandle (or the agent) instead of the real
+  // ownerHandle, dispose() would be missing and B would PIN — never
+  // cooling. This pins ownerHandleOf + the double-transition dispose.
+  const disposed: string[] = []
+  let sequence = 0
+  const lifecycle = new DirectSessionLifecycle(host({
+    create: async (request: { sessionId: string }) => {
+      const id = request.sessionId
+      return {
+        agent: { session: { id } },
+        dispose: async () => { disposed.push(id) },
+      }
+    },
+    resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
+  }), compose('preset-a'))
+
+  // Transition A -> B: create B's SessionHandle.
+  const handleB = await lifecycle.create({ sessionId: 'session-b', meta: {} })
+  // The commit stores the OWNER HANDLE (exactly what the runner does):
+  let liveHandle = ownerHandleOf(handleB) as { dispose(): Promise<void> }
+  assert.ok(liveHandle !== undefined, 'the commit stores the real owner handle, never the SessionHandle')
+
+  // Transition B -> C: the OLD live handle (B) is disposed exactly once.
+  sequence += 1
+  await liveHandle.dispose()
+  assert.deepEqual(disposed, ['session-b'], 'transition B→C disposes B\x27s original AgentHandle exactly once')
+
+  // And a third transition disposes C exactly once:
+  const handleC = await lifecycle.create({ sessionId: 'session-c', meta: {} })
+  liveHandle = ownerHandleOf(handleC) as { dispose(): Promise<void> }
+  await liveHandle.dispose()
+  assert.deepEqual(disposed, ['session-b', 'session-c'], 'each retired session disposes exactly once, in order')
 })

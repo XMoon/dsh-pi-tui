@@ -24,6 +24,11 @@ export type PreparedMessage = unknown
 export interface SessionWriter {
   /** Deliver a prepared user message to the session's agent. */
   followup(sessionId: string, message: PreparedMessage): void
+  /** Steer the queued messages + draft into the session's next step (the
+   * FINAL delivery of a steer — the Direct guard/fence/barrier
+   * orchestration lives in the runner's steerAll, which calls this for
+   * the actual delivery). */
+  steer(sessionId: string, messages: readonly PreparedMessage[]): void
   /** Remove one queued message (pull-back; by id, never a clear). */
   dequeue(sessionId: string, messageId: string): void
   /** Cancel the session's current run. `reason` is opaque (the runner's

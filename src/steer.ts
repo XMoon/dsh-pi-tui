@@ -79,6 +79,18 @@ export interface SteerDeps {
   /** The fence refusal notice (defaults to {@link staleNotice}). */
   fenceNotice?: () => string
   /**
+   * The session WRITE delivery seam (optional): when provided, the FINAL
+   * delivery (steer batch / followup / queue removal) goes through it —
+   * the Direct SessionWriter implements it; a Remote adapter would too.
+   * Absent keeps the historical direct-agent delivery (the runner always
+   * provides it).
+   */
+  writer?: {
+    steer(sessionId: string, messages: readonly unknown[]): void
+    followup(sessionId: string, message: unknown): void
+    dequeue(sessionId: string, messageId: string): void
+  }
+  /**
    * The session operation barrier (convergence plan phase 3): the WHOLE
    * steer write runs inside `runWriter`, so a transition started while
    * this steer awaits drains it first — the `fence` quick-refusal alone
@@ -201,6 +213,34 @@ export async function steerAll(deps: SteerDeps, text: string, options: SteerAllO
   return steerAllCore(deps, text, options)
 }
 
+
+/** Deliver one message through the writer seam when present, else directly
+ * on the agent (the historical Direct delivery). Runs inside steerAllCore
+ * AFTER the guard confirmed the session — the writer resolves the live
+ * agent by session id, so a switch that could not have happened (guarded)
+ * still resolves to the same agent. */
+const deliverSteer = (deps: SteerDeps, message: unknown): void => {
+  const writer = deps.writer
+  const agent = deps.currentAgent()
+  const sessionId = agent?.session.id
+  if (writer !== undefined && sessionId !== undefined) {
+    writer.steer(sessionId, [message])
+    return
+  }
+  agent?.steer(message)
+}
+
+const deliverFollowup = (deps: SteerDeps, message: unknown): void => {
+  const writer = deps.writer
+  const agent = deps.currentAgent()
+  const sessionId = agent?.session.id
+  if (writer !== undefined && sessionId !== undefined) {
+    writer.followup(sessionId, message)
+    return
+  }
+  agent?.followup(message)
+}
+
 async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
   const onlyDraft = options.onlyDraft === true
   const agent = deps.currentAgent()
@@ -242,8 +282,8 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
     // behind the user's back.
     if (verdict.kind === 'forced') deps.notify(deps.forcedNotice(), 'error')
     const message = deps.createDraft(text)
-    if (now.status === 'running') now.steer(message)
-    else now.followup(message)
+    if (now.status === 'running') deliverSteer(deps, message)
+    else deliverFollowup(deps, message)
     return 'ok'
   }
   const current = [...now.inbox.nextTurn, ...now.inbox.nextStep]
@@ -275,8 +315,11 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   ]
   // Remove ONLY the confirmed messages — never clear() — so anything
   // spliced in DURING the guard survives untouched.
-  for (const message of current) now.inbox.remove(message.id)
-  for (const message of messages) now.steer(message)
+  for (const message of current) {
+    if (deps.writer !== undefined) deps.writer.dequeue(now.session.id, message.id)
+    else now.inbox.remove(message.id)
+  }
+  for (const message of messages) deliverSteer(deps, message)
   if (!forced) {
     deps.notify(messages.length === 1 ? 'steering 1 message' : `steering ${messages.length} messages`, 'info')
   }

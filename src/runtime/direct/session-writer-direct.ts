@@ -27,6 +27,8 @@ export interface HostContextLike {
 export interface LiveAgentLike {
   readonly session: { readonly id: string }
   followup(message: unknown): void
+  /** Deliver the steered batch into the next step (the agent's steer). */
+  steer(message: unknown): void
   cancel(reason: unknown, options: { keepInbox: boolean }): void
   readonly inbox: { remove(id: string): void }
 }
@@ -54,6 +56,12 @@ export class DirectSessionWriter implements SessionWriter {
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return
     agent.followup(message)
+  }
+
+  steer(sessionId: string, messages: readonly unknown[]): void {
+    const agent = this.agentFor(sessionId)
+    if (agent === undefined) return
+    for (const message of messages) agent.steer(message)
   }
 
   dequeue(sessionId: string, messageId: string): void {

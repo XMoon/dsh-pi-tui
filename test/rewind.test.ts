@@ -644,6 +644,7 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     },
     sessionWriter: {
       followup: () => {},
+      steer: () => {},
       dequeue: () => {},
       cancel: () => {},
       rename: () => true,

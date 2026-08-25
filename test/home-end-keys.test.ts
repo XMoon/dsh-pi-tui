@@ -261,6 +261,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     },
     sessionWriter: {
       followup: () => {},
+      steer: () => {},
       dequeue: () => {},
       cancel: () => {},
       rename: () => true,
