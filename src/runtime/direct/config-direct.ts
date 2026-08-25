@@ -117,13 +117,18 @@ export class DirectConfigPort implements ConfigPort {
 const PROVIDER_ROUTE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 
 /** The ONE adapter-owned rule for where a keyless profile may live: the
- * conventional llm-pi-ai `providers.<route>` slot. Shared by the option
+ * conventional llm-pi-ai `providers.<route>` slot, for a VALID provider
+ * route that is not the deepseek official builtin. Shared by the option
  * DTO's `canProvisionProfile` flag and the write-time validation — the
  * flag can never advertise a slot the write would refuse (and vice
- * versa). A non-conventional entry (a route whose profile lives in its
- * OWN section, or a hostile/malformed one) is not keyless-writable. */
+ * versa): an invalid route (the write throws), the builtin (the write
+ * skips) and a non-conventional layout (a route whose profile lives in
+ * its OWN section, or a hostile/malformed one — the write skips) are all
+ * not keyless-writable. */
 function isKeylessProfileSlot(ns: string, path: readonly string[], route: string): boolean {
-  return ns === settingsNamespace('llm-pi-ai')
+  return route !== 'deepseek-official'
+    && PROVIDER_ROUTE_PATTERN.test(route)
+    && ns === settingsNamespace('llm-pi-ai')
     && path.length === 2 && path[0] === 'providers' && path[1] === route
 }
 
@@ -217,22 +222,21 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
       }
     }
     const settingsOnly = credentialOptionsFor(this.readPiAiProvidersInternal())
-    return settingsOnly.map((option, index) => index === 0 ? {
-      ...option,
-      route: 'deepseek-official',
-      configured: true,
-      declared: false,
-      namesCredential: true,
-      group: 'configured' as const,
-      canProvisionProfile: false,
-    } : {
-      ...option,
-      route: option.label,
-      configured: true,
-      declared: false,
-      namesCredential: true,
-      group: 'configured' as const,
-      canProvisionProfile: true,
+    return settingsOnly.map((option, index) => {
+      const route = index === 0 ? 'deepseek-official' : option.label
+      return {
+        ...option,
+        route,
+        configured: true,
+        declared: false,
+        namesCredential: true,
+        group: 'configured' as const,
+        // The flag is computed through the SAME rule the llm-absent write
+        // branch applies (the conventional `providers.<route>` slot): a
+        // hostile providers key that fails the route pattern (or the
+        // builtin) is never advertised as writable.
+        canProvisionProfile: isKeylessProfileSlot(settingsNamespace('llm-pi-ai'), ['providers', route], route),
+      }
     })
   }
 
