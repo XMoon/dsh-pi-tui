@@ -313,6 +313,17 @@ README/CHANGELOG language flip) and re-reviewed:
     (input-router header, keybinding-registry, definitions);
   - the consumed viewer-close Esc disarms the main-session double-Esc
     window (no stale cancel/rewind after closing a viewer).
+- PR review third pass (1 P1 + 1 P3 → accepted):
+  - `editorSubmitKeysFor()` now detects a leader-only submit override via
+    the EFFECTIVE leader bindings (not the raw parsed list): a leader
+    sequence disabled by a prefix collision or an ambiguity fail-softs
+    back to the builtin Enter — a dead leader-only submit never disables
+    submission entirely;
+  - the viewer-close/double-Esc regression test hardened to genuinely arm
+    the window (first main Esc returns false so handleEscapeKey arms it;
+    the viewer-close Esc consumes) — the disarm assertion is no longer
+    vacuous.
+  Final round verdict: accepted (188 targeted tests, all gates green).
 
 Final gates after the PR review rounds: 2429 bundle tests (incl. the
 focus-viewport-policy suite), 985 fork tests, 11 docs tests, typecheck
