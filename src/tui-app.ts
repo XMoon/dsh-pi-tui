@@ -8263,7 +8263,9 @@ export class TuiApp {
    *   null (the plugin autocomplete chain). Receives the same editor
    *   position; returns suggestions or null.
    * @param scope - M1.10: the Host identity the port is addressed by (the
-   *   live SESSION when one exists, the workspace cwd otherwise).
+   *   live SESSION when one exists, the workspace cwd otherwise). May be a
+   *   live SOURCE resolved at suggestion time — the runner passes one so
+   *   a session switch never needs a provider reinstall.
    */
   setCommandCompletions(
     commands: readonly SlashCommand[],
@@ -8276,7 +8278,8 @@ export class TuiApp {
       signal: AbortSignal
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
-    scope: import('./runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', cwd },
+    scope: import('./runtime/host-file-port.ts').HostFileScope
+      | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', cwd },
   ): void {
     const base = new MentionProvider([...commands], cwd, fileReferences, () => this.editor.getInputMode(), scope)
     if (extensionSuggest === undefined) {

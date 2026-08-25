@@ -505,3 +505,38 @@ test('findFileMentions stops at an unterminated quote and keeps later text safe'
   // The expander therefore leaves the line untouched (safe for the submit).
   assert.equal(await expandFileMentionsForSubmit(text, '/ws', exists), text)
 })
+
+test('the completion scope is resolved at SUGGESTION time, so a session switch needs no reinstall', async () => {
+  // The reviewer repro (rebase review round 1): the provider is installed
+  // while session A is live, then the runner switches to session B. A
+  // scope captured at INSTALL time would keep resolving A (stale session,
+  // fail-closed empty discovery after the switch); a LIVE scope source
+  // resolves the CURRENT session on the very next suggestion.
+  const root = fixtureWorkspace()
+  const scopes: import('../src/runtime/host-file-port.ts').HostFileScope[] = []
+  const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async (scope) => {
+      scopes.push(scope)
+      return [{ value: '@file-one.txt', label: 'file-one.txt', description: join(root, 'file-one.txt'), kind: 'file' }]
+    },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  // The runner's live agent — the scope source reads it at suggestion time.
+  let liveAgent: { session: { id: string } } | undefined = { session: { id: 'session-a' } }
+  const provider = new MentionProvider([], root, seam, undefined, () =>
+    liveAgent === undefined
+      ? { kind: 'workspace', cwd: root }
+      : { kind: 'session', sessionId: liveAgent.session.id })
+  await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  assert.deepEqual(scopes[0], { kind: 'session', sessionId: 'session-a' }, 'the first suggestion resolves session A')
+  // The session switch: the SAME provider instance is queried again (no
+  // reinstall — the editor keeps the installed provider across the switch).
+  liveAgent = { session: { id: 'session-b' } }
+  await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  assert.deepEqual(scopes[1], { kind: 'session', sessionId: 'session-b' }, 'the switch is picked up without a reinstall')
+  // And a sessionless install (deferred start) resolves the workspace.
+  liveAgent = undefined
+  await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  assert.deepEqual(scopes[2], { kind: 'workspace', cwd: root }, 'the sessionless fallback resolves the workspace')
+})
