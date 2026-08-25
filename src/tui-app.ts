@@ -6971,9 +6971,15 @@ export class TuiApp {
   }
 
   /** Set the Thinking detail bulk preference directly (the declarative
-   * surface — `/settings` uses this; Alt+T uses the toggle). */
+   * surface — `/settings` uses this; Alt+T uses the toggle). Clears
+   * every per-card Thinking override FIRST, exactly like Alt+T: a
+   * declarative value is a bulk statement ("all Thinking at this level"),
+   * so a stale fullscreen click or search reveal must never partially
+   * counteract it (review finding). Repaints even when the value is
+   * unchanged, if the clear changed any effective state. */
   setThinkingExpanded(expanded: boolean): void {
-    if (this.thinkingExpanded === expanded) return
+    const hadOverrides = this.clearThinkingExpansionOverrides()
+    if (this.thinkingExpanded === expanded && !hadOverrides) return
     this.thinkingExpanded = expanded
     this.rebuildMessages()
   }
@@ -6983,15 +6989,21 @@ export class TuiApp {
    * states (plan §9): the user asked for ALL Thinking at one detail
    * level, so old click/search overrides must not survive. Also used by
    * the fullscreen → regular transition (plan §6.2's preferred cleanup:
-   * regular must never re-read a fullscreen click state). Iterates the
-   * OVERRIDE MAP — the visible transcript is windowed, so a clicked card
-   * that scrolled out of the window must still be reset (a later search
-   * jump or window restore must never resurrect a stale per-card state). */
-  private clearThinkingExpansionOverrides(): void {
+   * regular must never re-read a fullscreen click state) and by the
+   * declarative /settings setter. Iterates the OVERRIDE MAP — the
+   * visible transcript is windowed, so a clicked card that scrolled out
+   * of the window must still be reset (a later search jump or window
+   * restore must never resurrect a stale per-card state).
+   * @returns whether any override was removed (the caller must repaint
+   *   when true, even if the bulk value did not change). */
+  private clearThinkingExpansionOverrides(): boolean {
+    let removed = false
     for (const message of this.expandedOverride.keys()) {
       if (message.kind !== 'thinking') continue
       this.expandedOverride.delete(message)
+      removed = true
     }
+    return removed
   }
 
   /** Alt+T: bulk collapse/expand every Thinking block (the disclosure
