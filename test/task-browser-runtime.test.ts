@@ -57,8 +57,8 @@ const subagentActivity = (rows: readonly TaskBrowserRow[], childId: string): str
 const rowValue = (rows: readonly TaskBrowserRow[]): string[] => rows.map(row => row.value)
 
 /** A harness with a DEFERRED listDescendants (each catalog request gets
- * its own deferred; the test settles them in any order), a mutable
- * registry-status map, and commit/badge journals. */
+ * its own deferred; the test settles or rejects them in any order), a
+ * mutable registry-status map, and commit/badge journals. */
 function makeHarness(): {
   runtime: TaskBrowserRuntime
   listings(): number
@@ -70,12 +70,15 @@ function makeHarness(): {
   setJobs(jobs: readonly TaskBrowserJobInput[]): void
   /** Resolve the listing of the i-th refreshCatalog call (0-based). */
   settleListing(index: number, entries: readonly SubagentDescendantListEntry[]): void
+  /** Reject the listing of the i-th refreshCatalog call (0-based). */
+  rejectListing(index: number, error: Error): void
 } {
   let key: string | undefined = 'g1:sess-main'
   const statuses = new Map<string, string>()
   let jobs: TaskBrowserJobInput[] = [job()]
   let listingCount = 0
-  const pendingResolves: ((entries: readonly SubagentDescendantListEntry[]) => void)[] = []
+  const pendingSettles: ((entries: readonly SubagentDescendantListEntry[]) => void)[] = []
+  const pendingRejects: ((error: Error) => void)[] = []
   const commits: TaskBrowserRow[][] = []
   const preferreds: (string | undefined)[] = []
   const badges: ReadonlyArray<{ id: string; label: string }>[] = []
@@ -83,7 +86,10 @@ function makeHarness(): {
     currentKey: () => key,
     listDescendants: () => {
       listingCount += 1
-      return new Promise(resolve => { pendingResolves.push(resolve) })
+      return new Promise((resolve, reject) => {
+        pendingSettles.push(resolve)
+        pendingRejects.push(reject)
+      })
     },
     readJobs: () => jobs,
     agentStatusOf: (id) => statuses.get(id),
@@ -102,7 +108,8 @@ function makeHarness(): {
     setKey: (next) => { key = next },
     setStatus: (id, status) => { if (status === undefined) statuses.delete(id); else statuses.set(id, status) },
     setJobs: (next) => { jobs = [...next] },
-    settleListing: (index, entries) => { pendingResolves[index]?.(entries) },
+    settleListing: (index, entries) => { pendingSettles[index]?.(entries) },
+    rejectListing: (index, error) => { pendingRejects[index]?.(error) },
   }
 }
 
@@ -294,6 +301,47 @@ test('Case D3: overlapping catalog refreshes commit in REQUEST order (epoch supe
   assert.equal(h.runtime.has('child-old'), false, 'the stale membership must never land')
 })
 
+test('Case D4: a FAILED newer request must not invalidate a valid older response', async () => {
+  // "Latest successfully committed wins", never "latest requested wins"
+  // (PR review P2): a newer listing that REJECTS (e.g. a persistence
+  // read failure on open) must not discard an older in-flight request
+  // whose response is valid — the badge/browser would otherwise stay
+  // empty/stale until the next catalog event.
+  const h = makeHarness()
+  h.setStatus('child-a', 'running')
+  const older = h.runtime.refreshCatalog()
+  const newer = h.runtime.refreshCatalog()
+  // The newer (open-browser) listing fails first.
+  h.rejectListing(1, new Error('persistence read failed'))
+  await assert.rejects(newer)
+  // The older listing still succeeds with a valid catalog: it must
+  // commit (its epoch is not below the committed fence).
+  h.settleListing(0, [child({ activity: 'running' })])
+  await older
+  assert.equal(h.commits().length, 1, 'the older success must still commit after a newer failure')
+  assert.equal(h.runtime.has('child-a'), true)
+  assert.deepEqual(h.badges()[0]!.map(entry => entry.id), ['child-a'])
+})
+
+test('a failure never advances the committed fence for LATER requests', async () => {
+  const h = makeHarness()
+  h.setStatus('child-a', 'running')
+  const first = h.runtime.refreshCatalog()
+  const failing = h.runtime.refreshCatalog()
+  h.rejectListing(1, new Error('boom'))
+  await assert.rejects(failing)
+  // The first request commits (committed fence = its epoch).
+  h.settleListing(0, [child({ activity: 'running' })])
+  await first
+  assert.equal(h.runtime.has('child-a'), true)
+  // A LATER request after the failure still commits normally.
+  const later = h.runtime.refreshCatalog()
+  h.settleListing(2, [child({ id: 'child-later' as SessionId, activity: 'running', depth: 1 })])
+  await later
+  assert.equal(h.runtime.has('child-later'), true)
+  assert.equal(h.commits().length, 2)
+})
+
 test('reset() also supersedes a listing still in flight', async () => {
   const h = makeHarness()
   const listing = h.runtime.refreshCatalog()
@@ -337,11 +385,17 @@ test('the runner wires agent/status to the membership-gated RUNTIME-only refresh
     'agent/status must never trigger a catalog re-listing')
 })
 
-test('a session switch closes the open task browser and resets the runtime coordinator', () => {
+test('a session switch closes the open task browser, CLEARS the badge synchronously and resets the runtime coordinator', () => {
   const bump = indexSource.slice(
     indexSource.indexOf('const bumpSessionGeneration'),
     indexSource.indexOf('const jumpToSearchMatch'),
   )
   assert.ok(bump.includes('activeTaskBrowser?.close()'), 'the session bump must close the open browser')
   assert.ok(bump.includes('taskRuntime?.reset()'), 'the session bump must drop the cached catalog')
+  // PR review P2: the OLD session's running badge must not hang on the
+  // footer until the new session's async listing lands (a failed listing
+  // must never leave a stale badge either) — the bump clears it
+  // SYNCHRONOUSLY.
+  assert.ok(bump.includes('app.setAgents([])'), 'the session bump must clear the badge synchronously')
+  assert.ok(bump.includes('taskBrowserRows = []'), 'the session bump must clear the row identity source')
 })

@@ -79,11 +79,16 @@ export class TaskBrowserRuntime {
   /** The last committed rows (the row-identity source for the open
    * browser's select path — see {@link rows}). */
   private lastRows: TaskBrowserRow[] = []
-  /** Monotonic catalog-request epoch: only the LATEST refresh may cache
-   * and commit, so overlapping listings of the same session can never
-   * commit out of order (an older response never overwrites newer
-   * membership). */
-  private epoch = 0
+  /** Monotonic catalog-request epoch: every refreshCatalog request takes
+   * the next value. */
+  private requestEpoch = 0
+  /** The epoch of the LAST SUCCESSFULLY COMMITTED catalog. A response
+   * may commit only when its own request epoch is NOT below this — i.e.
+   * "latest successfully committed wins", never "latest requested wins":
+   * a FAILED newer request must not invalidate a valid older response
+   * (it never advances the committed epoch), while a successful newer
+   * commit still supersedes every older in-flight response. */
+  private committedEpoch = 0
 
   constructor(hooks: TaskBrowserRuntimeHooks) {
     this.hooks = hooks
@@ -106,22 +111,24 @@ export class TaskBrowserRuntime {
   }
 
   /** A CATALOG refresh: re-list the descendants, then — if the session
-   * key is still current AND this is still the LATEST refresh (the epoch
-   * fence) — cache and commit. Runtime statuses are projected from the
-   * Agent registry AT COMMIT, so a stale catalog response can never flip
-   * an already-idle child back to `running` (plan §7.3). The epoch
-   * orders OVERLAPPING refreshes of the same session: the initial
-   * listing and an open-browser listing may be in flight together, and
-   * an older response must never overwrite the newer membership/tree
-   * catalog (a superseded response neither caches nor commits). No live
-   * session: no-op (the runner clears the badge itself). */
+   * key is still current AND this request is not superseded — cache and
+   * commit. Runtime statuses are projected from the Agent registry AT
+   * COMMIT, so a stale catalog response can never flip an already-idle
+   * child back to `running` (plan §7.3). The epoch orders OVERLAPPING
+   * refreshes of the same session (the initial listing and an
+   * open-browser listing may be in flight together): only the LATEST
+   * SUCCESSFULLY COMMITTED response wins — an older success response
+   * never overwrites a newer committed membership/tree catalog, and a
+   * FAILED newer request never invalidates a valid older response. No
+   * live session: no-op (the runner clears the badge itself). */
   async refreshCatalog(): Promise<void> {
     const key = this.hooks.currentKey()
     if (key === undefined) return
-    const requestEpoch = ++this.epoch
+    const epoch = ++this.requestEpoch
     const entries = await this.hooks.listDescendants()
     if (this.hooks.currentKey() !== key) return
-    if (requestEpoch !== this.epoch) return
+    if (epoch < this.committedEpoch) return
+    this.committedEpoch = epoch
     this.catalog = [...entries]
     this.apply(entries)
   }
@@ -138,11 +145,11 @@ export class TaskBrowserRuntime {
 
   /** Drop the cached catalog (session switch): the next catalog refresh
    * re-reads from the new root, and stale-session status flips find no
-   * membership. The epoch is bumped too, so a listing still in flight
-   * from the old session can never commit even if its key check were
-   * somehow satisfied. */
+   * membership. Every in-flight request is invalidated too (the fence
+   * jumps past them), so an old-session listing can never commit even
+   * if its key check were somehow satisfied. */
   reset(): void {
-    this.epoch += 1
+    this.committedEpoch = ++this.requestEpoch
     this.catalog = []
     this.lastRows = []
   }

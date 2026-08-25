@@ -2778,13 +2778,19 @@ export function apply(ctx: Context, config: Config): void {
       app.clearSessionOverrides()
       // A new session owns the surface: close the task browser opened for
       // the old session (its rows would otherwise go stale — the runtime
-      // refresh is fenced to the old root) and drop the cached descendant
-      // catalog, so stale-session `agent/status` flips find no membership
-      // and the next refresh reads the new root. The coordinator is
-      // re-populated by initLiveSession → refreshAgents.
+      // refresh is fenced to the old root) and CLEAR the subagent badge
+      // SYNCHRONOUSLY — the new session's first listing is async, and the
+      // old session's running badge must not hang on the footer until it
+      // lands (a failed listing must never leave a stale badge either).
+      // The cached catalog is dropped too, so stale-session
+      // `agent/status` flips find no membership and the next refresh
+      // reads the new root. The coordinator is re-populated by
+      // initLiveSession → refreshAgents.
       activeTaskBrowser?.close()
       activeTaskBrowser = undefined
       taskRuntime?.reset()
+      app.setAgents([])
+      taskBrowserRows = []
       // A new session owns the surface: tear down the subagent viewer. The
       // old viewer's parent session is gone (the continuation contract
       // requires the EXACT live parent), so the child transcript, the
@@ -4727,10 +4733,9 @@ export function apply(ctx: Context, config: Config): void {
     // their own channel into the subagent registry. The
     // TaskBrowserRuntime coordinator owns the split:
     // - `refreshAgents` (CATALOG): event-driven — subagent lifecycle events
-    //   (start/end), subagent tool calls in the live session (the
-    //   scope-filtered lifecycle events may not reach this context), and
-    //   every jobs change (a one-shot settlement implies membership may
-    //   have moved). listDescendants is async and may read persistence for
+    //   (start/end), subagent tool calls in the live session, and every
+    //   jobs change (a one-shot settlement implies membership may have
+    //   moved). listDescendants is async and may read persistence for
     //   cold children, so the commit is session-key fenced and never lands
     //   on a newer session.
     // - `refreshAgentRuntimeOnly` (RUNTIME): the `agent/status` handler —
@@ -5516,9 +5521,11 @@ export function apply(ctx: Context, config: Config): void {
           ? event.data.arguments
           : JSON.stringify(event.data.arguments))
         // Continuable children never register jobs, and their lifecycle
-        // events are scope-filtered (may not reach this context), so the
-        // subagent tool's own call in the live session is the reliable
-        // badge-arming signal.
+        // events are scoped by the delegating parent — an UNTAGGED
+        // listener (this runner) receives them all, so the tool's own
+        // call is a REDUNDANT badge-arming signal that stays as a
+        // defensive net (it also fires when the lifecycle events are
+        // suppressed upstream).
         if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
           refreshAgents()
           // Remember the pending delegation: the viewer matches one of these
@@ -5656,10 +5663,12 @@ export function apply(ctx: Context, config: Config): void {
       }
     })
     // Subagent lifecycle events drive the continuable-children half of the
-    // dock badge (they never register jobs). Scope-filtered by the
-    // delegating parent — when they do not reach this context, the
-    // tool/call fallback above still arms the badge. These are CATALOG
-    // events: membership/tree may have changed, so they re-list.
+    // dock badge (they never register jobs). The events are scoped by the
+    // delegating parent, but an UNTAGGED listener (this runner) receives
+    // every agent-scoped event — including nested descendants' — so no
+    // reachability caveat applies; the tool/call fallback above stays as
+    // a redundant safety net. These are CATALOG events: membership/tree
+    // may have changed, so they re-list.
     ctx.on('subagent/start', () => refreshAgents())
     ctx.on('subagent/end', () => refreshAgents())
     // `agent/status` is the LIVE runtime channel: a child's driver

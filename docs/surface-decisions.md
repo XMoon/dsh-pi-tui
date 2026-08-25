@@ -221,8 +221,11 @@ read the DURABLE descendant catalog, not the live-child list:
   membership/tree/mode never move). The runner's `agent/status` handler
   is membership-gated: only flips of children in the cached catalog
   refresh the surface, so the MAIN agent's own per-turn flips never
-  repaint. A session switch closes the open browser and drops the cached
-  catalog (the fence key = session generation + id).
+  repaint. A session switch closes the open browser, clears the badge
+  SYNCHRONOUSLY and drops the cached catalog — the old session's running
+  badge never hangs on the footer until the new session's first listing
+  lands (the fence key = session generation + id; a failed listing never
+  leaves a stale badge).
 - **Jobs are a separate flat group**, sorted by their own registry
   ordering; the background one-shot duplication (job row + child row with
   no cross-reference) is contract, locked in by test.
