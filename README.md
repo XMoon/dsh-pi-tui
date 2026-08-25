@@ -31,7 +31,7 @@ dsh --profile pi-tui
 * Plan Review
 * Todo / Goal 状态展示
 
-`Ctrl+O` 控制工具和系统详情，`Alt+T` 单独控制 Thinking。
+`Ctrl+O` 控制工具和系统详情;在全屏 Focus 下它整体展开最近几个 Thought root,或全部收起。`Alt+T` 单独控制 Thinking。
 
 ### Focus Mode
 
@@ -122,7 +122,7 @@ main
 
 `!` / `!!` 是独立的编辑器模式，而不是普通文本前缀。进入 Shell 模式后 Prompt 和补全行为会同步切换。
 
-Shell 卡片默认只显示有限的输出预览，`Ctrl+O` 可以展开完整保留内容。
+Shell 卡片默认只显示有限的输出预览，`Ctrl+O` 可以展开完整保留内容——全屏 Focus 除外:那里 `Ctrl+O` 负责 Thought root 的整体开关,Shell 卡片保持折叠。
 
 ### 文件引用与图片
 
@@ -172,7 +172,7 @@ TUI 使用 DSH 提供的模型和设置服务。
 | `Ctrl+T`      | 切换 Todo 面板              |
 | `Ctrl+R`      | 搜索输入历史                 |
 | `Ctrl+F`      | 搜索 Transcript          |
-| `Ctrl+O`      | 展开 / 折叠工具和系统详情         |
+| `Ctrl+O`      | 展开 / 折叠工具和系统详情;全屏 Focus 下整体切换 Thought root |
 | `Alt+T`       | 展开 / 折叠 Thinking       |
 | `Ctrl+G`      | 使用 `$VISUAL`/`$EDITOR` 编辑输入 |
 | `Ctrl+V`      | 粘贴图片                   |

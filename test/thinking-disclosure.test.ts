@@ -141,7 +141,7 @@ test('A1: Focus OFF regular — Thinking exists compact with a preview and the A
   show(app, folder)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('▸ Thinking'), `Thinking card missing:\n${view}`)
+  assert.ok(view.includes('🌊 Thinking'), `Thinking card missing:\n${view}`)
   assert.ok(view.includes('alpha latest'), `the compact preview must be the LATEST line:\n${view}`)
   assert.ok(!view.includes('alpha reasoning'), `the earlier body line must not leak:\n${view}`)
   assert.ok(hintCount(view, 'alt+t') === 2, `both compact cards carry the Alt+T hint:\n${view}`)
@@ -167,7 +167,7 @@ test('A2/A3: Alt+T expands ALL Thinking full, then back to compact — never rem
   assert.ok(view.includes('alpha latest'), `the compact preview must return:\n${view}`)
   assert.ok(!view.includes('alpha reasoning'), `the body must fold again:\n${view}`)
   assert.ok(hintCount(view, 'alt+t') === 2, `both cards carry the hint again:\n${view}`)
-  assert.ok(view.includes('▸ Thinking'), 'the blocks are PRESENT — Alt+T is a detail toggle, never a visibility gate')
+  assert.ok(view.includes('🌊 Thinking'), 'the blocks are PRESENT — Alt+T is a detail toggle, never a visibility gate')
   app.stop()
 })
 
@@ -182,7 +182,16 @@ test('A4: Ctrl+O expands recent tool/system output but NEVER Thinking detail', a
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('Read src/transcript.ts'), `the recent tool must expand:\n${view}`)
   assert.ok(hintCount(view, 'alt+t') === 1, `Thinking stays compact (its own owner):\n${view}`)
-  assert.ok(!view.includes('▾ Thinking'), 'Ctrl+O must never expand Thinking')
+  // Both disclosure states share the 🌊 marker, so compactness is proven
+  // by the geometry, not the marker: the card must still be the compact
+  // 3-row block (title + preview + hint) — an expanded card would render
+  // the reasoning body rows instead.
+  const rows = view.split('\n')
+  const thinkRow = rows.findIndex(line => line.includes('🌊 Thinking'))
+  assert.ok(thinkRow >= 0, `Thinking card missing:\n${view}`)
+  const block = rows.slice(thinkRow, thinkRow + 3)
+  assert.equal(block.length, 3, `the Thinking card must stay compact under Ctrl+O:\n${view}`)
+  assert.ok(block[2]!.includes('to expand'), `the compact hint must survive Ctrl+O:\n${view}`)
   app.stop()
 })
 
@@ -248,13 +257,13 @@ test('C1/C2: Focus collapsed — the Think: preview stays; Alt+T changes only th
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Think:   locating the transcript path…'), `the collapsed Think: preview missing:\n${view}`)
-  assert.ok(!view.includes('▸ Thinking'), 'the collapsed root hides the process rows')
+  assert.ok(!view.includes('🌊 Thinking'), 'the collapsed root hides the process rows')
   // Alt+T flips the bulk preference — the collapsed root shows nothing new.
   app.toggleThinkingExpanded()
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('🐋 Thought'), 'the root stays collapsed')
-  assert.ok(!view.includes('▸ Thinking'), 'no process leak under a collapsed root')
+  assert.ok(!view.includes('🌊 Thinking'), 'no process leak under a collapsed root')
   assert.equal(app.isThinkingExpanded(), true, 'the bulk preference changed')
   app.setFullscreen(false)
   app.stop()
@@ -758,17 +767,17 @@ test('P2a: a wide → narrow resize re-derives the compact Thinking rows (no sta
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview that must re-truncate' }])
   await vt.waitForRender()
   let lines = vt.getViewport()
-  let start = lines.findIndex(line => line.includes('▸ Thinking'))
+  let start = lines.findIndex(line => line.includes('🌊 Thinking'))
   assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
   assert.ok(lines[start + 1]!.includes('a fairly long reasoning preview'),
     'precondition: the 100-col preview is untruncated')
   vt.resize(8, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  // At 8 terminal cols the transcript content width is 6, so the title
-  // truncates to `▸ Thi…` — locate by the truncated prefix, never the
-  // full word (the right-gutter contract).
-  start = lines.findIndex(line => line.includes('Thi'))
+  // At 8 terminal cols the transcript content width is 6 and the 2-cell
+  // 🌊 marker eats into the title, so it truncates to `🌊 Th…` — locate
+  // by the marker, never the truncated word (the right-gutter contract).
+  start = lines.findIndex(line => line.includes('🌊'))
   assert.ok(start >= 0, `thinking block missing after resize:\n${lines.join('\n')}`)
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `resize must keep the fixed 3-row geometry:\n${block.join('\n')}`)
@@ -788,9 +797,10 @@ test('P2b: a narrow → wide resize restores the untruncated preview', async () 
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview line' }])
   await vt.waitForRender()
   let lines = vt.getViewport()
-  // 8 terminal cols → 6 transcript content cols: the title truncates to
-  // `▸ Thi…`, so locate by the truncated prefix (right-gutter contract).
-  let start = lines.findIndex(line => line.includes('Thi'))
+  // 8 terminal cols → 6 content cols: the 2-cell 🌊 marker eats into the
+  // title, so it truncates to `🌊 Th…` — locate by the marker, never the
+  // truncated word (the right-gutter contract).
+  let start = lines.findIndex(line => line.includes('🌊'))
   assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
   const narrowPreview = lines[start + 1]!
   assert.ok(visibleWidth(narrowPreview) <= transcriptContentWidth(8), `precondition: truncated at the 6-col content width (${JSON.stringify(narrowPreview)})`)
@@ -798,7 +808,7 @@ test('P2b: a narrow → wide resize restores the untruncated preview', async () 
   vt.resize(100, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  start = lines.findIndex(line => line.includes('▸ Thinking'))
+  start = lines.findIndex(line => line.includes('🌊 Thinking'))
   assert.ok(start >= 0, `thinking block missing after widening:\n${lines.join('\n')}`)
   const widePreview = lines[start + 1]!
   assert.ok(widePreview.includes('a fairly long reasoning preview line'),
@@ -822,7 +832,7 @@ test('P2c: fullscreen resize keeps the compact rows stable and the click map ali
   await vt.waitForRender()
   // Precondition: compact, click the title row → full.
   let lines = vt.getViewport()
-  let start = findRow(lines, '▸ Thinking')
+  let start = findRow(lines, '🌊 Thinking')
   assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
   click(vt, 3, start + 1)
   await vt.waitForRender()
@@ -835,12 +845,12 @@ test('P2c: fullscreen resize keeps the compact rows stable and the click map ali
   click(vt, 20, bodyY + 1)
   await vt.waitForRender()
   // Resize to 8: the card stays 3 rows, each within the 6-col content
-  // width (the transcript right gutter — locate by the truncated `Thi`
-  // prefix, the full title no longer fits).
+  // width (the transcript right gutter — the 2-cell 🌊 marker eats into
+  // the title, so locate by the marker, never the truncated word).
   vt.resize(8, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  start = lines.findIndex(line => line.includes('Thi'))
+  start = lines.findIndex(line => line.includes('🌊'))
   assert.ok(start >= 0, `thinking block missing after resize:\n${lines.join('\n')}`)
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `fullscreen resize must keep the 3-row geometry:\n${block.join('\n')}`)
@@ -889,7 +899,7 @@ test('P2: the compact Thinking card never wraps on a narrow terminal', async () 
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a very long reasoning line that would wrap' }])
   await vt.waitForRender()
   const lines = vt.getViewport()
-  const start = lines.findIndex(line => line.includes('Thi'))
+  const start = lines.findIndex(line => line.includes('🌊'))
   assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `the block must stay 3 rows on a narrow terminal:\n${block.join('\n')}`)
@@ -913,7 +923,7 @@ test('P2e: the compact card survives the 100 → 8 → 100 resize matrix inside 
   await vt.waitForRender()
   const rowsOf = (): string[] => {
     const lines = vt.getViewport()
-    const start = lines.findIndex(line => line.includes('▸ Thinking') || line.includes('Thi'))
+    const start = lines.findIndex(line => line.includes('🌊'))
     assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
     return lines.slice(start, start + 3)
   }

@@ -348,10 +348,28 @@ mode (only `TuiAltScreen` wires `onCellClick`):
     flips that card's EFFECTIVE state: under bulk-compact it expands
     only that card, under bulk-full it collapses only that card (the
     override always expresses the opposite of the effective state).
-  - Ctrl+O does not pierce the fullscreen Focus state — and never
-    expands Thinking on ANY surface (Ctrl+O owns tool/system/compaction
-    detail only; Alt+T owns Thinking detail; every disclosure has one
-    bulk owner).
+  - Ctrl+O is the Thought-ROOT bulk owner in fullscreen Focus ONLY (the
+    2026-08-25 supplement): no expanded root → expand the most recent
+    `EXPAND_RECENT_TURNS` eligible roots (real TurnActivity turns that
+    are currently projected — never a fake Thought); any expanded root →
+    Collapse All in ONE mutation + ONE rebuild + ONE viewport pass.
+    It NEVER touches Thinking on any surface (Alt+T owns Thinking
+    detail; every disclosure has one bulk owner), never full-reveals
+    secondaries (mouse-owned), and Collapse All additionally clears
+    every Focus-secondary local override and normalizes the regular
+    Ctrl+O tool master OFF — only there — so a later surface/Focus
+    switch cannot resurrect the old bulk detail.
+  - A click on a blank visual row INSIDE an expanded Thought (the
+    inter-block spacer rows) collapses that Thought — the escape hatch
+    that works even when its header scrolled out of view, reusing the
+    exact header-click collapse anchor. Row-based ownership only: a row
+    claimed by any concrete target (attachment / secondary / header /
+    ordinary message) keeps its own behavior — the same row's right-side
+    blank is never a Thought background (no X-axis hit geometry). The
+    Thought's trailing boundary spacer (the next Thought / a user
+    message / the final assistant follows) is unclaimed — a global blank
+    click is a no-op, never a guessed "nearest Thought", and editor /
+    footer / chrome / overlay areas are never pierced.
   - The fold hint reads `(click to expand)` for fullscreen secondary
     cards, `(alt+t to expand)` for regular Thinking, `(ctrl+o to
     expand)` for the ordinary keyboard-owned folds.
@@ -390,8 +408,10 @@ mode (only `TuiAltScreen` wires `onCellClick`):
   PRESENTS: a running card collapses to the newest 5 source lines, a
   settled card to at most 20 VISUAL rows, with an honest hidden-line
   marker. Ctrl+O (the existing master switch) expands to the retained
-  buffer; a running card's result is re-chained to the bounded tail on a
-  throttle.
+  buffer — everywhere EXCEPT fullscreen Focus, where Ctrl+O owns the
+  Thought-root bulk and the shell cards keep their folded state (their
+  local `!`/`!!` presentation is otherwise unchanged); a running card's
+  result is re-chained to the bounded tail on a throttle.
 - Quick dismiss (Alt+K) removes SETTLED cards only: a running card is
   never dismissed, the shell process is never cancelled (Esc owns that),
   no session event is deleted, and an already-submitted `!` context

@@ -31,7 +31,7 @@ dsh --profile pi-tui
 * Plan Review
 * Todo / Goal status
 
-`Ctrl+O` controls Tool and System details. `Alt+T` controls Thinking separately.
+`Ctrl+O` controls Tool and System details — and in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all. `Alt+T` controls Thinking separately.
 
 ### Focus Mode
 
@@ -122,7 +122,7 @@ Runs the command locally only. Its output is not added to model context.
 
 `!` / `!!` are editor modes rather than plain text prefixes. The prompt and completion behavior switch together with the active mode.
 
-Shell cards show a bounded output preview by default. `Ctrl+O` expands the retained output.
+Shell cards show a bounded output preview by default. `Ctrl+O` expands the retained output — except in fullscreen Focus, where Ctrl+O owns the Thought roots and the shell cards keep their folded state.
 
 ### File references and images
 
@@ -172,7 +172,7 @@ Slash Commands registered by other plugins through `ctx.commands` are discovered
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |
 | `Ctrl+F`      | Search Transcript                                   |
-| `Ctrl+O`      | Expand / collapse Tool and System details           |
+| `Ctrl+O`      | Expand / collapse Tool and System details; in fullscreen Focus, bulk-toggle the Thought roots |
 | `Alt+T`       | Expand / collapse Thinking                          |
 | `Ctrl+G`      | Edit current input in `$VISUAL`/`$EDITOR`           |
 | `Ctrl+V`      | Paste image                                         |
