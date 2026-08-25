@@ -183,8 +183,14 @@ export class EffectiveKeymap {
     source: KeybindingSource,
     priority: number,
   ): EffectiveBindingRule {
+    // The rule id is PER KEY (`${action}@${source}:${key}`): conflict
+    // deactivation is by id, so a conflict on ONE key of a multi-key
+    // action deactivates THAT key only — never the action's other keys
+    // (review finding: a shared `${action}@${source}` id chained the
+    // deactivation across every key of the action, and the resolve
+    // tie-break could not tell the rules apart either).
     return {
-      id: `${definition.id}@${source}`,
+      id: `${definition.id}@${source}:${key}`,
       action: definition.id,
       key,
       source,

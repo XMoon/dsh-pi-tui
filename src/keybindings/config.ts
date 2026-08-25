@@ -105,10 +105,13 @@ export function parseUserKeybindings(
   }
   const doc = raw as Record<string, unknown>
 
-  // The leader key itself.
+  // The leader key itself. A plain PRINTABLE leader key is rejected: the
+  // machine consumes it while idle (arming the pending state), so a
+  // printable leader would swallow typing — same rule as a direct
+  // printable binding (review finding).
   const leaderValue = doc[LEADER_KEY]
   if (leaderValue !== undefined) {
-    if (typeof leaderValue === 'string' && isValidKeyId(leaderValue)) {
+    if (typeof leaderValue === 'string' && isValidKeyId(leaderValue) && !isPlainPrintableKey(leaderValue)) {
       leader = { key: leaderValue, timeoutMs: options.leaderTimeoutMs ?? DEFAULT_LEADER_TIMEOUT_MS }
     } else {
       diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — ignored`)

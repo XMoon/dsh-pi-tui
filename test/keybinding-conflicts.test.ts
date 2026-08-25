@@ -109,3 +109,26 @@ test('conflict diagnostics are fail-soft: other rules keep working', () => {
   assert.equal(km.resolve('\x18', editorContext)?.action, 'app.input.steer')
   assert.equal(km.resolve('\x13', editorContext), undefined, 'the replaced ctrl+s is gone')
 })
+
+test('a conflict on ONE key of a multi-key action deactivates only that key', () => {
+  // Review finding: the rule id used to be `${action}@${source}` (shared
+  // by every key of one action), so a conflict on one key deactivated the
+  // action's OTHER keys too. Rule ids are per-key now.
+  const diagnostics: string[] = []
+  const km = new EffectiveKeymap({
+    definitions: APP_KEYBINDINGS,
+    userBindings: {
+      // ctrl+r conflicts with the todo toggle below; ctrl+shift+r must survive.
+      'app.history.search': ['ctrl+r', 'ctrl+shift+r'],
+      'app.todo.toggle': 'ctrl+r',
+    },
+    onDiagnostic: (message) => diagnostics.push(message),
+  })
+  assert.equal(km.resolve('\x12', editorContext), undefined, 'the conflicting ctrl+r must not fire')
+  assert.equal(km.resolve('\x1b[114;6u', editorContext)?.action, 'app.history.search', 'ctrl+shift+r survives the per-key deactivation')
+  assert.deepEqual(km.keysFor('app.history.search'), ['ctrl+shift+r'], 'only the conflicting key is dropped')
+  const conflict = km.conflictsList()[0]!
+  assert.equal(conflict.key, 'ctrl+r')
+  assert.equal(conflict.actions.length, 2)
+  assert.ok(diagnostics.some(message => message.includes('conflict')))
+})
