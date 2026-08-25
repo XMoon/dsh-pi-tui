@@ -264,6 +264,26 @@ export const LOCAL_COMMANDS = new Set([
 ])
 
 /**
+ * The runner's PERMISSION projection decision (review round 21): the
+ * permission sent to the app must be EXPLICITLY undefined when the
+ * permission-preset service or the live agent is unavailable — an
+ * omitted field would keep the stale value in the legacy merge and
+ * publish a stale permission to the extension snapshot. Pure so the
+ * runner-level regression is testable without mounting the bundle.
+ * @param permission - the permission-preset service (undefined when absent).
+ * @param agent - the live agent (undefined when absent).
+ * @param events - the agent's session events (the permission source).
+ * @returns the value to pass as setStatus' permission field.
+ */
+export function deriveRunnerPermission(
+  permission: { current(events: unknown): string | undefined } | undefined,
+  agent: { session: { events: unknown } } | undefined,
+): string | undefined {
+  if (permission === undefined || agent === undefined) return undefined
+  return permission.current(agent.session.events)
+}
+
+/**
  * Command semantics matrix (plan §19.3/M12): a LOCAL command line carrying a
  * staged image placeholder is REJECTED — local commands are pure UI
  * controls, never LLM prompts. AGENT-FACING input (plain prompts AND
@@ -2445,9 +2465,7 @@ export function apply(ctx: Context, config: Config): void {
         // and syncExtensionState would publish a STALE permission to the
         // extension snapshot (a state transition where the permission
         // preset service or the live agent is momentarily gone).
-        ...permission === undefined || liveAgent === undefined
-          ? { permission: undefined }
-          : { permission: permission.current(liveAgent.session.events) },
+        permission: deriveRunnerPermission(permission, liveAgent),
         ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
       })
     }
