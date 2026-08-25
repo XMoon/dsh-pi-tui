@@ -29,7 +29,7 @@ import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { iconStyleOf } from './icons.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
 import { APP_KEYBINDINGS } from './keybindings/definitions.ts'
-import { formatKeyId, formatKeyList, formatLeaderSequence } from './keybindings/hints.ts'
+import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
 import type { AppKeybindingId } from './keybindings/types.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
@@ -2875,10 +2875,12 @@ export function registerTuiCommands(
       // physical shortcut.
       const keybindings = app.keybindingsManager()
       const keysLabel = (action: AppKeybindingId): string => {
-        const keys = keybindings.keysFor(action)
-        if (keys.length > 0) return formatKeyList(keys)
-        const hint = keybindings.keyHint(action)
-        return hint === '' ? '—' : hint
+        // The full effective label: ALL direct keys AND ALL leader
+        // sequences (a mixed `['ctrl+z', '<leader>h']` shows
+        // `Ctrl+Z / Leader H`; a disabled action advertises nothing) —
+        // review finding: keysFor() alone dropped the leader bindings.
+        const label = keybindings.keysLabelFor(action)
+        return label === '' ? '—' : label
       }
       const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit (steers the running turn while busy when Enter while busy is Steer; skill commands steer too, UI commands run locally)', currentValue: '' },
         { id: 'k-queue', label: keysLabel('app.input.queue'), description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },

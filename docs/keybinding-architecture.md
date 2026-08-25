@@ -230,7 +230,11 @@ README/CHANGELOG language flip) and re-reviewed:
   (`['ctrl+z', '<leader>h']`) render BOTH in the snapshot (`keys` +
   `leaderKeys`) and in `keyHint` (`Ctrl+Z / Leader H`) — the leader
   sequence used to vanish behind the direct key.
+- Round 10 (needs-fixes): `/help` renders through the manager's new
+  `keysLabelFor()` — ALL direct keys and ALL leader sequences of an
+  action, one shared effective-label source (a mixed action no longer
+  shows only its direct keys).
 
-Final gates after the rebase: 2402 bundle tests, 985 fork tests, 11
+Final gates after the rebase: 2403 bundle tests, 985 fork tests, 11
 docs tests, typecheck (fork + bundle), `check-host-keybindings` gate,
 `git diff --check` — all green.
