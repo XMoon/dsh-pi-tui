@@ -2674,6 +2674,12 @@ export class TuiApp {
         // a remapped interrupt (Ctrl+X) is inert inside the read-only
         // viewer, never the parent's (PR review finding).
         if (matchesKey(data, 'escape')) {
+          // A CONSUMED viewer-close Esc is a fresh action: it disarms any
+          // pending double-Esc window (a prior main-session Esc may have
+          // armed it — the next main-session Esc after closing the viewer
+          // must not read as a second consecutive Esc; PR review
+          // finding). Same discipline as handleEscapeKey.
+          this.lastEscapeAt = undefined
           this.events.onSingleEscape?.()
           return { consume: true }
         }
@@ -2687,6 +2693,9 @@ export class TuiApp {
         // configurable app.agent.interrupt (whose remap could otherwise
         // swallow the exit — PR review finding).
         if (matchesKey(data, 'escape')) {
+          // Same disarm discipline as above: a consumed viewer-close Esc
+          // must not leave a stale double-Esc window for the main session.
+          this.lastEscapeAt = undefined
           this.events.onSingleEscape?.()
           return { consume: true }
         }

@@ -298,6 +298,21 @@ README/CHANGELOG language flip) and re-reviewed:
     leader-prefix collision (`hostActiveKeys`) all exclude PLUGIN rules
     — a plugin binding is additive and never a Host action.
   Final round: accepted, no findings.
+- PR review second pass (1 P1 + 1 P2 + 1 P3, then 1 more P2 — all
+  fixed):
+  - the read-only AND continuable viewers' Esc exit is a FIXED lifecycle
+    key, INDEPENDENT of the user-configurable app.agent.interrupt (a
+    remap to Ctrl+X must not break the viewer close); `app.agent.
+    interrupt` joined VIEWER_BLOCKED_PARENT_ACTIONS so a remapped
+    interrupt is inert inside a viewer;
+  - a leader-PREFIX collision clears `effectiveLeaderBindings`, so
+    keyHint / keysLabelFor / snapshot never advertise a dead leader
+    sequence (the "UI always shows the EFFECTIVE keys" contract);
+  - RESERVED_HOST_KEYS comments clarified: it is ONLY the Stable v1
+    plugin-registration guard, never the runtime reservation authority
+    (input-router header, keybinding-registry, definitions);
+  - the consumed viewer-close Esc disarms the main-session double-Esc
+    window (no stale cancel/rewind after closing a viewer).
 
 Final gates after the PR review rounds: 2429 bundle tests (incl. the
 focus-viewport-policy suite), 985 fork tests, 11 docs tests, typecheck
