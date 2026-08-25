@@ -1701,3 +1701,47 @@ test('a Stable extension prefix computed on the WIRE line applies without corrup
   }
   app.stop()
 })
+
+// ── review round: prefix normalization never strips a mid-body ! ──────────
+
+test('a mid-body ! completion token (echo !ch) keeps its literal !', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.setCommandCompletions([], fixtureWorkspace(), null, async () => ({
+    // The word being completed is `!ch` — the `!` is a LITERAL body
+    // character (the synthetic prefix sits at the wire line start), so
+    // the extension prefix includes it and it must survive the apply.
+    items: [{ value: '!checkout', label: '!checkout' }],
+    prefix: '!ch',
+  }))
+  app.start()
+  await vt.waitForRender()
+  setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+  try {
+    vt.sendInput('!')
+    vt.sendInput('echo !ch')
+    vt.sendInput('\t')
+    await vt.waitForRender()
+    assert.equal(app.seatTextForTest(), 'echo !checkout',
+      'a mid-body literal ! must never be stripped by the prefix normalization')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  app.stop()
+})
+
+test('an incomplete CSI tail buffers without loss and stitches a split sequence', async () => {
+  const { vt, app } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  // A lone incomplete CSI tail: buffered, never rendered, never crashes.
+  vt.sendInput('\x1b[')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '', 'an incomplete CSI tail must not enter the document')
+  // The continuation stitches it into a complete sequence (a split up
+  // arrow): processed as the key, not inserted as text.
+  vt.sendInput('A')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '', 'a stitched split CSI is handled as the key, never as text')
+  app.stop()
+})
