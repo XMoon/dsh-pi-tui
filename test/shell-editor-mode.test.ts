@@ -1966,3 +1966,130 @@ test('advanced editor controls replace a shell-mode draft through the wire bound
   assert.deepEqual(submitted, ['plain prose', '!pwd'])
   app.stop()
 })
+
+// ── review round: replacement-editor HOST EXECUTION MODE ───────────────────
+// A replacement editor in the seat has NO mode — its document IS the wire
+// form. The declined-key fallback decodes that wire document into the
+// HIDDEN host editor (mode + body) before every forwarded key, so the
+// host editor's OWN state is the authoritative execution mode for its
+// callbacks (onSubmit, the autocomplete provider). Serializing a fallback
+// submit by the VISIBLE seat mode would collapse `!!pwd` into a plain
+// `pwd` — a local-only command degrading into a model prompt.
+
+test('a replacement editor submit keeps the shell wire form through the host fallback', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'submit-fallback-plugin',
+    priority: 0,
+    create: () => {
+      const editor = pluginEditor()
+      // Decline every key: the plugin STAYS in the seat and Enter is
+      // host-owned (P1-10) — the hidden host editor submits.
+      editor.handleInput = () => false
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  const plugin = created[0]!
+  // shell-context: `!pwd` must submit as `!pwd`. The fallback decoded the
+  // wire document into the hidden host editor (shell-context + `pwd`)
+  // BEFORE Enter, and the host onSubmit must serialize from that HOST
+  // mode — never from the visible seat (which is a mode-less plugin).
+  plugin.setText('!pwd')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual([...submitted], ['!pwd'], 'a replacement !pwd submit keeps the shell-context wire form')
+  // shell-local: `!!pwd` is LOCAL-ONLY — degrading it to a plain `pwd`
+  // would leak the local command into the session/model.
+  plugin.setText('!!pwd')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual([...submitted], ['!pwd', '!!pwd'], 'a replacement !!pwd submit keeps the local-only wire form')
+  // prompt-mode wire: unchanged (identity — a plugin document is raw).
+  plugin.setText('plain prose')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual([...submitted], ['!pwd', '!!pwd', 'plain prose'])
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
+
+test('a replacement plugin Tab runs the shell completion grammar of the wire document', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const queries: { lines: readonly string[]; cursorCol: number }[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null, async (query) => {
+    queries.push({ lines: [...query.lines], cursorCol: query.cursorCol })
+    return null
+  })
+  app.start()
+  await vt.waitForRender()
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'completion-fallback-plugin',
+    priority: 0,
+    create: () => {
+      const editor = pluginEditor()
+      // Decline: the host fallback owns Tab (and every editing key).
+      editor.handleInput = () => false
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  const plugin = created[0]!
+  let compgenCalls = 0
+  try {
+    // The plugin document is the WIRE form: `!gi` is a shell-context
+    // document, so a declined Tab must run the SHELL command grammar
+    // (compgen) — the prompt-mode grammar would never invoke compgen.
+    setCompgenRunnerForTest((_cwd, expression) => {
+      compgenCalls += 1
+      return Promise.resolve({
+        ok: true,
+        lines: expression.includes('compgen -A command') ? ['git', 'gist'] : [],
+      })
+    })
+    plugin.setText('!gi')
+    plugin.setCursor(plugin.getText().length)
+    vt.sendInput('\t')
+    await pollUntil(() => compgenCalls === 1, 'the shell compgen ran through the plugin seat')
+    // The dropdown opens asynchronously inside the hidden host editor;
+    // the second Tab applies its selection synchronously and the fallback
+    // syncs the completed command back into the plugin wire document.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    vt.sendInput('\t')
+    await pollUntil(() => plugin.getText() === '!git ',
+      'the shell completion applies into the plugin wire document')
+    // The extension chain (host provider returns null) sees the WIRE line
+    // with the synthetic prefix and the shifted cursor — the shell
+    // semantics must survive the plugin seat. (The compgen result cache
+    // must drop Phase A's command list, or the host provider still wins.)
+    resetCommandCacheForTest()
+    setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+    plugin.setText('!gi')
+    plugin.setCursor(3)
+    vt.sendInput('\t')
+    await pollUntil(() => queries.length === 1, 'extension query through the shell wire plugin seat')
+    assert.deepEqual([...queries[0]!.lines], ['!gi'], 'the extension query sees the wire line through the plugin seat')
+    assert.equal(queries[0]!.cursorCol, 3, 'the wire cursor shifts by the synthetic prefix')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})

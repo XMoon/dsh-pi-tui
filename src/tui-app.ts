@@ -1876,7 +1876,14 @@ export class TuiApp {
       // fork clears the editor BEFORE onSubmit fires) and reset to the
       // prompt afterwards; a rejected submission restores the serialized
       // text through setEditorText, which decodes the mode back.
-      const serialized = this.serializeSeatDraft(text)
+      // HOST EXECUTION MODE (review round 23): this callback is owned by
+      // the HOST editor, and the text IS the host editor's body — so the
+      // wire form is serialized from the HOST editor's own mode, NEVER
+      // from the visible seat's mode. A replacement editor in the seat
+      // (the declined-key Enter fallback) has no mode: serializing with
+      // the visible-seat semantics would collapse `!!pwd` into a plain
+      // `pwd` and turn a local-only command into a normal prompt submit.
+      const serialized = serializeEditorInput(this.editor.getInputMode(), text)
       // DEFENSE IN DEPTH: the app-level guard consumes Enter while a
       // continuable viewer is up, so the host editor's own onSubmit never
       // fires there — but a replacement editor's submit routes through
@@ -5599,11 +5606,14 @@ export class TuiApp {
   }
 
   /**
-   * The shell-editor-mode boundary: serialize a seat draft into the wire
-   * form the shell dispatch understands. The HOST editor's mode prefixes
-   * the body (`!` / `!!`); a plugin editor has no mode — its text IS the
-   * wire form (a stale hidden-host mode must never leak into a plugin
-   * editor's submission).
+   * The shell-editor-mode boundary: serialize a VISIBLE SEAT draft into
+   * the wire form the shell dispatch understands. The HOST editor's mode
+   * prefixes the draft (`!` / `!!`); a plugin editor has no mode — its
+   * text IS the wire form (a stale hidden-host mode must never leak into
+   * a plugin editor's submission). Every caller passes text read from the
+   * VISIBLE seat. The HOST editor's own onSubmit does NOT use this: its
+   * text is the host editor's body and serializes from the host editor's
+   * mode (host execution mode — see the onSubmit wiring).
    */
   private serializeSeatDraft(text: string): string {
     const seat = this.seatEditor()
@@ -7832,7 +7842,7 @@ export class TuiApp {
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
   ): void {
-    const base = new MentionProvider([...commands], cwd, fdPath, () => this.seatInputMode())
+    const base = new MentionProvider([...commands], cwd, fdPath, () => this.editor.getInputMode())
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return
@@ -7841,10 +7851,17 @@ export class TuiApp {
     // plugin chain (M5 AutocompleteRegistry) is consulted only when the
     // host provider has nothing. applyCompletion always delegates to the
     // host provider (the fork's completion semantics own the editor).
-    // The VISIBLE seat decides the mode: a replacement editor in the seat
-    // has no shell mode (prompt semantics) — the hidden host editor's
-    // stale mode must never leak into completion routing (round-20).
-    const getMode = (): EditorInputMode => this.seatInputMode()
+    // HOST EXECUTION MODE (review round 23): the provider is attached to
+    // the HOST editor, and every forwarded key into it (the declined-key
+    // fallback) re-DECODES the visible plugin wire document into the host
+    // editor's mode first — so the host editor's mode is the
+    // authoritative completion mode. Reading the VISIBLE seat mode here
+    // would see a mode-less plugin and drop the shell semantics of a
+    // declined `!gi` Tab (no shell completion, no `!` wire prefix in the
+    // extension query). `seatInputMode()` stays for the genuine
+    // visible-seat consumers (the ↓ task-browser gate, the Ctrl+C clear,
+    // the footer badge).
+    const getMode = (): EditorInputMode => this.editor.getInputMode()
     const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
       async getSuggestions(lines, cursorLine, cursorCol, options) {
         const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
