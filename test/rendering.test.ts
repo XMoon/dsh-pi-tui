@@ -3264,11 +3264,13 @@ test('transcriptContentWidth reserves the right gutter and never goes negative',
   }
 })
 
-test('TranscriptGutterComponent renders the child at the content width and forwards lifecycle', () => {
+test('TranscriptGutterComponent renders the child at the content width and is NON-OWNING', () => {
   const observed: number[] = []
+  let invalidated = 0
+  let disposed = 0
   const child = {
-    invalidate: () => {},
-    dispose: () => {},
+    invalidate: () => { invalidated += 1 },
+    dispose: () => { disposed += 1 },
     render: (width: number): string[] => {
       observed.push(width)
       return ['x']
@@ -3281,7 +3283,13 @@ test('TranscriptGutterComponent renders the child at the content width and forwa
   assert.deepEqual(observed, [78, 1], 'a tiny terminal must still yield a 1-cell content width')
   assert.equal(wrapped.wantsKeyRelease, undefined)
   wrapped.invalidate()
+  assert.equal(invalidated, 1, 'invalidate() must forward to the child (non-destructive)')
+  // The ownership contract: the wrapper is a NON-OWNING projection — a
+  // messagesView.clear() (every rebuildMessages) calls dispose() on the
+  // wrapper, which must NOT dispose the CACHED child the cache reuses
+  // right after (an ImageThumbnail would drop its loader subscription).
   wrapped.dispose()
+  assert.equal(disposed, 0, 'dispose() must NOT forward: the component caches own the child lifecycle')
 })
 
 test('assistant long text wraps inside the transcript gutter (40 cols → 38)', async () => {

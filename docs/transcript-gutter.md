@@ -38,6 +38,14 @@ TUI terminal width
 - `TranscriptGutterComponent` wraps every transcript block at the
   `messagesView` boundary (`rebuildMessages`); plugin-rendered components
   inherit the gutter automatically — a renderer never knows it exists.
+  The wrapper is **non-owning**: `dispose()` does not forward to the
+  child. The component caches (`messageComponents` / `focusActivityComponents`)
+  own the child lifecycle (`pruneMessageComponents`, stale-rebuild and
+  session-switch dispose them); `messagesView` is only a projection /
+  mount point. The fork's `Container.clear()` disposes every child on
+  every `rebuildMessages` — forwarding the dispose would kill a CACHED
+  component the cache then reuses (an `ImageThumbnail` drops its loader
+  subscription and never repaints on the settle).
 - **Measurement == render width.** `rebuildMessages` / `refreshMessageRows`
   / `attachmentRangesOf` measure every transcript component at
   `transcriptRenderWidth()` — the exact width the wrapper feeds the frame
