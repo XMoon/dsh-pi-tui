@@ -24,7 +24,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 function startApp(width = 100, height = 30): { vt: VirtualTerminal; app: TuiApp } {
@@ -765,12 +765,16 @@ test('P2a: a wide → narrow resize re-derives the compact Thinking rows (no sta
   vt.resize(8, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  start = lines.findIndex(line => line.includes('Think'))
+  // At 8 terminal cols the transcript content width is 6, so the title
+  // truncates to `▸ Thi…` — locate by the truncated prefix, never the
+  // full word (the right-gutter contract, 2026-08-26 plan).
+  start = lines.findIndex(line => line.includes('Thi'))
   assert.ok(start >= 0, `thinking block missing after resize:\n${lines.join('\n')}`)
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `resize must keep the fixed 3-row geometry:\n${block.join('\n')}`)
   for (const line of block) {
-    assert.ok(visibleWidth(line) <= 8, `a row exceeds 8 cols after resize: ${JSON.stringify(line)}`)
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(8),
+      `a row exceeds the 6-col transcript content width after resize: ${JSON.stringify(line)}`)
   }
   app.stop()
 })
@@ -784,10 +788,12 @@ test('P2b: a narrow → wide resize restores the untruncated preview', async () 
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview line' }])
   await vt.waitForRender()
   let lines = vt.getViewport()
-  let start = lines.findIndex(line => line.includes('Think'))
+  // 8 terminal cols → 6 transcript content cols: the title truncates to
+  // `▸ Thi…`, so locate by the truncated prefix (right-gutter contract).
+  let start = lines.findIndex(line => line.includes('Thi'))
   assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
   const narrowPreview = lines[start + 1]!
-  assert.ok(visibleWidth(narrowPreview) <= 8, `precondition: truncated at 8 cols (${JSON.stringify(narrowPreview)})`)
+  assert.ok(visibleWidth(narrowPreview) <= transcriptContentWidth(8), `precondition: truncated at the 6-col content width (${JSON.stringify(narrowPreview)})`)
   assert.ok(!narrowPreview.includes('reasoning preview line'), 'precondition: the 8-col preview is truncated')
   vt.resize(100, 24)
   await vt.waitForRender()
@@ -828,16 +834,19 @@ test('P2c: fullscreen resize keeps the compact rows stable and the click map ali
   const bodyY = findRow(lines, 'two')
   click(vt, 20, bodyY + 1)
   await vt.waitForRender()
-  // Resize to 8: the card stays 3 rows, each within the new width.
+  // Resize to 8: the card stays 3 rows, each within the 6-col content
+  // width (the transcript right gutter — locate by the truncated `Thi`
+  // prefix, the full title no longer fits).
   vt.resize(8, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  start = lines.findIndex(line => line.includes('Think'))
+  start = lines.findIndex(line => line.includes('Thi'))
   assert.ok(start >= 0, `thinking block missing after resize:\n${lines.join('\n')}`)
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `fullscreen resize must keep the 3-row geometry:\n${block.join('\n')}`)
   for (const line of block) {
-    assert.ok(visibleWidth(line) <= 8, `a row exceeds 8 cols after resize: ${JSON.stringify(line)}`)
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(8),
+      `a row exceeds the 6-col transcript content width after resize: ${JSON.stringify(line)}`)
   }
   // The click map follows: clicking the (new) title row toggles the card.
   click(vt, 3, start + 1)
@@ -871,22 +880,61 @@ test('P2d: the compact card keeps a TRUE per-width reference-stable cache (width
 })
 
 test('P2: the compact Thinking card never wraps on a narrow terminal', async () => {
-  // Every compact row must truncate to the terminal width — a wrapped
-  // hint row would break the fixed three-row geometry (review finding).
+  // Every compact row must truncate to the transcript CONTENT width (the
+  // terminal width minus the right gutter) — a wrapped hint row would
+  // break the fixed three-row geometry (review finding).
   const vt = new VirtualTerminal(8, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a very long reasoning line that would wrap' }])
   await vt.waitForRender()
   const lines = vt.getViewport()
-  const start = lines.findIndex(line => line.includes('Think'))
+  const start = lines.findIndex(line => line.includes('Thi'))
   assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `the block must stay 3 rows on a narrow terminal:\n${block.join('\n')}`)
   for (const line of block) {
-    assert.ok(visibleWidth(line) <= 8, `a compact row exceeds 8 cols: ${JSON.stringify(line)}`)
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(8),
+      `a compact row exceeds the 6-col content width: ${JSON.stringify(line)}`)
   }
   assert.ok(block[2]!.trim() !== '', 'the (truncated) hint row must still render')
+  app.stop()
+})
+
+test('P2e: the compact card survives the 100 → 8 → 100 resize matrix inside the transcript gutter', async () => {
+  // The right-gutter contract's resize matrix (2026-08-26 plan §8.2):
+  // the same cached component must narrow to the 6-col content width and
+  // widen back to the full preview — the per-width cache keeps the fixed
+  // three-row geometry at every stop.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview line that must survive both resizes' }])
+  await vt.waitForRender()
+  const rowsOf = (): string[] => {
+    const lines = vt.getViewport()
+    const start = lines.findIndex(line => line.includes('▸ Thinking') || line.includes('Thi'))
+    assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
+    return lines.slice(start, start + 3)
+  }
+  let block = rowsOf()
+  assert.equal(block.length, 3, `100-col block must be 3 rows:\n${block.join('\n')}`)
+  assert.ok(block[1]!.includes('a fairly long reasoning preview line'),
+    `the 100-col preview must be untruncated:\n${block[1]}`)
+  vt.resize(8, 24)
+  await vt.waitForRender()
+  block = rowsOf()
+  assert.equal(block.length, 3, `8-col block must stay 3 rows:\n${block.join('\n')}`)
+  for (const line of block) {
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(8),
+      `a row exceeds the 6-col content width at 8 cols: ${JSON.stringify(line)}`)
+  }
+  vt.resize(100, 24)
+  await vt.waitForRender()
+  block = rowsOf()
+  assert.equal(block.length, 3, `widened block must stay 3 rows:\n${block.join('\n')}`)
+  assert.ok(block[1]!.includes('a fairly long reasoning preview line'),
+    'the widened preview must recover the full content width')
   app.stop()
 })
 

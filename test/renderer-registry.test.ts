@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { RendererRegistry } from '../src/renderer-registry.ts'
 import type { ExtensionView } from '../src/extension/public-types.ts'
 
@@ -437,5 +438,60 @@ test('TuiApp: the tool snapshot arguments/result are deeply frozen (round-1 P4)'
   assert.ok(Object.isFrozen(snapshotArgs as object), 'the arguments object must be frozen')
   assert.ok(Object.isFrozen((snapshotArgs as { nested: unknown }).nested as object), 'nested objects must be frozen')
   assert.ok(Object.isFrozen((snapshotArgs as { nested: { deep: unknown[] } }).nested.deep), 'nested arrays must be frozen')
+  app.stop()
+})
+
+test('TuiApp: a plugin-rendered component renders inside the transcript gutter (host-applied width)', async () => {
+  // The right-gutter contract (2026-08-26 plan §8.8): the gutter is
+  // applied by the HOST outside the plugin component — a plugin renderer
+  // must never need to know the terminal gutter exists. The probe
+  // component's long unbroken line wraps at the transcript content width
+  // (78 at 80 cols): 320 probe chars span ceil(320/78) = 5 rows, the
+  // first exactly 78 cells — a full-width wrap (80) would yield only 4
+  // rows of 80, so the row COUNT discriminates the two hypotheses even
+  // without reading the row width. (The plan's literal `observedWidths`
+  // probe is impossible through the public SDK: plugins contribute
+  // semantic VIEWS, the host compiles them and owns width measurement —
+  // no raw component ever sees the width. The decisive wrap count is the
+  // honest observable of the same contract.)
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp, transcriptContentWidth } = await import('../src/tui-app.ts')
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerMessageRenderer({
+    id: 'width-probe', kind: 'assistant',
+    render: () => ({ kind: 'text', spans: [{ text: 'probe'.repeat(64) }] }),
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'host fallback never runs' }])
+  await vt.waitForRender()
+  // The wrapped rows follow the first `probe` row (the tail row of the
+  // wrap may be a partial word like `robe`, so slice by position, never
+  // by content match) and end at the editor border (chrome, not content).
+  const rowsOf = (): string[] => {
+    const lines = vt.getViewport()
+    const start = lines.findIndex(line => line.includes('probe'))
+    const border = lines.findIndex(line => /^[─═]+$/.test(line.trim()))
+    assert.ok(start >= 0, `plugin rows missing:\n${lines.join('\n')}`)
+    return lines.slice(start, border === -1 ? start + 5 : border)
+  }
+  let rows = rowsOf()
+  assert.equal(rows.length, 5, `320 chars must wrap to 5 rows at the 78-col content width (4 at 80):\n${rows.join('\n')}`)
+  assert.equal(visibleWidth(rows[0]!), transcriptContentWidth(80),
+    `the first plugin row must fill exactly the 78-col content width:\n${rows[0]}`)
+  for (const row of rows) {
+    assert.ok(visibleWidth(row) <= transcriptContentWidth(80),
+      `a plugin row exceeds the 78-col content width: ${JSON.stringify(row)}`)
+  }
+  // A resize keeps the plugin component live inside the gutter: at 100
+  // cols the same component re-wraps at 98 (320 chars → 4 rows).
+  vt.resize(100, 24)
+  await vt.waitForRender()
+  rows = rowsOf()
+  assert.equal(rows.length, 4, `the plugin line must re-wrap at the widened content width (320 chars / 98):\n${rows.join('\n')}`)
+  assert.equal(visibleWidth(rows[0]!), transcriptContentWidth(100),
+    `the first plugin row must fill exactly the 98-col content width:\n${rows[0]}`)
   app.stop()
 })

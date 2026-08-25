@@ -12,9 +12,9 @@ import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/present.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
-import { TuiApp, BulletedComponent } from '../src/tui-app.ts'
+import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent } from '../src/tui-app.ts'
 import { WorkingIndicator } from '../src/working.ts'
-import { Text, type Terminal } from '@xmoon76/pi-tui'
+import { Text, visibleWidth, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 // CI/tooling environments export NO_COLOR, FORCE_COLOR=0 and CI=true, which
@@ -3249,4 +3249,169 @@ test('resultTextLines flattens blocks with the Web resultText semantics', () => 
   assert.deepEqual(resultTextLines([{ type: 'reasoning', text: 'think' }]), ['{\n  "type": "reasoning",\n  "text": "think"\n}'])
   assert.deepEqual(resultTextLines([], { name: 'Error', code: 'E_BAD' }), ['Error: E_BAD'])
   assert.deepEqual(resultTextLines([]), [])
+})
+
+// ── The transcript right gutter (2026-08-26 width contract) ───────────────
+
+test('transcriptContentWidth reserves the right gutter and never goes negative', () => {
+  assert.equal(TRANSCRIPT_RIGHT_GUTTER, 2)
+  // The plan §7 table: a 1-3 cell terminal still yields 1 cell.
+  const cases: Array<[number, number]> = [
+    [1, 1], [2, 1], [3, 1], [4, 2], [8, 6], [80, 78], [120, 118],
+  ]
+  for (const [terminal, expected] of cases) {
+    assert.equal(transcriptContentWidth(terminal), expected, `width ${terminal} must yield ${expected}`)
+  }
+})
+
+test('TranscriptGutterComponent renders the child at the content width and forwards lifecycle', () => {
+  const observed: number[] = []
+  const child = {
+    invalidate: () => {},
+    dispose: () => {},
+    render: (width: number): string[] => {
+      observed.push(width)
+      return ['x']
+    },
+  }
+  const wrapped = new TranscriptGutterComponent(child)
+  assert.deepEqual(wrapped.render(80), ['x'])
+  assert.deepEqual(observed, [78], 'the wrapper must render the child at width minus the gutter')
+  assert.deepEqual(wrapped.render(3), ['x'])
+  assert.deepEqual(observed, [78, 1], 'a tiny terminal must still yield a 1-cell content width')
+  assert.equal(wrapped.wantsKeyRelease, undefined)
+  wrapped.invalidate()
+  wrapped.dispose()
+})
+
+test('assistant long text wraps inside the transcript gutter (40 cols → 38)', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'x'.repeat(60) }])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const assistant = lines.findIndex(line => line.includes('x'))
+  assert.ok(assistant >= 0, `assistant rows missing:\n${lines.join('\n')}`)
+  // The whale bullet (4 cells) + the wrapped inner: the FIRST row fills
+  // exactly the transcript content width — wrapping happened at 38, not
+  // at the 40-col terminal edge.
+  assert.equal(visibleWidth(lines[assistant]!), transcriptContentWidth(40),
+    `the first row must fill exactly the 38-col content width:\n${lines[assistant]}`)
+  for (const line of lines.slice(assistant, assistant + 2)) {
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
+      `an assistant row exceeds the 38-col content width: ${JSON.stringify(line)}`)
+  }
+  // Continuation rows indent under the bullet (never repeat it).
+  assert.ok(!lines[assistant + 1]!.includes('🐋'), `continuation must not repeat the bullet:\n${lines[assistant + 1]}`)
+  app.stop()
+})
+
+test('the user bubble background ends at the transcript content width, not the terminal edge', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.applyTheme('dark')
+  app.start()
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'y'.repeat(60) }])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const user = lines.findIndex(line => line.includes('❯'))
+  assert.ok(user >= 0, `user row missing:\n${lines.join('\n')}`)
+  // The bubble covers the content width (38 at 40 cols): marker, body and
+  // the padded tail all carry roleUserBg; the LAST TWO cells stay the TUI
+  // background — the bubble ends at the gutter, like every other block.
+  assert.equal(vt.getCellBgRgb(user, 0), 0x2c2c2f, `bubble must start at column 0:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(user, transcriptContentWidth(40) - 1), 0x2c2c2f,
+    `bubble must cover the last content cell (col ${transcriptContentWidth(40) - 1}):\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(user, transcriptContentWidth(40)), undefined,
+    `the gutter cell (col ${transcriptContentWidth(40)}) must NOT carry the bubble:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(user, 39), undefined,
+    `the terminal-edge cell must NOT carry the bubble:\n${lines.join('\n')}`)
+  // The content still wraps INSIDE the content width (inner = 38 - marker).
+  for (const line of lines.slice(user, user + 2)) {
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
+      `a bubble row exceeds the 38-col content width: ${JSON.stringify(line)}`)
+  }
+  app.stop()
+})
+
+test('assistant markdown with CJK, emoji and inline code stays inside the gutter', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setTranscript([{
+    kind: 'assistant', turn: 0,
+    text: '这是一段非常长的中文内容用来验证窄终端换行必须发生在内容宽度内部 🎉 同时还有一段 `inline code` 片段需要保持完整',
+  }])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const joined = lines.join('\n')
+  assert.ok(joined.includes('🎉'), `the emoji must survive intact:\n${joined}`)
+  assert.ok(joined.includes('inline code'), `the inline code must survive intact:\n${joined}`)
+  for (const line of lines) {
+    if (line.includes('中文') || line.includes('inline')) {
+      assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
+        `a markdown row exceeds the 38-col content width: ${JSON.stringify(line)}`)
+    }
+  }
+  app.stop()
+})
+
+test('folded tool / system / compaction rows respect the transcript gutter', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: `echo ${'x'.repeat(80)}` }), result: 'y'.repeat(120), status: 'ok' },
+    { kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell', args: `echo ${'z'.repeat(80)}`, result: 'w'.repeat(200), status: 'ok' },
+    { kind: 'system', turn: 0, label: 'workspace-instructions', summary: 's'.repeat(60), text: 'body' },
+    { kind: 'compaction', turn: 0, items: 40, tokens: 12345, text: 'summary body' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  // The editor border (a full-width rule) is chrome, not a transcript
+  // row: only check the rows above it.
+  const border = lines.findIndex(line => /^[─═]+$/.test(line.trim()))
+  const rows = lines.slice(0, border === -1 ? lines.length : border).filter(line => line.trim() !== '')
+  for (const line of rows) {
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
+      `a folded card row exceeds the 38-col content width: ${JSON.stringify(line)}`)
+  }
+  // The folded command row must still show its prompt + a truncated command.
+  assert.ok(rows.some(line => line.includes('$ ')), `command row missing:\n${lines.join('\n')}`)
+  app.stop()
+})
+
+test('a terminal resize re-bakes the folded rows at the new content width (never wrap)', async () => {
+  // The width cache identity (review round 1, P1): folded rows truncate at
+  // BUILD time to the transcript content width. A 100 → 20 resize must
+  // rebuild them at the new width — a stale 98-col bake would wrap at the
+  // 18-col paint width and turn one folded row into several.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setTranscript([
+    { kind: 'system', turn: 0, label: 'workspace-instructions', summary: 's'.repeat(80), text: 'body' },
+    { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: `echo ${'x'.repeat(80)}` }), result: 'y'.repeat(80), status: 'ok' },
+  ])
+  await vt.waitForRender()
+  // Baseline at 100: the system fold is ONE row directly above the tool
+  // card (one blank spacer row between the blocks). Locate by the 📎
+  // marker — the label truncates at narrow widths ('Context injec…').
+  let lines = vt.getViewport()
+  let sysIdx = lines.findIndex(line => line.includes('📎'))
+  let toolIdx = lines.findIndex(line => line.includes('🖥️'))
+  assert.ok(sysIdx >= 0 && toolIdx > sysIdx, `folded rows missing at 100:\n${lines.join('\n')}`)
+  assert.equal(toolIdx - sysIdx, 2, `precondition: the system fold is ONE row at 100:\n${lines.join('\n')}`)
+  vt.resize(20, 24)
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  sysIdx = lines.findIndex(line => line.includes('📎'))
+  toolIdx = lines.findIndex(line => line.includes('🖥️'))
+  assert.ok(sysIdx >= 0 && toolIdx > sysIdx, `folded rows missing after resize:\n${lines.join('\n')}`)
+  assert.equal(toolIdx - sysIdx, 2,
+    `the system fold must stay ONE row after the resize (a stale 100-col bake would wrap):\n${lines.join('\n')}`)
+  assert.ok(visibleWidth(lines[sysIdx]!) <= transcriptContentWidth(20),
+    `the re-baked fold must fit the 18-col content width: ${JSON.stringify(lines[sysIdx])}`)
+  app.stop()
 })
