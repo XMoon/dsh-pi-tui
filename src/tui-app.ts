@@ -5525,6 +5525,7 @@ export class TuiApp {
         const targetLine = Math.min(line, Math.max(0, lines.length - 1))
         editor.setTextAndCursor(normalized, { line: targetLine, col: remaining })
       },
+      cancelAutocomplete: () => editor.cancelHostAutocomplete(),
       insertTextAtCursor: (text) => editor.insertTextAtCursor(text),
       handleInput: (data) => editor.handleInput(data),
       runWithoutChange: <T>(task: () => T): T => {

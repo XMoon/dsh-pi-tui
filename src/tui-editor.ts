@@ -170,6 +170,17 @@ export class TuiEditor extends Editor {
     return this.inputMode
   }
 
+  /** Close any open autocomplete dropdown and abort any pending completion
+   * request (the host-owned stale-context guard — the declined-key
+   * fallback cancels when the staged document differs from the host's
+   * current autocomplete context, so a stale dropdown can never accept
+   * candidates into the new document). Named distinctly: the fork's own
+   * `cancelAutocomplete` is private and MUST stay reachable for its
+   * internal callers — a same-named override would shadow it and recurse. */
+  cancelHostAutocomplete(): void {
+    ;(this as unknown as AutocompleteInternals).cancelAutocomplete()
+  }
+
   /** Switch the input mode. A real change fires onChange (the host's
    * viewer-draft mirror and seat subscribers must observe the wire form
    * changing even when the body text did not) and CANCELS any open
