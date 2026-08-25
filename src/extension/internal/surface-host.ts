@@ -284,8 +284,16 @@ export class SurfaceHost {
   // ── M4: the configurable footer item slot (chrome.footer.item) ────────
 
   /** The canonical config id for one contribution: `ext:<owner>/<id>` (the
-   * plan §16.4 key — stable across HMR, never collides across owners). */
+   * plan §16.4 key — stable across HMR, never collides across owners).
+   * The key is used WHOLE (never parsed), so `/` inside either part would
+   * make distinct contributions collide (`ext:a/b/c` from owner `a` +
+   * id `b/c` or owner `a/b` + id `c`): both parts must be `/`-free. */
   private static footerItemKey(owner: string, id: string): string {
+    if (owner.includes('/') || id.includes('/')) {
+      // Unreachable in practice: register() enforces the constraint; this
+      // guards a future caller that bypasses it.
+      throw new Error(`chrome.footer.item id must not contain "/" (owner "${owner}", id "${id}")`)
+    }
     return `ext:${owner}/${id}`
   }
 
@@ -328,10 +336,18 @@ export class SurfaceHost {
         defaultFormat: 'segment',
         // Extension spans are PLAIN DATA (the Stable contract): strip any
         // terminal control from the segment text at the boundary — the
-        // composer renders the result verbatim.
-        render: () => ({
-          spans: spans.map(span => ({ ...span as object, text: sanitizeSpanText(span.text as string) })),
-        }),
+        // composer renders the result verbatim. The item is MAIN-SUBJECT
+        // gated like every builtin main-subject item and the legacy ext:*
+        // bridge (the plugin's render has no snapshot access, so the host
+        // gates): while the subagent viewer is open the data source is the
+        // viewed CHILD, and a static plugin contribution would describe the
+        // session the user is not looking at.
+        render: (snapshot) => {
+          if (snapshot.view.subject.kind !== 'main') return { spans: [] }
+          return {
+            spans: spans.map(span => ({ ...span as object, text: sanitizeSpanText(span.text as string) })),
+          }
+        },
       }
     }
     return undefined
