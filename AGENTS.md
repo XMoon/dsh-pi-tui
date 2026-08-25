@@ -427,9 +427,21 @@ gitignored):
   suite only guards fork changes and CI runs it regardless).
 - **any other branch** → `pnpm typecheck` only (≈15 s), so WIP pushes stay
   cheap; fork untouched → `pnpm typecheck:bundle` (≈10 s).
-- Output is quiet by design: success prints ONE summary line (full logs
-  are discarded); failure prints the last 60 log lines and retains the
-  log path. Run `pnpm run verify:prepush` manually for unabridged output.
+- Output never goes silent: every stage prints a timestamped progress
+  line (`start` / `ok` + elapsed / `FAIL` + elapsed) as it runs, so a long
+  push always shows WHICH stage is live (the ≈2 min full chain, the
+  ≈1:45 nofork chain, or the ≈10–15 s typecheck). Verbose mode
+  (`PUSH_GATE_VERBOSE=1`) also streams every captured log line live with
+  a `[HH:MM:SS]` prefix, making a stuck stage show its raw tail as it
+  happens; `PUSH_GATE_QUIET=1` restores a single summary line for
+  scripted pushes. Success prints one summary line with the elapsed time
+  (logs discarded); failure prints the failed stage, the last 60 log
+  lines and retains the full log + progress timeline paths.
+  Run `pnpm run verify:prepush` manually for the unabridged reference
+  run. Stages are hard-coded in the hook (with a drift guard that fails
+  loudly when a stage disappears from the package.json `verify:*`
+  scripts); `verify:prepush` / `verify:prepush:nofork` remain the single
+  source of truth.
 - Escape hatch: `git push --no-verify` (then rely on CI).
 
 ## Reusable flow (worth repeating for the next capability)
