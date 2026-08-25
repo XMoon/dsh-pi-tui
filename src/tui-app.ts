@@ -9556,7 +9556,13 @@ export class TuiApp {
       composer: this.footerComposer,
       editorEmpty: () => this.editor.getText().trim() === '',
       extensionFooterText: () => this.extensionHost?.footerText() ?? '',
-      maxVisible: () => Math.max(8, Math.min(30, this.terminal.rows - 2)),
+      maxVisible: () => {
+        // The budget is bounded by the LIVE terminal height (never a
+        // floor that could exceed a very short terminal: the Frame adds
+        // borders, so the content budget must leave room for them).
+        const rows = Math.max(1, this.terminal.rows - 2)
+        return Math.max(3, Math.min(30, rows))
+      },
       onSave: (layout) => {
         handle?.hide()
         options.onSave(layout)
