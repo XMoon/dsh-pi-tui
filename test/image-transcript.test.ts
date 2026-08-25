@@ -195,3 +195,51 @@ test('a read_image tool card renders its image blocks as thumbnails', async () =
   assert.ok(view.includes('🖼️ '), `read_image card shows the thumbnail:\n${view}`)
   app.stop()
 })
+
+test('a rebuild (resize) keeps the thumbnail loader subscription alive (non-owning projection)', async () => {
+  // PR review round 3 blocker: rebuildMessages clears messagesView, and
+  // the fork's Container.clear() DISPOSES every child. The gutter wrapper
+  // must be NON-OWNING (the messageComponents cache owns the cached
+  // component lifecycle), or any rebuild — the first frame and every
+  // resize now rebuild — disposes the CACHED ImageThumbnail while the
+  // cache reuses it: the loader subscription drops, and the settle-time
+  // repaint is lost (the loading row sticks until an unrelated repaint).
+  let resolveRead!: (value: { ref: unknown; data: Uint8Array }) => void
+  const loader = new ImageLoader(() => new Promise<{ ref: unknown; data: Uint8Array }>(resolve => {
+    resolveRead = resolve
+  }))
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text) => text },
+  })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([userMessageEvent([
+    { type: 'text', text: 'check ' },
+    { type: 'image', attachment: IMAGE_REF },
+  ])])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  // The first geometry pass already clears + re-adds the projection: the
+  // subscription count is the regression lock (pre-fix it dropped to 0
+  // on the very first frame).
+  assert.equal(loader.listenerCount(), 1, 'a rebuild must not dispose the cached thumbnail (non-owning projection)')
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼️ shot.png · 800×600'), `the thumbnail row must render:\n${view}`)
+  // A resize rebuild must keep the same cached thumbnail alive — its
+  // loader subscription still reaches it.
+  vt.resize(100, 24)
+  await vt.waitForRender()
+  assert.equal(loader.listenerCount(), 1, 'a resize must NOT drop the loader subscription')
+  // The settle still reaches the live subscriber: it invalidates the
+  // component, so a repaint reads the resolved state.
+  resolveRead?.({ ref: {}, data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(loader.listenerCount(), 1, 'the subscriber must survive the settle')
+  app.requestRender(true)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼️ shot.png · 800×600'), 'the resolved thumbnail row must still render after the settle')
+  app.stop()
+})

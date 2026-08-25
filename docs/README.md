@@ -16,6 +16,7 @@ knows where the rest lives.
 | `input-history.md` | contributors | Per-cwd input history: why it left the settings document, the JSONL file design (v1/v2 rows, read-only load, recall vs. persistence), the recall-order contract, the Ctrl+R search panel (scope/detail/accept semantics), and the migration path |
 | `surface-decisions.md` | contributors | Plain-`exit` quitting, background-subagent notices in the queue pane, the /login credential-target resolution, the Web-parity tool-card rendering rules (web cards, structured rawInput, plan content), the mode-aware subagent viewer contract (continuable = interactive follow-up editor, one-shot = read-only; the single `ctx.subagents.followup` write path, per-child drafts, the child-owned footer while viewing), the durable hierarchical task browser (`listDescendants`, stable pre-order, done-one-shot reachability, nested read-only authority), the surface-adaptive Focus disclosure (regular Ctrl+O master with full-reveal, fullscreen Ctrl+O Thought-ROOT bulk — expand recent / collapse all — plus nearest-owner mouse disclosure including the internal blank-row collapse, the unified Thinking detail model — compact by default, Alt+T bulk toggle, per-card click overrides), the selected-row marquee, and the local-shell display policy (5/20 preview rows, Ctrl+O master outside fullscreen Focus, Alt+K dismiss) |
 | `input-and-card-polish.md` | contributors | The `!`/`!!` compgen completion bridge, the local-shell sandbox `/settings` row (default bypass), the `ask_user_question` answers card (folded summary + expanded answer lines), the goal cards (`get_goal`/`create_goal`/`update_goal` folded summary + field lines), the fullscreen todo-dock click mapping, and the web-parity JSON folded-preview audit (schedule/cordis-inspect/ralph) |
+| `transcript-gutter.md` | contributors | The transcript right-gutter width contract (2 cells at the terminal's right edge, transcript surface only): the measurement==render invariant every geometry path must hold, the folded-row truncation rule, and the narrow-terminal test conventions |
 | `image-completion-and-markers.md` | contributors | The `/image <path>` completion design (the fork's `getArgumentCompletions` extension point, the `shouldTriggerFileCompletion` trim quirk, directory reopen), the `🖼️` U+FE0F marker rationale (1-cell math vs 2-cell emoji fonts), the flat-text image placeholder for mixed user messages, and the fullscreen attachment collapse (constant info bar + click to hide/show the image rows) |
 | `repair-session.md` | ops | `scripts/repair-session.mjs`: damage classes, the zstd frame-layout constraint, and the failure modes that broke real logs |
 | `surface-catalog.md` | contributors | The surface catalog design: resume prefetch + standing-scope cold skills; why composition probes are REMOVED (host `session/created` observers write durable knob events) and the standing-key path that replaces them; the coordinator invariants that keep snapshots detached and first submissions correctly routed |
@@ -34,9 +35,9 @@ knows where the rest lives.
 
 Other documentation, and why it is not here:
 
-- Root `CHANGELOG.md` — the release history, maintained on every release
-  per the hard rule in `AGENTS.md` (Keep a Changelog 1.1.0 format), with
-  `CHANGELOG.zh-CN.md` kept in sync as the 简体中文 version.
+- Root `CHANGELOG.md` — the 简体中文 release history, maintained on every
+  release per the hard rule in `AGENTS.md` (Keep a Changelog 1.1.0 format),
+  with `CHANGELOG.en.md` kept in sync as the English version.
 - Root `AGENTS.md` — the contributor operating manual: naming, layout, key
   decisions, development loop, traps, and pointers into this directory.
 - `packages/pi-tui/AGENTS.md` — the vendored fork's divergence ledger: every

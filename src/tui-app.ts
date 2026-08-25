@@ -434,6 +434,72 @@ class MarqueeFilterAdapter implements Component {
 }
 
 /**
+ * The transcript surface's RIGHT GUTTER (the transcript right-gutter width contract):
+ * every transcript block renders this many cells short of the terminal
+ * edge, so content never visually collides with the right boundary. The
+ * gutter is a property of the TRANSCRIPT surface only — the editor,
+ * footer, welcome card, overlays and other chrome keep the full terminal
+ * width. Fixed at 2 (1 only solves "touching the wall", 3+ wastes space
+ * on narrow terminals); deliberately not a user setting.
+ */
+export const TRANSCRIPT_RIGHT_GUTTER = 2
+
+/** The usable width for transcript content at a given terminal width: the
+ * full width minus the right gutter, never 0/negative (a 1-3 cell
+ * terminal still yields 1 cell). EVERY transcript geometry measurement
+ * and the actual frame paint must go through this single contract — a
+ * drift between them shifts the fullscreen click hit-map. */
+export function transcriptContentWidth(width: number): number {
+  return Math.max(1, Math.floor(width) - TRANSCRIPT_RIGHT_GUTTER)
+}
+
+/**
+ * The thin host-owned transcript boundary: renders the child at the
+ * transcript content width (terminal width minus the right gutter), so
+ * EVERY transcript block — host cards AND plugin-rendered components —
+ * inherits the gutter without any renderer knowing about it.
+ *
+ * The wrapper is deliberately NON-OWNING: `dispose()` does NOT forward to
+ * the child. The message/focus component CACHES own the child's lifecycle
+ * (`pruneMessageComponents` / stale-rebuild / session-switch dispose
+ * them), while `messagesView` is only a projection / mount point — the
+ * fork's `Container.clear()` disposes every child on every
+ * `rebuildMessages`, and forwarding the dispose would kill a CACHED
+ * component the cache then reuses (an `ImageThumbnail` drops its loader
+ * subscription and never repaints on the settle). `invalidate()`/input
+ * forwarding stays (non-destructive, the fork calls them on the mounted
+ * tree).
+ */
+export class TranscriptGutterComponent implements Component {
+  private readonly child: Component
+
+  constructor(child: Component) {
+    this.child = child
+  }
+
+  invalidate(): void {
+    this.child.invalidate?.()
+  }
+
+  /** Deliberately non-owning: the component caches own the child's
+   * lifecycle — a projection clear (every rebuildMessages) must never
+   * dispose a cached component that is reused right after. */
+  dispose(): void {}
+
+  handleInput(data: string): void {
+    this.child.handleInput?.(data)
+  }
+
+  get wantsKeyRelease(): boolean | undefined {
+    return this.child.wantsKeyRelease
+  }
+
+  render(width: number): string[] {
+    return this.child.render(transcriptContentWidth(width))
+  }
+}
+
+/**
  * Bullet + continuation-indent wrapper that keeps its child LIVE, so a
  * terminal resize re-renders the child at the new width instead of
  * re-wrapping a frozen render (the 5a76526 regression: assistant/user
@@ -1345,6 +1411,15 @@ interface MessageComponentEntry {
   component: Component
   /** The fold boundary the component was built at (Ctrl+O / windowing). */
   boundary: number
+  /** The transcript content width a width-BAKING build truncated its
+   * folded rows at — set ONLY when the host build bakes width into the
+   * component (folded system/compaction/tool cards; see
+   * {@link TuiApp.bakesFoldedWidth}). Undefined for render-time
+   * width-aware builds (markdown, bubbles, Thinking compact, plugin
+   * views), which re-derive every frame and must NOT invalidate the
+   * renderer cache on a resize. A stale bake would wrap at the new paint
+   * width (the right-gutter resize matrix). */
+  builtWidth?: number
   /** The theme revision at build time (colors are baked into the ANSI). */
   themeRev: number
   /** Whether the entry renders expanded (boundary + click override). */
@@ -3492,7 +3567,8 @@ export class TuiApp {
    * long outputs — the FULLSCREEN timeline re-derives compact, while
    * regular mode full-reveals the process anyway. The single-turn and
    * bulk variants share the override-map iteration (see
-   * clearAllFocusSecondaryExpansions — parked overrides never survive). */
+   * clearFocusSecondaryExpansionsForTurns — parked overrides never
+   * survive). */
   private clearFocusSecondaryExpansions(turn: number): void {
     for (const message of this.expandedOverride.keys()) {
       if (!('turn' in message)) continue
@@ -3578,8 +3654,13 @@ export class TuiApp {
    */
   private collapseAllFullscreenFocusRoots(): void {
     const anchorTurn = this.topmostVisibleExpandedFocusTurn()
+    // Snapshot the expanded roots BEFORE clearing: the secondary
+    // override cleanup is scoped to exactly these turns (review P2) —
+    // parked/windowed-away roots are still in the set and get cleaned,
+    // while a local shell card's override (turn Infinity) survives.
+    const expandedTurns = new Set(this.focusExpandedTurns)
     this.focusExpandedTurns.clear()
-    this.clearAllFocusSecondaryExpansions()
+    this.clearFocusSecondaryExpansionsForTurns(expandedTurns)
     this.toolOutputExpanded = false
     this.rebuildMessages()
     this.applyFullscreenCollapseAnchor(anchorTurn)
@@ -3606,15 +3687,21 @@ export class TuiApp {
     return undefined
   }
 
-  /** Clear every Focus-secondary local override across ALL turns (the
-   * bulk Collapse All reset — plan §7): a later re-expansion of ANY
-   * Thought never restores the previous long outputs. Iterates the
-   * override MAP itself, never the current transcript window: an override
-   * parked on a windowed-away message (the same message object returns
-   * when the window widens again — search jumps / history) must not
-   * survive the bulk fold and resurrect a stale full-reveal. */
-  private clearAllFocusSecondaryExpansions(): void {
+  /** Clear every Focus-secondary local override of the given root TURNS
+   * (the bulk Collapse All reset — plan §7, review P2): a later
+   * re-expansion of those Thoughts never restores the previous long
+   * outputs. Iterates the override MAP itself, never the current
+   * transcript window: an override parked on a windowed-away message
+   * (the same message object returns when the window widens again —
+   * search jumps / history) must not survive the bulk fold and resurrect
+   * a stale full-reveal. The turn filter is what keeps the cleanup
+   * Focus-scoped: a LOCAL `!`/`!!` shell card (turn Infinity, mouse
+   * full-revealed in fullscreen Focus) belongs to no Thought root and
+   * must keep its override. */
+  private clearFocusSecondaryExpansionsForTurns(turns: ReadonlySet<number>): void {
     for (const message of this.expandedOverride.keys()) {
+      if (!('turn' in message)) continue
+      if (!turns.has(message.turn)) continue
       if (!isFocusSecondaryDisclosure(message)) continue
       this.expandedOverride.delete(message)
     }
@@ -3842,6 +3929,14 @@ export class TuiApp {
     return component
   }
 
+  /** The transcript content width for the CURRENT terminal: the single
+   * width every transcript geometry measurement AND the frame paint use
+   * (the right-gutter contract — measurement and render must never
+   * drift, or the fullscreen click hit-map shifts). */
+  private transcriptRenderWidth(): number {
+    return transcriptContentWidth(this.terminal.columns)
+  }
+
   /** Rebuild the message component tree from the current transcript state. */
   private rebuildMessages(): void {
     // Every rebuild path (transcript updates AND local-card push/replace/
@@ -3855,8 +3950,9 @@ export class TuiApp {
     this.messagesView.addChild(this.welcomeCard)
     const boundary = this.expandBoundary()
     // Row heights for mouse hit-testing: components render (and cache) at
-    // the same width the frame pass uses, so the heights match the screen.
-    const width = this.terminal.columns
+    // the transcript CONTENT width — the same width the gutter wrapper
+    // feeds the frame pass — so the heights match the screen exactly.
+    const width = this.transcriptRenderWidth()
     const rows: Array<{
       message?: TranscriptMessage
       activity?: TurnActivity
@@ -3893,7 +3989,7 @@ export class TuiApp {
         // actually hit — markdown is not re-parsed and heights are not
         // recomputed for content that did not change. Only streaming/changed
         // messages rebuild.
-        component = this.componentForMessage(block.message, boundary)
+        component = this.componentForMessage(block.message, boundary, width)
         rendered = component.render(width)
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
@@ -3917,11 +4013,20 @@ export class TuiApp {
         })
         return
       }
-      this.messagesView.addChild(component)
+      // The host-owned transcript gutter applies at THIS boundary: every
+      // block — host card or plugin-rendered component — renders inside
+      // the transcript content width, so no renderer needs to know the
+      // terminal gutter exists (the transcript right-gutter contract).
+      this.messagesView.addChild(new TranscriptGutterComponent(component))
       // The max-tokens truncated marker rides under the final assistant
       // (plan §13.8): one muted row, charged to the message's hit region.
+      // It is TRUNCATED to the content width at build time and wrapped in
+      // the gutter boundary, so it is exactly ONE row on any terminal —
+      // a wrap here would add invisible rows the hit-map does not count
+      // and shift every click below it (review finding).
       if (truncatedMarker) {
-        this.messagesView.addChild(new Text(color.textMuted('  (output may be truncated)'), 0, 0))
+        const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
+        this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
       }
       const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
       rows.push({
@@ -3937,11 +4042,13 @@ export class TuiApp {
     })
     if (this.notifyText !== '') {
       // Errors flash red with a ✗; informational notices render dim with a ℹ
-      // so a successful action never reads as a failure.
+      // so a successful action never reads as a failure. The notify row is
+      // part of the transcript visual surface: it shares the content width
+      // (plan §6.1), so a long notice wraps inside the gutter too.
       const line = this.notifyKind === 'info'
         ? color.textDim(`ℹ ${this.notifyText}`)
         : color.error(`✗ ${this.notifyText}`)
-      this.messagesView.addChild(new Text(line, 0, 0))
+      this.messagesView.addChild(new TranscriptGutterComponent(new Text(line, 0, 0)))
     }
     this.messageRows = rows
     this.renderTodoPanel()
@@ -4019,9 +4126,11 @@ export class TuiApp {
   /** Re-measure the message row map (heights + attachment spans) from the
    * cached components — called before a fullscreen click hit-test so a
    * thumbnail that just finished loading (1 row → image rows) never shifts
-   * the hit map. Cached renders make this cheap (reference-stable lines). */
+   * the hit map. Cached renders make this cheap (reference-stable lines).
+   * Must measure at the SAME transcript content width the frame paints at
+   * (the gutter contract), or the hit map drifts from the layout. */
   private refreshMessageRows(): void {
-    const width = this.terminal.columns
+    const width = this.transcriptRenderWidth()
     const boundary = this.expandBoundary()
     // The derived projection set is computed ONCE per refresh (never per
     // activity block — review finding).
@@ -4051,7 +4160,7 @@ export class TuiApp {
         )
         rendered = component.render(width)
       } else {
-        component = this.componentForMessage(block.message, boundary)
+        component = this.componentForMessage(block.message, boundary, width)
         rendered = component.render(width)
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
@@ -4297,12 +4406,20 @@ export class TuiApp {
       return
     }
     // Fullscreen layout: header row(s), then the transcript scroll pane.
+    const scroll = this.fullscreenScroll
+    if (scroll === undefined) return
     const headerHeight = this.header.render(width).length
     const rowInScroll = y - headerHeight
-    if (rowInScroll < 0) return
-    const scrollTop = this.fullscreenScroll?.scrollTop ?? 0
+    // STRICT viewport clip (review P1): the transcript hit-test is valid
+    // ONLY inside the ScrollView's rows. Below the pane (working row /
+    // editor seat / footer) `y - headerHeight + scrollTop` would fabricate
+    // a transcript row — with the view scrolled up that fake row can land
+    // on REAL but off-screen content and toggle a Tool card or even
+    // collapse a Thought via the blank-row fallback. Editor / footer /
+    // chrome clicks must stay no-ops (plan §17/§23.6).
+    if (rowInScroll < 0 || rowInScroll >= scroll.viewportHeight) return
     const welcomeHeight = this.welcomeCard.render(width).length
-    const messageRow = rowInScroll + scrollTop - welcomeHeight
+    const messageRow = rowInScroll + scroll.scrollTop - welcomeHeight
     if (messageRow < 0) return
     // Re-measure first: a thumbnail that just finished loading grew from
     // its 1-row info bar to info + image rows — a stale map would misplace
@@ -5722,6 +5839,10 @@ export class TuiApp {
   /** Phase 2: the last geometry the ADVANCED overlays were recompiled at
    * (the resize latch — recompile only on an actual geometry change). */
   private lastAdvancedGeometry: { width: number; height: number } = { width: -1, height: -1 }
+  /** The last terminal width the transcript components were built at (the
+   * right-gutter resize latch): a width change rebuilds the width-baked
+   * folds, so a stale truncation never wraps at the new paint width. */
+  private lastTranscriptWidth = -1
 
   /** M9: the host default editor adapted to the seat surface. The fork's
    * cursor is `{line, col}`; the seat uses a flat OFFSET (line lengths
@@ -6113,7 +6234,7 @@ export class TuiApp {
     return { expanded, fullReveal, expandHint }
   }
 
-  private componentForMessage(message: TranscriptMessage, boundary: number): Component {
+  private componentForMessage(message: TranscriptMessage, boundary: number, width = this.transcriptRenderWidth()): Component {
     // Focus-expanded turns reveal their process TIMELINE (plan §15.1 +
     // the secondary-disclosure supplement): in FULLSCREEN the foldable
     // process cards default COMPACT inside an open Thought and only the
@@ -6127,18 +6248,24 @@ export class TuiApp {
     // affected components (an HMR must never hit an old component).
     const entry = this.messageComponents.get(message)
     if (entry === undefined) {
-      const built = this.buildMessage(message, boundary, state)
+      const built = this.buildMessage(message, boundary, state, width)
       this.captureComponentState(built, message)
       this.messageComponents.set(message, built)
       return built.component
     }
     // Staleness: fold boundary, theme revision, expansion, the full-reveal
-    // flag, the click-hint owner, the RENDERER identity (registry revision
+    // flag, the click-hint owner, the WIDTH a width-BAKING build truncated
+    // its folds at (a resize re-bakes ONLY those entries at the new
+    // content width — render-time width-aware builds and plugin views
+    // stay cached, so a resize never re-runs a plugin renderer for
+    // unchanged content), the RENDERER identity (registry revision
     // changed → the winner may differ), or the message's own content. The
     // registry revision comparison is the CHEAP gate (plan §23): renderer
     // functions run only inside buildMessage, never for unchanged content.
     const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
-    if (entry.boundary !== boundary || entry.themeRev !== this.themeRevision
+    if (entry.boundary !== boundary
+      || (entry.builtWidth !== undefined && entry.builtWidth !== width)
+      || entry.themeRev !== this.themeRevision
       || entry.expanded !== state.expanded
       || entry.fullReveal !== state.fullReveal
       || entry.expandHint !== state.expandHint
@@ -6154,9 +6281,10 @@ export class TuiApp {
           // Best effort: a cached component's dispose must not break a paint.
         }
       }
-      const rebuilt = this.buildMessage(message, boundary, state)
+      const rebuilt = this.buildMessage(message, boundary, state, width)
       entry.component = rebuilt.component
       entry.boundary = rebuilt.boundary
+      entry.builtWidth = rebuilt.builtWidth
       entry.themeRev = rebuilt.themeRev
       entry.expanded = rebuilt.expanded
       entry.fullReveal = rebuilt.fullReveal
@@ -6166,6 +6294,23 @@ export class TuiApp {
       this.captureComponentState(entry, message)
     }
     return entry.component
+  }
+
+  /**
+   * Whether a HOST build bakes width-dependent truncation into the
+   * component at build time — the FOLDED system / compaction / tool
+   * cards (their preview rows truncate to the content width once, so a
+   * terminal resize must rebuild them at the new width). Render-time
+   * width-aware builds (assistant/user markdown and bubbles, Thinking
+   * compact with its per-width cache, expanded card bodies) re-derive
+   * every frame and are deliberately excluded: keying them by width
+   * would invalidate the whole message cache on every resize and re-run
+   * plugin renderers for unchanged content (the renderer-cache
+   * contract, plan §23).
+   */
+  private bakesFoldedWidth(message: TranscriptMessage, expanded: boolean): boolean {
+    if (expanded) return false
+    return message.kind === 'system' || message.kind === 'compaction' || message.kind === 'tool'
   }
 
   /**
@@ -6181,17 +6326,24 @@ export class TuiApp {
     message: TranscriptMessage,
     boundary: number,
     state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint },
+    width: number,
   ): MessageComponentEntry {
     const registry = this.renderers
     const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, state.expanded)
+    // The width-baking flag is a HOST-build property: plugin components
+    // never bake width (compiled views wrap at render time), so a resize
+    // must not invalidate them — the renderer-cache contract (renderers
+    // never run for unchanged content) survives resizes.
+    const hostBuilt = rendered === undefined
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
       // renderer: fullscreen secondaries default compact (per-card
       // override full-reveals), regular expanded roots full-reveal.
-      component: rendered === undefined
-        ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal)
+      component: hostBuilt
+        ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
         : rendered.component,
       boundary,
+      builtWidth: hostBuilt && this.bakesFoldedWidth(message, state.expanded) ? width : undefined,
       themeRev: this.themeRevision,
       expanded: state.expanded,
       fullReveal: state.fullReveal,
@@ -6344,7 +6496,7 @@ export class TuiApp {
     return container
   }
 
-  private renderMessage(message: TranscriptMessage, expanded: boolean, expandHint: ExpandHint, fullReveal: boolean): Component {
+  private renderMessage(message: TranscriptMessage, expanded: boolean, expandHint: ExpandHint, fullReveal: boolean, width: number): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
       // `--dsw-specific-bubble` background block) with a brand-blue ❯ —
@@ -6426,10 +6578,13 @@ export class TuiApp {
             ? skillFoldedPreview(message.text)
             : ` — ${message.summary}`
           // Folded rows truncate to one line: a long label/summary must not
-          // wrap the context row (same rule as folded thinking).
+          // wrap the context row (same rule as folded thinking). The
+          // truncation uses the transcript CONTENT width (the gutter
+          // contract), so the baked line fits the paint width exactly and
+          // the row can never wrap.
           row.addChild(new Text(truncateToWidth(
             color.textMuted(`${emoji}  Context injection ${message.label}${summary} (${expandHint ?? 'ctrl+o'} to expand)`),
-            this.terminal.columns,
+            width,
             '…',
           ), 0, 0))
         }
@@ -6438,7 +6593,7 @@ export class TuiApp {
       const unwrapped = systemContextBody(message.text)?.join('\n') ?? message.text
       const text = expanded
         ? `${color.textMuted('§')} ${color.textDim(unwrapped)}`
-        : color.textMuted(`§ ${truncateToWidth(preview(unwrapped, 2), Math.max(1, this.terminal.columns - 22), '…')} (${expandHint ?? 'ctrl+o'} to expand)`)
+        : color.textMuted(`§ ${truncateToWidth(preview(unwrapped, 2), Math.max(1, width - 22), '…')} (${expandHint ?? 'ctrl+o'} to expand)`)
       return new Text(text, 0, 0)
     }
     if (message.kind === 'summary') {
@@ -6470,7 +6625,7 @@ export class TuiApp {
         const summary = counts === '' ? '' : counts
         card.addChild(new Text(truncateToWidth(
           color.textDim(`${summary}${summary === '' ? '' : ' '}(${expandHint ?? 'ctrl+o'} to expand)`),
-          this.terminal.columns,
+          width,
           '…',
         ), 0, 0))
       }
@@ -6514,7 +6669,7 @@ export class TuiApp {
       // rows of output with a hidden-count marker — a long log previews
       // instead of filling the TUI.
       if (localShell) {
-        this.renderLocalShellFolded(card, message, head)
+        this.renderLocalShellFolded(card, message, head, width)
         return card
       }
       const rows: string[] = []
@@ -6588,12 +6743,12 @@ export class TuiApp {
       if (callPreview?.kind === 'bash' && callPreview.command !== '') {
         // The command row owns the result preview's separate line (kimi
         // ShellExecution layout), so the head row carries no result text.
-        rows.push(truncateToWidth(`${head}${callHead}`, this.terminal.columns, '…'))
+        rows.push(truncateToWidth(`${head}${callHead}`, width, '…'))
         const commandLines = callPreview.command.split('\n')
         const shown = commandLines.slice(0, FOLDED_COMMAND_LINES)
         const prompt = color.shellMode('$ ')
         const indent = '  '
-        const contentWidth = Math.max(1, this.terminal.columns - visibleWidth(indent) - visibleWidth(prompt))
+        const contentWidth = Math.max(1, width - visibleWidth(indent) - visibleWidth(prompt))
         rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(shown[0] ?? ''), contentWidth, '…')}`)
         for (const line of shown.slice(1)) {
           rows.push(`${indent}${' '.repeat(visibleWidth(prompt))}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
@@ -6607,7 +6762,7 @@ export class TuiApp {
           rows.push(color.textDim(`  ${resultPreview}`))
         }
       } else if (callPreview?.kind === 'diff' && callPreview.diffs.length > 0) {
-        rows.push(truncateToWidth(`${headWithPreview}`, this.terminal.columns, '…'))
+        rows.push(truncateToWidth(`${headWithPreview}`, width, '…'))
         for (const line of renderDiffView(callPreview.diffs, this.workspaceRoot, {
           maxLines: FOLDED_DIFF_LINES,
           expandHint: `${expandHint ?? 'ctrl+o'} to expand`,
@@ -6615,7 +6770,7 @@ export class TuiApp {
           rows.push(`  ${line}`)
         }
       } else {
-        rows.push(truncateToWidth(headWithPreview, this.terminal.columns, '…'))
+        rows.push(truncateToWidth(headWithPreview, width, '…'))
       }
       card.addChild(new Text(rows.join('\n'), 0, 0))
     }
@@ -6736,14 +6891,15 @@ export class TuiApp {
     card: Container,
     message: Extract<TranscriptMessage, { kind: 'tool' }>,
     head: string,
+    width: number,
   ): void {
     const running = message.status === 'running'
     const indent = '  '
-    const contentWidth = Math.max(1, this.terminal.columns - visibleWidth(indent) - 2)
+    const contentWidth = Math.max(1, width - visibleWidth(indent) - 2)
     const budget = running ? RUNNING_PREVIEW_LINES : SETTLED_PREVIEW_VISUAL_ROWS
     const mode = running ? 'lines' : 'visual'
     const preview = localShellPreview(message.result, contentWidth, budget, mode)
-    const rows = [truncateToWidth(head, this.terminal.columns, '…')]
+    const rows = [truncateToWidth(head, width, '…')]
     // The command row (kimi ShellExecution layout): the local shell card's
     // `args` IS the raw command string (never JSON).
     const prompt = color.shellMode('$ ')
@@ -7281,6 +7437,17 @@ export class TuiApp {
     try {
       const width = this.terminal.columns
       const height = this.terminal.rows
+      // The transcript folds bake width-dependent truncations at build
+      // time (folded tool/system/compaction/local-shell rows): a WIDTH
+      // change must rebuild them at the new content width — a stale bake
+      // would wrap at the new paint width and break the one-line fold
+      // contract (the right-gutter resize matrix). The latch skips the
+      // first geometry pass (nothing built yet); the rebuild re-enters
+      // requestRender, where the latch is already updated, so no loop.
+      if (width !== this.lastTranscriptWidth) {
+        this.lastTranscriptWidth = width
+        if (this.messageRows.length > 0) this.rebuildMessages()
+      }
       // Phase 2: a terminal resize recompiles every live ADVANCED overlay
       // wrapper — the plugin's render(ctx) must see the new geometry (the
       // compiled view itself re-wraps at the current width per frame, but
