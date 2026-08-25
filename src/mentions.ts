@@ -623,6 +623,24 @@ export class MentionProvider implements AutocompleteProvider {
         cursorCol: before.length + item.value.length + 1,
       }
     }
+    if (virtual !== null) {
+      // SYMMETRIC wire adapter: every non-shell apply (path completion,
+      // Stable-extension suggestions) runs on the VIRTUAL wire document —
+      // the fork's line-start judgments then see the `!` prefix (an
+      // absolute path like `/u` is never mistaken for a slash command,
+      // and an extension prefix computed on the wire line stays
+      // coordinate-consistent). The synthetic prefix is stripped from the
+      // applied result, so it never enters the buffer.
+      const wireLines = lines.map((line, index) => index === 0 ? virtual.line : line)
+      const applied = this.inner.applyCompletion(wireLines, cursorLine, virtual.cursorCol, item, prefix)
+      const resultLines = [...applied.lines]
+      resultLines[0] = resultLines[0]!.slice(virtual.prefixLength)
+      return {
+        lines: resultLines,
+        cursorLine: applied.cursorLine,
+        cursorCol: Math.max(0, applied.cursorCol - virtual.prefixLength),
+      }
+    }
     return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix)
   }
 

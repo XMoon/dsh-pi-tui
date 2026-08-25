@@ -72,6 +72,8 @@ export interface SeatEditor {
   /** The occupant's editor input mode (the host editor always answers; a
    * plugin editor has no mode — absent means prompt semantics). */
   getInputMode?(): import('./editor-input-mode.ts').EditorInputMode
+  /** Set the occupant's input mode (host editor only). */
+  setInputMode?(mode: import('./editor-input-mode.ts').EditorInputMode): void
   /** Replace the occupant's draft from a SERIALIZED user input (the host
    * editor decodes mode + body; a plugin editor has no mode and receives
    * the raw text). */
@@ -94,6 +96,9 @@ export interface HostEditorAdapter {
   isShowingAutocomplete?(): boolean
   /** The host editor's current input mode (shell-mode serialization). */
   getInputMode?(): import('./editor-input-mode.ts').EditorInputMode
+  /** Set the host editor's input mode (the declined-key fallback stages
+   * the decoded mode alongside the body). */
+  setInputMode?(mode: import('./editor-input-mode.ts').EditorInputMode): void
   /** Replace the host draft from a SERIALIZED user input (`!x` / `!!x`
    * decode into mode + body — the handoff restore path). */
   setSerializedInput?(text: string): void
@@ -244,6 +249,7 @@ export class EditorSeatHolder {
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getInputMode: () => editor.getInputMode?.() ?? 'prompt',
+      setInputMode: (mode) => editor.setInputMode?.(mode),
       // Only expose the serialized-input setter when the underlying
       // adapter implements it: a wrapper that silently no-ops would make
       // the handoff's capability check pass and DROP the transferred
@@ -612,19 +618,38 @@ export class EditorSeatHolder {
     try {
       const host = this.hostAdapter()
       if (host.handleInput === undefined) return false
-      const text = current.getText()
-      const cursor = current.getCursor()
+      const wireText = current.getText()
+      const wireCursor = current.getCursor()
       const run = <T>(task: () => T): T => {
         if (host.runWithoutChange !== undefined) return host.runWithoutChange(task)
         return task()
       }
       run(() => {
-        host.setTextAndCursor(text, cursor)
-        host.handleInput!(data)
-        const nextText = host.getText()
-        const nextCursor = host.getCursor?.() ?? 0
-        current.setText(nextText)
-        current.setCursor(nextCursor)
+        if (host.setSerializedInput !== undefined) {
+          // The plugin document IS the wire form, the host document is
+          // mode + body: decode the staged draft (through the narrow
+          // setTextAndCursor seam — no undo/autocomplete side effects —
+          // plus the decoded mode), run the host editor, then serialize
+          // the result back into the plugin's wire document. Without the
+          // round-trip a declined `!` would be consumed into the host's
+          // mode state and VANISH from the plugin (the shell-editor-mode
+          // representation boundary).
+          const decoded = editorModeFromHistoryEntry(wireText)
+          host.setTextAndCursor(decoded.text, Math.max(0, wireCursor - (wireText.length - decoded.text.length)))
+          host.setInputMode?.(decoded.mode)
+          host.handleInput!(data)
+          const mode = host.getInputMode?.() ?? 'prompt'
+          const prefix = shellPrefixForMode(mode)
+          current.setText(prefix + host.getText())
+          current.setCursor((host.getCursor?.() ?? 0) + prefix.length)
+        } else {
+          // Legacy raw fallback: the host document stays raw (no mode),
+          // so wire and host coordinates are the same bytes.
+          host.setTextAndCursor(wireText, wireCursor)
+          host.handleInput!(data)
+          current.setText(host.getText())
+          current.setCursor(host.getCursor?.() ?? 0)
+        }
       })
       // The host adapter may invoke the normal host onChange for a mutation,
       // and the fallback itself is also a seat mutation. The host callback is

@@ -597,6 +597,28 @@ rounds (codex / gpt-5.6-luna):
   serialized draft as non-empty — a bare `!` also clears back to the
   prompt before the exit window arms); P2 — the recorded test count went
   stale again (updated here).
+- **PR review round 2** (human, wire-form boundary audit): two P1
+  findings, both fixed —
+  1. The replacement-editor declined-input fallback
+     (`EditorSeatHolder.handleHostFallbackInput`) treated the plugin's
+     wire document as the host's bare body: a declined `!` was consumed
+     into the host mode state and VANISHED from the plugin. The fallback
+     now round-trips through the wire coordinates (decode the staged
+     draft via the narrow setTextAndCursor seam + the decoded mode, run
+     the host editor, serialize the result back with the cursor shifted
+     by the prefix). Regression tests: declined `!`/`!!`/Backspace
+     round-trips on the plugin document.
+  2. The autocomplete wire adapter only covered get/query, not apply:
+     accepting an absolute-path suggestion in a shell mode ran the fork's
+     apply on the BARE body, so `/u` was mistaken for a slash command
+     (`//usr/ `), and Stable-extension suggestions suffered the same
+     asymmetry. The apply is now SYMMETRIC: non-shell applies run on the
+     VIRTUAL wire document and the synthetic prefix is stripped from the
+     result. The delegated provider also inherits the shell-mode
+     natural-trigger suppression (a leading `/` never consults the plugin
+     chain mid-typing, which would double-apply on the next Tab).
+     Regression tests: `/u` → `/usr/` in both shell modes, extension
+     suggestions accepted into the bare body, natural-typing suppression.
 
 The full-suite tests (2060+), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the
