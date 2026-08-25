@@ -123,6 +123,20 @@ test('invalid leader sequence → diagnostic + ignore', () => {
   assert.equal(parsed.diagnostics.length, 1)
 })
 
+test('a plain printable leader key is rejected (it would swallow typing)', () => {
+  // Review finding: the leader machine consumes its key while idle, so a
+  // printable leader (e.g. `t`) would swallow every typed `t` — the same
+  // rule as a direct printable binding applies to the leader key.
+  const parsed = parseUserKeybindings({ leader: 't', 'app.tasks.open': `${LEADER_PREFIX}x` })
+  assert.equal(parsed.leader, undefined)
+  assert.deepEqual(parsed.leaderBindings, [])
+  assert.ok(parsed.diagnostics.some(message => message.includes('invalid leader key')))
+  // A modifier chord stays a valid leader.
+  const chord = parseUserKeybindings({ leader: 'ctrl+x', 'app.tasks.open': `${LEADER_PREFIX}x` })
+  assert.equal(chord.leader?.key, 'ctrl+x')
+  assert.equal(chord.leaderBindings.length, 1)
+})
+
 test('terminal-unreliable keys warn but stay', () => {
   const parsed = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+j' })
   assert.deepEqual(parsed.bindings, { 'app.todo.toggle': 'ctrl+j' })
