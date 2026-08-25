@@ -229,8 +229,17 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     }
     const directoryEntry = llm.listConfigurableProviders().find(candidate => candidate.provider === route)
     if (directoryEntry === undefined) return
+    // The directory metadata is validated against the adapter-owned
+    // provider-config schema before it reaches a mutate: the entry must
+    // live in the llm-pi-ai section and its path must be the providers
+    // slot OF THE ROUTE — a hostile/malformed directory entry can never
+    // redirect the write to an arbitrary namespace or path.
+    const path = [...directoryEntry.settingsPath]
+    const validLayout = directoryEntry.settingsNs === settingsNamespace('llm-pi-ai')
+      && path.length === 2 && path[0] === 'providers' && path[1] === route
+    if (!validLayout) return
     await settings.mutate(directoryEntry.settingsNs, [
-      { op: 'set', path: [...directoryEntry.settingsPath], value: {} },
+      { op: 'set', path, value: {} },
     ])
   }
 }

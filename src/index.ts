@@ -328,7 +328,10 @@ export function shouldSteerOnEnter(
 export function normalizeSkillInvocation(text: string): string | undefined {
   const parsed = parseCommand(text)
   if (parsed?.name !== 'skill') return undefined
-  const raw = parsed.rawInput.trim()
+  // Only the SEPARATOR whitespace is trimmed (the rawInput starts after
+  // the command name): the argument text — INCLUDING its trailing
+  // whitespace — travels verbatim (the skill-invocation contract).
+  const raw = parsed.rawInput.trimStart()
   if (raw === '') return undefined
   const match = /^([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+([\s\S]*))?$/.exec(raw)
   if (match === null) return undefined
