@@ -227,21 +227,26 @@ read the DURABLE descendant catalog, not the live-child list:
 
 The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
 
-- **Anchored expand**: clicking a collapsed Thought in fullscreen expands
-  it and scrolls the viewport so the Thought HEADER sits near the top
-  (one row of context above), with follow-end disabled — the freshly
-  revealed content cannot snap the view back to the tail.
+- **Follow-end expand**: clicking a collapsed Thought in fullscreen
+  expands it and the viewport FOLLOWS THE END — the default view after
+  expansion is the latest content (the final answer or the newest process
+  output) and keeps following as it grows. **Collapse anchors the header**:
+  closing the Thought scrolls the header back near the top with follow-end
+  disabled, so the Thought stays in view.
+- **Nearest-owner click routing**: attachment > secondary > outer Thought
+  > ordinary message. A compact secondary card full-reveals on click; an
+  expanded secondary's body click folds ONLY that card (the root stays
+  open); a NON-secondary process row (intermediate assistant) collapses
+  the owner Thought. **Attachment hit areas win first**.
+- **Root Collapse All**: clicking the expanded Thought header collapses
+  the turn and clears its per-card expansions — reopening shows the
+  timeline compact again.
 - **The regular surface never gets an ANSI scrollback anchor**: its
   viewport is owned by the terminal emulator / tmux / the SSH chain; the
   TUI does not fight it.
-- **Expanded-body click collapses the owner turn**: thinking, tool call,
-  tool result and ordinary process rows of an expanded Thought collapse
-  the WHOLE turn (anchored to the header) instead of toggling the single
-  card. **Attachment hit areas win first**: clicking an image's info bar
-  inside an expanded Thought toggles only that attachment.
 - **Transcript-search jumps keep their own scroll policy**: the search
-  caller owns the jump target; `expandFocusTurn` never forces a
-  Thought-header anchor.
+  caller owns the jump target; the reveal never forces a Thought-header
+  anchor.
 
 ## Focus V2 compact model (2026-08-24 plan)
 
@@ -283,11 +288,14 @@ mode (only `TuiAltScreen` wires `onCellClick`):
 
 - **Regular (fullscreen OFF) — keyboard-driven**:
   - Ctrl+O is the Focus detail master: it toggles a DERIVED reveal of the
-    recent `EXPAND_RECENT_TURNS` Focus Thoughts (root open == non-Thinking
-    process full). The derived state is NEVER written into
-    `focusExpandedTurns`, so switching to fullscreen drops it
-    (deterministic: `toolOutputExpanded` and `focusExpandedTurns` stay
-    orthogonal).
+    recent `EXPAND_RECENT_TURNS` Focus Thoughts. The derived state is
+    NEVER written into `focusExpandedTurns`, so switching to fullscreen
+    drops it (deterministic: `toolOutputExpanded` and `focusExpandedTurns`
+    stay orthogonal).
+  - ANY expanded Focus root — Ctrl+O-derived OR manually revealed
+    (search / viewer restore) — full-reveals its non-Thinking process:
+    regular has no mouse, so there are never compact secondary cards that
+    cannot be opened (`root open == process full`).
   - Alt+T shows/hides Thinking (full when visible — regular has no
     secondary click).
   - There are no `▸ Bash` affordances in regular mode — nothing to click.

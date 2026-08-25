@@ -3456,13 +3456,6 @@ export class TuiApp {
     return projectFocus(this.messages, this.turnActivities, projectionExpanded, this.focusModeEnabled)
   }
 
-  /** Alt+T's hideThinking filter over one projected block. An EXPANDED
-   * Thought is the user's explicit full-reveal request — thinking stays
-   * visible inside it even when hideThinking is on (plan §15.1: the outer
-   * disclosure IS the reveal). Focus-collapsed turns hide thinking anyway
-   * (their rows are absent), and Focus OFF restores the plain Alt+T
-   * semantics. rebuildMessages and refreshMessageRows SHARE this decision
-   * so the screen and the click map can never drift. */
   /** Whether one projected Thinking block is hidden: the Focus category
    * preference (focusThinkingVisible — default hidden, Alt+T shows it)
    * while Focus is on; the ordinary hideThinking preference otherwise.
@@ -5500,18 +5493,12 @@ export class TuiApp {
         // Fullscreen: explicit secondary disclosure only.
         return this.expandedOverride.get(message) === true
       }
-      // Regular: Ctrl+O is the master full-reveal mechanism for the
-      // DERIVED recent turns — non-Thinking process cards full-reveal,
-      // and Thinking (when visible via Alt+T) renders FULL (regular has
-      // no secondary click, so no compact affordance). A MANUALLY
-      // revealed turn (search / viewer restore) stays compact even when
-      // it also falls inside the Ctrl+O recent boundary — only DERIVED
-      // turns full-reveal (review finding).
-      if (this.isRegularCtrlOExpandedTurn(message.turn, boundary)
-        && !this.focusExpandedTurns.has(message.turn)) {
-        return message.kind !== 'thinking' || this.focusThinkingVisible
-      }
-      return this.expandedOverride.get(message) === true
+      // Regular: no mouse, so no compact secondary affordance — ANY
+      // expanded Focus root (Ctrl+O-derived OR manually revealed /
+      // search / viewer restore) full-reveals its non-Thinking process,
+      // and Thinking (when visible via Alt+T) renders FULL. There is
+      // never a dead `(ctrl+o to expand)` card that Ctrl+O cannot open.
+      return message.kind !== 'thinking' || this.focusThinkingVisible
     }
     return this.existingMessageExpandedRule(message, boundary)
   }
