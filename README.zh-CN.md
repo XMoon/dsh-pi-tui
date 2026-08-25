@@ -334,8 +334,10 @@ SDK。原始终端访问、pre-host 输入拦截与完整输入所有权**不属
 - `Ctrl+O` — 展开/折叠最近回合的可折叠条目(工具、system 卡片);
   同一个主开关也展开本地 `!`/`!!` shell 卡片(默认折叠——见下文
   "本地 shell")。在 Focus 模式(常规表面)下它派生展开最近几个
-  Thought 的完整过程;全屏 Focus 的二级卡片由鼠标控制,Ctrl+O 不会
-  展开它们。Thinking 的 detail 有自己的拥有者——见 `Alt+T`。
+  Thought 的完整过程;全屏 Focus 下它拥有 Thought root 的整体开关:
+  没有任何 Thought 展开时展开最近 3 个,有任意 Thought 展开时全部
+  收起(单个 secondary 细节仍由鼠标控制,Ctrl+O 不会 full-reveal
+  它们)。Thinking 的 detail 有自己的拥有者——见 `Alt+T`。
 - `Alt+T` — 折叠/展开所有 Thinking 块(折叠:最新一行推理作为
   preview;展开:完整推理正文)。Thinking 块是 disclosure,不是
   visibility:只要模型产生过 reasoning 且当前 projection 包含该块,

@@ -375,9 +375,11 @@ the Advanced/Unstable roadmap).
 - `Ctrl+O` — expand/collapse the most recent turns' collapsible entries
   (tool and system cards). The same master switch expands the local
   `!`/`!!` shell cards (see Local shell below). In Focus Mode (regular
-  surface) it derives a full reveal of the recent Thoughts; the
-  fullscreen Focus secondary cards are mouse-owned and Ctrl+O does not
-  expand them. Thinking detail has its own owner — see `Alt+T`.
+  surface) it derives a full reveal of the recent Thoughts; in fullscreen
+  Focus it owns the Thought-root bulk: with no Thought open it expands
+  the most recent 3, and with any Thought open it collapses them all
+  (the per-card secondary details stay mouse-owned — Ctrl+O never
+  full-reveals them). Thinking detail has its own owner — see `Alt+T`.
 - `Alt+T` — collapse/expand every Thinking block (compact: the latest
   reasoning line as a preview; full: the whole reasoning body). Thinking
   blocks are disclosure, never visibility: a block stays present

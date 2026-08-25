@@ -9,7 +9,8 @@
  * component tree through TuiAltScreen's layout engine, where the transcript
  * scrolls inside the alt screen.
  *
- * Keys: Enter submit, Ctrl+C/Ctrl+D exit, Ctrl+O expand/collapse recent turns,
+ * Keys: Enter submit, Ctrl+C/Ctrl+D exit, Ctrl+O expand/collapse recent turns
+ * (in fullscreen Focus it bulk-toggles the Thought roots),
  * Ctrl+F toggle fullscreen, Tab autocomplete (slash commands + paths).
  * @module @xmoon76/dsh-pi-tui/tui-app
  */
@@ -1769,6 +1770,11 @@ export class TuiApp {
      * assistant never carry it — clicking them must not collapse the
      * Thought. */
     collapseFocusOwnerOnClick?: number
+    /** Whether this entry's height includes the trailing inter-block
+     * spacer (a blank visual row — the plan §9 blank-row collapse
+     * target). Never set on the projection's LAST block or on skipped
+     * zero-row blocks, mirroring the rendered layout exactly. */
+    hasTrailingSpacer: boolean
   }> = []
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
@@ -2612,6 +2618,15 @@ export class TuiApp {
       return { consume: true }
     }
     if (matchesKey(data, 'ctrl+o')) {
+      // Fullscreen + Focus: Ctrl+O is the Thought-root bulk owner (plan
+      // §3) — no expanded root → expand the recent `EXPAND_RECENT_TURNS`
+      // eligible roots; any expanded root → Collapse All. Every other
+      // surface/Focus combination keeps the historical tool/system detail
+      // master (regular behavior untouched).
+      if (this.fullscreen !== undefined && this.focusModeEnabled) {
+        this.toggleFullscreenFocusRoots()
+        return { consume: true }
+      }
       this.toolOutputExpanded = !this.toolOutputExpanded
       this.rebuildMessages()
       return { consume: true }
@@ -3463,6 +3478,103 @@ export class TuiApp {
     this.setFocusTurnExpanded(turn, false, options)
   }
 
+  /** Fullscreen + Focus Ctrl+O: the Thought-root bulk disclosure (plan
+   * §3/§20). Any expanded root → Collapse All; none → expand the most
+   * recent `EXPAND_RECENT_TURNS` eligible roots. Never touches
+   * thinkingExpanded (Alt+T owns it) and never full-reveals secondaries
+   * (mouse-owned). */
+  private toggleFullscreenFocusRoots(): void {
+    if (this.focusExpandedTurns.size > 0) {
+      this.collapseAllFullscreenFocusRoots()
+      return
+    }
+    this.expandRecentFullscreenFocusRoots(EXPAND_RECENT_TURNS)
+  }
+
+  /** The eligible Focus roots for Ctrl+O bulk expansion: turns with a
+   * real TurnActivity that are CURRENTLY PROJECTED (present in the folded
+   * window — plan §20.1: never a fake Thought). Expanding a windowed-away
+   * turn would be invisible and would wedge the toggle into Collapse All.
+   * Newest turn number first. */
+  private eligibleFocusRootTurns(): number[] {
+    const projected = new Set<number>()
+    for (const message of this.messages) {
+      if ('turn' in message) projected.add(message.turn)
+    }
+    const turns: number[] = []
+    for (const activity of this.turnActivities.values()) {
+      if (projected.has(activity.turn)) turns.push(activity.turn)
+    }
+    return turns.sort((a, b) => b - a)
+  }
+
+  /** Ctrl+O Expand Recent (fullscreen + Focus): ONE mutation, ONE rebuild,
+   * ONE viewport pass (plan §19) — mark the recent roots expanded,
+   * rebuild, then follow the fullscreen expand behavior (the end), exactly
+   * like the single-root click. Creates no secondary overrides and never
+   * writes thinkingExpanded (plan §4/§5). */
+  private expandRecentFullscreenFocusRoots(count: number): void {
+    const recent = this.eligibleFocusRootTurns().slice(0, count)
+    if (recent.length === 0) return
+    for (const turn of recent) this.focusExpandedTurns.add(turn)
+    this.rebuildMessages()
+    this.applyFullscreenExpandViewport()
+    this.requestRender()
+  }
+
+  /**
+   * Ctrl+O Collapse All (fullscreen + Focus): ONE mutation pass, ONE
+   * rebuild, ONE viewport adjustment (plan §19) — never per-root
+   * collapse→rebuild→anchor cycles. Clears every root expansion and every
+   * Focus-secondary local override (a later re-expansion must not
+   * resurrect the old long outputs — plan §7), normalizes the Ctrl+O tool
+   * master OFF — ONLY here (plan §8), so a later surface/Focus switch
+   * cannot resurrect the old bulk detail — and keeps thinkingExpanded
+   * untouched (plan §5). The viewport anchors near the topmost
+   * currently-visible expanded root (the existing collapse anchor), or
+   * stays put when none is visible (plan §19: stable over clever).
+   */
+  private collapseAllFullscreenFocusRoots(): void {
+    const anchorTurn = this.topmostVisibleExpandedFocusTurn()
+    this.focusExpandedTurns.clear()
+    this.clearAllFocusSecondaryExpansions()
+    this.toolOutputExpanded = false
+    this.rebuildMessages()
+    this.applyFullscreenCollapseAnchor(anchorTurn)
+    this.requestRender()
+  }
+
+  /** The topmost EXPANDED Focus root whose Thought block intersects the
+   * fullscreen viewport — Collapse All's anchor candidate (plan §19: keep
+   * context near a visible Thought; no visible root → the viewport stays
+   * put and only clamps). */
+  private topmostVisibleExpandedFocusTurn(): number | undefined {
+    if (this.fullscreenScroll === undefined) return undefined
+    const width = this.terminal.columns
+    const welcomeHeight = this.welcomeCard.render(width).length
+    const top = this.fullscreenScroll.scrollTop - welcomeHeight
+    const bottom = top + this.fullscreenScroll.viewportHeight
+    let row = 0
+    for (const entry of this.messageRows) {
+      if (entry.activity !== undefined && this.focusExpandedTurns.has(entry.activity.turn)) {
+        if (row < bottom && row + entry.height > top) return entry.activity.turn
+      }
+      row += entry.height
+    }
+    return undefined
+  }
+
+  /** Clear every Focus-secondary local override across ALL turns (the
+   * bulk Collapse All reset — plan §7): a later re-expansion of ANY
+   * Thought never restores the previous long outputs. */
+  private clearAllFocusSecondaryExpansions(): void {
+    for (const message of this.messages) {
+      if (!('turn' in message)) continue
+      if (!isFocusSecondaryDisclosure(message)) continue
+      this.expandedOverride.delete(message)
+    }
+  }
+
   /**
    * The unified Focus disclosure transition (plan §8.4): every entry
    * point — header click, expanded-body click, search jumps — funnels
@@ -3487,36 +3599,51 @@ export class TuiApp {
     // (a thumbnail that just finished loading must not shift the anchor).
     this.rebuildMessages()
     if (options.anchorFullscreen && this.fullscreenScroll !== undefined) {
-      this.refreshMessageRows()
-      const width = this.terminal.columns
-      // The ScrollView's content height must reflect the NEW projection
-      // BEFORE the scroll, or scrollTo would clamp against the stale
-      // collapsed height. The layout pass uses the same rendered line
-      // count the frame will paint (cached renders make this cheap).
-      const contentHeight = this.messagesView.render(width).length
-      const viewportHeight = this.fullscreenScroll.viewportHeight
-      this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
       if (expanded) {
-        // 4. EXPAND: follow the end — the user sees the latest content
-        // and the viewport keeps following as the process grows (plan
-        // supplement: the default view after expansion is the end).
-        this.fullscreenScroll.scrollToEnd()
+        this.applyFullscreenExpandViewport()
       } else {
-        // 4. COLLAPSE: anchor the Thought header `FOCUS_ANCHOR_TOP_PADDING`
-        // rows below the viewport top (one row of previous context stays
-        // visible); disableFollow breaks follow-end so the collapsed
-        // content cannot snap back to the tail (plan §8.7).
-        const transcriptRow = this.focusTurnTranscriptRow(turn)
-        if (transcriptRow !== undefined) {
-          const welcomeHeight = this.welcomeCard.render(width).length
-          this.fullscreenScroll.scrollTo(
-            welcomeHeight + transcriptRow - FOCUS_ANCHOR_TOP_PADDING,
-            { disableFollow: true },
-          )
-        }
+        this.applyFullscreenCollapseAnchor(turn)
       }
     }
     this.requestRender()
+  }
+
+  /** The fullscreen EXPAND viewport pass (plan supplement): re-measure the
+   * row map, feed the layout the NEW projected content height (a stale
+   * height would clamp the scroll), then follow the end — the default view
+   * after any expansion is the latest content. */
+  private applyFullscreenExpandViewport(): void {
+    if (this.fullscreenScroll === undefined) return
+    this.refreshMessageRows()
+    const width = this.terminal.columns
+    const contentHeight = this.messagesView.render(width).length
+    const viewportHeight = this.fullscreenScroll.viewportHeight
+    this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+    this.fullscreenScroll.scrollToEnd()
+  }
+
+  /** The fullscreen COLLAPSE viewport pass (plan §8.7/§18): re-measure,
+   * update the layout, then anchor the given turn's Thought header
+   * `FOCUS_ANCHOR_TOP_PADDING` rows below the viewport top (one row of
+   * previous context stays visible) with follow-end disabled — the same
+   * behavior for header clicks, blank-row clicks and Ctrl+O Collapse All.
+   * `turn === undefined` keeps the current position (the layout is still
+   * updated and clamped against the shrunken content). */
+  private applyFullscreenCollapseAnchor(turn: number | undefined): void {
+    if (this.fullscreenScroll === undefined) return
+    this.refreshMessageRows()
+    const width = this.terminal.columns
+    const contentHeight = this.messagesView.render(width).length
+    const viewportHeight = this.fullscreenScroll.viewportHeight
+    this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+    if (turn === undefined) return
+    const transcriptRow = this.focusTurnTranscriptRow(turn)
+    if (transcriptRow === undefined) return
+    const welcomeHeight = this.welcomeCard.render(width).length
+    this.fullscreenScroll.scrollTo(
+      welcomeHeight + transcriptRow - FOCUS_ANCHOR_TOP_PADDING,
+      { disableFollow: true },
+    )
   }
 
   /** The projected transcript row (in `messageRows` coordinates, welcome
@@ -3690,6 +3817,8 @@ export class TuiApp {
       activity?: TurnActivity
       height: number
       attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+      collapseFocusOwnerOnClick?: number
+      hasTrailingSpacer: boolean
     }> = []
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
     // a session never reads as one undifferentiated wall of text. The spacer
@@ -3739,6 +3868,7 @@ export class TuiApp {
             : {}),
           height: 0,
           attachments: [],
+          hasTrailingSpacer: false,
         })
         return
       }
@@ -3756,6 +3886,7 @@ export class TuiApp {
           : {}),
         height,
         attachments,
+        hasTrailingSpacer: index < blocks.length - 1,
       })
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
     })
@@ -3859,6 +3990,8 @@ export class TuiApp {
       activity?: TurnActivity
       height: number
       attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+      collapseFocusOwnerOnClick?: number
+      hasTrailingSpacer: boolean
     }> = []
     blocks.forEach((block, index) => {
       let component: Component
@@ -3888,6 +4021,7 @@ export class TuiApp {
             : {}),
           height: 0,
           attachments: [],
+          hasTrailingSpacer: false,
         })
         return
       }
@@ -3899,6 +4033,7 @@ export class TuiApp {
           : {}),
         height,
         attachments,
+        hasTrailingSpacer: index < blocks.length - 1,
       })
     })
     this.messageRows = rows
@@ -4021,6 +4156,13 @@ export class TuiApp {
     }
   }
 
+  /** Test hook: a COPY of the live Focus root disclosure set — the
+   * fullscreen Ctrl+O bulk-toggle tests assert per-turn state; the
+   * internal set is never handed out. */
+  focusExpandedTurnsForTest(): ReadonlySet<number> {
+    return new Set(this.focusExpandedTurns)
+  }
+
   /**
    * Set the live session's auto-generated title (from the session/title
    * log) for the header; undefined clears it.
@@ -4113,11 +4255,32 @@ export class TuiApp {
     if (messageRow < 0) return
     // Re-measure first: a thumbnail that just finished loading grew from
     // its 1-row info bar to info + image rows — a stale map would misplace
-    // the click (cached renders make this cheap).
+    // the click (cached renders make this cheap). The re-measure also
+    // guarantees the y-regions below never go stale after a resize (plan
+    // §23.8): every click reads the CURRENT projection.
     this.refreshMessageRows()
     let row = 0
-    for (const entry of this.messageRows) {
+    for (let index = 0; index < this.messageRows.length; index += 1) {
+      const entry = this.messageRows[index]!
       if (messageRow < row + entry.height) {
+        const inMessage = messageRow - row
+        // NEW: the Thought internal blank-row escape hatch (plan §9/§23)
+        // — a click on a blank visual row (the inter-block spacer charged
+        // to this entry) that sits INSIDE an expanded Thought collapses
+        // that Thought, even when its header scrolled out of view. The
+        // row-based hit map is unchanged: content rows keep their own
+        // owners, and a boundary spacer (the next Thought / a user message
+        // / the final assistant follows) is unclaimed → no-op (plan
+        // §14/§16). An active overlay owns the click — the fallback never
+        // pierces it (plan §17/§23.7).
+        if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
+          if (this.activeScreen.hasOverlayEntries) return
+          const owner = this.blankRowFocusCollapseOwner(entry, this.messageRows[index + 1])
+          if (owner !== undefined) {
+            this.collapseFocusTurn(owner, { anchorFullscreen: true })
+          }
+          return
+        }
         // A Focus Thought block: the whole rendered block (collapsed body
         // AND expanded header) toggles the turn disclosure (plan §17.1 —
         // the header is always a hit area; the collapsed preview rows too).
@@ -4129,7 +4292,6 @@ export class TuiApp {
         // optional message for the attachment/message toggles below.
         const message = entry.message
         if (message === undefined) return
-        const inMessage = messageRow - row
         // Attachment rows win FIRST (plan §8.3): a click on an image's
         // info bar or its image rows toggles THAT OCCURRENCE's display —
         // the identity stays, the picture collapses/expands, and a
@@ -4170,6 +4332,24 @@ export class TuiApp {
       }
       row += entry.height
     }
+  }
+
+  /** The expanded Thought that OWNS a blank visual row — the inter-block
+   * spacer charged to `entry` (plan §9/§14): the row is INSIDE the
+   * Thought's outer region when the entry's own block and the FOLLOWING
+   * block both belong to the same expanded Thought (header → card,
+   * card → card). The Thought's trailing boundary spacer — the next
+   * Thought / a user message / the final assistant follows — is NOT
+   * claimed, so a click there stays a no-op (plan §16: never guess a
+   * "nearest Thought"). Returns undefined for every non-Focus row. */
+  private blankRowFocusCollapseOwner(
+    entry: Readonly<{ activity?: TurnActivity; collapseFocusOwnerOnClick?: number }>,
+    next: Readonly<{ activity?: TurnActivity; collapseFocusOwnerOnClick?: number }> | undefined,
+  ): number | undefined {
+    const turn = entry.activity?.turn ?? entry.collapseFocusOwnerOnClick
+    if (turn === undefined || !this.focusExpandedTurns.has(turn)) return undefined
+    const nextTurn = next?.activity?.turn ?? next?.collapseFocusOwnerOnClick
+    return nextTurn === turn ? turn : undefined
   }
 
   /** Toggle one collapsible message's individual expansion (mouse click).

@@ -2887,7 +2887,7 @@ export function registerTuiCommands(
         { id: 'k-queue', label: 'Ctrl+Enter', description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
         { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
         { id: 'k-cancel', label: 'Esc', description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
-        { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts (fullscreen Focus disclosures are mouse-owned). Thinking detail is Alt+T', currentValue: '' },
+        { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is Alt+T', currentValue: '' },
         { id: 'k-todo', label: 'Ctrl+T', description: 'Toggle the todo panel', currentValue: '' },
         { id: 'k-think', label: 'Alt+T', description: 'Collapse/expand thinking blocks (detail level — blocks stay visible)', currentValue: '' },
         { id: 'k-steer', label: 'Ctrl+S', description: 'Steer the running turn with the draft', currentValue: '' },
