@@ -456,8 +456,18 @@ export function transcriptContentWidth(width: number): number {
  * The thin host-owned transcript boundary: renders the child at the
  * transcript content width (terminal width minus the right gutter), so
  * EVERY transcript block — host cards AND plugin-rendered components —
- * inherits the gutter without any renderer knowing about it. Lifecycle
- * (invalidate/dispose/input) forwards to the child.
+ * inherits the gutter without any renderer knowing about it.
+ *
+ * The wrapper is deliberately NON-OWNING: `dispose()` does NOT forward to
+ * the child. The message/focus component CACHES own the child's lifecycle
+ * (`pruneMessageComponents` / stale-rebuild / session-switch dispose
+ * them), while `messagesView` is only a projection / mount point — the
+ * fork's `Container.clear()` disposes every child on every
+ * `rebuildMessages`, and forwarding the dispose would kill a CACHED
+ * component the cache then reuses (an `ImageThumbnail` drops its loader
+ * subscription and never repaints on the settle). `invalidate()`/input
+ * forwarding stays (non-destructive, the fork calls them on the mounted
+ * tree).
  */
 export class TranscriptGutterComponent implements Component {
   private readonly child: Component
@@ -470,9 +480,10 @@ export class TranscriptGutterComponent implements Component {
     this.child.invalidate?.()
   }
 
-  dispose(): void {
-    this.child.dispose?.()
-  }
+  /** Deliberately non-owning: the component caches own the child's
+   * lifecycle — a projection clear (every rebuildMessages) must never
+   * dispose a cached component that is reused right after. */
+  dispose(): void {}
 
   handleInput(data: string): void {
     this.child.handleInput?.(data)
