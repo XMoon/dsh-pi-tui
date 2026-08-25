@@ -1442,8 +1442,10 @@ export class TuiApp {
   /** Ctrl+O master switch: expand the most recent turns' collapsible
    * entries (the ordinary fold) — and, in REGULAR Focus, the DERIVED
    * reveal of the recent Focus Thoughts (never written into
-   * focusExpandedTurns). Fullscreen Focus disclosures are mouse-owned:
-   * Ctrl+O does not pierce them. */
+   * focusExpandedTurns). In FULLSCREEN Focus Ctrl+O owns the Thought-root
+   * bulk instead (toggleFullscreenFocusRoots) and this master is not
+   * consulted there; the bulk Collapse All normalizes it OFF (plan §8) so
+   * a later surface/Focus switch starts from a clean baseline. */
   private toolOutputExpanded = false
   /** Alt+T: the ONE Thinking disclosure preference — whether Thinking
    * blocks render FULL (true) or COMPACT with a preview (false). Thinking
@@ -1700,10 +1702,10 @@ export class TuiApp {
    * Per-message expansion overrides from mouse clicks: a message whose entry
    * is true stays expanded even when the global fold is off; absent falls
    * back to the global boundary. In FULLSCREEN Focus the per-card override
-   * IS the secondary disclosure owner (the mouse controls the cards —
-   * Ctrl+O does not pierce them); in REGULAR Focus any expanded root
-   * full-reveals its non-Thinking process regardless of the fold or the
-   * override.
+   * IS the secondary disclosure owner (the MOUSE controls the cards —
+   * Ctrl+O owns the Thought ROOTS, never the per-card detail); in REGULAR
+   * Focus any expanded root full-reveals its non-Thinking process
+   * regardless of the fold or the override.
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
   /**
@@ -1776,6 +1778,18 @@ export class TuiApp {
      * zero-row blocks, mirroring the rendered layout exactly. */
     hasTrailingSpacer: boolean
   }> = []
+  /** The terminal geometry the row map was built at by the last
+   * FRAME-DRIVING rebuild (rebuildMessages — the click-path re-measure in
+   * refreshMessageRows deliberately does NOT update it). The blank-row
+   * collapse — the one destructive fullscreen click — uses it as a
+   * stale-frame guard (plan §23.8): between a terminal resize and the
+   * next rebuild the on-screen frame still shows the OLD layout, so the
+   * first blank-row click after a geometry change is dropped (the map is
+   * re-measured and re-stamped for the next one) instead of resolving
+   * against regions the user never saw. Concrete-row clicks keep their
+   * historical immediate behavior. */
+  private rowMapTermColumns = 0
+  private rowMapTermRows = 0
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
@@ -3904,6 +3918,11 @@ export class TuiApp {
       this.messagesView.addChild(new Text(line, 0, 0))
     }
     this.messageRows = rows
+    // The frame-driving rebuild re-stamps the row-map geometry: the next
+    // render paints this exact map, so the blank-row stale-frame guard
+    // (see rowMapTermColumns) has a fresh reference.
+    this.rowMapTermColumns = width
+    this.rowMapTermRows = this.terminal.rows
     this.renderTodoPanel()
     this.requestRender()
   }
@@ -4284,6 +4303,21 @@ export class TuiApp {
         // / the final assistant follows) is unclaimed → no-op (plan
         // §14/§16). Overlays were already handled above.
         if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
+          // Stale-frame guard (plan §23.8, the question-frame class): a
+          // terminal resize between the last frame-driving rebuild and the
+          // next repaint leaves the ON-SCREEN frame at the OLD geometry —
+          // the click's coordinates belong to a layout the user never saw.
+          // The blank-row collapse is the one destructive fullscreen click,
+          // so only it waits: re-measure the map for the CURRENT geometry,
+          // re-stamp the reference and drop THIS click (the fresh regions
+          // serve the next one). Concrete-row clicks keep their historical
+          // immediate behavior.
+          if (this.terminal.columns !== this.rowMapTermColumns || this.terminal.rows !== this.rowMapTermRows) {
+            this.refreshMessageRows()
+            this.rowMapTermColumns = this.terminal.columns
+            this.rowMapTermRows = this.terminal.rows
+            return
+          }
           // The interior test follows the VISUAL sequence: zero-height
           // blocks render nothing, so a spacer whose following entries are
           // all zero-height is the Thought's BOUNDARY spacer — the next

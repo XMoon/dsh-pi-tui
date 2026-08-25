@@ -408,8 +408,10 @@ mode (only `TuiAltScreen` wires `onCellClick`):
   PRESENTS: a running card collapses to the newest 5 source lines, a
   settled card to at most 20 VISUAL rows, with an honest hidden-line
   marker. Ctrl+O (the existing master switch) expands to the retained
-  buffer; a running card's result is re-chained to the bounded tail on a
-  throttle.
+  buffer — everywhere EXCEPT fullscreen Focus, where Ctrl+O owns the
+  Thought-root bulk and the shell cards keep their folded state (their
+  local `!`/`!!` presentation is otherwise unchanged); a running card's
+  result is re-chained to the bounded tail on a throttle.
 - Quick dismiss (Alt+K) removes SETTLED cards only: a running card is
   never dismissed, the shell process is never cancelled (Esc owns that),
   no session event is deleted, and an already-submitted `!` context

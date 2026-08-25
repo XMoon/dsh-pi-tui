@@ -1360,6 +1360,31 @@ test('fullscreen Focus Ctrl+O expands ONLY the recent roots; secondaries stay co
   app.stop()
 })
 
+test('fullscreen Ctrl+O Expand Recent follows a pre-set global Thinking preference (plan §22.1/§5)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  for (let turn = 1; turn <= 3; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Pre-set the bulk Thinking preference (Alt+T) BEFORE the expansion:
+  // Expand Recent must neither hide it nor ignore it.
+  app.toggleThinkingExpanded()
+  await vt.waitForRender()
+  assert.equal(app.isThinkingExpanded(), true, 'precondition: Thinking bulk-full')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1, 2, 3], 'Ctrl+O expanded the recent roots')
+  assert.equal(app.isThinkingExpanded(), true, 'Ctrl+O must never change the global Thinking preference')
+  const joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('(click to expand)'), `the expanded roots' Thinking cards must follow the bulk-full preference:\n${joined}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('fullscreen Ctrl+O collapses ALL roots once any is expanded (plan §22.2)', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1781,9 +1806,21 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   const echoY = findRow(view, 'Bash echo done')
   assert.ok(echoY >= 0, `the second tool card missing after resize:\n${view.join('\n')}`)
   assert.equal(view[echoY - 1].trim(), '', `the clicked row must still be the interior blank after resize:\n${view.join('\n')}`)
-  // The blank row above the second tool card is still an INTERIOR blank
-  // of the same expanded Thought: collapses with the header anchored.
+  // The stale-frame guard (plan §23.8): between the resize and the next
+  // frame-driving rebuild, the ON-SCREEN frame still shows the OLD layout
+  // — the blank-row collapse (the one destructive click) drops THIS click
+  // and re-measures the map — never a mis-collapse.
   click(vt, 3, echoY)
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'the stale-frame blank click must be dropped')
+  const primed = vt.getViewport()
+  assert.ok(!primed.join('\n').includes('🐋 Thought'), `the Thought must stay expanded after the dropped click:\n${primed.join('\n')}`)
+  // The next blank click resolves against the fresh regions: collapses
+  // with the header anchored.
+  const echoY2 = findRow(primed, 'Bash echo done')
+  assert.ok(echoY2 >= 0, `the second tool card missing after the prime:\n${primed.join('\n')}`)
+  assert.equal(primed[echoY2 - 1].trim(), '', 'the primed click row must be blank')
+  click(vt, 3, echoY2)
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('🐋 Thought'), `the blank-row collapse must work after resize:\n${after}`)
