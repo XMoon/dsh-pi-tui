@@ -12,6 +12,7 @@ import {
   classifySubagentFollowupError,
   resolveSubagentSettleTarget,
   submitSubagentFollowup,
+  viewerCanonicalizeScope,
   type SubagentFollowupService,
   type SubagentParentLike,
   type SubagentSettleViewerState,
@@ -241,4 +242,26 @@ test('a closed viewer (no viewing child) is STALE', () => {
     viewingLabel: undefined,
     viewingParentSessionId: undefined,
   })), { kind: 'stale' })
+})
+
+test('review: the canonicalize scope is the VIEWED CHILD workspace, never the parent cwd', () => {
+  // The child may have been born in another directory: rewriting its
+  // `@src/foo.ts` against the PARENT cwd would resolve to the wrong tree.
+  // A known child cwd wins; an unknown cold-child cwd falls back to the
+  // live parent session.
+  assert.deepEqual(
+    viewerCanonicalizeScope('/repo-b', 'session-parent'),
+    { kind: 'workspace', cwd: '/repo-b' },
+    'a known child cwd is the scope (parent cwd is irrelevant)',
+  )
+  assert.deepEqual(
+    viewerCanonicalizeScope('', 'session-parent'),
+    { kind: 'session', sessionId: 'session-parent' },
+    'an unknown cold-child cwd falls back to the live parent',
+  )
+  assert.deepEqual(
+    viewerCanonicalizeScope(undefined, undefined),
+    { kind: 'session', sessionId: '' },
+    'a sessionless fallback stays fail-closed',
+  )
 })

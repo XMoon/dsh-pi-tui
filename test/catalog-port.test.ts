@@ -69,7 +69,7 @@ test('models surface detached provider/model DTOs and forward discovery', async 
   assert.deepEqual(await models.listModels('deepseek'), [{ id: 'deepseek-chat', name: 'Chat' }])
   assert.deepEqual(await models.resolveModelInfo('deepseek', 'deepseek-chat'), { reasoning: { efforts: [{ id: 'low', name: 'Low' }] } })
   assert.deepEqual(await models.discoverModels({ baseURL: 'http://x' }), [{ id: 'm1' }])
-  assert.deepEqual(models.listConfigurableProviders(), [{ provider: 'openai', displayName: 'openai', settingsNs: 'llm-pi-ai', settingsPath: [] }])
+  assert.deepEqual(models.listConfigurableProviders(), [{ id: 'openai', displayName: 'openai' }])
   assert.deepEqual(models.currentSelection(), { provider: 'deepseek', model: 'deepseek-chat' })
   await models.saveSelection({ provider: 'deepseek', model: 'deepseek-chat' })
   assert.deepEqual(saved, { provider: 'deepseek', model: 'deepseek-chat' })
@@ -103,8 +103,10 @@ test('catalog DTOs are DETACHED — mutating a returned value never aliases Host
   ;(info.reasoning!.efforts as Array<{ id: string; name: string }>)[0]!.id = 'MUTATED'
   assert.equal(efforts[0]!.id, 'low', 'the reasoning metadata is never aliased')
   const directoryOut = modelsPort.listConfigurableProviders()!
-  ;(directoryOut as unknown as Array<{ settingsPath: string[] }>)[0]!.settingsPath.push('INJECTED')
-  assert.deepEqual(directory[0]!.settingsPath, ['providers', 'openai'], 'the directory entries are never aliased')
+  ;(directoryOut as unknown as Array<{ displayName: string }>)[0]!.displayName = 'MUTATED'
+  assert.equal(directory[0]!.displayName, 'openai', 'the directory entries are never aliased')
+  // The semantic DTO never exposes the config schema layout.
+  assert.deepEqual(Object.keys(directoryOut[0]!).sort(), ['displayName', 'id'], 'no settings namespace/path in the catalog contract')
   const skillSource = {
     resourceBase: { kind: 'directory', path: '/skills', nested: { owner: 'host' } },
     invocation: { userInvocable: true, modelInvocable: true },

@@ -85,7 +85,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       available: () => true,
       listCredentialOptions: () => [],
       writeProfile: async () => {},
-      writeKeylessProfile: async () => {},
+      writeKeylessProfile: async () => ({ kind: 'written' as const }),
     },
     credentials: {
       available: () => true,
@@ -99,7 +99,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     authorization: {
       available: () => false,
       listTargets: () => [],
-      begin: async () => ({ status: 'cancelled' as const }),
+      begin: async () => ({ kind: 'unavailable' as const }),
+      onEvent: () => () => {},
+      respond: async () => {},
+      cancel: async () => {},
     },
     permissions: {
       presetNames: () => [],

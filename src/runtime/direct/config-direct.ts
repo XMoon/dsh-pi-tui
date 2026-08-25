@@ -16,9 +16,14 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/config-direct
  */
 
+import { randomUUID } from 'node:crypto'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
-import type { AuthorizationInteraction } from '@deepseek-ai/dsh-authorization'
+import {
+  AuthorizationDeclinedError,
+  type AuthorizationInteraction,
+  type AuthorizationPrompt,
+} from '@deepseek-ai/dsh-authorization'
 import {
   authorizationTargets,
   type AuthorizationServiceLike,
@@ -30,8 +35,12 @@ import {
   type ProviderCatalogEntry,
   type ProviderOption,
 } from '../../provider-catalog.ts'
+import { cancellationError } from '../../detached.ts'
+import { safeErrorMessage } from '../../error-boundary.ts'
 import type {
   AuthorizationConfig,
+  AuthorizationFlowEvent,
+  AuthorizationPromptEvent,
   ConfigPort,
   CredentialConfig,
   PermissionConfig,
@@ -204,7 +213,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     ])
   }
 
-  async writeKeylessProfile(route: string): Promise<void> {
+  async writeKeylessProfile(route: string): Promise<{ kind: 'written' } | { kind: 'skipped'; reason: string }> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
     // The route becomes a settings path segment in the fallback layout.
@@ -215,20 +224,23 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     // The route's profile location is resolved INTERNALLY from the
     // CURRENT directory: with the llm service present, the entry's own
     // section/path is used VERBATIM (a consumer never names a namespace);
-    // a route the directory no longer offers writes NOTHING (a directory
-    // race between the catalog read and the authorization completion must
-    // never fall back to a guessed slot). Only when the llm service is
-    // ABSENT (the settings-only /login fallback) does the conventional
-    // llm-pi-ai slot apply.
+    // a route the directory no longer offers is SKIPPED (a directory race
+    // between the catalog read and the authorization completion must never
+    // fall back to a guessed slot) — reported as a skip, never a silent
+    // no-op the caller could present as a success. Only when the llm
+    // service is ABSENT (the settings-only /login fallback) does the
+    // conventional llm-pi-ai slot apply.
     const llm = this.llm()
     if (llm === undefined) {
       await settings.mutate(settingsNamespace('llm-pi-ai'), [
         { op: 'set', path: ['providers', route], value: {} },
       ])
-      return
+      return { kind: 'written' }
     }
     const directoryEntry = llm.listConfigurableProviders().find(candidate => candidate.provider === route)
-    if (directoryEntry === undefined) return
+    if (directoryEntry === undefined) {
+      return { kind: 'skipped', reason: `no configurable-provider entry for ${route}` }
+    }
     // The directory metadata is validated against the adapter-owned
     // provider-config schema before it reaches a mutate: the entry must
     // live in the llm-pi-ai section and its path must be the providers
@@ -237,10 +249,13 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     const path = [...directoryEntry.settingsPath]
     const validLayout = directoryEntry.settingsNs === settingsNamespace('llm-pi-ai')
       && path.length === 2 && path[0] === 'providers' && path[1] === route
-    if (!validLayout) return
+    if (!validLayout) {
+      return { kind: 'skipped', reason: `hostile or malformed directory entry for ${route}` }
+    }
     await settings.mutate(directoryEntry.settingsNs, [
       { op: 'set', path, value: {} },
     ])
+    return { kind: 'written' }
   }
 }
 
@@ -317,9 +332,26 @@ export class DirectCredentialConfig implements CredentialConfig {
 }
 
 /** The Direct authorization config (`ctx.authorization` behind the
- * authorization.ts seam). */
+ * authorization.ts seam). The upstream interaction model (notify/prompt
+ * callbacks) is bridged into the port's EVENT model: the adapter owns the
+ * bridge interaction, consumers see only detached events and answer with
+ * `respond`/`cancel` — no callback ever crosses the contract. */
 export class DirectAuthorizationConfig implements AuthorizationConfig {
   private readonly ctx: HostContextLike
+  private readonly listeners = new Set<(event: AuthorizationFlowEvent) => void>()
+  /** Pending prompt promises: promptId → the answer bridge. */
+  private readonly pendingPrompts = new Map<string, {
+    attemptId: string
+    resolve: (answer: string) => void
+    reject: (error: unknown) => void
+  }>()
+  /** attemptId → the upstream attempt's withdraw controller + the observed
+   * settlement promise (held so the flow is never a floating promise). */
+  private readonly attempts = new Map<string, {
+    controller: AbortController
+    key: CredentialKey
+    settlement: Promise<void>
+  }>()
 
   constructor(ctx: HostContextLike) {
     this.ctx = ctx
@@ -341,18 +373,138 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       .map(target => ({ ...target, methods: target.methods.map(method => ({ ...method })) }))
   }
 
+  onEvent(listener: (event: AuthorizationFlowEvent) => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
   begin(request: {
     key: string
     method?: string
-    interaction: AuthorizationInteraction
     signal?: AbortSignal
-  }): Promise<{ status: 'authorized' | 'cancelled' }> {
+  }): Promise<{ kind: 'started'; attemptId: string } | { kind: 'unavailable' }> {
     const authorization = this.authorization()
-    if (authorization === undefined) return Promise.resolve({ status: 'cancelled' })
-    return authorization.begin({
-      ...request,
-      key: request.key as CredentialKey,
+    if (authorization === undefined) return Promise.resolve({ kind: 'unavailable' })
+    const attemptId = randomUUID()
+    const controller = new AbortController()
+    const key = request.key as CredentialKey
+    const signal = request.signal === undefined
+      ? controller.signal
+      : AbortSignal.any([request.signal, controller.signal])
+    // The upstream seam is callback-shaped; the adapter bridges it:
+    // notices and prompts become detached EVENTS, and the prompt promise
+    // resolves through `respond` / rejects through `cancel` — the flow
+    // never sees the TUI, and the TUI never crosses the contract with a
+    // callback.
+    const interaction: AuthorizationInteraction = {
+      notify: (notice) => {
+        this.emit({ kind: 'notice', attemptId, notice: { ...notice } })
+      },
+      prompt: (prompt) => this.bridgePrompt(attemptId, prompt),
+    }
+    const flow = authorization.begin({ key, method: request.method, interaction, signal })
+    // The attempt runs detached: its settlement is an EVENT, never a
+    // return value. The settlement promise is HELD in the attempts map
+    // (observed, never a floating discard) and removed when it settles.
+    const settlement = flow.then(
+      (outcome) => {
+        this.attempts.delete(attemptId)
+        this.rejectAttemptPrompts(attemptId)
+        this.emit({ kind: 'settled', attemptId, status: outcome.status })
+      },
+      (error: unknown) => {
+        this.attempts.delete(attemptId)
+        this.rejectAttemptPrompts(attemptId)
+        this.emit({
+          kind: 'settled',
+          attemptId,
+          status: 'failed',
+          code: (error as { code?: unknown } | null)?.code as string | undefined,
+          message: safeErrorMessage(error),
+        })
+      },
+    )
+    this.attempts.set(attemptId, { controller, key, settlement })
+    return Promise.resolve({ kind: 'started', attemptId })
+  }
+
+  respond(attemptId: string, promptId: string, answer: string | null): Promise<void> {
+    const pending = this.pendingPrompts.get(promptId)
+    if (pending === undefined || pending.attemptId !== attemptId) return Promise.resolve()
+    this.pendingPrompts.delete(promptId)
+    if (answer === null) {
+      // The human declined the prompt: the seam's decline taxonomy, not a
+      // withdrawal (the flow distinguishes the two).
+      pending.reject(new AuthorizationDeclinedError())
+    } else {
+      pending.resolve(answer)
+    }
+    return Promise.resolve()
+  }
+
+  cancel(attemptId: string): Promise<void> {
+    const attempt = this.attempts.get(attemptId)
+    if (attempt === undefined) return Promise.resolve()
+    attempt.controller.abort()
+    return Promise.resolve()
+  }
+
+  /** Bridge one upstream prompt into an event + a pending answer promise. */
+  private bridgePrompt(attemptId: string, prompt: AuthorizationPrompt): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const promptId = randomUUID()
+      this.pendingPrompts.set(promptId, { attemptId, resolve, reject })
+      const event: AuthorizationPromptEvent = prompt.kind === 'select'
+        ? {
+            kind: 'select',
+            message: prompt.message,
+            options: prompt.options.map(option => ({
+              id: option.id,
+              label: option.label,
+              ...(option.description !== undefined && option.description !== ''
+                ? { description: option.description }
+                : {}),
+            })),
+          }
+        : {
+            kind: prompt.kind,
+            message: prompt.message,
+            ...(prompt.placeholder !== undefined && prompt.placeholder !== ''
+              ? { placeholder: prompt.placeholder }
+              : {}),
+          }
+      this.emit({ kind: 'prompt', attemptId, promptId, prompt: event })
+      // The flow may withdraw a prompt on its own (its signal): the
+      // withdrawal is NOT a decline — surface it as an event so the
+      // consumer closes the prompt UI, and reject with a non-decline
+      // cancellation.
+      prompt.signal?.addEventListener('abort', () => {
+        const pending = this.pendingPrompts.get(promptId)
+        if (pending === undefined || pending.attemptId !== attemptId) return
+        this.pendingPrompts.delete(promptId)
+        reject(cancellationError('authorization prompt withdrawn'))
+        this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
+      }, { once: true })
     })
+  }
+
+  private rejectAttemptPrompts(attemptId: string): void {
+    for (const [promptId, pending] of this.pendingPrompts) {
+      if (pending.attemptId !== attemptId) continue
+      this.pendingPrompts.delete(promptId)
+      pending.reject(cancellationError('authorization attempt settled'))
+    }
+  }
+
+  private emit(event: AuthorizationFlowEvent): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(event)
+      } catch {
+        // A listener must never break the attempt (the surface that
+        // cannot render a notice loses the notice, never the flow).
+      }
+    }
   }
 }
 

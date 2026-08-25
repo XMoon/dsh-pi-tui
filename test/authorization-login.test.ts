@@ -15,7 +15,6 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { AuthorizationDeclinedError } from '@deepseek-ai/dsh-authorization'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import {
@@ -25,7 +24,7 @@ import {
 import {
   authorizationFailureText,
   authorizationTargets,
-  createAuthorizationInteraction,
+  createAuthorizationFlow,
   flowForRoute,
   formatAuthorizationNotice,
   mergeLoginTargets,
@@ -38,6 +37,12 @@ import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Flush the microtask queue (the flow's respond chain is promise-based). */
+async function settle(): Promise<void> {
+  await new Promise<void>((resolve) => { resolve() })
+  await new Promise<void>((resolve) => { resolve() })
+}
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -366,20 +371,21 @@ test('notices reuse one durable panel and refresh its body; close hides it', () 
     askQuestions: async () => [{ id: 'answer', selected: [], custom: 'x' }],
     openPicker: () => ({ close: () => {} }),
   }
-  const { interaction, close } = createAuthorizationInteraction(surface)
-  interaction.notify({ message: 'first progress' })
-  interaction.notify({ message: 'Open this page', url: 'https://example.com' })
-  interaction.notify({ message: 'Code time', code: '12-34' })
+  const flow = createAuthorizationFlow(surface, { respond: async () => {}, cancel: async () => {} })
+  flow.onEvent({ kind: 'notice', attemptId: 'a', notice: { message: 'first progress' } })
+  flow.onEvent({ kind: 'notice', attemptId: 'a', notice: { message: 'Open this page', url: 'https://example.com' } })
+  flow.onEvent({ kind: 'notice', attemptId: 'a', notice: { message: 'Code time', code: '12-34' } })
   assert.equal(opened.length, 1, 'one durable panel per attempt')
   assert.ok(opened[0]!.includes('first progress'))
-  close()
+  flow.close()
   assert.equal(closed, 1)
 })
 
 // ── §17.8 prompt interaction ───────────────────────────────────────────────
 
-test('a text prompt returns the typed text', async () => {
+test('a text prompt answers the typed text through the port', async () => {
   const asked: unknown[] = []
+  const answered: Array<{ promptId: string; answer: string | null }> = []
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async (questions) => {
@@ -388,15 +394,20 @@ test('a text prompt returns the typed text', async () => {
     },
     openPicker: () => ({ close: () => {} }),
   }
-  const { interaction } = createAuthorizationInteraction(surface)
-  const value = await interaction.prompt({ kind: 'text', message: 'Enter the code', placeholder: 'ABCD' })
-  assert.equal(value, 'the-code')
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, promptId, answer) => { answered.push({ promptId, answer }) },
+    cancel: async () => {},
+  })
+  flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'Enter the code', placeholder: 'ABCD' } })
+  await settle()
+  assert.deepEqual(answered, [{ promptId: 'p1', answer: 'the-code' }])
   const question = (asked[0] as { masked?: boolean }[])[0]
   assert.equal(question?.masked, undefined, 'a text prompt is not masked')
 })
 
-test('a secret prompt is masked and returns the value', async () => {
+test('a secret prompt is masked and answers the value', async () => {
   const asked: unknown[] = []
+  const answered: Array<string | null> = []
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async (questions) => {
@@ -405,14 +416,19 @@ test('a secret prompt is masked and returns the value', async () => {
     },
     openPicker: () => ({ close: () => {} }),
   }
-  const { interaction } = createAuthorizationInteraction(surface)
-  const value = await interaction.prompt({ kind: 'secret', message: 'Paste the API key' })
-  assert.equal(value, 'sk-test-secret')
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'secret', message: 'Paste the API key' } })
+  await settle()
+  assert.deepEqual(answered, ['sk-test-secret'])
   const question = (asked[0] as { masked?: boolean }[])[0]
   assert.equal(question?.masked, true, 'the secret prompt must ask masked')
 })
 
-test('a select prompt returns the option id, not its label', async () => {
+test('a select prompt answers the option id, not its label', async () => {
+  const answered: Array<string | null> = []
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async () => [],
@@ -421,92 +437,112 @@ test('a select prompt returns the option id, not its label', async () => {
       return { close: () => {} }
     },
   }
-  const { interaction } = createAuthorizationInteraction(surface)
-  const value = await interaction.prompt({
-    kind: 'select',
-    message: 'How do you want to sign in?',
-    options: [
-      { id: 'oauth', label: 'OAuth' },
-      { id: 'api-key', label: 'API key' },
-    ],
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
   })
-  assert.equal(value, 'oauth')
+  flow.onEvent({
+    kind: 'prompt',
+    attemptId: 'a',
+    promptId: 'p1',
+    prompt: {
+      kind: 'select',
+      message: 'How do you want to sign in?',
+      options: [
+        { id: 'oauth', label: 'OAuth' },
+        { id: 'api-key', label: 'API key' },
+      ],
+    },
+  })
+  await settle()
+  assert.deepEqual(answered, ['oauth'])
 })
 
-test('the user cancelling a prompt is a decline (AuthorizationDeclinedError)', async () => {
+test('the user cancelling a prompt is a decline (answered null)', async () => {
+  const answered: Array<string | null> = []
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async () => { throw new Error('question flow cancelled') },
     openPicker: () => ({ close: () => {} }),
   }
-  const { interaction } = createAuthorizationInteraction(surface)
-  await assert.rejects(
-    interaction.prompt({ kind: 'text', message: 'enter' }),
-    (error) => error instanceof AuthorizationDeclinedError,
-    'a user cancel must reject with AuthorizationDeclinedError',
-  )
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'enter' } })
+  await settle()
+  assert.deepEqual(answered, [null], 'a user cancel must answer null (a decline)')
 })
 
 test('an empty typed answer is a decline, not an empty string', async () => {
+  const answered: Array<string | null> = []
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async () => [{ id: 'answer', selected: [], custom: '' }],
     openPicker: () => ({ close: () => {} }),
   }
-  const { interaction } = createAuthorizationInteraction(surface)
-  await assert.rejects(
-    interaction.prompt({ kind: 'text', message: 'enter' }),
-    (error) => error instanceof AuthorizationDeclinedError,
-  )
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'enter' } })
+  await settle()
+  assert.deepEqual(answered, [null], 'an empty typed answer is a decline')
 })
 
-// ── §17.9 prompt-level signal ──────────────────────────────────────────────
+// ── §17.9 prompt-level withdrawal ──────────────────────────────────────────
 
-test('a prompt withdrawn by its own signal is NOT a decline', async () => {
-  const controller = new AbortController()
+test('a prompt withdrawn by the flow is NOT answered (not a decline)', async () => {
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async () => {
-      controller.abort(new Error('losing race'))
       throw new Error('question flow cancelled')
     },
     openPicker: () => ({ close: () => {} }),
   }
-  const { interaction } = createAuthorizationInteraction(surface)
-  await assert.rejects(
-    interaction.prompt({ kind: 'text', message: 'enter', signal: controller.signal }),
-    (error) => !(error instanceof AuthorizationDeclinedError),
-    'a withdrawn prompt must reject with a non-decline error',
-  )
+  const answered: Array<string | null> = []
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  flow.onEvent({ kind: 'prompt', attemptId: 'a', promptId: 'p1', prompt: { kind: 'text', message: 'enter' } })
+  // The flow withdraws the losing prompt BEFORE the question settles: the
+  // open UI closes and the prompt is never answered (a refusal, not a
+  // decline — the adapter already rejected its pending bridge).
+  flow.onEvent({ kind: 'prompt-withdrawn', attemptId: 'a', promptId: 'p1' })
+  await settle()
+  assert.deepEqual(answered, [], 'a withdrawn prompt must not be answered')
 })
 
-test('a select prompt withdrawn by its signal closes the picker, non-decline', async () => {
-  const controller = new AbortController()
+test('a select prompt withdrawn by the flow closes the picker, non-decline', async () => {
   let closed = 0
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async () => [],
-    openPicker: (items, onSelect, onCancel) => {
+    openPicker: () => {
       // The flow withdraws the losing prompt while the picker is open.
-      controller.abort(new Error('browser callback won'))
       return { close: () => { closed += 1 } }
     },
   }
-  const { interaction } = createAuthorizationInteraction(surface)
-  await assert.rejects(
-    interaction.prompt({
-      kind: 'select',
-      message: 'How?',
-      options: [{ id: 'oauth', label: 'OAuth' }],
-      signal: controller.signal,
-    }),
-    (error) => !(error instanceof AuthorizationDeclinedError),
-    'a withdrawn select prompt must reject with a non-decline error',
-  )
+  const answered: Array<string | null> = []
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  flow.onEvent({
+    kind: 'prompt',
+    attemptId: 'a',
+    promptId: 'p1',
+    prompt: { kind: 'select', message: 'How?', options: [{ id: 'oauth', label: 'OAuth' }] },
+  })
+  flow.onEvent({ kind: 'prompt-withdrawn', attemptId: 'a', promptId: 'p1' })
+  await settle()
   assert.equal(closed, 1, 'the open picker must be closed on withdrawal')
+  assert.deepEqual(answered, [], 'a withdrawn select prompt must not be answered')
 })
 
 test('the user cancelling a select prompt is a decline', async () => {
+  const answered: Array<string | null> = []
   const surface: AuthorizationSurface = {
     openOutputViewer: () => () => {},
     askQuestions: async () => [],
@@ -515,15 +551,18 @@ test('the user cancelling a select prompt is a decline', async () => {
       return { close: () => {} }
     },
   }
-  const { interaction } = createAuthorizationInteraction(surface)
-  await assert.rejects(
-    interaction.prompt({
-      kind: 'select',
-      message: 'How?',
-      options: [{ id: 'oauth', label: 'OAuth' }],
-    }),
-    (error) => error instanceof AuthorizationDeclinedError,
-  )
+  const flow = createAuthorizationFlow(surface, {
+    respond: async (_attemptId, _promptId, answer) => { answered.push(answer) },
+    cancel: async () => {},
+  })
+  flow.onEvent({
+    kind: 'prompt',
+    attemptId: 'a',
+    promptId: 'p1',
+    prompt: { kind: 'select', message: 'How?', options: [{ id: 'oauth', label: 'OAuth' }] },
+  })
+  await settle()
+  assert.deepEqual(answered, [null], 'a user closing the picker is a decline')
 })
 
 // ── §17.6 method selection ─────────────────────────────────────────────────
@@ -642,10 +681,17 @@ test('/login user decline reports login cancelled', async () => {
 
 // ── §17.10 whole-attempt cancellation ──────────────────────────────────────
 
-test('/login passes the runner signal into begin', async () => {
+test('/login passes the runner signal into begin (the flow withdraws with it)', async () => {
   const t = setup()
   await t.run(t.login, 'anthropic')
-  assert.equal(t.authorization.begins[0]!.signal, t.runner.signal)
+  const received = t.authorization.begins[0]!.signal
+  assert.ok(received !== undefined, 'the attempt receives the runner signal')
+  // The Direct adapter composes the caller signal with its own withdraw
+  // controller, so the object crossing is NOT the runner's own — the
+  // SEMANTIC is what matters: an attempt begun with an already-aborted
+  // runner signal arrives already aborted (covered below), and the
+  // mid-attempt abort test pins the withdrawal path end to end.
+  assert.equal(received.aborted, t.runner.signal.aborted)
   t.app.stop()
 })
 

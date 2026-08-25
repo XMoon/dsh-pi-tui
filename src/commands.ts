@@ -69,7 +69,7 @@ import {
 } from './provider-catalog.ts'
 import {
   authorizationFailureText,
-  createAuthorizationInteraction,
+  createAuthorizationFlow,
   flowForRoute,
   mergeLoginTargets,
   type AuthorizationTarget,
@@ -588,13 +588,15 @@ function mergedTargetsSummary(merged: readonly LoginTarget[]): string {
 }
 
 /**
- * Run one authorization attempt on the seam and report it. Method picking
- * (single method → direct; multiple → a picker), notice rendering and
- * prompts all live behind the interaction built here; the seam's stable
- * error taxonomy maps to user-facing copy (§15). On success, a catalog
- * route that is not configured yet gets a minimal keyless profile so the
- * runtime keeps reading the credential record (§12.1 — never an apiKeyEnv,
- * which would switch the request path back to a reference that is not set).
+ * Run one authorization attempt on the port and report it. Method picking
+ * (single method → direct; multiple → a picker) is a client concern; the
+ * attempt itself is EVENT-DRIVEN (migration M1.9): the port emits detached
+ * notice/prompt events and the TUI answers through `respond`/`cancel` —
+ * no callback-bearing interaction ever crosses the contract. On success, a
+ * catalog route that is not configured yet gets a minimal keyless profile
+ * so the runtime keeps reading the credential record (§12.1 — never an
+ * apiKeyEnv, which would switch the request path back to a reference that
+ * is not set).
  */
 async function runAuthorizationLogin(
   app: TuiApp,
@@ -619,21 +621,29 @@ async function runAuthorizationLogin(
     if (picked === undefined) return { kind: 'error', text: 'login cancelled' }
     method = picked
   }
-  const { interaction, close } = createAuthorizationInteraction(app)
-  let outcome: { status: 'authorized' | 'cancelled' }
-  try {
-    outcome = await authorization.begin({ key: target.key, method, interaction, signal: runner.signal })
-  } catch (error) {
-    if (runner.signal.aborted) return { kind: 'error', text: 'login cancelled' }
-    if ((error as { code?: unknown } | null)?.code === 'NOT_COMMITTED') {
-      // A provider flow bug/abnormality: worth a diagnostic line.
-      runner.diag.error('authorization', { key: target.key, error: safeErrorMessage(error) })
-    }
-    return { kind: 'error', text: authorizationFailureText(error, safeErrorMessage(error)) }
-  } finally {
-    close()
+  // The client flow driver renders notices and prompts and answers them
+  // through the port (never a callback across the contract). The
+  // subscription is registered BEFORE begin so no early event (a settled
+  // outcome can land in the same microtask turn) is ever missed.
+  const flow = createAuthorizationFlow(app, authorization)
+  const off = authorization.onEvent(flow.onEvent)
+  const started = await authorization.begin({ key: target.key, method, signal: runner.signal })
+  if (started.kind !== 'started') {
+    off()
+    flow.close()
+    return { kind: 'error', text: 'authorization service unavailable' }
   }
-  if (outcome.status === 'cancelled') return { kind: 'error', text: 'login cancelled' }
+  const outcome = await flow.outcome
+  off()
+  flow.close()
+  if (outcome.status === 'cancelled' || runner.signal.aborted) return { kind: 'error', text: 'login cancelled' }
+  if (outcome.status === 'failed') {
+    if (outcome.code === 'NOT_COMMITTED') {
+      // A provider flow bug/abnormality: worth a diagnostic line.
+      runner.diag.error('authorization', { key: target.key, error: outcome.message })
+    }
+    return { kind: 'error', text: authorizationFailureText({ code: outcome.code }, outcome.message ?? 'login failed') }
+  }
   const profileNote = await provisionKeylessProfile(runner, target, options)
   return { kind: 'success', text: `signed in to ${target.label}${profileNote}` }
 }
@@ -660,9 +670,11 @@ async function provisionKeylessProfile(
   try {
     // The adapter resolves the route's profile location internally —
     // only the ROUTE crosses (migration M1.9: no settings schema in the
-    // command surface, and a hostile route writes nothing).
-    await runner.config.providers.writeKeylessProfile(option.route)
-    return ' — provider profile recorded'
+    // command surface). The outcome is EXPLICIT: only a real write is
+    // presented as "recorded"; a directory race or hostile layout is a
+    // SKIP (never a fake success, never a fallback guess).
+    const outcome = await runner.config.providers.writeKeylessProfile(option.route)
+    return outcome.kind === 'written' ? ' — provider profile recorded' : ''
   } catch (error) {
     runner.diag.warn('authorization', { key: target.key, note: 'profile write failed', error: safeErrorMessage(error) })
     return ''

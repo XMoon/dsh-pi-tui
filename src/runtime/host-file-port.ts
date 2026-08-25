@@ -25,17 +25,17 @@
  * @module @xmoon76/dsh-pi-tui/runtime/host-file-port
  */
 
-/** One `@`-reference completion candidate (detached, path-only). The
- * presentation fields carry the EXACT completion the editor inserts (the
- * Direct adapter preserves the current fd/fallback item shapes). */
+/** One `@`-reference completion candidate (detached, path-only — the
+ * exact upstream `FileReferenceCandidate` shape: `path` + `kind`). All
+ * TUI presentation (fuzzy ranking, quoting, the `@`-insertion value, the
+ * basename label, the description row, directory continuation) is CLIENT
+ * policy in the editor's mention provider, never Host data: a Remote
+ * adapter answers "which Host files exist" and nothing more. */
 export interface HostFileCandidate {
-  /** The completion VALUE (the `@path` / `@"path"` form the editor
-   * inserts; directories keep their trailing `/`). */
-  readonly value: string
-  /** The display label (basename + `/` for directories). */
-  readonly label: string
-  /** The resolved absolute/display path the description row shows. */
-  readonly description: string
+  /** The user-facing path relative to the scope workspace (`src/deep.ts`),
+   * accepted by normal prompts and filesystem tools; directories carry NO
+   * trailing slash here (the client adds `/` for continuation). */
+  readonly path: string
   /** Whether the candidate is a directory (completion stays open). */
   readonly kind: 'file' | 'directory'
 }
