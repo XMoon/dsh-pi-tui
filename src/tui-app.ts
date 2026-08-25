@@ -7358,20 +7358,25 @@ export class TuiApp {
     this.requestRender()
   }
 
-  /** The editor's current draft text (the Alt+↑ dequeue merge reads it).
-   * In a continuable viewer the VISIBLE editor is the authority — it is
-   * exactly what the user sees and submits: a replacement editor's edits
-   * (through its own handleInput) never mirror through the host's
-   * onChange, so the per-child slot may lag and must never be submitted
-   * in the visible text's place. The slot remains the CROSS-SESSION
-   * store (park on exit/switch, map-only stale restores, re-entry seed);
-   * the visible text is the CURRENT-session truth. A one-shot viewer
-   * returns the preserved main draft. */
+  /** The editor's current draft in its WIRE form (mode + body serialized
+   * — the symmetric counterpart of {@link setDraft}, which decodes).
+   * Callers that read, merge and restore drafts (the runner's restore
+   * paths, the Alt+↑ dequeue, the steer action) therefore never lose the
+   * shell mode: a shell-mode draft reads back as `!pwd` and restores as
+   * shell mode. In a continuable viewer the VISIBLE editor is the
+   * authority — it is exactly what the user sees and submits: a
+   * replacement editor's edits (through its own handleInput) never
+   * mirror through the host's onChange, so the per-child slot may lag and
+   * must never be submitted in the visible text's place. The slot
+   * remains the CROSS-SESSION store (park on exit/switch, map-only stale
+   * restores, re-entry seed); the visible text is the CURRENT-session
+   * truth. A one-shot viewer returns the preserved main draft (already
+   * the wire form). */
   getDraft(): string {
     const target = this.viewerMode
-    if (target === undefined) return this.seatEditor().getText()
+    if (target === undefined) return this.serializeSeatDraft(this.seatEditor().getText())
     if (isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
-      return this.seatEditor().getText()
+      return this.serializeSeatDraft(this.seatEditor().getText())
     }
     return this.mainDraftBeforeViewer ?? ''
   }
@@ -7391,10 +7396,10 @@ export class TuiApp {
     // session-side effect after teardown.
     if (this.disposed) return
     const target = this.viewerMode
-    const text = this.getDraft()
-    // The shell-editor-mode boundary: the visible body is re-serialized
-    // into the wire form (`!` / `!!` prefixes) before it leaves the app.
-    const serialized = this.serializeSeatDraft(text)
+    // getDraft returns the WIRE form (the symmetric counterpart of
+    // setDraft), so no re-serialization happens here — the text is
+    // already the `!` / `!!` prefixed form the protocol expects.
+    const serialized = this.getDraft()
     // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
     // shell mode has an empty BODY but a non-empty wire form, and must
     // reach the existing protocol like the literal prefix did before the
@@ -7749,8 +7754,21 @@ export class TuiApp {
           force: options.force,
         })
       },
-      applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
-        base.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+      applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
+        // A Stable plugin computes its prefix on the WIRE document it
+        // received (line 0 carries the synthetic `!` / `!!`), so its
+        // prefix may legitimately include it (`!ch` for `!checkout`).
+        // Normalize back to BARE coordinates before the host apply —
+        // the base adapter adds its own virtual prefix and strips it
+        // exactly once; a doubled prefix would corrupt the result
+        // (`checkout` → `heckout`).
+        const mode = getMode()
+        const barePrefix = mode !== 'prompt' && cursorLine === 0
+          && (prefix.startsWith('!!') || prefix.startsWith('!'))
+          ? prefix.slice(prefix.startsWith('!!') ? 2 : 1)
+          : prefix
+        return base.applyCompletion(lines, cursorLine, cursorCol, item, barePrefix)
+      },
       shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
         base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol),
     }
