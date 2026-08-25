@@ -1280,6 +1280,14 @@ interface MessageComponentEntry {
   themeRev: number
   /** Whether the entry renders expanded (boundary + click override). */
   expanded: boolean
+  /** The full-reveal flag (tool bodies / large diffs): per-card override
+   * OR any REGULAR Focus expanded root. Part of the cache identity — a
+   * Focus toggle must rebuild the diff presentation. */
+  fullReveal: boolean
+  /** The fold-hint owner: click-owned fullscreen secondaries read
+   * `(click to expand)`, everything else `(ctrl+o to expand)`. Part of
+   * the cache identity — a surface switch must not reuse the old hint. */
+  clickHint: boolean
   /** The values the component was built from, for O(1) staleness checks:
    * text-bearing kinds compare the CURRENT text object — an unchanged
    * message keeps the same string instance, so the check is O(1) and
@@ -5539,6 +5547,34 @@ export class TuiApp {
    * state, and the message's own content — plus wholesale on session
    * switch (clearSessionOverrides).
    */
+  /** The surface-adaptive render state of one foldable message: the
+   * effective expansion, the full-reveal flag (tool bodies / large
+   * diffs) and the fold-hint owner (click vs ctrl+o). Computed ONCE per
+   * componentForMessage call and PART OF THE RENDER-CACHE IDENTITY — a
+   * Focus toggle or a surface switch must rebuild the component when any
+   * of these change, even when the message content and the boundary are
+   * unchanged (review finding: fullReveal/clickHint were not cached, so
+   * `Ctrl+O ON → /focus on` reused the capped diff component). */
+  private messageRenderState(
+    message: TranscriptMessage,
+    boundary: number,
+  ): { expanded: boolean; fullReveal: boolean; clickHint: boolean } {
+    const expanded = this.effectiveMessageExpanded(message, boundary)
+    const insideFocusSecondary = 'turn' in message
+      && this.isInsideExpandedFocus(message, boundary)
+      && isFocusSecondaryDisclosure(message)
+    // Fullscreen SECONDARY cards are click-owned: their fold hint reads
+    // `click to expand`; every other fold is keyboard-owned.
+    const clickHint = this.fullscreen !== undefined && insideFocusSecondary
+    // The FULL-REVEAL flag for tool bodies (large diffs): true for the
+    // per-card override AND for any REGULAR Focus expanded root (the
+    // surface contract — no mouse, so a capped diff would be unreadable);
+    // fullscreen keeps the per-card override semantics.
+    const fullReveal = this.expandedOverride.get(message) === true
+      || (this.fullscreen === undefined && insideFocusSecondary)
+    return { expanded, fullReveal, clickHint }
+  }
+
   private componentForMessage(message: TranscriptMessage, boundary: number): Component {
     // Focus-expanded turns reveal their process TIMELINE (plan §15.1 +
     // the secondary-disclosure supplement): in FULLSCREEN the foldable
@@ -5547,25 +5583,28 @@ export class TuiApp {
     // full-reveals (no mouse, no dead compact cards). Collapsed Focus
     // turns never reach this method: their process rows are absent from
     // the projection.
-    const expanded = this.effectiveMessageExpanded(message, boundary)
+    const state = this.messageRenderState(message, boundary)
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
     // affected components (an HMR must never hit an old component).
     const entry = this.messageComponents.get(message)
     if (entry === undefined) {
-      const built = this.buildMessage(message, boundary, expanded)
+      const built = this.buildMessage(message, boundary, state)
       this.captureComponentState(built, message)
       this.messageComponents.set(message, built)
       return built.component
     }
-    // Staleness: fold boundary, theme revision, expansion, the RENDERER
-    // identity (registry revision changed → the winner may differ), or
-    // the message's own content. The registry revision comparison is the
-    // CHEAP gate (plan §23): renderer functions run only inside
-    // buildMessage, never for unchanged content.
+    // Staleness: fold boundary, theme revision, expansion, the full-reveal
+    // flag, the click-hint owner, the RENDERER identity (registry revision
+    // changed → the winner may differ), or the message's own content. The
+    // registry revision comparison is the CHEAP gate (plan §23): renderer
+    // functions run only inside buildMessage, never for unchanged content.
     const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
     if (entry.boundary !== boundary || entry.themeRev !== this.themeRevision
-      || entry.expanded !== expanded || rendererRevisionChanged
+      || entry.expanded !== state.expanded
+      || entry.fullReveal !== state.fullReveal
+      || entry.clickHint !== state.clickHint
+      || rendererRevisionChanged
       || this.componentStale(entry, message)) {
       // Dispose the OLD component (a thumbnail's loader subscription) so a
       // rebuild never leaks listeners (round-1 finding 7).
@@ -5577,11 +5616,13 @@ export class TuiApp {
           // Best effort: a cached component's dispose must not break a paint.
         }
       }
-      const rebuilt = this.buildMessage(message, boundary, expanded)
+      const rebuilt = this.buildMessage(message, boundary, state)
       entry.component = rebuilt.component
       entry.boundary = rebuilt.boundary
       entry.themeRev = rebuilt.themeRev
       entry.expanded = rebuilt.expanded
+      entry.fullReveal = rebuilt.fullReveal
+      entry.clickHint = rebuilt.clickHint
       entry.rendererId = rebuilt.rendererId
       entry.rendererRevision = rebuilt.rendererRevision
       this.captureComponentState(entry, message)
@@ -5601,31 +5642,22 @@ export class TuiApp {
   private buildMessage(
     message: TranscriptMessage,
     boundary: number,
-    expanded: boolean,
+    state: { expanded: boolean; fullReveal: boolean; clickHint: boolean },
   ): MessageComponentEntry {
     const registry = this.renderers
-    const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, expanded)
-    // Fullscreen SECONDARY cards are click-owned: their fold hint reads
-    // `click to expand`; every other fold is keyboard-owned (`ctrl+o to
-    // expand`).
-    const clickHint = this.fullscreen !== undefined
-      && 'turn' in message
-      && this.isInsideExpandedFocus(message, boundary)
-      && isFocusSecondaryDisclosure(message)
-    // The FULL-REVEAL flag for tool bodies (large diffs): true for the
-    // per-card override AND for any REGULAR Focus expanded root (the
-    // surface contract — no mouse, so a capped diff would be unreadable);
-    // fullscreen keeps the per-card override semantics.
-    const fullReveal = this.expandedOverride.get(message) === true
-      || (this.fullscreen === undefined && 'turn' in message && this.isInsideExpandedFocus(message, boundary) && isFocusSecondaryDisclosure(message))
+    const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, state.expanded)
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
       // renderer: fullscreen secondaries default compact (per-card
       // override full-reveals), regular expanded roots full-reveal.
-      component: rendered === undefined ? this.renderMessage(message, expanded, clickHint, fullReveal) : rendered.component,
+      component: rendered === undefined
+        ? this.renderMessage(message, state.expanded, state.clickHint, state.fullReveal)
+        : rendered.component,
       boundary,
       themeRev: this.themeRevision,
-      expanded,
+      expanded: state.expanded,
+      fullReveal: state.fullReveal,
+      clickHint: state.clickHint,
       rendererId: rendered?.rendererId,
       rendererRevision: registry === undefined ? undefined : registry.snapshot().revision,
     }
