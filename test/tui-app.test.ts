@@ -1270,6 +1270,55 @@ test('openTaskBrowser setItems replaces rows live', async () => {
   app.stop()
 })
 
+test('openTaskBrowser repaints a subagent row in place on runtime re-projection (running -> inactive)', async () => {
+  // The runner's agent/status path: the TaskBrowserRuntime re-projects
+  // the CACHED catalog from the Agent registry and commits through
+  // handle.setItems — the open browser must flip the SAME row's status
+  // word to inactive WITHOUT closing (plan §6.2 Case A) and drop the
+  // interrupt verb with it (plan §I).
+  const { vt, app } = startApp()
+  const handle = app.openTaskBrowser(
+    [{
+      value: 'agent:child-1',
+      label: 'subagent · research',
+      suffix: 'continuable',
+      status: 'running',
+      group: 'subagents',
+      treePrefix: '├─ ',
+      interruptible: true,
+      type: 'subagent',
+    }],
+    () => {},
+    () => {},
+    { header: 'tasks · subagents', enableSearch: true },
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('running'), `running row missing:\n${view}`)
+  assert.ok(view.includes('i interrupt'), `a running continuable must advertise the stop verb:\n${view}`)
+  // The child's driver goes idle: the runtime-only commit re-projects
+  // the row (SAME value, new status) — this is exactly what the runner's
+  // commitRows hook does on agent/status.
+  handle.setItems([{
+    value: 'agent:child-1',
+    label: 'subagent · research',
+    suffix: 'continuable',
+    status: 'inactive',
+    group: 'subagents',
+    treePrefix: '├─ ',
+    interruptible: false,
+    type: 'subagent',
+  }])
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('inactive'), `the row must repaint to inactive in place:\n${view}`)
+  assert.ok(!view.includes('running'), `the old status word must be gone:\n${view}`)
+  assert.ok(!view.includes('i interrupt'), `an idle continuable must not advertise the stop verb:\n${view}`)
+  assert.ok(view.includes('tasks · subagents'), `the browser must stay open:\n${view}`)
+  app.stop()
+})
+
 test('openSettings revert() restores a rejected row display (M5 gate)', async () => {
   const { vt, app } = startApp()
   let revertedValue = ''

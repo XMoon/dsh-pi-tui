@@ -56,9 +56,9 @@ const subagentActivity = (rows: readonly TaskBrowserRow[], childId: string): str
 
 const rowValue = (rows: readonly TaskBrowserRow[]): string[] => rows.map(row => row.value)
 
-/** A harness with a DEFERRED listDescendants (the async catalog listing
- * completes only when the test settles it), a mutable registry-status
- * map, and commit/badge journals. */
+/** A harness with a DEFERRED listDescendants (each catalog request gets
+ * its own deferred; the test settles them in any order), a mutable
+ * registry-status map, and commit/badge journals. */
 function makeHarness(): {
   runtime: TaskBrowserRuntime
   listings(): number
@@ -68,13 +68,14 @@ function makeHarness(): {
   setKey(key: string | undefined): void
   setStatus(id: string, status: string | undefined): void
   setJobs(jobs: readonly TaskBrowserJobInput[]): void
-  settleList(entries: readonly SubagentDescendantListEntry[]): void
+  /** Resolve the listing of the i-th refreshCatalog call (0-based). */
+  settleListing(index: number, entries: readonly SubagentDescendantListEntry[]): void
 } {
   let key: string | undefined = 'g1:sess-main'
   const statuses = new Map<string, string>()
   let jobs: TaskBrowserJobInput[] = [job()]
   let listingCount = 0
-  let pendingResolve: ((entries: readonly SubagentDescendantListEntry[]) => void) | undefined
+  const pendingResolves: ((entries: readonly SubagentDescendantListEntry[]) => void)[] = []
   const commits: TaskBrowserRow[][] = []
   const preferreds: (string | undefined)[] = []
   const badges: ReadonlyArray<{ id: string; label: string }>[] = []
@@ -82,7 +83,7 @@ function makeHarness(): {
     currentKey: () => key,
     listDescendants: () => {
       listingCount += 1
-      return new Promise(resolve => { pendingResolve = resolve })
+      return new Promise(resolve => { pendingResolves.push(resolve) })
     },
     readJobs: () => jobs,
     agentStatusOf: (id) => statuses.get(id),
@@ -101,7 +102,7 @@ function makeHarness(): {
     setKey: (next) => { key = next },
     setStatus: (id, status) => { if (status === undefined) statuses.delete(id); else statuses.set(id, status) },
     setJobs: (next) => { jobs = [...next] },
-    settleList: (entries) => { const resolve = pendingResolve; pendingResolve = undefined; resolve?.(entries) },
+    settleListing: (index, entries) => { pendingResolves[index]?.(entries) },
   }
 }
 
@@ -109,7 +110,7 @@ test('Case A: a running continuable child turns inactive on agent idle without r
   const h = makeHarness()
   h.setStatus('child-a', 'running')
   const listing = h.runtime.refreshCatalog()
-  h.settleList([child({ activity: 'running' })])
+  h.settleListing(0, [child({ activity: 'running' })])
   await listing
   assert.equal(h.listings(), 1)
   assert.equal(h.commits().length, 1)
@@ -130,7 +131,7 @@ test('Case B: a followup reactivation flips an inactive row back to running', as
   const h = makeHarness()
   h.setStatus('child-a', 'idle')
   const listing = h.runtime.refreshCatalog()
-  h.settleList([child({ activity: 'running' })])
+  h.settleListing(0, [child({ activity: 'running' })])
   await listing
   assert.equal(subagentActivity(h.commits()[0]!, 'child-a'), 'inactive', 'store presence never means running')
   // The user sends a followup to the continuable child: the driver
@@ -153,7 +154,7 @@ test('Case C: nested children project independently and the tree order never mov
     child({ id: 'B' as SessionId, activity: 'running', hasChildren: false, parentId: 'A' as SessionId, depth: 2 }),
   ]
   const listing = h.runtime.refreshCatalog()
-  h.settleList(catalog)
+  h.settleListing(0, catalog)
   await listing
   assert.deepEqual(rowValue(h.commits()[0]!), [`${AGENT_ROW_PREFIX}A`, `${AGENT_ROW_PREFIX}B`])
   assert.equal(subagentActivity(h.commits()[0]!, 'A'), 'inactive')
@@ -176,7 +177,7 @@ test('Case D: a stale catalog response cannot overwrite a newer runtime state', 
   const listing = h.runtime.refreshCatalog()
   // T3: the OLD listing returns with its stale store-presence `running` —
   // the commit must re-project from the registry and show inactive.
-  h.settleList([child({ activity: 'running' })])
+  h.settleListing(0, [child({ activity: 'running' })])
   await listing
   assert.equal(h.commits().length, 1)
   assert.equal(subagentActivity(h.commits()[0]!, 'child-a'), 'inactive', 'the commit reads the registry, not the response')
@@ -189,7 +190,7 @@ test('Case D2: a session switch mid-listing never commits the old catalog', asyn
   const listing = h.runtime.refreshCatalog()
   // The user switches sessions while the listing is in flight.
   h.setKey('g2:sess-other')
-  h.settleList([child({ activity: 'running' })])
+  h.settleListing(0, [child({ activity: 'running' })])
   await listing
   assert.equal(h.commits().length, 0, 'the fenced listing must not commit')
   assert.equal(h.badges().length, 0)
@@ -199,7 +200,7 @@ test('Case D2: a session switch mid-listing never commits the old catalog', asyn
 test('the membership gate admits only cached descendants', async () => {
   const h = makeHarness()
   const listing = h.runtime.refreshCatalog()
-  h.settleList([
+  h.settleListing(0, [
     child({ id: 'child-a' as SessionId, activity: 'running', depth: 1 }),
     child({ id: 'child-b' as SessionId, activity: 'running', parentId: 'child-a' as SessionId, depth: 2 }),
   ])
@@ -213,7 +214,7 @@ test('the membership gate admits only cached descendants', async () => {
 test('reset() drops the cached catalog and the committed rows', async () => {
   const h = makeHarness()
   const listing = h.runtime.refreshCatalog()
-  h.settleList([child({ activity: 'running' })])
+  h.settleListing(0, [child({ activity: 'running' })])
   await listing
   assert.equal(h.runtime.has('child-a'), true)
   h.runtime.reset()
@@ -234,7 +235,7 @@ test('every commit re-reads the CURRENT jobs snapshot', async () => {
   const h = makeHarness()
   h.setStatus('child-a', 'running')
   const listing = h.runtime.refreshCatalog()
-  h.settleList([child({ activity: 'running' })])
+  h.settleListing(0, [child({ activity: 'running' })])
   await listing
   assert.deepEqual(rowValue(h.commits()[0]!), [`${AGENT_ROW_PREFIX}child-a`, 'job:bash-1'])
   // A job settles while the browser stays open: the NEXT commit re-reads
@@ -249,7 +250,7 @@ test('the preferred cursor is the first running subagent, else the first active 
   h.setStatus('child-a', 'running')
   h.setStatus('child-b', 'idle')
   const listing = h.runtime.refreshCatalog()
-  h.settleList([
+  h.settleListing(0, [
     child({ id: 'child-a' as SessionId, activity: 'running', depth: 1 }),
     child({ id: 'child-b' as SessionId, activity: 'running', parentId: 'child-a' as SessionId, depth: 2 }),
   ])
@@ -263,4 +264,84 @@ test('the preferred cursor is the first running subagent, else the first active 
   h.setJobs([])
   h.runtime.refreshRuntime()
   assert.equal(h.preferreds()[2], undefined)
+})
+
+test('Case D3: overlapping catalog refreshes commit in REQUEST order (epoch supersede)', async () => {
+  // The initial badge refresh and an open-browser refresh can be in
+  // flight together; the NEWER request must stay authoritative even when
+  // its listing settles FIRST and the older one settles later (review
+  // round 1, P1): an older response must never overwrite newer
+  // membership/tree state.
+  const h = makeHarness()
+  h.setStatus('child-new', 'running')
+  const initial = h.runtime.refreshCatalog()
+  const openRefresh = h.runtime.refreshCatalog()
+  // The OPEN refresh (request 2) settles first with the NEWER
+  // membership: child-new exists.
+  h.settleListing(1, [child({ id: 'child-new' as SessionId, activity: 'running', depth: 1 })])
+  await openRefresh
+  assert.equal(h.commits().length, 1)
+  assert.equal(h.runtime.has('child-new'), true)
+  assert.deepEqual(rowValue(h.commits()[0]!), [`${AGENT_ROW_PREFIX}child-new`, 'job:bash-1'])
+  // The INITIAL refresh (older request) settles LAST with a STALE
+  // membership that never saw child-new: it must neither commit nor
+  // overwrite the cache (without the epoch, the stale response would
+  // drop the child from the open browser and gate out its agent/status).
+  h.settleListing(0, [child({ id: 'child-old' as SessionId, activity: 'running', depth: 1 })])
+  await initial
+  assert.equal(h.commits().length, 1, 'the superseded listing must not commit')
+  assert.equal(h.runtime.has('child-new'), true, 'the cache must keep the newer membership')
+  assert.equal(h.runtime.has('child-old'), false, 'the stale membership must never land')
+})
+
+test('reset() also supersedes a listing still in flight', async () => {
+  const h = makeHarness()
+  const listing = h.runtime.refreshCatalog()
+  h.runtime.reset()
+  h.settleListing(0, [child({ activity: 'running' })])
+  await listing
+  assert.equal(h.commits().length, 0, 'a post-reset listing must not commit')
+  assert.equal(h.runtime.has('child-a'), false)
+})
+
+// ── production wiring lock (review round 1, P2) ───────────────────────────
+// The coordinator tests alone would pass even if the runner never wired
+// `agent/status` (or wired it to the catalog refresh). The runner cannot
+// be booted headlessly, so the WIRING ITSELF is locked by a source audit
+// (the rules.test.ts precedent): the listener must exist, must be
+// membership-gated, must route to the RUNTIME-only refresh (never a
+// re-listing), and a session bump must close the open browser and reset
+// the coordinator.
+
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const indexSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.ts'),
+  'utf8',
+)
+
+test('the runner wires agent/status to the membership-gated RUNTIME-only refresh', () => {
+  assert.ok(indexSource.includes("ctx.on('agent/status', ({ agent }) => {"),
+    'the runner must register the agent/status listener')
+  assert.ok(indexSource.includes('if (taskRuntime?.has(agent.id) !== true) return'),
+    'the listener must be membership-gated (main-agent flips must never repaint)')
+  // The handler must route to the runtime-only refresh — a re-listing
+  // here would defeat the whole split (and the membership gate).
+  const marker = "ctx.on('agent/status', ({ agent }) => {"
+  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 400)
+  assert.ok(handler.includes('refreshAgentRuntimeOnly()'),
+    'agent/status must refresh RUNTIME only, never refreshAgents()')
+  assert.ok(!handler.includes('refreshAgents()'),
+    'agent/status must never trigger a catalog re-listing')
+})
+
+test('a session switch closes the open task browser and resets the runtime coordinator', () => {
+  const bump = indexSource.slice(
+    indexSource.indexOf('const bumpSessionGeneration'),
+    indexSource.indexOf('const jumpToSearchMatch'),
+  )
+  assert.ok(bump.includes('activeTaskBrowser?.close()'), 'the session bump must close the open browser')
+  assert.ok(bump.includes('taskRuntime?.reset()'), 'the session bump must drop the cached catalog')
 })
