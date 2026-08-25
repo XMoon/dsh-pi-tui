@@ -661,6 +661,20 @@ rounds (codex / gpt-5.6-luna):
   immediately). Regression tests: a mid-body `!` completion token keeps
   its literal `!`; an incomplete CSI tail buffers without loss and
   stitches a split sequence.
+- **PR review round 3** (human, multiline shell audit): P1 — a
+  continuation line (`! echo foo \` + `/u`) still treated a leading `/`
+  as a slash command, because the line-0-only virtual prefix was also
+  used for the host's SHELL-SEMANTIC routing (natural-trigger
+  suppression, apply classification, Tab gating). FIXED: the two
+  concepts are now split — the WIRE representation keeps the synthetic
+  prefix on line 0 only (shell-grammar parse + extension query), while a
+  SHELL-SEMANTIC context stages the prefix on the CURSOR line of ANY
+  shell-mode line and strips it from the result, so slash-vs-path
+  routing, apply classification and Tab gating treat every line as
+  shell-owned. Regression tests: continuation-line `/u` in both shell
+  modes (natural typing stays quiet, Tab lists `/usr/`, accept never
+  doubles the slash), plus a provider-level multiline apply/Tab-gate
+  test.
 
 The full-suite tests (2060+), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the

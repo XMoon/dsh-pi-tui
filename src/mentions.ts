@@ -532,15 +532,31 @@ export class MentionProvider implements AutocompleteProvider {
     return { line: prefix + line, cursorCol: cursorCol + prefix.length, prefixLength: prefix.length }
   }
 
-  /** The virtual shell line ONLY for the first document line (see
-   * {@link virtualShellLine}); later lines complete without a prefix. */
-  private virtualShellContext(
+  /** The WIRE representation: the synthetic `!` / `!!` prefix belongs to
+   * LINE 0 only — the serialized wire document carries it once, and a
+   * body continuation line is ordinary text. Used for the shell-grammar
+   * parse and the Stable-extension wire query. Null in prompt mode or on
+   * a later line. */
+  private virtualWireShellContext(
     lines: string[],
     cursorLine: number,
     cursorCol: number,
   ): { line: string; cursorCol: number; prefixLength: number } | null {
     if (cursorLine !== 0) return null
     return this.virtualShellLine(lines[0] ?? '', cursorCol)
+  }
+
+  /** The SHELL SEMANTIC context: EVERY line of a shell-mode document is
+   * part of the shell command, so slash-vs-path routing, the apply
+   * classification and the Tab gating treat any line as shell-owned. The
+   * synthetic prefix is staged on the cursor line and stripped from the
+   * result — the wire document itself never changes. Null in prompt
+   * mode. */
+  private virtualShellSemanticContext(
+    currentLine: string,
+    cursorCol: number,
+  ): { line: string; cursorCol: number; prefixLength: number } | null {
+    return this.virtualShellLine(currentLine, cursorCol)
   }
 
   async getSuggestions(
@@ -568,22 +584,25 @@ export class MentionProvider implements AutocompleteProvider {
     // shell MODE the buffer holds the bare body, so the shell grammar
     // receives the VIRTUAL serialized line (the synthetic prefix — line 0
     // only, matching the wire document); in prompt mode the line is
-    // parsed as-is (a literal `!` draft).
-    const virtual = this.virtualShellContext(lines, cursorLine, cursorCol)
-    const shellLine = virtual ?? { line: currentLine, cursorCol, prefixLength: 0 }
+    // parsed as-is (a literal `!` draft). The leading-`/` suppression is
+    // SHELL-SEMANTIC: EVERY line of a shell-mode document is shell-owned,
+    // so a path on any line stays a path (never a slash command).
+    const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
+    const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
     const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
     if (shellContext !== undefined) {
       const suggestions = await suggestShellCompletion(shellContext, this.workDir, options)
       if (suggestions !== null) return suggestions
       // No shell suggestions (or the shell is unavailable): fall through —
       // a path position still gets the fork's file completion.
-    } else if (virtual !== null && !options.force && currentLine.startsWith('/')) {
+    } else if (this.virtualShellSemanticContext(currentLine, cursorCol) !== null
+      && !options.force && currentLine.startsWith('/')) {
       // A NATURAL trigger on a leading `/` in a shell mode is a PATH,
       // never a slash command: the fork's slash-command branch must not
-      // flash the command list while the user types `/usr/lo`. Stay quiet
-      // until Tab (which routes through the path branch below) — this
-      // matches the pre-mode behavior, where the literal `!` prefix kept
-      // the fork's slash branch off.
+      // flash the command list while the user types `/usr/lo` — on ANY
+      // line. Stay quiet until Tab (which routes through the path branch
+      // below) — this matches the pre-mode behavior, where the literal
+      // `!` prefix kept the fork's slash branch off.
       return null
     }
     try {
@@ -609,8 +628,8 @@ export class MentionProvider implements AutocompleteProvider {
     // itself operates on the REAL line: the completion prefix sits after
     // the synthetic `!`, so it is identical in both forms and no prefix
     // stripping is needed — the synthetic prefix never enters the buffer.
-    const virtual = this.virtualShellContext(lines, cursorLine, cursorCol)
-    const shellLine = virtual ?? { line: currentLine, cursorCol, prefixLength: 0 }
+    const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
+    const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
     if (shellCompletionContext(shellLine.line, shellLine.cursorCol) !== undefined) {
       const before = currentLine.slice(0, cursorCol - prefix.length)
       const after = currentLine.slice(cursorCol)
@@ -623,22 +642,24 @@ export class MentionProvider implements AutocompleteProvider {
         cursorCol: before.length + item.value.length + 1,
       }
     }
-    if (virtual !== null) {
-      // SYMMETRIC wire adapter: every non-shell apply (path completion,
-      // Stable-extension suggestions) runs on the VIRTUAL wire document —
-      // the fork's line-start judgments then see the `!` prefix (an
-      // absolute path like `/u` is never mistaken for a slash command,
-      // and an extension prefix computed on the wire line stays
-      // coordinate-consistent). The synthetic prefix is stripped from the
-      // applied result, so it never enters the buffer.
-      const wireLines = lines.map((line, index) => index === 0 ? virtual.line : line)
-      const applied = this.inner.applyCompletion(wireLines, cursorLine, virtual.cursorCol, item, prefix)
+    // SYMMETRIC SHELL-SEMANTIC adapter: every non-shell apply (path
+    // completion, Stable-extension suggestions) on ANY line of a
+    // shell-mode document runs on the virtual line — the fork's
+    // line-start judgments then see the `!` prefix (an absolute path
+    // like `/u` is never mistaken for a slash command, on line 0 or a
+    // continuation line, and an extension prefix computed on the wire
+    // line stays coordinate-consistent). The synthetic prefix is
+    // stripped from the applied result, so it never enters the buffer.
+    const semantic = this.virtualShellSemanticContext(currentLine, cursorCol)
+    if (semantic !== null) {
+      const wireLines = lines.map((line, index) => index === cursorLine ? semantic.line : line)
+      const applied = this.inner.applyCompletion(wireLines, cursorLine, semantic.cursorCol, item, prefix)
       const resultLines = [...applied.lines]
-      resultLines[0] = resultLines[0]!.slice(virtual.prefixLength)
+      resultLines[cursorLine] = resultLines[cursorLine]!.slice(semantic.prefixLength)
       return {
         lines: resultLines,
         cursorLine: applied.cursorLine,
-        cursorCol: Math.max(0, applied.cursorCol - virtual.prefixLength),
+        cursorCol: Math.max(0, applied.cursorCol - semantic.prefixLength),
       }
     }
     return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix)
@@ -668,14 +689,13 @@ export class MentionProvider implements AutocompleteProvider {
     }
     // In a shell MODE a leading `/` is a PATH, never a slash command: the
     // fork's bare-slash-command block (`/usr/lo` has no space) must not
-    // swallow Tab. The VIRTUAL serialized line keeps the fork's own
-    // judgment on the line the shell dispatch would see — the wire
-    // document carries the prefix on LINE 0 only, so a body continuation
-    // line keeps the fork's plain judgment.
-    const virtual = this.virtualShellContext(lines, cursorLine, cursorCol)
-    if (virtual !== null) {
-      const virtualLines = lines.map((line, index) => index === 0 ? virtual.line : line)
-      return this.inner.shouldTriggerFileCompletion?.(virtualLines, cursorLine, virtual.cursorCol) ?? true
+    // swallow Tab. The VIRTUAL SHELL-SEMANTIC line keeps the fork's own
+    // judgment on the cursor line — on ANY line of the shell document
+    // (the wire representation still carries the prefix on line 0 only).
+    const semantic = this.virtualShellSemanticContext(currentLine, cursorCol)
+    if (semantic !== null) {
+      const virtualLines = lines.map((line, index) => index === cursorLine ? semantic.line : line)
+      return this.inner.shouldTriggerFileCompletion?.(virtualLines, cursorLine, semantic.cursorCol) ?? true
     }
     return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true
   }
