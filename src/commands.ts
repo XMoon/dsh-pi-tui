@@ -965,13 +965,8 @@ export function registerTuiCommands(
       })),
       runner.sessionCwd(),
       // The Host-file port owns the `@`-mention discovery (migration
-      // M1.10) — the command surface never resolves fd itself. The scope
-      // is the live SESSION when one exists (Host identity), the
-      // workspace cwd otherwise (sessionless cold completion).
+      // M1.10) — the command surface never resolves fd itself.
       runner.hostFile,
-      runner.liveAgent === undefined
-        ? { kind: 'workspace', cwd: runner.sessionCwd() }
-        : { kind: 'session', sessionId: runner.liveAgent.session.id },
       extensionAutocomplete === undefined
         ? undefined
         : async (query) => {
@@ -986,6 +981,12 @@ export function registerTuiCommands(
             if (result === null) return null
             return { items: [...result.items], prefix: result.prefix }
           },
+      // The completion scope is the live SESSION when one exists (Host
+      // identity), the workspace cwd otherwise (sessionless cold
+      // completion).
+      runner.liveAgent === undefined
+        ? { kind: 'workspace', cwd: runner.sessionCwd() }
+        : { kind: 'session', sessionId: runner.liveAgent.session.id },
     )
     claims = new Set(sorted.map(command => command.name))
   }

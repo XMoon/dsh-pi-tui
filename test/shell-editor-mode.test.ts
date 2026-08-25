@@ -22,6 +22,7 @@ import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
 import { createDiag } from '../src/diag.ts'
 import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../src/shell-completion.ts'
 import { MentionProvider } from '../src/mentions.ts'
+import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** The owned-task entry the runner wires in production (real runOwned,
@@ -55,6 +56,10 @@ function startApp(
     onQueueSubmit?: (text: string) => void
     onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string }) => void
     commands?: { name: string; description: string }[]
+    /** The Host-file seam (migration M1.10): `@`-mention completion is
+     * port-backed — tests that exercise it wire the Direct adapter
+     * (fallback mode), the rest keep the unavailable default. */
+    fileReferences?: import('../src/runtime/host-file-port.ts').HostFilePort
   } = {},
 ): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; queued: string[]; cancels: number } {
   const vt = new VirtualTerminal(100, 24)
@@ -68,7 +73,7 @@ function startApp(
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   })
-  app.setCommandCompletions(options.commands ?? [], cwd, null)
+  app.setCommandCompletions(options.commands ?? [], cwd, options.fileReferences ?? null)
   app.start()
   return { vt, app, submitted, queued, get cancels() { return cancels } }
 }
@@ -1340,7 +1345,13 @@ test('a paste closing marker split across chunks is stitched back together', asy
 })
 
 test('a pasted @dir/ path reopens the mention dropdown like ordinary input', async () => {
-  const { vt, app } = startApp(fixtureWithFiles())
+  const root = fixtureWithFiles()
+  // The mention dropdown is Host-file-port-backed (migration M1.10): the
+  // Direct adapter in FALLBACK mode (no fd binary) serves the directory
+  // children, exactly like the pre-migration fd/fallback path.
+  const { vt, app } = startApp(root, {
+    fileReferences: new DirectHostFilePort(() => undefined, null),
+  })
   await vt.waitForRender()
   // Paste `@src/`: the reopen runs AFTER the paste landed, so the
   // dropdown shows the directory children exactly like typed input.
