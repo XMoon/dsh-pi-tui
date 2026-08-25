@@ -248,12 +248,15 @@ export function createAuthorizationFlow(
   /** The prompt UI open per PROMPT id (a withdrawal closes exactly the
    * prompt it names; answers settle exactly the prompt they answer). */
   const openPrompts = new Map<string, { withdraw(): void }>()
-  /** Events received before `bind` (the subscription starts before the
-   * attempt id is known — the runner subscribes before begin). BOUNDED:
-   * the window is one microtask turn in practice, but a wedged begin
-   * must never grow the buffer without limit or retain a concurrent
-   * attempt's payloads past close(). */
-  const buffered: AuthorizationFlowEvent[] = []
+  /** Events received before `bind`, keyed by ATTEMPT id (the subscription
+   * starts before the attempt id is known — the runner subscribes before
+   * begin). BOUNDED per attempt and total: the window is one microtask
+   * turn in practice, but a wedged begin must never grow the buffer
+   * without limit or retain a concurrent attempt's payloads past
+   * close(). A pre-bind TERMINAL event of ANOTHER attempt must never
+   * settle this flow (attempt isolation) — the terminal event is only
+   * applied at bind() for the matching id. */
+  const buffered = new Map<string, AuthorizationFlowEvent[]>()
   const BUFFER_LIMIT = 32
   let boundAttemptId: string | undefined
   let closed = false
@@ -278,7 +281,7 @@ export function createAuthorizationFlow(
     openPrompts.clear()
     noticeHandle?.()
     noticeHandle = undefined
-    buffered.length = 0
+    buffered.clear()
     closed = true
   }
   /** Present one prompt event and answer it through the port. */
@@ -400,27 +403,34 @@ export function createAuthorizationFlow(
       boundAttemptId = attemptId
       // Replay the events that arrived before the attempt id was known
       // (the runner subscribes before begin so no early event is missed);
-      // events of ANY other attempt are dropped.
-      for (const event of buffered) {
-        if (event.attemptId === attemptId) handle(event)
+      // events of ANY other attempt are dropped. The pre-bind terminal
+      // event is applied HERE — only for the bound attempt — so a
+      // concurrent attempt's settled event can never settle this flow
+      // (attempt isolation).
+      const pending = buffered.get(attemptId)
+      if (pending !== undefined) {
+        for (const event of pending) handle(event)
       }
-      buffered.length = 0
+      buffered.clear()
     },
     onEvent: (event) => {
       if (closed) return
       if (boundAttemptId === undefined) {
-        // Bounded with TERMINAL-EVENT PRESERVATION: a wedged begin must
-        // not grow the buffer without limit, but the attempt's SETTLED
-        // event is never dropped — the outcome must resolve even if the
-        // settlement lands beyond the buffer limit (a silent drop would
-        // hang the login forever). Non-terminal overflow events are
-        // dropped (fail-closed: the buffer stays bounded).
+        // Bounded PER ATTEMPT with TERMINAL-EVENT PRESERVATION: a wedged
+        // begin must not grow the buffer without limit, but the bound
+        // attempt's SETTLED event is never dropped — the outcome must
+        // resolve even if the settlement lands beyond the buffer limit (a
+        // silent drop would hang the login forever). Non-terminal
+        // overflow events are dropped (fail-closed). Terminal events of
+        // OTHER attempts are kept only in the bounded per-attempt slot
+        // and dropped at bind (never applied).
+        const pending = buffered.get(event.attemptId) ?? []
         if (event.kind === 'settled') {
-          settle({ status: event.status, code: event.code, message: event.message })
-          close()
-        } else if (buffered.length < BUFFER_LIMIT) {
-          buffered.push(event)
+          pending.push(event)
+        } else if (pending.length < BUFFER_LIMIT) {
+          pending.push(event)
         }
+        buffered.set(event.attemptId, pending)
         return
       }
       if (event.attemptId !== boundAttemptId) return

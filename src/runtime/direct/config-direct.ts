@@ -357,11 +357,13 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     cleanup: () => void
   }>()
   /** attemptId → the upstream attempt's withdraw controller + the observed
-   * settlement promise (held so the flow is never a floating promise). */
+   * settlement promise (held so the flow is never a floating promise) +
+   * the caller-abort listener disposer. */
   private readonly attempts = new Map<string, {
     controller: AbortController
     key: CredentialKey
     settlement: Promise<void>
+    disposeCallerAbortListener: () => void
   }>()
 
   constructor(ctx: HostContextLike) {
@@ -418,8 +420,13 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // their withdrawals IMMEDIATELY — a provider that ignores its abort
     // signal must never leave the client's prompt UI open (or the command
     // hanging on the outcome) until some settlement that never comes.
+    // The listener is DISPOSED on every settlement/cancel path (never
+    // left attached to the long-lived runner signal — a leak per login).
     const withdrawOnCallerAbort = (): void => {
       this.rejectAttemptPrompts(attemptId)
+    }
+    const disposeCallerAbortListener = (): void => {
+      request.signal?.removeEventListener('abort', withdrawOnCallerAbort)
     }
     if (request.signal !== undefined) {
       request.signal.addEventListener('abort', withdrawOnCallerAbort, { once: true })
@@ -432,11 +439,13 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       (outcome) => {
         this.attempts.delete(attemptId)
         this.rejectAttemptPrompts(attemptId)
+        disposeCallerAbortListener()
         this.emit({ kind: 'settled', attemptId, status: outcome.status })
       },
       (error: unknown) => {
         this.attempts.delete(attemptId)
         this.rejectAttemptPrompts(attemptId)
+        disposeCallerAbortListener()
         this.emit({
           kind: 'settled',
           attemptId,
@@ -446,7 +455,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
         })
       },
     )
-    this.attempts.set(attemptId, { controller, key, settlement })
+    this.attempts.set(attemptId, { controller, key, settlement, disposeCallerAbortListener })
     return Promise.resolve({ kind: 'started', attemptId })
   }
 
@@ -471,8 +480,10 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // Withdraw the attempt: reject the pending prompt bridges IMMEDIATELY
     // (never wait on the upstream settlement — a flow that does not honor
     // its signal must not leave the client's prompt UI hanging), then
-    // abort the upstream controller.
+    // abort the upstream controller. The caller-abort listener is
+    // disposed too (this attempt is over).
     this.rejectAttemptPrompts(attemptId)
+    attempt.disposeCallerAbortListener()
     attempt.controller.abort()
     return Promise.resolve()
   }
