@@ -1459,11 +1459,14 @@ test('fullscreen Ctrl+O Collapse All clears every secondary override; the global
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('(click to expand)'), 'precondition: the Thinking click collapsed only that card (local override)')
-  // Full-reveal the Bash card: the viewport follows the END, so the last
-  // result line proves the card is full.
+  // Full-reveal the Bash card; the settled expand preserved the viewport,
+  // so scroll to the tail — the last result line proves the card is full
+  // (plan 2026-08-25).
   const bashY = findRow(vt.getViewport(), 'Bash cmd 1')
   assert.ok(bashY >= 0, `Bash card missing:\n${joined}`)
   click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  app.scrollToBottom()
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('out 1 line 39'), 'precondition: the Bash card is locally full (tail visible)')
@@ -1539,8 +1542,10 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // Expand the root, then full-reveal the Bash card: the viewport follows
-  // the END, so the Thought header scrolls out of view.
+  // Expand the root, then full-reveal the Bash card; scroll to the bottom
+  // so the Thought header scrolls OUT of view (the settled-thought expand
+  // preserves the viewport — plan 2026-08-25 — the user scrolls to the
+  // tail).
   let y = findRow(vt.getViewport(), '🐋 Thought')
   assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, y + 1)
@@ -1548,6 +1553,8 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   const bashY = findRow(vt.getViewport(), 'Bash seq 1 120')
   assert.ok(bashY >= 0, `Bash card missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  app.scrollToBottom()
   await vt.waitForRender()
   let view = vt.getViewport()
   assert.ok(findRow(view, '🐳 Thought') < 0, `precondition: the header must be scrolled out of view:\n${view.join('\n')}`)
@@ -1589,10 +1596,14 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   click(vt, 3, y + 1)
   await vt.waitForRender()
   // The Bash card's CONTENT row toggles only the secondary: the last
-  // result line proves the full-reveal, and the ROOT stays open.
+  // result line proves the full-reveal, and the ROOT stays open. The
+  // settled expand preserved the viewport — scroll to the tail to see the
+  // full-reveal proof (plan 2026-08-25).
   const bashY = findRow(vt.getViewport(), 'Bash cmd 1')
   assert.ok(bashY >= 0, `Bash card missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  app.scrollToBottom()
   await vt.waitForRender()
   let joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('out 1 line 39'), 'the Bash secondary must full-reveal on its own row')
@@ -1798,6 +1809,10 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   assert.ok(bashY >= 0, `Bash card missing:\n${view.join('\n')}`)
   click(vt, 10, bashY + 1)
   await vt.waitForRender()
+  // The settled expand preserved the viewport: scroll to the tail so the
+  // result tail is visible (plan 2026-08-25).
+  app.scrollToBottom()
+  await vt.waitForRender()
   view = vt.getViewport()
   assert.ok(findRow(view, 'result line 119') >= 0, 'precondition: the result tail is visible')
   // Resize: rows re-wrap — the y-regions must be re-measured, never stale.
@@ -1837,6 +1852,10 @@ test('a blank-row click BEFORE the first paint after a resize is dropped — reb
   const bashY = findRow(view, 'Bash seq 1 120')
   assert.ok(bashY >= 0, `Bash card missing:\n${view.join('\n')}`)
   click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  // The settled expand preserved the viewport: scroll to the tail so the
+  // second tool card is visible (plan 2026-08-25).
+  app.scrollToBottom()
   await vt.waitForRender()
   view = vt.getViewport()
   const preEchoY = findRow(view, 'Bash echo done')
@@ -1884,6 +1903,10 @@ test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message
   const bashY = findRow(view, 'Bash cmd 1')
   assert.ok(bashY >= 0, `Bash card missing:\n${view.join('\n')}`)
   click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  // The settled expand preserved the viewport: scroll to the tail so the
+  // full-reveal proof is visible (plan 2026-08-25).
+  app.scrollToBottom()
   await vt.waitForRender()
   view = vt.getViewport()
   assert.ok(view.join('\n').includes('out 1 line 39'), 'precondition: turn-1 Bash is locally full')
@@ -2336,6 +2359,10 @@ test('editor/footer clicks are clipped OUT of the transcript hit-test when scrol
   const bashY = findRow(view, 'Bash seq 1 120')
   assert.ok(bashY >= 0, `Bash card missing:\n${view.join('\n')}`)
   click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  // The settled expand preserved the viewport: scroll to the tail so the
+  // full-reveal proof is visible (plan 2026-08-25).
+  app.scrollToBottom()
   await vt.waitForRender()
   view = vt.getViewport()
   assert.ok(view.join('\n').includes('result line 119'), 'precondition: the Bash card is full')

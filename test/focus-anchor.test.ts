@@ -86,7 +86,7 @@ function click(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x};${y}m`)
 }
 
-test('expanding a collapsed Thought in fullscreen FOLLOWS THE END (plan supplement)', async () => {
+test('expanding a collapsed SETTLED Thought preserves the viewport (plan 2026-08-25)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
@@ -103,30 +103,32 @@ test('expanding a collapsed Thought in fullscreen FOLLOWS THE END (plan suppleme
   assert.ok(headerY >= 0, `collapsed Thought header missing:\n${view.join('\n')}`)
   const before = app.fullscreenScrollForTest()
   assert.equal(before?.isFollowingEnd, true, 'precondition: following the end')
-  // Click the collapsed header: the root expands and the viewport follows
-  // the END (the default view after expansion is the latest content).
+  // Click the collapsed header: the settled Thought's expansion PRESERVES
+  // the viewport (a completed Thought has no live output to chase — plan
+  // 2026-08-25 §4.2) instead of jumping to the end.
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
   assert.ok(joined.includes('🐳 Thought'), `expanded symbol missing:\n${joined}`)
   const after = app.fullscreenScrollForTest()
-  assert.equal(after?.isFollowingEnd, true, 'expansion must keep following the end')
-  assert.ok(after !== undefined && after.scrollTop === after.maxScrollTop,
-    `the viewport must sit at the end (scrollTop ${after?.scrollTop} vs max ${after?.maxScrollTop})`)
+  assert.ok(after !== undefined)
+  assert.equal(after.isFollowingEnd, false, 'a settled Thought expansion must disable follow-end')
   // The process timeline is COMPACT: the 120-line result stays hidden.
   assert.ok(!joined.includes('result line 50'), `the long result must stay hidden (compact secondary):\n${joined}`)
-  // Full-reveal the Bash secondary: the follow-end keeps the viewport at
-  // the bottom, so the result TAIL is what the user sees.
+  // Full-reveal the Bash secondary, then scroll to the bottom: the result
+  // TAIL is what the end of the transcript shows.
   const bashY = findRow(view, 'Bash seq 1 120')
   assert.ok(bashY >= 0, `compact Bash card missing:\n${view.join('\n')}`)
   click(vt, 10, bashY + 1)
   await vt.waitForRender()
+  app.scrollToBottom()
+  await vt.waitForRender()
   view = vt.getViewport()
   const expanded = view.join('\n')
-  assert.ok(expanded.includes('result line 119'), `the result tail must be visible (follow-end):\n${expanded}`)
+  assert.ok(expanded.includes('result line 119'), `the result tail must be visible at the bottom:\n${expanded}`)
   const final = app.fullscreenScrollForTest()
-  assert.equal(final?.isFollowingEnd, true, 'the viewport keeps following the end')
+  assert.equal(final?.isFollowingEnd, true, 'manual scroll to the bottom re-enables follow-end')
   app.setFullscreen(false)
   app.stop()
 })
@@ -155,11 +157,15 @@ test('clicking an expanded SECONDARY body collapses only the secondary (plan §3
   assert.ok(bashY >= 0, `compact Bash card missing:\n${view.join('\n')}`)
   click(vt, 10, bashY + 1)
   await vt.waitForRender()
+  // The settled Thought preserved the viewport, so after the full reveal
+  // scroll to the bottom: the result TAIL is what the end shows (the
+  // consumer scrolls; the viewport policy never guesses — plan 2026-08-25).
+  app.scrollToBottom()
+  await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  // The follow-end viewport shows the result TAIL (the default view after
-  // expansion is the end) — the Thought header is scrolled out of view,
-  // which is the intended default.
+  // The viewport now shows the result TAIL — the Thought header is scrolled
+  // out of view, which is the intended end-of-transcript view.
   assert.ok(joined.includes('result line 99'), `the full result must appear (tail visible):\n${joined}`)
   // Click a result line: ONLY the secondary collapses.
   const bodyY = findRow(view, 'result line 99')
@@ -232,10 +238,14 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   const bashY = findRow(view, 'Bash seq 1 120')
   click(vt, 10, bashY + 1)
   await vt.waitForRender()
+  // The settled Thought preserved the viewport: scroll to the bottom to
+  // SEE the full result tail (the viewport policy never auto-follows on a
+  // settled expansion — plan 2026-08-25).
+  app.scrollToBottom()
+  await vt.waitForRender()
   view = vt.getViewport()
   assert.ok(view.join('\n').includes('result line 99'), 'precondition: the Bash secondary is full (tail visible)')
-  // The follow-end viewport sits at the bottom: scroll back to the header
-  // before the Collapse All click.
+  // Scroll back to the header before the Collapse All click.
   app.scrollToTop()
   await vt.waitForRender()
   view = vt.getViewport()
@@ -471,6 +481,10 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   view = vt.getViewport()
   const bashY = findRow(view, 'Bash seq 1 120')
   click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  // The settled Thought preserved the viewport: scroll to the bottom to
+  // SEE the full result tail before the resize resequence.
+  app.scrollToBottom()
   await vt.waitForRender()
   view = vt.getViewport()
   assert.ok(view.join('\n').includes('result line 99'), 'precondition: the Bash secondary is full (tail visible)')

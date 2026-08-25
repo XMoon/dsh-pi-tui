@@ -263,12 +263,22 @@ read the DURABLE descendant catalog, not the live-child list:
 
 The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
 
-- **Follow-end expand**: clicking a collapsed Thought in fullscreen
-  expands it and the viewport FOLLOWS THE END — the default view after
-  expansion is the latest content (the final answer or the newest process
-  output) and keeps following as it grows. **Collapse anchors the header**:
-  closing the Thought scrolls the header back near the top with follow-end
-  disabled, so the Thought stays in view.
+- **Scroll-intent expand (2026-08-25)**: clicking a collapsed Thought in
+  fullscreen expands it and the viewport policy is scroll-intent +
+  running-ness — never "expand ⇒ follow the end". A SETTLED (completed) or
+  unknown-activity Thought expansion PRESERVES the user's current
+  historical position and disables follow-end — a historical Thought has
+  no live output to chase. A RUNNING Thought expansion follows the end
+  (and keeps following) ONLY when the user was already following live
+  output; when the user has scrolled into history the running Thought
+  expands in place too. **Collapse anchors the header**: closing the
+  Thought scrolls the header back near the top with follow-end disabled,
+  so the Thought stays in view.
+- **Ctrl+O Expand Recent follows the same scroll-intent rule**: it
+  follows the end only when the user was already following AND the
+  expanded set contains a running Thought; every other case preserves the
+  current viewport. Ctrl+O Collapse All keeps the bulk-collapse anchor
+  policy.
 - **Nearest-owner click routing**: attachment > secondary > outer Thought
   > ordinary message. A compact secondary card full-reveals on click; an
   expanded secondary's body click folds ONLY that card (the root stays
