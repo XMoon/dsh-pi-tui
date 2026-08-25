@@ -168,7 +168,7 @@ function main() {
       }
       fixtureApply(ctx)
       const slots = registrations.map(r => r.slot).sort().join(',')
-      if (slots !== 'chrome.footer.item,chrome.footer.status,input.dock.item,chrome.header.badge') {
+      if (slots !== 'chrome.footer.item,chrome.footer.status,chrome.header.badge,input.dock.item') {
         throw new Error('bad registrations: ' + slots)
       }
       console.log('fixture-apply-ok')
