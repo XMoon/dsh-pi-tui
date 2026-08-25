@@ -5885,8 +5885,10 @@ export class TuiApp {
       // compact preview is never repeated next to the full body). An
       // empty entry renders the bare title — never a fake "No reasoning"
       // row (plan §13.3). The compact geometry (title + preview + hint)
-      // is height-stable while reasoning streams.
-      const head = color.textDim(`${expanded ? '▾' : '▸'} Thinking`)
+      // is height-stable while reasoning streams. EVERY row truncates to
+      // the terminal width — a narrow terminal must never wrap a row and
+      // break the fixed geometry (review finding).
+      const head = truncateToWidth(color.textDim(`${expanded ? '▾' : '▸'} Thinking`), this.terminal.columns, '…')
       const previewLine = latestLine(message.text)
       if (!expanded && previewLine === '') {
         // An existing block with no text yet (a very short streaming /
@@ -5898,7 +5900,7 @@ export class TuiApp {
       if (!expanded) {
         const rows = [head]
         rows.push(color.textDimItalic(`  ${truncateToWidth(previewLine, Math.max(1, this.terminal.columns - 2), '…')}`))
-        rows.push(color.textDim(`  (${hintVerb} to expand)`))
+        rows.push(color.textDim(truncateToWidth(`  (${hintVerb} to expand)`, this.terminal.columns, '…')))
         return new Text(rows.join('\n'), 0, 0)
       }
       const body = message.text === '' ? '' : message.text.split('\n').map(line => `  ${line}`).join('\n')
