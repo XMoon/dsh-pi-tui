@@ -185,9 +185,13 @@ export class HostKeybindingManager {
       this.diagnostics.push(
         `keybinding: leader key ${formatKeyId(leaderKey)} is also an active host key — the leader machine is disabled (the direct key wins)`,
       )
-      // Disable the leader machine: the direct key wins (never a silent
-      // shadow — PR review finding).
+      // Disable the leader machine AND its advertised bindings: the
+      // direct key wins (never a silent shadow — PR review finding). The
+      // effectiveLeaderBindings are cleared here so keyHint /
+      // keysLabelFor / snapshot never advertise a leader sequence that
+      // cannot fire (the "UI always shows the EFFECTIVE keys" contract).
       this.leaderConfigShadowed = true
+      this.effectiveLeaderBindings = []
       this.leader?.dispose()
       this.leader = undefined
     } else {

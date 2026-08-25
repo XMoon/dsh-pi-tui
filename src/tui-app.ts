@@ -2662,20 +2662,43 @@ export class TuiApp {
     if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
       const viewer = this.viewerMode
       if (!isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
-        // Esc is a fixed lifecycle key (never user-configurable); the
-        // FOLD pass-through resolves the EFFECTIVE fold key (a remap of
-        // app.transcript.toggleExpand must still let the viewed
-        // transcript fold — review finding).
-        if (!matchesKey(data, 'escape') && !this.keybindings.matches(data, 'app.transcript.toggleExpand')) {
+        // The read-only viewer's EXIT is a FIXED lifecycle key — Esc is
+        // the viewer's own close contract (like question.cancel /
+        // search.close / tasks.cancel), INDEPENDENT of the user-
+        // configurable app.agent.interrupt. A remap of interrupt to
+        // Ctrl+X must not break the viewer exit: Esc here runs the
+        // runner's single-Esc handler DIRECTLY (the viewer's close path)
+        // and is consumed. The FOLD pass-through resolves the EFFECTIVE
+        // fold key (a remap of app.transcript.toggleExpand must still
+        // let the viewed transcript fold). Every other key is consumed —
+        // a remapped interrupt (Ctrl+X) is inert inside the read-only
+        // viewer, never the parent's (PR review finding).
+        if (matchesKey(data, 'escape')) {
+          this.events.onSingleEscape?.()
           return { consume: true }
         }
-      } else if (this.isSubmitKey(data)) {
-        this.submitSubagentDraft()
-        return { consume: true }
-      } else if (this.viewerParentLockedKey(data)) {
-        return { consume: true }
+        if (!this.keybindings.matches(data, 'app.transcript.toggleExpand')) {
+          return { consume: true }
+        }
+      } else {
+        // The CONTINUABLE viewer keeps the child editor live, but Esc is
+        // STILL the viewer's fixed exit lifecycle key — it closes the
+        // viewer (single-Esc close path), independent of the user-
+        // configurable app.agent.interrupt (whose remap could otherwise
+        // swallow the exit — PR review finding).
+        if (matchesKey(data, 'escape')) {
+          this.events.onSingleEscape?.()
+          return { consume: true }
+        }
+        if (this.isSubmitKey(data)) {
+          this.submitSubagentDraft()
+          return { consume: true }
+        } else if (this.viewerParentLockedKey(data)) {
+          return { consume: true }
+        }
       }
-      // Esc (exit) and the effective fold key fall through to the host ladder.
+      // The effective fold key falls through to the host ladder (the
+      // fold toggle); Esc was consumed above as the viewer exit.
     }
     // Transcript search owns these keys while its overlay is up; everything
     // else falls through to the focused search input. The close/next/
