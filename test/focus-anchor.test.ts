@@ -221,7 +221,10 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   let y = findRow(view, '🐋 Thought')
   click(vt, 3, y + 1)
   await vt.waitForRender()
-  // Expand BOTH secondaries (Thinking + Bash).
+  // Reveal the Thinking category (Alt+T — hidden by default), then expand
+  // BOTH secondaries (Thinking + Bash).
+  app.toggleFocusThinkingVisible()
+  await vt.waitForRender()
   view = vt.getViewport()
   const thinkingY = findRow(view, 'checking the projection')
   assert.ok(thinkingY >= 0, `compact Thinking card missing:\n${view.join('\n')}`)
