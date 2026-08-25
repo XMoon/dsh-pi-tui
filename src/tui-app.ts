@@ -3203,10 +3203,12 @@ export class TuiApp {
 
   /**
    * Replace the transcript and rebuild the message components. Collapsible
-   * entries (thinking, tool cards) render folded unless the Ctrl+O master
+   * entries (tool, system cards) render folded unless the Ctrl+O master
    * switch is on and the entry belongs to the most recent turns (or, in
    * REGULAR Focus, an expanded Thought root full-reveals its process —
-   * fullscreen secondaries are mouse-owned).
+   * fullscreen secondaries are mouse-owned). Thinking has its OWN detail
+   * owner: Alt+T (the shared `thinkingExpanded` preference) plus per-card
+   * overrides — Ctrl+O never touches it.
    * @param messages - the folded transcript.
    * @param activities - the same fold state's per-turn Focus activities
    *   (plan §19: messages and activities must come from ONE fold snapshot,
