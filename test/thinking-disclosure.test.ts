@@ -18,6 +18,7 @@ import test from 'node:test'
 import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
@@ -714,6 +715,26 @@ test('K2: FULL running reasoning live-appends new deltas into the open body', as
 })
 
 // ── L. Cache identity ────────────────────────────────────────────────────
+
+test('P2: the compact Thinking card never wraps on a narrow terminal', async () => {
+  // Every compact row must truncate to the terminal width — a wrapped
+  // hint row would break the fixed three-row geometry (review finding).
+  const vt = new VirtualTerminal(8, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a very long reasoning line that would wrap' }])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const start = lines.findIndex(line => line.includes('Think'))
+  assert.ok(start >= 0, `thinking block missing:\n${lines.join('\n')}`)
+  const block = lines.slice(start, start + 3)
+  assert.equal(block.length, 3, `the block must stay 3 rows on a narrow terminal:\n${block.join('\n')}`)
+  for (const line of block) {
+    assert.ok(visibleWidth(line) <= 8, `a compact row exceeds 8 cols: ${JSON.stringify(line)}`)
+  }
+  assert.ok(block[2]!.trim() !== '', 'the (truncated) hint row must still render')
+  app.stop()
+})
 
 test('L3: an Alt+T expanded transition rebuilds the plugin-rendered component too', async () => {
   const { RendererRegistry } = await import('../src/renderer-registry.ts')
