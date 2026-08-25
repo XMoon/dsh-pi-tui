@@ -218,9 +218,28 @@ export class HostKeybindingManager {
     return definition.defaultKeys.some(key => matchesKey(data, key))
   }
 
-  /** The effective keys of one action. */
+  /** The effective keys of one action (direct keys only — leader
+   * sequences live in {@link leaderKeysFor}). */
   keysFor(action: AppKeybindingId): KeyId[] {
     return this.keymap.keysFor(action)
+  }
+
+  /** The EFFECTIVE `<leader>X` completing keys of one action (M6),
+   * ambiguous/disabled sequences excluded. */
+  leaderKeysFor(action: AppKeybindingId): KeyId[] {
+    return this.effectiveLeaderBindings
+      .filter(binding => binding.action === action)
+      .map(binding => binding.key)
+  }
+
+  /** The full display label for one action: ALL direct keys and ALL
+   * leader sequences, each formatted (e.g. `Ctrl+Z / Leader H`); '' when
+   * the action advertises nothing (disabled, or no keys at all). */
+  keysLabelFor(action: AppKeybindingId): string {
+    if (this.isDisabled(action)) return ''
+    const direct = this.keysFor(action).map(formatKeyId)
+    const leader = this.leaderKeysFor(action).map(formatLeaderSequence)
+    return [...direct, ...leader].join(' / ')
   }
 
   /** The primary effective key of one action, or undefined. */

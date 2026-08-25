@@ -113,3 +113,19 @@ test('mixed direct + leader keys both appear in the snapshot and the hint (revie
   assert.deepEqual(binding!.leaderKeys, ['h'], 'the leader completing key is carried separately')
   assert.equal(manager.keyHint('app.history.search'), 'Ctrl+Z / Leader H', 'the hint shows both forms')
 })
+
+test('keysLabelFor shows ALL direct and leader keys (the /help source)', () => {
+  // Review finding: /help used keysFor() (direct only) — a mixed
+  // ['ctrl+z', '<leader>h'] action showed only the direct key. The
+  // manager's keysLabelFor renders every effective form.
+  const manager = managerWith({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.history.search': ['ctrl+z', 'ctrl+shift+z', '<leader>h'],
+    },
+  })
+  assert.equal(manager.keysLabelFor('app.history.search'), 'Ctrl+Z / Ctrl+Shift+Z / Leader H')
+  // Disabled actions advertise nothing.
+  const disabled = managerWith({ 'app.history.search': false })
+  assert.equal(disabled.keysLabelFor('app.history.search'), '')
+})
