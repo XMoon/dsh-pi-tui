@@ -36,6 +36,9 @@
 set -eu
 
 FULL=0
+# Aggregate across ALL pushed refs: the gate must run the strictest level
+# any ref demands. Initialise to the safe "fork changed" default and only
+# ever raise it — a later ref without fork changes must NOT reset it.
 FORK_CHANGED=1
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
@@ -44,9 +47,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   # The remote base may be unknown (new branch: zero sha, or a shallow
   # clone): fall back to the safe "fork changed" default.
   if git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
-    if git diff --quiet "$remote_sha" "$local_sha" -- packages/pi-tui/; then
-      FORK_CHANGED=0
-    else
+    if ! git diff --quiet "$remote_sha" "$local_sha" -- packages/pi-tui/; then
       FORK_CHANGED=1
     fi
   fi
@@ -70,7 +71,17 @@ fi
 # package.json script. Non-verify scripts (typecheck / typecheck:bundle)
 # are passed through as a single stage.
 if [ "${PUSH_GATE_TEST_MODE:-0}" = "1" ] && [ -n "${PUSH_GATE_STAGES:-}" ]; then
+  # Test override: trim (the check above is on the raw value, so a
+  # whitespace-only override must not survive) and reject an empty list —
+  # a gate that runs zero stages and reports success silently would be
+  # indistinguishable from a passed verify.
   STAGES=$PUSH_GATE_STAGES
+  STAGES_TRIMMED=$(printf '%s\n' "$STAGES" | sed '/^[[:space:]]*$/d' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -z "$STAGES_TRIMMED" ]; then
+    echo "pre-push gate: PUSH_GATE_STAGES override produced no runnable stages; refusing to bypass the gate" >&2
+    exit 1
+  fi
+  STAGES=$STAGES_TRIMMED
 elif case "$VERIFY" in verify:*) true ;; *) false ;; esac; then
   STAGES=$(node scripts/pre-push-stages.mjs "$VERIFY")
 else
@@ -143,9 +154,13 @@ fail_stage=""
 fail_code=0
 while IFS= read -r stage; do
   [ -n "$stage" ] || continue
+  # Execute via `sh -c` so a stage's own quoting/escapes survive (the
+  # derived text is a shell command fragment, not a list of words —
+  # `node -e "console.log('a && b')"` must run as one command with its
+  # quotes intact). `$stage` itself (unquoted) is only used for display.
   ts_start=$(date +%s)
   say "$(stamp)  start: $stage"
-  if $stage >>"$LOG" 2>&1; then
+  if sh -c "$stage" >>"$LOG" 2>&1; then
     ts_end=$(date +%s)
     say "$(stamp)  ok:    $stage ($((ts_end - ts_start))s)"
   else
@@ -160,16 +175,18 @@ $STAGES
 EOF
 
 if [ "$VERBOSE" -eq 1 ]; then
-  # Final drain: emit any lines the poller has not streamed yet (its
-  # offset lags by up to one poll interval), then stop the poller.
+  # Stop the poller FIRST, then drain once from its last persisted offset:
+  # draining before the kill could race the poller and print lines twice
+  # (both would read the same range). After the wait, the main shell is
+  # the only reader, so the drain is exact-once.
+  kill "$STREAM_PID" 2>/dev/null || true
+  wait "$STREAM_PID" 2>/dev/null || true
   if [ -n "${LOG_OFFSET:-}" ] && [ -f "$LOG_OFFSET" ]; then
     offset=$(cat "$LOG_OFFSET" 2>/dev/null || echo 1)
     drain_log "$offset" >/dev/null
   else
     drain_log 1 >/dev/null
   fi
-  kill "$STREAM_PID" 2>/dev/null || true
-  wait "$STREAM_PID" 2>/dev/null || true
   rm -f "$LOG_OFFSET"
 fi
 
