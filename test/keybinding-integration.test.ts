@@ -382,3 +382,35 @@ test('a remapped submit key keeps the editor backslash-newline semantics (PR rev
   assert.ok(app.getDraft().includes('line'), `the draft must gain a newline, not submit:\n${JSON.stringify(app.getDraft())}`)
   app.stop()
 })
+
+test('a remapped submit does not leak into a NEW TuiApp instance (PR review P1)', async () => {
+  // The fork keybindings are PROCESS-GLOBAL: the first app remaps/
+  // disables submit, then stops. A fresh DEFAULT app must NOT inherit
+  // the old state — its Enter must submit again.
+  const vt1 = new VirtualTerminal(80, 24)
+  const first: string[] = []
+  const app1 = new TuiApp(vt1, { onSubmit: (text: string) => first.push(text), onExit: () => {} })
+  app1.start()
+  app1.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
+  await vt1.waitForRender()
+  app1.setDraft('x')
+  await vt1.waitForRender()
+  vt1.sendInput('\r')
+  await vt1.waitForRender()
+  assert.deepEqual(first, [], 'the disabled submit must not fire in the first app')
+  app1.dispose()
+
+  // A brand-new default app: Enter must submit again (the global binding
+  // was restored on dispose).
+  const vt2 = new VirtualTerminal(80, 24)
+  const second: string[] = []
+  const app2 = new TuiApp(vt2, { onSubmit: (text: string) => second.push(text), onExit: () => {} })
+  app2.start()
+  await vt2.waitForRender()
+  app2.setDraft('fresh')
+  await vt2.waitForRender()
+  vt2.sendInput('\r')
+  await vt2.waitForRender()
+  assert.deepEqual(second, ['fresh'], 'Enter must submit in the fresh default app')
+  app2.dispose()
+})
