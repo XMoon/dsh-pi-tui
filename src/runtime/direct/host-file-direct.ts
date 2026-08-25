@@ -112,6 +112,11 @@ export class DirectHostFilePort implements HostFilePort {
         // quoting stay byte-identical.
         const provider = new CombinedAutocompleteProvider([], workDir, this.fdPath)
         const result = await provider.getSuggestions([query], 0, query.length, { signal: signal ?? new AbortController().signal })
+        // The fork's own post-await abort check covers ITS internal
+        // consumers; this port must fail closed for DIRECT consumers too
+        // (a result that settled after the request was cancelled is never
+        // served — review finding).
+        if (signal?.aborted === true) return []
         if (result !== null) return result.items.map(toCandidate)
         return []
       } catch {
