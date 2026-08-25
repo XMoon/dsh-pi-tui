@@ -440,20 +440,10 @@ gitignored):
   survives; the fork-change check aggregates across ALL pushed refs (any
   ref touching `packages/pi-tui/` or with an unknown base forces the full
   chain — a later clean ref never downgrades it, and a fully clean push
-  still selects the fast chain). Verbose mode (`PUSH_GATE_VERBOSE=1`)
-  also streams every captured log line live with a `[HH:MM:SS]` prefix:
-  a poller subshell drains the log in cycles and persists its read
-  offset between cycles; on shutdown the main shell writes a
-  `LOG_STOP` sentinel and `wait`s — the poller exits on its OWN next
-  cycle check, never by an external signal, so it can not be
-  interrupted mid-drain, and the final drain from the persisted offset
-  is exact-once (no lost or duplicated lines). A stuck stage shows its
-  raw tail as it happens; `PUSH_GATE_QUIET=1` restores a single summary
-  line for scripted pushes and takes precedence over `PUSH_GATE_VERBOSE`
-  (under QUIET the poller is not started and streamed log lines are
-  suppressed). Success prints one summary line with the
-  elapsed time (logs discarded); failure prints the failed stage, the
-  last 60 log lines and retains the full log + progress timeline paths.
+  still selects the fast chain). `PUSH_GATE_QUIET=1` restores a single
+  summary line for scripted pushes. Success prints one summary line with
+  the elapsed time (logs discarded); failure prints the failed stage,
+  the last 60 log lines and retains the full log path.
   `PUSH_GATE_STAGES` (test/dry-run only) is ignored unless
   `PUSH_GATE_TEST_MODE=1` is set — and a whitespace-only override is
   refused — so a stray env var can never shrink a real push's gate.

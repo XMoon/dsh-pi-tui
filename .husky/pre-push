@@ -19,14 +19,10 @@
 # Output: the gate never goes silent. Every stage prints a timestamped
 # progress line (start / ok + elapsed / FAIL + elapsed) as it runs, and
 # the full command output is captured into a log (discarded on success;
-# on failure the last 60 lines plus the retained log + progress paths are
-# printed). A long push therefore always shows WHICH stage is live.
+# on failure the last 60 lines plus the retained log path are printed).
+# A long push therefore always shows WHICH stage is live.
 # Toggles:
-#   PUSH_GATE_VERBOSE=1   also stream every captured log line live with a
-#                         [HH:MM:SS] prefix, so a stuck stage shows its
-#                         raw tail as it happens (requires QUIET=0).
-#   PUSH_GATE_QUIET=1     single summary line only (scripted pushes);
-#                         takes precedence over VERBOSE.
+#   PUSH_GATE_QUIET=1     single summary line only (scripted pushes).
 #   PUSH_GATE_STAGES="..."  test/dry-run ONLY: override the stage list.
 #                         Ignored unless PUSH_GATE_TEST_MODE=1 is set, so
 #                         a stray env var can never shrink a real push's
@@ -95,75 +91,21 @@ fi
 
 TMP_DIR="${TMPDIR:-/tmp}"
 LOG=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.log")
-PROGRESS=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.progress")
 START=$(date +%s)
 
 QUIET=0
 [ "${PUSH_GATE_QUIET:-0}" = "1" ] && QUIET=1
-VERBOSE=0
-[ "${PUSH_GATE_VERBOSE:-0}" = "1" ] && VERBOSE=1
 
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
-# Progress goes to the TTY (skipped in quiet mode) AND to the progress
-# file (always), so a quiet run still leaves a timeline behind.
+# Progress goes to the TTY (skipped in quiet mode).
 say() {
   if [ "$QUIET" -ne 1 ]; then printf '%s\n' "$@"; fi
-  printf '%s\n' "$@" >>"$PROGRESS"
 }
 
 STAGE_COUNT=$(printf '%s\n' "$STAGES" | sed '/^$/d' | wc -l | tr -d ' ')
 LABEL="stage"; [ "$STAGE_COUNT" -ne 1 ] && LABEL="stages"
 if [ "$QUIET" -ne 1 ]; then
   echo "pre-push gate: $VERIFY ($STAGE_COUNT $LABEL) — log: $LOG"
-fi
-
-# Read previously-unstreamed lines from the log and print them with a
-# timestamp. Prints to stderr (the hook's progress lines go to stdout),
-# and echoes the next unread offset (total+1, or start when the log has
-# not grown) so callers can track position. Used by the poller loop and
-# by the final drain, so every line is streamed exactly once — nothing is
-# lost in the poll gap. In quiet mode the stream is suppressed entirely
-# (PUSH_GATE_QUIET promises a single summary line — no progress, no
-# stream).
-drain_log() {
-  start=${1:-1}
-  total=$(wc -l <"$LOG" 2>/dev/null || echo 0)
-  if [ "$total" -ge "$start" ]; then
-    if [ "$QUIET" -ne 1 ]; then
-      sed -n "${start},${total}p" "$LOG" | while IFS= read -r line; do
-        printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$line"
-      done >&2
-    fi
-    next=$((total + 1))
-  else
-    next=$start
-  fi
-  echo "$next"
-}
-
-# Verbose mode: stream the captured log live, one timestamped line per
-# new line (drain_log off the shared LOG_OFFSET position). The poller is
-# a single subshell that checks a STOP file between drains; killing it
-# therefore lands cleanly AFTER a drain+offset-write pair (kill is
-# delivered between iterations, not mid-drain), so the main shell's final
-# drain never re-reads lines the poller already emitted. The offset file
-# also lets the main shell drain the final partial poll window.
-# PUSH_GATE_QUIET takes precedence: quiet promises ONE summary line, so
-# the verbose stream (and its poller) is skipped entirely.
-if [ "$VERBOSE" -eq 1 ] && [ "$QUIET" -ne 1 ]; then
-  LOG_OFFSET=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.offset")
-  LOG_STOP=$(mktemp "${TMP_DIR}/dsh-pi-tui-push.XXXXXX.stop")
-  (
-    next=1
-    while :; do
-      [ -e "$LOG_STOP" ] && break
-      next=$(drain_log "$next")
-      printf '%s\n' "$next" >"$LOG_OFFSET"
-      [ -e "$LOG_STOP" ] && break
-      sleep 0.4
-    done
-  ) &
-  STREAM_PID=$!
 fi
 
 fail_stage=""
@@ -190,26 +132,9 @@ done <<EOF
 $STAGES
 EOF
 
-if [ "$VERBOSE" -eq 1 ] && [ "$QUIET" -ne 1 ]; then
-  # Cooperative shutdown: signal the poller to stop BETWEEN drain cycles
-  # (it checks LOG_STOP before each drain and before each sleep), then
-  # wait for it to finish its current cycle — the offset it persisted is
-  # then exactly what it emitted. The final drain from that offset is
-  # therefore idempotent: it only ever prints lines the poller never saw.
-  : >"$LOG_STOP"
-  wait "$STREAM_PID" 2>/dev/null || true
-  if [ -n "${LOG_OFFSET:-}" ] && [ -f "$LOG_OFFSET" ]; then
-    offset=$(cat "$LOG_OFFSET" 2>/dev/null || echo 1)
-    drain_log "$offset" >/dev/null
-  else
-    drain_log 1 >/dev/null
-  fi
-  rm -f "$LOG_OFFSET" "$LOG_STOP"
-fi
-
 END=$(date +%s)
 if [ -z "$fail_stage" ]; then
-  rm -f "$LOG" "$PROGRESS"
+  rm -f "$LOG"
   echo "✓ pre-push verification passed ($VERIFY, $((END - START))s)"
   exit 0
 fi
@@ -219,5 +144,4 @@ echo "  failed stage: $fail_stage (exit $fail_code)"
 echo "  last 60 log lines:"
 tail -n 60 "$LOG" | sed 's/^/    /'
 echo "  full log: $LOG"
-echo "  progress: $PROGRESS"
 exit 1

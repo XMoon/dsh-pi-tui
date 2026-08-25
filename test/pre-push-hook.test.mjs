@@ -1,8 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -22,16 +20,6 @@ function runHook(refs, env) {
 }
 
 const FEAT = ['refs/heads/feat/x 0000000000000000000000000000000000000000 refs/heads/feat/x 1111111111111111111111111111111111111111']
-
-// Create a temp script and return a { path, cleanup } handle so callers
-// can remove the temp dir when the test ends (no /tmp leaks across runs).
-function tmpScript(contents) {
-  const dir = mkdtempSync(join(tmpdir(), 'hook-'))
-  const p = join(dir, 'stage.sh')
-  writeFileSync(p, contents)
-  chmodSync(p, 0o755)
-  return { path: p, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
-}
 
 test('pre-push hook: stage with quotes executes via sh -c with quotes intact (F1)', () => {
   const stage = 'node -e "if (\'a && b\'.indexOf(\'&\') === -1) process.exit(1); console.log(\'quoted-stage-ran\')"'
@@ -83,18 +71,6 @@ test('pre-push hook: whitespace-only test override is refused (F5)', () => {
   assert.match(out, /no runnable stages/)
 })
 
-test('pre-push hook: final drain emits the last line exactly once (F3)', () => {
-  const stage = tmpScript('#!/bin/sh\necho "final-line-XYZ"\n')
-  try {
-    const { code, out } = runHook(FEAT, { PUSH_GATE_VERBOSE: '1', PUSH_GATE_TEST_MODE: '1', PUSH_GATE_STAGES: stage.path })
-    assert.equal(code, 0, out)
-    const count = (out.match(/final-line-XYZ/g) ?? []).length
-    assert.equal(count, 1, `final line must appear exactly once, got ${count}:\n${out}`)
-  } finally {
-    stage.cleanup()
-  }
-})
-
 test('pre-push hook: PUSH_GATE_STAGES ignored without PUSH_GATE_TEST_MODE', () => {
   const { code, out } = runHook(FEAT, { PUSH_GATE_STAGES: 'echo fake-stage-should-not-run' })
   // Without test mode the real gate derives (typecheck here — feat branch,
@@ -121,23 +97,4 @@ test('pre-push hook: quiet mode prints only the summary line', () => {
   const lines = out.trim().split('\n')
   assert.equal(lines.length, 1, out)
   assert.match(lines[0], /pre-push verification passed/)
-})
-
-test('pre-push hook: QUIET takes precedence over VERBOSE (P3) — one summary line, no stream', () => {
-  const stage = tmpScript('#!/bin/sh\necho "quiet-stream-line"\n')
-  try {
-    const { code, out } = runHook(FEAT, {
-      PUSH_GATE_QUIET: '1',
-      PUSH_GATE_VERBOSE: '1',
-      PUSH_GATE_TEST_MODE: '1',
-      PUSH_GATE_STAGES: stage.path,
-    })
-    assert.equal(code, 0, out)
-    const lines = out.trim().split('\n')
-    assert.equal(lines.length, 1, `QUIET+VERBOSE must still be one line, got ${lines.length}:\n${out}`)
-    assert.match(lines[0], /pre-push verification passed/)
-    assert.ok(!out.includes('quiet-stream-line'), `verbose stream must be suppressed under QUIET:\n${out}`)
-  } finally {
-    stage.cleanup()
-  }
 })
