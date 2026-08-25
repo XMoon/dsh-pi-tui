@@ -675,6 +675,14 @@ rounds (codex / gpt-5.6-luna):
   modes (natural typing stays quiet, Tab lists `/usr/`, accept never
   doubles the slash), plus a provider-level multiline apply/Tab-gate
   test.
+- **Round 18** (on the round-3 fix): P1 — the Stable-extension
+  delegating provider's natural-trigger suppression still carried the
+  `cursorLine === 0` restriction, so a continuation-line `/` could still
+  consult the plugin chain mid-typing (FIXED: the suppression now covers
+  ANY line of a shell-mode document, matching the host provider's
+  shell-semantic rule; the wire query keeps the line-0-only prefix).
+  Regression test: the extension chain is never consulted on a
+  continuation-line natural `/` trigger (Tab still consults it once).
 
 The full-suite tests (2060+), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the

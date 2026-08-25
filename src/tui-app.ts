@@ -7723,12 +7723,14 @@ export class TuiApp {
         const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
         if (host !== null) return host
         // Preserve the shell-mode natural-trigger suppression: a leading
-        // `/` on the first line in a shell mode is a PATH, and the host
-        // provider deliberately stays quiet until Tab — the plugin chain
-        // must not flash its suggestions over it (that would reopen the
-        // dropdown mid-typing and double-apply on the next Tab).
+        // `/` on ANY line of a shell-mode document is a PATH, and the
+        // host provider deliberately stays quiet until Tab — the plugin
+        // chain must not flash its suggestions over it (that would
+        // reopen the dropdown mid-typing and double-apply on the next
+        // Tab). The wire query below still carries the prefix on line 0
+        // only.
         const mode = getMode()
-        if (mode !== 'prompt' && cursorLine === 0 && options.force !== true
+        if (mode !== 'prompt' && options.force !== true
           && (lines[cursorLine] ?? '').startsWith('/')) {
           return null
         }
