@@ -7,6 +7,14 @@
  * a persistent `TranscriptFolder` folds appended events incrementally and a
  * coalesced repaint flushes the windowed transcript (older turns collapse
  * into a summary), so long sessions never re-scan the whole log per event.
+ *
+ * KEYS ARE NOT HARD-CODED HERE: host shortcuts are semantic actions (app.*)
+ * resolved through the user-orchestrable keymap; the single source of truth
+ * for default keys is src/keybindings/definitions.ts and the effective map
+ * is inspectable at runtime with `/keybindings`. User-FACING strings derive
+ * key labels through the keymap's keyHint() (e.g. the guard notices); key
+ * names in comments are shorthand for the default binding and must never be
+ * relied on as the live binding.
  * @module @xmoon76/dsh-pi-tui
  */
 
@@ -78,6 +86,7 @@ import { formatStats, StatsFolder } from './stats.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
+import type { AppKeybindingId } from './keybindings/types.ts'
 import { normalizedKeyToKeyId } from './keybindings/manager.ts'
 import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
@@ -860,14 +869,16 @@ const DANGER_PATTERNS: readonly RegExp[] = [
   /\bcurl\b[^\n|]*\|\s*(ba)?sh\b/,
 ]
 
-/** Divergence-guard notices (user-facing, English like the rest of the TUI). */
-const GUARD_BLOCKED_NOTIFY = (action: GuardAction): string =>
-  `This session may be open in another dsh process (TUI/web); send blocked. Press ${action === 'submit' ? 'Enter' : 'Ctrl+S'} again to force (may corrupt the session log)`
-const GUARD_TAIL_MISMATCH_NOTIFY = (action: GuardAction): string =>
-  `This session file was rewritten by another process (same event count, different content); send blocked. Press ${action === 'submit' ? 'Enter' : 'Ctrl+S'} again to force (may corrupt the session log)`
+/** Divergence-guard notices (user-facing, English like the rest of the TUI).
+ * The key labels are the EFFECTIVE keymap hints (defaults: Enter for
+ * submit, Ctrl+S for steer) — a user remap updates the notice. */
+const GUARD_BLOCKED_NOTIFY = (action: GuardAction, submitKey: string, steerKey: string): string =>
+  `This session may be open in another dsh process (TUI/web); send blocked. Press ${action === 'submit' ? submitKey : steerKey} again to force (may corrupt the session log)`
+const GUARD_TAIL_MISMATCH_NOTIFY = (action: GuardAction, submitKey: string, steerKey: string): string =>
+  `This session file was rewritten by another process (same event count, different content); send blocked. Press ${action === 'submit' ? submitKey : steerKey} again to force (may corrupt the session log)`
 const GUARD_FORCED_NOTIFY = 'Forced send — the session may be written by another process; the log may be damaged'
-const GUARD_REMOVED_NOTIFY = (action: GuardAction): string =>
-  `This session's log was removed externally — it can no longer be persisted. Press ${action === 'submit' ? 'Enter' : 'Ctrl+S'} again to continue without persistence (restart to recover)`
+const GUARD_REMOVED_NOTIFY = (action: GuardAction, submitKey: string, steerKey: string): string =>
+  `This session's log was removed externally — it can no longer be persisted. Press ${action === 'submit' ? submitKey : steerKey} again to continue without persistence (restart to recover)`
 
 /** Hard cap for the /exit session flush: a hung provider must not trap the
  * user; after this the TUI exits and warns that the tail may be lost. */
@@ -2400,7 +2411,7 @@ export function apply(ctx: Context, config: Config): void {
       extensionHost = undefined
       diag.dispose()
     }
-    // The ONE exit orchestration, shared by every exit entry (Ctrl+C, Ctrl+D,
+    // The ONE exit orchestration, shared by every exit entry (the exit keys,
     // /exit, /quit): flush with a hard timeout → record → idempotent cleanup
     // → warn on a failed/timed-out flush → resume hint → process exit. A
     // later request while one is in flight is a no-op (createExitController
@@ -3144,10 +3155,10 @@ export function apply(ctx: Context, config: Config): void {
           app.setEditorText(merged)
           app.notify(merged === text
             ? (verdict.reason === 'removed'
-              ? GUARD_REMOVED_NOTIFY('submit')
+              ? GUARD_REMOVED_NOTIFY('submit', keyHint('app.input.submit'), keyHint('app.input.steer'))
               : verdict.reason === 'tail-mismatch'
-                ? GUARD_TAIL_MISMATCH_NOTIFY('submit')
-                : GUARD_BLOCKED_NOTIFY('submit'))
+                ? GUARD_TAIL_MISMATCH_NOTIFY('submit', keyHint('app.input.submit'), keyHint('app.input.steer'))
+                : GUARD_BLOCKED_NOTIFY('submit', keyHint('app.input.submit'), keyHint('app.input.steer')))
             : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
           return
         }
@@ -3524,10 +3535,10 @@ export function apply(ctx: Context, config: Config): void {
           fenceNotice: () => 'a session transition is in progress — try again in a moment',
           createDraft: () => prepared,
           blockedNotice: (reason) => reason === 'removed'
-            ? GUARD_REMOVED_NOTIFY('save')
+            ? GUARD_REMOVED_NOTIFY('save', keyHint('app.input.submit'), keyHint('app.input.steer'))
             : reason === 'tail-mismatch'
-              ? GUARD_TAIL_MISMATCH_NOTIFY('save')
-              : GUARD_BLOCKED_NOTIFY('save'),
+              ? GUARD_TAIL_MISMATCH_NOTIFY('save', keyHint('app.input.submit'), keyHint('app.input.steer'))
+              : GUARD_BLOCKED_NOTIFY('save', keyHint('app.input.submit'), keyHint('app.input.steer')),
           forcedNotice: () => GUARD_FORCED_NOTIFY,
           staleNotice: () => 'the queue or session changed while sending — try again',
           mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
@@ -4318,6 +4329,13 @@ export function apply(ctx: Context, config: Config): void {
     // overrides, and the plugin contributions — all fail-soft (a bad entry
     // is a diagnostic, never a startup failure; plan §16/§17).
     const keybindings = app.keybindingsManager()
+    /** The EFFECTIVE key label for user-facing notices (guard messages):
+     * a remap updates the notice; a disabled action falls back to a
+     * neutral phrase instead of a stale default. */
+    const keyHint = (id: AppKeybindingId): string => {
+      const hint = keybindings.keyHint(id)
+      return hint === '' ? 'the action key' : hint
+    }
     if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS === '1') {
       keybindings.setSafeMode(true)
       diag.info('keybindings', { safeMode: true })

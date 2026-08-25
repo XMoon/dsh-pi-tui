@@ -946,6 +946,13 @@ export function registerTuiCommands(
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
 
+  /** The EFFECTIVE key label for user-facing descriptions (plan §18): a
+   * remap updates every row; a disabled action shows a neutral dash. */
+  const keyHint = (id: AppKeybindingId): string => {
+    const hint = app.keybindingsManager().keyHint(id)
+    return hint === '' ? '—' : hint
+  }
+
   // Fire-and-forget with the runner's diag: cancellations debug-only,
   // recoverable (persistence) failures notify + warn, everything else
   // warns — never a bare `void somePromise()` (AGENTS.md hard rule). The
@@ -1194,7 +1201,7 @@ export function registerTuiCommands(
           ...permissionNames.length > 0 ? [{
             id: 'default-permission',
             label: 'Default permission',
-            description: 'Preset new sessions start with (persisted; Shift+Tab cycles this session)',
+            description: `Preset new sessions start with (persisted; ${keyHint('app.permission.cycle')} cycles this session)`,  // keysLabel? no — keyHint
             currentValue: defaultPermission ?? permissionNames[0] ?? '',
             values: permissionNames,
           }] : [],
@@ -1240,7 +1247,7 @@ export function registerTuiCommands(
           {
             id: 'busy-enter',
             label: 'Enter while busy',
-            description: 'Steer injects the draft into the running turn; Ctrl+Enter uses the other behavior',
+            description: `Steer injects the draft into the running turn; ${keyHint('app.input.queue')} uses the other behavior`,
             currentValue: tuiSettings?.get().busyEnter ?? 'queue',
             values: ['queue', 'steer'],
           },
@@ -2889,7 +2896,9 @@ export function registerTuiCommands(
         { id: 'k-think', label: keysLabel('app.transcript.toggleThinking'), description: 'Collapse/expand thinking blocks (detail level — blocks stay visible)', currentValue: '' },
         { id: 'k-steer', label: keysLabel('app.input.steer'), description: 'Steer the running turn with the draft', currentValue: '' },
         { id: 'k-editor', label: keysLabel('app.editor.external'), description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
-        { id: 'k-search', label: keysLabel('app.transcript.search'), description: 'Search the transcript (Enter/Shift+Enter jump, Esc closes)', currentValue: '' },
+
+        { id: 'k-search', label: keysLabel('app.transcript.search'), description: `Search the transcript (${keysLabel('app.transcript.search.next')}/${keysLabel('app.transcript.search.previous')} jump, ${keysLabel('app.transcript.search.close')} closes)`, currentValue: '' },
+
         { id: 'k-tab', label: 'Tab', description: 'Autocomplete slash commands and file paths', currentValue: '' },
         { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
         { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs locally without recording', currentValue: '' },

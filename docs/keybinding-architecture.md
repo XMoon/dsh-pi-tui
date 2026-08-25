@@ -146,6 +146,28 @@ direct settings.yaml write). `/help` and the footer hints render through
   their component-local keys (the plan's M5 covers QuestionFlow and
   TaskBrowserPanel; the others follow the same pattern later).
 
+## Comment and copy convention (review follow-up)
+
+Host code must not hard-code physical keys in a way that can drift from
+the user's live bindings:
+
+- **The single source of truth for DEFAULT keys is `definitions.ts`**
+  (plus the `RESERVED_HOST_KEYS` inventory in keybinding-registry.ts).
+  `src/tui-app.ts` and `src/index.ts` carry a header note pointing here.
+- **User-facing strings derive key labels from the keymap**
+  (`keyHint()` / `keysFor()` — e.g. the guard notices and the `/settings`
+  row descriptions). A remap updates the copy automatically; a disabled
+  action shows a neutral fallback.
+- **Comments** may name a key only when the SEMANTICS are key-specific
+  (the Ctrl+C clear-then-exit chord, the double-Esc window, the
+  read-only viewer's fixed Esc/Ctrl+O policy, the search overlay's fixed
+  keys). Every other mention is shorthand for the default binding and
+  must not be relied on as the live binding.
+- **The static gate** also rejects hard-coded chord labels in
+  user-facing string literals (`src/index.ts`, `src/commands.ts`,
+  `src/tui-app.ts`), with a documented allowlist for fork editor-level
+  keys (Ctrl+Home/End).
+
 ## Review chain (2026-08-25, openai-codex / gpt-5.6-luna)
 
 Four review rounds on `feat/keybinding-customization`; the reviewer
