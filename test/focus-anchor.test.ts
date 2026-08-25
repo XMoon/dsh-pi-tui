@@ -200,8 +200,8 @@ test('clicking a NON-secondary process row collapses the owner Thought (plan §3
   const joined = view.join('\n')
   assert.ok(joined.includes('🐋 Thought'), 'a non-secondary process row must collapse the owner Thought')
   // The process rows are gone (the collapsed card's previews are not the
-  // process timeline — the thinking card's expand hint only exists there).
-  assert.ok(!joined.includes('ctrl+o to expand'), `the expanded body must be gone:\n${joined}`)
+  // process timeline — the compact cards' hints only exist there).
+  assert.ok(!joined.includes('to expand'), `the expanded body must be gone:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -221,10 +221,8 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   let y = findRow(view, '🐋 Thought')
   click(vt, 3, y + 1)
   await vt.waitForRender()
-  // Reveal the Thinking category (Alt+T — hidden by default), then expand
-  // BOTH secondaries (Thinking + Bash).
-  app.toggleFocusThinkingVisible()
-  await vt.waitForRender()
+  // The Thinking card is compact by default: expand BOTH secondaries
+  // (Thinking + Bash) via their per-card clicks.
   view = vt.getViewport()
   const thinkingY = findRow(view, 'checking the projection')
   assert.ok(thinkingY >= 0, `compact Thinking card missing:\n${view.join('\n')}`)
@@ -261,6 +259,7 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   assert.ok(joined.includes('🐳 Thought'), 'the root must reopen')
   assert.ok(!joined.includes('result line 99'), `the Bash secondary must be compact again:\n${joined}`)
   assert.ok(joined.includes('Bash seq 1 120'), 'the compact Bash card must be visible')
+  assert.ok(joined.includes('(click to expand)'), 'the reopened Thinking card must be compact again (no stale override)')
   app.setFullscreen(false)
   app.stop()
 })

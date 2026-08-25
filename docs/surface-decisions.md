@@ -274,12 +274,16 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   fallback (`skill` maps to the read variant with the `Load skill` title
   on both paths). The fold stores raw call facts only — presentation
   strings never enter the TranscriptFolder.
-- **Thinking is hidden by default in Focus**: an expanded Thought reveals
-  the non-thinking process; Alt+T is the Focus category toggle
-  (`focusThinkingVisible`, default false, reset on entering Focus, kept
-  across session switches, never cleared by Root Collapse All). The
-  ordinary `hideThinking` preference stays untouched — `/settings`
-  Thinking keeps controlling only the ordinary transcript.
+- **Thinking is disclosure, never visibility (2026-08-25 unified
+  model)**: a Thinking block exists whenever the model produced
+  reasoning and the current projection contains it — a collapsed Focus
+  root hides it (the outer projection gate), every other context keeps
+  it. There is exactly ONE Thinking preference, `thinkingExpanded`
+  (compact default / full): `Alt+T` bulk-toggles it and clears every
+  per-card override first, `/settings` → `Thinking detail` is the same
+  state, and neither Focus ON/OFF nor fullscreen ON/OFF nor session
+  switches reset it. The old `hideThinking` / `focusThinkingVisible`
+  visibility pair is deleted.
 
 ## Focus is surface-adaptive
 
@@ -296,21 +300,40 @@ mode (only `TuiAltScreen` wires `onCellClick`):
     (search / viewer restore) — full-reveals its non-Thinking process:
     regular has no mouse, so there are never compact secondary cards that
     cannot be opened (`root open == process full`).
-  - Alt+T shows/hides Thinking (full when visible — regular has no
-    secondary click).
+  - Thinking is a SECONDARY detail owner: it renders COMPACT (with the
+    `(alt+t to expand)` hint) unless the shared `thinkingExpanded` bulk
+    preference says full. `Alt+T` never removes a block — it only picks
+    the detail level.
   - There are no `▸ Bash` affordances in regular mode — nothing to click.
 - **Fullscreen — mouse-driven fine inspection**:
   - The Thought is click-disclosed; an expanded Thought shows COMPACT
-    secondary cards (Thinking included only after Alt+T), and a click
-    full-reveals one card (attachment > secondary > outer Thought).
-  - Ctrl+O does not pierce the fullscreen Focus state.
+    secondary cards (Thinking included), and a click full-reveals one
+    card (attachment > secondary > outer Thought). A Thinking click
+    flips that card's EFFECTIVE state: under bulk-compact it expands
+    only that card, under bulk-full it collapses only that card (the
+    override always expresses the opposite of the effective state).
+  - Ctrl+O does not pierce the fullscreen Focus state — and never
+    expands Thinking on ANY surface (Ctrl+O owns tool/system/compaction
+    detail only; Alt+T owns Thinking detail; every disclosure has one
+    bulk owner).
   - The fold hint reads `(click to expand)` for fullscreen secondary
-    cards, `(ctrl+o to expand)` everywhere else.
-  - Root Collapse All clears the turn's per-card expansions but never the
-    Focus Thinking category preference.
+    cards, `(alt+t to expand)` for regular Thinking, `(ctrl+o to
+    expand)` for the ordinary keyboard-owned folds.
+  - Alt+T bulk-toggles ALL Thinking and clears every Thinking per-card
+    override first (a predictable ALL-compact / ALL-full result).
+  - Root Collapse All clears the turn's per-card expansions but never
+    the Thinking bulk preference.
 - **Switching surfaces** re-derives the projection: entering fullscreen
-  drops the Ctrl+O-derived reveal (manual disclosures only); returning to
-  regular restores it while the master is ON.
+  drops the Ctrl+O-derived reveal (manual disclosures only); returning
+  to regular restores it while the master is ON — and CLEARS every
+  Thinking per-card override (regular's only Thinking state is the bulk
+  preference; a stale fullscreen click must never leak back).
+- **Search** full-reveals ONLY the matched Thinking block (a per-card
+  override) and never writes the bulk preference; the reveal rides the
+  same override channel as a fullscreen click, so the next Alt+T resets
+  it. In regular the override is honored for search reveals — the only
+  override that can exist there, because the fullscreen → regular
+  transition clears the click ones.
 
 ## Selected-row marquee
 

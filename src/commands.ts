@@ -1243,16 +1243,16 @@ export function registerTuiCommands(
           {
             id: 'expand',
             label: 'Tool output',
-            description: 'Whether thinking/tool entries start expanded',
+            description: 'Whether recent tool/system entries start expanded',
             currentValue: app.isToolOutputExpanded() ? 'expanded' : 'collapsed',
             values: ['collapsed', 'expanded'],
           },
           {
             id: 'thinking',
-            label: 'Thinking blocks',
-            description: 'Whether reasoning entries render at all',
-            currentValue: app.isThinkingHidden() ? 'hidden' : 'shown',
-            values: ['shown', 'hidden'],
+            label: 'Thinking detail',
+            description: 'Default detail level for reasoning blocks; blocks stay visible',
+            currentValue: app.isThinkingExpanded() ? 'expanded' : 'collapsed',
+            values: ['collapsed', 'expanded'],
           },
           {
             id: 'footer',
@@ -1429,7 +1429,9 @@ export function registerTuiCommands(
           } else if (id === 'expand') {
             app.setToolOutputExpanded(value === 'expanded')
           } else if (id === 'thinking') {
-            if ((value === 'shown') === app.isThinkingHidden()) app.toggleThinkingHidden()
+            // The declarative surface sets the SHARED bulk preference —
+            // `/settings` and Alt+T are the same state (plan §10.4).
+            app.setThinkingExpanded(value === 'expanded')
           } else if (id === 'footer') {
             if (value === 'full' || value === 'compact') {
               app.setFooterPreset(value)
@@ -2885,9 +2887,9 @@ export function registerTuiCommands(
         { id: 'k-queue', label: 'Ctrl+Enter', description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
         { id: 'k-exit', label: 'Ctrl+C / Ctrl+D', description: 'Quit the TUI (flushes the session)', currentValue: '' },
         { id: 'k-cancel', label: 'Esc', description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
-        { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool output and thinking; in regular Focus it reveals the recent Thoughts (fullscreen Focus disclosures are mouse-owned)', currentValue: '' },
+        { id: 'k-fold', label: 'Ctrl+O', description: 'Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts (fullscreen Focus disclosures are mouse-owned). Thinking detail is Alt+T', currentValue: '' },
         { id: 'k-todo', label: 'Ctrl+T', description: 'Toggle the todo panel', currentValue: '' },
-        { id: 'k-think', label: 'Alt+T', description: 'Hide/show thinking blocks', currentValue: '' },
+        { id: 'k-think', label: 'Alt+T', description: 'Collapse/expand thinking blocks (detail level — blocks stay visible)', currentValue: '' },
         { id: 'k-steer', label: 'Ctrl+S', description: 'Steer the running turn with the draft', currentValue: '' },
         { id: 'k-editor', label: 'Ctrl+G', description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
         { id: 'k-search', label: 'Ctrl+F', description: 'Search the transcript (Enter/Shift+Enter jump, Esc closes)', currentValue: '' },

@@ -1456,7 +1456,8 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport()
-  const thinkingRow = view.findIndex(line => line.includes('think one'))
+  // The compact Thinking card previews the LATEST reasoning line.
+  const thinkingRow = view.findIndex(line => line.includes('think two'))
   const bashRow = view.findIndex(line => line.includes('Bash ls'))
   assert.ok(thinkingRow >= 0, `thinking card must render:\n${view.join('\n')}`)
   assert.ok(bashRow >= 0, `bash card must render:\n${view.join('\n')}`)
