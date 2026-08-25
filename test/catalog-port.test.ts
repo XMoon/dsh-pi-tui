@@ -105,23 +105,23 @@ test('catalog DTOs are DETACHED — mutating a returned value never aliases Host
   const directoryOut = modelsPort.listConfigurableProviders()!
   ;(directoryOut as unknown as Array<{ settingsPath: string[] }>)[0]!.settingsPath.push('INJECTED')
   assert.deepEqual(directory[0]!.settingsPath, ['providers', 'openai'], 'the directory entries are never aliased')
-  const skills = port({
-    skills: {
-      snapshot: async () => ({ skills: [], complete: true }),
-      get: async () => undefined,
-    },
-  }).skills
+  const skillSource = {
+    resourceBase: { kind: 'directory', path: '/skills', nested: { owner: 'host' } },
+    invocation: { userInvocable: true, modelInvocable: true },
+  }
   const skillPort = port({
     skills: {
       snapshot: async () => ({ skills: [], complete: true }),
-      get: async () => ({ name: 'alpha', description: 'A', content: 'body', invocation: { userInvocable: true, modelInvocable: true } }),
+      get: async () => ({ name: 'alpha', description: 'A', content: 'body', ...skillSource }),
     },
   }).skills
   const resolved = await skillPort.resolveSkill('session-live', 'alpha')
   assert.equal(resolved.kind, 'found')
   if (resolved.kind === 'found') {
+    ;(resolved.skill.resourceBase as { nested: { owner: string } }).nested.owner = 'client-mutation'
     ;(resolved.skill.invocation as { userInvocable?: unknown }).userInvocable = false
-    assert.equal(skills !== undefined, true)
+    assert.equal(skillSource.resourceBase.nested.owner, 'host', 'nested resource metadata is detached')
+    assert.equal(skillSource.invocation.userInvocable, true, 'invocation policy is detached')
   }
 })
 

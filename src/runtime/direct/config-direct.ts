@@ -24,6 +24,12 @@ import {
   type AuthorizationServiceLike,
   type AuthorizationTarget,
 } from '../../authorization.ts'
+import {
+  credentialOptionsFor,
+  providerOptionsFor,
+  type ProviderCatalogEntry,
+  type ProviderOption,
+} from '../../provider-catalog.ts'
 import type {
   AuthorizationConfig,
   ConfigPort,
@@ -98,6 +104,8 @@ export class DirectConfigPort implements ConfigPort {
 /** The Direct provider-profile config (`ctx.settings`; the llm-pi-ai
  * schema knowledge is adapter-owned — the wizard never names a settings
  * namespace or path). */
+const PROVIDER_ROUTE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
+
 export class DirectProviderProfileConfig implements ProviderProfileConfig {
   private readonly ctx: HostContextLike
 
@@ -113,21 +121,32 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     return this.settings() !== undefined
   }
 
-  readSection(): unknown {
-    const settings = this.settings()
-    if (settings === undefined) return undefined
-    // The llm-pi-ai section is the ONLY provider-config section this
-    // adapter owns — a consumer never names a namespace (the no-schema-
-    // knowledge rule). The value is a DETACHED copy: the caller can never
-    // alias or mutate the Host's live document.
-    return detachedSection(settings.get(settingsNamespace('llm-pi-ai')))
+  /** The llm directory surface (the catalog port's directory source). */
+  private llm(): { listConfigurableProviders(): readonly ProviderCatalogEntry[] } | undefined {
+    return this.ctx.get('llm') as { listConfigurableProviders(): readonly ProviderCatalogEntry[] } | undefined
   }
 
-  readPiAiProviders(): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
-    const section = this.readSection() as
+  /** Read ONE provider-config settings section DETACHED (the section URI
+   * comes from the directory entries — internal to the adapter, a
+   * consumer never names a namespace). */
+  private readSectionInternal(ns: string): unknown {
+    const settings = this.settings()
+    if (settings === undefined) return undefined
+    try {
+      return detachedSection(settings.get(ns))
+    } catch {
+      // An unregistered namespace degrades to undefined (the old read-side
+      // degradation — /login never escapes its command handler).
+      return undefined
+    }
+  }
+
+  /** The llm-pi-ai `providers` dict (route → apiKeyEnv), detached. */
+  private readPiAiProvidersInternal(): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
+    const section = this.readSectionInternal(settingsNamespace('llm-pi-ai')) as
       | { providers?: Record<string, { apiKeyEnv?: string } | undefined> }
       | undefined
-    if (section === undefined) return undefined
+    if (section === undefined || typeof section !== 'object' || section === null) return undefined
     const providers = section.providers
     if (providers === undefined) return undefined
     // Detached copy of the providers dict (route → apiKeyEnv only).
@@ -140,9 +159,46 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     return out
   }
 
+  /** The merged /login option list: the llm configurable-provider
+   * directory over its PER-ENTRY sections when the llm service is
+   * present, the settings-only fallback otherwise. The pure merge stays
+   * in provider-catalog.ts; this adapter only wires the section reads. */
+  listCredentialOptions(): readonly ProviderOption[] {
+    const readSection = (ns: string): unknown => this.readSectionInternal(ns)
+    const llm = this.llm()
+    if (llm !== undefined) {
+      try {
+        return providerOptionsFor(llm.listConfigurableProviders(), readSection)
+      } catch {
+        // A throwing directory read degrades to the settings-only fallback.
+      }
+    }
+    const settingsOnly = credentialOptionsFor(this.readPiAiProvidersInternal())
+    return settingsOnly.map((option, index) => index === 0 ? {
+      ...option,
+      route: 'deepseek-official',
+      configured: true,
+      declared: false,
+      namesCredential: true,
+      group: 'configured' as const,
+      settingsNs: '',
+      settingsPath: [],
+    } : {
+      ...option,
+      route: option.label,
+      configured: true,
+      declared: false,
+      namesCredential: true,
+      group: 'configured' as const,
+      settingsNs: 'llm-pi-ai',
+      settingsPath: ['providers', option.label],
+    })
+  }
+
   async writeProfile(route: string, profile: Record<string, unknown>): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
+    if (!PROVIDER_ROUTE_PATTERN.test(route)) throw new Error('invalid provider route')
     await settings.mutate(settingsNamespace('llm-pi-ai'), [
       { op: 'set', path: ['providers', route], value: profile },
     ])
@@ -151,21 +207,30 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
   async writeKeylessProfile(route: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
-    // The route's profile location is resolved INTERNALLY: the provider
-    // directory entry when the llm service names one, else the
-    // conventional llm-pi-ai providers slot. A route the directory does
-    // not offer (and that is not the conventional fallback) writes
-    // nothing — an arbitrary namespace/path can never reach the mutate.
-    const entry = this.ctx.get('llm') as
-      | { listConfigurableProviders(): readonly ProviderCatalogEntryLike[] }
-      | undefined
-    const directoryEntry = entry?.listConfigurableProviders().find(candidate => candidate.provider === route)
-    const ns = directoryEntry?.settingsNs ?? 'llm-pi-ai'
-    const path = directoryEntry !== undefined && directoryEntry.settingsPath.length > 0
-      ? [...directoryEntry.settingsPath]
-      : ['providers', route]
-    await settings.mutate(ns, [
-      { op: 'set', path, value: {} },
+    // The route becomes a settings path segment in the fallback layout.
+    // Validate it at the Host boundary too: callers normally pass a catalog
+    // route, but a malformed/hostile provider directory must never turn this
+    // write into a path-injection primitive.
+    if (!PROVIDER_ROUTE_PATTERN.test(route)) throw new Error('invalid provider route')
+    // The route's profile location is resolved INTERNALLY from the
+    // CURRENT directory: with the llm service present, the entry's own
+    // section/path is used VERBATIM (a consumer never names a namespace);
+    // a route the directory no longer offers writes NOTHING (a directory
+    // race between the catalog read and the authorization completion must
+    // never fall back to a guessed slot). Only when the llm service is
+    // ABSENT (the settings-only /login fallback) does the conventional
+    // llm-pi-ai slot apply.
+    const llm = this.llm()
+    if (llm === undefined) {
+      await settings.mutate(settingsNamespace('llm-pi-ai'), [
+        { op: 'set', path: ['providers', route], value: {} },
+      ])
+      return
+    }
+    const directoryEntry = llm.listConfigurableProviders().find(candidate => candidate.provider === route)
+    if (directoryEntry === undefined) return
+    await settings.mutate(directoryEntry.settingsNs, [
+      { op: 'set', path: [...directoryEntry.settingsPath], value: {} },
     ])
   }
 }
@@ -179,14 +244,6 @@ function detachedSection(value: unknown): unknown {
   } catch {
     return undefined
   }
-}
-
-/** The structural provider-directory entry shape (the catalog port's
- * DTO — the adapter reads the llm service through the same shape). */
-interface ProviderCatalogEntryLike {
-  readonly provider: string
-  readonly settingsNs: string
-  readonly settingsPath: readonly string[]
 }
 
 /** The Direct credentials config (`ctx.credentials` + the credential

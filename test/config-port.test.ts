@@ -34,13 +34,52 @@ function port(services: Record<string, unknown>): DirectConfigPort {
 
 // ── provider profiles ─────────────────────────────────────────────────────
 
-test('providers read the llm-pi-ai section and degrade when settings is absent', () => {
-  const providers = port({ settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }) }).providers
-  assert.deepEqual(providers.readPiAiProviders(), { acme: { apiKeyEnv: 'ACME_KEY' } })
-  assert.deepEqual(providers.readSection(), { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } })
+test('providers listCredentialOptions merges the directory over PER-ENTRY sections', () => {
+  const providers = port({
+    settings: settings({
+      'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } },
+      'llm-deepseek': { deepseek: { apiKeyEnv: 'DEEPSEEK_LEGACY' } },
+    }),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+        // A NON-llm-pi-ai entry: its profile lives in its OWN section.
+        { provider: 'deepseek', displayName: 'DeepSeek legacy', settingsNs: 'llm-deepseek', settingsPath: ['deepseek'] },
+      ],
+    },
+  }).providers
+  const options = providers.listCredentialOptions()
+  const acme = options.find(option => option.route === 'acme')
+  assert.ok(acme !== undefined)
+  assert.equal(acme.ref, 'ACME_KEY', 'the apiKeyEnv from the llm-pi-ai section wins')
+  assert.equal(acme.configured, true)
+  const legacy = options.find(option => option.route === 'deepseek')
+  assert.ok(legacy !== undefined, 'the llm-deepseek entry is read from ITS OWN section')
+  assert.equal(legacy.ref, 'DEEPSEEK_LEGACY')
+  assert.equal(legacy.configured, true)
+})
+
+test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
+  const providers = port({
+    settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),
+  }).providers
+  const options = providers.listCredentialOptions()
+  assert.equal(options.length, 2, 'deepseek official + the acme route')
+  assert.equal(options[0]!.route, 'deepseek-official')
+  assert.equal(options[1]!.ref, 'ACME_KEY')
   assert.equal(port({}).providers.available(), false)
-  assert.equal(port({}).providers.readPiAiProviders(), undefined)
-  assert.equal(port({}).providers.readSection(), undefined)
+  assert.deepEqual(port({}).providers.listCredentialOptions().map(option => option.route), ['deepseek-official'])
+})
+
+test('providers degrade when reading an unregistered settings namespace', () => {
+  const providers = port({
+    settings: {
+      get: () => { throw new Error('namespace not registered') },
+      mutate: async () => {},
+    },
+  }).providers
+  // The settings-only fallback sees no section: only the official target.
+  assert.deepEqual(providers.listCredentialOptions().map(option => option.route), ['deepseek-official'])
 })
 
 test('providers writeProfile owns the llm-pi-ai schema (the wizard never names a namespace)', async () => {
@@ -70,8 +109,26 @@ test('providers writeKeylessProfile writes an EMPTY profile at the adapter-resol
   assert.deepEqual(writes2, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
 })
 
+test('providers reject malformed routes before writing a settings path', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({ settings: settings({}, writes) }).providers
+  await assert.rejects(() => providers.writeKeylessProfile('../escape'), /invalid provider route/)
+  await assert.rejects(() => providers.writeProfile('acme/escape', {}), /invalid provider route/)
+  assert.deepEqual(writes, [])
+})
+
 test('providers writeKeylessProfile refuses when the settings service is absent (never a silent no-op)', async () => {
   await assert.rejects(() => port({}).providers.writeKeylessProfile('acme'), /settings service unavailable/)
+})
+
+test('providers writeKeylessProfile writes NOTHING when the route vanished from the directory', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    settings: settings({}, writes),
+    llm: { listConfigurableProviders: () => [] },
+  }).providers
+  await providers.writeKeylessProfile('acme')
+  assert.deepEqual(writes, [], 'a directory race must never fall back to a guessed slot')
 })
 
 test('config DTOs are DETACHED — mutating a returned value never aliases Host data', async () => {
@@ -103,9 +160,14 @@ test('config DTOs are DETACHED — mutating a returned value never aliases Host 
   const names = config.permissions.presetNames()
   ;(names as string[])[0] = 'MUTATED'
   assert.deepEqual(flows.length > 0 ? [] : [], [])
-  const piAi = config.providers.readPiAiProviders()!
-  piAi['acme']!.apiKeyEnv = 'MUTATED'
-  assert.equal((config.providers.readSection() as { providers: Record<string, { apiKeyEnv?: string }> }).providers['acme']!.apiKeyEnv, 'ACME_KEY', 'the section read is a detached copy')
+  const options = config.providers.listCredentialOptions()
+  const acme = options.find(option => option.route === 'acme')
+  assert.ok(acme !== undefined)
+  // The DTO is detached: mutating the returned option never reaches the
+  // Host section (the settings fake holds the live document).
+  ;(acme as { ref: string }).ref = 'MUTATED'
+  const again = config.providers.listCredentialOptions()
+  assert.equal(again.find(option => option.route === 'acme')!.ref, 'ACME_KEY', 'the merged options are never aliased')
 })
 
 // ── credentials ───────────────────────────────────────────────────────────

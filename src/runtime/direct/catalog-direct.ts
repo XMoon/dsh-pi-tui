@@ -317,18 +317,24 @@ function toSkillDefinitionDto(skill: SkillSummaryLike): SkillDefinitionDto | und
 }
 
 /** Detached copy of the opaque resource base (the consumer validates the
- * shape; only a shallow object copy crosses — never the Host object). */
+ * shape). Resource metadata may contain nested provider-owned objects, so a
+ * shallow spread is insufficient for the DTO boundary. Non-JSON values are
+ * refused rather than leaking a live Host object. */
 function detachedResourceBase(value: unknown): unknown {
-  if (typeof value !== 'object' || value === null) return value
-  return { ...(value as Record<string, unknown>) }
+  try {
+    return JSON.parse(JSON.stringify(value))
+  } catch {
+    return undefined
+  }
 }
 
-/** Detached copy of the invocation policy flags. */
+/** Detached copy of the invocation policy flags. Only booleans are valid
+ * policy values; refusing arbitrary objects also prevents nested aliasing. */
 function detachedInvocation(value: unknown): { modelInvocable?: unknown; userInvocable?: unknown } | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const record = value as Record<string, unknown>
   return {
-    ...record.modelInvocable === undefined ? {} : { modelInvocable: record.modelInvocable },
-    ...record.userInvocable === undefined ? {} : { userInvocable: record.userInvocable },
+    ...typeof record.modelInvocable === 'boolean' ? { modelInvocable: record.modelInvocable } : {},
+    ...typeof record.userInvocable === 'boolean' ? { userInvocable: record.userInvocable } : {},
   }
 }

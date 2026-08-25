@@ -55,8 +55,8 @@ import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
-import type { Catalog, ModelCatalog } from './runtime/catalog-port.ts'
-import type { ConfigPort, ProviderProfileConfig } from './runtime/config-port.ts'
+import type { Catalog } from './runtime/catalog-port.ts'
+import type { ConfigPort } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
 import {
   credentialOptionsFor,
@@ -532,49 +532,6 @@ export function extensionHealthRows(runner: TuiCommandRunner): { id: string; lab
         ).join(' · '),
   })
   return rows
-}
-
-/** Read the merged /login option list: the llm configurable-provider
- * directory when the llm service is present, the settings-only fallback
- * otherwise. The directory read and the section reads go through the
- * semantic ports (migration M1.8/M1.9) — never the raw services. */
-function readProviderOptions(models: ModelCatalog, providers: ProviderProfileConfig): ProviderOption[] {
-  // The section read is the adapter-owned llm-pi-ai read (no namespace
-  // knowledge in the command surface); the directory entries' sections
-  // are all served by the same adapter-owned section.
-  const readSection = (): unknown => providers.readSection()
-  const entries = models.listConfigurableProviders()
-  if (entries !== undefined) {
-    try {
-      return providerOptionsFor(entries, readSection)
-    } catch {
-      // A throwing directory read degrades to the settings-only fallback.
-    }
-  }
-  // Settings-only fallback (old behavior): deepseek official plus every
-  // llm-pi-ai route the section declares. The settings-only reader only
-  // sees routes that NAME a credential (credentialOptionsFor skips keyless
-  // profiles), so every fallback option names its reference.
-  const settingsOnly = credentialOptionsFor(providers.readPiAiProviders())
-  return settingsOnly.map((option, index) => index === 0 ? {
-    ...option,
-    route: 'deepseek-official',
-    configured: true,
-    declared: false,
-    namesCredential: true,
-    group: 'configured' as const,
-    settingsNs: '',
-    settingsPath: [],
-  } : {
-    ...option,
-    route: option.label,
-    configured: true,
-    declared: false,
-    namesCredential: true,
-    group: 'configured' as const,
-    settingsNs: 'llm-pi-ai',
-    settingsPath: ['providers', option.label],
-  })
 }
 
 /** Build the merged /login picker rows: reference targets (the API-key
@@ -2652,7 +2609,7 @@ export function registerTuiCommands(
       // the provider catalog, authorization flows from the seam. An absent
       // authorization service degrades to the reference-only surface.
       const targets = runner.config.authorization.listTargets()
-      const options = readProviderOptions(runner.catalog.models, runner.config.providers)
+      const options = runner.config.providers.listCredentialOptions()
       const merged = mergeLoginTargets(options, targets)
       const arg = invocation.rawInput.trim()
       let route: string | undefined
@@ -2767,7 +2724,7 @@ export function registerTuiCommands(
       const credentials = runner.config.credentials
       if (!credentials.available()) return { kind: 'error', text: 'credentials service unavailable' }
       const targets = runner.config.authorization.listTargets()
-      const options = readProviderOptions(runner.catalog.models, runner.config.providers)
+      const options = runner.config.providers.listCredentialOptions()
       const arg = invocation.rawInput.trim()
       if (arg !== '') {
         // A configured/derived reference name takes the reference path
