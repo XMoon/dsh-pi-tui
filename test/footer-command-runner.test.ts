@@ -121,7 +121,11 @@ test('requests within the interval NEVER overlap a running child (coalescing gua
   // in-interval request coalesces, it does not kill or shadow the child.
   const outputs: Array<string[] | undefined> = []
   const runner = new FooterCommandRunner({
-    config: { ...CONFIG, command: 'node -e "setTimeout(() => process.stdout.write(\'slow\\n\'), 150)"' },
+    // A child that takes ~150ms and a GENEROUS timeout (the production
+    // 300ms default is too tight under packed-suite load — the child must
+    // never be killed by the runner's own timeout or the test measures
+    // timeout behavior instead of the coalescing guarantee).
+    config: { ...CONFIG, timeoutMs: 10000, command: 'node -e "setTimeout(() => process.stdout.write(\'slow\\n\'), 150)"' },
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,
@@ -129,9 +133,12 @@ test('requests within the interval NEVER overlap a running child (coalescing gua
     signal: new AbortController().signal,
   })
   runner.requestRefresh()
-  // A second request lands INSIDE the interval: it must coalesce.
+  // A second request lands INSIDE the interval (the first child is still
+  // in flight): it must COALESCE — never a second spawn, never a kill of
+  // the running child. Give the spawn a moment to start, then fire.
   await new Promise(resolve => setTimeout(resolve, 20))
   runner.requestRefresh()
+  // Wait for the first child's completion EVENT (bounded poll).
   const deadline = Date.now() + 5000
   while (outputs.length === 0 && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 10))

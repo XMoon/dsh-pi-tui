@@ -247,6 +247,23 @@ layer of your settings document. A repository/project-supplied
 native layout applies. Failures (empty output, non-zero exit, timeout)
 fall back to the native layout automatically.
 
+### Extension footer items
+
+Plugins can contribute **configurable footer items** through the Stable
+extension API (`@xmoon76/dsh-pi-tui/extensions`): register a
+`FooterItemContribution` on the `chrome.footer.item` slot — a label and a
+plain-data `segment` (styled spans; the host strips any terminal control
+sequence, plugins never style the terminal). Users show/hide, reorder and
+zone-place the item in `/footer` exactly like a builtin item. Feature-detect
+the `slot.chrome.footer.item` capability before registering (it is
+advertised before any surface exists). The item's config identity is the
+canonical key `ext:<owner>/<id>` where the owner is the plugin's stable
+name — **stable across HMR**: a layout referencing an unloaded plugin's
+item keeps the reference and recovers automatically when the plugin
+reloads. The legacy `chrome.footer.status` slot is unchanged: its segments
+aggregate into the single `ext:*` item. Full author guide:
+[docs/extension-api.md](docs/extension-api.md).
+
 ## Common keys
 
 | Key           | Action                                              |

@@ -301,3 +301,38 @@ test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the
 function hostFooterIds(app: TuiApp): string[] {
   return app.getFooterItemRegistry().ids()
 }
+
+test("a configurable footer item span text is SANITIZED (no terminal control reaches the render)", async () => {
+  const ctx = new Context()
+  try {
+    const { service } = await mountTree(ctx)
+    const { vt, app } = attachApp(service)
+    const evil = '\u001b]0;title\u0007\u001b[2J\u001b[?1049hOSC52:\u001b]52;c;YQ==\u0007clean \u001b[31mred\u001b[0m \u009b1;1H'
+    service.register<FooterItemContribution>('chrome.footer.item', { id: 'evil', order: 100 }, {
+      label: 'Evil',
+      segment: { spans: [{ text: evil }], minWidth: 4 },
+    })
+    await settle()
+    await vt.waitForRender()
+    const key = canonicalKey(service, 'chrome.footer.item', 'evil')
+    app.setFooterLayout({
+      schemaVersion: 1,
+      rows: [{ left: [{ id: key }], right: [] }],
+    })
+    app.setStatus({})
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    // The plain text survives; every control sequence is stripped.
+    assert.ok(view.includes('clean'), `the plain text must survive:\n${view}`)
+    assert.ok(view.includes('red'), `the SGR body text must survive (sequence stripped):\n${view}`)
+    assert.ok(!view.includes('\u001b'), `no ESC sequence may reach the terminal:\n${JSON.stringify(view)}`)
+    assert.ok(!view.includes('\u009b'), `no C1 CSI may reach the terminal:\n${JSON.stringify(view)}`)
+    assert.ok(!view.includes('YQ=='), `the OSC 52 clipboard payload must be stripped:\n${view}`)
+    assert.ok(!view.includes('1;1H'), `the C1 CSI cursor move must be stripped:\n${view}`)
+    app.stop()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
