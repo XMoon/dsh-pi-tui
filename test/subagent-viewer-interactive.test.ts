@@ -507,6 +507,7 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   await vt.waitForRender()
   app.setViewerFooter({
     label: 'research',
+    childSessionId: 'child-1',
     mode: 'continuable',
     activity: 'running',
     cwd: '/child-workspace',
@@ -548,6 +549,7 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
   await vt.waitForRender()
   app.setViewerFooter({
     label: 'audit',
+    childSessionId: 'child-1',
     mode: 'one-shot',
     activity: 'inactive',
     cwd: '',
@@ -583,6 +585,7 @@ test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 
   await vt.waitForRender()
   app.setViewerFooter({
     label: 'research',
+    childSessionId: 'child-1',
     mode: 'continuable',
     activity: 'running',
     cwd: '',

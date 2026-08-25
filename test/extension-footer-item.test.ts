@@ -73,6 +73,23 @@ function attachApp(service: PiTuiExtensionServiceLike): { vt: VirtualTerminal; a
   return { vt, app, host }
 }
 
+test('slot.chrome.footer.item is advertised BEFORE any surface exists', async () => {
+  const ctx = new Context()
+  try {
+    const { service } = await mountTree(ctx)
+    // No surface attached: the advertised baseline must already expose the
+    // item slot so a plugin can feature-detect at apply() time and
+    // register-before-surface (the plan's registration contract).
+    const api = (service as unknown as { api(): { capabilities: ReadonlySet<string> } }).api()
+    assert.ok(api.capabilities.has('slot.chrome.footer.item'),
+      'the item slot capability must be advertised from service-provide time')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
 test('a plugin registers a configurable footer item; the composer renders it under the canonical key', async () => {
   const ctx = new Context()
   try {
@@ -196,21 +213,19 @@ test('the configurator lists extension items in the Available section and can ad
   }
 })
 
-test('same id under different owners is two distinct config keys across HMR; the legacy status slot is untouched', async () => {
+test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the key (HMR contract)', async () => {
   const ctx = new Context()
   try {
     const { service } = await mountTree(ctx)
     const { vt, app } = attachApp(service)
-    // Fiber A registers 'quota'; the ledger's (slot, id) uniqueness means
-    // a second LIVE registration with the same id is an explicit error —
-    // the OWNER-scoped canonical key matters across HMR: after A unloads,
-    // B's same-id registration is a NEW config identity.
-    const fiberA = ctx.plugin((c) => {
+    // NAMED plugins: the owner is the stable plugin name, so two
+    // DIFFERENT plugins with the same item id get distinct config keys.
+    const fiberA = ctx.plugin({ name: 'quota-a', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as PiTuiExtensionServiceLike
       svc.register<FooterItemContribution>('chrome.footer.item', { id: 'quota' }, {
         label: 'Quota A', segment: { spans: [{ text: 'A' }] },
       })
-    })
+    } })
     await fiberA
     const keyA = canonicalKey(service, 'chrome.footer.item', 'quota')
     assert.ok(hostFooterIds(app).includes(keyA), `owner-a key missing: ${keyA}`)
@@ -218,26 +233,54 @@ test('same id under different owners is two distinct config keys across HMR; the
     await settle()
     assert.ok(!hostFooterIds(app).includes(keyA), `the unloaded owner's key must disappear: ${keyA}`)
 
-    // Fiber B registers the SAME id: a new canonical key.
-    const fiberB = ctx.plugin((c) => {
+    // A DIFFERENT named plugin with the same id: a distinct config key.
+    const fiberB = ctx.plugin({ name: 'quota-b', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as PiTuiExtensionServiceLike
       svc.register<FooterItemContribution>('chrome.footer.item', { id: 'quota' }, {
         label: 'Quota B', segment: { spans: [{ text: 'B' }] },
       })
-    })
+    } })
     await fiberB
     const keyB = canonicalKey(service, 'chrome.footer.item', 'quota')
-    assert.ok(keyB !== keyA, 'the same id under a new owner must be a NEW config key')
+    assert.ok(keyB !== keyA, 'the same id under a different NAMED plugin must be a NEW config key')
     assert.ok(hostFooterIds(app).includes(keyB), `owner-b key missing: ${keyB}`)
     await (fiberB as { dispose(): Promise<void> }).dispose()
     await settle()
 
-    // The legacy chrome.footer.status slot still works through ext:*.
+    // HMR RELOAD of the SAME plugin: the new fiber gets a new uid but the
+    // SAME name — the canonical key must be IDENTICAL so a persisted
+    // layout referencing ext:<owner>/<id> recovers automatically.
+    const fiberC = ctx.plugin({ name: 'quota-a', apply(c) {
+      const svc = c.get('piTuiExtensions') as unknown as PiTuiExtensionServiceLike
+      svc.register<FooterItemContribution>('chrome.footer.item', { id: 'quota' }, {
+        label: 'Quota A reloaded', segment: { spans: [{ text: 'A2' }] },
+      })
+    } })
+    await fiberC
+    const keyC = canonicalKey(service, 'chrome.footer.item', 'quota')
+    assert.equal(keyC, keyA, 'a reloaded plugin must recover the SAME config key')
+    assert.ok(hostFooterIds(app).includes(keyC), `the recovered key must be live: ${keyC}`)
+    // The layout reference resolves again: a persisted layout pointing at
+    // the recovered key renders the reloaded plugin's item.
+    app.setFooterLayout({
+      schemaVersion: 1,
+      rows: [{ left: [{ id: keyC }], right: [] }],
+    })
+    app.setStatus({})
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(view.includes('A2'), `the recovered item must render:\n${view}`)
+    await (fiberC as { dispose(): Promise<void> }).dispose()
+    await settle()
+
+    // The legacy chrome.footer.status slot still works through ext:*
+    // (the default layout).
+    app.setFooterLayout(undefined)
     const legacy = service.register<{ spans: Array<{ text: string }> }>('chrome.footer.status', { id: 'legacy-seg' }, { spans: [{ text: '[LEGACY]' }] })
     await settle()
     await vt.waitForRender()
-    const view = vt.getViewport().join('\n')
-    assert.ok(view.includes('[LEGACY]'), `the legacy status segment must still render:\n${view}`)
+    const legacyView = vt.getViewport().join('\n')
+    assert.ok(legacyView.includes('[LEGACY]'), `the legacy status segment must still render:\n${legacyView}`)
     legacy.dispose()
     app.stop()
   } finally {
