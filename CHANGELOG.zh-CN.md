@@ -7,6 +7,49 @@
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-25
+
+### 新增
+
+- **Ctrl+R 搜索你的输入历史。** 编辑器上方打开一个模态面板:实时输入
+  过滤历史,`↑/↓` 在匹配项间移动,详情区展示完整多行提示词、目录、时间
+  与会话。`Tab` 循环切换 scope——`Current session`(当前会话)→
+  `Current directory`(当前目录)→ `All directories`(全部目录)(查询词
+  保留)。有活跃会话时 `Current session` 是默认档:只显示当前会话自己
+  的输入(v2 行携带 session id,legacy 行绝不猜测归属);id 在面板打开
+  时一次性捕获,切换会话后下一次 Ctrl+R 搜索的就是新会话;deferred
+  start(尚无会话)时面板回退到 `Current directory` 并隐藏会话 tab。
+  搜索是有界、最近优先的:通过 reverse reader 从 canonical JSONL 存储
+  尾部倒序读取,消耗全局扫描预算(每次搜索在所有文件中最多 5000 条
+  physical lines,绝不是每文件 5000),并优先访问最近活跃的 workspace
+  ——大历史不再每次查询都付出全量解析成本,canonical 文件永远不会被
+  整体读取。结果现在是分页的:当还有更老的历史时,source 返回
+  continuation,可精确从上次停止处继续(不重扫、不重复行)——这是未来
+  "Search older" UI 的基础。`Enter` 把选中的历史文本放回编辑器继续
+  编辑——绝不提交——`Esc` 取消且草稿原样保留。新行以 v2 schema 写入,
+  携带 cwd、时间戳与会话 id,跨 workspace 结果按时间全局排序;旧 v1
+  行永远可读,在无法证明其目录时诚实地显示 `Unknown (legacy history)`
+  (且目录只能在扫描窗口之外证明时可能从 `All directories` 中省略)。
+  `↑`/`↓` 回溯仍只从最近 100 条播种。
+
+- **`/tasks` 以树形展示完整的 subagent 世系。** 浏览器现在读取 durable
+  的后代目录(`listDescendants`):子代理的子代理会挂在父节点之下,按深度
+  缩进并带 `├─` 连接符,顺序为稳定的 pre-order——运行中的孙节点绝不会
+  跳到其 inactive 父节点之上,jobs 仍然作为树后的独立平铺组。已结束的
+  one-shot 子代理仍然可达:`inactive` 只是 live-store 的存在状态,不是
+  结果,所以 Enter 依然能打开其持久化 transcript。浏览器打开时光标落在
+  第一个 RUNNING 子代理上(或第一个活跃 job),但绝不为光标重排树。
+  查看嵌套(深度 > 1)后代时只读——mode 是持久语义,access 是当前表面
+  的权限,只有直接(深度 1)continuable 子代理可从根交互;头部会标注
+  `<mode> · nested · read-only from this parent`(始终显示真实 mode——
+  continuable 或 one-shot)。
+
+- **选中行的超长标签现在会横向滚动(marquee)。** 选中的 task 或 session
+  行标签超出列宽时,标签会水平滚动(停顿 → 每 250ms 一列 → 尾部停顿 →
+  循环),而不是静止截断——只有**主标签**在动;树连接符、当前会话标记、
+  mode 后缀、状态与耗时保持固定,CJK/emoji/ZWJ 不会在字素中间裂开。
+  未选中行保持省略号,每个面板只有一个 marquee 定时器(关闭时销毁)。
+
 ### 变更
 
 - **Thinking 块是 disclosure,不再是 visibility。** `Alt+T` 不再隐藏或
@@ -25,19 +68,46 @@
   离开 fullscreen 时清理陈旧的 per-card 点击状态,regular 永远只跟随
   bulk。
 
+- **`!` / `!!` shell 行升级为一等公民的编辑器模式。** shell 前缀不再是
+  草稿文本的一部分:在空输入框输入 `!`(本地执行并把命令与输出提交给
+  会话)或 `!!`(纯本地执行,不进会话)即切换到 shell 模式——提示符
+  本身变成 `!`/`!!`,缓冲区内只有命令本身,空 shell 行上按 Backspace
+  或 Esc 回到普通 `❯` 提示符。粘贴 `!git status` 会落成「模式 + 命令」,
+  而不是字面文本,shell 模式文档的每一行都走真实 shell 语义。补全跟随
+  **当前可见**模式:shell 行补全路径(不触发斜杠命令),普通 prompt 行
+  保留斜杠命令补全,补全下拉在 pageUp/pageDown 后仍然存活。Ctrl+C 连同
+  草稿一起退出该模式;模式会完整穿越 busy-Esc、steer 交接与
+  replacement-editor fallback——提交时 host 收到的仍是完整的 `!`/`!!`
+  行。
+
+- **本地 `!`/`!!` shell 卡片改为预览,不再刷屏。** 运行中的卡片折叠为
+  最新 5 行,已结束的卡片最多显示 20 个视觉行(超长行会换行并按多行计),
+  各自带诚实的隐藏行数标记——Ctrl+O(与折叠最近工具回合的同一个主开关)
+  展开到 retained buffer,命令仍在跑时也会实时跟随。capture 层完全不动
+  (字节/行/磁盘上限仍然掌管内存);被约束的只是卡片**展示**的内容。
+  **Alt+K** 快速清除已结束的卡片(运行中的卡片绝不会被清除,进程也不会
+  被取消——那是 Esc 的职责——已经提交的 `!` context payload 不受影响);
+  `!!` 仍然是纯本地。
+
+### 修复
+
+- **Linux Wayland/X11 下 Ctrl+V 图片粘贴恢复可用。** 剪贴板 runner 执行
+  `wl-paste`/`xclip` 时未显式指定编码,二进制 stdout 被当作 UTF-8 解码,
+  非法字节被替换——PNG magic 变成 `EF BF BD …`,图片解析器无法识别
+  载荷,粘贴静默无反应。runner 现在强制 `encoding: 'buffer'`,stdout/
+  stderr 全程保持原始字节,并有逐字节回归测试守护该路径。Ctrl+V 也
+  补进了 host 保留键清单,与 host 自身的生命周期处理保持一致。
+
+- **Task 弹层不再在边框旁出现黑色遮罩。** 声明了固定宽度的带框弹层现在
+  精确填满该宽度(`Frame(child, true)`):picker、task 浏览器、设置与
+  输出查看器盒子在每一行都占满声明的矩形——compositor 补出来的空白
+  (深色终端上就是一条黑带)消失了。按终端宽度计算的 approval 对话框
+  保持不变。
+
 ## [0.3.3] - 2026-08-24
 
 ### 新增
 
-- **Ctrl+R 搜索你的输入历史。** 编辑器上方打开一个模态面板:实时输入
-  过滤当前目录的历史,`Tab` 在 `Current directory`(当前目录)与
-  `All directories`(全部目录)之间切换(查询词保留),`↑/↓` 在匹配项间
-  移动,详情区展示完整多行提示词、目录、时间与会话。`Enter` 把选中的
-  历史文本放回编辑器继续编辑——绝不提交——`Esc` 取消且草稿原样保留。
-  `↑/↓` 回溯仍只从最近 100 条播种,而搜索读取完整 canonical JSONL
-  (读取不再裁剪文件)。新行以 v2 schema 写入,携带 cwd 与时间戳,
-  全目录结果按时间全局排序;旧 v1 行永远可读,在无法证明其目录时
-  诚实地显示 `Unknown (legacy history)`。
 - **continuable 子代理查看器现在可交互。** 从 `/tasks` 进入 `continuable`
   子代理时,打开的是一个实时对话界面:编辑器持有子代理自己的草稿(与主
   会话草稿隔离,再次进入时保留),回车把文本作为子代理的**下一回合**
@@ -98,43 +168,8 @@
   `parentSession`/`seedLength` 的 agent 创建),因此 preset、provider/model
   与 cwd 的继承在两个表面之间永远不会漂移;`/fork` 现在使用当前会话的
   cwd,而不是启动时捕获的值。
-- **`/tasks` 以树形展示完整的 subagent 世系。** 浏览器现在读取 durable
-  的后代目录(`listDescendants`):子代理的子代理会挂在父节点之下,按深度
-  缩进并带 `├─` 连接符,顺序为稳定的 pre-order——运行中的孙节点绝不会
-  跳到其 inactive 父节点之上,jobs 仍然作为树后的独立平铺组。已结束的
-  one-shot 子代理仍然可达:`inactive` 只是 live-store 的存在状态,不是
-  结果,所以 Enter 依然能打开其持久化 transcript。浏览器打开时光标落在
-  第一个 RUNNING 子代理上(或第一个活跃 job),但绝不为光标重排树。
-  查看嵌套(深度 > 1)后代时只读——mode 是持久语义,access 是当前表面
-  的权限,只有直接(深度 1)continuable 子代理可从根交互;头部会标注
-  `<mode> · nested · read-only from this parent`(始终显示真实 mode——
-  continuable 或 one-shot)。
-- **选中行的超长标签现在会横向滚动(marquee)。** 选中的 task 或 session
-  行标签超出列宽时,标签会水平滚动(停顿 → 每 250ms 一列 → 尾部停顿 →
-  循环),而不是静止截断——只有**主标签**在动;树连接符、当前会话标记、
-  mode 后缀、状态与耗时保持固定,CJK/emoji/ZWJ 不会在字素中间裂开。
-  未选中行保持省略号,每个面板只有一个 marquee 定时器(关闭时销毁)。
 
 ### 变更
-
-- **本地 `!`/`!!` shell 卡片改为预览,不再刷屏。** 运行中的卡片折叠为
-  最新 5 行,已结束的卡片最多显示 20 个视觉行(超长行会换行并按多行计),
-  各自带诚实的隐藏行数标记——Ctrl+O(与折叠最近工具回合的同一个主开关)
-  展开到 retained buffer,命令仍在跑时也会实时跟随。capture 层完全不动
-  (字节/行/磁盘上限仍然掌管内存);被约束的只是卡片**展示**的内容。
-  **Alt+K** 快速清除已结束的卡片(运行中的卡片绝不会被清除,进程也不会
-  被取消——那是 Esc 的职责——已经提交的 `!` context payload 不受影响);
-  `!!` 仍然是纯本地。
-- **Focus 模式现在是 surface-adaptive 的。** 常规模式完全由键盘驱动:
-  Ctrl+O 派生展开最近几个 Focus Thought 的完整过程(绝不写入手工
-  disclosure 状态),Thinking 默认隐藏、Alt+T 显示(已被 2026-08-25
-  的统一 disclosure 模型取代——Thinking 默认紧凑,Alt+T 只选 detail
-  级别,块永远不会被隐藏),任何已展开的 Thought 根都会完整展开其
-  过程。全屏模式由鼠标驱动:展开 Thought 时
-  视口**跟随末尾**(最新内容保持在视野内),收起时锚定头部;过程时间线
-  显示**紧凑**的二级卡片,点击单个卡片完整展开(attachment > secondary
-  > outer Thought),折叠提示为 `(click to expand)`。全屏的逐卡点击
-  不会泄漏到键盘表面,反之亦然。
 
 - **Esc 不再清空你的队列。** 中断 agent(忙碌时按一次 Esc,空闲时按两次)
   现在会保留已排队的输入——与 web Stop 按钮相同的 `keepInbox` 语义。
@@ -151,11 +186,6 @@
 
 ### 修复
 
-- **Task 弹层不再在边框旁出现黑色遮罩。** 声明了固定宽度的带框弹层现在
-  精确填满该宽度(`Frame(child, true)`):picker、task 浏览器、设置与
-  输出查看器盒子在每一行都占满声明的矩形——compositor 补出来的空白
-  (深色终端上就是一条黑带)消失了。按终端宽度计算的 approval 对话框
-  保持不变。
 - **Session transition 现在是单写事务。** `/new`、`/fork`、`/rewind` 与
   `/sessions` 切换统一走同一个事务(顺序由 `src/transition.ts` 固定并
   单元测试):先让**旧** agent 安静(`whenIdle`——busy 时的切换现在会
@@ -275,39 +305,6 @@
   以及 vendored pi-tui 类型——被内联进发布的 `.d.mts`,触发 tarball
   声明泄漏门禁失败。该函数现在只接收一个最小结构化表面(phase/busy/
   working 三个 setter),`dist/` 声明仅保留公开 runner 表面。
-
-## [Unreleased]
-
-### 变更
-
-- **Ctrl+R 默认改为当前会话，并新增第三档 scope。** `Tab` 现在循环
-  `Current session`(当前会话)→ `Current directory`(当前目录)→
-  `All directories`(全部目录)(查询词保留)。`Current session`——有
-  活跃会话时的新默认——只显示当前会话自己的输入(v2 行携带 session id,
-  legacy 行绝不猜测归属),所以 Ctrl+R 首先给出的是**本次对话**输入过
-  什么,而 `Current directory` 与 `All directories` 保留跨会话检索能力。
-  deferred start(尚无会话)时面板回退到 `Current directory` 并隐藏
-  会话 tab。session id 在面板打开时一次性捕获,因此切换会话后下一次
-  Ctrl+R 搜索的就是新会话。scope tab 是响应式的(宽终端完整标签,
-  窄终端短标签)。
-- **Ctrl+R 历史搜索改为有界、最近优先。** 不再每次按键都完整解析所有候选
-  历史文件：搜索通过新的 reverse reader 从 JSONL 存储尾部倒序读取，消耗
-  全局扫描预算（每次搜索在所有文件中最多 5000 条 physical lines，绝不是
-  每文件 5000），并优先访问最近活跃的 workspace。大历史不再每次查询都付出
-  全量解析成本，canonical 文件永远不会被整体读取。搜索结果现在是分页的：
-  当还有更老的历史时，source 返回 continuation，可精确从上次停止处继续
-  （不重扫、不重复行）——这是未来 "Search older" UI 的基础。目录只能在
-  扫描窗口之外证明的 legacy 行可能从 `All directories` 中省略（有意的
-  coverage trade-off；v2 cwd 验证规则本身不变）。
-
-### 修复
-
-- **Linux Wayland/X11 下 Ctrl+V 图片粘贴恢复可用。** 剪贴板 runner 执行
-  `wl-paste`/`xclip` 时未显式指定编码,二进制 stdout 被当作 UTF-8 解码,
-  非法字节被替换——PNG magic 变成 `EF BF BD …`,图片解析器无法识别
-  载荷,粘贴静默无反应。runner 现在强制 `encoding: 'buffer'`,stdout/
-  stderr 全程保持原始字节,并有逐字节回归测试守护该路径。Ctrl+V 也
-  补进了 host 保留键清单,与 host 自身的生命周期处理保持一致。
 
 ## [0.3.2] - 2026-08-22
 
@@ -937,7 +934,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...v0.3.1

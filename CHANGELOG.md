@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-25
+
+### Added
+
+- **Ctrl+R searches your input history.** The modal panel opens over the
+  editor: type to filter the history live, `↑/↓` to move through the
+  matches, and a details pane shows the full multi-line prompt, its
+  directory, timestamp and session. `Tab` cycles the scope —
+  `Current session` → `Current directory` → `All directories` (the query
+  survives). `Current session` is the default while a session is live:
+  it shows only the current session's own inputs (v2 rows carry the
+  session id; legacy rows are never guessed into a session), the id is
+  captured at panel open time so a session switch makes the next Ctrl+R
+  search the new session, and on a deferred start (no session yet) the
+  panel falls back to `Current directory` and hides the session tab.
+  The search is bounded and recent-first: it reads the canonical JSONL
+  store from the tail backwards through a reverse reader with a global
+  scan budget (5000 physical lines per search across all files, never
+  per file) and visits the most recently active workspaces first —
+  large histories never cost a full parse per query, and the canonical
+  files are never read whole. The result is a page: when older history
+  remains, the source returns a continuation that resumes exactly where
+  the search stopped (no re-scanning, no duplicate rows) — the
+  foundation for a future "Search older" UI. `Enter` puts the selected
+  history back into the editor for editing — it never submits — and
+  `Esc` cancels with the draft untouched. New rows are written in a v2
+  schema carrying cwd, timestamp and session, so cross-workspace
+  results order globally by time; legacy v1 rows stay readable forever
+  and honestly show `Unknown (legacy history)` when their directory
+  cannot be proven (they may be omitted from `All directories` when
+  they can only be proven outside the scanned window). `↑`/`↓` recall
+  still seeds from the latest 100 entries.
+
+- **`/tasks` shows the full subagent lineage as a tree.** The browser now
+  reads the durable descendant catalog (`listDescendants`): a subagent's
+  subagent appears under its parent with a `├─` connector indented by
+  depth, in stable pre-order — a running grandchild never jumps above its
+  inactive parent, and jobs stay their own flat group after the tree. A
+  FINISHED one-shot child stays reachable: `inactive` is live-store
+  presence, not an outcome, so Enter still opens its persisted
+  transcript. The cursor lands on the first RUNNING subagent when the
+  browser opens (or the first active job), without ever re-sorting the
+  tree. Viewing a NESTED (depth > 1) descendant is read-only — mode is
+  the durable semantic, access is the surface authority, and only a
+  direct continuable child is interactive from the root; the header
+  advertises `<mode> · nested · read-only from this parent` (the real
+  mode — continuable or one-shot — is always shown).
+
+- **The selected row's long label marquees.** A selected task or session
+  row whose label overflows its column scrolls the label horizontally
+  (pause → one cell per 250ms → tail pause → loop) instead of sitting
+  truncated — only the MAIN label moves; the tree connector, the current-
+  session marker, the mode suffix, status and elapsed stay fixed, and
+  CJK/emoji/ZWJ never split mid-grapheme. Unselected rows keep the
+  ellipsis, and only one marquee timer per panel exists (disposed on
+  close).
+
 ### Changed
 
 - **Thinking blocks are disclosure, not visibility.** `Alt+T` no longer
@@ -28,23 +85,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preference survives Focus and fullscreen switches; leaving fullscreen
   clears stale per-card click states so regular always follows the bulk.
 
+- **`!` / `!!` shell lines are a first-class editor mode.** The shell
+  prefix is no longer part of the draft text: typing `!` (run the
+  command and submit it with its output to the session) or `!!` (run
+  purely locally) in an empty input switches the editor into shell
+  mode — the prompt itself becomes `!`/`!!`, the buffer holds only the
+  command, and Backspace or Esc on an empty shell line returns to the
+  normal `❯` prompt. Pasting `!git status` lands as mode + command, not
+  as literal text, and every line of a shell-mode document routes
+  through the real shell semantics. Completion follows the VISIBLE
+  mode: shell lines complete paths (never slash commands), prompt lines
+  keep slash-command completion, and the completion dropdown survives
+  pageUp/pageDown. Ctrl+C exits the mode together with its draft, and
+  the mode travels intact through busy-Esc, steer handoffs and the
+  replacement-editor fallback — the host still receives the verbatim
+  `!`/`!!` line on submit.
+
+- **Local `!`/`!!` shell cards preview instead of flooding the screen.**
+  A running card collapses to the newest 5 lines, a settled card to at
+  most 20 visual rows (long lines wrap and count as several), each with
+  an honest hidden-line marker — and Ctrl+O (the same master switch that
+  folds recent tool turns) expands to the retained buffer, streaming
+  live while the command still runs. The capture layer is untouched
+  (the byte/line/disk caps still own memory); only what the card SHOWS
+  is bounded. **Alt+K** quick-dismisses the settled cards (a running
+  card is never dismissed, the process is not cancelled — Esc owns that
+  — and an already-submitted `!` context payload is untouched); `!!`
+  stays local-only.
+
+### Fixed
+
+- **Ctrl+V image paste works again on Linux Wayland/X11.** The clipboard
+  runner executed `wl-paste`/`xclip` without an explicit encoding, so
+  binary stdout was decoded as UTF-8 and invalid bytes were replaced —
+  PNG magic arrived as `EF BF BD …`, the image parser could not recognize
+  the payload, and the paste silently did nothing. The runner now forces
+  `encoding: 'buffer'`, keeping stdout/stderr as raw bytes end to end, and
+  a byte-for-byte regression test guards the path. Ctrl+V is also recorded
+  in the host-reserved key inventory, matching the host's own lifecycle
+  handling.
+
+- **Task overlays no longer draw a black mask beside the border.** A
+  framed overlay that declares a fixed width now fills exactly that
+  width (`Frame(child, true)`): the picker, task browser, settings and
+  output viewer boxes span the full declared rectangle on every row —
+  the compositor's leftover padding (a black band on dark terminals)
+  is gone. The computed-width approval dialog is unchanged.
+
 ## [0.3.3] - 2026-08-24
 
 ### Added
 
-- **Ctrl+R searches your input history.** A modal panel opens over the
-  editor: type to filter the per-directory history live, `Tab` to switch
-  between `Current directory` and `All directories` (the query survives),
-  `↑/↓` to move through the matches, and a details pane shows the full
-  multi-line prompt, its directory, timestamp and session. `Enter` puts
-  the selected history back into the editor for editing — it never
-  submits — and `Esc` cancels with your draft untouched. `↑/↓` recall
-  still seeds from the latest 100 entries, while the search reads the
-  full canonical JSONL (which is no longer trimmed on read). New rows
-  are written in a v2 schema carrying cwd + timestamp, so
-  all-directory results order globally by time; legacy v1 rows stay
-  readable forever and honestly show `Unknown (legacy history)` when
-  their directory cannot be proven.
 - **Continuable subagent viewers are now interactive.** Entering a
   `continuable` child from `/tasks` opens a live conversation surface: the
   editor carries the child's own draft (isolated from your main-session
@@ -93,28 +184,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and quoted (`@"dir with spaces/f.ts"`) forms are supported; a mention
   that does not resolve (a typo, or a non-path `@` word) is sent verbatim.
   Email addresses and `pkg@1.0.0`-style text are never touched.
-- **`/tasks` shows the full subagent lineage as a tree.** The browser now
-  reads the durable descendant catalog (`listDescendants`): a subagent's
-  subagent appears under its parent with a `├─` connector indented by
-  depth, in stable pre-order — a running grandchild never jumps above its
-  inactive parent, and jobs stay their own flat group after the tree. A
-  FINISHED one-shot child stays reachable: `inactive` is live-store
-  presence, not an outcome, so Enter still opens its persisted
-  transcript. The cursor lands on the first RUNNING subagent when the
-  browser opens (or the first active job), without ever re-sorting the
-  tree. Viewing a NESTED (depth > 1) descendant is read-only — mode is
-  the durable semantic, access is the surface authority, and only a
-  direct continuable child is interactive from the root; the header
-  advertises `<mode> · nested · read-only from this parent` (the real
-  mode — continuable or one-shot — is always shown).
-- **The selected row's long label marquees.** A selected task or session
-  row whose label overflows its column scrolls the label horizontally
-  (pause → one cell per 250ms → tail pause → loop) instead of sitting
-  truncated — only the MAIN label moves; the tree connector, the current-
-  session marker, the mode suffix, status and elapsed stay fixed, and
-  CJK/emoji/ZWJ never split mid-grapheme. Unselected rows keep the
-  ellipsis, and only one marquee timer per panel exists (disposed on
-  close).
 - **The task browser filters by row type.** Pressing Tab in `/tasks` (or
   the ↓/Ctrl+J trigger) cycles `All → subagent → bash → pwsh → …`; the
   header shows the active scope (`[bash]`) and the counts follow it. The
@@ -147,30 +216,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Local `!`/`!!` shell cards preview instead of flooding the screen.**
-  A running card collapses to the newest 5 lines, a settled card to at
-  most 20 visual rows (long lines wrap and count as several), each with
-  an honest hidden-line marker — and Ctrl+O (the same master switch that
-  folds recent tool turns) expands to the retained buffer, streaming
-  live while the command still runs. The capture layer is untouched
-  (the byte/line/disk caps still own memory); only what the card SHOWS
-  is bounded. **Alt+K** quick-dismisses the settled cards (a running
-  card is never dismissed, the process is not cancelled — Esc owns that
-  — and an already-submitted `!` context payload is untouched); `!!`
-  stays local-only.
-- **Focus Mode is surface-adaptive.** Regular mode is keyboard-driven:
-  Ctrl+O derives a full reveal of the recent Focus Thoughts (never
-  written into the manual disclosures), Thinking is hidden by default
-  and Alt+T shows it (SUPERSEDED by the 2026-08-25 unified disclosure
-  model — Thinking is compact by default and Alt+T picks the detail
-  level; blocks are never hidden), and any expanded Thought root
-  full-reveals its process. Fullscreen is mouse-driven: expanding a
-  Thought FOLLOWS THE END (the latest content stays in view), collapsing
-  anchors the header; the process timeline shows COMPACT secondary cards
-  and a click full-reveals one card (attachment > secondary > outer
-  Thought), with
-  `(click to expand)` hints. The fullscreen per-card clicks never leak
-  into the keyboard surface and vice versa.
 - **Esc never destroys your queue again.** Interrupting the agent (one
   Esc while busy, double-Esc while idle) now preserves queued input — the
   same `keepInbox` semantics as the web Stop button. The pending queue is
@@ -190,12 +235,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Task overlays no longer draw a black mask beside the border.** A
-  framed overlay that declares a fixed width now fills exactly that
-  width (`Frame(child, true)`): the picker, task browser, settings and
-  output viewer boxes span the full declared rectangle on every row —
-  the compositor's leftover padding (a black band on dark terminals)
-  is gone. The computed-width approval dialog is unchanged.
 - **Session transitions are now a single-writer transaction.** `/new`,
   `/fork`, `/rewind` and `/sessions` switches all run through one unified
   transaction (`transitionTo`, ordered in `src/transition.ts`): the OLD
@@ -351,48 +390,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files, tripping the tarball declaration-leak gate. The seam now takes a
   minimal structural surface (the three phase/busy/working setters), so
   `dist/` declarations stay limited to the public runner surface.
-
-## [Unreleased]
-
-### Changed
-
-- **Ctrl+R defaults to the current session and gains a third scope.**
-  `Tab` now cycles `Current session` → `Current directory` → `All
-  directories` (the query survives). `Current session` — the new default
-  when a session is live — shows only the current session's own inputs
-  (v2 rows carry the session id; legacy rows are never guessed into a
-  session), so the first thing Ctrl+R offers is what THIS conversation
-  typed, while `Current directory` and `All directories` keep the
-  cross-session reach. On a deferred start (no session yet) the panel
-  falls back to `Current directory` and hides the session tab. The
-  session id is captured at panel open time, so a session switch makes
-  the next Ctrl+R search the new session. The scope tabs are responsive
-  (full labels on wide terminals, short labels on narrow ones).
-- **Ctrl+R history search is now bounded and recent-first.** Instead of
-  parsing every candidate history file in full on each keystroke, the
-  search reads the JSONL store from the tail backwards through a new
-  reverse reader, consuming a global scan budget (5000 physical lines per
-  search across all files, never per file) and visiting the most recently
-  active workspaces first. Large histories no longer cost a full parse per
-  query; the canonical files are never read whole. The search result is
-  now a page: when older history remains, the source returns a
-  continuation that can resume exactly where the search stopped (no
-  re-scanning, no duplicate rows) — the foundation for a future
-  "Search older" UI. Legacy rows whose directory can only be proven
-  outside the scanned window may be omitted from `All directories` (an
-  intentional coverage trade-off; v2 cwd validation itself is unchanged).
-
-### Fixed
-
-- **Ctrl+V image paste works again on Linux Wayland/X11.** The clipboard
-  runner executed `wl-paste`/`xclip` without an explicit encoding, so
-  binary stdout was decoded as UTF-8 and invalid bytes were replaced —
-  PNG magic arrived as `EF BF BD …`, the image parser could not recognize
-  the payload, and the paste silently did nothing. The runner now forces
-  `encoding: 'buffer'`, keeping stdout/stderr as raw bytes end to end, and
-  a byte-for-byte regression test guards the path. Ctrl+V is also recorded
-  in the host-reserved key inventory, matching the host's own lifecycle
-  handling.
 
 ## [0.3.2] - 2026-08-22
 
@@ -1169,7 +1166,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.0...v0.3.1
