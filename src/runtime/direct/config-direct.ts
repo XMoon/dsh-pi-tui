@@ -431,7 +431,17 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     if (request.signal !== undefined) {
       request.signal.addEventListener('abort', withdrawOnCallerAbort, { once: true })
     }
-    const flow = authorization.begin({ key, method: request.method, interaction, signal })
+    let flow: ReturnType<AuthorizationServiceLike['begin']>
+    try {
+      flow = authorization.begin({ key, method: request.method, interaction, signal })
+    } catch (error) {
+      // A SYNCHRONOUS begin failure (a wire backend throwing before its
+      // first await): no attempt exists yet, but the caller-abort listener
+      // must still be disposed — a leaked listener on the long-lived
+      // runner signal would accumulate across logins (review finding).
+      disposeCallerAbortListener()
+      return Promise.reject(error)
+    }
     // The attempt runs detached: its settlement is an EVENT, never a
     // return value. The settlement promise is HELD in the attempts map
     // (observed, never a floating discard) and removed when it settles.
