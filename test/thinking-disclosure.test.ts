@@ -22,7 +22,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
-import { TranscriptFolder } from '../src/transcript.ts'
+import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -614,6 +614,41 @@ test('J1: a turn without reasoning-delta never manufactures a Thinking block', a
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('Thinking'), `no Thinking block may be manufactured:\n${view}`)
   assert.ok(view.includes('Bash pnpm test'), 'the tool card still renders')
+  app.stop()
+})
+
+// ── K. Running ───────────────────────────────────────────────────────────
+
+test('P1: an override on a Thinking card OUTSIDE the visible window is still cleared by Alt+T and surface transitions', async () => {
+  // The visible transcript is WINDOWED: a clicked card can scroll out of
+  // `messages` while its override stays in the map. Alt+T and the
+  // fullscreen → regular transition must reset EVERY Thinking override —
+  // a later search jump / window restore must never resurrect a stale
+  // per-card state (review finding).
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  // A card that IS in the visible window, and one that is NOT (its turn
+  // scrolled out — the window only carries the newest turns).
+  const visible = { kind: 'thinking', turn: 9, text: 'visible card' } as const
+  const scrolledOut = { kind: 'thinking', turn: 0, text: 'scrolled-out card' } as const
+  app.setTranscript([visible])
+  overrides.set(visible, true)
+  overrides.set(scrolledOut, true)
+  await vt.waitForRender()
+  // Alt+T: clears EVERY Thinking override, windowed or not.
+  app.toggleThinkingExpanded()
+  assert.equal(overrides.has(visible), false, 'Alt+T must clear the visible card override')
+  assert.equal(overrides.has(scrolledOut), false, 'Alt+T must clear a scrolled-out card override too')
+  // The fullscreen → regular transition clears them as well.
+  overrides.set(visible, true)
+  overrides.set(scrolledOut, true)
+  app.setFullscreen(false)
+  assert.equal(overrides.has(visible), false, 'leaving fullscreen must clear the visible card override')
+  assert.equal(overrides.has(scrolledOut), false, 'leaving fullscreen must clear a scrolled-out card override too')
   app.stop()
 })
 
