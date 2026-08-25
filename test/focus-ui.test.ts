@@ -1190,14 +1190,15 @@ test('fullscreen Focus expand/collapse: the expanded Bash card keeps the multili
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: bashHeredocPresenter() })
   app.start()
   const folder = new TranscriptFolder()
-  // Same diff-frame sequence: clean baseline, then the call + settle land
-  // in one later frame (the collapsed ghost would appear here pre-fix).
+  // Same diff-frame sequence: clean baseline, then ONLY the appended
+  // suffix (tool/call + settle) lands in one later frame — a real
+  // append-only event stream, never a duplicated user/message.
   folder.apply(noToolTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  folder.apply([...multilineBashTurn(0).slice(1), ...settleMultilineBashTurn(0)])
+  folder.apply([...multilineBashTurn(0).slice(2), ...settleMultilineBashTurn(0)])
   show(app, folder)
   await vt.waitForRender()
   // Collapsed: the Tool slot is ONE row with the command identity only.

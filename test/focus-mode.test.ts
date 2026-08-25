@@ -1427,14 +1427,6 @@ const MULTILINE_BASH_COMMAND = [
 ].join('\n')
 
 test('focusToolDisplay keeps a multiline terminal title to ONE line (ghost-row fix)', () => {
-  const presenter: ToolPresenter = {
-    call(name) {
-      return name === 'bash'
-        ? { card: 'terminal', title: MULTILINE_BASH_COMMAND, description: 'Patch commands test' }
-        : undefined
-    },
-    result() { return undefined },
-  }
   // LF, CRLF and lone-CR variants all collapse to the first line.
   const variants = [
     MULTILINE_BASH_COMMAND,
