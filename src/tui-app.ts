@@ -7838,13 +7838,16 @@ export class TuiApp {
         // unchanged (no new fields, no semantic drift).
         const mode = getMode()
         const prefix = shellPrefixForMode(mode)
+        // The wire document carries the shell prefix on LINE 0 only: a
+        // body continuation line is ordinary text in the wire form too,
+        // and only the first-line cursor shifts by the prefix.
         const wireLines = mode === 'prompt'
           ? lines
-          : lines.map((line, index) => index === cursorLine ? prefix + line : line)
+          : lines.map((line, index) => index === 0 ? prefix + line : line)
         return extensionSuggest({
           lines: wireLines,
           cursorLine,
-          cursorCol: cursorCol + (mode === 'prompt' ? 0 : prefix.length),
+          cursorCol: cursorCol + (mode === 'prompt' || cursorLine > 0 ? 0 : prefix.length),
           signal: options.signal,
           force: options.force,
         })
