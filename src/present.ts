@@ -1102,9 +1102,13 @@ export function focusToolDisplay(
 /** The compact line from a tool-owned presentCall view: the title, plus
  * the rawInput when it is a string the title does not already carry (the
  * skill tool's title is `Load skill <name>` — appending its rawInput
- * again would duplicate). */
+ * again would duplicate). The terminal title is the FULL command, which
+ * may contain real line breaks (heredoc / python / node -); the compact
+ * Focus Tool slot is exactly ONE physical framebuffer row, so only its
+ * FIRST line may surface here — the expanded tool card still renders the
+ * full multiline command (ghost-row fix). */
 function formatOwnedCallForCompactFocus(view: ToolCallView): string {
-  if (view.card === 'terminal') return view.title
+  if (view.card === 'terminal') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
   if (view.card === 'diff') {
     const path = view.diffs[0]?.path
     return path === undefined ? view.title : `${view.title} ${path}`

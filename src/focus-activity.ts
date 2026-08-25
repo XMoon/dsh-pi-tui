@@ -130,14 +130,30 @@ export function formatFocusHeaderLine(
  * (plan §25, aligned by visible width). */
 const FOCUS_SLOT_LABEL_WIDTH = 9
 
+/** Collapse arbitrary slot text to ONE physical terminal row: CR/LF
+ * sequences (LF, CRLF, lone CR) are normalized to the FIRST line. This is
+ * the final boundary the fullscreen compositor depends on — every
+ * string[] element a component renders is exactly one framebuffer row, so
+ * no caller-provided multiline text (bash heredocs, multiline errors, …)
+ * may ever escape a compact slot as embedded line breaks (ghost-row fix).
+ * The first line is kept rather than joining the lines with spaces: the
+ * compact preview must not smuggle later lines' content into the row, and
+ * width truncation would keep the leading lines anyway. */
+function compactSingleLine(text: string): string {
+  return text.split(/\r\n|\r|\n/)[0] ?? ''
+}
+
 /** One collapsed body slot line, truncated to the content width: the body
  * budget is the width MINUS the lead ('Think:   ' / 'Error:   '), and a
  * lead that alone exceeds the width truncates too — a preview line can
- * never wrap (the fullscreen row hit-map depends on that). */
+ * never wrap (the fullscreen row hit-map depends on that). The returned
+ * string is one PHYSICAL terminal row: CR/LF are normalized before width
+ * truncation; no caller-provided multiline text may escape. */
 function previewLine(label: string, text: string, width: number): string {
+  const singleLine = compactSingleLine(text)
   const lead = `${label}${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth(label)))}`
   const bodyBudget = width - visibleWidth(lead)
-  const body = bodyBudget > 0 ? truncateToWidth(text, bodyBudget, '…') : ''
+  const body = bodyBudget > 0 ? truncateToWidth(singleLine, bodyBudget, '…') : ''
   return truncateToWidth(`${lead}${body}`, Math.max(1, width), '…')
 }
 
