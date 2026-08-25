@@ -619,6 +619,15 @@ rounds (codex / gpt-5.6-luna):
      chain mid-typing, which would double-apply on the next Tab).
      Regression tests: `/u` → `/usr/` in both shell modes, extension
      suggestions accepted into the bare body, natural-typing suppression.
+- **Round 14** (on the round-2 fixes): P1 — `adaptHost` always exposed
+  `setInputMode` even when the underlying adapter does not implement it,
+  so a half-capable adapter (setSerializedInput without setInputMode)
+  silently discarded the decoded mode in the declined-input fallback
+  (FIXED: the mode setter is capability-gated exactly like
+  setSerializedInput, and the wire round-trip requires the FULL pair —
+  a partial adapter falls back to the raw path, so a declined `!` is
+  never dropped). Regression test: a partial adapter preserves a
+  declined `!` in the plugin document.
 
 The full-suite tests (2060+), typecheck, `git diff --check` and the
 pre-push gate (pack + all smokes) all pass; the vendored fork and the
