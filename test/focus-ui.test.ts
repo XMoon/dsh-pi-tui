@@ -68,6 +68,18 @@ function settleEvents(seqBase: number): SessionEvent[] {
   ]
 }
 
+/** A MINIMAL settled turn (one bash call, no reasoning): enough turns to
+ * exercise the recent-turn derivation. */
+function miniTurn(turn: number, baseSeq: number): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn }, T0 + baseSeq, baseSeq),
+    eventAt('user/message', { id: MessageId(`u${turn}`), role: 'user', content: [{ type: 'text', text: `prompt ${turn}` }], source: { kind: 'user' } }, T0 + baseSeq + 1, baseSeq + 1),
+    eventAt('tool/call', { turn, step: 0, callId: CallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 2, baseSeq + 2),
+    eventAt('assistant/message', { turn, step: 1, message: { id: MessageId(`a${turn}`), role: 'assistant', content: [{ type: 'text', text: `done ${turn}` }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + baseSeq + 3, baseSeq + 3),
+    eventAt('turn/end', { turn, reason: { kind: 'completed' } }, T0 + baseSeq + 4, baseSeq + 4),
+  ]
+}
+
 /** The row (0-based viewport y) whose text contains `needle`, or -1. */
 function findRow(view: readonly string[], needle: string): number {
   return view.findIndex(line => line.includes(needle))
@@ -864,5 +876,54 @@ test('regular mode: a manually revealed turn full-reveals its process (no dead c
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('locating the transcript path'), 'Alt+T reveals the Thinking')
   assert.ok(!joined.includes('(ctrl+o to expand)'), 'the revealed Thinking is FULL, never compact')
+  app.stop()
+})
+
+test('regular Ctrl+O derives ONLY the recent Focus turns; older roots stay collapsed (plan §11)', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  for (let turn = 1; turn <= 4; turn += 1) folder.apply(miniTurn(turn, turn * 100))
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  // Ctrl+O OFF: everything compact.
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🐋 Thought'), 'starts compact')
+  assert.ok(!joined.includes('🖥️  Bash cmd 2'), 'no process rows while compact')
+  // Ctrl+O ON: the RECENT 3 turns derive-expand (their tool cards appear);
+  // the OLDEST turn stays collapsed (its process stays hidden).
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  const expandedHeaders = (joined.match(/🐳 Thought/g) ?? []).length
+  assert.equal(expandedHeaders, 3, `exactly the recent 3 turns derive-expand:\n${joined}`)
+  assert.ok(joined.includes('🖥️  Bash cmd 4'), 'the newest turn full-reveals')
+  assert.ok(joined.includes('🖥️  Bash cmd 2'), 'the boundary turn full-reveals')
+  assert.ok(!joined.includes('🖥️  Bash cmd 1'), 'the OLDEST turn stays collapsed (no derived reveal)')
+  app.stop()
+})
+
+test('regular search reveal of a NON-recent root full-reveals its process (no dead compact cards)', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  for (let turn = 1; turn <= 4; turn += 1) folder.apply(miniTurn(turn, turn * 100))
+  app.setFocusMode(true)
+  app.setToolOutputExpanded(true) // Ctrl+O ON: turns 2-4 derive
+  show(app, folder)
+  await vt.waitForRender()
+  // The search reveals the OLDEST turn — NOT inside the recent boundary:
+  // regular mode must still full-reveal its process (a manual root is
+  // never a dead compact timeline).
+  const oldestTool = folder.messages().find(m => m.kind === 'tool' && m.turn === 1)
+  assert.ok(oldestTool !== undefined, 'fixture: the oldest turn has a tool card')
+  app.revealSearchMatch(oldestTool)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('🖥️  Bash cmd 1'), 'the non-recent root full-reveals its tool card in regular mode')
+  assert.ok(!joined.includes('(ctrl+o to expand)'), 'no dead compact secondary affordance')
   app.stop()
 })
