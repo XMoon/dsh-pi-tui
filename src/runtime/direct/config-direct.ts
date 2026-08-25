@@ -428,6 +428,16 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     const disposeCallerAbortListener = (): void => {
       request.signal?.removeEventListener('abort', withdrawOnCallerAbort)
     }
+    // An ALREADY-ABORTED caller signal never dispatches the abort event to
+    // a listener added afterwards — and the upstream flow must NOT be
+    // started at all (a provider that ignores its signal would otherwise
+    // keep the attempt and the listener retained forever even though the
+    // login is already cancelled). Finalize deterministically: report the
+    // attempt as settled-cancelled immediately, nothing is retained.
+    if (request.signal?.aborted === true) {
+      this.emit({ kind: 'settled', attemptId, status: 'cancelled' })
+      return Promise.resolve({ kind: 'started', attemptId })
+    }
     if (request.signal !== undefined) {
       request.signal.addEventListener('abort', withdrawOnCallerAbort, { once: true })
     }

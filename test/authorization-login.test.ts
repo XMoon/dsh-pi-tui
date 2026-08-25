@@ -948,6 +948,20 @@ test('/login aborted mid-attempt reports login cancelled', async () => {
   t.app.stop()
 })
 
+test('an ALREADY-ABORTED start never launches the upstream flow (nothing retained)', async () => {
+  // The runner signal is aborted BEFORE /login begins. The adapter must
+  // finalize deterministically: report settled-cancelled immediately and
+  // NEVER call the upstream begin (a provider that ignores its signal
+  // would otherwise keep the attempt and the caller-abort listener
+  // retained forever even though the login is already cancelled).
+  const t = setup({ drivePromptAndHang: true })
+  t.runner.signal = AbortSignal.abort()
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
+  assert.equal(result.text, 'login cancelled')
+  assert.equal(t.authorization.begins.length, 0, 'the upstream flow is never started under an already-aborted signal')
+  t.app.stop()
+})
+
 test('/login runner abort with an ACTIVE prompt closes the UI and settles (a wedged provider never settles)', async () => {
   // The provider drives a prompt and then IGNORES its abort signal (never
   // settles). The runner abort must still: reject the pending bridge
