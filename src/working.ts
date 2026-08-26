@@ -79,11 +79,18 @@ export class WorkingIndicator extends Text {
   /** Replace the animation frames at runtime (an active indicator repaints
    * with the new set immediately; the frame position is clamped). This is
    * the generic setter — extension/advanced custom indicators can keep
-   * swapping frames through it. */
+   * swapping frames through it. A frame-COUNT change re-arms the timer:
+   * shrinking to ≤1 frame clears the interval, growing re-arms it — an
+   * active indicator never keeps ticking a stale interval (and never
+   * modulo-zeros on an empty set). */
   setFrames(frames: readonly string[]): void {
     this.frames = [...frames]
     if (this.currentFrame >= this.frames.length) this.currentFrame = 0
-    if (this.active) this.updateDisplay()
+    if (!this.active) return
+    // restartAnimation clears the old interval and re-arms (or clears)
+    // per the NEW length; updateDisplay paints the first frame.
+    this.restartAnimation()
+    this.updateDisplay()
   }
 
   /** Follow an icon-style frame set ONLY when no explicit custom frames
