@@ -58,7 +58,12 @@ export class FooterCommandRunner {
 
   constructor(options: FooterCommandRunnerOptions) {
     this.options = options
-    options.signal.addEventListener('abort', () => this.dispose())
+    if (options.signal.aborted) {
+      // The caller already cancelled: never spawn.
+      this.disposed = true
+      return
+    }
+    options.signal.addEventListener('abort', () => this.dispose(), { once: true })
   }
 
   /** Request a refresh: at most one start per refresh interval; requests
@@ -69,6 +74,13 @@ export class FooterCommandRunner {
     const now = Date.now()
     const elapsed = now - this.lastStartAt
     if (elapsed >= this.options.config.refreshIntervalMs) {
+      // A pending coalesced timer from an EARLIER interval must not fire
+      // later (a config switch to a shorter interval would otherwise
+      // spawn an extra command): clear it before starting.
+      if (this.timer !== undefined) {
+        clearTimeout(this.timer)
+        this.timer = undefined
+      }
       this.start()
       return
     }

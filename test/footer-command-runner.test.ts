@@ -86,7 +86,11 @@ test('coalescing: requests within the interval produce ONE spawn', async () => {
   let spawns = 0
   const outputs: Array<string[] | undefined> = []
   const runner = new FooterCommandRunner({
-    config: { ...CONFIG, command: 'node -e "process.stdout.write(\'x\\n\')"' },
+    // A SHORT interval (50ms) keeps the observation window tiny: the
+    // two later requests coalesce onto a 50ms-later start, and a 30ms
+    // window is far too short for that timer to fire even under heavy
+    // event-loop load (a false-fail would require ~40x early firing).
+    config: { ...CONFIG, refreshIntervalMs: 50, command: 'node -e "process.stdout.write(\'x\\n\')"' },
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,
@@ -105,14 +109,10 @@ test('coalescing: requests within the interval produce ONE spawn', async () => {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   assert.equal(spawns, 1, `the first start must produce one result, saw ${spawns}`)
-  // Within a window far shorter than the 1000ms interval, no second start
-  // may appear (the two later requests coalesced, they never overlap).
-  // The assertion is STRUCTURAL: the interval is 1000ms, so a second
-  // spawn before ~1s would violate the coalescing contract; a 150ms
-  // observation window is far enough inside it that scheduling jitter
-  // cannot produce a false pass OR a false fail (a second start would
-  // need the timer to fire ~6x early).
-  await new Promise(resolve => setTimeout(resolve, 150))
+  // The coalesced second start is scheduled 50ms after the first start
+  // began; a 30ms observation window cannot reach it (a second spawn
+  // would need the 50ms timer to fire ~40x early).
+  await new Promise(resolve => setTimeout(resolve, 30))
   assert.equal(spawns, 1, `no second spawn within the interval, saw ${spawns}`)
   runner.dispose()
 })
@@ -381,5 +381,60 @@ test('a STALE child timeout never kills the CURRENT child (generation-scoped kil
   // its 400ms write and 'new' would never commit.
   assert.ok(outputs.some(rows => rows?.includes('new')),
     `the new child must commit (the stale timeout must not kill it):\n${JSON.stringify(outputs)}`)
+  runner.dispose()
+})
+
+test('a config switch to a SHORTER interval never spawns from a stale coalesced timer', async () => {
+  // The first refresh starts (lastStartAt set); the second coalesces
+  // onto the LONG interval's timer. setConfig switches to interval 0,
+  // whose requestRefresh takes the IMMEDIATE start branch — the stale
+  // long-interval timer must be cleared there, otherwise it fires later
+  // and spawns an EXTRA command.
+  const outputs: Array<string[] | undefined> = []
+  const runner = new FooterCommandRunner({
+    config: { ...CONFIG, refreshIntervalMs: 200, command: 'node -e "process.stdout.write(\'a\\n\')"' },
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: (rows) => outputs.push(rows),
+    signal: new AbortController().signal,
+  })
+  // Two requests on the LONG interval: the first starts, the second
+  // coalesces onto a timer 100s away.
+  runner.requestRefresh()
+  runner.requestRefresh()
+  // Wait until the 200ms stale timer is ARMED (100ms in), then switch:
+  // the immediate-start branch must clear it, or it fires ~100ms later.
+  await new Promise(resolve => setTimeout(resolve, 100))
+  runner.setConfig({ ...CONFIG, refreshIntervalMs: 0, command: 'node -e "process.stdout.write(\'b\\n\')"' })
+  const deadline = Date.now() + 5000
+  while (!outputs.some(rows => rows?.includes('b')) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.ok(outputs.some(rows => rows?.includes('b')), 'the new config must commit')
+  const countAtCommit = outputs.length
+  // A stale 100s timer would still be armed: if the immediate branch did
+  // not clear it, it eventually fires and spawns a THIRD command.
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.equal(outputs.length, countAtCommit, `no extra spawn from a stale timer: ${JSON.stringify(outputs)}`)
+  runner.dispose()
+})
+
+test('an already-aborted signal never spawns a child', async () => {
+  const signal = new AbortController()
+  signal.abort()
+  let outputs = 0
+  const runner = new FooterCommandRunner({
+    config: CONFIG,
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: () => { outputs += 1 },
+    signal: signal.signal,
+  })
+  runner.requestRefresh()
+  runner.requestRefresh()
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(outputs, 0, 'an aborted runner must never spawn')
   runner.dispose()
 })
