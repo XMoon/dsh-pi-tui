@@ -81,7 +81,7 @@ export function isValidKeyId(value: string): value is KeyId {
  * (matchesKey('A','shift+a') is TRUE) and the normalized 'a'+shift on
  * Kitty — either way it produces text, so a binding on it behaves
  * terminal-dependently and steals uppercase input on some terminals.
- * Named keys (shift+left, shift+enter, shift+f5, ...) are NOT
+ * Named keys (shift+left, shift+enter, ...) are NOT
  * text-producing and stay bindable. Shared by the config parser
  * (direct bindings + the leader key), the InputRouter (a text key never
  * reaches the plugin stage) and the plugin registry (registration
@@ -94,6 +94,28 @@ export function isTextProducingKeyId(key: KeyId): boolean {
   if (hasNonShiftModifier) return false
   if (base === 'space') return true
   return base.length === 1 && base.charCodeAt(0) >= 32 && base.charCodeAt(0) <= 126
+}
+
+/** Whether a key is a runtime-bindable KeyId (round-22 finding): the
+ * fork's matcher hard-rejects ANY modifier on the F-keys and Escape
+ * (keys.ts: `if (modifier !== 0) return false`), so `shift+f5` /
+ * `ctrl+escape` / ... are syntactically valid but can NEVER fire on any
+ * terminal protocol — advertising them would be a dead binding. This
+ * gate separates "syntactically valid grammar" from "the runtime can
+ * actually match it"; the config parser (direct bindings, the leader key
+ * and completions) and the plugin registry share it. Unmodified F-keys
+ * and Escape stay bindable; every other named key has a CSI-u /
+ * modifyOtherKeys path for its modified forms. */
+export function isRuntimeBindableKeyId(key: KeyId): boolean {
+  const canonical = canonicalizeKeyId(key)
+  if (!isValidKeyId(canonical)) return false
+  const parts = canonical.split('+')
+  if (parts.length === 1) return true
+  const base = parts[parts.length - 1]!
+  // The fork's UNMODIFIABLE bases (matchesKey: modifier !== 0 → false).
+  if (base === 'escape') return false
+  if (/^f\d+$/.test(base)) return false
+  return true
 }
 
 /** The fork EDITOR's unconditionally-owned binding keys (packages/pi-tui

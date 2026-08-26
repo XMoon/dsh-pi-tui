@@ -1260,9 +1260,11 @@ test('7.7c shift-only text keys are rejected for USER configs and leaders too', 
   const leader = parseUserKeybindings({ leader: 'shift+s', bindings: { 'app.tasks.open': '<leader>t' } })
   assert.equal(leader.leader, undefined, 'a text-producing leader must be rejected')
   // Named non-text keys keep their chords (shift+tab is the permission
-  // cycle default; shift+f5 is a plain chord).
-  const named = parseUserKeybindings({ 'app.transcript.toggleExpand': 'shift+f5' })
-  assert.deepEqual(named.bindings, { 'app.transcript.toggleExpand': 'shift+f5' })
+  // cycle default; shift+left is a plain chord — the runtime matches it,
+  // round-22 finding: shift+f5 used to be the example but modified
+  // F-keys can never fire).
+  const named = parseUserKeybindings({ 'app.transcript.toggleExpand': 'shift+left' })
+  assert.deepEqual(named.bindings, { 'app.transcript.toggleExpand': 'shift+left' })
   assert.ok(!named.diagnostics.some(message => message.includes('text-producing')))
 })
 
@@ -1304,8 +1306,10 @@ test('7.8 the registry rejects fork EDITOR-owned keys (no advertised-but-dead ru
     { id: 'ok-chord', key: { key: 'x', ctrl: true, alt: true, shift: false, super: false }, action: 'open-search', description: 'chord' },
     'plugin',
   )
+  // Shift+Left is a REAL runtime chord (the fork matches CSI-u
+  // '\x1b[1;2D') — unlike modified F-keys (round-22 finding).
   registry.register(
-    { id: 'ok-f5', key: { key: 'f5', ctrl: false, alt: false, shift: true, super: false }, action: 'open-search', description: 'f5' },
+    { id: 'ok-shift-left', key: { key: 'left', ctrl: false, alt: false, shift: true, super: false }, action: 'open-search', description: 'shift-left' },
     'plugin',
   )
   assert.equal(registry.snapshot().bindings.length, 2)
@@ -1383,4 +1387,63 @@ test('7.9c the fork premise: raw 0x08 is Backspace on legacy, Ctrl+Backspace on 
       else process.env[name] = value
     }
   }
+})
+
+test('7.10 runtime-bindable gate: modified F-keys and modified Escape are rejected for USER configs', () => {
+  // isValidKeyId only checks the SYNTAX; the fork matcher hard-rejects
+  // ANY modifier on F-keys and Escape (keys.ts: `modifier !== 0` →
+  // false), so those combos can never fire on any terminal protocol —
+  // an advertised-but-dead binding (round-22 finding). The parser now
+  // applies the runtime-bindable gate.
+  for (const key of ['shift+f5', 'ctrl+f5', 'alt+f12', 'super+f1']) {
+    const direct = parseUserKeybindings({ 'app.todo.toggle': key })
+    assert.deepEqual(direct.bindings, {}, `"${key}" must be rejected`)
+    assert.ok(direct.diagnostics.some(message => message.includes('can never match')),
+      `no runtime gate rejection for "${key}": ${direct.diagnostics.join(' | ')}`)
+  }
+  for (const key of ['ctrl+escape', 'shift+escape', 'alt+escape', 'super+esc']) {
+    const direct = parseUserKeybindings({ 'app.todo.toggle': key })
+    assert.deepEqual(direct.bindings, {}, `"${key}" must be rejected`)
+    assert.ok(direct.diagnostics.some(message => message.includes('can never match')),
+      `no runtime gate rejection for "${key}": ${direct.diagnostics.join(' | ')}`)
+  }
+  // Leader prefix + completions get the same gate.
+  const leader = parseUserKeybindings({ leader: 'shift+f5', bindings: { 'app.tasks.open': '<leader>t' } })
+  assert.equal(leader.leader, undefined, 'a modified F-key leader must be rejected')
+  const completion = parseUserKeybindings({ leader: 'ctrl+x', bindings: { 'app.tasks.open': '<leader>ctrl+escape' } })
+  assert.deepEqual(completion.leaderBindings, [], 'a modified escape completion must be rejected')
+  // UNMODIFIED F-keys and Escape stay bindable (the matcher supports them).
+  const plain = parseUserKeybindings({ 'app.todo.toggle': 'f5' })
+  assert.deepEqual(plain.bindings, { 'app.todo.toggle': 'f5' })
+  assert.ok(!plain.diagnostics.some(message => message.includes('can never match')))
+})
+
+test('7.10b the registry applies the runtime-bindable gate too', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  for (const key of [
+    { key: 'f5', ctrl: false, alt: false, shift: true, super: false },
+    { key: 'f5', ctrl: true, alt: false, shift: false, super: false },
+    { key: 'escape', ctrl: true, alt: false, shift: false, super: false },
+    { key: 'esc', ctrl: false, alt: false, shift: true, super: false },
+  ]) {
+    assert.throws(() => registry.register(
+      { id: `runtime-${key.key}-${key.ctrl ? 'c' : ''}${key.shift ? 's' : ''}`, key, action: 'open-search', description: 'x' },
+      'plugin',
+    ), /can never be matched/, `modified ${key.key} must be rejected at registration`)
+  }
+  assert.equal(registry.snapshot().bindings.length, 0)
+})
+
+test('7.10c the runtime premise: modified F-keys/Escape never match; shift+left does', () => {
+  // The gate mirrors the fork matcher exactly (probe-verified).
+  assert.ok(!matchesKey('\x1b[15;2u', 'shift+f5' as never), 'CSI-u Shift+F5 never matches')
+  assert.ok(!matchesKey('\x1b[15;5u', 'ctrl+f5' as never), 'CSI-u Ctrl+F5 never matches')
+  assert.ok(!matchesKey('\x1b', 'ctrl+escape' as never), 'Ctrl+Escape never matches')
+  assert.ok(!matchesKey('\x1b[27;2u', 'shift+escape' as never), 'Shift+Escape never matches')
+  // The positive controls DO have a runtime path.
+  assert.ok(matchesKey('\x1b[15~', 'f5' as never), 'unmodified F5 matches on legacy')
+  assert.ok(matchesKey('\x1b', 'escape' as never), 'unmodified Escape matches')
+  assert.ok(matchesKey('\x1b[1;2D', 'shift+left' as never), 'Shift+Left matches (CSI-u)')
+  assert.ok(matchesKey('\x1b[1;5D', 'ctrl+left' as never), 'Ctrl+Left matches (CSI-u)')
 })
