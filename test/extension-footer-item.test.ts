@@ -437,13 +437,21 @@ test('a chrome.footer.item registration id containing "/" is rejected; a SCOPED 
     )
     // A control-character id is the same injection class (the id is
     // persisted into user layouts and rendered raw by the configurator
-    // when the plugin is gone): rejected too.
+    // when the plugin is gone): rejected too — and the REJECTION ERROR
+    // itself must not interpolate the raw controls (host logs/diagnostics
+    // would receive the ESC sequence).
     assert.throws(
       () => service.register<FooterItemContribution>('chrome.footer.item', { id: 'bad\u001b]52;c;x\u0007id', order: 100 }, {
         label: 'bad', segment: { spans: [{ text: 'x' }] },
       }),
-      /control characters/,
-      'a control-char registration id must be rejected',
+      (error: Error) => {
+        assert.match(error.message, /control characters/)
+        assert.ok(!error.message.includes('\u001b'), 'the rejection error must not carry the raw ESC')
+        assert.ok(!error.message.includes('\u0007'), 'the rejection error must not carry the raw BEL')
+        assert.ok(error.message.includes('bad]52;c;xid'), 'the sanitized id text stays readable in the error')
+        return true
+      },
+      'a control-char registration id must be rejected (error message sanitized)',
     )
     // The check is SCOPED to chrome.footer.item: other slots keep their
     // own id semantics (slash ids remain valid — their keys are not
