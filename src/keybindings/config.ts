@@ -149,7 +149,15 @@ export function parseUserKeybindings(
   const leaderValue = doc[LEADER_KEY]
   if (leaderValue !== undefined) {
     if (typeof leaderValue === 'string' && isValidKeyId(leaderValue) && !isPlainPrintableKey(leaderValue)) {
-      leader = { key: canonicalizeKeyId(leaderValue as KeyId), timeoutMs: options.leaderTimeoutMs ?? DEFAULT_LEADER_TIMEOUT_MS }
+      const canonicalLeader = canonicalizeKeyId(leaderValue as KeyId)
+      // Legacy terminal collisions are REJECTED for the leader prefix too
+      // (convergence finding): a leader on ctrl+[ / ctrl+j / ctrl+m would
+      // swallow the lifecycle Esc/Enter on legacy terminals.
+      if (LEGACY_COLLISION_KEYS.has(canonicalLeader)) {
+        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — it collides with a lifecycle key on legacy terminals — ignored`)
+      } else {
+        leader = { key: canonicalLeader, timeoutMs: options.leaderTimeoutMs ?? DEFAULT_LEADER_TIMEOUT_MS }
+      }
     } else {
       diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — ignored`)
     }
@@ -221,6 +229,13 @@ export function parseUserKeybindings(
         const canonicalCompleting = canonicalizeKeyId(completing as KeyId)
         if (canonicalCompleting === 'escape') {
           diagnostics.push(`keybindings: "${actionId}" binds a "<leader>escape" sequence — Esc is the leader cancel key and cannot be a completion — ignored`)
+          continue
+        }
+        // Legacy terminal collisions are REJECTED for completions too
+        // (convergence finding): a completion on ctrl+[ / ctrl+j / ctrl+m
+        // would swallow the lifecycle Esc/Enter on legacy terminals.
+        if (LEGACY_COLLISION_KEYS.has(canonicalCompleting)) {
+          diagnostics.push(`keybindings: "${actionId}" binds a "<leader>${completing}" sequence — it collides with a lifecycle key on legacy terminals — ignored`)
           continue
         }
         leaderBindings.push({ action, key: canonicalCompleting })

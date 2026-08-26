@@ -726,3 +726,46 @@ test('5.12 canonical named keys still display as PageUp/PageDown', async () => {
   assert.deepEqual(lower.keysFor('app.transcript.toggleExpand'), ['pageup'])
   assert.equal(lower.keyHint('app.transcript.toggleExpand'), 'PageUp')
 })
+
+// ── uppercase aliases + leader legacy collisions + LF submit (round-7) ────
+
+test('5.13 uppercase aliases canonicalize to the same key (ESC/escape, RETURN/enter)', async () => {
+  const { canonicalizeKeyId } = await import('../src/keybindings/key-identity.ts')
+  assert.equal(canonicalizeKeyId('ESC' as never), 'escape')
+  assert.equal(canonicalizeKeyId('RETURN' as never), 'enter')
+  assert.equal(canonicalizeKeyId('CTRL+RETURN' as never), 'ctrl+enter')
+  assert.equal(canonicalizeKeyId('Shift+Ctrl+ESC' as never), 'ctrl+shift+escape')
+  // An uppercase-alias config conflicts with the canonical spelling.
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({ 'app.history.search': 'ESC', 'app.todo.toggle': 'escape' }))
+  assert.deepEqual(manager.keysFor('app.history.search'), [], 'ESC and escape must conflict as one key')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')))
+})
+
+test('5.14 the leader prefix and completions reject legacy lifecycle collisions', () => {
+  // leader: ctrl+[ would swallow Esc on legacy terminals.
+  const leader = parseUserKeybindings({ leader: 'ctrl+[', bindings: { 'app.tasks.open': '<leader>t' } })
+  assert.equal(leader.leader, undefined, 'a legacy-collision leader must be rejected')
+  assert.ok(leader.diagnostics.some(message => message.includes('legacy terminals')))
+  // A completion on ctrl+j would swallow Enter on legacy terminals.
+  const completion = parseUserKeybindings({ leader: 'ctrl+x', bindings: { 'app.tasks.open': '<leader>ctrl+j' } })
+  assert.deepEqual(completion.leaderBindings, [], 'a legacy-collision completion must be rejected')
+  assert.ok(completion.diagnostics.some(message => message.includes('legacy terminals')))
+})
+
+test('5.15 a disabled submit never fires on LF/Enter through the host editor', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
+  await vt.waitForRender()
+  app.setDraft('stays')
+  await vt.waitForRender()
+  vt.sendInput('\r') // Enter
+  await vt.waitForRender()
+  vt.sendInput('\n') // LF (Ctrl+J)
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [], 'a disabled submit must not fire on Enter or LF')
+  app.stop()
+})

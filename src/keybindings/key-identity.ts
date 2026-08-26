@@ -54,20 +54,29 @@ const MODIFIER_ORDER: readonly string[] = ['ctrl', 'shift', 'alt', 'super']
 export function canonicalizeKeyId(key: KeyId): KeyId {
   const raw = key as string
   if (raw === '' || !raw.includes('+')) {
-    const aliased = BASE_KEY_ALIASES[raw] ?? raw
-    return (aliased.length === 1 ? aliased : aliased.toLowerCase()) as KeyId
+    // LOWERCASE FIRST, then apply the alias map: `ESC` → `esc` →
+    // `escape`, `RETURN` → `return` → `enter` (a single-char key is
+    // untouched). Order matters — an uppercase alias must collapse onto
+    // the canonical base (convergence finding).
+    const lowered = raw.length === 1 ? raw : raw.toLowerCase()
+    const aliased = BASE_KEY_ALIASES[lowered] ?? lowered
+    return aliased as KeyId
   }
   const parts = raw.split('+')
   const base = parts[parts.length - 1]!
   const modifiers = parts.slice(0, -1)
-  // Collapse the base alias first, then order the modifiers. Named keys
-  // canonicalize to LOWERCASE so the keymap identity matches the runtime
-  // parser's lowercased normalized keys (pageUp/pageup are the same key).
-  const canonicalBase = BASE_KEY_ALIASES[base] ?? (base.length === 1 ? base : base.toLowerCase())
-  const ordered = MODIFIER_ORDER.filter(modifier => modifiers.includes(modifier))
+  // Collapse the base alias first (case-insensitive: lowercase the base
+  // BEFORE the alias lookup so `ESC` collapses to `escape`), then order
+  // the modifiers. Named keys canonicalize to LOWERCASE so the keymap
+  // identity matches the runtime parser's lowercased normalized keys
+  // (pageUp/pageup are the same key).
+  const loweredBase = base.length === 1 ? base : base.toLowerCase()
+  const canonicalBase = BASE_KEY_ALIASES[loweredBase] ?? loweredBase
+  const loweredMods = modifiers.map(m => m.toLowerCase())
+  const ordered = MODIFIER_ORDER.filter(modifier => loweredMods.includes(modifier))
   // A modifier not in the fixed order is impossible per the fork grammar,
   // but keep it appended (defensive — never drop an unknown modifier).
-  const extra = modifiers.filter(modifier => !MODIFIER_ORDER.includes(modifier))
+  const extra = loweredMods.filter(modifier => !MODIFIER_ORDER.includes(modifier))
   return [...ordered, ...extra, canonicalBase].join('+') as KeyId
 }
 
