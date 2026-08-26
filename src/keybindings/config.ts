@@ -217,6 +217,17 @@ export function parseUserKeybindings(
         diagnostics.push(`keybindings: "${actionId}" cannot bind the plain printable key "${entry}" to a Host action — ignored`)
         continue
       }
+      // Shift+Enter is the fork editor's FIXED newline key (tui.input
+      // .newLine): binding it to app.input.submit would be advertised by
+      // the read model but could never fire as a submit (the editor
+      // treats it as newline; the host submit seam excludes it). Rejected
+      // with a diagnostic — a binding that can never work must not be
+      // accepted (convergence §3 finding).
+      const canonicalEntry0 = canonicalizeKeyId(entry as KeyId)
+      if (actionId === 'app.input.submit' && canonicalEntry0 === 'shift+enter') {
+        diagnostics.push('keybindings: "app.input.submit" cannot bind Shift+Enter — it is the editor newline key — ignored')
+        continue
+      }
       const canonicalEntry = canonicalizeKeyId(entry as KeyId)
       if (TERMINAL_UNRELIABLE_KEYS.has(canonicalEntry)) {
         diagnostics.push(`keybindings: "${actionId}" binds "${entry}", which legacy terminals report as Enter — the binding may not fire there`)

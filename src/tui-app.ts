@@ -2649,11 +2649,16 @@ export class TuiApp {
     // of Esc would trip the double-Esc cancel. The framework already filters
     // releases for the focused component; listeners are on their own.
     if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
-    // The double-Esc window is a CONSECUTIVE-press chord: any real
-    // non-Esc key press between the two Esc presses disarms it (review
-    // E12 — `Esc → Left → Esc` must not rewind). Releases/repeats already
-    // returned above, so only genuine presses reach this line.
-    if (!matchesKey(data, 'escape')) this.lastEscapeAt = undefined
+    // The double-action window is a CONSECUTIVE-press chord: any real
+    // key press between the two presses of the interrupt trigger disarms
+    // it (review E12 — `Esc → Left → Esc` must not rewind). Releases/
+    // repeats already returned above, so only genuine presses reach this
+    // line. The disarming key is the PHYSICAL Escape key OR the
+    // EFFECTIVE interrupt trigger (a remapped Ctrl+X keeps its own
+    // consecutive-press semantics — two Ctrl+X presses in the window
+    // still fire the idle double action; convergence §5 finding).
+    if (!matchesKey(data, 'escape')
+      && !this.keybindings.matches(data, 'app.agent.interrupt')) this.lastEscapeAt = undefined
     if (this.activeQuestions !== undefined) {
       return this.handleQuestionKey(data)
     }
@@ -2897,7 +2902,16 @@ export class TuiApp {
    * whole Esc path to the new key. Returns whether the key was consumed. */
   private dispatchResolvedAction(action: AppKeybindingId, data: string, key?: KeyId): boolean {
     if (action === 'app.agent.interrupt') {
-      return this.handleEscapeKey(data) !== undefined
+      // Convergence §5: the PHYSICAL Escape key runs the full
+      // handleEscapeKey (editor Escape seams + semantic core); a REMAPPED
+      // interrupt key (e.g. Ctrl+X) goes STRAIGHT to the semantic core —
+      // it must never inherit the physical-Escape editor behavior (a
+      // replacement editor could otherwise consume the remapped interrupt
+      // instead of interrupting the agent).
+      if (matchesKey(data, 'escape')) {
+        return this.handleEscapeKey(data) !== undefined
+      }
+      return this.handleInterruptAction(data) !== undefined
     }
     if (action === 'app.exit.request') {
       this.handleExitKey(data)

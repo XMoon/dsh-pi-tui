@@ -348,3 +348,81 @@ test('4.11 reserved session/model actions are not user-configurable', () => {
   assert.deepEqual(parsedModel.bindings, {})
   assert.ok(parsedModel.diagnostics.some(message => message.includes('not user-configurable')))
 })
+
+// ── 5.x remapped interrupt: semantic core, double-action, no editor steal ──
+
+test('5.1 a remapped interrupt (ctrl+x) does NOT enter the physical-Escape editor seams', async () => {
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const cancels: number[] = []
+  const registry = new EditorRegistry()
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels.push(1) },
+  }, {
+    editorRegistry: registry,
+  })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
+  // A replacement editor whose handleInput CONSUMES Ctrl+X — the remapped
+  // interrupt must NOT be routed to it (a replacement editor's Esc seams
+  // belong to the PHYSICAL Escape key only, convergence §5).
+  registry.register({
+    id: 'consuming',
+    priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: 'vim' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      focused: true,
+      handleInput: () => true, // consumes everything
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  app.setBusy(true)
+  await vt.waitForRender()
+  vt.sendInput('\x18') // ctrl+x — the remapped interrupt
+  await vt.waitForRender()
+  assert.deepEqual(cancels, [1], 'a remapped interrupt must interrupt the busy agent, never the editor')
+  app.stop()
+})
+
+test('5.2 a remapped interrupt keeps its consecutive-press idle semantics', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let cancels = 0
+  let rewinds = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+    onRewind: () => { rewinds += 1 },
+  })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
+  await vt.waitForRender()
+  // Idle: two Ctrl+X presses within the window = the idle double action
+  // (rewind on an empty editor). The remapped key must NOT be disarmed by
+  // its own first press (convergence §5 finding).
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  assert.equal(rewinds, 1, 'two remapped-interrupt presses must fire the idle double action')
+  app.stop()
+})
+
+test('5.3 Shift+Enter cannot be bound to submit (the editor newline key)', () => {
+  const parsed = parseUserKeybindings({ 'app.input.submit': 'shift+enter' })
+  assert.deepEqual(parsed.bindings, {}, 'shift+enter submit must be rejected')
+  assert.ok(parsed.diagnostics.some(message => message.includes('newline')),
+    `no diagnostic for shift+enter submit: ${parsed.diagnostics.join(' | ')}`)
+  // The alias spelling (shift+return) is rejected the same way.
+  const aliased = parseUserKeybindings({ 'app.input.submit': 'shift+return' })
+  assert.deepEqual(aliased.bindings, {})
+  assert.ok(aliased.diagnostics.some(message => message.includes('newline')))
+})
