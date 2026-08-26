@@ -245,13 +245,14 @@ export class KeybindingRegistry {
         `keybinding key "${describeKey(canonicalKey)}" is not a valid key name (the host grammar cannot produce it)`,
       )
     }
-    // RUNTIME-BINDABLE GATE (round-22 finding): the fork matcher can
-    // never match a modified F-key or modified Escape (keys.ts:
-    // `modifier !== 0` → false), so the registration would be an
+    // RUNTIME-BINDABLE GATE (round-22/24 finding): the fork matcher can
+    // never match certain modifier combinations (F-keys/Escape take no
+    // modifiers — keys.ts `modifier !== 0` → false; Clear takes only
+    // Shift/Ctrl — no CSI-u fallback), so the registration would be an
     // advertised rule that can never fire on any terminal protocol.
     if (!isRuntimeBindableKeyId(canonicalKeyId)) {
       throw new Error(
-        `keybinding for "${describeKey(canonicalKey)}" can never be matched by the runtime (modified F-keys and Escape are unsupported)`,
+        `keybinding for "${describeKey(canonicalKey)}" can never be matched by the runtime (F-keys and Escape take no modifiers; Clear takes only Shift/Ctrl)`,
       )
     }
     // TEXT-PRODUCING REJECTION (review findings): the router keeps text-

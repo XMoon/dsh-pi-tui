@@ -98,9 +98,10 @@ and `a`+shift on Kitty — either way it produces text, so a binding on
 it would steal the user's typing on some terminals; `Ctrl+Alt+X`-style
 chords and named keys like `Shift+Left` are NOT
 text-producing and stay bindable); or the key can never be MATCHED by
-the runtime (a modified F-key or a modified Escape — the fork's matcher
-hard-rejects any modifier on F1-F12 and Esc, so the binding could never
-fire on any terminal protocol); or the key is a legacy-terminal
+the runtime (the fork matcher's capability table: any modifier on F1-F12
+or Esc is hard-rejected, and `clear` supports only exactly `shift` or
+exactly `ctrl` — all other bases accept any grammar-supported modifier
+via CSI-u/modifyOtherKeys); or the key is a legacy-terminal
 collision (`ctrl+[`, `ctrl+j`, `ctrl+m`, `ctrl+i`, `ctrl+h`, `ctrl+_`,
 `ctrl+-`, `ctrl+backspace` — on legacy terminals these are indistinguishable from
 Esc/Enter/Tab/Backspace/Ctrl+-, so the binding could never fire through

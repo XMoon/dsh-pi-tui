@@ -1447,3 +1447,68 @@ test('7.10c the runtime premise: modified F-keys/Escape never match; shift+left 
   assert.ok(matchesKey('\x1b[1;2D', 'shift+left' as never), 'Shift+Left matches (CSI-u)')
   assert.ok(matchesKey('\x1b[1;5D', 'ctrl+left' as never), 'Ctrl+Left matches (CSI-u)')
 })
+
+test('7.11 modified Clear is runtime-unbindable beyond shift/ctrl (USER config)', () => {
+  // The fork's `clear` case has NO kitty/modifyOtherKeys fallback:
+  // modifier 0 → the legacy sequence; otherwise ONLY matchesLegacyModifier-
+  // Sequence (exactly shift OR exactly ctrl). alt+clear / super+clear /
+  // ctrl+alt+clear / ctrl+shift+clear can never be matched (round-24
+  // finding — the capability table missed clear).
+  for (const key of ['alt+clear', 'super+clear', 'ctrl+alt+clear', 'ctrl+shift+clear']) {
+    const direct = parseUserKeybindings({ 'app.todo.toggle': key })
+    assert.deepEqual(direct.bindings, {}, `"${key}" must be rejected`)
+    assert.ok(direct.diagnostics.some(message => message.includes('can never match')),
+      `no runtime gate rejection for "${key}": ${direct.diagnostics.join(' | ')}`)
+    assert.ok(direct.diagnostics.some(message => message.includes('Clear takes only Shift/Ctrl')),
+      `the diagnostic must explain the Clear capability: ${direct.diagnostics.join(' | ')}`)
+  }
+  const leader = parseUserKeybindings({ leader: 'alt+clear', bindings: { 'app.tasks.open': '<leader>t' } })
+  assert.equal(leader.leader, undefined, 'an alt+clear leader must be rejected')
+  const completion = parseUserKeybindings({ leader: 'ctrl+x', bindings: { 'app.tasks.open': '<leader>super+clear' } })
+  assert.deepEqual(completion.leaderBindings, [], 'a super+clear completion must be rejected')
+  // The SUPPORTED forms stay bindable: clear, shift+clear, ctrl+clear.
+  for (const key of ['clear', 'shift+clear', 'ctrl+clear']) {
+    const direct = parseUserKeybindings({ 'app.todo.toggle': key })
+    assert.deepEqual(direct.bindings, { 'app.todo.toggle': key }, `"${key}" must stay bindable`)
+    assert.ok(!direct.diagnostics.some(message => message.includes('can never match')))
+  }
+})
+
+test('7.11b the registry applies the modified-Clear gate too', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  for (const key of [
+    { key: 'clear', ctrl: false, alt: true, shift: false, super: false },
+    { key: 'clear', ctrl: false, alt: false, shift: false, super: true },
+    { key: 'clear', ctrl: true, alt: false, shift: true, super: false },
+  ]) {
+    assert.throws(() => registry.register(
+      { id: `clear-${key.alt ? 'a' : key.super ? 's' : 'cs'}`, key, action: 'open-search', description: 'x' },
+      'plugin',
+    ), /can never be matched/, 'unsupported modified clear must be rejected')
+  }
+  // clear / shift+clear / ctrl+clear register fine.
+  for (const key of [
+    { key: 'clear', ctrl: false, alt: false, shift: false, super: false },
+    { key: 'clear', ctrl: false, alt: false, shift: true, super: false },
+    { key: 'clear', ctrl: true, alt: false, shift: false, super: false },
+  ]) {
+    registry.register(
+      { id: `ok-${key.ctrl ? 'c' : key.shift ? 's' : 'plain'}-clear`, key, action: 'open-search', description: 'ok' },
+      'plugin',
+    )
+  }
+  assert.equal(registry.snapshot().bindings.length, 3)
+})
+
+test('7.11c the runtime premise: clear supports only unmodified / shift / ctrl', () => {
+  assert.ok(matchesKey('\x1b[E', 'clear' as never), 'clear matches on legacy')
+  assert.ok(matchesKey('\x1b[e', 'shift+clear' as never), 'shift+clear matches on legacy')
+  assert.ok(matchesKey('\x1bOe', 'ctrl+clear' as never), 'ctrl+clear matches on legacy')
+  assert.ok(!matchesKey('\x1b[1;3E', 'alt+clear' as never), 'alt+clear has no matcher path')
+  assert.ok(!matchesKey('\x1bOe', 'super+clear' as never), 'super+clear has no matcher path')
+  assert.ok(!matchesKey('\x1b[1;6E', 'ctrl+shift+clear' as never), 'ctrl+shift+clear has no matcher path')
+  // Other named keys keep their kitty fallback (the capability table is
+  // complete: only escape / f1-f12 / clear are restricted).
+  assert.ok(matchesKey('\x1b[2;2~', 'shift+insert' as never), 'shift+insert still matches (kitty fallback)')
+})

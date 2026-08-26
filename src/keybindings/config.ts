@@ -169,7 +169,7 @@ export function parseUserKeybindings(
     if (typeof leaderValue === 'string' && isValidKeyId(leaderValue)) {
       const canonicalLeader = canonicalizeKeyId(leaderValue as KeyId)
       if (!isRuntimeBindableKeyId(canonicalLeader)) {
-        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — the runtime can never match a modified F-key or Escape — ignored`)
+        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — the runtime can never match this modifier combination (F-keys and Escape take no modifiers; Clear takes only Shift/Ctrl) — ignored`)
       } else if (isTextProducingKeyId(canonicalLeader)) {
         diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — a text-producing leader would swallow typing — ignored`)
       } else if (TERMINAL_AMBIGUOUS_KEY_IDS.has(canonicalLeader)) {
@@ -253,10 +253,11 @@ export function parseUserKeybindings(
           diagnostics.push(`keybindings: "${actionId}" binds a "<leader>escape" sequence — Esc is the leader cancel key and cannot be a completion — ignored`)
           continue
         }
-        // The runtime-bindable gate (round-22 finding): a completion on a
-        // modified F-key or modified Escape can never be matched.
+        // The runtime-bindable gate (round-22/24 finding): a completion
+        // whose modifier combination the fork matcher can never match
+        // (F-keys/Escape take no modifiers; Clear takes only Shift/Ctrl).
         if (!isRuntimeBindableKeyId(canonicalCompleting)) {
-          diagnostics.push(`keybindings: "${actionId}" binds a "<leader>${completing}" sequence — the runtime can never match a modified F-key or Escape — ignored`)
+          diagnostics.push(`keybindings: "${actionId}" binds a "<leader>${completing}" sequence — the runtime can never match this modifier combination (F-keys and Escape take no modifiers; Clear takes only Shift/Ctrl) — ignored`)
           continue
         }
         // Legacy terminal collisions are REJECTED for completions too
@@ -279,13 +280,15 @@ export function parseUserKeybindings(
       // never bypass the printable guard or the collision sets — the raw
       // spelling is only used in the diagnostic text.
       const canonicalEntry = canonicalizeKeyId(entry as KeyId)
-      // RUNTIME-BINDABLE GATE (round-22 finding): the fork matcher can
-      // never match a modified F-key or modified Escape (keys.ts:
-      // `modifier !== 0` → false), so accepting them would advertise a
-      // key that can never fire. Separates "valid grammar" from
-      // "runtime-bindable" — the plugin registry shares the gate.
+      // RUNTIME-BINDABLE GATE (round-22/24 finding): the fork matcher
+      // can never match certain modifier combinations (F-keys/Escape
+      // take no modifiers — keys.ts `modifier !== 0` → false; Clear
+      // takes only Shift/Ctrl — no CSI-u fallback), so accepting them
+      // would advertise a key that can never fire. Separates "valid
+      // grammar" from "runtime-bindable" — the plugin registry shares
+      // the gate.
       if (!isRuntimeBindableKeyId(canonicalEntry)) {
-        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — the runtime can never match a modified F-key or Escape — ignored`)
+        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — the runtime can never match this modifier combination (F-keys and Escape take no modifiers; Clear takes only Shift/Ctrl) — ignored`)
         continue
       }
       if (isTextProducingKeyId(canonicalEntry)) {
