@@ -28,7 +28,7 @@
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'
-import { canonicalizeKeyId, isTextProducingKeyId, isValidKeyId } from './key-identity.ts'
+import { canonicalizeKeyId, EDITOR_OWNED_KEY_IDS, EDITOR_POST_SUBMIT_KEYS, isTextProducingKeyId, isValidKeyId } from './key-identity.ts'
 import { APP_KEYBINDINGS, NON_CONFIGURABLE_ACTIONS } from './definitions.ts'
 import type { AppKeybindingId, LeaderBinding, LeaderConfig, UserKeybindingValue, UserKeybindingsConfig } from './types.ts'
 
@@ -44,38 +44,21 @@ export const LEADER_PREFIX = '<leader>'
  * for callers of the parser module). */
 export { isValidKeyId }
 
-/** The FORK EDITOR's UNCONDITIONAL pre-submit keys (packages/pi-tui
- * TUI_KEYBINDINGS + components/editor.ts handleInput): the editor
- * dispatches these bindings BEFORE its submit check (copy, undo, tab,
- * deletion, kill-ring, line/word cursor moves, newline), so a submit
- * remap onto one of them would be advertised by the read model but could
- * never fire — the editor consumes the key earlier (e.g. `submit: tab`
- * stays autocomplete). Same unsupported-key policy as the Shift+Enter
- * newline rejection (review finding): a binding that can never work is
- * rejected, never advertised. The list is the fork's DEFAULT keys only —
- * the autocomplete-gated select.* keys (up/down/enter/escape/pageUp/
- * pageDown while the dropdown is open) are NOT included: enter is the
- * default submit itself and the others still reach the submit check when
- * the dropdown is closed. Consumer-side validation only — the fork stays
- * pristine. */
-const EDITOR_PRE_SUBMIT_KEYS = new Set([
-  'ctrl+c', // tui.input.copy
-  'ctrl+-', // tui.editor.undo
-  'tab', // tui.input.tab
-  'ctrl+k', // tui.editor.deleteToLineEnd
-  'ctrl+u', // tui.editor.deleteToLineStart
-  'ctrl+w', 'alt+backspace', // tui.editor.deleteWordBackward
-  'alt+d', 'alt+delete', // tui.editor.deleteWordForward
-  'backspace', 'shift+backspace', // tui.editor.deleteCharBackward
-  'delete', 'shift+delete', 'ctrl+d', // tui.editor.deleteCharForward
-  'ctrl+y', // tui.editor.yank
-  'alt+y', // tui.editor.yankPop
-  'home', 'ctrl+home', 'ctrl+a', // tui.editor.cursorLineStart
-  'end', 'ctrl+end', 'ctrl+e', // tui.editor.cursorLineEnd
-  'alt+left', 'ctrl+left', 'alt+b', // tui.editor.cursorWordLeft
-  'alt+right', 'ctrl+right', 'alt+f', // tui.editor.cursorWordRight
-  'shift+enter', 'ctrl+j', // tui.input.newLine (also covered by dedicated checks)
-].map(key => canonicalizeKeyId(key as KeyId)),
+/** The FORK EDITOR's UNCONDITIONAL PRE-SUBMIT keys — DERIVED from the
+ * shared {@link EDITOR_OWNED_KEY_IDS} inventory minus the POST-SUBMIT
+ * keys (packages/pi-tui components/editor.ts handleInput dispatch
+ * order): the editor dispatches these bindings BEFORE its submit check
+ * (copy, undo, tab, deletion, kill-ring, line/word cursor moves,
+ * newline), so a submit remap onto one of them would be advertised by
+ * the read model but could never fire — the editor consumes the key
+ * earlier (e.g. `submit: tab` stays autocomplete). Same unsupported-key
+ * policy as the Shift+Enter newline rejection (review finding): a
+ * binding that can never work is rejected, never advertised. The
+ * POST-SUBMIT keys (arrows, page keys, jump chords, enter, escape) DO
+ * reach the submit check and stay bindable for submit. Consumer-side
+ * validation only — the fork stays pristine. */
+const EDITOR_PRE_SUBMIT_KEYS = new Set(
+  [...EDITOR_OWNED_KEY_IDS].filter(key => !EDITOR_POST_SUBMIT_KEYS.has(key)),
 )
 
 /** Whether a key is a PLAIN (unmodified) printable — the strict subset of

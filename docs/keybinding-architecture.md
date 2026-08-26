@@ -351,13 +351,20 @@ terminals; the shared `isTextProducingKeyId` policy treats shift-only
 printables as text on every protocol — the router and the registry
 agree, and the user config parser rejects them too), (c) non-grammar
 key names (the runtime parser can never produce them — `f13`,
-arbitrary strings — round-17 finding), and (d) the legacy
+arbitrary strings — round-17 finding), (d) the legacy
 C0 collisions — the registry shares the config parser's legacy inventory
 (`isLegacyCollisionKeyId`), so `ctrl+i`/`ctrl+h`/`ctrl+_`/`ctrl+-`/
 `ctrl+[`/`ctrl+j`/`ctrl+m` registrations are rejected too (on a legacy
 terminal the raw byte is Tab/Backspace/0x1f/Esc/Enter — the router's
 normalized plugin lookup could never match it; the old "a plugin may
-claim Ctrl+J" exception is gone, round-13/16 findings). The owner-aware
+claim Ctrl+J" exception is gone, round-13/16 findings), and (e) FORK
+EDITOR-owned keys (round-19 finding): Tab, arrows, Home/End,
+PageUp/PageDown, Backspace/Delete, word-moves, kill/yank/undo,
+Shift+Enter — the InputRouter's editorAccepts probe claims the editor's
+whole binding set on every keystroke, so such a registration would be
+an advertised-but-dead rule that even disabled a colliding leader; the
+registry shares the single `EDITOR_OWNED_KEY_IDS` inventory (the
+submit pre-submit set derives from it). The owner-aware
 dispatcher NEVER routes a plugin-owner winner into the
 AppActionDispatcher: only 'host' winners execute Host-private actions,
 'editor' winners go to the fork editor, and 'plugin' winners continue to
@@ -384,7 +391,7 @@ The read model is ONE projection: `keysFor`/`keyHint`/
 working submit remap never leaves the replaced Enter advertised), and a
 CONDITIONAL top claim never permanently hides its context fallback.
 
-Final gates: 2494 bundle tests, 985 fork tests, 11 docs tests,
+Final gates: 2496 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The final
 convergence review round was accepted with no findings.

@@ -552,15 +552,17 @@ test('KeybindingRegistry: duplicate keys conflict; unload removes bindings', () 
   const registry = new KeybindingRegistry()
   const handle = registry.register({
     id: 'k1',
-    key: { key: 'y', ctrl: false, alt: true, shift: false, super: false },
+    // Ctrl+Alt+Y: not editor-owned (yank is Alt+Y / Ctrl+Y — round-19
+    // finding), so it is a bindable plugin chord.
+    key: { key: 'y', ctrl: true, alt: true, shift: false, super: false },
     action: 'open-search',
   }, 'o')
   assert.throws(() => registry.register({
     id: 'k2',
-    key: { key: 'y', ctrl: false, alt: true, shift: false, super: false },
+    key: { key: 'y', ctrl: true, alt: true, shift: false, super: false },
     action: 'cancel-activity',
   }, 'o2'), /duplicate keybinding/)
-  assert.equal(registry.actionFor({ key: 'y', ctrl: false, alt: true, shift: false, super: false }), 'open-search')
+  assert.equal(registry.actionFor({ key: 'y', ctrl: true, alt: true, shift: false, super: false }), 'open-search')
   handle.dispose()
   assert.equal(registry.actionFor({ key: 'y', ctrl: false, alt: true, shift: false, super: false }), undefined)
 })

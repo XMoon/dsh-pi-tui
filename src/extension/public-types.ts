@@ -579,7 +579,7 @@ export type TuiAction =
 
 /** One keybinding contribution (M5): a normalized key + one of the
  * PUBLIC semantic actions. The registry validates and canonicalizes it
- * (action whitelist, reserved keys, text-producing keys, legacy C0
+ * (action whitelist, reserved keys, text-producing keys, editor-owned keys, legacy C0
  * collisions); the records feed the LIVE InputRouter lookups and the
  * runner's effective-keymap plugin rules (M6). */
 export interface TuiKeybindingContribution {
