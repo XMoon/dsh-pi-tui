@@ -42,7 +42,9 @@ function runOnce(config: FooterCommandConfig, script: string): Promise<string[] 
 }
 
 test('success: the sanitized rows reach the output sink', async () => {
-  const rows = await runOnce({ ...CONFIG, maxRows: 2 }, 'process.stdout.write("line one\\nline two\\n")')
+  // Generous timeout: the test proves OUTPUT semantics, never the
+  // timeout behavior (packed-suite spawn latency can exceed 300ms).
+  const rows = await runOnce({ ...CONFIG, maxRows: 2, timeoutMs: 10000 }, 'process.stdout.write("line one\\nline two\\n")')
   assert.deepEqual(rows, ['line one', 'line two'])
 })
 
