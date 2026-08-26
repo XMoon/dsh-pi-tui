@@ -33,7 +33,7 @@ handler.
 | `context.ts` | `deriveKeybindingContext`: the resolver's context, built in ONE place per surface. `editorEmpty` is a LAZY getter — the live editor is only read when a rule predicate needs it (the input path must not add a draft read per keystroke) |
 | `effective-keymap.ts` | The rule compiler + resolver: builtin (100) / composition (100) / user (200) / plugin (10) priorities; conflict detection; `includeScopes` (the HOST keymap resolves the non-capturing scopes only) |
 | `conflicts.ts` | The conflict model: same key + overlapping scope + same priority. Capturing scopes (question/approval/overlay/search/viewer/tasks) are mutually exclusive surfaces — they never conflict with non-capturing scopes or each other |
-| `config.ts` | The user settings parser: string / array / `false` / `<leader>X`; unknown action, invalid key, the RUNTIME-BINDABLE gate (modified F-keys / modified Escape can never be matched), plain-printable-to-host-action (text-producing), the SHARED terminal-ambiguous key inventory (TERMINAL_AMBIGUOUS_KEY_IDS: Ctrl+[ / Ctrl+J/M / Ctrl+I/H / Ctrl+_/- / Ctrl+Backspace) and the editor-owned submit pre-submit set; all fail-soft |
+| `config.ts` | The user settings parser: string / array / `false` / `<leader>X`; unknown action, invalid key, the RUNTIME-BINDABLE gate (a capability table: modified F-keys / modified Escape / unsupported modified Clear can never be matched), plain-printable-to-host-action (text-producing), the SHARED terminal-ambiguous key inventory (TERMINAL_AMBIGUOUS_KEY_IDS: Ctrl+[ / Ctrl+J/M / Ctrl+I/H / Ctrl+_/- / Ctrl+Backspace) and the editor-owned submit pre-submit set; all fail-soft |
 | `manager.ts` | The stateful facade: user config, safe mode, plugin rules, leader machine, diagnostics, snapshot |
 | `action-dispatcher.ts` | The semantic action → host method router (`AppActionHost`). The dispatcher NEVER re-implements business state |
 | `leader.ts` | The M6 leader state machine: pending prefix, timeout, ambiguous prefix, cancel, paste/typing isolation |
@@ -395,7 +395,7 @@ The read model is ONE projection: `keysFor`/`keyHint`/
 working submit remap never leaves the replaced Enter advertised), and a
 CONDITIONAL top claim never permanently hides its context fallback.
 
-Final gates: 2502 bundle tests, 985 fork tests, 11 docs tests,
+Final gates: 2505 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The final
 convergence review round was accepted with no findings.

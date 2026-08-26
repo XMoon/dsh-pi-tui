@@ -96,26 +96,47 @@ export function isTextProducingKeyId(key: KeyId): boolean {
   return base.length === 1 && base.charCodeAt(0) >= 32 && base.charCodeAt(0) <= 126
 }
 
+/** The fork matcher's RUNTIME MODIFIER CAPABILITY per base key (keys.ts
+ * switch — the exact answer to "does this base+modifier combination have
+ * at least one matching path?"):
+ * - `escape`: NONE — any modifier hits `modifier !== 0 → false`;
+ * - `f1`..`f12`: NONE — same hard reject;
+ * - `clear`: `shift` | `ctrl` ONLY — the case has no kitty /
+ *   modifyOtherKeys fallback and matchesLegacyModifierSequence supports
+ *   exactly shift or exactly ctrl (round-24 finding: alt+clear /
+ *   super+clear / ctrl+alt+clear / ctrl+shift+clear can never be
+ *   matched);
+ * - every OTHER base: ANY grammar-supported modifier — a CSI-u /
+ *   modifyOtherKeys fallback exists (probe-verified for insert/delete/
+ *   home/end/pageUp/pageDown/arrows/space/tab/enter/backspace and the
+ *   single-character branch). */
+const RUNTIME_MODIFIER_CAPABILITY: Readonly<Record<string, ReadonlySet<string>>> = {
+  escape: new Set(),
+  clear: new Set(['shift', 'ctrl']),
+}
+
 /** Whether a key is a runtime-bindable KeyId (round-22 finding): the
  * fork's matcher hard-rejects ANY modifier on the F-keys and Escape
- * (keys.ts: `if (modifier !== 0) return false`), so `shift+f5` /
- * `ctrl+escape` / ... are syntactically valid but can NEVER fire on any
- * terminal protocol — advertising them would be a dead binding. This
- * gate separates "syntactically valid grammar" from "the runtime can
- * actually match it"; the config parser (direct bindings, the leader key
- * and completions) and the plugin registry share it. Unmodified F-keys
- * and Escape stay bindable; every other named key has a CSI-u /
- * modifyOtherKeys path for its modified forms. */
+ * (keys.ts: `if (modifier !== 0) return false`), and `clear` only
+ * supports exactly shift or exactly ctrl — every other syntactically
+ * valid combination can NEVER fire on any terminal protocol, so
+ * advertising it would be a dead binding. This gate separates
+ * "syntactically valid grammar" from "the runtime can actually match
+ * it"; the config parser (direct bindings, the leader key and
+ * completions) and the plugin registry share it. Unmodified keys stay
+ * bindable. */
 export function isRuntimeBindableKeyId(key: KeyId): boolean {
   const canonical = canonicalizeKeyId(key)
   if (!isValidKeyId(canonical)) return false
   const parts = canonical.split('+')
   if (parts.length === 1) return true
   const base = parts[parts.length - 1]!
-  // The fork's UNMODIFIABLE bases (matchesKey: modifier !== 0 → false).
-  if (base === 'escape') return false
+  const modifiers = parts.slice(0, -1)
+  // The F-keys are unconditionally unmodifiable.
   if (/^f\d+$/.test(base)) return false
-  return true
+  const capability = RUNTIME_MODIFIER_CAPABILITY[base]
+  if (capability === undefined) return true
+  return modifiers.length === 1 && capability.has(modifiers[0]!)
 }
 
 /** The fork EDITOR's unconditionally-owned binding keys (packages/pi-tui
