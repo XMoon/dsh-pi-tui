@@ -347,3 +347,35 @@ test('setConfig clears the OLD config\'s committed rows immediately (no stale su
   assert.ok(outputs.some(rows => rows?.includes('second')), 'the new config must commit')
   runner.dispose()
 })
+
+test('a STALE child timeout never kills the CURRENT child (generation-scoped kill)', async () => {
+  // The race: the first child is SIGTERM-resistant (its close event is
+  // delayed), setConfig starts a NEW child, and the OLD child's timeout
+  // fires — it must NOT kill the new child.
+  const outputs: Array<string[] | undefined> = []
+  const runner = new FooterCommandRunner({
+    // A child that traps TERM and keeps running (the close event never
+    // fires promptly, so its timeout stays armed).
+    config: { ...CONFIG, timeoutMs: 100, command: 'sh -c "trap \\"\\" TERM; sleep 30"' },
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: (rows) => outputs.push(rows),
+    signal: new AbortController().signal,
+  })
+  runner.requestRefresh()
+  await Promise.resolve()
+  // Replace with a fast new child BEFORE the old timeout (100ms) fires.
+  runner.setConfig({ ...CONFIG, command: 'node -e "process.stdout.write(\'new\\n\')"' })
+  const deadline = Date.now() + 5000
+  while (!outputs.some(rows => rows?.includes('new')) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.ok(outputs.some(rows => rows?.includes('new')), 'the new child must commit')
+  // The stale timeout (old generation) must not have killed the new
+  // child: if it had, the new child would have been SIGTERMed before
+  // writing (or its close would produce undefined, never 'new').
+  assert.ok(!outputs.some(rows => rows === undefined && outputs.indexOf(rows) > outputs.findIndex(r => r?.includes('new'))),
+    'no failure output after the new child committed')
+  runner.dispose()
+})
