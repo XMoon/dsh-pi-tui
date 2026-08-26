@@ -468,7 +468,10 @@ export interface TuiCommandBridgeSnapshot {
 /** One registered theme contribution (M5). */
 export interface TuiThemeContribution {
   readonly id: string
-  /** The SELECTABLE name (shown in the theme picker). */
+  /** The DISPLAY name (shown in the theme picker). The selection IDENTITY
+   * is the source-qualified value `plugin:<owner>/<id>` — a display name
+   * is a label only and never round-trips back to an identity (the
+   * review's P2). */
   readonly name: string
   /** The semantic palette (hex colours; the host maps it at apply time). */
   readonly palette: TuiColorPalette

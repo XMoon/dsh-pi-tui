@@ -43,7 +43,7 @@ import { consumeDraftImages, pruneUnreferencedDrafts } from './image/submit.ts'
 import { readImageFile } from './image/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
-import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf, themeDisplayToValue } from './theme-menu.ts'
+import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
 import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.ts'
 import { suggestPathArgument } from './mentions.ts'
 import { ModelSubmenu } from './model-menu.ts'
@@ -1235,18 +1235,18 @@ export function registerTuiCommands(
             // picker's built-in auto/dark/light + custom list. The theme
             // row DISPLAYS the friendly name; the picker is an in-place
             // submenu (the fork's SettingItem.submenu slot — the /model
-            // pattern) whose rows carry BOTH the display name and the
-            // SOURCE-QUALIFIED selectable value (`auto|dark|light`,
-            // `file:<name>`, `plugin:<owner>/<id>` — the review's P2: a
-            // plugin theme must never share the value namespace of a
-            // custom FILE of the same name, so a persisted value's meaning
-            // never depends on which source exists; a gone plugin's
-            // persisted value degrades deterministically and never
-            // silently becomes the same-named file). The old
-            // bare-name/custom:<name> persisted forms display their
-            // friendly name.
+            // pattern) whose row ids ARE the SOURCE-QUALIFIED selectable
+            // values (`auto|dark|light`, `file:<name>`,
+            // `plugin:<owner>/<id>` — the review's P2: a plugin theme must
+            // never share the value namespace of a custom FILE of the same
+            // name, and the identity is carried end-to-end, never
+            // round-tripped through the display label). The submenu
+            // receives the outer row's CURRENT display name (the fork
+            // passes the LIVE item.currentValue — after a previous pick in
+            // the same panel session it is the NEW selection, so
+            // `← current` follows the latest choice — the review's P3).
             currentValue: themeDisplayName,
-            submenu: (currentValue, done) => new ThemeSubmenu(themeDisplayName, runner.extensions?.themes, (picked) => {
+            submenu: (currentValue, done) => new ThemeSubmenu(currentValue, runner.extensions?.themes, (picked) => {
               if (picked !== undefined) done(picked)
               else done()
             }),
@@ -1373,12 +1373,12 @@ export function registerTuiCommands(
               detach('permission default write', () => runner.config.permissions.setDefaultPreset(value) as Promise<unknown>, { notify: true })
             }
           } else if (id === 'theme') {
-            // The submenu fires onChange with the DISPLAY name; map it back
-            // to the SOURCE-QUALIFIED selectable value (the identity that
-            // is applied and persisted). An unmapped display (a row that
-            // vanished between the picker and the confirm) is ignored.
-            const displayToValue = themeDisplayToValue(runner.extensions?.themes)
-            const qualified = displayToValue.get(value)
+            // The submenu fires onChange with the SOURCE-QUALIFIED selectable
+            // value DIRECTLY (the row id IS the identity — the review's P2:
+            // no display-label round-trip, so an HMR unload between open
+            // and confirm can never redirect the selection to a same-named
+            // new contribution). The value is applied and persisted as-is.
+            const qualified = value
             if (qualified !== undefined) {
               lastThemeChoice = qualified
               if (qualified === 'auto') {

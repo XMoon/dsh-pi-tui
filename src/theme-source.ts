@@ -99,9 +99,13 @@ export function resolveThemeSelection(
 
 /** The rows of the theme picker's SOURCE-QUALIFIED values, as
  * {value, displayName} pairs: builtins, then custom files, then plugin
- * themes. When a display name appears in BOTH the file and plugin
- * sources, each row's label is source-disambiguated (the review's P2:
- * the identity is unique even though the labels can repeat). */
+ * themes. The DISPLAY names are unique across the WHOLE row set
+ * (builtin/file/plugin AND any label that a user file name could mimic,
+ * e.g. a `(plugin)`/`(file)` suffix — the review's P2: a `dark.json` file
+ * next to the builtin `dark`, or a file literally named `X (plugin)`,
+ * must never produce two rows with the same label). The VALUE stays the
+ * identity; the LABEL is purely presentational and never round-tripped
+ * back to an identity. */
 export function themePickerRows(themes: ThemeRegistry | undefined): readonly {
   readonly value: string
   readonly displayName: string
@@ -116,20 +120,44 @@ export function themePickerRows(themes: ThemeRegistry | undefined): readonly {
     value,
     displayName: themes?.displayNameForSelectable(value) ?? value,
   }))
-  // Disambiguate same-named file/plugin rows: the values stay unique, the
-  // labels say which source.
-  const pluginNames = new Set(plugins.map(row => row.displayName))
-  return [
-    ...builtins,
-    ...files.map(row => ({
-      value: row.value,
-      displayName: pluginNames.has(row.displayName) ? `${row.displayName} (file)` : row.displayName,
-    })),
-    ...plugins.map(row => ({
-      value: row.value,
-      displayName: files.some(file => file.displayName === row.displayName)
-        ? `${row.displayName} (plugin)`
-        : row.displayName,
-    })),
-  ]
+  // Disambiguate EVERY label collision across all three sources, in
+  // declaration order (builtin < file < plugin): the first holder keeps
+  // the bare label, later holders get their source tagged. This covers
+  // builtin/file (`dark` vs `dark.json`), file/plugin (the original P2)
+  // AND a user file that literally names itself `X (plugin)` — the
+  // tagging is computed against the CURRENT unique set, so an already
+  // taken suffixed label is tagged again, never silently duplicated.
+  const used = new Map<string, 'builtin' | 'file' | 'plugin'>()
+  const claim = (
+    value: string,
+    displayName: string,
+    source: 'builtin' | 'file' | 'plugin',
+  ): string => {
+    let label = displayName
+    if (used.has(label) && used.get(label) !== source) {
+      label = `${displayName} (${source})`
+      // A file may already be named `X (plugin)`; keep tagging until the
+      // label is unique (the suffix is a label, never an identity).
+      let n = 2
+      while (used.has(label)) {
+        label = `${displayName} (${source} ${n})`
+        n += 1
+      }
+    }
+    used.set(label, source)
+    return label
+  }
+  const claimedBuiltins = builtins.map(row => ({
+    value: row.value,
+    displayName: claim(row.value, row.displayName, 'builtin'),
+  }))
+  const claimedFiles = files.map(row => ({
+    value: row.value,
+    displayName: claim(row.value, row.displayName, 'file'),
+  }))
+  const claimedPlugins = plugins.map(row => ({
+    value: row.value,
+    displayName: claim(row.value, row.displayName, 'plugin'),
+  }))
+  return [...claimedBuiltins, ...claimedFiles, ...claimedPlugins]
 }
