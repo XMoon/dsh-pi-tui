@@ -2947,24 +2947,48 @@ export function registerTuiCommands(
       }
       if (verb === 'reload') {
         // Re-validate the settings document and rebuild the keymap
-        // (fail-soft: bad entries are diagnostics, never a crash).
-        const parsed = parseUserKeybindings(runner.tuiSettings?.get().keybindings)
-        for (const message of parsed.diagnostics) runner.diag.warn('keybindings', { message })
-        keybindings.setUserConfiguration(parsed)
+        // (fail-soft: bad entries are diagnostics, never a crash). The
+        // settings read itself is guarded too — a transient `get()`
+        // failure must NOT throw out of the handler: the keymap keeps its
+        // last-known-good configuration and the command reports the error
+        // (review round 28: reload is now the ONLY reload seam, so its
+        // fail-soft contract must match the startup application).
+        try {
+          const parsed = parseUserKeybindings(runner.tuiSettings?.get().keybindings)
+          for (const message of parsed.diagnostics) runner.diag.warn('keybindings', { message })
+          keybindings.setUserConfiguration(parsed)
+        } catch (error: unknown) {
+          const message = safeErrorMessage(error)
+          runner.diag.warn('keybindings', { error: message, message: 'keybindings reload failed — keeping the last-known-good configuration' })
+          app.notify(`keybindings reload failed: ${message}`, 'error')
+          return { kind: 'error', text: `keybindings reload failed: ${message}` }
+        }
         app.notify('Keybindings reloaded.', 'info')
         return { kind: 'success', text: 'Keybindings reloaded.' }
       }
       if (verb === 'reset') {
         const settings = runner.tuiSettings
         if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
-        const doc = { ...settings.get() } as Record<string, unknown>
-        delete doc.keybindings
-        // Await the persistence write: the command result reflects the
-        // ACTUAL outcome (a failed write must not report success — review
-        // finding). The handler may return a Promise<CommandResult>.
+        // The whole reset is guarded — INCLUDING the initial read (review
+        // round 30): a throwing first `get()` must not escape the handler;
+        // it reports an error and the running keymap stays untouched.
         return (async (): Promise<CommandResult> => {
           try {
+            const doc = { ...settings.get() } as Record<string, unknown>
+            delete doc.keybindings
+            // Await the persistence write: the command result reflects the
+            // ACTUAL outcome (a failed write must not report success — review
+            // finding). The handler may return a Promise<CommandResult>.
             await settings.replace(doc as unknown as import('./runtime/config-port.ts').TuiSettingsDoc)
+            // Apply the cleared configuration NOW: with the automatic
+            // settings watch removed (review round 28 — the reload seam is
+            // explicit), a reset that only persisted would leave the
+            // RUNNING keymap with the old overrides until a manual
+            // /keybindings reload. The reset is a full reset: persist AND
+            // rebuild from the (now keybindings-less) document.
+            const parsed = parseUserKeybindings(settings.get().keybindings)
+            for (const message of parsed.diagnostics) runner.diag.warn('keybindings', { message })
+            keybindings.setUserConfiguration(parsed)
             app.notify('Keybindings reset to defaults.', 'info')
             return { kind: 'success', text: 'Keybindings reset to defaults.' }
           } catch (error: unknown) {

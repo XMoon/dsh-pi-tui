@@ -26,17 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   semantic action (`app.*`) resolved through a context-aware keymap, so
   the UI (footer hints, `/help`, `/keybindings`) always shows the
   EFFECTIVE keys. Configure overrides in the `dsh-pi-tui` settings namespace
-  (`keybindings` field, hot-reloaded — no restart): a string for one
-  key, an array for several, `false` to disable an action's keys, and a
-  `leader` key plus `<leader>X` sequences for multi-key bindings (M6).
+  (`keybindings` field), then apply with `/keybindings reload` (explicit —
+  a settings edit takes effect after the reload, no restart): a string for
+  one key, an array for several, `false` to disable an action's keys, and
+  a `leader` key plus `<leader>X` sequences for multi-key bindings (M6).
   A plain printable key can never be bound to a Host action; a bad entry
   is a warning, never a startup failure (fail-soft); conflicts (same key
   + overlapping scope + same priority) are diagnosed and deactivated —
   never silent last-write-wins. `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores
   all user overrides. `/keybindings` shows the effective table,
   `/keybindings conflicts` lists conflicts, `/keybindings reload`
-  re-reads the settings, and `/keybindings reset` clears the overrides
-  through the settings service.
+  re-reads the settings (fail-soft — a throwing read keeps the
+  last-known-good keymap and reports an error), and `/keybindings reset`
+  clears the overrides through the settings service and rebuilds the
+  running keymap immediately.
 - **The subagent viewer guard is action-based.** The continuable viewer
   blocks PARENT actions by action id (not by physical key), so a
   remapped parent shortcut stays blocked inside the viewer — the

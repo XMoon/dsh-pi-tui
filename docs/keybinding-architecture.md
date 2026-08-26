@@ -199,8 +199,13 @@ typing), and `app.input.submit` can never be bound to a key the fork
 editor consumes BEFORE its submit check (tab/backspace/Ctrl+A/E/U/K/W/
 Y/C/D/Home/End/word-moves/undo/copy — the editor would consume it first,
 so the binding could never fire; rejected like Shift+Enter, other
-actions are unaffected). Hot reload: the runner watches the settings
-document and rebuilds the keymap without a restart.
+actions are unaffected). The reload seam is EXPLICIT, never automatic:
+`/keybindings reload` re-reads the settings document and rebuilds the
+keymap without a restart — there is deliberately no settings `watch`
+callback, because the config port (`TuiSettingsConfig`) is get/replace
+only and a callback could not map across the process boundary in the
+future Remote adapter (migration rule: no callbacks across the wire;
+see docs/client-server-migration.md).
 
 **Conditional affordances are ADDITIVE, never replaced.** A composition
 rule (the empty-editor `↓` task-browser affordance → `app.tasks.open`)
@@ -215,10 +220,15 @@ adds a trigger for that semantic action; `false` removes them all*.
 
 `/keybindings` shows the effective table (action, keys, scope, source)
 grouped by category; `/keybindings conflicts` lists only conflicts;
-`/keybindings reload` re-reads the settings document; `/keybindings
-reset` clears the user overrides THROUGH the settings service (never a
-direct settings.yaml write). `/help` and the footer hints render through
-`keyHint`/`keysFor` — a user remap updates every hint automatically.
+`/keybindings reload` re-reads the settings document (fail-soft: a
+throwing read keeps the last-known-good keymap and reports an error);
+`/keybindings reset` clears the user overrides THROUGH the settings
+service (never a direct settings.yaml write) AND rebuilds the running
+keymap from the cleared document — the reset takes effect immediately,
+no follow-up reload needed (the reload seam is explicit since the
+automatic settings watch was removed). `/help` and the footer hints
+render through `keyHint`/`keysFor` — a user remap updates every hint
+automatically.
 
 ## Out of scope (first version)
 
