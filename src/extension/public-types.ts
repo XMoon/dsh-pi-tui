@@ -551,10 +551,23 @@ export interface TuiCommandBridgeView {
   snapshot(): TuiCommandBridgeSnapshot
 }
 
-/** The read-side of the theme registry (M5). */
+/** The read-side of the theme registry (M5). Selections are addressed by
+ * SOURCE-QUALIFIED selectable values (`plugin:<owner>/<id>`), never by
+ * the bare display name — the picker/apply/persist protocol (the review's
+ * P2: a bare name shared the custom-FILE namespace, so a persisted value's
+ * meaning depended on which source existed). */
 export interface TuiThemeRegistryView {
+  /** The display names (diagnostics / /status counts only). */
   names(): string[]
-  paletteFor(name: string): TuiColorPalette | undefined
+  /** The source-qualified selectable values (the /settings picker's
+   * plugin section; sorted). */
+  selectableValues(): string[]
+  /** The palette for one source-qualified selectable value. */
+  paletteForSelectable(value: string): TuiColorPalette | undefined
+  /** The display name behind one source-qualified selectable value. */
+  displayNameForSelectable(value: string): string | undefined
+  /** Whether one source-qualified selectable value is live. */
+  hasSelectable(value: string): boolean
   snapshot(): TuiThemeRegistrySnapshot
 }
 

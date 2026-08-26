@@ -159,23 +159,48 @@ test('CommandBridge: sessionless contributions join the sessionless set', () => 
 
 // ── ThemeRegistry ──────────────────────────────────────────────────────────
 
-test('ThemeRegistry: selectable names are deterministic and collisions error', () => {
+test('ThemeRegistry: selectable values are source-qualified, deterministic, and name collisions error', () => {
   const registry = new ThemeRegistry()
   const handle = registry.register({
     id: 't1',
     name: 'My Theme',
     palette: { text: '#fff' } as never,
-  }, 'owner-a')
+  }, 'owner-a', 'plugin-a')
   assert.deepEqual(registry.names(), ['My Theme'])
+  // The selectable value is the SOURCE-QUALIFIED identity
+  // `plugin:<stableOwner>/<id>` (the review's P2) — never the bare name.
+  assert.deepEqual(registry.selectableValues(), ['plugin:plugin-a/t1'])
   assert.throws(() => registry.register({
     id: 't2',
     name: 'My Theme',
     palette: { text: '#000' } as never,
-  }, 'owner-b'), /duplicate theme name/)
+  }, 'owner-b', 'plugin-b'), /duplicate theme name/)
   assert.deepEqual(registry.names(), ['My Theme'])
-  assert.ok(registry.paletteFor('My Theme') !== undefined, 'the registered palette resolves')
+  // The palette resolves through the SELECTABLE VALUE; a bare NAME never
+  // resolves a palette (a name is a label, not an identity).
+  assert.ok(registry.paletteForSelectable('plugin:plugin-a/t1') !== undefined, 'the registered palette resolves by value')
+  assert.equal(registry.paletteForSelectable('My Theme'), undefined,
+    'a bare name must never resolve a palette (the old name-addressing is gone)')
+  assert.equal(registry.displayNameForSelectable('plugin:plugin-a/t1'), 'My Theme')
+  assert.equal(registry.hasSelectable('plugin:plugin-a/t1'), true)
+  assert.equal(registry.selectableValueForName('My Theme'), 'plugin:plugin-a/t1',
+    'the name → value map resolves the live identity')
   handle.dispose()
   assert.deepEqual(registry.names(), [], 'dispose removes the theme')
+  assert.deepEqual(registry.selectableValues(), [], 'dispose removes the value')
+  assert.equal(registry.hasSelectable('plugin:plugin-a/t1'), false)
+})
+
+test('ThemeRegistry: the selectable value is INJECTIVE across owners and ids', () => {
+  const registry = new ThemeRegistry()
+  // A literal '~' owner and an encoded slash owner must never collide
+  // (the encodeURIComponent argument, same as the M4 footer keys).
+  registry.register({ id: 'a1', name: 'A1', palette: { text: '#fff' } as never }, 'o1', '~')
+  registry.register({ id: 'a2', name: 'A2', palette: { text: '#000' } as never }, 'o2', '%2F')
+  const values = registry.selectableValues()
+  assert.deepEqual(values, ['plugin:%252F/a2', 'plugin:~/a1'])
+  assert.equal(registry.displayNameForSelectable('plugin:~/a1'), 'A1')
+  assert.equal(registry.displayNameForSelectable('plugin:%252F/a2'), 'A2')
 })
 
 test('ThemeRegistry: the host-builtin names (auto/dark/light) are RESERVED at registration', () => {
@@ -199,13 +224,15 @@ test('ThemeRegistry: the host-builtin names (auto/dark/light) are RESERVED at re
 
 test('ThemeRegistry: owner unload removes the theme (selected-theme fallback gate)', () => {
   const registry = new ThemeRegistry()
-  registry.register({ id: 'gone', name: 'Gone', palette: { text: '#fff' } as never }, 'owner-a')
-  registry.register({ id: 'stay', name: 'Stay', palette: { text: '#000' } as never }, 'owner-b')
+  registry.register({ id: 'gone', name: 'Gone', palette: { text: '#fff' } as never }, 'owner-a', 'plugin-a')
+  registry.register({ id: 'stay', name: 'Stay', palette: { text: '#000' } as never }, 'owner-b', 'plugin-b')
   registry.disposeOwner('owner-a')
   assert.deepEqual(registry.names(), ['Stay'])
+  assert.deepEqual(registry.selectableValues(), ['plugin:plugin-b/stay'])
   // The host's fallback: a selection whose palette is gone resolves
   // undefined → the runner applies the built-in dark palette.
-  assert.equal(registry.paletteFor('Gone'), undefined)
+  assert.equal(registry.paletteForSelectable('plugin:plugin-a/gone'), undefined)
+  assert.equal(registry.hasSelectable('plugin:plugin-a/gone'), false)
 })
 
 // ── SettingsRegistry ───────────────────────────────────────────────────────

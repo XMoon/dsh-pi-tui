@@ -195,6 +195,8 @@ export interface AdvancedHostSeam {
 /** The service name plugins inject (`piTuiExtensions` in cordis.patch.yml). */
 export const PI_TUI_EXTENSIONS_SERVICE = 'piTuiExtensions'
 
+
+
 /** The public service surface plugins consume. */
 export interface PiTuiExtensionService {
   /** Host identity: version + capability set (feature-detect, never parse versions). */
@@ -415,8 +417,6 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** Phase 3: the still-open UNSTABLE mount close functions (closed by
    * the emergency fail-safe and by owner unload). */
   private readonly unstableMounts = new Set<() => void>()
-  /** The runner's theme-unload notification (see setThemeUnloadedHook). */
-  private themeUnloadedHook: ((name: string) => void) | undefined
   /** Track health for one external registry contribution. */
   private trackRegistryHealth(slot: string, id: string, owner: string): void {
     this.ledger.trackHealth(slot, id, owner)
@@ -881,7 +881,17 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerTheme(contribution: TuiThemeContribution): TuiThemeHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
-    const handle = this.themes.register(contribution, owner)
+    // The plugin's STABLE owner name (the nearest named ancestor's display
+    // name — 'root' for anonymous plugins): the source-qualified
+    // SELECTABLE value `plugin:<stableOwner>/<id>` is what the runner
+    // persists, so it must survive HMR — a reloaded plugin gets a NEW
+    // fiber (new uid) but the SAME name, and the persisted theme identity
+    // recovers (the review's P2: the old bare-name value named both the
+    // plugin AND any custom file of the same name, so the meaning of a
+    // persisted value depended on which source existed).
+    const stableOwner = caller.fiber.name
+    const selectableValue = ThemeRegistry.selectableValue(stableOwner, contribution.id)
+    const handle = this.themes.register(contribution, owner, stableOwner)
     this.trackRegistryHealth('theme', contribution.id, owner)
     let dispose: () => void
     try {
@@ -891,15 +901,17 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
         // The selected-theme fallback contract: when the unloaded theme is
         // the one currently applied, the HOST must restore the builtin
         // palette — the service does not know the selection, so the
-        // runner's hook (setThemeUnloadedHook) is asked (the review's P2:
-        // the old code only removed the record and repainted, leaving the
-        // dead plugin's palette on screen until the user switched).
-        this.themeUnloadedHook?.(contribution.name)
+        // runner's hook (setThemeUnloadedHook) is asked with the
+        // SOURCE-QUALIFIED selectable value (the same identity the runner
+        // records when it applies the palette) (the review's P2: the old
+        // code only removed the record and repainted, leaving the dead
+        // plugin's palette on screen until the user switched).
+        this.themeUnloadedHook?.({ selectableValue, name: contribution.name })
       }, 'piTuiExtensions.registerTheme()')
     } catch (error) {
       handle.dispose()
       this.untrackRegistryHealth('theme', contribution.id, owner)
-      this.themeUnloadedHook?.(contribution.name)
+      this.themeUnloadedHook?.({ selectableValue, name: contribution.name })
       throw error
     }
     return {
@@ -907,17 +919,69 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       dispose: () => {
         handle.dispose()
         this.untrackRegistryHealth('theme', contribution.id, owner)
-        this.themeUnloadedHook?.(contribution.name)
+        this.themeUnloadedHook?.({ selectableValue, name: contribution.name })
         dispose()
       },
     }
   }
 
-  /** Runner-only seam: notified with the SELECTABLE name of every theme
-   * that unloads (fiber unload or explicit dispose). The runner restores
-   * the builtin fallback when the unloaded theme is the live selection. */
-  setThemeUnloadedHook(hook: (name: string) => void): void {
+  /** The runner's theme-unload notification target (see the setter). */
+  private themeUnloadedHook:
+    | ((unloaded: { selectableValue: string; name: string }) => void)
+    | undefined
+  /** The theme-unload hook LEASE (the review's P2): `{hook, token}` of the
+   * CURRENT generation. OBJECT-VALUED deliberately — the Cordis Service
+   * proxy wraps FUNCTION-valued property reads with a fresh wrapper per
+   * access, so identity comparisons against a function field can never
+   * work through the proxy; a plain object field is read as-is, so the
+   * token comparison is reliable. A stale release (an old runner
+   * generation's cleanup) carries a different token and is a no-op. */
+  private themeHookLease:
+    | { readonly hook: (unloaded: { selectableValue: string; name: string }) => void; readonly token: number }
+    | undefined
+
+  /**
+   * Runner-only seam: notified with the SOURCE-QUALIFIED selectable value
+   * (and display name) of every theme that unloads (fiber unload or
+   * explicit dispose). The runner restores the builtin fallback when the
+   * unloaded theme is the live selection.
+   *
+   * GENERATION LEASE (the review's P2): the returned disposer is the only
+   * way to clear the hook, and it clears only while THIS call's token is
+   * still the CURRENT registration — an old runner generation's cleanup
+   * can never clear a NEWER generation's hook. Without the lease, an HMR
+   * unload left the old generation's callback (capturing the disposed
+   * app) installed until the next runner installed its own — and if a
+   * theme fiber unloaded in the window, the callback would reach into the
+   * disposed app (the same stale-detach class every other surface seam
+   * guards against).
+   *
+   * LEASE IDENTITY: the Cordis Service proxy wraps function-valued
+   * PROPERTY reads (a fresh wrapper per access), so no identity
+   * comparison against `this.themeUnloadedHook` can ever work through the
+   * proxy. The lease token is therefore a PRIVATE closure marker held in
+   * a module-level WeakMap keyed by the service instance (stable object
+   * identity): the CURRENT token is the one the CURRENT hook call set,
+   * and a stale release (a different token) is a no-op — it can never
+   * clear a newer generation's hook.
+   */
+  setThemeUnloadedHook(
+    hook: (unloaded: { selectableValue: string; name: string }) => void,
+  ): () => void {
+    const current = this.themeHookLease
+    const token = current === undefined ? 1 : current.token + 1
     this.themeUnloadedHook = hook
+    this.themeHookLease = { hook, token }
+    let released = false
+    return () => {
+      // Only the CURRENT token's disposer clears the callback: a stale
+      // old-generation release is a no-op for a NEWER generation's hook.
+      const live = this.themeHookLease
+      if (released || live === undefined || live.token !== token || live.hook !== hook) return
+      released = true
+      this.themeUnloadedHook = undefined
+      this.themeHookLease = undefined
+    }
   }
 
   /**
@@ -1670,32 +1734,36 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
 
   /** The identity ({id, owner}) of one external-registry contribution.
    * Non-theme slots resolve by the contribution ID; the THEME slot
-   * resolves by the SELECTABLE NAME ONLY (the unified theme protocol —
-   * a mixed name/id lookup is inherently ambiguous because one theme's
-   * name may equal another's id; see ThemeRegistry.identityOf). The
-   * resolved id is the contribution id health records key by. */
-  private registryIdentity(slot: string, idOrName: string): { id: string; owner: string } | undefined {
+   * resolves by the SOURCE-QUALIFIED SELECTABLE VALUE ONLY (`plugin:…` —
+   * the unified theme protocol; a mixed name/id lookup is inherently
+   * ambiguous because one theme's name may equal another's id, and a bare
+   * name also collides with a custom FILE of the same name — the review's
+   * P2). The resolved id is the contribution id health records key by. */
+  private registryIdentity(slot: string, idOrSelectable: string): { id: string; owner: string } | undefined {
     switch (slot) {
       case 'command': {
-        const owner = this.commands.ownerOf(idOrName)
-        return owner === undefined ? undefined : { id: idOrName, owner }
+        const owner = this.commands.ownerOf(idOrSelectable)
+        return owner === undefined ? undefined : { id: idOrSelectable, owner }
       }
-      case 'theme': return this.themes.identityOf(idOrName)
+      case 'theme': {
+        const identity = this.themes.identityOfSelectable(idOrSelectable)
+        return identity === undefined ? undefined : { id: identity.id, owner: identity.owner }
+      }
       case 'autocomplete': {
-        const owner = this.autocomplete.ownerOf(idOrName)
-        return owner === undefined ? undefined : { id: idOrName, owner }
+        const owner = this.autocomplete.ownerOf(idOrSelectable)
+        return owner === undefined ? undefined : { id: idOrSelectable, owner }
       }
       case 'setting': {
-        const owner = this.settings.ownerOf(idOrName)
-        return owner === undefined ? undefined : { id: idOrName, owner }
+        const owner = this.settings.ownerOf(idOrSelectable)
+        return owner === undefined ? undefined : { id: idOrSelectable, owner }
       }
       case 'keybinding': {
-        const owner = this.keybindings.ownerOf(idOrName)
-        return owner === undefined ? undefined : { id: idOrName, owner }
+        const owner = this.keybindings.ownerOf(idOrSelectable)
+        return owner === undefined ? undefined : { id: idOrSelectable, owner }
       }
       case 'editor': {
-        const owner = this.editors.ownerOf(idOrName)
-        return owner === undefined ? undefined : { id: idOrName, owner }
+        const owner = this.editors.ownerOf(idOrSelectable)
+        return owner === undefined ? undefined : { id: idOrSelectable, owner }
       }
       default: return undefined
     }
