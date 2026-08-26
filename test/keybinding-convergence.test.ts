@@ -597,3 +597,51 @@ test('5.6 a plugin cannot bind the space key (it would swallow typing)', () => {
   const result = router.route(' ', { questionActive: false, approvalActive: false, viewerInputMode: 'none', hasOverlay: false, searchActive: false, hostDeclined: false }, () => 'open-search')
   assert.equal(result.kind, 'editor', 'a plain space must reach the editor, never a plugin binding')
 })
+
+// ── dynamic plugin keybinding lifecycle (full-review finding) ─────────────
+
+test('5.7 the registry notifies subscribers on register/dispose (dynamic sync)', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  let notified = 0
+  const unsubscribe = registry.subscribe(() => { notified += 1 })
+  registry.register(
+    { id: 'late', key: { key: 'z', ctrl: true, alt: true, shift: false, super: false }, action: 'open-search', description: 'late' },
+    'plugin',
+  )
+  assert.equal(notified, 1, 'register must notify subscribers (the runner resyncs the keymap)')
+  const handle = registry.register(
+    { id: 'second', key: { key: 'y', ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'second' },
+    'plugin',
+  )
+  assert.equal(notified, 2)
+  handle.dispose()
+  assert.equal(notified, 3, 'dispose must notify subscribers (an unloaded binding stops firing)')
+  unsubscribe()
+  registry.register(
+    { id: 'after-unsub', key: { key: 'x', ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'after' },
+    'plugin',
+  )
+  assert.equal(notified, 3, 'unsubscribe must stop notifications')
+  // The runner wiring (index.ts) subscribes and calls setPluginRules on
+  // every notification — the pieces are now covered: registry notify +
+  // the manager's setPluginRules resync.
+  const manager = new HostKeybindingManager()
+  manager.setPluginRules([{ id: 'late', action: 'app.transcript.toggleFullscreen', key: 'ctrl+alt+z' }])
+  assert.deepEqual(manager.keysFor('app.transcript.toggleFullscreen'), ['ctrl+alt+z'])
+  manager.setPluginRules([])
+  assert.deepEqual(manager.keysFor('app.transcript.toggleFullscreen'), [], 'removing the plugin rule stops it')
+})
+
+// ── leaderTimeoutMs override (full-review finding) ────────────────────────
+
+test('5.8 the manager leaderTimeoutMs override is applied to the machine', () => {
+  const manager = new HostKeybindingManager({ leaderTimeoutMs: 777 })
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.transcript.toggleFullscreen': '<leader>n' },
+  }, { leaderTimeoutMs: 1500 }))
+  const machine = manager.leaderMachine()
+  const cfg = (machine as unknown as { config: { timeoutMs: number } }).config
+  assert.equal(cfg.timeoutMs, 777, 'the manager override must win over the config default')
+})
