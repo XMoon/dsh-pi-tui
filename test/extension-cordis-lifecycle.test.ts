@@ -597,7 +597,10 @@ test('M5: command/theme/setting registrations are fiber-bound (owner unload clea
       svc.registerAutocomplete({ id: 'auto-a', provider: { getSuggestions: async () => null } })
       svc.registerKeybinding({
         id: 'key-a',
-        key: { key: 'k', ctrl: false, alt: false, shift: false, super: false },
+        // A modified chord: a plain printable key is rejected at
+        // registration (the router keeps printable keys with the editor,
+        // so the binding could never fire — round-12 finding).
+        key: { key: 'k', ctrl: true, alt: true, shift: false, super: false },
         action: 'open-search',
       })
     })
@@ -620,6 +623,56 @@ test('M5: command/theme/setting registrations are fiber-bound (owner unload clea
     assert.equal(service.themes.hasAny(), false)
     assert.equal(service.settings.hasAny(), false)
     assert.equal(service.autocomplete.hasAny(), false)
+    assert.equal(service.keybindings.hasAny(), false)
+    await host()
+    await startup()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('M5: the keybinding registry rejects non-public actions and printable keys through the PUBLIC path (round 12)', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      registerKeybinding(contribution: {
+        id: string
+        key: { key: string; ctrl: boolean; alt: boolean; shift: boolean; super: boolean }
+        action: string
+      }): { id: string; dispose(): void }
+      keybindings: { hasAny(): boolean }
+    }
+    assert.ok(service !== undefined)
+    // A Host-private app.* action is NOT a public TuiAction: the runtime
+    // whitelist must reject it through the PUBLIC extension path — a
+    // JS/`as any` plugin can never trigger the Host dispatcher with it
+    // (capability boundary, round-12 finding).
+    assert.throws(() => service.registerKeybinding({
+      id: 'bad-exit',
+      key: { key: 'x', ctrl: true, alt: false, shift: false, super: false },
+      action: 'app.exit.request' as never,
+    }), /not a public TuiAction/, 'a Host-private action string must be rejected through the public path')
+    // A plain printable key can never reach the plugin stage: rejected too.
+    assert.throws(() => service.registerKeybinding({
+      id: 'bad-space',
+      key: { key: 'space', ctrl: false, alt: false, shift: false, super: false },
+      action: 'open-search',
+    }), /printable/, 'a printable key must be rejected through the public path')
+    // A public action + modified chord registers fine.
+    const handle = service.registerKeybinding({
+      id: 'good',
+      key: { key: 'x', ctrl: true, alt: true, shift: false, super: false },
+      action: 'open-search',
+    })
+    await settle()
+    assert.equal(service.keybindings.hasAny(), true)
+    handle.dispose()
+    await settle()
     assert.equal(service.keybindings.hasAny(), false)
     await host()
     await startup()

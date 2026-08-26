@@ -226,8 +226,9 @@ direct settings.yaml write). `/help` and the footer hints render through
 - No arbitrary JS callback bindings.
 - No raw terminal bytes to plugins; no plugin preemption of the protocol
   stage; no breaking extension API change (the plugin registry keeps its
-  key-level reservation; a plugin binding a protected action to a NEW key
-  is additive and allowed).
+  key-level reservation AND the runtime ACTION whitelist — a Stable
+  plugin registers only the public `TuiAction` set; the Host-private
+  `app.*` actions are never plugin-bindable, round-12 finding).
 - The model-menu / history-panel / output-viewer focused components keep
   their component-local keys (the plan's M5 covers QuestionFlow and
   TaskBrowserPanel; the others follow the same pattern later).
@@ -320,10 +321,14 @@ plugin NormalizedKey shape at register/storage/lookup (including the
 reserved-key check, which runs AFTER canonicalization so `esc`/`return`
 registrations are rejected as the reserved `escape`/`enter`).
 
-**Legacy terminal collisions are rejected everywhere.** `ctrl+[` (Esc)
-and `ctrl+j`/`ctrl+m` (Enter) are rejected as direct bindings, leader
-prefixes and leader completions — a binding indistinguishable from a
-lifecycle key on legacy terminals is unsupported, never a warning.
+**Legacy terminal collisions are rejected everywhere.** `ctrl+[` (Esc),
+`ctrl+j`/`ctrl+m` (Enter), `ctrl+i` (the Tab byte — `matchesKey('\t',
+'ctrl+i')` is true, so a Host binding fires on Tab presses on legacy
+terminals), `ctrl+h` (the Backspace byte) and `ctrl+_` (the same 0x1f
+byte the fork's rawCtrlChar maps Ctrl+- to) are rejected as direct
+bindings, leader prefixes and leader completions — a binding
+indistinguishable from a fixed key on legacy terminals is unsupported,
+never a warning.
 
 **Dynamic plugin lifecycle + edge hardening.** Plugin keybinding rules
 resync on every registry register/dispose (subscribe), plugin rule ids
@@ -332,6 +337,21 @@ the manager's leaderTimeoutMs is applied, and stop() cancels a pending
 leader + clears the interrupt double-action window. The host editor
 submits ONLY through the synced `tui.input.submit` binding — a disabled
 submit never fires on Enter or LF (LF is a newline).
+
+**The Stable plugin boundary is capability-enforced (round 12).** The
+registry REJECTS at registration: (a) any action string outside the
+public `TuiAction` set (the runtime whitelist `TUI_ACTIONS` — a
+JS/`as any` plugin can never register `app.exit.request` and reach the
+Host dispatcher), and (b) plain printable keys (the spacebar and bare
+letters never reach the plugin stage — the router keeps them with the
+editor's text entry; modified chords stay bindable). The owner-aware
+dispatcher NEVER routes a plugin-owner winner into the
+AppActionDispatcher: only 'host' winners execute Host-private actions,
+'editor' winners go to the fork editor, and 'plugin' winners continue to
+the Stable plugin remainder (`onExtensionAction`). A leader prefix that
+equals a LIVE plugin key disables the leader machine with a diagnostic
+(the leader feeds before the plugin stage — never a silent swallow;
+same fail-soft as a host-key collision).
 
 **Owner-aware winner selection (round 9).** All owners (host/editor/
 plugin) compete in the resolver on equal footing; the resolution carries
@@ -351,7 +371,7 @@ The read model is ONE projection: `keysFor`/`keyHint`/
 working submit remap never leaves the replaced Enter advertised), and a
 CONDITIONAL top claim never permanently hides its context fallback.
 
-Final gates: 2482 bundle tests, 985 fork tests, 11 docs tests,
+Final gates: 2490 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The final
 convergence review round was accepted with no findings.

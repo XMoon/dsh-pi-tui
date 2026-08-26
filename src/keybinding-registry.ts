@@ -9,11 +9,16 @@
  * Contract (plan §11):
  * - keys are NORMALIZED (the host's key identity — never raw escape
  *   sequences; a plugin can never interpret terminal bytes);
- * - actions are SEMANTIC (the plan's action list: submit-draft,
- *   queue-draft, steer-draft, cancel-activity, open-search,
- *   toggle-fullscreen, cycle-permission, ...) — the host executes;
+ * - actions are SEMANTIC and WHITELISTED (the public `TuiAction` set —
+ *   submit-draft, queue-draft, steer-draft, cancel-activity, open-search,
+ *   toggle-fullscreen, cycle-permission — enforced at RUNTIME by
+ *   {@link TUI_ACTIONS}: a JS/`as any` plugin can never register a
+ *   Host-private `app.*` action and reach the Host dispatcher, round-12
+ *   finding) — the host executes;
  * - reserved Host lifecycle keys cannot be claimed by a plugin (the
- *   registry REJECTS a reserved key loudly);
+ *   registry REJECTS a reserved key loudly), and plain printable keys
+ *   (letters, the spacebar) are rejected too (they never reach the
+ *   plugin stage — round-12 finding);
  * - unload removes the bindings (fiber-bound);
  * - duplicates are an explicit conflict error.
  *
@@ -21,10 +26,12 @@
  * action-level abstraction of the host's safety-critical set
  * (app.exit.request / app.agent.interrupt / app.input.submit). The
  * registry keeps the KEY-level reservation (RESERVED_HOST_KEYS) as the
- * compatibility guard; a plugin binding a protected action to a NEW key
- * is ADDITIVE (the host's own handler still executes — the runner routes
- * the semantic action through the host paths), so it is allowed. The
- * protected set is what the USER-config surface and the viewer guard use.
+ * compatibility guard. The ACTION whitelist is the other half of the
+ * boundary: the protected `app.*` actions are HOST-PRIVATE and are never
+ * plugin-bindable — a plugin may only trigger the public semantic
+ * actions, which the runner routes through the host's own execution
+ * paths (round-12 finding). The protected set is what the USER-config
+ * surface and the viewer guard use.
  * @module @xmoon76/dsh-pi-tui/keybinding-registry
  */
 
@@ -34,6 +41,38 @@ import { canonicalizeKeyId } from './keybindings/key-identity.ts'
 import { PROTECTED_HOST_ACTIONS } from './keybindings/definitions.ts'
 
 export { PROTECTED_HOST_ACTIONS }
+
+/** The PUBLIC semantic actions a Stable plugin may trigger (the
+ * `TuiAction` union — the extension API's capability boundary). The
+ * runner's `onExtensionAction` switch executes exactly these; the HOST
+ * `app.*` actions are private to the Host and are NEVER reachable from a
+ * plugin-registered action string (review finding: the registry had no
+ * runtime action whitelist, so a JS/`as any` plugin could register
+ * `app.exit.request` and the plugin-owned winner would then enter the
+ * Host dispatcher — the AppActionDispatcher must never execute a
+ * plugin-supplied string). Kept in sync with `TuiAction` in
+ * extension/public-types.ts. */
+export const TUI_ACTIONS: ReadonlySet<TuiAction> = new Set<TuiAction>([
+  'submit-draft',
+  'queue-draft',
+  'steer-draft',
+  'cancel-activity',
+  'open-search',
+  'toggle-fullscreen',
+  'cycle-permission',
+])
+
+/** Whether a NORMALIZED key is a plain printable (a plugin binding for a
+ * printable key would swallow typing — the router keeps printable keys
+ * with the editor's text entry, so the binding could never fire; the
+ * registration must be rejected, never advertised as an effective rule —
+ * review finding). The `space` key name (the spacebar) is printable too.
+ * Mirrors the InputRouter's isPrintableKey — both guards must agree. */
+export function isPlainPrintableNormalizedKey(key: NormalizedKey): boolean {
+  if (key.ctrl || key.alt || key.shift || key.super) return false
+  if (key.key === 'space') return true
+  return key.key.length === 1 && key.key.charCodeAt(0) >= 32 && key.key.charCodeAt(0) <= 126
+}
 
 
 /** Internal registration record. */
@@ -165,11 +204,33 @@ export class KeybindingRegistry {
       throw new Error(`duplicate keybinding id "${contribution.id}"`)
     }
     if (contribution.key.key === '') throw new Error('keybinding key must not be empty')
+    // THE ACTION WHITELIST (review finding): only the PUBLIC TuiAction set
+    // may be registered. A Host-private `app.*` action string would be
+    // routed to the Host dispatcher by the plugin-owned winner — a Stable
+    // plugin must never trigger a Host-private semantic action. The
+    // TuiAction TYPE enforces this at compile time; this is the RUNTIME
+    // enforcement for JS plugins / `as any` callers.
+    if (!TUI_ACTIONS.has(contribution.action)) {
+      throw new Error(
+        `keybinding action "${contribution.action}" is not a public TuiAction (a Stable plugin may only trigger the public semantic actions)`,
+      )
+    }
     // CANONICALIZE FIRST (convergence finding): the reserved-key check
     // must see the canonical identity — a plugin registering `esc` or
     // `return` is bound to the reserved `escape`/`enter` and must be
     // rejected, not accepted under an alias spelling.
     const canonicalKey = canonicalNormalizedKey(contribution.key)
+    // PLAIN PRINTABLE REJECTION (review finding): the router keeps plain
+    // printable keys (and the spacebar) with the editor's text entry, so
+    // a plugin binding on one can never fire. Accepting it would
+    // advertise an "effective rule" that never executes — rejected here,
+    // mirroring the config parser's Host-side rule. Modified chords
+    // (ctrl+space) stay bindable — they really reach the plugin stage.
+    if (isPlainPrintableNormalizedKey(canonicalKey)) {
+      throw new Error(
+        `keybinding for "${describeKey(canonicalKey)}" is a plain printable key and cannot be bound by a plugin (it would never reach the plugin stage)`,
+      )
+    }
     if (isReservedHostKey(canonicalKey)) {
       throw new Error(
         `keybinding for "${describeKey(canonicalKey)}" is reserved by the host and cannot be claimed by a plugin`,

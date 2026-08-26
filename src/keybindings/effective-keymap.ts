@@ -449,6 +449,23 @@ export class EffectiveKeymap {
     return [...keys]
   }
 
+  /** Every ACTIVE key of the PLUGIN-owned rules (owner=plugin — the
+   * Stable plugin bindings). The leader-prefix collision check considers
+   * these too (round-12 finding): the leader machine feeds BEFORE the
+   * plugin stage, so a leader key equal to a live plugin key would
+   * silently swallow the plugin binding while the read model still
+   * advertised it — the leader must be disabled instead. Visible rules
+   * only: a deactivated (conflicted) or unconditionally shadowed plugin
+   * key is not a live binding. */
+  pluginActiveKeys(): KeyId[] {
+    const keys = new Set<KeyId>()
+    for (const rule of this.visibleRules) {
+      if (rule.owner !== 'plugin') continue
+      keys.add(rule.key)
+    }
+    return [...keys]
+  }
+
   /** Whether one action can fire in the CURRENT context (convergence
    * §4.7/§8.3): the action has at least one effective rule whose
    * predicate passes. Used by the leader machine before dispatching a

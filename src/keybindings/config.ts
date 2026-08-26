@@ -121,17 +121,25 @@ export function isPlainPrintableKey(key: KeyId): boolean {
 }
 
 /** LEGACY TERMINAL COLLISIONS — REJECTED, never warned (convergence §4.5
- * finding): on legacy/non-Kitty terminals these keys are INDISTINGUISHABLE
- * from fixed lifecycle keys, so a binding on them would silently steal the
- * lifecycle key (or never fire):
+ * finding + round-12 finding): on legacy/non-Kitty terminals these keys
+ * are INDISTINGUISHABLE from fixed keys, so a binding on them would
+ * silently steal the other key (or never fire):
  * - `ctrl+[` is the legacy ESC sequence (0x1b) — binding it would steal
  *   the interrupt/viewer-close key on legacy terminals;
  * - `ctrl+j` / `ctrl+m` are LF/CR (Enter) — binding them would steal
- *   submit/queue on legacy terminals.
+ *   submit/queue on legacy terminals;
+ * - `ctrl+i` is the TAB byte (0x09 — the fork's rawCtrlChar maps Ctrl+I
+ *   to 9, and matchesKey('\t','ctrl+i') is TRUE, so a Host binding on
+ *   ctrl+i fires on Tab presses on legacy terminals — stealing the
+ *   editor's tab completion);
+ * - `ctrl+h` is the BACKSPACE byte (0x08) — same class as ctrl+i;
+ * - `ctrl+_` is the 0x1f byte — the fork maps Ctrl+- to the SAME 0x1f
+ *   (rawCtrlChar('-') = 31, the same physical US key as _), so ctrl+_ and
+ *   ctrl+- are one physical legacy byte.
  * A binding that depends on the terminal protocol to be distinguishable
- * from a lifecycle key is unsupported: rejected with a diagnostic. */
+ * from a fixed key is unsupported: rejected with a diagnostic. */
 const LEGACY_COLLISION_KEYS = new Set(
-  ['ctrl+[', 'ctrl+j', 'ctrl+m'].map(key => canonicalizeKeyId(key as KeyId)),
+  ['ctrl+[', 'ctrl+j', 'ctrl+m', 'ctrl+i', 'ctrl+h', 'ctrl+_'].map(key => canonicalizeKeyId(key as KeyId)),
 )
 
 /** The NON-CONFIGURABLE overlay/component default keys (plan §3.3 fixed
@@ -193,7 +201,7 @@ export function parseUserKeybindings(
         // Legacy terminal collisions are REJECTED for the leader prefix too
         // (convergence finding): a leader on ctrl+[ / ctrl+j / ctrl+m would
         // swallow the lifecycle Esc/Enter on legacy terminals.
-        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — it collides with a lifecycle key on legacy terminals — ignored`)
+        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — it collides with a fixed key on legacy terminals — ignored`)
       } else {
         leader = { key: canonicalLeader, timeoutMs: options.leaderTimeoutMs ?? DEFAULT_LEADER_TIMEOUT_MS }
       }
@@ -274,7 +282,7 @@ export function parseUserKeybindings(
         // (convergence finding): a completion on ctrl+[ / ctrl+j / ctrl+m
         // would swallow the lifecycle Esc/Enter on legacy terminals.
         if (LEGACY_COLLISION_KEYS.has(canonicalCompleting)) {
-          diagnostics.push(`keybindings: "${actionId}" binds a "<leader>${completing}" sequence — it collides with a lifecycle key on legacy terminals — ignored`)
+          diagnostics.push(`keybindings: "${actionId}" binds a "<leader>${completing}" sequence — it collides with a fixed key on legacy terminals — ignored`)
           continue
         }
         leaderBindings.push({ action, key: canonicalCompleting })
@@ -304,11 +312,11 @@ export function parseUserKeybindings(
         diagnostics.push('keybindings: "app.input.submit" cannot bind Shift+Enter — it is the editor newline key — ignored')
         continue
       }
-      // Legacy terminal collisions are REJECTED (convergence §4.5): a
-      // binding indistinguishable from a lifecycle key on legacy
-      // terminals is unsupported, never a warning.
+      // Legacy terminal collisions are REJECTED (convergence §4.5 +
+      // round-12 finding): a binding indistinguishable from a fixed key
+      // on legacy terminals is unsupported, never a warning.
       if (LEGACY_COLLISION_KEYS.has(canonicalEntry)) {
-        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — it collides with a lifecycle key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter) — ignored`)
+        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — it collides with a fixed key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter; Ctrl+I/H are Tab/Backspace; Ctrl+_ is Ctrl+-) — ignored`)
         continue
       }
       // The fork editor CONSUMES its own editing bindings BEFORE the

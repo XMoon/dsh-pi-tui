@@ -2824,18 +2824,22 @@ export class TuiApp {
     const resolution = this.keybindings.resolve(data, this.keybindingContext())
     let hostDeclined = false
     if (resolution !== undefined) {
-      // OWNER-AWARE DISPATCH (review finding): the resolution's owner says
-      // WHO executes the winner — 'host'/'plugin' → the host dispatcher
-      // (a plugin-owner winner still dispatches its semantic action; the
-      // plugin remainder only claims keys nothing earlier consumed);
-      // 'editor' → the FORK EDITOR executes (hostResolved: false — the
-      // editor's tui.input.submit was synced by onEditorSubmitSync, so
-      // the key really submits there with paste-burst/backslash-newline
-      // semantics). An editor-owned winner must NOT be dispatched here:
-      // the old code skipped editor rules before winner selection, so
-      // `submit: ctrl+s` resolved to the steer builtin and steered at
-      // runtime while the read model advertised submit (round-9 finding).
-      if (resolution.owner !== 'editor') {
+      // OWNER-AWARE DISPATCH (review findings): the resolution's owner
+      // says WHO executes the winner —
+      // - 'host' → the Host dispatcher (the only owner that may run the
+      //   Host-private app.* actions);
+      // - 'editor' → the FORK EDITOR executes (hostResolved: false — the
+      //   editor's tui.input.submit was synced by onEditorSubmitSync, so
+      //   the key really submits there with paste-burst/backslash-newline
+      //   semantics);
+      // - 'plugin' → NEVER the AppActionDispatcher: a Stable plugin may
+      //   only trigger the PUBLIC TuiAction set, and those execute
+      //   through the router's plugin remainder (onExtensionAction).
+      //   Sending a plugin-owner winner into the Host dispatcher would
+      //   let a smuggled action string (e.g. `app.exit.request`) run a
+      //   Host-private semantic action (round-12 finding — capability
+      //   boundary).
+      if (resolution.owner === 'host') {
         const consumed = this.dispatchResolvedAction(resolution.action as AppKeybindingId, data, resolution.key)
         if (consumed) return { consume: true }
         // The HOST dispatcher declined (e.g. pasteMedia without a
@@ -2843,6 +2847,8 @@ export class TuiApp {
         // be re-reserved by the same host action (convergence §6/§4.9).
         hostDeclined = true
       }
+      // owner === 'editor' | 'plugin': fall through to the editor / the
+      // router's Stable plugin remainder below.
     }
     // M6: the router first determines whether a capturing path owns the key.
     // A replacement editor gets the first chance for editor-routed input;
