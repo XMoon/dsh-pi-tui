@@ -141,6 +141,33 @@ test('Shift+↑/↓ reorder and Tab switches the row', async () => {
   app.stop()
 })
 
+test('an UNKNOWN item id renders its label SANITIZED (control chars never reach the panel)', async () => {
+  const { vt, app } = startApp()
+  // The model carries a ref whose id is NOT in the registry (an unloaded
+  // plugin) and contains terminal control characters: the raw id must
+  // never reach the panel (the parser rejects such ids in layouts — this
+  // is the defense-in-depth layer for any other id source).
+  const malicious = 'ext:gone/\u001b]52;c;bWFsaWNpb3Vz\u0007'
+  const model = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: malicious }], right: [] }],
+  }, app.getFooterItemRegistry())
+  app.openFooterConfigurator({
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\u001b]'), `an ESC sequence must never reach the panel:\n${view}`)
+  assert.ok(!view.includes('\u0007'), `a BEL must never reach the panel:\n${view}`)
+  // The visible label keeps the readable parts (the control chars are
+  // stripped, the rest stays).
+  assert.ok(view.includes('ext:gone/'), `the sanitized label must still show the id text:\n${view}`)
+  app.stop()
+})
+
 test('the preview context is LIVE: an extension segment update while open shows up', async () => {
   // The panel receives GETTERS for the editor-empty flag and the
   // extension footer text: a change while the panel is open (a segment
@@ -165,7 +192,7 @@ test('the preview context is LIVE: an extension segment update while open shows 
       return { ...snap, view: { subject: { kind: 'main' } } } as never
     },
     composer: new FooterComposer(createBuiltinFooterRegistry()),
-    editorEmpty: () => true,
+    taskBrowserAvailable: () => true,
     extensionFooterText: () => extensionText,
     maxVisible: () => 100,
     onSave: () => {},
@@ -183,8 +210,8 @@ test('the preview context is LIVE: an extension segment update while open shows 
   app.stop()
 })
 
-test('the preview editor-empty getter is LIVE: a draft typed under the panel updates the hint', async () => {
-  let editorEmpty = true
+test('the preview task-browser getter is LIVE: a draft typed under the panel updates the hint', async () => {
+  let taskBrowserAvailable = true
   const { FooterConfiguratorPanel } = await import('../src/footer/configurator.ts')
   const { FooterComposer } = await import('../src/footer/composer.ts')
   const { createBuiltinFooterRegistry } = await import('../src/footer/builtin-items.ts')
@@ -203,19 +230,19 @@ test('the preview editor-empty getter is LIVE: a draft typed under the panel upd
       return { ...snap, view: { subject: { kind: 'main' } }, activity: { taskCount: 1 } } as never
     },
     composer: new FooterComposer(createBuiltinFooterRegistry()),
-    editorEmpty: () => editorEmpty,
+    taskBrowserAvailable: () => taskBrowserAvailable,
     extensionFooterText: () => '',
     maxVisible: () => 100,
     onSave: () => {},
     onCancel: () => {},
   })
-  // The tasks badge advertises the ↓ browser ONLY while the editor is
-  // empty (prompt mode) — the editor-empty getter must be LIVE.
+  // The tasks badge advertises the ↓ browser ONLY while the routing gate
+  // holds (the empty visible prompt editor) — the getter must be LIVE.
   const first = panel.render(100).join('\n')
-  assert.ok(first.includes('↓ view'), `the empty-editor hint must show:\n${first}`)
-  editorEmpty = false
+  assert.ok(first.includes('↓ view'), `the available hint must show:\n${first}`)
+  taskBrowserAvailable = false
   const second = panel.render(100).join('\n')
-  assert.ok(!second.includes('↓ view'), `a non-empty editor must drop the hint:\n${second}`)
+  assert.ok(!second.includes('↓ view'), `an unavailable browser must drop the hint:\n${second}`)
   app.stop()
 })
 

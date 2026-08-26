@@ -1514,12 +1514,17 @@ export function registerTuiCommands(
     handler: () => {
       const settings = runner.tuiSettings
       const doc = settings?.get()
-      // The configurator starts from the CURRENT effective layout: the
-      // persisted custom layout when active, else the builtin default.
+      // The configurator starts from the CURRENT EFFECTIVE layout: the
+      // persisted custom layout when active, else whatever the composer
+      // renders right now — getEffectiveFooterLayout() maps the active
+      // MODE (default/compact/custom). The old `getFooterLayout() ??
+      // DEFAULT` fallback lost the compact mode: a compact user opening
+      // /footer and pressing Enter unchanged would have saved the full
+      // two-row default as their custom layout (the review's P2).
       const persisted = doc !== undefined && doc.footer === 'custom' ? parseFooterLayout(doc.footerLayout) : undefined
       const initial = persisted !== undefined && isFooterLayout(persisted)
         ? persisted
-        : app.getFooterLayout() ?? DEFAULT_FOOTER_LAYOUT
+        : app.getEffectiveFooterLayout()
       const registry = app.getFooterItemRegistry()
       const model = new FooterConfiguratorModel(initial, registry)
       app.openFooterConfigurator({

@@ -45,6 +45,10 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 300
 export const MAX_COMMAND_TIMEOUT_MS = 1000
 /** The minimum refresh interval (plan §17.7). */
 export const MIN_COMMAND_REFRESH_MS = 1000
+/** The grace between SIGTERM and SIGKILL when terminating a command: a
+ * TERM-resistant child (e.g. `trap "" TERM`) must not leak as a detached
+ * orphan — the escalation is the hard kill that actually reclaims it. */
+export const KILL_GRACE_MS = 500
 
 /** The footer command runner. */
 export class FooterCommandRunner {
@@ -52,6 +56,7 @@ export class FooterCommandRunner {
   private generation = 0
   private lastStartAt = 0
   private child: ChildProcess | undefined
+  private readonly terminating = new Set<ChildProcess>()
   private timer: NodeJS.Timeout | undefined
   private errorGeneration = 0
   private disposed = false
@@ -210,23 +215,42 @@ export class FooterCommandRunner {
     this.options.onOutput(rows)
   }
 
-  /** Best-effort process-tree termination (the child is a group leader). */
+  /** Best-effort process-tree termination (the child is a group leader).
+   * SIGTERM first, then — when the child ignores TERM — a hard SIGKILL
+   * after a bounded grace: a TERM-resistant child must never leak as a
+   * detached orphan (the review's P1: the old code sent only SIGTERM and
+   * dropped the handle, so `trap "" TERM` children ran forever). The
+   * escalation holds the CAPTURED child — a newer child is a different
+   * object and can never be signalled by mistake — and skips a child
+   * that already closed. The generation-scoped handle (this.child) stays
+   * until the close event confirms the process is gone. */
   private killChild(): void {
     const child = this.child
-    if (child === undefined) return
-    this.child = undefined
-    if (child.pid !== undefined) {
+    if (child === undefined || this.terminating.has(child)) return
+    this.terminating.add(child)
+    const signalGroup = (signal: NodeJS.Signals): void => {
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signal)
+        } catch {
+          // Already gone.
+        }
+      }
       try {
-        process.kill(-child.pid, 'SIGTERM')
+        child.kill(signal)
       } catch {
         // Already gone.
       }
     }
-    try {
-      child.kill('SIGTERM')
-    } catch {
-      // Already gone.
-    }
+    signalGroup('SIGTERM')
+    const escalation = setTimeout(() => {
+      // Both still null = the process has not closed yet (exitCode is
+      // null while running; a signal-dead process has signalCode set).
+      if (child.exitCode === null && child.signalCode === null) {
+        signalGroup('SIGKILL')
+      }
+    }, KILL_GRACE_MS)
+    child.once('close', () => clearTimeout(escalation))
   }
 
   /** Dispose: terminate the child, drop the coalescing timer. */

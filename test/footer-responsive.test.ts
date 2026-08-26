@@ -14,7 +14,7 @@ import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
 
 const composer = new FooterComposer(createBuiltinFooterRegistry())
-const CONTEXT = { editorEmpty: true, extensionFooterText: '[EXT-SEG]' }
+const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '[EXT-SEG]' }
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
 type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
@@ -94,6 +94,56 @@ test('a right zone is never covered by the left zone at any width', () => {
     assert.ok(first.includes('focus'), `right zone lost at ${width}: ${JSON.stringify(first)}`)
     assert.ok(visibleWidth(first) <= width, `row overflows at ${width}`)
   }
+})
+
+test('a right zone ALONE stays flush to the RIGHT edge (an empty left zone must not drag it left)', () => {
+  // The review's P2: when every left item is unavailable (a sessionless
+  // snapshot), the old code joined the right items at the LEFT edge —
+  // the right zone lost its alignment semantic.
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.interaction.focusMode = true
+  for (const width of [80, 40, 20]) {
+    const text = composer.render({
+      snapshot: snap,
+      layout: { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [{ id: 'focus-mode' }] }] },
+      width,
+      context: CONTEXT,
+    })
+    const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
+    const row = plain.split('\n')[0]!
+    assert.ok(row.includes('focus'), `the right item must render:\n${plain}`)
+    assert.equal(row.length, width, `the row must be flush to the right edge (${row.length} vs ${width}): ${JSON.stringify(row)}`)
+    // The right item occupies the TAIL: nothing but spaces before it.
+    assert.ok(/^\s+focus$/.test(row) || /^focus$/.test(row), `focus must be right-aligned: ${JSON.stringify(row)}`)
+  }
+})
+
+test('the right zone drops LOW-importance items before the rightmost high-importance one (item-level fitting)', () => {
+  // The review's P2b: when the right zone itself overflows the leftover
+  // room, the old whole-string truncate cut the RIGHTMOST item even when
+  // a LOWER-importance neighbor was the better victim — on a narrow row
+  // `version(10) focus(120)` must drop version, never the pinned focus.
+  const snap = busySnapshot() as DeepMutable<StatusSnapshot>
+  snap.interaction.focusMode = true
+  // Width 10: the right zone (13 cells) alone exceeds the room the left
+  // leaves (8) — item-level fitting must drop the low-importance version
+  // and keep the high-importance focus (the old code truncated the whole
+  // string and cut focus).
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [{
+        left: [{ id: 'permission-preset' }],
+        right: [{ id: 'version', format: 'tui' }, { id: 'focus-mode' }],
+      }],
+    },
+    width: 10,
+    context: CONTEXT,
+  })
+  const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(plain.includes('focus'), `the high-importance right item must survive:\n${plain}`)
+  assert.ok(!plain.includes('v0.0.0'), `the low-importance version must drop first:\n${plain}`)
 })
 
 test('items drop by importance under pressure (the tail goes first)', () => {

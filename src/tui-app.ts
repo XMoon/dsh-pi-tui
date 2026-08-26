@@ -2095,6 +2095,14 @@ export class TuiApp {
     // footer always composes from a snapshot (headless tests drive it
     // through setStatus).
     this.statusStore = options.statusStore ?? new StatusStoreImpl(initialStatusSnapshot('0.0.0'))
+    // M0/M5: the store notify IS the footer's render path — every
+    // ACCEPTED projection (activity, surface, view, host facts) re-renders
+    // the composer. The old per-caller `projectActivity(); renderFooter()`
+    // pairing left gaps (the P2 approval-open/close path mutated activity
+    // WITHOUT a paired render, so run-state went stale until an unrelated
+    // event repainted); the store's no-churn discipline keeps this
+    // event-driven (a same-value refresh never notifies, never renders).
+    this.statusStore.subscribe(() => this.renderFooter())
     this.footerItemRegistry = createBuiltinFooterRegistry()
     // M4: the extension host's configurable footer items join the catalog
     // as a live external source (resolved on demand — replace()/dispose()
@@ -4644,8 +4652,8 @@ export class TuiApp {
    */
   setBusy(busy: boolean): void {
     this.busy = busy
+    // The store notify re-renders the footer (the unified render path).
     this.projectActivity()
-    this.renderFooter()
     // The extension surface snapshot reports the busy flag (the activity
     // phase is a projection of it) — keep it live.
     this.syncExtensionState()
@@ -4666,8 +4674,8 @@ export class TuiApp {
     if (this.compactionPhase === phase) return
     this.compactionPhase = phase
     this.reconcileWorkingRow()
+    // The activity projection's store notify re-renders the footer.
     this.projectActivity()
-    this.renderFooter()
     this.requestRender()
     this.syncExtensionState()
   }
@@ -4816,8 +4824,8 @@ export class TuiApp {
   setWorking(active: boolean): void {
     this.workingActive = active
     this.reconcileWorkingRow()
+    // The activity notify re-renders the footer.
     this.projectActivity()
-    this.renderFooter()
     this.requestRender()
     this.syncExtensionState()
   }
@@ -6637,6 +6645,23 @@ export class TuiApp {
   }
 
   /**
+   * The task-browser trigger semantic — ONE definition shared by the ↓
+   * routing gate, the viewer's parent-lock, and the footer's `↓ view`
+   * hint: active background tasks, no overlay entries, an EMPTY VISIBLE
+   * seat editor in PROMPT mode. The visible seat decides (a shell-mode
+   * empty body is composing a command; a plugin replacement editor
+   * contributes its own text/mode) — the hidden host editor's draft is
+   * never the gate (a P2 regression once used it and advertised a ↓ the
+   * gate refused).
+   */
+  private taskBrowserAvailable(): boolean {
+    return this.tasksActive
+      && !this.activeScreen.hasOverlayEntries
+      && this.seatEditor().getText().trim() === ''
+      && this.seatInputMode() === 'prompt'
+  }
+
+  /**
    * Decode a SERIALIZED user input (`!x` / `!!x`) into the seat editor:
    * the host editor restores mode + body; a plugin editor (no mode) gets
    * the raw text. The single decode point for every host restore path.
@@ -8199,8 +8224,8 @@ export class TuiApp {
    */
   setTodoSummary(todos: readonly TodoItem[]): void {
     this.todoItems = todos
+    // The activity notify re-renders the footer.
     this.projectActivity()
-    this.renderFooter()
     this.renderDock()
     if (this.todoPanelVisible) this.renderTodoPanel()
     this.syncExtensionState()
@@ -8601,8 +8626,8 @@ export class TuiApp {
   setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
     this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
+    // The activity notify re-renders the footer.
     this.projectActivity()
-    this.renderFooter()
     this.syncExtensionState()
   }
 
@@ -8615,8 +8640,8 @@ export class TuiApp {
   setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
     this.dockAgents = agents
     this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
+    // The activity notify re-renders the footer.
     this.projectActivity()
-    this.renderFooter()
     this.syncExtensionState()
   }
 
@@ -8633,8 +8658,8 @@ export class TuiApp {
    */
   setQueueItems(items: readonly QueueItem[]): void {
     this.queueItems = items
+    // The activity notify re-renders the footer.
     this.projectActivity()
-    this.renderFooter()
     this.renderQueuePane()
     this.syncExtensionState()
   }
@@ -8961,6 +8986,14 @@ export class TuiApp {
     return this.customFooterLayout
   }
 
+  /** M3: the CURRENT EFFECTIVE layout the composer renders (custom when
+   * set, else the builtin preset layout for the active mode) — the
+   * configurator must start from THIS, never from `getFooterLayout() ??
+   * default` (which would map a compact mode to the full default). */
+  getEffectiveFooterLayout(): FooterLayoutV1 {
+    return this.currentFooterLayout()
+  }
+
   /** M3: the composer's item registry (the configurator lists the same
    * catalog the preview composes). */
   getFooterItemRegistry(): FooterItemRegistry {
@@ -9023,7 +9056,7 @@ export class TuiApp {
         layout: this.currentFooterLayout(),
         width,
         context: {
-          editorEmpty: this.editor.getText().trim() === '',
+          taskBrowserAvailable: this.taskBrowserAvailable(),
           extensionFooterText: this.extensionHost?.footerText() ?? '',
         },
         instruction,
@@ -9565,7 +9598,7 @@ export class TuiApp {
       registry: options.registry,
       snapshot: () => this.statusStore.snapshot(),
       composer: this.footerComposer,
-      editorEmpty: () => this.editor.getText().trim() === '',
+      taskBrowserAvailable: () => this.taskBrowserAvailable(),
       extensionFooterText: () => this.extensionHost?.footerText() ?? '',
       maxVisible: () => {
         // The budget is bounded by the LIVE terminal height MINUS the

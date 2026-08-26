@@ -67,8 +67,13 @@ export interface FooterLayoutV1 {
  * state — the plan's §2.2 prohibition targets permission/plan/focus/stats/
  * git/model derivation). */
 export interface FooterRenderContext {
-  /** Whether the editor draft is empty (the task badge's `↓ view` hint). */
-  readonly editorEmpty: boolean
+  /** Whether ↓ would open the task browser RIGHT NOW — the exact routing
+   * gate: active tasks, no overlay entries, an EMPTY VISIBLE seat editor
+   * in prompt mode (a shell-mode body is composing a command, and a
+   * plugin replacement editor decides by its own text/mode — the host
+   * editor's draft is not the gate). Drives the task badge's `↓ view`
+   * hint. */
+  readonly taskBrowserAvailable: boolean
   /** The extension footer segments' baked text (the ext:* synthetic item). */
   readonly extensionFooterText: string
 }

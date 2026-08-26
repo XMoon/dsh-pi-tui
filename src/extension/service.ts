@@ -790,9 +790,12 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // The chrome.footer.item canonical key is ext:<owner>/<id> — the
     // owner's `/` (an npm scoped plugin name) is ESCAPED to `~` in the
     // key, so only the ID must be `/`-free (the key is used whole, never
-    // parsed). Enforce the id constraint at registration.
-    if (slot === 'chrome.footer.item' && spec.id.includes('/')) {
-      throw new Error(`chrome.footer.item registration id must not contain "/" (owner "${owner}", id "${spec.id}")`)
+    // parsed). An id with control characters is the same injection class
+    // as a malicious layout (the configurator renders raw ids as labels
+    // for unknown items — and this id gets PERSISTED into user layouts):
+    // reject both at registration.
+    if (slot === 'chrome.footer.item' && (spec.id.includes('/') || /[\u0000-\u001f\u007f-\u009f]/.test(spec.id))) {
+      throw new Error(`chrome.footer.item registration id must not contain "/" or control characters (owner "${owner}", id "${spec.id}")`)
     }
     const handle = this.ledger.register<T>(slot, spec, contribution, owner)
     let dispose: () => void

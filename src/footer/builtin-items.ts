@@ -108,7 +108,12 @@ const tasksItem: FooterItemDefinition = {
     if (tasks > 0) parts.push(`${tasks} task${tasks === 1 ? '' : 's'} running`)
     if (agents > 0) parts.push(`${agents} agent${agents === 1 ? '' : 's'}`)
     if (parts.length === 0) return null
-    const hint = context.editorEmpty ? ' · ↓ view' : ''
+    // The ↓ hint mirrors the ROUTING GATE exactly (a P2 regression once
+    // shrunk it to "host editor empty" — a shell-mode empty body and a
+    // plugin replacement editor with a draft then advertised a ↓ that
+    // the gate refuses): the visible prompt-mode seat editor with no
+    // overlays can actually open the browser.
+    const hint = context.taskBrowserAvailable ? ' · ↓ view' : ''
     return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone: 'primary' }] }
   },
 }

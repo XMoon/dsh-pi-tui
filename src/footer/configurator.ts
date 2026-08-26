@@ -17,6 +17,7 @@ import type { StatusSnapshot } from '../status/types.ts'
 import { FooterComposer, renderSpans } from './composer.ts'
 import type { FooterConfiguratorModel } from './configurator-model.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
+import { stripControlChars } from './layout.ts'
 import type { FooterLayoutV1 } from './types.ts'
 
 /** The configurator panel's options. */
@@ -27,9 +28,9 @@ export interface FooterConfiguratorOptions {
   readonly snapshot: () => StatusSnapshot
   readonly composer: FooterComposer
   /** LIVE getters, not captured values: the preview reflects the current
-   * editor emptiness and extension footer text even while the panel is
-   * open (a draft typed under the overlay, an extension segment update). */
-  readonly editorEmpty: () => boolean
+   * task-browser availability (the same routing-gate semantic the footer
+   * hint uses) and extension footer text even while the panel is open. */
+  readonly taskBrowserAvailable: () => boolean
   readonly extensionFooterText: () => string
   /** The overlay's row budget source: re-read at EVERY render so a
    * terminal resize never leaves the panel clipped or oversized. */
@@ -44,7 +45,7 @@ export class FooterConfiguratorPanel implements Component {
   private readonly registry: FooterItemRegistry
   private readonly snapshot: () => StatusSnapshot
   private readonly composer: FooterComposer
-  private readonly editorEmpty: () => boolean
+  private readonly taskBrowserAvailable: () => boolean
   private readonly extensionFooterText: () => string
   private readonly maxVisible: () => number
   private readonly onSave: (layout: FooterLayoutV1) => void
@@ -57,7 +58,7 @@ export class FooterConfiguratorPanel implements Component {
     this.registry = options.registry
     this.snapshot = options.snapshot
     this.composer = options.composer
-    this.editorEmpty = options.editorEmpty
+    this.taskBrowserAvailable = options.taskBrowserAvailable
     this.extensionFooterText = options.extensionFooterText
     this.maxVisible = options.maxVisible
     this.onSave = options.onSave
@@ -139,7 +140,11 @@ export class FooterConfiguratorPanel implements Component {
       available.forEach((id, index) => {
         const active = state.cursorInAvailable && index === state.availableIndex
         const def = this.registry.get(id)
-        const label = def?.label ?? id
+        // An UNKNOWN id renders its raw text: strip control characters
+        // (the parser rejects them in layouts, but a registry id from an
+        // extension source is never trusted — an ESC/OSC id must not
+        // reach the panel).
+        const label = def === undefined ? stripControlChars(id) : def.label
         const marker = active ? color.primary('›') : ' '
         const line = `${marker} ${color.textMuted('[ ]')} ${active ? color.textStrong(label) : color.text(label)}`
         lines.push(truncateToWidth(line, Math.max(1, width), '…'))
@@ -152,7 +157,7 @@ export class FooterConfiguratorPanel implements Component {
       snapshot: this.snapshot(),
       layout: this.model.preview(),
       width,
-      context: { editorEmpty: this.editorEmpty(), extensionFooterText: this.extensionFooterText() },
+      context: { taskBrowserAvailable: this.taskBrowserAvailable(), extensionFooterText: this.extensionFooterText() },
     })
     for (const row of preview.split('\n')) lines.push(row)
     lines.push(rule)
@@ -204,7 +209,10 @@ export class FooterConfiguratorPanel implements Component {
       const active = rowIndex === state.activeRow && zone === state.activeZone
         && !state.cursorInAvailable && index === state.activeIndex
       const def = this.registry.get(ref.id)
-      const label = def?.label ?? ref.id
+      // An UNKNOWN ref renders its raw id (a plugin may have unloaded);
+      // strip control chars — the same injection defense as the
+      // available list.
+      const label = def === undefined ? stripControlChars(ref.id) : def.label
       const preview = this.itemPreview(ref)
       const marker = active ? color.primary('›') : ' '
       const checked = color.text('[x]')
@@ -219,7 +227,7 @@ export class FooterConfiguratorPanel implements Component {
     if (def === undefined) return ''
     try {
       const segment = def.render(this.snapshot(), ref, 'preferred', {
-        editorEmpty: this.editorEmpty(),
+        taskBrowserAvailable: this.taskBrowserAvailable(),
         extensionFooterText: this.extensionFooterText(),
       })
       if (segment === null) return color.textMuted('(unavailable)')

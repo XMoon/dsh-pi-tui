@@ -276,6 +276,83 @@ test('/footer starts from the persisted custom layout when active', async () => 
   app.stop()
 })
 
+test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing Enter unchanged keeps one row)', async () => {
+  // The review's P2: the old `getFooterLayout() ?? DEFAULT` fallback lost
+  // the compact mode — opening /footer in compact mode and pressing Enter
+  // unchanged saved the full TWO-ROW default as the custom layout. The
+  // configurator must start from the CURRENT effective layout (the
+  // compact preset here) so an unchanged save preserves the look.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setFooterPreset('compact')
+  const commands = fakeCommands()
+  ctx.provide('commands', commands.service as never)
+  const settings = fakeSettings({ footer: 'compact' })
+  const applied: Array<{ footer: string; footerLayout?: unknown }> = []
+  const runner: TuiCommandRunner = {
+    ctx, app, diag: {} as never,
+    get liveAgent() { return undefined },
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    tuiSettings: settings.value,
+    agents: {} as never,
+    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
+    commandRegistry: ctx.get('commands') as never,
+    cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
+    copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    get sessionGeneration() { return 0 },
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    get pendingPreset() { return undefined },
+    set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
+    applyFooterSettings: (doc) => {
+      if (doc === undefined) return
+      applied.push({ ...doc })
+      if (doc.footer === 'custom') {
+        app.setFooterPreset('full')
+        app.setFooterLayout(doc.footerLayout as never)
+      }
+    },
+  }
+  registerTuiCommands(runner)
+  const def = commands.defs.find(entry => entry.name === 'footer')
+  await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  // The compact layout is ONE row: the panel must not list a second row.
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Row 1 · Left'), `the compact row must be listed:\n${view}`)
+  assert.ok(!view.includes('Row 2'), `the compact layout must not start from the two-row default:\n${view}`)
+  // Enter UNCHANGED: the saved custom layout must stay ONE row.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(applied.length, 1, 'Enter must apply the layout')
+  const saved = applied[0]!.footerLayout as { rows: unknown[] }
+  assert.equal(saved.rows.length, 1, `an unchanged compact save must stay one row:\n${JSON.stringify(saved)}`)
+  app.stop()
+})
+
 test('/footer Enter with a FAILED settings write keeps the old layout and notifies', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)

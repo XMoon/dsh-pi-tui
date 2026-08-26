@@ -129,7 +129,7 @@ function mainSnapshot(): StatusSnapshot {
   }
 }
 
-const CONTEXT = { editorEmpty: true, extensionFooterText: '' }
+const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '' }
 
 test('default preset output is byte-equivalent to the legacy footer (wide)', () => {
   const snap = mainSnapshot()
