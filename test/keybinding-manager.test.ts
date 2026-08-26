@@ -54,17 +54,21 @@ test('safe mode restores the advertised defaults for a disabled action', () => {
 
 test('an ambiguous leader sequence is never advertised (review round 3)', () => {
   // Two actions bound to the SAME completing key: neither fires, so
-  // neither may be advertised by keyHint. (app.session.* have no default
-  // keys, so the leader sequence is their ONLY key — a clean probe.)
+  // neither may be advertised by keyHint. (app.transcript.toggleFullscreen
+  // and app.tasks.open are configurable actions whose <leader>n is a
+  // leader-only trigger — a clean probe.)
   const manager = managerWith({
     leader: 'ctrl+x',
     bindings: {
-      'app.session.new': '<leader>n',
-      'app.session.resume': '<leader>n',
+      'app.transcript.toggleFullscreen': '<leader>n',
+      'app.tasks.open': '<leader>n',
     },
   })
-  assert.equal(manager.keyHint('app.session.new'), '')
-  assert.equal(manager.keyHint('app.session.resume'), '')
+  assert.equal(manager.keyHint('app.transcript.toggleFullscreen'), '')
+  // app.tasks.open keeps its SEPARATE down affordance (a composition key,
+  // not the ambiguous leader — convergence §4.5/§6.5: leader bindings are
+  // additive triggers, never a predicate bypass).
+  assert.equal(manager.keyHint('app.tasks.open'), 'Down')
   assert.ok(manager.diagnosticsList().some(message => message.includes('ambiguous leader sequence')))
   // The leader machine itself carries no bindings.
   assert.deepEqual(manager.leaderMachine()?.leaderBindings ?? [], [])
@@ -85,18 +89,18 @@ test('matches() reflects a remap of a configurable action; matchesDefault() stay
 
 test('a leader-only action appears in the snapshot with its leader sequence (review round)', () => {
   // Review finding: an action with NO default keys configured only as
-  // `<leader>X` (e.g. app.session.new) was advertised by keyHint but
-  // absent from the /keybindings table. The snapshot now includes it with
-  // the leader flag so the table renders `Leader N`.
+  // `<leader>X` (e.g. app.transcript.toggleFullscreen) was advertised by
+  // keyHint but absent from the /keybindings table. The snapshot now
+  // includes it with the leader flag so the table renders `Leader N`.
   const manager = managerWith({
     leader: 'ctrl+x',
-    bindings: { 'app.session.new': '<leader>n' },
+    bindings: { 'app.transcript.toggleFullscreen': '<leader>n' },
   })
-  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.session.new')
+  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.transcript.toggleFullscreen')
   assert.ok(binding !== undefined, 'the leader-only action must appear in the snapshot')
   assert.deepEqual(binding!.keys, [], 'no direct keys')
   assert.deepEqual(binding!.leaderKeys, ['n'], 'the raw completing key is carried')
-  assert.equal(manager.keyHint('app.session.new'), 'Leader N', 'keyHint and snapshot agree')
+  assert.equal(manager.keyHint('app.transcript.toggleFullscreen'), 'Leader N', 'keyHint and snapshot agree')
 })
 
 test('mixed direct + leader keys both appear in the snapshot and the hint (review round)', () => {
@@ -161,7 +165,7 @@ test('duplicate leader bindings of the SAME action are not ambiguous (review rou
     leader: 'ctrl+x',
     bindings: {
       'app.history.search': '<leader>h',
-      'app.session.new': '<leader>h',
+      'app.transcript.toggleFullscreen': '<leader>h',
     },
   })
   assert.ok(ambiguous.diagnosticsList().some(message => message.includes('ambiguous')), 'cross-action same-key stays ambiguous')

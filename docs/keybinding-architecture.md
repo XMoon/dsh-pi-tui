@@ -77,37 +77,81 @@ configurable action first (plan §3.3).
 
 ## Key decisions
 
-1. **Enter stays with the fork editor.** `app.input.submit` is
-   `hostResolved: false`: the builtin Enter rule is NOT compiled into the
-   host keymap, because the fork editor's submit path owns paste-burst
-   suppression and the backslash-newline workaround. A user-bound
-   alternate key for the action still compiles and routes through
-   `submitDraft` (which mirrors the Enter path exactly).
-2. **The viewer guard is action-based.** `viewerParentLockedKey` resolves
+1. **One canonical physical-key identity.** Every key spelling collapses
+   onto ONE canonical KeyId (`esc`→`escape`, `return`→`enter`, modifier
+   order → `ctrl`→`shift`→`alt`→`super`) at every rule entry point
+   (builtin defaults, user keys, leader prefix/completions, composition,
+   plugin rules, the fixed-overlay/terminal-unreliable inventories, rule
+   ids and conflict grouping). Aliases can never bypass conflict
+   detection, leader-prefix collision or dedup (convergence §1/§4.1).
+2. **Declared / effective / shadowed / conflicted are distinct states.**
+   The effective keymap compiles declared rules, DEDUPES same-action
+   same-canonical-key declarations, DEACTIVATES same-priority conflicts
+   (with a diagnostic), and SHADOWS lower-priority rules on an
+   overlapping key. Only EFFECTIVE rules feed `resolve`, `keysFor`,
+   `keyHint`, `hostResolves` and `snapshot` — a shadowed or conflicted
+   rule is never advertised, and no fabricated builtin fallback
+   resurrects a replaced default (convergence §2/§4.3/§4.4).
+3. **Editor-owned submit lives in the unified rule model.** `app.input
+   .submit` is `hostResolved: false` — the fork editor's submit path
+   owns paste-burst suppression and the backslash-newline workaround, so
+   the HOST ladder never consumes a direct submit key. But submit
+   PARTICIPATES in the unified model: user remaps/`false` sync into the
+   fork editor's `tui.input.submit` (`onEditorSubmitSync`), conflict and
+   shadow apply, the read model (`keysFor`/`keyHint`/`keysLabelFor`/
+   `snapshot`/`canActivate`) reports the editor-owned facts, and
+   fail-soft (a dead override restores the builtin Enter unless `false`)
+   is evaluated on the EFFECTIVE rules — never the raw config
+   (convergence §3/§4.5).
+4. **The viewer guard is action-based.** `viewerParentLockedKey` resolves
    the key through the effective keymap and blocks
-   `VIEWER_BLOCKED_PARENT_ACTIONS` — a user remap of a parent action stays
-   blocked automatically. The guard never maintains a physical key list.
-3. **The Esc path stays a host method.** `app.agent.interrupt` resolves to
-   `handleEscapeKey` (autocomplete/replacement-editor pass-through,
-   single/double-Esc, rewind) — a user remap moves the WHOLE path to the
-   new key. Same for `app.exit.request` → `handleExitKey` (Ctrl+C keeps
-   its clear-then-exit chord; every other bound key exits immediately).
-4. **Conflicts are deactivated, never last-write-wins.** A conflict
-   (same key + overlapping scope + same priority) disables BOTH rules with
-   a diagnostic; every other rule keeps working (fail-soft).
-5. **Safe mode** (`DSH_PI_TUI_SAFE_KEYBINDINGS=1`) ignores user overrides
+   `VIEWER_BLOCKED_PARENT_ACTIONS` (which includes `app.agent.interrupt`)
+   — a user remap of a parent action stays blocked automatically,
+   direct and leader triggers alike. The guard never maintains a
+   physical key list.
+5. **Semantic interrupt ≠ physical Escape.** `app.agent.interrupt` on the
+   physical Escape key runs the editor-owned Escape seams (autocomplete
+   pass-through, replacement-editor Esc, shell-mode exit — with the busy
+   cancel keeping Host priority over all of them) then the semantic
+   core; a REMAPPED interrupt key goes straight to the semantic core
+   (`handleInterruptAction` — single/double-action policy, rewind) and
+   never inherits the physical-Escape seams (convergence §5/§4.8). The
+   viewer's fixed Esc close stays independent.
+6. **A declined host action reaches the remainder — once.** When the
+   host dispatcher returns false (GENUINE feature absence, e.g.
+   `pasteMedia` with no handler), the key must reach the editor/plugin
+   remainder and is never re-reserved by the same host rule
+   (convergence §6/§4.9). HOST-GUARDED NO-OPS (empty queue, no history
+   source) are NOT declines: the host owns the key and consumes it.
+7. **Conflicts are deactivated, never last-write-wins.** A conflict
+   (same canonical key + overlapping scope + same priority) disables
+   BOTH rules with a diagnostic; every other rule keeps working
+   (fail-soft). If the highest tier is fully conflict-deactivated, the
+   next DECLARED tier survives — never a fabricated builtin.
+8. **Safe mode** (`DSH_PI_TUI_SAFE_KEYBINDINGS=1`) ignores user overrides
    and keeps the builtin defaults; plugin keybindings still load.
-6. **The leader is opt-in.** No leader key is configured by default, so
-   the pending-prefix machinery never changes ordinary input. A leader
-   sequence is cancelled by: timeout, Esc, a non-matching key (passed
-   through), a paste burst (passed through), or a focus transition
-   (question/approval/overlay/viewer/fullscreen).
-7. **The static gate** (`scripts/check-host-keybindings.mts`, wired into
-   `verify:prepush`) forbids NEW `matchesKey(data, 'ctrl+…'/'alt+…'/
-   'shift+…')` chords in `src/tui-app.ts`. The allowlist covers the
-   sanctioned seams: the read-only viewer guard, the Ctrl+C exit-chord
-   discriminator, the approval dialog keys, and the replacement-editor
-   Enter seams.
+9. **The leader is opt-in and availability-aware.** No leader key is
+   configured by default. Esc (any alias) can never be a completion
+   (it is the pending-cancel contract — parser-rejected); a leader with
+   zero EFFECTIVE completions has no machine; a completion dispatches
+   only when the action's context predicate holds (`canActivate` — the
+   ↓ tasks affordance is not bypassable); the viewer parent-action guard
+   blocks leader completions like direct keys. A leader-PREFIX key that
+   collides with an active host or editor-owned key is fail-soft
+   disabled with a diagnostic (convergence §4/§4.6/§4.7).
+10. **Reserved-but-unimplemented actions are not bindable.** The
+    session/model actions (`app.session.*`, `app.model.open`) are
+    `configurable: false` + `availability: 'reserved'`: the parser
+    rejects any user binding with a diagnostic — never a bindable no-op
+    key (convergence §7).
+11. **The static gate** (`scripts/check-host-keybindings.mts`, wired into
+    `verify:prepush`) forbids NEW hard-coded chord labels in user-facing
+    strings across ALL quote styles (single/double/backtick, either
+    casing) and new `matchesKey(data, 'ctrl+…'/'alt+…'/'shift+…')`
+    chords in `src/tui-app.ts`, with a documented allowlist for the
+    sanctioned seams (read-only viewer guard, Ctrl+C exit-chord
+    discriminator, approval dialog keys, replacement-editor Enter seams,
+    the effective-submit Shift+Enter exclusion).
 
 ## User configuration
 
@@ -185,147 +229,55 @@ the user's live bindings:
   `src/tui-app.ts`), with a documented allowlist for fork editor-level
   keys (Ctrl+Home/End).
 
-## Review chain (2026-08-25, openai-codex / gpt-5.6-luna)
+## Revision history and convergence
 
-Four review rounds on `feat/keybinding-customization`; the reviewer
-accepted at round 4 with no open findings.
+The branch went through an extended external review chain
+(openai-codex / gpt-5.6-luna) on the PR #34 diff: review rounds fixed
+per-key rule ids, printable/space leader rejection, the monotonic keymap
+revision, leader fall-through, search-toggle effective keys, the
+`dsh-pi-tui` settings namespace, `app.input.submit` real remapping
+(editor sync + cross-instance isolation + safe mode + leader-only/
+conflict fail-soft), action-driven host reservation, leader-prefix
+collision, host/plugin rule layering, the fixed viewer Esc close, the
+armed exit-chord copy, and the effective read-model (no fabricated
+fallback, no dead leader advertisement). The final round was accepted.
+This doc records the CONTRACT, not the review log. The convergence pass
+then re-derived the architecture from first principles and is what the
+current code implements:
 
-- Round 1 (needs-fixes, 7 findings): advanced-capture ordering
-  (documented by-design — the pre-migration phase contract placed the
-  host ladder before the advanced stage; AGENTS.md decision 13 keeps
-  session-safety paths Host-owned), safe mode now disables the leader
-  config, conditional-action remaps inherit their predicate and `false`
-  disables the composition rule, `false` wins over `<leader>X` bindings,
-  leader sequences cannot bypass the viewer parent-action guard, duplicate
-  action declarations are a diagnostic (never last-write-wins), CJK
-  comments translated.
-- Round 2 (needs-fixes, 1 P2): disabled actions are never advertised by
-  `keyHint()`/`snapshot()`.
-- Round 3 (accepted-with-followups, 1 P2): hints read the EFFECTIVE
-  (ambiguity-filtered) leader bindings.
-- Round 4 (accepted, none).
+**Canonical physical identity.** `esc`/`escape`, `return`/`enter` and
+modifier order collapse to ONE key identity at every rule entry point
+(`src/keybindings/key-identity.ts`) — aliases can never bypass conflict,
+leader collision or dedup.
 
-The branch was then REBASED onto the current main (M1 migration ports,
-shell-editor-mode, thinking-disclosure unify, focus-v2, the
-README/CHANGELOG language flip) and re-reviewed:
-- Round 5 (needs-fixes): per-key rule ids (a conflict on ONE key of a
-  multi-key action now deactivates only that key); printable-leader keys
-  rejected.
-- Round 6 (needs-fixes): the monotonic keymap revision joins the
-  transcript cache identity (a remap refreshes already-rendered fold
-  hints; onInvalidate rebuilds messages); the leader machine propagates
-  the dispatch result (a declined action falls through, not consumed);
-  the configurable search toggle matches EFFECTIVE keys while the fixed
-  overlay keys keep their defaults; `space` is printable (rejected as
-  leader/direct binding); the settings namespace docs corrected to
-  `dsh-pi-tui` (not `pi-tui`); `/keybindings reset` notifies success
-  only after the write resolves; hot reload keeps last-known-good;
-  definitions.ts joins the gate scan (its `defaultKeys` are the source
-  of truth, its description strings must stay key-neutral); the
-  config-port documents `keybindings` as raw pass-through extension
-  data.
-- Round 7 (needs-fixes, 3 P2): the config.ts header example namespace
-  corrected to `dsh-pi-tui`; the fixed overlay-key precedence is
-  documented and the parser warns on a collision; `/keybindings reset`
-  honors the async write outcome.
-- Round 8 (needs-fixes): the read-only viewer fold pass-through and the
-  search-overlay ownership resolve the EFFECTIVE keymap (a remap of
-  `app.transcript.toggleExpand` / `app.transcript.search` stays
-  authoritative — the router consults `matchesEffective`); leader-only
-  actions appear in the `/keybindings` snapshot with their leader
-  completing keys; the changelog namespace examples corrected to
-  `dsh-pi-tui`.
-- Round 9 (needs-fixes): MIXED direct + leader bindings
-  (`['ctrl+z', '<leader>h']`) render BOTH in the snapshot (`keys` +
-  `leaderKeys`) and in `keyHint` (`Ctrl+Z / Leader H`) — the leader
-  sequence used to vanish behind the direct key.
-- Round 10 (needs-fixes): `/help` renders through the manager's new
-  `keysLabelFor()` — ALL direct keys and ALL leader sequences of an
-  action, one shared effective-label source (a mixed action no longer
-  shows only its direct keys).
-- Round 11 (needs-fixes): `keysLabelFor()` falls back to an overlay
-  action's DEFAULTS when it has no host-keymap keys (search
-  close/next/previous, question/tasks flows — `/help` no longer shows
-  '—' for them); duplicate `<leader>X` entries of the SAME action are
-  deduped before ambiguity detection (only cross-action same-key pairs
-  are ambiguous).
-- Round 12 (accepted, none) — after the SECOND rebase onto main
-  (76c8c96, the focus-viewport policy): the reviewer swept all 39
-  changed files, verified the keybinding feature coexists with the
-  focus viewport-anchoring logic in src/tui-app.ts, re-checked every
-  prior-round fix survived both rebases, and accepted with no findings.
-- PR #34 review (REQUEST CHANGES, 2 P1 + 1 P2 + 2 followups): ALL
-  fixed —
-  1. `app.input.submit` is now REALLY configurable: the effective
-     submit keys sync into the fork editor's `tui.input.submit` binding
-     (`onEditorSubmitSync`), so a remap MOVES submission to the new key
-     and `false` makes Enter inert; the host-owned seams (continuable
-     viewer submit, replacement-editor forward) mirror the effective
-     submit key via `isSubmitKey`.
-  2. The InputRouter's runtime reservation is ACTION-driven
-     (`hostResolves` — a key is reserved only while an ACTIVE host
-     action binds it); `RESERVED_HOST_KEYS` remains ONLY the
-     plugin-registration compatibility guard. A remapped-away old key
-     (Ctrl+V after pasteMedia moved to Ctrl+P) falls through to the
-     editor/plugin instead of being swallowed.
-  3. The leader PREFIX key is collision-checked against all ACTIVE
-     host keys at rebuild: a collision (e.g. `leader: ctrl+f` vs
-     app.transcript.search) fail-soft DISABLES the leader machine with
-     a diagnostic — never a silent shadow.
-  4. Conditional affordances documented as ADDITIVE (a user binding of
-     app.tasks.open adds a trigger; only `false` removes the ↓
-     affordance) — README/README.en/architecture doc.
-  5. The armed exit-chord footer hint names Ctrl+C literally (the
-     clear-then-exit chord is Ctrl+C-specific) — never the action's
-     primary key.
-- PR review rounds 2–6 (openai-codex / gpt-5.6-luna): six more
-  review-fix rounds reached acceptance —
-  - direct submit keys stay with the fork editor (the host ladder never
-    consumes a DIRECT submit key — backslash-newline/paste-burst
-    semantics preserved);
-  - the fork's PROCESS-GLOBAL submit binding is restored per TuiApp
-    instance (constructor sync + dispose restore — no cross-instance
-    leakage);
-  - the keybinding manager dies FIRST in TuiApp.dispose (armed-leader
-    timers and teardown-time rebuilds are inert), with dispose guards on
-    the mutators;
-  - a leader-ONLY submit override removes Enter (no builtin fallback);
-  - safe mode restores the builtin Enter submit (raw overrides ignored);
-  - the leader-prefix collision check includes the editor-owned submit
-    key (`leader: enter` is caught);
-  - HOST/PLUGIN rule layering: the runtime reservation
-    (`hostResolves`), the editor submit sync (`hostKeysFor`) and the
-    leader-prefix collision (`hostActiveKeys`) all exclude PLUGIN rules
-    — a plugin binding is additive and never a Host action.
-  Final round: accepted, no findings.
-- PR review second pass (1 P1 + 1 P2 + 1 P3, then 1 more P2 — all
-  fixed):
-  - the read-only AND continuable viewers' Esc exit is a FIXED lifecycle
-    key, INDEPENDENT of the user-configurable app.agent.interrupt (a
-    remap to Ctrl+X must not break the viewer close); `app.agent.
-    interrupt` joined VIEWER_BLOCKED_PARENT_ACTIONS so a remapped
-    interrupt is inert inside a viewer;
-  - a leader-PREFIX collision clears `effectiveLeaderBindings`, so
-    keyHint / keysLabelFor / snapshot never advertise a dead leader
-    sequence (the "UI always shows the EFFECTIVE keys" contract);
-  - RESERVED_HOST_KEYS comments clarified: it is ONLY the Stable v1
-    plugin-registration guard, never the runtime reservation authority
-    (input-router header, keybinding-registry, definitions);
-  - the consumed viewer-close Esc disarms the main-session double-Esc
-    window (no stale cancel/rewind after closing a viewer).
-- PR review third pass (1 P1 + 1 P3 → accepted):
-  - `editorSubmitKeysFor()` now detects a leader-only submit override via
-    the EFFECTIVE leader bindings (not the raw parsed list): a leader
-    sequence disabled by a prefix collision or an ambiguity fail-softs
-    back to the builtin Enter — a dead leader-only submit never disables
-    submission entirely;
-  - the viewer-close/double-Esc regression test hardened to genuinely arm
-    the window (first main Esc returns false so handleEscapeKey arms it;
-    the viewer-close Esc consumes) — the disarm assertion is no longer
-    vacuous.
-  Final round verdict: accepted (188 targeted tests, all gates green).
+**Single effective rule model.** The keymap compiles `declared` rules,
+dedupes same-action canonical keys, deactivates same-priority conflicts,
+and shadows lower-priority overlapping rules. Only `effective` rules
+feed the resolver, the host reservation, the editor submit sync, the
+leader availability check and the read model — `runtime == /help ==
+/keybindings == footer` by construction. No fabricated builtin
+fallback; a guard no-op stays host-owned; a genuinely declined host
+action (pasteMedia with no handler) falls through to the editor/plugin
+remainder exactly once.
 
-Final gates after the PR review rounds: 2429 bundle tests (incl. the
-focus-viewport-policy suite), 985 fork tests, 11 docs tests, typecheck
-(fork + bundle), `check-host-keybindings` gate, `git diff --check` —
-all green.
+**Editor-owned submit as a first-class rule.** `app.input.submit` keeps
+the fork editor's execution semantics while participating in the unified
+model (canonical identity, dedupe, conflict, shadow, fail-soft, read
+model) via its owner/effective state.
+
+**Leader availability.** Escape completions are parser-rejected;
+zero-effective leaders create no machine; completions obey the action's
+context predicate (`canActivate`); direct/leader/remap are blocked in
+viewers alike.
+
+**Semantic interrupt ≠ physical Escape.** Only the physical Escape key
+owns the editor Escape seams; a remapped interrupt goes straight to the
+semantic core. The fixed viewer close stays independent.
+
+**Reserved actions.** Unimplemented session/model actions are
+`configurable: false` + `availability: 'reserved'` — never bindable
+no-ops.
+
+Final gates: 2452 bundle tests, 985 fork tests, 11 docs tests,
+typecheck (fork + bundle), `check-host-keybindings` gate (all quote
+styles, either casing), `git diff --check` — all green.

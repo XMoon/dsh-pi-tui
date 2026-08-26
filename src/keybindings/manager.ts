@@ -198,8 +198,12 @@ export class HostKeybindingManager {
       this.leaderConfigShadowed = false
       this.leader?.dispose()
       this.leader = undefined
-      // Rebuild the leader machine (its bindings/config may have changed).
-      if (effectiveLeaderConfig !== undefined && effectiveLeaderConfig.key !== undefined) {
+      // Rebuild the leader machine ONLY when it has at least one
+      // EFFECTIVE completion (convergence §4.6b): with zero completions
+      // (every sequence ambiguous/disabled), the machine must not exist —
+      // the leader prefix would otherwise enter a dead pending state that
+      // can never complete.
+      if (effectiveLeaderConfig !== undefined && effectiveLeaderConfig.key !== undefined && leaderBindings.length > 0) {
         this.leader = new LeaderStateMachine(effectiveLeaderConfig, leaderBindings, {
           onActivate: (action) => this.onLeaderActivate(action),
           onStateChange: () => this.onLeaderStateChange(),
@@ -327,8 +331,11 @@ export class HostKeybindingManager {
   }
 
   /** The effective keys of one action (direct keys only — leader
-   * sequences live in {@link leaderKeysFor}). */
+   * sequences live in {@link leaderKeysFor}). For the editor-owned
+   * submit action the read model reflects the fork editor's effective
+   * trigger keys (convergence §7: one fact everywhere). */
   keysFor(action: AppKeybindingId): KeyId[] {
+    if (action === 'app.input.submit') return this.editorSubmitKeysFor()
     return this.keymap.keysFor(action)
   }
 
@@ -337,6 +344,23 @@ export class HostKeybindingManager {
    * plugin dispatch stage; PR review finding). */
   hostResolves(data: string, context: KeybindingContext): boolean {
     return this.keymap.hostResolves(data, context)
+  }
+
+  /** Whether one action can fire in the CURRENT context (leader
+   * completions check this before dispatching — a leader sequence obeys
+   * the action's context predicate, convergence §4.7). */
+  canActivate(action: AppKeybindingId, context: KeybindingContext): boolean {
+    // Editor-owned submit: the action is active whenever it has an
+    // EFFECTIVE editor trigger (the fork editor's tui.input.submit or a
+    // live leader sequence) — the host keymap has no submit rule to
+    // evaluate (hostResolved:false). A leader submit completion must
+    // activate iff submit itself is available (convergence §4.7).
+    if (action === 'app.input.submit') {
+      if (this.isDisabled(action)) return false
+      return this.editorSubmitKeysFor().length > 0
+        || this.effectiveLeaderBindings.some(binding => binding.action === action)
+    }
+    return this.keymap.canActivate(action, context)
   }
 
   /** The EFFECTIVE `<leader>X` completing keys of one action (M6),
@@ -357,12 +381,15 @@ export class HostKeybindingManager {
     if (direct.length > 0 || leader.length > 0) {
       return [...direct, ...leader].join(' / ')
     }
-    // Capturing-scope actions (search close/next/previous, question/tasks
-    // flows) are excluded from the HOST keymap, so keysFor() is empty —
-    // fall back to their defaults for display (review finding: /help
-    // showed '—' for Enter submission and the fixed overlay controls).
+    // ONLY fixed non-configurable component actions (search
+    // close/next/previous, question/tasks flows) may display their
+    // defaults — they never resolve in the HOST keymap (plan §3.3) and
+    // their keys are NOT user-configurable, so the default IS the
+    // effective key (convergence §8: no fabricated fallback for
+    // configurable actions — a conflicted/shadowed user override must
+    // not resurrect the builtin).
     const definition = APP_KEYBINDINGS[action]
-    if (definition !== undefined && definition.defaultKeys.length > 0) {
+    if (definition !== undefined && !definition.configurable && definition.defaultKeys.length > 0) {
       return definition.defaultKeys.map(formatKeyId).join(' / ')
     }
     return ''
@@ -381,7 +408,10 @@ export class HostKeybindingManager {
    * fires is never advertised (review round 3). */
   keyHint(action: AppKeybindingId): string {
     if (this.isDisabled(action)) return ''
-    const direct = this.keymap.keyHint(action)
+    // The read model is unified through keysFor (editor-owned submit
+    // included — convergence §7: one fact everywhere).
+    const directKeys = this.keysFor(action)
+    const direct = directKeys.length > 0 ? formatKeyId(directKeys[0]!) : ''
     const leaderKeys = this.effectiveLeaderBindings
       .filter(binding => binding.action === action)
       .map(binding => formatLeaderSequence(binding.key))
@@ -392,8 +422,10 @@ export class HostKeybindingManager {
     }
     if (direct !== '') return direct
     if (leaderKeys.length > 0) return leaderKeys[0]!
+    // Same no-fabrication rule as keysLabelFor: only fixed
+    // non-configurable component actions display their defaults.
     const definition = APP_KEYBINDINGS[action]
-    if (definition !== undefined && definition.defaultKeys.length > 0) {
+    if (definition !== undefined && !definition.configurable && definition.defaultKeys.length > 0) {
       return formatKeyId(definition.defaultKeys[0]!)
     }
     return ''
@@ -454,7 +486,11 @@ export class HostKeybindingManager {
         })
         continue
       }
-      if (definition.defaultKeys.length === 0) continue
+      // No fabricated builtin fallback for CONFIGURABLE actions (a
+      // conflicted/shadowed override must not resurrect the default);
+      // only fixed non-configurable component actions display defaults
+      // (their keys never resolve in the host keymap, plan §3.3).
+      if (definition.defaultKeys.length === 0 || definition.configurable) continue
       merged.push({
         action: id,
         keys: [...definition.defaultKeys],

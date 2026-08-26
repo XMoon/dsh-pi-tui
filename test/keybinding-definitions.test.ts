@@ -112,10 +112,21 @@ test('viewer-blocked parent actions are all defined and configurable', () => {
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.tasks.open'))
 })
 
-test('non-configurable actions are exactly the focused-component set', () => {
+test('non-configurable actions are the focused-component set plus the reserved session/model tier', () => {
   for (const action of NON_CONFIGURABLE_ACTIONS) {
     assert.ok(action.startsWith('question.') || action.startsWith('tasks.')
-      || action.startsWith('app.transcript.search.'),
+      || action.startsWith('app.transcript.search.')
+      // The RESERVED session/model actions are not implemented this
+      // version — never user-configurable no-op keys (convergence §7).
+      || action.startsWith('app.session.') || action === 'app.model.open',
     `unexpected non-configurable action "${action}"`)
+  }
+  // Every non-configurable action must be either a fixed component
+  // contract or explicitly marked reserved.
+  for (const action of NON_CONFIGURABLE_ACTIONS) {
+    const definition = APP_KEYBINDINGS[action]
+    if (action.startsWith('app.session.') || action === 'app.model.open') {
+      assert.equal(definition.availability, 'reserved', `"${action}" must be availability:reserved`)
+    }
   }
 })

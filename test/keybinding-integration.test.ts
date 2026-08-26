@@ -84,17 +84,22 @@ test('the viewer guard still blocks the DEFAULT parent keys', async () => {
   app.stop()
 })
 
-test('leader sequence: leader+t opens the task browser', async () => {
+test('leader sequence: leader+t opens the task browser when the action predicate holds', async () => {
+  // Convergence §4.7: a leader completion obeys the action's context
+  // predicate (the empty-editor ↓ tasks affordance) — it is another
+  // TRIGGER, never a predicate bypass.
   let tasksOpened = 0
   const { vt, app } = startApp({ onOpenTasks: () => { tasksOpened += 1 } }, managerWith({
     leader: 'ctrl+x',
     bindings: { 'app.tasks.open': '<leader>t' },
   }))
+  app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
+  await vt.waitForRender()
   vt.sendInput('\x18') // leader
   await vt.waitForRender()
   vt.sendInput('t') // completing key
   await vt.waitForRender()
-  assert.equal(tasksOpened, 1, 'the leader sequence must fire the bound action')
+  assert.equal(tasksOpened, 1, 'the leader sequence must fire when the predicate holds')
   app.stop()
 })
 
@@ -540,7 +545,7 @@ test('a plugin submit binding is ADDITIVE — the builtin Enter stays (PR review
 test('a plugin key does NOT collide with the leader prefix (PR review P2)', () => {
   const manager = new HostKeybindingManager()
   manager.setPluginRules([{ id: 'plugin-x', action: 'app.tasks.open', key: 'ctrl+alt+x' }])
-  manager.setUserConfiguration(parseUserKeybindings({ leader: 'ctrl+alt+x', bindings: { 'app.session.new': '<leader>n' } }))
+  manager.setUserConfiguration(parseUserKeybindings({ leader: 'ctrl+alt+x', bindings: { 'app.transcript.toggleFullscreen': '<leader>n' } }))
   assert.ok(manager.leaderMachine() !== undefined, 'a plugin-only key must not disable the leader')
   assert.ok(!manager.diagnosticsList().some(message => message.includes('active host key')),
     `no collision expected: ${manager.diagnosticsList().join(' | ')}`)
@@ -610,14 +615,14 @@ test('a leader-prefix collision stops advertising the leader bindings (PR review
   const manager = new HostKeybindingManager()
   manager.setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+f', // collides with app.transcript.search's ctrl+f
-    bindings: { 'app.session.new': '<leader>n' },
+    bindings: { 'app.transcript.toggleFullscreen': '<leader>n' },
   }))
   assert.equal(manager.leaderMachine(), undefined, 'the colliding leader is disabled')
   assert.ok(manager.diagnosticsList().some(message => message.includes('active host key')))
   // The UI must NOT advertise the dead leader sequence anywhere.
-  assert.equal(manager.keyHint('app.session.new'), '', 'keyHint must not advertise the shadowed leader')
-  assert.equal(manager.keysLabelFor('app.session.new'), '', 'keysLabelFor must not advertise the shadowed leader')
-  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.session.new')
+  assert.equal(manager.keyHint('app.transcript.toggleFullscreen'), '', 'keyHint must not advertise the shadowed leader')
+  assert.equal(manager.keysLabelFor('app.transcript.toggleFullscreen'), '', 'keysLabelFor must not advertise the shadowed leader')
+  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.transcript.toggleFullscreen')
   assert.equal(binding?.leaderKeys, undefined, 'the snapshot must not carry the shadowed leader')
 })
 
@@ -693,7 +698,7 @@ test('an AMBIGUOUS leader-only submit restores the builtin Enter (PR review P1)'
     leader: 'ctrl+x',
     bindings: {
       'app.input.submit': '<leader>s',
-      'app.session.new': '<leader>s',
+      'app.transcript.toggleFullscreen': '<leader>s',
     },
   }))
   assert.equal(manager.leaderMachine()?.leaderBindings.length ?? 0, 0, 'the ambiguous sequence is dropped')

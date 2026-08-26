@@ -101,6 +101,11 @@ export interface InputRouterContext {
    * (PR review finding — the runtime reservation is action-driven, never
    * a static physical-key list). */
   readonly hostResolves?: (data: string) => boolean
+  /** The HOST dispatcher already DECLINED this exact input (e.g.
+   * pasteMedia without a handler returned false). The reservation must
+   * be SKIPPED — the key must reach the editor/plugin remainder, never
+   * be re-reserved by the same host action (convergence §6/§4.9). */
+  readonly hostDeclined?: boolean
   /** Whether a replacement editor must receive an editor-routed key before
    * plugin bindings are considered. TuiApp flips this off only after the
    * replacement editor explicitly declines the key. */
@@ -226,7 +231,7 @@ export class InputRouter {
     // (RESERVED_HOST_KEYS) keeps the Stable v1 compatibility rejection;
     // the RUNTIME swallowing here is purely action-driven.
     const normalized = this.normalize(data)
-    if (normalized !== undefined && ctx.hostResolves?.(data) === true) {
+    if (!ctx.hostDeclined && normalized !== undefined && ctx.hostResolves?.(data) === true) {
       return { kind: 'consumed' }
     }
     // A replacement editor is probed by TuiApp before this final plugin

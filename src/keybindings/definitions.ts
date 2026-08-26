@@ -67,7 +67,11 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'app.agent.interrupt': {
     id: 'app.agent.interrupt',
     defaultKeys: ['escape'],
-    description: 'Interrupt the current activity (single Esc while busy; double-Esc while idle)',
+    // Action-neutral on purpose: the description shows in /keybindings
+    // and must not hard-code the physical Escape chord — the action is
+    // user-configurable, so a remap must not make the copy a lie
+    // (convergence §14 copy convention).
+    description: 'Interrupt the current activity (once while busy; twice while idle)',
     category: 'Agent',
     scope: 'agent-running',
     configurable: true,
@@ -207,38 +211,47 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     configurable: true,
   },
 
-  // ── Session / Model (reserved for later unification — plan §3.2) ──────
+  // ── Session / Model (RESERVED for later unification — plan §3.2) ──────
+  // These are NOT implemented in this version: the dispatcher has no
+  // host behavior for them. `configurable: false` + `availability:
+  // 'reserved'` means the parser rejects any user binding with a
+  // diagnostic — they are never bindable no-op keys (convergence §7: a
+  // user-configurable action must actually DO something).
   'app.session.open': {
     id: 'app.session.open',
     defaultKeys: [],
-    description: 'Open a session',
+    description: 'Open a session (reserved — not implemented in this version)',
     category: 'Session',
     scope: 'global',
-    configurable: true,
+    configurable: false,
+    availability: 'reserved',
   },
   'app.session.new': {
     id: 'app.session.new',
     defaultKeys: [],
-    description: 'Start a new session',
+    description: 'Start a new session (reserved — not implemented in this version)',
     category: 'Session',
     scope: 'global',
-    configurable: true,
+    configurable: false,
+    availability: 'reserved',
   },
   'app.session.resume': {
     id: 'app.session.resume',
     defaultKeys: [],
-    description: 'Resume a session',
+    description: 'Resume a session (reserved — not implemented in this version)',
     category: 'Session',
     scope: 'global',
-    configurable: true,
+    configurable: false,
+    availability: 'reserved',
   },
   'app.model.open': {
     id: 'app.model.open',
     defaultKeys: [],
-    description: 'Open the model picker',
+    description: 'Open the model picker (reserved — not implemented in this version)',
     category: 'Session',
     scope: 'global',
-    configurable: true,
+    configurable: false,
+    availability: 'reserved',
   },
 
   // ── Focused component: user-questions flow (plan §3.3) ────────────────

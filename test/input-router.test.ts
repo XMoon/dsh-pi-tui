@@ -379,13 +379,17 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
   const { TuiApp } = await import('../src/tui-app.ts')
   const vt = new VirtualTerminal(80, 24)
   const actions: string[] = []
+  const queued: string[] = []
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
+    // A real queue handler: with it wired, Ctrl+Enter is a live host
+    // action that CONSUMES (never declines) — the plugin must not see it.
+    onQueueSubmit: (text) => { queued.push(text) },
     onExtensionAction: (action) => { actions.push(action) },
   }, {
     // A resolver that would claim EVERY key — the router must stop the
-    // ACTIVE host lifecycle ones before it is consulted.
+    // ACTIVE (non-declining) host lifecycle ones before it is consulted.
     pluginActionFor: (key) => `open-search` as const,
   })
   app.start()
@@ -395,10 +399,13 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.deepEqual(actions, [], 'Enter must never fire a plugin binding')
-  // Ctrl+Enter (app.input.queue): an ACTIVE host action in the default
-  // keymap — consumed by the host ladder, never a plugin binding.
+  // Ctrl+Enter (app.input.queue) with a LIVE handler AND a non-empty
+  // draft: the host action CONSUMES (queues) — never a plugin binding.
+  app.setDraft('queued text')
+  await vt.waitForRender()
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
   await vt.waitForRender()
+  assert.deepEqual(queued, ['queued text'], 'Ctrl+Enter must queue (host-owned)')
   // Ctrl+O (app.transcript.toggleExpand): ACTIVE host action — never a
   // plugin binding. Kitty ctrl+o = modifier 5.
   vt.sendInput('\x1b[111;5u')
@@ -412,24 +419,31 @@ test('TuiApp: a key with NO active host action falls through to a plugin binding
   const { TuiApp } = await import('../src/tui-app.ts')
   const vt = new VirtualTerminal(80, 24)
   const actions: string[] = []
+  const pasted: number[] = []
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
+    // A LIVE paste handler: with it wired, Ctrl+V is a CONSUMING host
+    // action (never declines) — the plugin must not see it. (The
+    // decline-to-plugin case is covered separately by "a declined host
+    // action is not re-reserved".)
+    onClipboardPaste: () => { pasted.push(1) },
     onExtensionAction: (action) => { actions.push(action) },
   }, {
     // The PR review repro: a plugin binds Ctrl+V — legal AFTER the host
     // remapped app.clipboard.pasteMedia away from Ctrl+V (action-driven
     // reservation: no host action binds Ctrl+V anymore, so the plugin
-    // may claim it). With the DEFAULT keymap Ctrl+V IS a host action, so
-    // this plugin binding must NOT fire — verify both sides.
+    // may claim it). With the DEFAULT keymap Ctrl+V IS a CONSUMING host
+    // action, so this plugin binding must NOT fire — verify both sides.
     pluginActionFor: (key) => key.key === 'v' && key.ctrl ? 'open-search' as const : undefined,
   })
   app.start()
   await vt.waitForRender()
-  // Default keymap: Ctrl+V is app.clipboard.pasteMedia (ACTIVE host
-  // action) — the host ladder consumes it, the plugin never sees it.
+  // Default keymap: Ctrl+V is app.clipboard.pasteMedia (ACTIVE, CONSUMING
+  // host action) — the host ladder consumes it, the plugin never sees it.
   vt.sendInput('\x16')
   await vt.waitForRender()
+  assert.equal(pasted.length, 1, 'the live paste handler must run')
   assert.deepEqual(actions, [], 'an active host action key must not reach a plugin binding')
   // Remap pasteMedia away from Ctrl+V: now NOT reserved — but the host
   // ladder also does not consume it, so with the HOST EDITOR in the seat
