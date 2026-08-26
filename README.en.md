@@ -155,6 +155,11 @@ Common entry points:
 
 Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics.
 
+The `Icon style` option in `/settings` switches the TUI's structural icons:
+`Emoji` (default, colorful), `Symbols` (compact single-cell terminal
+symbols), or `Minimal` (decorative icons hidden; only status/interaction
+markers remain). Switching applies immediately and persists.
+
 Slash Commands registered by other plugins through `ctx.commands` are discovered automatically.
 
 ## Common keys
