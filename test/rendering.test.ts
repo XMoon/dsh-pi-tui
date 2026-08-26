@@ -13,8 +13,8 @@ import {
 } from '../src/present.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent } from '../src/tui-app.ts'
-import { WorkingIndicator } from '../src/working.ts'
-import { Text, visibleWidth, type Terminal } from '@xmoon76/pi-tui'
+import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
+import { Text, visibleWidth, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 // CI/tooling environments export NO_COLOR, FORCE_COLOR=0 and CI=true, which
@@ -1925,12 +1925,12 @@ test('injected context rows show their emoji in the viewport', async () => {
     kind: 'system', turn: 0,
     text: '# AGENTS.md\nRead me first.',
     label: 'AGENTS.md',
-    emoji: '📄',
+    icon: 'context-file',
   }, {
     kind: 'system', turn: 0,
     text: 'catalog',
     label: 'skill-catalog',
-    emoji: '📚',
+    icon: 'context-skill',
   }])
   const view = await viewport(vt)
   assert.ok(view.includes('📄  Context injection AGENTS.md'), `instruction emoji missing:\n${view}`)
@@ -1944,6 +1944,159 @@ test('slash command cards carry a control-panel emoji', async () => {
   ])
   const view = await viewport(vt)
   assert.ok(view.includes('🎛️  compact [ok]'), `slash emoji missing:\n${view}`)
+})
+
+test('tool and context cards render the symbols palette', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'symbols' })
+  t.after(() => app.stop())
+  app.start()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: 'ls' }), result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'grep', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'edit', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'unknown-thing', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'subagent', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'workflow', args: '', result: '', status: 'ok' },
+    // The ERROR semantic belongs to the synthetic error card (the
+    // `error`-named tool); an ordinary tool that FAILED keeps its own
+    // variant icon — the status pill carries the failure.
+    { kind: 'tool', turn: 0, name: 'some-tool', args: '', result: 'boom', status: 'error' },
+    { kind: 'tool', turn: 0, name: 'error', args: '', result: '', status: 'error' },
+    { kind: 'tool', turn: 0, name: 'ask_user_question', args: '', result: '', status: 'error' },
+    { kind: 'tool', turn: 0, name: '/compact', args: '', result: 'executed', status: 'ok' },
+    { kind: 'system', turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('▤  Read /ws/src/foo.ts'), `symbols read icon missing:\n${view}`)
+  assert.ok(view.includes('›  Bash'), `symbols bash icon missing:\n${view}`)
+  assert.ok(view.includes('⌕  Search'), `symbols search icon missing:\n${view}`)
+  assert.ok(view.includes('~  Edit'), `symbols edit icon missing:\n${view}`)
+  assert.ok(view.includes('•  Tool call'), `symbols generic icon missing:\n${view}`)
+  assert.ok(view.includes('◆  Subagent'), `symbols subagent icon missing:\n${view}`)
+  assert.ok(view.includes('◇  Workflow'), `symbols workflow icon missing:\n${view}`)
+  assert.ok(view.includes('×  Error'), `symbols error icon missing:\n${view}`)
+  assert.ok(view.includes('?  Question'), `symbols question icon missing:\n${view}`)
+  assert.ok(view.includes('›  compact [ok]'), `symbols slash icon missing:\n${view}`)
+  assert.ok(view.includes('▤  Context injection AGENTS.md'), `symbols context icon missing:\n${view}`)
+})
+
+test('minimal hides decorative icons with no dangling whitespace', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'minimal' })
+  t.after(() => app.stop())
+  app.start()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'subagent', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'workflow', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'some-tool', args: '', result: 'boom', status: 'error' },
+    { kind: 'tool', turn: 0, name: 'error', args: '', result: '', status: 'error' },
+    { kind: 'tool', turn: 0, name: '/compact', args: '', result: 'executed', status: 'ok' },
+    { kind: 'system', turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' },
+  ])
+  const view = await viewport(vt)
+  const lines = view.split('\n').map(stripTerminalSequences)
+  // Decorative icons are gone AND no leading space remains where the icon
+  // used to sit — the header starts directly with the title.
+  const read = lines.find(line => line.startsWith('Read /ws/src/foo.ts'))
+  assert.ok(read !== undefined, `minimal read header missing or space-prefixed:\n${view}`)
+  const subagent = lines.find(line => line.startsWith('Subagent'))
+  assert.ok(subagent !== undefined, `minimal subagent header missing or space-prefixed:\n${view}`)
+  const workflow = lines.find(line => line.startsWith('Workflow'))
+  assert.ok(workflow !== undefined, `minimal workflow header missing or space-prefixed:\n${view}`)
+  const slash = lines.find(line => line.startsWith('compact [ok]'))
+  assert.ok(slash !== undefined, `minimal slash header missing or space-prefixed:\n${view}`)
+  const context = lines.find(line => line.startsWith('Context injection AGENTS.md'))
+  assert.ok(context !== undefined, `minimal context row missing or space-prefixed:\n${view}`)
+  // No decorative glyphs survived anywhere.
+  assert.ok(!view.includes('📖') && !view.includes('▤') && !view.includes('🤖') && !view.includes('◆')
+    && !view.includes('🎛️') && !view.includes('›  '), `decorative icons leaked into minimal:\n${view}`)
+  // The important state markers survive — the synthetic error card keeps
+  // its `×` while an ordinary failed tool stays icon-free (the [error]
+  // pill carries it).
+  assert.ok(lines.some(line => line.startsWith('×  Error')), `minimal error marker missing:\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('Tool call [error]')), `a failed ordinary tool must not gain a marker:\n${view}`)
+})
+
+test('the same folded messages repaint across emoji → symbols → minimal → emoji', async (t) => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  t.after(() => app.stop())
+  app.start()
+  const messages = [
+    { kind: 'tool' as const, turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' as const },
+    { kind: 'system' as const, turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' as const },
+  ]
+  app.setTranscript(messages)
+  // Emoji (the default).
+  let view = await viewport(vt)
+  assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `emoji read icon missing:\n${view}`)
+  assert.ok(view.includes('📄  Context injection AGENTS.md'), `emoji context icon missing:\n${view}`)
+  // Symbols: the SAME folded messages, no reload, no re-fold.
+  app.setIconStyle('symbols')
+  view = await viewport(vt)
+  assert.ok(view.includes('▤  Read /ws/src/foo.ts'), `symbols read icon missing after switch:\n${view}`)
+  assert.ok(view.includes('▤  Context injection AGENTS.md'), `symbols context icon missing after switch:\n${view}`)
+  // Minimal: icons disappear, no dangling whitespace.
+  app.setIconStyle('minimal')
+  view = await viewport(vt)
+  const lines = view.split('\n').map(stripTerminalSequences)
+  assert.ok(lines.some(line => line.startsWith('Read /ws/src/foo.ts')), `minimal read header missing:\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('Context injection AGENTS.md')), `minimal context row missing:\n${view}`)
+  // Back to emoji: the fold state never baked a glyph, so the original
+  // palette returns exactly.
+  app.setIconStyle('emoji')
+  view = await viewport(vt)
+  assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `emoji read icon missing after round-trip:\n${view}`)
+  assert.ok(view.includes('📄  Context injection AGENTS.md'), `emoji context icon missing after round-trip:\n${view}`)
+  app.stop()
+})
+
+test('working indicator frames follow the icon style; custom frames survive switches', async (t) => {
+  // The default frame pairs per style (emoji keeps the whale pair;
+  // symbols and minimal share the low-noise pair — minimal removes static
+  // icons, not animation semantics).
+  assert.deepEqual(workingFramesFor('emoji'), ['🐋', '🐳'])
+  assert.deepEqual(workingFramesFor('symbols'), ['•', '◦'])
+  assert.deepEqual(workingFramesFor('minimal'), ['•', '◦'])
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
+  t.after(() => app.stop())
+  app.start()
+  app.setWorking(true)
+  await vt.waitForRender()
+  const workingLine = (): string | undefined =>
+    vt.getViewport().join('\n').split('\n').find(line => line.includes('Working'))
+  // Default frames are the whale pair under emoji (either frame may be
+  // live at sample time — the 20ms interval cycles fast).
+  let line = workingLine()
+  assert.ok(line !== undefined && (line.includes('🐋') || line.includes('🐳')),
+    `emoji whale frame missing:\n${vt.getViewport().join('\n')}`)
+  // A runtime switch swaps the frames to the low-noise pair.
+  app.setIconStyle('symbols')
+  await vt.waitForRender()
+  line = workingLine()
+  assert.ok(line !== undefined && (line.includes('•') || line.includes('◦')), `symbols frame missing:\n${vt.getViewport().join('\n')}`)
+  assert.ok(!line.includes('🐋') && !line.includes('🐳'), `whale frames survived the switch:\n${line}`)
+  // Minimal shares the same animation pair.
+  app.setIconStyle('minimal')
+  await vt.waitForRender()
+  line = workingLine()
+  assert.ok(line !== undefined && (line.includes('•') || line.includes('◦')), `minimal frame missing:\n${line}`)
+  app.setWorking(false)
+  app.stop()
+})
+
+test('setIconStyleFrames never overwrites an explicit custom frame set', () => {
+  const renders: string[] = []
+  const capture = (): void => { renders.push(indicator.render(80).join('')) }
+  const indicator = new WorkingIndicator(capture, { frames: ['❄️'], intervalMs: 1000 })
+  indicator.setIconStyleFrames(['•', '◦'])
+  indicator.start()
+  assert.ok(renders[renders.length - 1]!.includes('❄️'), `custom frames must survive an icon-style switch:\n${renders.join('\n')}`)
+  indicator.dispose()
 })
 
 
@@ -2323,7 +2476,7 @@ test('injected skill rows fold with the instruction count and expand to the pars
   ].join('\n')
   // Folded (old turn): the row names the skill and the instruction count,
   // never a single envelope tag.
-  app.setTranscript([{ kind: 'system', turn: 99, text: envelope, label: 'review-fix-loop', emoji: '📚' }])
+  app.setTranscript([{ kind: 'system', turn: 99, text: envelope, label: 'review-fix-loop', icon: 'context-skill' }])
   let view = await viewport(vt)
   assert.ok(view.includes('Context injection review-fix-loop — 2 lines of instructions'), `skill count missing:\n${view}`)
   assert.ok(!view.includes('<skill_content'), `raw skill envelope leaked into the folded row:\n${view}`)
@@ -2331,7 +2484,7 @@ test('injected skill rows fold with the instruction count and expand to the pars
   // Expanded (Ctrl+O, recent turn): the instructions body renders, the
   // envelope stays out — the same no-XML rule as the skill tool card.
   app.setToolOutputExpanded(true)
-  app.setTranscript([{ kind: 'system', turn: 0, text: envelope, label: 'review-fix-loop', emoji: '📚' }])
+  app.setTranscript([{ kind: 'system', turn: 0, text: envelope, label: 'review-fix-loop', icon: 'context-skill' }])
   view = await viewport(vt)
   assert.ok(view.includes('Context injection review-fix-loop'), `labeled header missing:\n${view}`)
   assert.ok(view.includes('Follow these instructions.'), `instructions body missing:\n${view}`)
@@ -2341,7 +2494,7 @@ test('injected skill rows fold with the instruction count and expand to the pars
   assert.ok(!view.includes('<skill_resources'), `raw skill envelope leaked into the expanded row:\n${view}`)
   assert.ok(!view.includes('Base directory'), `resource chrome leaked into the expanded row:\n${view}`)
   // A malformed skill envelope in a system row renders the header only.
-  app.setTranscript([{ kind: 'system', turn: 0, text: '<skill_content name="">broken', label: 'x', emoji: '📚' }])
+  app.setTranscript([{ kind: 'system', turn: 0, text: '<skill_content name="">broken', label: 'x', icon: 'context-skill' }])
   view = await viewport(vt)
   assert.ok(view.includes('Context injection x'), `malformed header missing:\n${view}`)
   assert.ok(!view.includes('<skill'), `malformed skill envelope leaked:\n${view}`)
@@ -2362,7 +2515,7 @@ test('injected catalog and instruction rows strip their reminder framing when ex
     'If the user names a skill, call the `skill` tool.',
     '</system-reminder>',
   ].join('\n')
-  app.setTranscript([{ kind: 'system', turn: 0, text: catalog, label: 'skill-catalog', emoji: '📚' }])
+  app.setTranscript([{ kind: 'system', turn: 0, text: catalog, label: 'skill-catalog', icon: 'context-skill' }])
   let view = await viewport(vt)
   assert.ok(view.includes('Context injection skill-catalog'), `catalog header missing:\n${view}`)
   assert.ok(view.includes('- `glab`: GitLab helper'), `catalog entry missing:\n${view}`)
@@ -2378,7 +2531,7 @@ test('injected catalog and instruction rows strip their reminder framing when ex
     'Do the thing carefully.',
     '</system-reminder>',
   ].join('\n')
-  app.setTranscript([{ kind: 'system', turn: 0, text: instructions, label: 'AGENTS.md', emoji: '📄' }])
+  app.setTranscript([{ kind: 'system', turn: 0, text: instructions, label: 'AGENTS.md', icon: 'context-file' }])
   view = await viewport(vt)
   assert.ok(view.includes('Context injection AGENTS.md'), `instruction header missing:\n${view}`)
   assert.ok(view.includes('Do the thing carefully.'), `instruction body missing:\n${view}`)

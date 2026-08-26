@@ -890,15 +890,19 @@ test('an unreadable injection source degrades to its kind as the label', () => {
   assert.equal(system.label, 'mystery-producer')
 })
 
-test('injected context rows carry a source-kind emoji', () => {
-  const cases: { source: Record<string, unknown>; emoji: string }[] = [
-    { source: { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] }, emoji: '📄' },
-    { source: { kind: 'skill-invocation', form: 'instructions', name: 'skill-catalog' }, emoji: '📚' },
-    { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, emoji: '📦' },
-    { source: { kind: 'plugin', plugin: 'todo', form: 'notice', summary: 'saved' }, emoji: '📌' },
+test('injected context rows carry a source-kind icon SEMANTIC (never a glyph)', () => {
+  // The fold must store the semantic identity, not the concrete emoji:
+  // an icon-style switch repaints already-folded cards (plan §11).
+  const cases: { source: Record<string, unknown>; icon: string }[] = [
+    { source: { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] }, icon: 'context-file' },
+    { source: { kind: 'skill-invocation', form: 'instructions', name: 'skill-catalog' }, icon: 'context-skill' },
+    { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, icon: 'context-plugin' },
+    { source: { kind: 'plugin', plugin: 'todo', form: 'notice', summary: 'saved' }, icon: 'context-notice' },
+    { source: { kind: 'session-reference', references: [{ label: 'yesterday' }] }, icon: 'context-recall' },
+    { source: { kind: 'mystery-producer' } as never, icon: 'context-generic' },
   ]
   const events: SessionEvent[] = cases.map((entry, index) => event('user/message', {
-    id: MessageId(`msg-emoji-${index}`),
+    id: MessageId(`msg-icon-${index}`),
     role: 'user',
     content: [{ type: 'text', text: 'body' }],
     source: entry.source as never,
@@ -906,7 +910,9 @@ test('injected context rows carry a source-kind emoji', () => {
   const messages = foldTranscript(events)
   messages.forEach((message, index) => {
     assert.ok(message !== undefined && message.kind === 'system')
-    assert.equal(message.emoji, cases[index]?.emoji, `emoji for injection ${index}`)
+    assert.equal(message.icon, cases[index]?.icon, `icon semantic for injection ${index}`)
+    // The fold NEVER stores a concrete glyph.
+    assert.equal('emoji' in (message as Record<string, unknown>), false, `folded system rows must not carry a glyph field:\n${JSON.stringify(message)}`)
   })
 })
 

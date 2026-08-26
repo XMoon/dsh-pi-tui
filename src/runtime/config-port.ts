@@ -27,12 +27,13 @@
 
 import type { AuthorizationTarget } from '../authorization.ts'
 
-/** The TUI settings document (theme/footer/fullscreen/busyEnter/
+/** The TUI settings document (theme/iconStyle/footer/fullscreen/busyEnter/
  * localShellSandbox/homeEndKeys/focusMode). The old `history` field moved
  * to $DSH_HOME/user-history/*.jsonl and is deliberately NOT part of the
  * document anymore. */
 export interface TuiSettingsDoc {
   theme: string
+  iconStyle: string
   footer: string
   fullscreen: string
   busyEnter: string

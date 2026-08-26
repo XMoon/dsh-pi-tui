@@ -23,6 +23,7 @@
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
+import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import type { TurnActivity } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
@@ -30,8 +31,18 @@ import type { TranscriptMessage } from './transcript.ts'
  * (plan §10.4). */
 export const FOCUS_TOOL_SUMMARY_MAX_TYPES = 3
 
-/** The disclosure icon: 🐋 collapsed, 🐳 expanded — disclosure state ONLY
- * (plan §2.1/§2.2). The execution outcome lives in the header label. */
+/** The disclosure icon SEMANTIC: collapsed / expanded — disclosure state
+ * ONLY (plan §2.1/§2.2). The execution outcome lives in the header label.
+ * The glyph resolves through iconFor(..., iconStyle) at render time. */
+export function focusDisclosureSemantic(expanded: boolean): IconSemantic {
+  return expanded ? 'disclosure-expanded' : 'disclosure-collapsed'
+}
+
+/**
+ * The disclosure icon in the LEGACY emoji style: 🐋 collapsed, 🐳 expanded.
+ * @deprecated internal compatibility — resolve through
+ * `focusDisclosureSemantic` + `iconFor(..., iconStyle)`.
+ */
 export function focusDisclosureIcon(expanded: boolean): '🐋' | '🐳' {
   return expanded ? '🐳' : '🐋'
 }
@@ -98,15 +109,20 @@ export function focusDurationText(activity: TurnActivity, now: () => number): st
  * the header NEVER breaks the terminal (plan §14/§46): full tail → token +
  * tool count → token → bare label (then a hard truncate as the last
  * resort). The per-turn token segment is hidden entirely when the turn has
- * no usage fact (never a fake `0 tok` — plan §13.3). */
+ * no usage fact (never a fake `0 tok` — plan §13.3). The disclosure glyph
+ * resolves against the CURRENT icon style (the disclosure is an
+ * interaction affordance and is never hidden — not even under minimal,
+ * plan §34.7); the single-space lead keeps the historical `🐋 Thought`
+ * layout. */
 export function formatFocusHeaderLine(
   activity: TurnActivity,
   expanded: boolean,
   now: () => number,
   width: number,
+  iconStyle: IconStyle = 'emoji',
 ): string {
   const label = focusStatusLabel(activity, focusDurationText(activity, now))
-  const head = `${focusDisclosureIcon(expanded)} ${label}`
+  const head = `${iconFor(focusDisclosureSemantic(expanded), iconStyle)} ${label}`
   const token = activity.totalTokens === undefined ? undefined : `${formatTokens(activity.totalTokens)} tok`
   const tail = focusToolStatParts(activity.tools, activity.toolCalls)
   const candidates: string[] = []
@@ -189,28 +205,31 @@ export function focusCollapsedBody(
  * The live Thought disclosure. render() re-reads `now()` on EVERY frame, so
  * the WorkingIndicator's 500ms repaint heartbeat refreshes the running
  * duration without a second timer (plan §3.2); the TuiApp component cache
- * (keyed on the activity revision + expansion + theme + tool display) keeps
- * that cheap. The component never mutates Focus state — clicks route through
- * the app's hit map to toggleFocusTurn (plan §17). The Tool line's display
- * text is PRECOMPUTED by the app (presenter-first, plan §38) — the
- * component stays a pure renderer.
+ * (keyed on the activity revision + expansion + theme + tool display +
+ * icon style) keeps that cheap. The component never mutates Focus state —
+ * clicks route through the app's hit map to toggleFocusTurn (plan §17).
+ * The Tool line's display text is PRECOMPUTED by the app (presenter-first,
+ * plan §38) — the component stays a pure renderer.
  */
 export class FocusActivityComponent {
   private readonly activity: TurnActivity
   private readonly expanded: boolean
   private readonly now: () => number
   private readonly toolDisplay: string | undefined
+  private readonly iconStyle: IconStyle
 
   constructor(options: {
     activity: TurnActivity
     expanded: boolean
     now?: () => number
     toolDisplay?: string
+    iconStyle?: IconStyle
   }) {
     this.activity = options.activity
     this.expanded = options.expanded
     this.now = options.now ?? (() => Date.now())
     this.toolDisplay = options.toolDisplay
+    this.iconStyle = options.iconStyle ?? 'emoji'
   }
 
   /** The Component interface requires invalidate(); the component keeps no
@@ -227,7 +246,7 @@ export class FocusActivityComponent {
     // The header formatter budgets the CONTENT width (the indent is added
     // after), so a header that fits never wraps past the terminal — the
     // fullscreen row hit-map depends on that (review fix).
-    lines.push(`${indent}${color.textDim(formatFocusHeaderLine(this.activity, this.expanded, this.now, contentWidth))}`)
+    lines.push(`${indent}${color.textDim(formatFocusHeaderLine(this.activity, this.expanded, this.now, contentWidth, this.iconStyle))}`)
     if (!this.expanded) {
       for (const line of focusCollapsedBody(this.activity, contentWidth, this.toolDisplay)) {
         lines.push(`${indent}${color.textDim(line)}`)

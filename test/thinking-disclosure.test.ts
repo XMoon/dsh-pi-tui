@@ -610,7 +610,9 @@ test('I1–I6: the /settings Thinking row is the SAME state as Alt+T (detail sem
   assert.ok(view.includes('Thinking detail'), `the row must render:\n${view}`)
   assert.ok(view.includes('collapsed'), `the default value must be collapsed:\n${view}`)
   // I2: the value list is exactly collapsed / expanded (cycle once).
-  // Select the row (rows without a session: theme, expand, thinking).
+  // Select the row (rows without a session: theme, icon-style, expand,
+  // thinking).
+  t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\x1b[B')
   view = await t.view()

@@ -88,7 +88,7 @@ import {
   focusToolDisplay,
   systemContextBody,
   toolCardHeader,
-  toolEmoji,
+  toolIconSemantic,
   webCardLines,
   type ToolPresenter,
 } from './present.ts'
@@ -99,7 +99,8 @@ import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
 import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
 import { FocusActivityComponent, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
-import { WorkingIndicator } from './working.ts'
+import { WorkingIndicator, workingFramesFor } from './working.ts'
+import { iconPrefix, type IconStyle } from './icons.ts'
 import { indeterminateProgressFrames } from './progress.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
@@ -1272,6 +1273,13 @@ export interface TuiAppOptions {
   /** Working-indicator frame interval in ms; injectable so tests stay fast. */
   workingIntervalMs?: number
   /**
+   * The structural icon palette (emoji | symbols | minimal), read once at
+   * startup from the persisted settings. Runtime switches go through
+   * {@link TuiApp.setIconStyle} — renderers NEVER deep-read a settings
+   * service per frame.
+   */
+  iconStyle?: IconStyle
+  /**
    * The extension surface host (M2). When attached, the header/dock/footer
    * renders merge the extension outlets' content (header badges, dock
    * items, footer segments) into the host chrome. Optional — the surface
@@ -1439,6 +1447,10 @@ interface MessageComponentEntry {
   builtWidth?: number
   /** The theme revision at build time (colors are baked into the ANSI). */
   themeRev: number
+  /** The icon style at build time (glyphs are baked into the header). An
+   * icon-style switch must rebuild the entry — the cache never serves a
+   * frame painted in the old palette (plan §34.9). */
+  iconStyle: IconStyle
   /** Whether the entry renders expanded (boundary + click override). */
   expanded: boolean
   /** The full-reveal flag (tool bodies / large diffs): per-card override
@@ -1788,6 +1800,10 @@ export class TuiApp {
   private readonly imageTheme: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
   /** The busy indicator row directly above the editor border; idle renders nothing. */
   private readonly working: WorkingIndicator
+  /** The structural icon palette (emoji | symbols | minimal). The runtime
+   * source of truth — mutated ONLY through {@link setIconStyle}, never a
+   * per-render settings read. */
+  private iconStyle: IconStyle
   /** The fullscreen transcript ScrollView, for click hit-testing offsets. */
   private fullscreenScroll: ScrollView | undefined
   /**
@@ -1819,10 +1835,10 @@ export class TuiApp {
   /** The folder's per-turn activities (same fold state as `messages`). */
   private turnActivities: ReadonlyMap<number, TurnActivity> = new Map()
   /** The FocusActivityComponent cache, keyed by turn: rebuilds on the
-   * activity revision, the expansion state, the theme revision, or the
-   * precomputed Tool display (plan §39). render() still re-reads
-   * Date.now() per frame, so the running duration refreshes on the
-   * WorkingIndicator's repaint heartbeat. */
+   * activity revision, the expansion state, the theme revision, the icon
+   * style, or the precomputed Tool display (plan §39 + §34.9). render()
+   * still re-reads Date.now() per frame, so the running duration refreshes
+   * on the WorkingIndicator's repaint heartbeat. */
   private readonly focusActivityComponents = new Map<number, {
     /** The activity object the component was built from (identity key). */
     activity: TurnActivity
@@ -1830,6 +1846,7 @@ export class TuiApp {
     revision: number
     expanded: boolean
     themeRev: number
+    iconStyle: IconStyle
     toolDisplay?: string
   }>()
   /** The parent session's expansion set while the subagent viewer covers
@@ -1961,6 +1978,7 @@ export class TuiApp {
     })
     this.terminal = resizeAware
     this.events = events
+    this.iconStyle = options.iconStyle ?? 'emoji'
     this.extensionHost = options.extensionHost
     // F-17: an invalidation batch re-bakes the outlets; the host then
     // re-merges its chrome rows so the new content reaches the screen.
@@ -2156,6 +2174,9 @@ export class TuiApp {
     this.working = new WorkingIndicator(() => this.requestRender(), options.workingIntervalMs === undefined
       ? {}
       : { intervalMs: options.workingIntervalMs })
+    // The startup icon style decides the default animation frames (the
+    // guard keeps any explicit custom frames untouched).
+    this.working.setIconStyleFrames(workingFramesFor(this.iconStyle))
     this.footer = new Text('', 0, 0)
     // The M4 widget zones: bounded rows above and below the editor seat,
     // fed by the extension widget outlets. Host-owned Text components — a
@@ -3536,6 +3557,28 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /** Switch the structural icon palette at runtime (the /settings write
+   * path). Applies IMMEDIATELY — no restart, no session reload: the
+   * working frames follow the new style, the message/focus component
+   * caches detect the stale `iconStyle` on the next rebuild and re-resolve
+   * every glyph, and the frame repaints. A persistence failure leaves this
+   * session's preference live (the next start restores the persisted
+   * value) — same policy as theme/focus. */
+  setIconStyle(style: IconStyle): void {
+    if (this.iconStyle === style) return
+    this.iconStyle = style
+    // Default working frames follow the style; an explicit custom frame
+    // set (extension/advanced indicator) is never overwritten.
+    this.working.setIconStyleFrames(workingFramesFor(style))
+    this.rebuildMessages()
+    this.requestRender()
+  }
+
+  /** The current icon style (diagnostics / test hook). */
+  currentIconStyle(): IconStyle {
+    return this.iconStyle
+  }
+
   /** Toggle one turn's Thought disclosure (click on the header — plan
    * §16.1). Running turns are toggleable; turn/end never reverts the
    * choice. Closing is a COLLAPSE ALL: the turn's secondary expansions
@@ -3997,16 +4040,18 @@ export class TuiApp {
     if (entry !== undefined && entry.activity === activity
       && entry.revision === activity.revision
       && entry.expanded === expanded && entry.themeRev === this.themeRevision
+      && entry.iconStyle === this.iconStyle
       && entry.toolDisplay === toolDisplay) {
       return entry.component
     }
-    const component = new FocusActivityComponent({ activity, expanded, toolDisplay })
+    const component = new FocusActivityComponent({ activity, expanded, toolDisplay, iconStyle: this.iconStyle })
     this.focusActivityComponents.set(activity.turn, {
       activity,
       component,
       revision: activity.revision,
       expanded,
       themeRev: this.themeRevision,
+      iconStyle: this.iconStyle,
       toolDisplay,
     })
     return component
@@ -6349,6 +6394,7 @@ export class TuiApp {
     if (entry.boundary !== boundary
       || (entry.builtWidth !== undefined && entry.builtWidth !== width)
       || entry.themeRev !== this.themeRevision
+      || entry.iconStyle !== this.iconStyle
       || entry.expanded !== state.expanded
       || entry.fullReveal !== state.fullReveal
       || entry.expandHint !== state.expandHint
@@ -6369,6 +6415,7 @@ export class TuiApp {
       entry.boundary = rebuilt.boundary
       entry.builtWidth = rebuilt.builtWidth
       entry.themeRev = rebuilt.themeRev
+      entry.iconStyle = rebuilt.iconStyle
       entry.expanded = rebuilt.expanded
       entry.fullReveal = rebuilt.fullReveal
       entry.expandHint = rebuilt.expandHint
@@ -6428,6 +6475,7 @@ export class TuiApp {
       boundary,
       builtWidth: hostBuilt && this.bakesFoldedWidth(message, state.expanded) ? width : undefined,
       themeRev: this.themeRevision,
+      iconStyle: this.iconStyle,
       expanded: state.expanded,
       fullReveal: state.fullReveal,
       expandHint: state.expandHint,
@@ -6632,9 +6680,13 @@ export class TuiApp {
       // the generic section marker.
       if (message.label !== undefined) {
         const row = new Container()
-        const emoji = message.emoji ?? '📎'
+        // The fold stores the icon SEMANTIC; the glyph resolves against the
+        // CURRENT icon style, so a live switch repaints already-folded rows.
+        // iconPrefix hides the separator entirely when the style hides the
+        // icon (minimal) — never a dangling leading space.
+        const icon = iconPrefix(message.icon ?? 'context-generic', this.iconStyle)
         if (expanded) {
-          row.addChild(new Text(color.textMuted(`${emoji}  Context injection ${message.label}`), 0, 0))
+          row.addChild(new Text(color.textMuted(`${icon}Context injection ${message.label}`), 0, 0))
           // Injected content stays dimmed like tool-card bodies: context is
           // never mistaken for the assistant's actual output. XML-framed
           // envelopes (the skill loader's `<skill_content>` body, the skill
@@ -6666,7 +6718,7 @@ export class TuiApp {
           // contract), so the baked line fits the paint width exactly and
           // the row can never wrap.
           row.addChild(new Text(truncateToWidth(
-            color.textMuted(`${emoji}  Context injection ${message.label}${summary} (${expandHint ?? 'ctrl+o'} to expand)`),
+            color.textMuted(`${icon}Context injection ${message.label}${summary} (${expandHint ?? 'ctrl+o'} to expand)`),
             width,
             '…',
           ), 0, 0))
@@ -6721,13 +6773,16 @@ export class TuiApp {
     const card = new Container()
     const header = toolCardHeader(message.name, message.args, this.workspaceRoot)
     const summary = header.summary === '' ? '' : ` ${header.summary}`
-    const emoji = toolEmoji(message.name)
+    // The glyph resolves through the icon registry against the CURRENT
+    // style; iconPrefix drops the separator when the style hides the icon
+    // (minimal) — the header starts directly with the title.
+    const icon = iconPrefix(toolIconSemantic(message.name), this.iconStyle)
     const pill = message.status === 'ok'
       ? color.success('[ok]')
       : message.status === 'error'
         ? color.error('[error]')
         : color.textDim('[running]')
-    const head = `${color.textDim(`${emoji}  ${header.title}${summary}`)} ${pill}`
+    const head = `${color.textDim(`${icon}${header.title}${summary}`)} ${pill}`
     // LOCAL `!`/`!!` shell cards read the master Ctrl+O switch (plan §5.3),
     // never the unbounded turn marker: collapsed by default so a long log
     // cannot fill the TUI, expanded only while Ctrl+O is on.

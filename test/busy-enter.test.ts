@@ -229,9 +229,11 @@ test('the busy-enter row Enter toggle persists the other behavior', async () => 
   const t = setup({ busyEnter: 'steer' })
   await t.run('')
   await t.view()
-  // Rows without a session: theme, expand, thinking, footer, busy-enter,
-  // fullscreen, separator, cwd — the busy-enter row is the 5th.
-  t.vt.sendInput('\x1b[B') // down × 4
+  // Rows without a session: theme, icon-style, expand, thinking, footer,
+  // busy-enter, fullscreen, separator, cwd — the busy-enter row is the
+  // 6th.
+  t.vt.sendInput('\x1b[B') // down × 5
+  t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\x1b[B')
@@ -254,6 +256,10 @@ test('the busy-enter row defaults to queue', async () => {
 test('/settings shows the local-shell-sandbox row with the persisted value', async () => {
   const t = setup({ localShellSandbox: 'sandbox' })
   await t.run('')
+  await t.view()
+  // The row sits below the initial fold (theme, icon-style, expand,
+  // thinking, footer, busy-enter, then sandbox).
+  for (let i = 0; i < 6; i += 1) t.vt.sendInput('\x1b[B')
   const view = await t.view()
   assert.ok(view.includes('Local shell sandbox'), `local-shell-sandbox row missing:\n${view}`)
   assert.ok(view.includes('sandbox'), `persisted value missing:\n${view}`)
@@ -263,6 +269,8 @@ test('/settings shows the local-shell-sandbox row with the persisted value', asy
 test('the local-shell-sandbox row defaults to bypass', async () => {
   const t = setup()
   await t.run('')
+  await t.view()
+  for (let i = 0; i < 6; i += 1) t.vt.sendInput('\x1b[B')
   const view = await t.view()
   assert.ok(view.includes('bypass'), `default bypass value missing:\n${view}`)
   t.app.stop()
@@ -272,10 +280,11 @@ test('the local-shell-sandbox row Enter toggle persists the other behavior', asy
   const t = setup({ localShellSandbox: 'bypass' })
   await t.run('')
   await t.view()
-  // Rows without a session: theme, expand, thinking, footer, busy-enter,
-  // local-shell-sandbox, fullscreen, separator, cwd — the sandbox row is
-  // the 6th.
-  t.vt.sendInput('\x1b[B') // down × 5
+  // Rows without a session: theme, icon-style, expand, thinking, footer,
+  // busy-enter, local-shell-sandbox, fullscreen, separator, cwd — the
+  // sandbox row is the 7th.
+  t.vt.sendInput('\x1b[B') // down × 6
+  t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\x1b[B')

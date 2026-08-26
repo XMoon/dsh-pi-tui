@@ -9,6 +9,8 @@
  * @module @xmoon76/dsh-pi-tui/context
  */
 
+import { type IconSemantic } from './icons.ts'
+
 /** One durable source narrowed to the readable-record shape; null for anything else. */
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
@@ -75,25 +77,27 @@ export function contextProvenance(source: unknown): ContextProvenance {
 }
 
 /**
- * The card-header emoji for one context injection, keyed by source kind so a
- * reader can tell an instruction file from a skill catalog or a recalled
- * session at a glance (the Web renders one browse icon for all of them).
+ * The card-header icon SEMANTIC for one context injection, keyed by source
+ * kind so a reader can tell an instruction file from a skill catalog or a
+ * recalled session at a glance (the Web renders one browse icon for all of
+ * them). The glyph itself resolves through src/icons.ts at render time —
+ * fold state stores the semantic, never a concrete emoji/symbol, so an
+ * icon-style switch repaints ALREADY-FOLDED context cards immediately.
  * @param source - the logged user/message source.
- * @returns the emoji for this injection.
  */
-export function contextEmoji(source: unknown): string {
+export function contextIconSemantic(source: unknown): IconSemantic {
   const record = asRecord(source)
   const kind = record === null ? null : readString(record, 'kind')
   switch (kind) {
-    case 'agent-instructions': return '📄'
-    case 'skill-invocation': return '📚'
+    case 'agent-instructions': return 'context-file'
+    case 'skill-invocation': return 'context-skill'
     case 'plugin': {
       // A notice is a one-off account; everything else is payload.
-      return readString(record ?? {}, 'form') === 'notice' ? '📌' : '📦'
+      return readString(record ?? {}, 'form') === 'notice' ? 'context-notice' : 'context-plugin'
     }
-    case 'subagent-settled': return '📌'
-    case 'session-reference': return '🕘'
-    default: return '📎'
+    case 'subagent-settled': return 'context-notice'
+    case 'session-reference': return 'context-recall'
+    default: return 'context-generic'
   }
 }
 
