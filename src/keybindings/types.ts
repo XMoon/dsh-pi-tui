@@ -177,13 +177,16 @@ export interface KeybindingContext {
 /** Where an effective rule came from (plan §7). */
 export type KeybindingSource = 'builtin' | 'plugin' | 'composition' | 'user'
 
-/** Who EXECUTES a rule's key (convergence §3). `editor` rules are the
- * fork-editor-owned submit triggers: they participate in the unified
- * model (canonical/conflict/shadow/snapshot/read-model) but are NEVER
- * resolved by the HOST ladder — `resolve`/`hostResolves`/
- * `hostActiveKeys`/`hostKeysFor` exclude them, and the fork editor (via
- * `onEditorSubmitSync`) executes them, preserving paste-burst and
- * backslash-newline semantics. */
+/** Who EXECUTES a rule's key (convergence §3, review finding: the owner
+ * is "who runs the winner", NEVER a pre-filter of who may compete).
+ * `editor` rules are the fork-editor-owned submit triggers: they
+ * PARTICIPATE in the unified winner selection (a user submit override at
+ * priority 200 genuinely beats a builtin host rule on the same key —
+ * `submit: ctrl+s` really submits, it never steers), and the RESOLUTION
+ * carries the winner's owner so the caller can route execution: host →
+ * the Host dispatcher, editor → the fork editor (via `onEditorSubmitSync`
+ * + `hostResolves: false`), plugin → the plugin remainder. The editor
+ * path preserves paste-burst and backslash-newline semantics. */
 export type RuleOwner = 'host' | 'editor' | 'plugin'
 
 /** One compiled rule of the effective keymap (plan §7). */
@@ -201,12 +204,18 @@ export interface EffectiveBindingRule {
   readonly predicate?: (context: KeybindingContext) => boolean
 }
 
-/** The outcome of one resolution (plan §7). */
+/** The outcome of one resolution (plan §7). The winner is the highest-
+ * priority PREDICATE-PASSING rule across ALL owners (host, editor and
+ * plugin compete on equal footing); `owner` says who must EXECUTE it. */
 export interface KeybindingResolution {
   readonly action: string
   readonly key: KeyId
   readonly source: KeybindingSource
   readonly ruleId: string
+  /** The winner's executor (review finding): 'host' → the Host ladder
+   * dispatches; 'editor' → the fork editor executes (hostResolved: false);
+   * 'plugin' → the plugin remainder. */
+  readonly owner: RuleOwner
 }
 
 /** One detected conflict (plan §15): same key + overlapping scope + same

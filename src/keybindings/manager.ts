@@ -235,10 +235,20 @@ export class HostKeybindingManager {
    * only consumer. */
   editorSubmitKeysFor(): KeyId[] {
     if (this.isDisabled('app.input.submit')) return []
-    // A live leader-ONLY submit override (an effective sequence) removes
-    // Enter: the leader is the only trigger (checked BEFORE the editor-key
-    // fallback — the builtin Enter rule is always in the effective set).
-    if (this.effectiveLeaderBindings.some(binding => binding.action === 'app.input.submit')) return []
+    // A truly LEADER-ONLY submit (a live effective sequence AND no
+    // working direct user rule) removes Enter: the leader is the only
+    // trigger (checked BEFORE the editor-key fallback — the builtin Enter
+    // rule is always in the effective set). A leader sequence NEVER
+    // clears the DIRECT keys though (review finding): `submit:
+    // ['ctrl+z', '<leader>s']` keeps Ctrl+Z AND gains the leader —
+    // additive triggers, exactly like every other action (direct +
+    // leader = both fire). editorHasUserRule asks whether the user's
+    // direct override is EFFECTIVE (a conflicted-away override does not
+    // count).
+    if (this.effectiveLeaderBindings.some(binding => binding.action === 'app.input.submit')
+      && !this.keymap.editorHasUserRule('app.input.submit')) {
+      return []
+    }
     // The sync derives ONLY from the effective EDITOR-OWNED rules
     // (convergence §3 finding): submit's rules (builtin Enter + user
     // overrides) compile with owner=editor and participate in the unified
@@ -463,7 +473,14 @@ export class HostKeybindingManager {
     }
     const merged: MutableSnapshotBinding[] = snapshot.bindings.map(binding => ({
       action: binding.action,
-      keys: [...binding.keys],
+      // The snapshot projects the SAME per-action effective keys as
+      // keysFor/keyHint (external-review finding): the manager-level
+      // projection for app.input.submit is editorSubmitKeysFor, which a
+      // LEADER-ONLY override empties — the keymap row alone cannot see
+      // the manager-level leader state and would re-advertise the inert
+      // builtin Enter. For every other action keysFor is the keymap's own
+      // visible-rules projection, so the row is unchanged.
+      keys: [...this.keysFor(binding.action as AppKeybindingId)],
       scope: binding.scope,
       source: binding.source,
     }))

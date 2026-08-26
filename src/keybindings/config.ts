@@ -55,6 +55,40 @@ const MODIFIERS = new Set(['ctrl', 'shift', 'alt', 'super'])
  * are the SAME physical key (the canonical identity is lowercase). */
 const BASE_KEYS_LOWER = new Set([...BASE_KEYS].map(key => key.toLowerCase()))
 
+/** The FORK EDITOR's UNCONDITIONAL pre-submit keys (packages/pi-tui
+ * TUI_KEYBINDINGS + components/editor.ts handleInput): the editor
+ * dispatches these bindings BEFORE its submit check (copy, undo, tab,
+ * deletion, kill-ring, line/word cursor moves, newline), so a submit
+ * remap onto one of them would be advertised by the read model but could
+ * never fire — the editor consumes the key earlier (e.g. `submit: tab`
+ * stays autocomplete). Same unsupported-key policy as the Shift+Enter
+ * newline rejection (review finding): a binding that can never work is
+ * rejected, never advertised. The list is the fork's DEFAULT keys only —
+ * the autocomplete-gated select.* keys (up/down/enter/escape/pageUp/
+ * pageDown while the dropdown is open) are NOT included: enter is the
+ * default submit itself and the others still reach the submit check when
+ * the dropdown is closed. Consumer-side validation only — the fork stays
+ * pristine. */
+const EDITOR_PRE_SUBMIT_KEYS = new Set([
+  'ctrl+c', // tui.input.copy
+  'ctrl+-', // tui.editor.undo
+  'tab', // tui.input.tab
+  'ctrl+k', // tui.editor.deleteToLineEnd
+  'ctrl+u', // tui.editor.deleteToLineStart
+  'ctrl+w', 'alt+backspace', // tui.editor.deleteWordBackward
+  'alt+d', 'alt+delete', // tui.editor.deleteWordForward
+  'backspace', 'shift+backspace', // tui.editor.deleteCharBackward
+  'delete', 'shift+delete', 'ctrl+d', // tui.editor.deleteCharForward
+  'ctrl+y', // tui.editor.yank
+  'alt+y', // tui.editor.yankPop
+  'home', 'ctrl+home', 'ctrl+a', // tui.editor.cursorLineStart
+  'end', 'ctrl+end', 'ctrl+e', // tui.editor.cursorLineEnd
+  'alt+left', 'ctrl+left', 'alt+b', // tui.editor.cursorWordLeft
+  'alt+right', 'ctrl+right', 'alt+f', // tui.editor.cursorWordRight
+  'shift+enter', 'ctrl+j', // tui.input.newLine (also covered by dedicated checks)
+].map(key => canonicalizeKeyId(key as KeyId)),
+)
+
 /** Whether a string is a valid KeyId (the fork's grammar). */
 export function isValidKeyId(value: string): value is KeyId {
   if (value === '') return false
@@ -145,15 +179,20 @@ export function parseUserKeybindings(
   // The leader key itself. A plain PRINTABLE leader key is rejected: the
   // machine consumes it while idle (arming the pending state), so a
   // printable leader would swallow typing — same rule as a direct
-  // printable binding (review finding).
+  // printable binding (review finding). The check runs on the CANONICAL
+  // key: an uppercase `SPACE`/`Space` spelling is still the printable
+  // spacebar (the whole pipeline is grammar → canonicalize → policy →
+  // store, review finding).
   const leaderValue = doc[LEADER_KEY]
   if (leaderValue !== undefined) {
-    if (typeof leaderValue === 'string' && isValidKeyId(leaderValue) && !isPlainPrintableKey(leaderValue)) {
+    if (typeof leaderValue === 'string' && isValidKeyId(leaderValue)) {
       const canonicalLeader = canonicalizeKeyId(leaderValue as KeyId)
-      // Legacy terminal collisions are REJECTED for the leader prefix too
-      // (convergence finding): a leader on ctrl+[ / ctrl+j / ctrl+m would
-      // swallow the lifecycle Esc/Enter on legacy terminals.
-      if (LEGACY_COLLISION_KEYS.has(canonicalLeader)) {
+      if (isPlainPrintableKey(canonicalLeader)) {
+        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — a plain printable leader would swallow typing — ignored`)
+      } else if (LEGACY_COLLISION_KEYS.has(canonicalLeader)) {
+        // Legacy terminal collisions are REJECTED for the leader prefix too
+        // (convergence finding): a leader on ctrl+[ / ctrl+j / ctrl+m would
+        // swallow the lifecycle Esc/Enter on legacy terminals.
         diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — it collides with a lifecycle key on legacy terminals — ignored`)
       } else {
         leader = { key: canonicalLeader, timeoutMs: options.leaderTimeoutMs ?? DEFAULT_LEADER_TIMEOUT_MS }
@@ -245,7 +284,13 @@ export function parseUserKeybindings(
         diagnostics.push(`keybindings: "${actionId}" has an invalid key "${entry}" — ignored`)
         continue
       }
-      if (isPlainPrintableKey(entry)) {
+      // The policy pipeline is grammar → CANONICALIZE → policy → store
+      // (review finding): every check below runs on the canonical identity,
+      // so an uppercase spelling (`SPACE`, `ctrl+A`, `CTRL+RETURN`) can
+      // never bypass the printable guard or the collision sets — the raw
+      // spelling is only used in the diagnostic text.
+      const canonicalEntry = canonicalizeKeyId(entry as KeyId)
+      if (isPlainPrintableKey(canonicalEntry)) {
         diagnostics.push(`keybindings: "${actionId}" cannot bind the plain printable key "${entry}" to a Host action — ignored`)
         continue
       }
@@ -255,17 +300,25 @@ export function parseUserKeybindings(
       // treats it as newline; the host submit seam excludes it). Rejected
       // with a diagnostic — a binding that can never work must not be
       // accepted (convergence §3 finding).
-      const canonicalEntry0 = canonicalizeKeyId(entry as KeyId)
-      if (actionId === 'app.input.submit' && canonicalEntry0 === 'shift+enter') {
+      if (actionId === 'app.input.submit' && canonicalEntry === 'shift+enter') {
         diagnostics.push('keybindings: "app.input.submit" cannot bind Shift+Enter — it is the editor newline key — ignored')
         continue
       }
-      const canonicalEntry = canonicalizeKeyId(entry as KeyId)
       // Legacy terminal collisions are REJECTED (convergence §4.5): a
       // binding indistinguishable from a lifecycle key on legacy
       // terminals is unsupported, never a warning.
       if (LEGACY_COLLISION_KEYS.has(canonicalEntry)) {
         diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — it collides with a lifecycle key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter) — ignored`)
+        continue
+      }
+      // The fork editor CONSUMES its own editing bindings BEFORE the
+      // submit check, so an app.input.submit remap onto one of them could
+      // never fire (review finding: `submit: tab` stayed autocomplete).
+      // Rejected like Shift+Enter — never advertised as a submit key. The
+      // other actions are NOT affected: the host ladder consumes their
+      // keys before the editor, so they really fire.
+      if (actionId === 'app.input.submit' && EDITOR_PRE_SUBMIT_KEYS.has(canonicalEntry)) {
+        diagnostics.push(`keybindings: "app.input.submit" cannot bind "${entry}" — the editor consumes it before submit — ignored`)
         continue
       }
       // Fixed overlay-key precedence (review finding): a configurable
