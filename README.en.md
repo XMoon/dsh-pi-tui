@@ -179,6 +179,11 @@ settings document) selects the preset:
 | `custom` | a versioned `footerLayout` (see below) |
 | `command` | a user-configured command renders the status surface (see below) |
 
+The first three values are selectable in the `/settings` panel; `command`
+is NOT in the panel — it can only be enabled through the USER-layer
+settings document (`footer: "command"` + `footerCommand`). The `/settings`
+Status line row offers exactly `default / compact / custom`.
+
 `/footer` is the interactive configurator: toggle items, move them
 between the left/right zones, reorder, switch rows, cycle formatters,
 and watch a live preview composed by the real footer engine. `Enter`

@@ -337,6 +337,12 @@ export class KeybindingRegistry {
     }
   }
 
+  /** The owning fiber of one binding id (the health bridge resolves
+   * owners here — the runner never passes owners around). */
+  ownerOf(id: string): string | undefined {
+    return this.records.get(id)?.owner
+  }
+
   /** The action bound to one normalized key, or undefined. */
   actionFor(key: NormalizedKey): TuiAction | undefined {
     const canonical = canonicalNormalizedKey(key)

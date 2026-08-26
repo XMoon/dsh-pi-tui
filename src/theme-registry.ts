@@ -98,6 +98,21 @@ export class ThemeRegistry {
     }
   }
 
+  /** The identity ({id, owner}) of one theme, matched by contribution ID
+   * first and the SELECTABLE name second (the picker/runner paths address
+   * themes by name while health records them by id — the bridge must
+   * normalize the name to the record's id or the health key never
+   * matches; the review's P2). */
+  identityOf(idOrName: string): { id: string; owner: string } | undefined {
+    const byId = this.records.get(idOrName)
+    if (byId !== undefined && !byId.disposed) return { id: byId.id, owner: byId.owner }
+    for (const record of this.records.values()) {
+      if (record.disposed) continue
+      if (record.name === idOrName) return { id: record.id, owner: record.owner }
+    }
+    return undefined
+  }
+
   /** The live record for one selectable name, or undefined. */
   byName(name: string): ThemeRecord | undefined {
     for (const record of this.records.values()) {
