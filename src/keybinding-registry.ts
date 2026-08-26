@@ -165,12 +165,16 @@ export class KeybindingRegistry {
       throw new Error(`duplicate keybinding id "${contribution.id}"`)
     }
     if (contribution.key.key === '') throw new Error('keybinding key must not be empty')
-    if (isReservedHostKey(contribution.key)) {
+    // CANONICALIZE FIRST (convergence finding): the reserved-key check
+    // must see the canonical identity — a plugin registering `esc` or
+    // `return` is bound to the reserved `escape`/`enter` and must be
+    // rejected, not accepted under an alias spelling.
+    const canonicalKey = canonicalNormalizedKey(contribution.key)
+    if (isReservedHostKey(canonicalKey)) {
       throw new Error(
-        `keybinding for "${describeKey(contribution.key)}" is reserved by the host and cannot be claimed by a plugin`,
+        `keybinding for "${describeKey(canonicalKey)}" is reserved by the host and cannot be claimed by a plugin`,
       )
     }
-    const canonicalKey = canonicalNormalizedKey(contribution.key)
     for (const record of this.records.values()) {
       if (record.disposed) continue
       if (keyEquals(record.key, canonicalKey)) {

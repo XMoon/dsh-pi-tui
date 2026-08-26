@@ -661,31 +661,42 @@ test('5.9 a plugin rule id cannot shadow-deactivate a HOST rule', () => {
     'the host builtin steer ctrl+s must survive plugin-id collisions')
 })
 
-test('5.10 the registry canonicalizes alias keys (esc/escape, return/enter)', async () => {
+test('5.10 the registry canonicalizes modifier-order keys and named-key casing', async () => {
   const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
-  // Register with the alias spelling.
-  registry.register(
-    { id: 'alias-esc', key: { key: 'esc', ctrl: false, alt: false, shift: false, super: false }, action: 'open-search', description: 'alias' },
-    'plugin',
-  )
-  // Lookup with the CANONICAL spelling must find it.
-  assert.equal(registry.actionFor({ key: 'escape', ctrl: false, alt: false, shift: false, super: false }), 'open-search',
-    'a plugin registered with "esc" must be found by "escape"')
-  // And the reverse: register return, find by enter.
-  registry.register(
-    { id: 'alias-return', key: { key: 'return', ctrl: false, alt: false, shift: false, super: false }, action: 'toggle-fullscreen', description: 'alias' },
-    'plugin',
-  )
-  assert.equal(registry.actionFor({ key: 'enter', ctrl: false, alt: false, shift: false, super: false }), 'toggle-fullscreen')
-  // Duplicate detection sees canonical-equivalent keys as one (modifier
-  // order variants — neither is a reserved host key).
+  // Register ctrl+shift+p; look up by shift+ctrl+p (modifier order
+  // canonicalizes to one identity).
   registry.register(
     { id: 'mod-a', key: { key: 'p', ctrl: true, shift: true, alt: false, super: false }, action: 'open-search', description: 'a' },
     'plugin',
   )
+  assert.equal(registry.actionFor({ key: 'p', shift: true, ctrl: true, alt: false, super: false }), 'open-search')
+  // Named-key casing: register pageUp; look up pageup (the runtime parser
+  // lowercases) — convergence finding: both must be the same key.
+  registry.register(
+    { id: 'page', key: { key: 'pageUp', ctrl: false, alt: false, shift: false, super: false }, action: 'toggle-fullscreen', description: 'page' },
+    'plugin',
+  )
+  assert.equal(registry.actionFor({ key: 'pageup', ctrl: false, alt: false, shift: false, super: false }), 'toggle-fullscreen')
+  // Duplicate detection sees canonical-equivalent keys as one.
   assert.throws(() => registry.register(
     { id: 'mod-b', key: { key: 'p', shift: true, ctrl: true, alt: false, super: false }, action: 'open-search', description: 'b' },
     'plugin',
   ), /duplicate keybinding/, 'ctrl+shift+p and shift+ctrl+p must be detected as the same key')
+})
+
+test('5.11 a reserved key ALIAS (esc/return) is rejected at registration', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  // Registering the alias spelling of a reserved key must be rejected
+  // AFTER canonicalization (convergence finding — the reserved check ran
+  // before canonicalize and let `esc`/`return` through).
+  assert.throws(() => registry.register(
+    { id: 'alias-esc', key: { key: 'esc', ctrl: false, alt: false, shift: false, super: false }, action: 'open-search', description: 'alias' },
+    'plugin',
+  ), /reserved by the host/, 'esc is the reserved escape and must be rejected')
+  assert.throws(() => registry.register(
+    { id: 'alias-return', key: { key: 'return', ctrl: false, alt: false, shift: false, super: false }, action: 'open-search', description: 'alias' },
+    'plugin',
+  ), /reserved by the host/, 'return is the reserved enter and must be rejected')
 })
