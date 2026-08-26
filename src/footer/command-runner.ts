@@ -216,22 +216,35 @@ export class FooterCommandRunner {
   }
 
   /** Best-effort process-tree termination (the child is a group leader).
-   * SIGTERM first, then — when the child ignores TERM — a hard SIGKILL
-   * after a bounded grace: a TERM-resistant child must never leak as a
-   * detached orphan (the review's P1: the old code sent only SIGTERM and
-   * dropped the handle, so `trap "" TERM` children ran forever). The
-   * escalation holds the CAPTURED child — a newer child is a different
-   * object and can never be signalled by mistake — and skips a child
-   * that already closed. The generation-scoped handle (this.child) stays
-   * until the close event confirms the process is gone. */
+   * SIGTERM first, then — when a TERM-resistant member ignores it — a
+   * hard SIGKILL after a bounded grace. The escalation is GROUP-scoped:
+   * the LEADER may exit on TERM while a TERM-resistant DESCENDANT keeps
+   * the process group alive (the review's P1 scenario: `cmd & wait` with
+   * the background job trapping TERM and its stdio redirected — the
+   * leader's close fires and would cancel a leader-bound timer), so the
+   * grace timer is NOT cancelled by the leader's close: it probes the
+   * WHOLE group (kill(-pgid, 0)) and SIGKILLs it while any member
+   * survives. The timer holds the CAPTURED pgid — a newer child is a
+   * different group and can never be signalled by mistake. */
   private killChild(): void {
     const child = this.child
     if (child === undefined || this.terminating.has(child)) return
     this.terminating.add(child)
+    const pgid = child.pid
+    /** Whether ANY member of the captured process group still exists. */
+    const groupAlive = (): boolean => {
+      if (pgid === undefined) return false
+      try {
+        process.kill(-pgid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
     const signalGroup = (signal: NodeJS.Signals): void => {
-      if (child.pid !== undefined) {
+      if (pgid !== undefined) {
         try {
-          process.kill(-child.pid, signal)
+          process.kill(-pgid, signal)
         } catch {
           // Already gone.
         }
@@ -244,18 +257,21 @@ export class FooterCommandRunner {
     }
     signalGroup('SIGTERM')
     const escalation = setTimeout(() => {
-      // Both still null = the process has not closed yet (exitCode is
-      // null while running; a signal-dead process has signalCode set).
-      if (child.exitCode === null && child.signalCode === null) {
-        signalGroup('SIGKILL')
-      }
+      // The GROUP probe, never a leader check: the leader may already
+      // have closed while a TERM-resistant descendant still runs.
+      if (!groupAlive()) return
+      signalGroup('SIGKILL')
     }, KILL_GRACE_MS)
     child.once('close', () => {
-      clearTimeout(escalation)
-      // The child is gone: drop it from the termination ledger — the
-      // set must not retain every terminated ChildProcess (streams +
-      // listeners) for the runner's lifetime.
+      // Drop the child from the termination ledger — the set must not
+      // retain every terminated ChildProcess (streams + listeners) for
+      // the runner's lifetime.
       this.terminating.delete(child)
+      // Cancel the escalation ONLY when the WHOLE GROUP is already gone
+      // (an empty group id cannot gain new members, so ESRCH here is
+      // final). A live descendant must keep the timer armed — the review
+      // scenario the leader-based clear missed.
+      if (!groupAlive()) clearTimeout(escalation)
     })
   }
 

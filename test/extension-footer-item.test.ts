@@ -118,6 +118,26 @@ test('a plugin registers a configurable footer item; the composer renders it und
     // The canonical config key: ext:<owner>/<id> (the fiber identity).
     const key = canonicalKey(service, 'chrome.footer.item', 'quota')
     assert.ok(hostFooterIds(app).includes(key), `the canonical key must be exposed: ${key}`)
+    // The SEGMENT's minWidth is the single min-width authority and MUST
+    // reach the composer's item definition (the review's P2: the old
+    // top-level duplicate was never forwarded).
+    const def = app.getFooterItemRegistry().get(key)
+    assert.equal(def?.minWidth, 8, `segment.minWidth must reach the item definition: ${JSON.stringify(def)}`)
+    // And the composer honours it: at a width that cannot hold 8 cells,
+    // the item is DROPPED (never truncated below its minWidth).
+    const { FooterComposer } = await import('../src/footer/composer.ts')
+    const { emptyStatusSnapshot } = await import('../src/status/types.ts')
+    const composer = new FooterComposer(app.getFooterItemRegistry())
+    const narrow = composer.render({
+      snapshot: emptyStatusSnapshot(),
+      layout: {
+        schemaVersion: 1,
+        rows: [{ left: [{ id: 'model' }], right: [{ id: key }] }],
+      },
+      width: 6,
+      context: { taskBrowserAvailable: false, extensionFooterText: '' },
+    })
+    assert.ok(!narrow.includes('quota'), `below its minWidth the item must be dropped, never truncated:\n${narrow}`)
 
     // A custom layout referencing the item renders it.
     app.setFooterLayout({
@@ -241,11 +261,12 @@ test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the
     app.setStatus({})
     await vt.waitForRender()
     assert.ok(vt.getViewport().join('\n').includes('A'), 'the layout must render the live item first')
-    await (fiberA as { dispose(): Promise<void> }).dispose()
-    await settle()
-    assert.ok(!hostFooterIds(app).includes(keyA), `the unloaded owner's key must disappear: ${keyA}`)
 
-    // A DIFFERENT named plugin with the same id: a distinct config key.
+    // A DIFFERENT named plugin with the same id registers WHILE owner-a
+    // is still LIVE: both must coexist (the review's P2 — the old
+    // (slot, id)-keyed ledger threw a duplicate here; the public contract
+    // is unique per (slot, owner), and the canonical keys embed the
+    // owner).
     const fiberB = ctx.plugin({ name: 'quota-b', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as PiTuiExtensionServiceLike
       svc.register<FooterItemContribution>('chrome.footer.item', { id: 'quota' }, {
@@ -253,9 +274,25 @@ test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the
       })
     } })
     await fiberB
-    const keyB = canonicalKey(service, 'chrome.footer.item', 'quota')
+    const records = service._ledger().snapshot('chrome.footer.item').records
+    const keyOf = (owner: string): string => {
+      const record = records.find(entry => entry.owner === owner)
+      assert.ok(record !== undefined, `record for owner ${owner} missing`)
+      return `ext:${record.owner.replaceAll('/', '~')}/${record.id}`
+    }
+    const keyA2 = keyOf('quota-a')
+    const keyB = keyOf('quota-b')
+    assert.equal(keyA2, keyA, 'owner-a keeps its key')
     assert.ok(keyB !== keyA, 'the same id under a different NAMED plugin must be a NEW config key')
+    assert.ok(hostFooterIds(app).includes(keyA), 'both live keys must be exposed')
     assert.ok(hostFooterIds(app).includes(keyB), `owner-b key missing: ${keyB}`)
+
+    // Unloading ONE owner removes only ITS key: the other owner's same-id
+    // item survives (owner-scoped disposal).
+    await (fiberA as { dispose(): Promise<void> }).dispose()
+    await settle()
+    assert.ok(!hostFooterIds(app).includes(keyA), `the unloaded owner's key must disappear: ${keyA}`)
+    assert.ok(hostFooterIds(app).includes(keyB), `the surviving owner's key must stay: ${keyB}`)
     await (fiberB as { dispose(): Promise<void> }).dispose()
     await settle()
 

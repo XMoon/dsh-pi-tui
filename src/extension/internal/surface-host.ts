@@ -324,6 +324,13 @@ export class SurfaceHost {
         ? rawSpans.filter((span): span is { text: unknown; tone?: unknown; emphasis?: unknown } =>
             span !== null && typeof span === 'object' && typeof (span as { text?: unknown }).text === 'string')
         : []
+      // The SEGMENT's minWidth is the single min-width authority (the
+      // review's P2: the top-level contribution.minWidth duplicate was
+      // never forwarded, so plugins following the documented
+      // `segment: { spans, minWidth: 8 }` shape got their contract
+      // silently ignored on narrow terminals).
+      const rawMinWidth = rawSegment !== null && typeof rawSegment === 'object'
+        && (rawSegment as { minWidth?: unknown }).minWidth
       const label = typeof contribution.label === 'string' ? contribution.label : record.id
       const description = typeof contribution.description === 'string' ? contribution.description : undefined
       return {
@@ -332,7 +339,7 @@ export class SurfaceHost {
         ...description === undefined ? {} : { description: sanitizeSpanText(description) },
         defaultZone: contribution.defaultZone === 'right' ? 'right' : 'left',
         defaultImportance: typeof contribution.importance === 'number' ? contribution.importance : 0,
-        ...typeof contribution.minWidth === 'number' ? { minWidth: contribution.minWidth } : {},
+        ...typeof rawMinWidth === 'number' && Number.isFinite(rawMinWidth) ? { minWidth: rawMinWidth } : {},
         formats: ['segment'],
         defaultFormat: 'segment',
         // Extension spans are PLAIN DATA (the Stable contract): strip any

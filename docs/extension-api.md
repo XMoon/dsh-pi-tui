@@ -158,9 +158,13 @@ capability — never parse the package version.
 
 `chrome.footer.item` is the configurable footer item slot: a plugin
 contributes a **plain-data** item (`FooterItemContribution` — label,
-description, a `FooterSegment`, default zone, importance, minWidth) that
+description, a `FooterSegment` with its own `minWidth`, default zone,
+importance) that
 becomes a first-class citizen of the footer configurator — users can
-show/hide, reorder and zone-place it like any builtin item. Dynamic
+show/hide, reorder and zone-place it like any builtin item. The
+`FooterSegment.minWidth` is the item's minimum renderable width (never
+truncated below it — the segment is the SINGLE authority; there is no
+top-level minWidth duplicate). Dynamic
 updates use the standard `handle.replace(...)` / `handle.invalidate()`
 pattern (async producer → cache → replace plain data → host render).
 
@@ -198,8 +202,11 @@ when the plugin is gone — the same injection class as a malicious
 layout). A layout
 referencing an unloaded plugin's item keeps the reference (the item is
 skipped at render) and recovers automatically when the plugin reloads. The
-ledger's (slot, id) uniqueness still rejects two LIVE registrations of the
-same id regardless of owner. The legacy
+ledger's (slot, owner, id) uniqueness still rejects two LIVE registrations
+of the same id under the SAME owner — while DIFFERENT owners may
+simultaneously register the same local id (their canonical keys embed the
+owner, so the config identities stay distinct; the public contract: an id
+is unique per (slot, owner)). The legacy
 `chrome.footer.status` slot is unchanged: its segments aggregate into the
 single `ext:*` item (show/hide as a whole, no per-segment ordering).
 

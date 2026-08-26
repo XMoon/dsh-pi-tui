@@ -34,9 +34,9 @@ function fakeCommands(): { defs: Array<{ name: string; handler?: unknown }>; ser
 }
 
 /** A fake settings document. */
-function fakeSettings(initial: { footer: string; footerLayout?: unknown }): {
+function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerFallbackMode?: string }): {
   value: TuiSettingsLike
-  doc: { footer: string; footerLayout?: unknown }
+  doc: { footer: string; footerLayout?: unknown; footerFallbackMode?: string }
 } {
   const doc = { ...initial }
   return {
@@ -46,15 +46,17 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown }): {
         theme: 'auto',
         footer: doc.footer,
         footerLayout: doc.footerLayout,
+        footerFallbackMode: doc.footerFallbackMode,
         fullscreen: 'on',
         busyEnter: 'queue',
         localShellSandbox: 'bypass',
         homeEndKeys: 'viewport',
         focusMode: 'off',
       }),
-      replace: (next: { footer: string; footerLayout?: unknown }) => {
+      replace: (next: { footer: string; footerLayout?: unknown; footerFallbackMode?: string }) => {
         doc.footer = next.footer
         doc.footerLayout = next.footerLayout
+        doc.footerFallbackMode = next.footerFallbackMode
         return undefined
       },
     },
@@ -494,5 +496,80 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   }
   assert.equal(applied.length, 0, 'a failed settings write must not apply the footer layout')
   assert.equal(app.getFooterMode(), 'default', 'the old layout must stay active')
+  app.stop()
+})
+
+test('/settings footer change PERSISTS footerFallbackMode (the command-mode restart fallback source)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const commands = fakeCommands()
+  ctx.provide('commands', commands.service as never)
+  const settings = fakeSettings({ footer: 'default' })
+  const applied: Array<{ footer: string }> = []
+  const runner: TuiCommandRunner = {
+    ctx, app, diag: {} as never,
+    get liveAgent() { return undefined },
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    tuiSettings: settings.value,
+    agents: {} as never,
+    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
+    commandRegistry: ctx.get('commands') as never,
+    cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
+    copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    get sessionGeneration() { return 0 },
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    get pendingPreset() { return undefined },
+    set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
+    applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
+  }
+  registerTuiCommands(runner)
+  const def = commands.defs.find(entry => entry.name === 'settings')
+  assert.ok(def?.handler !== undefined, 'settings handler missing')
+  await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  // Walk to the footer row: SettingsList rows cycle their value on Enter
+  // (firing onChange) and ↓ moves to the next row. The footer row is not
+  // necessarily the first row (theme/expand/thinking precede it), so keep
+  // stepping until the footer write actually persists — bounded, never a
+  // fixed walk.
+  let saved = false
+  for (let step = 0; step < 12 && !saved; step += 1) {
+    vt.sendInput('\r')
+    const deadline = Date.now() + 250
+    while (settings.doc.footerFallbackMode === undefined && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    saved = settings.doc.footerFallbackMode !== undefined
+    if (!saved) {
+      vt.sendInput('\x1b[B')
+      await new Promise(resolve => setTimeout(resolve, 30))
+    }
+  }
+  assert.equal(settings.doc.footer, 'compact', 'the mode must persist')
+  assert.equal(settings.doc.footerFallbackMode, 'compact', 'the fallback mode must persist alongside')
   app.stop()
 })

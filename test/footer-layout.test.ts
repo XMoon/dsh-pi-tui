@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isFooterLayout, parseFooterLayout, resolveCommandFallbackLayout, stripControlChars } from '../src/footer/layout.ts'
+import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback, stripControlChars } from '../src/footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 
 test('the builtin default layout parses as valid', () => {
@@ -101,23 +101,30 @@ test('a separator-less layout survives the settings-service round-trip (schemast
   assert.equal(withSep.rows[0]!.separator?.text, ' │ ')
 })
 
-test('resolveCommandFallbackLayout: the persisted custom layout is the command mode\'s fallback', () => {
+test('resolveCommandFooterFallback: the command fallback restores the persisted NATIVE mode, restart-proof', () => {
   const custom = {
     schemaVersion: 1,
     rows: [{ left: [{ id: 'run-state' }], right: [] }],
   }
-  // A persisted custom layout under command mode: the fallback is THAT
-  // layout (the restart case — the memory has no "last layout").
-  const fallback = resolveCommandFallbackLayout({ footerLayout: custom })
-  assert.deepEqual(fallback, custom, 'a valid persisted layout must be the fallback')
-  // An INVALID persisted layout: undefined (the caller keeps the current
-  // state — the builtin default at startup).
-  assert.equal(resolveCommandFallbackLayout({ footerLayout: { schemaVersion: 9 } }), undefined)
-  // No layout in the document: undefined.
-  assert.equal(resolveCommandFallbackLayout({}), undefined)
-  assert.equal(resolveCommandFallbackLayout(undefined), undefined)
-  // A layout with a control-char id is invalid → undefined.
-  assert.equal(resolveCommandFallbackLayout({ footerLayout: { schemaVersion: 1, rows: [{ left: [{ id: '\u001b[2J' }] }] } }), undefined)
+  // 'custom' + a valid persisted layout: the fallback is THAT layout (the
+  // restart case — the memory has no "last layout").
+  assert.deepEqual(resolveCommandFooterFallback({ footerFallbackMode: 'custom', footerLayout: custom }),
+    { mode: 'custom', layout: custom }, 'a valid persisted custom layout must be the fallback')
+  // 'custom' + an INVALID layout: degrades to the builtin default.
+  assert.deepEqual(resolveCommandFooterFallback({ footerFallbackMode: 'custom', footerLayout: { schemaVersion: 9 } }),
+    { mode: 'custom', layout: undefined })
+  // 'compact': the compact preset survives the restart — `footer` itself
+  // is overwritten by 'command', so the mode must come from the separate
+  // footerFallbackMode field (the review's P2: the old resolution only
+  // read footerLayout and silently fell back to the FULL default).
+  assert.deepEqual(resolveCommandFooterFallback({ footerFallbackMode: 'compact' }),
+    { mode: 'compact', layout: undefined }, 'a compact user must keep compact')
+  // 'default' / absent field (documents predating the field): default.
+  assert.deepEqual(resolveCommandFooterFallback({ footerFallbackMode: 'default' }), { mode: 'default', layout: undefined })
+  assert.deepEqual(resolveCommandFooterFallback({}), { mode: 'default', layout: undefined })
+  assert.deepEqual(resolveCommandFooterFallback(undefined), { mode: 'default', layout: undefined })
+  // An unknown mode value is treated as default (never a crash).
+  assert.deepEqual(resolveCommandFooterFallback({ footerFallbackMode: 'command' }), { mode: 'default', layout: undefined })
 })
 
 test('stripControlChars removes EVERY control character, not just the first (the review round-2 catch)', () => {
