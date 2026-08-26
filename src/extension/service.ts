@@ -47,6 +47,7 @@ import { UnstableInputRegistry } from './internal/unstable-input.ts'
 import { normalizeInputEvent } from './internal/input-events.ts'
 import { CommandBridge } from '../command-bridge.ts'
 import { ThemeRegistry } from '../theme-registry.ts'
+import { stripControlChars } from '../footer/layout.ts'
 import { AutocompleteRegistry } from '../autocomplete-registry.ts'
 import { SettingsRegistry } from '../settings-registry.ts'
 import { KeybindingRegistry } from '../keybinding-registry.ts'
@@ -795,7 +796,10 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // for unknown items — and this id gets PERSISTED into user layouts):
     // reject both at registration.
     if (slot === 'chrome.footer.item' && (spec.id.includes('/') || /[\u0000-\u001f\u007f-\u009f]/.test(spec.id))) {
-      throw new Error(`chrome.footer.item registration id must not contain "/" or control characters (owner "${owner}", id "${spec.id}")`)
+      // The error message strips the id's control characters: the
+      // rejection is often surfaced in host logs/diagnostics, and the raw
+      // id must never smuggle ESC/OSC/C0 into them (round-3 review).
+      throw new Error(`chrome.footer.item registration id must not contain "/" or control characters (owner "${owner}", id "${stripControlChars(spec.id)}")`)
     }
     const handle = this.ledger.register<T>(slot, spec, contribution, owner)
     let dispose: () => void

@@ -131,15 +131,19 @@ test('repeated TERM-resistant children are each hard-killed (the termination led
   // escalated and killed after the first one completed its cycle — the
   // ledger entry of the first child must not block or leak into the next.
   const dir = mkdtempSync(join(tmpdir(), 'footer-kill-loop-'))
-  const marker = join(dir, 'child.pid')
+  // A DISTINCT marker per cycle: a stale first-cycle pid must never be
+  // mistaken for the second child's (the round-3 review catch).
   let pid = -1
+  let cycle = 0
   const runCycle = async (): Promise<void> => {
+    const markerPath = join(dir, `cycle-${cycle}.pid`)
+    cycle += 1
     const rows = await new Promise<string[] | undefined>((resolve) => {
       const runner = new FooterCommandRunner({
         config: {
           ...CONFIG,
           timeoutMs: 150,
-          command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done`,
+          command: `trap "" TERM; echo $$ > ${markerPath}; while :; do sleep 1; done`,
         },
         snapshot: () => emptyStatusSnapshot(),
         width: () => 100,
@@ -153,18 +157,20 @@ test('repeated TERM-resistant children are each hard-killed (the termination led
       runner.requestRefresh()
     })
     assert.equal(rows, undefined, 'each cycle must fall back on timeout')
-    // Read the new child's pid (bounded poll).
-    pid = -1
+    // Read the NEW child's pid from ITS OWN marker (bounded poll).
+    let nextPid = -1
     const readDeadline = Date.now() + 3000
-    while (pid < 0 && Date.now() < readDeadline) {
+    while (nextPid < 0 && Date.now() < readDeadline) {
       try {
-        pid = Number.parseInt(readFileSync(marker, 'utf8').trim(), 10)
+        nextPid = Number.parseInt(readFileSync(markerPath, 'utf8').trim(), 10)
       } catch {
         // Not written yet.
       }
-      if (pid < 0) await new Promise(resolve => setTimeout(resolve, 10))
+      if (nextPid < 0) await new Promise(resolve => setTimeout(resolve, 10))
     }
-    assert.ok(pid > 0, 'each cycle child must write its pid')
+    assert.ok(nextPid > 0, 'each cycle child must write its pid')
+    assert.notEqual(nextPid, pid, 'each cycle must spawn a FRESH child (a stale marker read would hide a dead kill)')
+    pid = nextPid
   }
   await runCycle()
   const firstPid = pid
