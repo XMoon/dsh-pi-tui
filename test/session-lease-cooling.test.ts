@@ -75,11 +75,22 @@ async function settle(ms = 60): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/** Poll until the session is released (the assertion target) instead of
+ * sleeping a fixed window: the cooling sampler runs every 5ms, and a
+ * fixed settle under a loaded parallel test run can finish before the
+ * third stable sample + release land (the pack-gate flake). */
+async function waitForReleased(rig: Rig, id: string, deadlineMs = 2000): Promise<void> {
+  const deadline = Date.now() + deadlineMs
+  while (!rig.released.includes(id) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
 test('cooling: 3 stable identical samples release the lease', async () => {
   const seed = events(100)
   const rig = makeRig([{ events: seed }, { events: seed }, { events: seed }])
   startCooling(rig, 'session-a', seed)
-  await settle()
+  await waitForReleased(rig, 'session-a')
   assert.deepEqual(rig.released, ['session-a'])
   assert.equal(rig.manager.state('session-a')?.state, 'released')
 })
@@ -89,7 +100,7 @@ test('cooling: delayed persistence catches up within the window and releases', a
   const behind = events(99)
   const rig = makeRig([{ events: behind }, { events: seed }, { events: seed }, { events: seed }])
   startCooling(rig, 'session-a', seed)
-  await settle()
+  await waitForReleased(rig, 'session-a')
   assert.deepEqual(rig.released, ['session-a'], 'a delayed persistence that catches up still releases')
 })
 
@@ -125,7 +136,7 @@ test('cooling: a missing inspect() pins (no reliable durable read)', async () =>
 test('cooling: an empty session releases after repeated authoritative not-found', async () => {
   const rig = makeRig(['not-found', 'not-found', 'not-found'])
   startCooling(rig, 'session-a', [])
-  await settle()
+  await waitForReleased(rig, 'session-a')
   assert.deepEqual(rig.released, ['session-a'], 'the empty-session fast path releases')
   assert.equal(rig.manager.state('session-a')?.state, 'released')
 })
