@@ -1448,7 +1448,7 @@ export function apply(ctx: Context, config: Config): void {
     // the Direct session lifecycle can resolve preset compositions.
     const backend = createDirectBackend(
       new DirectSubagentPort(ctx),
-      new DirectSessionReader(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectSessionReader(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined, diag),
       new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),

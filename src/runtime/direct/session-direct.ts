@@ -15,7 +15,7 @@
  */
 
 import { dshHome } from '../../diag.ts'
-import { loadSessionTitleBatch, type SessionPickerPersistence, type SessionQueryLike } from '../../sessions.ts'
+import { loadSessionTitleBatch, type SessionPickerPersistence, type SessionQueryLike, type TitleDiagLike } from '../../sessions.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { ExportReadResult, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
@@ -48,10 +48,16 @@ export interface LiveAgentLike {
 export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
   private readonly agentFor: (sessionId: string) => unknown | undefined
+  private readonly diag: TitleDiagLike | undefined
 
-  constructor(ctx: HostContextLike, agentFor?: (sessionId: string) => unknown | undefined) {
+  constructor(
+    ctx: HostContextLike,
+    agentFor?: (sessionId: string) => unknown | undefined,
+    diag?: TitleDiagLike,
+  ) {
     this.ctx = ctx
     this.agentFor = agentFor ?? (() => undefined)
+    this.diag = diag
   }
 
   private liveAgent(sessionId: string): LiveAgentLike | undefined {
@@ -124,7 +130,7 @@ export class DirectSessionReader implements SessionReader {
   titles(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, string>> {
     const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
     const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
-    return loadSessionTitleBatch(query, persistence, dshHome(process.env), rows, signal)
+    return loadSessionTitleBatch(query, persistence, dshHome(process.env), rows, signal, this.diag)
   }
 
   measureContext(sessionId: string): number | undefined {

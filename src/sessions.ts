@@ -11,9 +11,16 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, normalize } from 'node:path'
+import { safeErrorMessage } from './error-boundary.ts'
 
-/** How many most-recent sessions the picker shows at once (older rows still
- * appear, but only this many get background title reads). */
+/**
+ * Legacy exported window size: how many most-recent sessions the picker's
+ * FIRST title batch used to be capped to, historically. It no longer caps
+ * the title reads — the picker loads titles for every MAIN row it can
+ * display (see commands.ts `openSessionPicker`), so a session beyond this
+ * window still gets its title. Kept exported (and pinned by a test) as a
+ * documented legacy value; do not reintroduce it as a read cap.
+ */
 export const MAX_PICKER_SESSIONS = 200
 /** First-batch size for the progressive session-title loader: the visible
  * picker window fills immediately, then the remaining rows load behind it. */
@@ -47,6 +54,23 @@ export type SessionTitleObservationResultLike =
 /** The persistence surface the fallback title path needs. */
 export interface SessionPickerPersistence {
   inspect(id: SessionId, signal?: AbortSignal): Promise<{ events: readonly SessionEvent[] }>
+}
+
+/** The optional diagnostics sink the title loader reports rejected engine
+ * reads through (a structural subset of the runner's Diag channel — the
+ * pure helper never imports the runner). */
+export interface TitleDiagLike {
+  info(message: string, fields?: Record<string, unknown>): void
+}
+
+/** The engine's rejection `code` when the reason carries one (a
+ * `SessionQueryError`-shaped object), else `UNKNOWN`. */
+function errorCodeOf(reason: unknown): string {
+  if (typeof reason === 'object' && reason !== null) {
+    const code = (reason as { code?: unknown }).code
+    if (typeof code === 'string' && code !== '') return code
+  }
+  return 'UNKNOWN'
 }
 
 /** Strip the `session-` prefix and keep the first 8 characters, like the
@@ -230,13 +254,17 @@ export function headerToPickerRow(header: SessionHeader, live: boolean): Session
 /**
  * Load the latest titles for a batch of sessions, newest-first order
  * preserved. Prefers the session-query engine's batch observation (one
- * cancellable corpus read, failures isolated per session); falls back to
- * bounded sequential persistence inspections folded with `foldSessionTitle`
- * when the engine is absent. Never throws for per-session failures.
+ * cancellable corpus read, failures isolated per session — a rejected
+ * session's id lands an info diagnostic with the engine's code and
+ * reason, never a silent drop and never a behind-the-engine retry);
+ * falls back to bounded sequential persistence inspections folded with
+ * `foldSessionTitle` when the engine is absent. Never throws for
+ * per-session failures.
  * @param query - the mounted session-query engine, when present.
  * @param persistence - the persistence backend for the fallback path.
  * @param ids - session ids to title, in display order.
  * @param signal - optional cancellation for the whole batch.
+ * @param diag - optional diagnostics sink for rejected engine reads.
  * @returns title text by session id; absent ids simply have no entry.
  */
 export async function loadSessionTitles(
@@ -244,8 +272,9 @@ export async function loadSessionTitles(
   persistence: SessionPickerPersistence | undefined,
   ids: readonly string[],
   signal?: AbortSignal,
+  diag?: TitleDiagLike,
 ): Promise<Map<string, string>> {
-  return loadSessionTitleBatch(query, persistence, undefined, ids.map(id => ({ id })), signal)
+  return loadSessionTitleBatch(query, persistence, undefined, ids.map(id => ({ id })), signal, diag)
 }
 
 /**
@@ -257,12 +286,28 @@ export async function loadSessionTitles(
  * session whose log facts cannot be derived (unknown layout, absent file)
  * simply skips the cache and reads directly. `home === undefined` disables
  * the cache entirely (plain `loadSessionTitles` semantics).
+ *
+ * The engine batch isolates failures PER SESSION: a fulfilled result with
+ * a title is final, a fulfilled result WITHOUT a title means the session
+ * genuinely has none, and a REJECTED result is a real per-session read
+ * failure. Rejected reads are NEVER retried behind the engine's back and
+ * NEVER silently dropped: the engine's cold path already performs the
+ * same persistence inspection, so re-running it reproduces the identical
+ * failure for `SESSION_QUERY_PERSISTENCE_FAILED` / `CORRUPT_SESSION` and
+ * would BYPASS the engine's header-identity guard for
+ * `SESSION_QUERY_SOURCE_CONFLICT` (folding a title from a mismatched
+ * header). The engine-present path used to drop rejects silently, leaving
+ * the picker on a bare short id with no explanation; now every rejected
+ * read lands an info diagnostic carrying the engine's original code and
+ * reason, so the failure is visible in the default log file.
  * @param query - the mounted session-query engine, when present.
- * @param persistence - the persistence backend for the fallback path.
+ * @param persistence - the persistence backend for the fallback path
+ *   (used ONLY when no engine is mounted).
  * @param home - `$DSH_HOME` (cache root); undefined disables the cache.
  * @param rows - sessions to title (id + cwd for the log-path derivation),
  *   in display order.
  * @param signal - optional cancellation for the whole batch.
+ * @param diag - optional diagnostics sink for rejected engine reads.
  * @returns title text by session id; absent ids simply have no entry.
  */
 export async function loadSessionTitleBatch(
@@ -271,6 +316,7 @@ export async function loadSessionTitleBatch(
   home: string | undefined,
   rows: readonly { id: string; cwd?: string }[],
   signal?: AbortSignal,
+  diag?: TitleDiagLike,
 ): Promise<Map<string, string>> {
   const titles = new Map<string, string>()
   if (rows.length === 0) return titles
@@ -292,29 +338,27 @@ export async function loadSessionTitleBatch(
   if (toRead.length > 0) {
     if (query !== undefined) {
       const results = await query.readTitleSnapshots(toRead.map(row => SessionId(row.id)), signal)
+      // Cancellation propagates: the engine rethrows an aborted signal, but
+      // re-checking after the await keeps the contract explicit even for a
+      // non-conforming engine, and a cancelled batch must never emit
+      // diagnostics or touch persistence.
+      signal?.throwIfAborted()
       for (const result of results) {
-        if (result.status === 'fulfilled' && result.value.title !== undefined) {
-          found.set(result.sessionId, result.value.title.title)
+        if (result.status === 'fulfilled') {
+          if (result.value.title !== undefined) found.set(result.sessionId, result.value.title.title)
+          continue
         }
+        // A rejected engine read is a real per-session failure: expose the
+        // engine's code + reason at INFO level (visible in the default
+        // diagnostics log file). Never a fallback — see the doc comment.
+        diag?.info('session title unavailable', {
+          session: result.sessionId,
+          code: errorCodeOf(result.reason),
+          reason: safeErrorMessage(result.reason),
+        })
       }
     } else if (persistence !== undefined) {
-      // Fallback: sequential bounded inspections; one failing session must
-      // not starve the rest, so every worker catches per-session failures.
-      const queue = [...toRead]
-      const workers = Array.from({ length: 4 }, async () => {
-        for (;;) {
-          const row = queue.shift()
-          if (row === undefined) return
-          try {
-            const inspection = await persistence.inspect(SessionId(row.id), signal)
-            const title = foldSessionTitle(inspection.events)
-            if (title !== undefined) found.set(row.id, title.title)
-          } catch {
-            // Isolated failure: the row stays untitled.
-          }
-        }
-      })
-      await Promise.all(workers)
+      await inspectTitlesFromPersistence(persistence, toRead, found, signal)
     }
   }
   for (const [id, title] of found) titles.set(id, title)
@@ -332,6 +376,44 @@ export async function loadSessionTitleBatch(
     if (Object.keys(writes).length > 0) cache.write({ ...cached, ...writes })
   }
   return titles
+}
+
+/**
+ * Bounded fallback title reads for deployments WITHOUT a session-query
+ * engine: sequential 4-worker inspections; one failing session must not
+ * starve the rest, so every worker catches per-session failures.
+ * Cancellation propagates — the workers re-check the signal before every
+ * inspection, and each inspection receives it. (Engine-present batches
+ * NEVER reach this path: the engine already performs these same
+ * inspections behind its consistency guards.)
+ * @param persistence - the persistence backend to inspect.
+ * @param rows - the sessions to inspect (the whole batch, no engine).
+ * @param found - the shared title map, filled in place.
+ * @param signal - optional cancellation for the whole fallback.
+ */
+async function inspectTitlesFromPersistence(
+  persistence: SessionPickerPersistence | undefined,
+  rows: readonly { id: string; cwd?: string }[],
+  found: Map<string, string>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (persistence === undefined) return
+  const queue = [...rows]
+  const workers = Array.from({ length: 4 }, async () => {
+    for (;;) {
+      signal?.throwIfAborted()
+      const row = queue.shift()
+      if (row === undefined) return
+      try {
+        const inspection = await persistence.inspect(SessionId(row.id), signal)
+        const title = foldSessionTitle(inspection.events)
+        if (title !== undefined) found.set(row.id, title.title)
+      } catch {
+        // Isolated failure: the row stays untitled.
+      }
+    }
+  })
+  await Promise.all(workers)
 }
 
 /** One title-cache entry: the title plus the log file facts it was read
