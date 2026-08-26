@@ -155,6 +155,22 @@ test('/footer is sessionless and opens the configurator; Enter saves and persist
   const saved = settings.doc.footerLayout as { rows: Array<{ left: Array<{ id: string }> }> }
   assert.ok(!saved.rows[0]!.left.some(ref => ref.id === 'view-scope'), 'the persisted layout must reflect the toggle')
   assert.equal(app.getFooterMode(), 'custom', 'the app must apply the custom layout')
+
+  // The approved `/statusline` alias (other-agent muscle memory) registers
+  // the SAME handler and opens the SAME configurator — `/status` keeps
+  // priority matching, this pairing is explicit (see the registration
+  // comment in commands.ts).
+  const alias = commands.defs.find(entry => entry.name === 'statusline')
+  assert.ok(alias?.handler !== undefined, 'the statusline alias must be registered')
+  assert.equal(alias!.handler, def.handler, 'the alias must share the footer handler')
+  const aliasResult = await (alias!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  assert.deepEqual(aliasResult, { kind: 'success' })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Configure Footer'), `the alias must open the configurator`)
+  // Esc closes the alias-opened panel without writing (applied stays 1).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(applied.length, 1, 'Esc on the alias-opened panel must not write')
   app.stop()
 })
 

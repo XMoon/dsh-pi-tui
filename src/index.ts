@@ -245,6 +245,10 @@ const LOCAL_SHELL_TAIL_FLUSH_MS = 200
 export const SESSIONLESS_COMMANDS = new Set([
   'exit', 'focus', 'footer', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset',
+  // `/statusline` is the approved alias of `/footer` (same configurator,
+  // other-agent muscle memory) — it rides the same ownership sets, so it
+  // executes locally, never steers, and works before any session exists.
+  'statusline',
 ])
 
 /**
@@ -264,6 +268,10 @@ export const LOCAL_COMMANDS = new Set([
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
+  // `/statusline` — the approved alias of `/footer` (see its registration
+  // comment: the near-synonym rule stays, this pairing is an explicit
+  // alias, and `/status` keeps priority matching).
+  'statusline',
 ])
 
 /**
