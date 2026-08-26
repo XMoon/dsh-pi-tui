@@ -196,7 +196,7 @@ ancestor's display name; anonymous plugins share `root`) — stable across
 HMR, because a reloaded plugin gets a NEW fiber (new uid) but the same
 name. An npm-scoped plugin name (`@scope/name`) is legal: its `/` is
 percent-ENCODED in the key via `encodeURIComponent`
-(`ext:@scope%2Fname/<id>`) — an injective encoding, so scoped plugins get
+(`ext:%40scope%2Fname/<id>`) — an injective encoding, so scoped plugins get
 an unambiguous identity and a literal `~` owner can never collide with an
 encoded slash owner; the id itself must not contain `/` or terminal
 control characters (both rejected at registration: a control-char id
