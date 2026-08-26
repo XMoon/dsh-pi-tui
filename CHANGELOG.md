@@ -9,6 +9,24 @@
 
 ### 新增
 
+- **插件主题的选择身份改为 SOURCE-QUALIFIED(`plugin:<owner>/<id>`)。**
+  之前插件主题与本地自定义主题文件共享同一个裸名字空间:`Foo.json` 与
+  插件注册的 `name: "Foo"` 会在 picker 里出现两个完全相同的值,真正
+  apply 时插件永远压过文件,持久化的 `custom:Foo` 含义随插件是否存在
+  而变。现在 `/settings` 的取值是 `auto|dark|light`、`file:<name>`、
+  `plugin:<owner>/<id>`(owner 为插件稳定 fiber 名,与 M4 footer 键
+  相同的编码),显示名仍为友好的 `Foo`(同名时标注 `(file)`/`(plugin)`)。
+  插件卸载后持久化的插件选择确定性地回退到内置 dark,绝不会悄悄变成
+  同名文件;旧文档里的 `custom:<name>` 仍作为文件主题读取,新写入
+  一律使用带来源前缀的形式。Theme registry 的读取侧新增
+  `selectableValues()` / `paletteForSelectable()` / `displayNameForSelectable()` /
+  `hasSelectable()`;health 协议也改为按可取值寻址。
+- **Theme-unload hook 增加 generation lease。** runner 的
+  `setThemeUnloadedHook` 现在返回一个 disposer,且只有当前 generation
+  的 disposer 能清除回调——旧 runner 的 HMR cleanup 永远不会清掉新
+  runner 的 hook,也不会在窗口期把卸载通知送进已 dispose 的 app(与
+  既有 surface seam 的 stale-detach 规则一致)。
+
 - **`Icon style` 设置:在 Emoji、Symbols 与 Minimal 三种结构图标风格间
   切换。** Emoji 是默认且与之前完全一致;Symbols 用一套少量、单格
   (1-cell)的 Unicode 符号表达同样的语义(tool card、context card、

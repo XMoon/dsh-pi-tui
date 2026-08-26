@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Plugin theme selections are now SOURCE-QUALIFIED (`plugin:<owner>/<id>`).**
+  Previously a plugin theme and a local custom theme file shared one bare
+  name namespace: `Foo.json` and a plugin's `name: "Foo"` produced two
+  identical picker values, the plugin always won on apply, and a persisted
+  `custom:Foo` changed meaning depending on which source existed. The
+  `/settings` values are now `auto|dark|light`, `file:<name>` and
+  `plugin:<owner>/<id>` (owner = the plugin's stable fiber name, the same
+  encoding as the M4 footer keys), while the displayed label stays the
+  friendly `Foo` (tagged `(file)`/`(plugin)` on a name collision). A
+  persisted plugin selection degrades deterministically to the built-in
+  dark palette when its plugin unloads — it can never silently become the
+  same-named file. Legacy `custom:<name>` documents still read as file
+  themes; new writes always use the source-qualified forms. The theme
+  registry read side gained `selectableValues()` /
+  `paletteForSelectable()` / `displayNameForSelectable()` /
+  `hasSelectable()`; the health protocol addresses themes by selectable
+  value only.
+- **The theme-unload hook is now generation-leased.** The runner's
+  `setThemeUnloadedHook` returns a disposer, and only the CURRENT
+  generation's disposer clears the callback — an old runner's HMR cleanup
+  can never clear a newer runner's hook, and unload notifications can
+  never reach a disposed app in the window (the same stale-detach rule as
+  the other surface seams).
+
 - **An `Icon style` setting switches between Emoji, Symbols and Minimal
   structural icon palettes.** Emoji is the default and is byte-identical
   to the previous UI; Symbols expresses the same semantics with a small

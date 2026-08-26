@@ -121,6 +121,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
     refreshStatus: () => {},
+    applyFooterSettings: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
     updateWelcomeCard: () => {},
