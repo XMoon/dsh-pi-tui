@@ -26,10 +26,12 @@
  * Deliberate non-goals (see the plan): no global emoji sanitizer, no
  * glyph persistence in session/fold state (fold state carries the
  * SEMANTIC, resolved at render time), no user/assistant/tool-content
- * rewriting, no font dependencies. The assistant whale bullet, the header
- * brand whale, the thinking/compaction markers and the image attachment
- * marker stay emoji-only in this version — they are content-adjacent or
- * brand markers, not registry semantics.
+ * rewriting, no font dependencies. The header brand whale and the
+ * welcome-card brand line stay emoji-only — they are brand identity,
+ * not registry semantics. The image ATTACHMENT marker resolves through
+ * the registry at RENDER time (the folded flat text keeps the emoji
+ * fact for search/export; the marker is TUI-owned text, never a
+ * user-typed emoji).
  * @module @xmoon76/dsh-pi-tui/icons
  */
 
@@ -61,6 +63,11 @@ export type IconSemantic =
   | 'disclosure-expanded'
   | 'working-a'
   | 'working-b'
+  | 'assistant-bullet'
+  | 'thinking'
+  | 'compaction'
+  | 'image-marker'
+  | 'queue-notice'
 
 /** Every semantic, for exhaustive palette/width sweeps. */
 export const ALL_ICON_SEMANTICS: readonly IconSemantic[] = [
@@ -87,6 +94,11 @@ export const ALL_ICON_SEMANTICS: readonly IconSemantic[] = [
   'disclosure-expanded',
   'working-a',
   'working-b',
+  'assistant-bullet',
+  'thinking',
+  'compaction',
+  'image-marker',
+  'queue-notice',
 ]
 
 /** The full palette: semantic × style. The emoji column is the historical
@@ -119,6 +131,11 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'disclosure-expanded': '🐳',
     'working-a': '🐋',
     'working-b': '🐳',
+    'assistant-bullet': '🐋',
+    thinking: '🌊',
+    compaction: '🗜',
+    'image-marker': '🖼️',
+    'queue-notice': '⏳',
   },
   symbols: {
     'tool-read': '▤',
@@ -144,6 +161,15 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'disclosure-expanded': '▾',
     'working-a': '•',
     'working-b': '◦',
+    // The markdown bullet (the list-bullet glyph itself), the thinking
+    // wave (U+223F echoes the 🌊 idea), the compaction squeeze (U+21A7),
+    // the attachment marker (U+25A7) and the queued-notice hourglass
+    // (U+29D7) — all verified 1 cell by the width gate.
+    'assistant-bullet': '•',
+    thinking: '∿',
+    compaction: '↧',
+    'image-marker': '▧',
+    'queue-notice': '⧗',
   },
   minimal: {
     // Ordinary decorative icons are HIDDEN — the title + semantic color
@@ -173,6 +199,15 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     // icons, it does not change animation semantics.
     'working-a': '•',
     'working-b': '◦',
+    // Structure anchors survive minimal: the message bullet (the
+    // continuation indent depends on it), the attachment marker (the
+    // image's position in the text flow must stay visible) and the
+    // queued-notice hourglass (a real waiting state).
+    'assistant-bullet': '•',
+    thinking: '',
+    compaction: '',
+    'image-marker': '▧',
+    'queue-notice': '⧗',
   },
 }
 
@@ -192,6 +227,16 @@ export function iconFor(semantic: IconSemantic, style: IconStyle): string {
 export function iconPrefix(semantic: IconSemantic, style: IconStyle): string {
   const icon = iconFor(semantic, style)
   return icon === '' ? '' : `${icon}  `
+}
+
+/** The icon plus its SINGLE-space trailing separator when the style shows
+ * a glyph, '' when hidden — for titles whose historical layout uses one
+ * space (`` `🌊 Thinking` ``, `` `🗜 Context compacted` ``, `` `⏳ notice` ``),
+ * so the emoji default stays byte-identical and minimal never leaves a
+ * dangling space. */
+export function iconLead(semantic: IconSemantic, style: IconStyle): string {
+  const icon = iconFor(semantic, style)
+  return icon === '' ? '' : `${icon} `
 }
 
 /** Normalize any persisted/old value to a valid IconStyle: unknown and
