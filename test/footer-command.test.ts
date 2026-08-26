@@ -44,6 +44,7 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerF
     value: {
       get: () => ({
         theme: 'auto',
+        iconStyle: 'emoji',
         footer: doc.footer,
         footerLayout: doc.footerLayout,
         footerFallbackMode: doc.footerFallbackMode,
@@ -385,7 +386,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   // A settings document whose replace REJECTS (the write fails).
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -455,7 +456,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   ctx.provide('commands', commands.service as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []

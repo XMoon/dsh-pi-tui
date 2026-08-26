@@ -154,6 +154,29 @@ construction or restore failure leaves the old seat available.
 Always `service.api().capabilities.has(...)` before relying on a
 capability — never parse the package version.
 
+## Theme registry (M5)
+
+`registerTheme(contribution)` registers a named color palette into the
+host's `/settings` theme picker. The contribution carries an `id`, the
+**display `name`** shown in the picker, the semantic `palette` and an
+optional `description`. Owner unload removes the theme; if the removed
+theme is the one currently applied, the host falls back to its built-in
+dark palette.
+
+**Selection identity is SOURCE-QUALIFIED.** The picker/apply/persist path
+never addresses a theme by its display name — plugin themes are
+identified by the selectable value `plugin:<owner>/<id>` (the owner is
+the plugin's STABLE fiber name, the same identity the M4 canonical footer
+keys use; both segments are percent-encoded), custom theme files by
+`file:<name>`, and builtins by `auto|dark|light`. A plugin theme can
+therefore never shadow or collide with a custom file of the same name,
+and a persisted plugin selection degrades deterministically when the
+plugin unloads (it resolves nothing — the built-in fallback, never
+silently the same-named file). The registry's read-side view exposes
+`selectableValues()` / `paletteForSelectable(value)` /
+`displayNameForSelectable(value)` / `hasSelectable(value)` for the
+picker; the bare `name` is a display label, never an identity.
+
 ## Configurable footer items (M4)
 
 `chrome.footer.item` is the configurable footer item slot: a plugin

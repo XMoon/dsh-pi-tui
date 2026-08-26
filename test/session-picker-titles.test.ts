@@ -147,6 +147,7 @@ test('the picker title loader covers EVERY main row beyond the legacy window, an
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'locked' }),
     refreshStatus: () => {},
+    applyFooterSettings: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
     updateWelcomeCard: () => {},
