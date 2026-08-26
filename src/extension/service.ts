@@ -245,7 +245,7 @@ export interface PiTuiExtensionService {
   /**
    * Register a keybinding (M5): normalized key → public semantic action.
    * The registry validates the contribution (public TuiAction whitelist,
-   * reserved keys, text-producing keys, legacy C0 collisions) and its
+   * reserved keys, text-producing keys, editor-owned keys, legacy C0 collisions) and its
    * records feed the LIVE InputRouter lookups + the runner's
    * effective-keymap plugin rules (M6); routing precedence stays
    * Host-owned. Rejections throw loudly; the binding is owned by the
@@ -943,7 +943,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /**
    * Register a keybinding (M5): normalized key → public semantic action.
    * Fiber-bound; owner unload removes the binding. The registry rejects
-   * loudly: non-public actions, reserved host keys, text-producing keys and
+   * loudly: non-public actions, reserved host keys, text-producing keys, editor-owned keys and
    * legacy C0 collisions. The records feed the live InputRouter lookups
    * and the runner's effective-keymap plugin rules (M6).
    */

@@ -678,6 +678,14 @@ test('M5: the keybinding registry rejects non-public actions and printable keys 
       key: { key: 'definitely-not-a-key', ctrl: true, alt: false, shift: false, super: false },
       action: 'open-search',
     }), /not a valid key/, 'a non-grammar key name must be rejected through the public path')
+    // A fork EDITOR-owned key (Tab) is consumed by the focused editor
+    // before the plugin stage — the registration is rejected instead of
+    // advertising a dead rule (round-19 finding).
+    assert.throws(() => service.registerKeybinding({
+      id: 'bad-tab',
+      key: { key: 'tab', ctrl: false, alt: false, shift: false, super: false },
+      action: 'open-search',
+    }), /editor/, 'an editor-owned key must be rejected through the public path')
     // A legacy C0 alias (Ctrl+I is the Tab byte on legacy terminals) can
     // never fire through the plugin stage either: rejected through the
     // public path, sharing the config parser's legacy inventory (round-13

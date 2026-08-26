@@ -96,17 +96,21 @@ key is TEXT-PRODUCING — a bare letter, digit, symbol or the spacebar,
 WITH OR WITHOUT Shift (Shift+A is the raw `A` byte on legacy terminals
 and `a`+shift on Kitty — either way it produces text, so a binding on
 it would steal the user's typing on some terminals; `Ctrl+Alt+X`-style
-chords and named keys like `Shift+Tab`/`Shift+Left`/`Shift+F5` are NOT
+chords and named keys like `Shift+Left`/`Shift+F5` are NOT
 text-producing and stay bindable); or the key is a legacy-terminal
 collision (`ctrl+[`, `ctrl+j`, `ctrl+m`, `ctrl+i`, `ctrl+h`, `ctrl+_`,
 `ctrl+-` — on legacy terminals these are indistinguishable from
 Esc/Enter/Tab/Backspace/Ctrl+-, so the binding could never fire through
 the normalized lookup; the plugin registry shares the Host config
-parser's legacy inventory). Keys are canonicalized (aliases
-`esc`→`escape`, `return`→`enter`, modifier order) before every check,
-so a spelling variant cannot bypass the policy. Duplicate keys are an
-explicit conflict error; every registration is fiber-bound and removed
-on owner unload.
+parser's legacy inventory); or the key is a FORK EDITOR-owned key (Tab,
+arrows, Home/End, PageUp/PageDown, Backspace/Delete, word-moves,
+kill/yank/undo, Shift+Enter — the focused editor consumes these before
+the plugin stage on every keystroke, so the binding could never fire;
+the registry shares the `EDITOR_OWNED_KEY_IDS` inventory). Keys are
+canonicalized (aliases `esc`→`escape`, `return`→`enter`, modifier
+order) before every check, so a spelling variant cannot bypass the
+policy. Duplicate keys are an explicit conflict error; every
+registration is fiber-bound and removed on owner unload.
 Editor replacement input is the ONE deliberate exception to the
 normalized-key rule: while a replacement occupies the seat, its optional
 `handleInput(event)` hook receives a SEMANTIC {@link EditorInputEvent} —

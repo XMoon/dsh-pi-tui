@@ -81,8 +81,8 @@ export function isValidKeyId(value: string): value is KeyId {
  * (matchesKey('A','shift+a') is TRUE) and the normalized 'a'+shift on
  * Kitty — either way it produces text, so a binding on it behaves
  * terminal-dependently and steals uppercase input on some terminals.
- * Named keys (shift+tab, shift+left, shift+enter, shift+f5, ...) are
- * NOT text-producing and stay bindable. Shared by the config parser
+ * Named keys (shift+left, shift+enter, shift+f5, ...) are NOT
+ * text-producing and stay bindable. Shared by the config parser
  * (direct bindings + the leader key), the InputRouter (a text key never
  * reaches the plugin stage) and the plugin registry (registration
  * rejection). */
@@ -94,6 +94,53 @@ export function isTextProducingKeyId(key: KeyId): boolean {
   if (hasNonShiftModifier) return false
   if (base === 'space') return true
   return base.length === 1 && base.charCodeAt(0) >= 32 && base.charCodeAt(0) <= 126
+}
+
+/** The fork EDITOR's unconditionally-owned binding keys (packages/pi-tui
+ * TUI_KEYBINDINGS defaults + the editor's hardcoded shift+backspace /
+ * shift+delete): the InputRouter's editorAccepts probe claims this whole
+ * set for the focused editor on EVERY keystroke, so a Stable plugin
+ * binding on one of these keys can never fire — the editor wins by
+ * precedence and even a replacement editor's decline re-runs the probe
+ * (round-19 finding). The plugin registry rejects them at registration;
+ * the USER config parser does NOT (a Host action resolves BEFORE the
+ * editor, so tab/arrows/etc. stay bindable for user overrides). This is
+ * the single inventory — derived sets (the submit pre-submit keys) and
+ * the registry share it, never a third hard-coded copy. */
+export const EDITOR_OWNED_KEY_IDS: ReadonlySet<string> = new Set([
+  // Navigation (tui.editor.cursorUp/Down/Left/Right, cursorWordLeft/
+  // Right, cursorLineStart/End, pageUp/pageDown, jumpForward/Backward)
+  'up', 'down', 'left', 'right', 'ctrl+b', 'ctrl+f',
+  'alt+left', 'ctrl+left', 'alt+b', 'alt+right', 'ctrl+right', 'alt+f',
+  'home', 'ctrl+home', 'ctrl+a', 'end', 'ctrl+end', 'ctrl+e',
+  'pageUp', 'ctrl+pageUp', 'pageDown', 'ctrl+pageDown',
+  'ctrl+]', 'ctrl+alt+]',
+  // Editing (deleteCharBackward/Forward, deleteWordBackward/Forward,
+  // deleteToLineStart/End, yank, yankPop, undo)
+  'backspace', 'shift+backspace', 'delete', 'shift+delete', 'ctrl+d',
+  'ctrl+w', 'alt+backspace', 'alt+d', 'alt+delete',
+  'ctrl+u', 'ctrl+k', 'ctrl+y', 'alt+y', 'ctrl+-',
+  // Input / select (newLine, tab, copy, submit, select.*)
+  'shift+enter', 'ctrl+j', 'enter', 'tab', 'escape', 'ctrl+c',
+].map(key => canonicalizeKeyId(key as KeyId)))
+
+/** The editor's POST-SUBMIT keys (fork components/editor.ts handleInput
+ * dispatch order — arrows, page keys and the jump chords are checked
+ * AFTER the submit check, so a submit remap onto them WOULD fire). The
+ * app.input.submit pre-submit inventory is EDITOR_OWNED minus this set
+ * (round-9 finding: a submit remap on a PRE-submit key could never
+ * fire; a post-submit key is fine). */
+export const EDITOR_POST_SUBMIT_KEYS: ReadonlySet<string> = new Set(
+  ['up', 'down', 'left', 'right', 'ctrl+b', 'ctrl+f',
+    'pageUp', 'ctrl+pageUp', 'pageDown', 'ctrl+pageDown',
+    'ctrl+]', 'ctrl+alt+]', 'enter', 'escape']
+    .map(key => canonicalizeKeyId(key as KeyId)),
+)
+
+/** Whether one canonical key id is a fork EDITOR-owned key (the shared
+ * plugin-registration policy; see {@link EDITOR_OWNED_KEY_IDS}). */
+export function isEditorOwnedKeyId(key: KeyId): boolean {
+  return EDITOR_OWNED_KEY_IDS.has(canonicalizeKeyId(key))
 }
 
 /**

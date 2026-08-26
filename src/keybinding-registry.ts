@@ -19,8 +19,9 @@
  * - reserved Host lifecycle keys cannot be claimed by a plugin (the
  *   registry REJECTS a reserved key loudly), and TEXT-PRODUCING keys
  *   (letters/digits/symbols/space — shift-only printables included,
- *   round-17 finding) are rejected too (they never reach the plugin
- *   stage);
+ *   round-17 finding) and FORK EDITOR-owned keys (tab/arrows/home/end/
+ *   backspace/kill-yank/undo — round-19 finding) are rejected too (they
+ *   never reach the plugin stage);
  * - unload removes the bindings (fiber-bound);
  * - duplicates are an explicit conflict error.
  *
@@ -39,7 +40,7 @@
 
 import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
-import { canonicalizeKeyId, isTextProducingKeyId, isValidKeyId } from './keybindings/key-identity.ts'
+import { canonicalizeKeyId, isEditorOwnedKeyId, isTextProducingKeyId, isValidKeyId } from './keybindings/key-identity.ts'
 import { isLegacyCollisionKeyId } from './keybindings/config.ts'
 import { PROTECTED_HOST_ACTIONS } from './keybindings/definitions.ts'
 
@@ -272,6 +273,19 @@ export class KeybindingRegistry {
     if (isReservedHostKey(canonicalKey)) {
       throw new Error(
         `keybinding for "${describeKey(canonicalKey)}" is reserved by the host and cannot be claimed by a plugin`,
+      )
+    }
+    // FORK EDITOR-OWNED REJECTION (round-19 finding): the InputRouter's
+    // editorAccepts probe claims the fork editor's whole binding set for
+    // the focused editor on EVERY keystroke (tab, arrows, home/end, page
+    // keys, backspace/delete, word moves, kill/yank/undo, newline — the
+    // shared EDITOR_OWNED_KEY_IDS inventory), so a plugin registration
+    // on one of these could never fire — yet it used to enter the
+    // effective keymap, appear in /keybindings and even disable a
+    // colliding leader. Rejected at the registration boundary.
+    if (isEditorOwnedKeyId(canonicalKeyId)) {
+      throw new Error(
+        `keybinding for "${describeKey(canonicalKey)}" is an editor-owned key and cannot be bound by a plugin (the focused editor consumes it first)`,
       )
     }
     for (const record of this.records.values()) {

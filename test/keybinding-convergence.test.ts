@@ -619,7 +619,7 @@ test('5.7 the registry notifies subscribers on register/dispose (dynamic sync)',
   )
   assert.equal(notified, 1, 'register must notify subscribers (the runner resyncs the keymap)')
   const handle = registry.register(
-    { id: 'second', key: { key: 'y', ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'second' },
+    { id: 'second', key: { key: 'y', ctrl: true, alt: true, shift: false, super: false }, action: 'open-search', description: 'second' },
     'plugin',
   )
   assert.equal(notified, 2)
@@ -679,13 +679,14 @@ test('5.10 the registry canonicalizes modifier-order keys and named-key casing',
     'plugin',
   )
   assert.equal(registry.actionFor({ key: 'p', shift: true, ctrl: true, alt: false, super: false }), 'open-search')
-  // Named-key casing: register pageUp; look up pageup (the runtime parser
-  // lowercases) — convergence finding: both must be the same key.
+  // Named-key casing: register F5; look up f5 (the runtime parser
+  // lowercases) — convergence finding: both must be the same key. (pageUp
+  // is editor-owned now — a plugin cannot claim it, round-19 finding.)
   registry.register(
-    { id: 'page', key: { key: 'pageUp', ctrl: false, alt: false, shift: false, super: false }, action: 'toggle-fullscreen', description: 'page' },
+    { id: 'page', key: { key: 'F5', ctrl: false, alt: false, shift: false, super: false }, action: 'toggle-fullscreen', description: 'page' },
     'plugin',
   )
-  assert.equal(registry.actionFor({ key: 'pageup', ctrl: false, alt: false, shift: false, super: false }), 'toggle-fullscreen')
+  assert.equal(registry.actionFor({ key: 'f5', ctrl: false, alt: false, shift: false, super: false }), 'toggle-fullscreen')
   // Duplicate detection sees canonical-equivalent keys as one.
   assert.throws(() => registry.register(
     { id: 'mod-b', key: { key: 'p', shift: true, ctrl: true, alt: false, super: false }, action: 'open-search', description: 'b' },
@@ -1241,9 +1242,10 @@ test('7.7b shift+letter routes to the EDITOR on every protocol (legacy and CSI-u
     'legacy uppercase A types into the editor, never a plugin action')
   assert.equal(router.route('\x1b[97;2u', context, alwaysPlugin).kind, 'editor',
     'Kitty CSI-u Shift+A types into the editor, never a plugin action')
-  // Named non-text keys stay bindable chords.
-  assert.equal(router.route('\x1b[Z', context, alwaysPlugin).kind, 'plugin-action',
-    'Shift+Tab is a named chord, not text — it may reach the plugin stage')
+  // Named non-text keys stay ROUTER-eligible chords (the registry applies
+  // the further editor-owned/reserved rejections — round-19 finding).
+  assert.equal(router.route('\x1b[1;2D', context, alwaysPlugin).kind, 'plugin-action',
+    'Shift+Left is a named chord, not text — it may reach the plugin stage')
 })
 
 test('7.7c shift-only text keys are rejected for USER configs and leaders too', () => {
@@ -1261,4 +1263,66 @@ test('7.7c shift-only text keys are rejected for USER configs and leaders too', 
   const named = parseUserKeybindings({ 'app.transcript.toggleExpand': 'shift+f5' })
   assert.deepEqual(named.bindings, { 'app.transcript.toggleExpand': 'shift+f5' })
   assert.ok(!named.diagnostics.some(message => message.includes('text-producing')))
+})
+
+test('7.8 the registry rejects fork EDITOR-owned keys (no advertised-but-dead rules)', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  // The focused editor consumes these keys BEFORE the plugin stage (the
+  // InputRouter's editorAccepts probe claims the whole fork editor
+  // binding set), so a plugin registration on one of them could never
+  // fire — yet it used to enter the effective keymap, show up in
+  // /keybindings and even disable a colliding leader (round-19 finding).
+  const editorOwned: { key: string; ctrl?: boolean; alt?: boolean; shift?: boolean }[] = [
+    { key: 'tab' },
+    { key: 'enter', shift: true }, // shift+enter — the newline key
+    { key: 'backspace' },
+    { key: 'delete' },
+    { key: 'left' },
+    { key: 'right' },
+    { key: 'up' },
+    { key: 'down' },
+    { key: 'home' },
+    { key: 'end' },
+    { key: 'pageUp' },
+    { key: 'pageDown' },
+    { key: 'left', ctrl: true }, // ctrl+left — word navigation
+    { key: 'b', alt: true }, // alt+b — word navigation
+    { key: 'a', ctrl: true }, // ctrl+a — line start
+    { key: 'k', ctrl: true }, // ctrl+k — delete to line end
+    { key: 'y', ctrl: true }, // ctrl+y — yank
+  ]
+  for (const key of editorOwned) {
+    assert.throws(() => registry.register(
+      { id: `editor-${key.key}`, key: { key: key.key, ctrl: key.ctrl ?? false, alt: key.alt ?? false, shift: key.shift ?? false, super: false }, action: 'open-search', description: 'editor' },
+      'plugin',
+    ), /editor/, `a plugin must not claim the editor-owned ${key.ctrl ? 'Ctrl+' : key.alt ? 'Alt+' : key.shift ? 'Shift+' : ''}${key.key}`)
+  }
+  // Real plugin chords stay bindable.
+  registry.register(
+    { id: 'ok-chord', key: { key: 'x', ctrl: true, alt: true, shift: false, super: false }, action: 'open-search', description: 'chord' },
+    'plugin',
+  )
+  registry.register(
+    { id: 'ok-f5', key: { key: 'f5', ctrl: false, alt: false, shift: true, super: false }, action: 'open-search', description: 'f5' },
+    'plugin',
+  )
+  assert.equal(registry.snapshot().bindings.length, 2)
+})
+
+test('7.8b a rejected editor-owned plugin key never disables a colliding leader', () => {
+  const manager = new HostKeybindingManager()
+  // Tab can never become a plugin rule (the registry rejects it), so the
+  // keymap has NO plugin rule on tab — a user leader on tab must stay
+  // alive instead of being disabled by a dead "plugin binding" (round-19
+  // finding: pluginActiveKeys used to count editor-owned keys as live).
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'tab',
+    bindings: { 'app.transcript.toggleFullscreen': '<leader>n' },
+  }))
+  assert.ok(manager.leaderMachine() !== undefined, 'the leader stays alive (no plugin rule exists to collide)')
+  assert.ok(!manager.diagnosticsList().some(message => message.includes('plugin key')),
+    `no plugin collision expected: ${manager.diagnosticsList().join(' | ')}`)
+  assert.ok(!manager.snapshot().bindings.some(binding => binding.action === 'open-search'),
+    'no dead plugin rule is advertised')
 })
