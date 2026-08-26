@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
+import { eastAsianWidthType } from 'get-east-asian-width'
 import { ALL_ICON_SEMANTICS, iconFor, iconLead, iconPrefix, iconStyleOf } from '../src/icons.ts'
 
 /** The ONLY semantics allowed to show a glyph under minimal (the plan §34
@@ -24,17 +25,41 @@ const MINIMAL_VISIBLE: ReadonlySet<string> = new Set([
   'disclosure-expanded',
   'working-a',
   'working-b',
-  // Structure anchors survive minimal: the message bullet, the attachment
-  // marker and the queued-notice hourglass (plan §34 addendum).
+  // Structure anchors survive minimal: the message bullet and the
+  // queued-notice hourglass (plan §34 addendum).
   'assistant-bullet',
-  'image-marker',
   'queue-notice',
 ])
 
-test('every symbols glyph measures exactly ONE terminal cell', () => {
+/** The EAW classes that are safe under CJK-width terminals: ambiguous
+ * (A) glyphs are REJECTED because VTE/WezTerm-style cjk-ambiguous-width
+ * handling may paint them two cells, which would drift truncation, table
+ * borders and the fullscreen hit-map. */
+const SAFE_EAW = new Set(['neutral', 'narrow', 'halfwidth'])
+
+function assertEawSafe(glyph: string, semantic: string, style: string): void {
+  for (const char of glyph) {
+    const cp = char.codePointAt(0)!
+    const type = eastAsianWidthType(cp)
+    assert.ok(SAFE_EAW.has(type),
+      `${style} glyph for ${semantic} (${JSON.stringify(char)} U+${cp.toString(16).toUpperCase()}) is EAW ${type} — ambiguous/wide glyphs drift on CJK terminals`)
+  }
+}
+
+test('every symbols glyph measures exactly ONE cell AND is EAW-safe', () => {
   for (const semantic of ALL_ICON_SEMANTICS) {
     const glyph = iconFor(semantic, 'symbols')
     assert.equal(visibleWidth(glyph), 1, `symbols glyph for ${semantic} must be 1 cell (got ${JSON.stringify(glyph)})`)
+    assertEawSafe(glyph, semantic, 'symbols')
+  }
+})
+
+test('every visible minimal marker is also EAW-safe', () => {
+  for (const semantic of ALL_ICON_SEMANTICS) {
+    const glyph = iconFor(semantic, 'minimal')
+    if (glyph === '') continue
+    assert.equal(visibleWidth(glyph), 1, `minimal marker for ${semantic} must be 1 cell (got ${JSON.stringify(glyph)})`)
+    assertEawSafe(glyph, semantic, 'minimal')
   }
 })
 
@@ -58,8 +83,8 @@ test('iconPrefix never emits a dangling separator for hidden icons', () => {
   // Visible icons keep their historical two-space trail (byte-identical
   // emoji default rendering).
   assert.equal(`${iconPrefix('tool-read', 'emoji')}Read`, '📖  Read')
-  assert.equal(`${iconPrefix('tool-read', 'symbols')}Read`, '▤  Read')
-  assert.equal(`${iconPrefix('error', 'minimal')}Error`, '×  Error')
+  assert.equal(`${iconPrefix('tool-read', 'symbols')}Read`, '≣  Read')
+  assert.equal(`${iconPrefix('error', 'minimal')}Error`, '⨯  Error')
 })
 
 test('iconLead composes SINGLE-space titles and never dangles under minimal', () => {
@@ -79,12 +104,8 @@ test('iconLead composes SINGLE-space titles and never dangles under minimal', ()
   // The assistant bullet keeps its TWO-space prefix in every style (the
   // continuation indent depends on it).
   assert.equal(`${iconPrefix('assistant-bullet', 'emoji')}line`, '🐋  line')
-  assert.equal(`${iconPrefix('assistant-bullet', 'symbols')}line`, '•  line')
-  assert.equal(`${iconPrefix('assistant-bullet', 'minimal')}line`, '•  line')
-  // The attachment marker follows the style too.
-  assert.equal(`${iconPrefix('image-marker', 'emoji')}shot.png`, '🖼️  shot.png')
-  assert.equal(`${iconPrefix('image-marker', 'symbols')}shot.png`, '▧  shot.png')
-  assert.equal(`${iconPrefix('image-marker', 'minimal')}shot.png`, '▧  shot.png')
+  assert.equal(`${iconPrefix('assistant-bullet', 'symbols')}line`, '∙  line')
+  assert.equal(`${iconPrefix('assistant-bullet', 'minimal')}line`, '∙  line')
 })
 
 test('the emoji palette preserves the historical glyphs', () => {
@@ -117,7 +138,6 @@ test('the emoji palette preserves the historical glyphs', () => {
     'assistant-bullet': '🐋',
     thinking: '🌊',
     compaction: '🗜',
-    'image-marker': '🖼️',
     'queue-notice': '⏳',
   }
   for (const semantic of ALL_ICON_SEMANTICS) {
@@ -127,33 +147,32 @@ test('the emoji palette preserves the historical glyphs', () => {
 
 test('the symbols palette is the documented compact vocabulary', () => {
   const expected: Record<string, string> = {
-    'tool-read': '▤',
+    'tool-read': '≣',
     'tool-search': '⌕',
     'tool-shell': '›',
     'tool-write': '+',
     'tool-edit': '~',
-    'tool-code': '◆',
-    'tool-generic': '•',
-    subagent: '◆',
-    workflow: '◇',
-    error: '×',
-    interrupted: '■',
+    'tool-code': '⊞',
+    'tool-generic': '∗',
+    subagent: '⋄',
+    workflow: '⇄',
+    error: '⨯',
+    interrupted: '∎',
     question: '?',
     'slash-command': '›',
-    'context-file': '▤',
-    'context-skill': '◆',
-    'context-plugin': '◇',
+    'context-file': '≣',
+    'context-skill': '⋈',
+    'context-plugin': '◻',
     'context-notice': '!',
     'context-recall': '↶',
-    'context-generic': '·',
+    'context-generic': '⋅',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
-    'working-a': '•',
+    'working-a': '∙',
     'working-b': '◦',
-    'assistant-bullet': '•',
+    'assistant-bullet': '∙',
     thinking: '∿',
     compaction: '↧',
-    'image-marker': '▧',
     'queue-notice': '⧗',
   }
   for (const semantic of ALL_ICON_SEMANTICS) {

@@ -42,11 +42,6 @@ export class ImageThumbnail implements Component {
   private readonly theme: ImageThumbnailTheme
   private readonly ref: ImageAttachmentRefLike
   private readonly collapsedRef: (() => boolean) | undefined
-  /** The attachment marker glyph (the icon-style resolved marker, default
-   * the historical `🖼️`). Resolved by the HOST at construction — the
-   * message cache embeds the icon style, so a live switch rebuilds the
-   * thumbnail with the new marker. */
-  private readonly marker: string
   private unsubscribe: (() => void) | undefined
   private instance: Image | undefined
   private cachedLines: string[] | undefined
@@ -57,14 +52,12 @@ export class ImageThumbnail implements Component {
     loader: ImageLoader,
     theme: ImageThumbnailTheme,
     collapsedRef?: () => boolean,
-    marker = '🖼️',
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
     this.loader = loader
     this.theme = theme
     this.collapsedRef = collapsedRef
-    this.marker = marker
     // Subscribe to THIS attachment's settles only: N thumbnails loading in
     // parallel never invalidate each other (review finding 8 — no O(N²)
     // repaint churn, no kitty image-id churn).
@@ -102,16 +95,14 @@ export class ImageThumbnail implements Component {
   }
 
   /** The constant info line (§17.1): the attachment's identity — name +
-   * dimensions + size — visible in EVERY state. The marker glyph comes
-   * from the icon registry (the emoji `🖼️` carries the U+FE0F variation
-   * selector: U+1F5BC alone has no default emoji presentation, so the
-   * width math measures it as ONE cell while fonts with an emoji face
-   * render it TWO cells wide — the glyph overhang then eats the space and
-   * overlaps the name (font-dependent). VS16 forces the wide 2-cell
-   * rendering the measurement expects; the symbols/minimal markers are
-   * plain 1-cell glyphs with no overhang). */
+   * dimensions + size — visible in EVERY state. The marker is `🖼️` WITH
+   * the U+FE0F variation selector: U+1F5BC alone has no default emoji
+   * presentation, so the width math measures it as ONE cell while fonts
+   * with an emoji face render it TWO cells wide — the glyph overhang then
+   * eats the space and overlaps the name (font-dependent). VS16 forces the
+   * wide 2-cell rendering the measurement expects. */
   private infoLine(): string {
-    return `${this.marker} ${this.label()} · ${this.ref.width}×${this.ref.height} · ${formatBytes(this.ref.bytes)}`
+    return `🖼️ ${this.label()} · ${this.ref.width}×${this.ref.height} · ${formatBytes(this.ref.bytes)}`
   }
 
   invalidate(): void {
