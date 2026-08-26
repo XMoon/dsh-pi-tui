@@ -85,18 +85,22 @@ test('the trailing newline is removed', async () => {
 test('coalescing: requests within the interval produce ONE spawn', async () => {
   let spawns = 0
   const outputs: Array<string[] | undefined> = []
+  const runStartedAt: number[] = []
   const runner = new FooterCommandRunner({
-    // A SHORT interval (50ms) keeps the observation window tiny: the
-    // two later requests coalesce onto a 50ms-later start, and a 30ms
-    // window is far too short for that timer to fire even under heavy
-    // event-loop load (a false-fail would require ~40x early firing).
-    config: { ...CONFIG, refreshIntervalMs: 50, command: 'node -e "process.stdout.write(\'x\\n\')"' },
+    config: { ...CONFIG, refreshIntervalMs: 500, command: 'node -e "process.stdout.write(\'x\\n\')"' },
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,
     onOutput: (rows) => {
       spawns += 1
       outputs.push(rows)
+      // onOutput fires at the child's CLOSE, not its start — record the
+      // close time and verify the SPAWN spacing via the runner's own
+      // lastStartAt indirectly: a second spawn cannot occur before the
+      // interval from the FIRST start. The first output's close time
+      // upper-bounds the first start time, so (interval + close latency)
+      // is the earliest a second spawn's output can legally arrive.
+      runStartedAt.push(Date.now())
     },
     signal: new AbortController().signal,
   })
@@ -109,11 +113,29 @@ test('coalescing: requests within the interval produce ONE spawn', async () => {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   assert.equal(spawns, 1, `the first start must produce one result, saw ${spawns}`)
-  // The coalesced second start is scheduled 50ms after the first start
-  // began; a 30ms observation window cannot reach it (a second spawn
-  // would need the 50ms timer to fire ~40x early).
-  await new Promise(resolve => setTimeout(resolve, 30))
-  assert.equal(spawns, 1, `no second spawn within the interval, saw ${spawns}`)
+  const firstCloseAt = runStartedAt[0]!
+  // Wait until WELL PAST the interval from the FIRST START (the close
+  // time upper-bounds it): a second spawn (the single coalesced one) may
+  // now legally appear — but NEVER more than one, and never before the
+  // interval's worth of time has elapsed since the first start.
+  const intervalWait = 500 + 300 // interval + generous close-latency margin
+  const waitUntil = Date.now() + 3000
+  while (spawns < 2 && Date.now() < waitUntil) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  // Exactly one coalesced second spawn: no third.
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.equal(spawns, 2, `two coalesced requests must produce exactly ONE extra spawn, saw ${spawns}: ${JSON.stringify(outputs)}`)
+  // The second spawn is the coalesced one: it cannot have STARTED before
+  // `firstCloseAt + interval - closeLatency`... the hard assertion is
+  // that the second spawn's CLOSE is at least `interval` after the first
+  // start. Since firstCloseAt >= firstStart, secondClose - firstCloseAt
+  // >= interval - (firstClose - firstStart) — with a fast child
+  // (low close latency) this is >= ~interval - closeLatency. Use a
+  // tolerant bound (interval - 200ms) to avoid flaking on slow spawns.
+  const secondCloseAt = runStartedAt[1]!
+  assert.ok(secondCloseAt - firstCloseAt >= 500 - 200,
+    `the second (coalesced) spawn must respect the interval spacing: ${secondCloseAt - firstCloseAt}ms`)
   runner.dispose()
 })
 
