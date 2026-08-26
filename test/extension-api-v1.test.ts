@@ -217,6 +217,20 @@ test('the runner health bridge is OWNER-LESS: (slot, id, error) resolves the own
     // An UNKNOWN id is skipped: a ghost error must not mint a record.
     service._recordRegistryError('theme', 'No Such Theme', new Error('ghost'))
     assert.equal(service._ledger().healthSnapshot().length, 1, 'a ghost error must not mint a health record')
+    // The name/id cross-resolution (the review's P2): another theme whose
+    // CONTRIBUTION ID equals this theme's SELECTABLE name must not shadow
+    // it — the name matches FIRST (an id-first lookup would land the
+    // error on the wrong owner).
+    const secondFiber = ctx.plugin({ name: 'id-clash-owner', apply(c) {
+      const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): unknown }
+      svc.registerTheme({ id: 'Health Theme', name: 'other-name', palette: {} })
+    } })
+    await secondFiber
+    service._recordRegistryError('theme', 'Health Theme', new Error('name-first boom'))
+    const clash = service._ledger().healthSnapshot().find(entry => entry.id === 'health-theme')
+    assert.equal(clash?.lastError, 'name-first boom',
+      'the selectable-name match must win over a same-string contribution id')
+    assert.ok(clash?.owner.endsWith(':health-owner'), `the error must land on the NAMED theme's owner: ${clash?.owner}`)
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
