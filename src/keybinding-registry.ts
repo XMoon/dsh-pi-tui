@@ -41,7 +41,7 @@
 import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
 import { canonicalizeKeyId, isEditorOwnedKeyId, isTextProducingKeyId, isValidKeyId } from './keybindings/key-identity.ts'
-import { isLegacyCollisionKeyId } from './keybindings/config.ts'
+import { isTerminalAmbiguousKeyId } from './keybindings/config.ts'
 import { PROTECTED_HOST_ACTIONS } from './keybindings/definitions.ts'
 
 export { PROTECTED_HOST_ACTIONS }
@@ -117,7 +117,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   // which the editor treats as Enter, so the chord was unreliable in
   // practice — the task browser is reached via ↓ (empty editor) and
   // `/tasks` instead. The LEGACY-COLLISION policy (shared with the config
-  // parser — isLegacyCollisionKeyId) rejects a plugin registration on it
+  // parser — isTerminalAmbiguousKeyId) rejects a plugin registration on it
   // anyway: on a legacy terminal the byte IS Enter, so the binding could
   // never fire through the router's normalized lookup (round-13 finding).
   { key: 'enter', ctrl: true, alt: false, shift: false, super: false }, // Ctrl+Enter queue
@@ -265,9 +265,9 @@ export class KeybindingRegistry {
     // such a registration (matchesKey accepts the raw byte), but the
     // router's plugin stage normalizes \t to `tab` and could never match
     // it — an advertised plugin rule that can never fire.
-    if (isLegacyCollisionKeyId(canonicalKeyId)) {
+    if (isTerminalAmbiguousKeyId(canonicalKeyId)) {
       throw new Error(
-        `keybinding for "${describeKey(canonicalKey)}" collides with a fixed key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter; Ctrl+I/H are Tab/Backspace; Ctrl+_ and Ctrl+- are one key) and cannot be claimed by a plugin`,
+        `keybinding for "${describeKey(canonicalKey)}" collides with a fixed key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter; Ctrl+I/H are Tab/Backspace; Ctrl+_ and Ctrl+- are one key; Ctrl+Backspace is Backspace on legacy, Ctrl+Backspace on Windows Terminal) and cannot be claimed by a plugin`,
       )
     }
     if (isReservedHostKey(canonicalKey)) {
