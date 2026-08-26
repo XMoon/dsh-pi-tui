@@ -19,6 +19,11 @@
 
 import type { TuiSettingContribution, TuiSettingHandle, TuiSettingsRegistrySnapshot } from './extension/public-types.ts'
 
+/** The detailed outcome of one settings apply. 'stale' and 'gone' are
+ * NOT plugin rejections (a newer apply superseded this one, or the row
+ * was disposed mid-apply) — the host must stay silent on them. */
+export type SettingApplyOutcome = 'accepted' | 'rejected' | 'stale' | 'gone'
+
 
 /** Internal registration record. */
 interface SettingRecord {
@@ -123,14 +128,27 @@ export class SettingsRegistry {
       .sort((left, right) => left.order - right.order || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
   }
 
+  /** The detailed outcome of one apply — the host needs to distinguish a
+   * plugin REJECTION (a real failure: record health, revert, notify) from
+   * a STALE or GONE result (a newer apply superseded this one, or the row
+   * was disposed mid-apply: the plugin never refused — recording a
+   * failure would be a false alarm; the review's P2). */
+  applyDetailed(id: string, value: string): Promise<SettingApplyOutcome> {
+    return this.applyInternal(id, value)
+  }
+
   /** Apply a value change to one row; returns whether the change was
    * accepted (the row's onChange may reject). P2-01: concurrent applies
    * use latest-only commit — a slow EARLIER change that settles after a
    * NEWER one must NOT overwrite it (last-completion-wins race). Each
    * apply stamps an epoch; only the LATEST epoch may write the value. */
   async apply(id: string, value: string): Promise<boolean> {
+    return (await this.applyInternal(id, value)) === 'accepted'
+  }
+
+  private async applyInternal(id: string, value: string): Promise<SettingApplyOutcome> {
     const record = this.records.get(id)
-    if (record === undefined || record.disposed) return false
+    if (record === undefined || record.disposed) return 'gone'
     const epoch = record.applyEpoch + 1
     record.applyEpoch = epoch
     const onChange = record.onChange
@@ -139,21 +157,23 @@ export class SettingsRegistry {
       try {
         accepted = await onChange(value)
       } catch {
-        return false
+        // The plugin's onChange THREW — a real failure of the
+        // contribution, distinct from a stale supersede.
+        return 'rejected'
       }
-      if (accepted === false) return false
+      if (accepted === false) return 'rejected'
       // A newer apply started while this onChange was in flight: this
       // result is stale — never commit it.
-      if (record.applyEpoch !== epoch) return false
+      if (record.applyEpoch !== epoch) return 'stale'
     }
     // The row may have been disposed (or replaced under the same id) while
     // an async callback was in flight. A detached callback must never commit
     // into an orphaned record or invalidate the live registry.
-    if (record.disposed || this.records.get(id) !== record) return false
+    if (record.disposed || this.records.get(id) !== record) return 'gone'
     record.currentValue = value
     this.revision += 1
     this.onInvalidate()
-    return true
+    return 'accepted'
   }
 
   /** Whether any row is live (health /status). */

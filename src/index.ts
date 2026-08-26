@@ -3368,12 +3368,13 @@ export function apply(ctx: Context, config: Config): void {
       const extensionCommandId = parsedAtSubmit === undefined
         ? undefined
         : extensionService?.commands.idFor(parsedAtSubmit.name)
-      // Capture the health identity NOW (submit time): the settlement
-      // below may arrive after an HMR reload replaced this id with a new
-      // owner — the stale result must never land on the reloaded plugin.
-      const extensionCommandRef = extensionCommandId === undefined || extensionService === undefined
-        ? undefined
-        : extensionService._recordRegistryHealthRef('command', extensionCommandId)
+      // Assigned inside the runOwned factory (invocation-time capture).
+      let commandHealthRef: { slot: string; id: string; owner: string } | undefined
+      // The health ref is NOT captured here: the submit-time identity can
+      // be stale after the async ensureSession/guard phase below (an HMR
+      // reload in between means the REAL invocation runs the NEW owner's
+      // command). It is re-captured inside the runOwned factory,
+      // immediately before execute() — see below (the review's P2).
       const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
@@ -3473,12 +3474,26 @@ export function apply(ctx: Context, config: Config): void {
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
             return
           }
-          runOwned('command execution', () => commands.execute(agent as Agent, toggled, [], signal), {
+          runOwned('command execution', () => {
+            // RE-CAPTURE at invocation time: the runOwned factory runs
+            // SYNCHRONOUSLY right before execute(), so there is no race
+            // window — the ref always names the owner whose command is
+            // actually about to run (a submit-time capture could name a
+            // long-gone owner after an HMR reload, silently dropping the
+            // new owner's real failures; the review's P2).
+            const liveCommandId = extensionCommandId === undefined || extensionService === undefined
+              ? undefined
+              : extensionService.commands.idFor(parsedAtSubmit?.name ?? '')
+            commandHealthRef = liveCommandId === undefined
+              ? undefined
+              : extensionService?._recordRegistryHealthRef('command', liveCommandId)
+            return commands.execute(agent as Agent, toggled, [], signal)
+          }, {
             diag,
             sessionId: () => agent.session.id,
             onResult: (execution) => {
-              if (extensionCommandRef !== undefined && execution !== undefined) {
-                extensionService?._clearRegistryError(extensionCommandRef)
+              if (commandHealthRef !== undefined && execution !== undefined) {
+                extensionService?._clearRegistryError(commandHealthRef)
               }
               // A command the surface advertised (e.g. from the startup
               // probe) but the real session's catalog lacks: consume the
@@ -3570,7 +3585,7 @@ export function apply(ctx: Context, config: Config): void {
             },
             onError: (error) => {
               fallbackPin()
-              if (extensionCommandRef !== undefined) extensionService?._recordRegistryError(extensionCommandRef, error)
+              if (commandHealthRef !== undefined) extensionService?._recordRegistryError(commandHealthRef, error)
               const message = safeErrorMessage(error)
               try {
                 ctx.logger.error(`tui-runner: command execution failed: ${message}`)
