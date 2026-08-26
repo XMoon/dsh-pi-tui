@@ -261,7 +261,8 @@ canonical key `ext:<owner>/<id>` where the owner is the plugin's stable
 name — **stable across HMR**: a layout referencing an unloaded plugin's
 item keeps the reference and recovers automatically when the plugin
 reloads. An npm-scoped plugin name (`@scope/name`) is legal: its `/` is
-escaped to `~` in the key (`ext:@scope~name/<id>`); the id itself must
+percent-encoded via `encodeURIComponent` in the key
+(`ext:%40scope%2Fname/<id>`); the id itself must
 not contain `/`. The legacy `chrome.footer.status` slot is unchanged: its
 segments aggregate into the single `ext:*` item. Full author guide:
 [docs/extension-api.md](docs/extension-api.md).
