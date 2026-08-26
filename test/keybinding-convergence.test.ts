@@ -26,6 +26,7 @@ import { TuiApp } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/keybindings/manager.ts'
 import { deriveKeybindingContext } from '../src/keybindings/context.ts'
+import { InputRouter } from '../src/input-router.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const editorContext = deriveKeybindingContext({ focusedSeat: 'editor' })
@@ -544,4 +545,55 @@ test('4.11b legacy terminal collisions are rejected bindings', () => {
     assert.ok(parsed.diagnostics.some(message => message.includes('legacy terminals') || message.includes('collides')),
       `no rejection diagnostic for "${key}": ${parsed.diagnostics.join(' | ')}`)
   }
+})
+
+// ── stop/start lifecycle (full-review findings) ───────────────────────────
+
+test('5.4 stop() cancels a pending leader sequence', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let tasksOpened = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onOpenTasks: () => { tasksOpened += 1 } })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.tasks.open': '<leader>t' },
+  }))
+  await vt.waitForRender()
+  vt.sendInput('\x18') // arm the leader
+  await vt.waitForRender()
+  app.stop() // stop with the leader pending
+  app.start() // restart (fresh lifecycle)
+  await vt.waitForRender()
+  // Complete the OLD sequence on the NEW surface: it must NOT fire.
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'a stopped-then-restarted surface must not fire a stale leader sequence')
+  app.stop()
+})
+
+test('5.5 stop() clears the interrupt double-action window', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let cancels = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => { cancels += 1 } })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // first Esc (idle) arms the double window
+  await vt.waitForRender()
+  app.stop()
+  app.start()
+  await vt.waitForRender()
+  // A post-restart single Esc must NOT read as the second press (which
+  // would cancel/rewind an empty session).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancels, 0, 'stop() must clear the pre-stop double-action window')
+  app.stop()
+})
+
+test('5.6 a plugin cannot bind the space key (it would swallow typing)', () => {
+  // isPrintableKey('space') must be true, so the router never routes a
+  // plain space to a plugin binding.
+  const router = new InputRouter()
+  const result = router.route(' ', { questionActive: false, approvalActive: false, viewerInputMode: 'none', hasOverlay: false, searchActive: false, hostDeclined: false }, () => 'open-search')
+  assert.equal(result.kind, 'editor', 'a plain space must reach the editor, never a plugin binding')
 })

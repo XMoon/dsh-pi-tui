@@ -2354,6 +2354,13 @@ export class TuiApp {
     // Issue #8: the exit-chord timer dies with the surface — a stopped
     // TUI must never fire a stale disarm into a dead footer.
     this.clearCtrlCExit()
+    // A stop/start cycle is a fresh surface lifecycle: a PENDING leader
+    // sequence must be cancelled (its timeout must never fire into the
+    // stopped surface) and the interrupt double-action window must not
+    // survive the restart (a post-start interrupt must not read as the
+    // second press of a pre-stop one — convergence findings).
+    this.keybindings.cancelLeader()
+    this.lastEscapeAt = undefined
     this.working.dispose()
     // Every pending question flow settles rejected: a stopped TUI must not
     // leave askQuestions promises hanging forever.
