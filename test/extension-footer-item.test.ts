@@ -138,6 +138,23 @@ test('a plugin registers a configurable footer item; the composer renders it und
       context: { taskBrowserAvailable: false, extensionFooterText: '' },
     })
     assert.ok(!narrow.includes('quota'), `below its minWidth the item must be dropped, never truncated:\n${narrow}`)
+    // The DEPRECATED top-level minWidth is honored as a fallback when the
+    // segment carries none (type-level compatibility), but the segment
+    // WINS when both are set.
+    service.register<FooterItemContribution>('chrome.footer.item', { id: 'legacy-width', order: 300 }, {
+      label: 'Legacy width', segment: { spans: [{ text: 'legacy' }] }, minWidth: 12,
+    })
+    await settle()
+    const legacyKey = canonicalKey(service, 'chrome.footer.item', 'legacy-width')
+    assert.equal(app.getFooterItemRegistry().get(legacyKey)?.minWidth, 12,
+      'the deprecated top-level minWidth must still be honored when the segment has none')
+    service.register<FooterItemContribution>('chrome.footer.item', { id: 'both-widths', order: 99 }, {
+      label: 'Both widths', segment: { spans: [{ text: 'both' }], minWidth: 4 }, minWidth: 12,
+    })
+    await settle()
+    const bothKey = canonicalKey(service, 'chrome.footer.item', 'both-widths')
+    assert.equal(app.getFooterItemRegistry().get(bothKey)?.minWidth, 4,
+      'the segment minWidth must WIN over the deprecated top-level field')
 
     // A custom layout referencing the item renders it.
     app.setFooterLayout({

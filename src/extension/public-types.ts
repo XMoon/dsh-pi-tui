@@ -294,13 +294,19 @@ export interface FooterItemContribution {
   readonly description?: string
   /** The rendered segment (the LIVE value — replace() swaps it). The
    * segment's OWN `minWidth` is the item's minimum renderable width
-   * (never truncated below it) — the segment is the single authority
-   * (there is deliberately NO top-level minWidth duplicate). */
+   * (never truncated below it) and is the AUTHORITY when both are set. */
   readonly segment: FooterSegment
   /** Where the item lands by default in a fresh layout. */
   readonly defaultZone?: 'left' | 'right'
   /** Layout weight: lower importance items drop first under pressure. */
   readonly importance?: number
+  /**
+   * @deprecated Use `segment.minWidth` — the segment is the single
+   * min-width authority and WINS when both are set. This top-level field
+   * is kept (and still honored when the segment carries none) so earlier
+   * draft code keeps type-checking; new code must set it on the segment.
+   */
+  readonly minWidth?: number
 }
 
 /** One styled run of text. The host owns ANSI compilation; plugins supply
