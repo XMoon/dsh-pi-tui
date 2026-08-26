@@ -287,7 +287,7 @@ export class SurfaceHost {
    * plan §16.4 key — stable across HMR, never collides across owners).
    * The key is used WHOLE (never parsed), so the OWNER's `/` (an npm
    * scoped plugin name like `@scope/name` is the fiber name) is ESCAPED
-   * to `~` — `ext:@scope/name~<id>` is unambiguous while the id stays
+   * to `~` — `ext:@scope~name/<id>` is unambiguous while the id stays
    * `/`-free (register() enforces that). */
   private static footerItemKey(owner: string, id: string): string {
     if (id.includes('/')) {

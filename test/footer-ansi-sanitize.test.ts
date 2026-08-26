@@ -58,3 +58,17 @@ test('bare C1 controls (0x80-0x9F) are stripped, including C1 CSI/OSC lead bytes
   assert.equal(out, 'a2;3Hbc52;clipboard')
   assert.ok(!/[\u0080-\u009f]/.test(out), `no C1 byte may survive:\n${JSON.stringify(out)}`)
 })
+
+test('a control byte INSIDE an OSC 8 URI forces the whole sequence to be stripped', () => {
+  // The KEEP branch's URI charset excludes C0/C1: a NUL or a C1 ST inside
+  // the URI makes the sequence invalid, so it must NOT survive (neither
+  // as a link nor as a bare control byte).
+  const nul = sanitizeCommandOutput('a\x1b]8;;http://x\u0000y\x07b')
+  assert.ok(!/\u0000|\u001b/.test(nul), `no control may survive a poisoned URI:\n${JSON.stringify(nul)}`)
+  assert.ok(nul.includes('ab'), 'the surrounding text survives')
+  const c1 = sanitizeCommandOutput('a\x1b]8;;http://x\u009cy\x07b')
+  assert.ok(!/[\u0080-\u009f\u001b]/.test(c1), `no C1 may survive a poisoned URI:\n${JSON.stringify(c1)}`)
+  // A CLEAN OSC 8 hyperlink still survives.
+  const good = sanitizeCommandOutput('a\x1b]8;;http://x.com\x07b')
+  assert.ok(good.includes('\x1b]8;;http://x.com\x07'), `a clean OSC 8 link must survive:\n${JSON.stringify(good)}`)
+})

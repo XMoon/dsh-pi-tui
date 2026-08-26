@@ -455,7 +455,7 @@ test('a chrome.footer.item registration id containing "/" is rejected; a SCOPED 
     } })
     await scopedFiber
     const scopedKey = canonicalKey(service, 'chrome.footer.item', 'quota')
-    assert.ok(scopedKey.startsWith('ext:@quota~scope/'), `the scoped owner must be ESCAPED: ${scopedKey}`)
+    assert.equal(scopedKey, 'ext:@quota~scope/quota', `the scoped owner must be ESCAPED exactly: ${scopedKey}`)
     assert.ok(!scopedKey.includes('@quota/scope/'), `a raw slash owner must never appear: ${scopedKey}`)
     await (scopedFiber as { dispose(): Promise<void> }).dispose()
     await settle()

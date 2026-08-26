@@ -9,8 +9,11 @@
  */
 
 /** One KEEP alternative: an SGR sequence (`ESC [ params m`) or an OSC 8
- * hyperlink (`ESC ] 8 ; ; uri ST`). */
-const KEEP = String.raw`\x1b\[[0-9;:]*m|\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)`
+ * hyperlink (`ESC ] 8 ; ; uri ST`). The URI character set EXCLUDES C0/C1
+ * controls (a control byte inside the URI must never ride through as
+ * part of the kept sequence — the sanitizer's contract strips all of
+ * them). */
+const KEEP = String.raw`\x1b\[[0-9;:]*m|\x1b\]8;;[^\x00-\x1f\x7f-\x9f]*(?:\x07|\x1b\\)`
 
 /** One STRIP alternative: any other ESC-led sequence (CSI/OSC/DCS/PM/APC)
  * or a lone ESC (the group is optional — a truncated sequence consumes
