@@ -350,13 +350,16 @@ test('setConfig clears the OLD config\'s committed rows immediately (no stale su
 
 test('a STALE child timeout never kills the CURRENT child (generation-scoped kill)', async () => {
   // The race: the first child is SIGTERM-resistant (its close event is
-  // delayed), setConfig starts a NEW child, and the OLD child's timeout
-  // fires — it must NOT kill the new child.
+  // delayed, so its timeout stays armed); setConfig REPLACES it
+  // immediately (refreshIntervalMs 0 forces the start); the OLD child's
+  // timeout then fires while the NEW child is already in flight — it
+  // must NOT kill the new child. The new child writes LATE (400ms), so
+  // it is still running when the old timeout (200ms) fires.
   const outputs: Array<string[] | undefined> = []
   const runner = new FooterCommandRunner({
     // A child that traps TERM and keeps running (the close event never
     // fires promptly, so its timeout stays armed).
-    config: { ...CONFIG, timeoutMs: 100, command: 'sh -c "trap \\"\\" TERM; sleep 30"' },
+    config: { ...CONFIG, refreshIntervalMs: 0, timeoutMs: 200, command: 'sh -c "trap \\"\\" TERM; sleep 30"' },
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,
@@ -365,17 +368,18 @@ test('a STALE child timeout never kills the CURRENT child (generation-scoped kil
   })
   runner.requestRefresh()
   await Promise.resolve()
-  // Replace with a fast new child BEFORE the old timeout (100ms) fires.
-  runner.setConfig({ ...CONFIG, command: 'node -e "process.stdout.write(\'new\\n\')"' })
+  // Replace IMMEDIATELY (interval 0): the new child starts now, before
+  // the old timeout (200ms) fires. It writes at 400ms — after the stale
+  // timeout — with a generous timeout of its own (10s).
+  runner.setConfig({ ...CONFIG, refreshIntervalMs: 0, timeoutMs: 10000, command: 'node -e "setTimeout(() => process.stdout.write(\'new\\n\'), 400)"' })
   const deadline = Date.now() + 5000
   while (!outputs.some(rows => rows?.includes('new')) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
-  assert.ok(outputs.some(rows => rows?.includes('new')), 'the new child must commit')
-  // The stale timeout (old generation) must not have killed the new
-  // child: if it had, the new child would have been SIGTERMed before
-  // writing (or its close would produce undefined, never 'new').
-  assert.ok(!outputs.some(rows => rows === undefined && outputs.indexOf(rows) > outputs.findIndex(r => r?.includes('new'))),
-    'no failure output after the new child committed')
+  // The stale timeout (old generation, 200ms) must NOT have killed the
+  // new child: if it had, the new child would have been SIGTERMed before
+  // its 400ms write and 'new' would never commit.
+  assert.ok(outputs.some(rows => rows?.includes('new')),
+    `the new child must commit (the stale timeout must not kill it):\n${JSON.stringify(outputs)}`)
   runner.dispose()
 })
