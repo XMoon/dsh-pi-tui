@@ -96,7 +96,7 @@ import { usageFromStats } from './status/derive-usage.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
-import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
+import { parseFooterLayout, isFooterLayout, resolveCommandFallbackLayout } from './footer/layout.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
@@ -834,6 +834,25 @@ function packageVersion(): string {
     return dshVersion() ?? pkg.version ?? '0.0.0'
   } catch {
     return dshVersion() ?? '0.0.0'
+  }
+}
+
+/**
+ * The BUNDLE's OWN version (`@xmoon76/dsh-pi-tui`'s package.json),
+ * INDEPENDENT of the installed dsh version. The status snapshot's
+ * host.tuiVersion and the footer's `version(format=tui)` item must report
+ * the TUI's own patch level — the welcome-card helper above deliberately
+ * prefers the dsh version for display, so reusing it made `tui` show the
+ * harness version (and `both` show the dsh version twice) inside a real
+ * dsh installation (the review's P2).
+ * @returns the bundle version string, or a fallback when the file is unreadable.
+ */
+function bundleVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
+    return pkg.version ?? '0.0.0'
+  } catch {
+    return '0.0.0'
   }
 }
 
@@ -2355,10 +2374,13 @@ export function apply(ctx: Context, config: Config): void {
         ...gitBranch(cwd) === '' ? {} : { branch: gitBranch(cwd) },
       }
     }
-    /** M0: the host section (dsh + bundle versions). */
+    /** M0: the host section (dsh + bundle versions). tuiVersion is the
+     * BUNDLE's own version (bundleVersion), never the dsh version — the
+     * welcome-card helper prefers dsh for display, which would show the
+     * harness version under `version(format=tui)` (review finding). */
     const deriveHostStatus = (): HostStatus => ({
       ...dshVersion() === undefined ? {} : { dshVersion: dshVersion() },
-      tuiVersion: packageVersion(),
+      tuiVersion: bundleVersion(),
     })
     /** The sandbox fold (dsh-sandbox-policy's effectiveSandboxMode),
      * capability-detected: the VALUE import must not break module load on
@@ -2483,7 +2505,7 @@ export function apply(ctx: Context, config: Config): void {
     // input. The runner derives the DSH-owned sections (composition/access/
     // workspace/usage/host/plan); the app projects its own surface state
     // (interaction/activity/surface/view) through its setters.
-    const statusStore = new StatusStore(initialStatusSnapshot(packageVersion()))
+    const statusStore = new StatusStore(initialStatusSnapshot(bundleVersion()))
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
@@ -4976,6 +4998,22 @@ export function apply(ctx: Context, config: Config): void {
     const applyFooterSettings = (doc: { footer: string; footerLayout?: unknown } | undefined): void => {
       if (doc === undefined) return
       if (doc.footer === 'command') {
+        // The native FALLBACK layout must be established from the
+        // PERSISTED document, never from whatever the memory happens to
+        // hold: at STARTUP the memory is still the builtin default, so a
+        // persisted custom layout (footerLayout) must be applied BEFORE
+        // the command surface arms — a failed command then restores the
+        // user's OWN layout (M5 contract), never the builtin default
+        // (the review's P2: compact could not survive a restart either —
+        // the mode itself is persisted, the layout is what is lost). A
+        // runtime switch re-applies the same value the memory already
+        // holds (no visible change); an absent/invalid layout keeps the
+        // current state (the builtin default at startup).
+        const fallback = resolveCommandFallbackLayout(doc)
+        if (fallback !== undefined) {
+          app.setFooterPreset('full')
+          app.setFooterLayout(fallback)
+        }
         // The trust gate: the COMMAND must live in the USER layer of the
         // settings descriptor (never the merged/project value), AND the
         // command MODE must be user-layer-owned — a project flipping the

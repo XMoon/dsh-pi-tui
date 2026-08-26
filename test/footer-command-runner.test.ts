@@ -7,7 +7,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { FooterCommandRunner, type FooterCommandConfig } from '../src/footer/command-runner.ts'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { FooterCommandRunner, KILL_GRACE_MS, type FooterCommandConfig } from '../src/footer/command-runner.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -64,6 +67,62 @@ test('a non-zero exit falls back', async () => {
 test('a timeout kills the child and falls back', async () => {
   const rows = await runOnce({ ...CONFIG, timeoutMs: 100 }, 'setTimeout(() => process.stdout.write("late"), 5000)')
   assert.equal(rows, undefined)
+})
+
+test('a TERM-resistant child is HARD-killed after the grace period (no detached orphan)', async () => {
+  // The child traps TERM and would run forever: a plain SIGTERM (the old
+  // killChild) leaves it running as a detached orphan — the runner must
+  // escalate to SIGKILL within KILL_GRACE_MS. The child records its own
+  // pid (the detached group leader) so the test can PROVE the process is
+  // actually gone — this assertion fails against the old implementation.
+  const dir = mkdtempSync(join(tmpdir(), 'footer-kill-'))
+  const marker = join(dir, 'child.pid')
+  const rows = await new Promise<string[] | undefined>((resolve) => {
+    const runner = new FooterCommandRunner({
+      config: {
+        ...CONFIG,
+        timeoutMs: 150,
+        command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done`,
+      },
+      snapshot: () => emptyStatusSnapshot(),
+      width: () => 100,
+      height: () => 30,
+      onOutput: (out) => {
+        runner.dispose()
+        resolve(out)
+      },
+      signal: new AbortController().signal,
+    })
+    runner.requestRefresh()
+  })
+  assert.equal(rows, undefined, 'the timeout must fall back to the native surface')
+  // Read the child pid (bounded poll — the spawn is async).
+  let pid = -1
+  const readDeadline = Date.now() + 3000
+  while (pid < 0 && Date.now() < readDeadline) {
+    try {
+      pid = Number.parseInt(readFileSync(marker, 'utf8').trim(), 10)
+    } catch {
+      // Not written yet.
+    }
+    if (pid < 0) await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.ok(pid > 0, 'the child must have written its pid')
+  // The process must be ACTUALLY dead within the grace + a margin:
+  // kill(pid, 0) throws ESRCH once the process is reaped. A TERM-only
+  // kill would leave it alive forever (it traps TERM).
+  const deadDeadline = Date.now() + KILL_GRACE_MS + 3000
+  let dead = false
+  while (!dead && Date.now() < deadDeadline) {
+    try {
+      process.kill(pid, 0)
+      await new Promise(resolve => setTimeout(resolve, 20))
+    } catch {
+      dead = true
+    }
+  }
+  assert.ok(dead, `the TERM-resistant child must be hard-killed (no orphan), pid ${pid} still alive`)
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('huge stdout is capped at 16 KiB', async () => {

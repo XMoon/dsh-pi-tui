@@ -35,9 +35,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Terminal control characters (C0, DEL and C1): a layout is display
  * decoration — ESC/OSC/CSI sequences must never reach the terminal through
- * a prefix/suffix/separator (a project-supplied layout could otherwise
- * inject title/clipboard/cursor/screen sequences). */
+ * an id/prefix/suffix/separator (a project-supplied layout could otherwise
+ * inject title/clipboard/cursor/screen sequences — including through the
+ * configurator's unknown-id label fallback, which renders a raw id). */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/
+
+/** Strip terminal control characters from display text (the configurator's
+ * unknown-item label fallback: a raw id must never carry ESC/OSC/C0 into
+ * the panel — the parser already rejects such ids, this is defense in
+ * depth for any other id source). */
+export function stripControlChars(text: string): string {
+  return text.replace(CONTROL_CHARS, '')
+}
 
 /** Narrow a parse result onto the error arm (the ref type has no kind). */
 function isError<T>(value: T | FooterLayoutError): value is FooterLayoutError {
@@ -49,6 +58,13 @@ function parseItemRef(input: unknown, index: number): FooterItemRef | FooterLayo
   const id = input.id
   if (typeof id !== 'string' || id.trim() === '') {
     return { kind: 'error', message: `item ${index}: id must be a non-empty string` }
+  }
+  // An id is DISPLAY TEXT too: an unknown item renders its id verbatim in
+  // the configurator's item rows, so control characters in an id are the
+  // same injection class as prefix/suffix/separator (OSC 52 clipboard, CSI
+  // title/screen control).
+  if (CONTROL_CHARS.test(id)) {
+    return { kind: 'error', message: `item ${index}: id must not contain terminal control characters` }
   }
   const ref: {
     id: string
@@ -184,4 +200,17 @@ export function parseFooterLayout(input: unknown): FooterLayoutV1 | FooterLayout
 /** Whether a parsed value is a valid layout (not an error). */
 export function isFooterLayout(value: FooterLayoutV1 | FooterLayoutError): value is FooterLayoutV1 {
   return !isError(value)
+}
+
+/** M5: resolve the persisted NATIVE fallback layout a command surface
+ * restores when the command fails (undefined rows). The fallback must
+ * come from the DOCUMENT, never from in-memory state — a restart has no
+ * "last in-memory layout" (the app starts on the builtin default), so a
+ * persisted custom layout is the user's own fallback; an absent or
+ * invalid layout means "keep the current state" (the builtin default at
+ * startup). */
+export function resolveCommandFallbackLayout(doc: { footerLayout?: unknown } | undefined): FooterLayoutV1 | undefined {
+  if (doc === undefined || doc.footerLayout === undefined) return undefined
+  const parsed = parseFooterLayout(doc.footerLayout)
+  return isFooterLayout(parsed) ? parsed : undefined
 }

@@ -435,6 +435,16 @@ test('a chrome.footer.item registration id containing "/" is rejected; a SCOPED 
       /must not contain "\/"/,
       'a slash in the registration id must be rejected',
     )
+    // A control-character id is the same injection class (the id is
+    // persisted into user layouts and rendered raw by the configurator
+    // when the plugin is gone): rejected too.
+    assert.throws(
+      () => service.register<FooterItemContribution>('chrome.footer.item', { id: 'bad\u001b]52;c;x\u0007id', order: 100 }, {
+        label: 'bad', segment: { spans: [{ text: 'x' }] },
+      }),
+      /control characters/,
+      'a control-char registration id must be rejected',
+    )
     // The check is SCOPED to chrome.footer.item: other slots keep their
     // own id semantics (slash ids remain valid — their keys are not
     // parsed as owner/id).

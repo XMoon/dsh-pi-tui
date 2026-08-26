@@ -191,7 +191,11 @@ ancestor's display name; anonymous plugins share `root`) — stable across
 HMR, because a reloaded plugin gets a NEW fiber (new uid) but the same
 name. An npm-scoped plugin name (`@scope/name`) is legal: its `/` is
 ESCAPED to `~` in the key (`ext:@scope~name/<id>`), so scoped plugins get
-an unambiguous identity; the id itself must not contain `/`. A layout
+an unambiguous identity; the id itself must not contain `/` or terminal
+control characters (both rejected at registration: a control-char id
+would be persisted into user layouts and rendered raw by the configurator
+when the plugin is gone — the same injection class as a malicious
+layout). A layout
 referencing an unloaded plugin's item keeps the reference (the item is
 skipped at render) and recovers automatically when the plugin reloads. The
 ledger's (slot, id) uniqueness still rejects two LIVE registrations of the

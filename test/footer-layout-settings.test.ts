@@ -156,7 +156,7 @@ test('layout overrides apply: prefix/suffix wrap the item, tone overrides the se
       }],
     },
     width: 100,
-    context: { editorEmpty: true, extensionFooterText: '' },
+    context: { taskBrowserAvailable: true, extensionFooterText: '' },
   })
   assert.ok(text.includes('‹ '), `prefix must wrap the item: ${JSON.stringify(text)}`)
   assert.ok(text.includes(' ›'), `suffix must wrap the item: ${JSON.stringify(text)}`)
@@ -179,7 +179,7 @@ test('a tone override applies to EMPHASIZED spans too (strong/dim/italic keep th
       }],
     },
     width: 100,
-    context: { editorEmpty: true, extensionFooterText: '' },
+    context: { taskBrowserAvailable: true, extensionFooterText: '' },
   })
   // The model item's span is uncolored; the warning override must color
   // it (the emphasis path is not involved here, but the override must
@@ -214,7 +214,7 @@ test('the compact phase re-renders items at the compact density before dropping'
       }],
     },
     width: 40,
-    context: { editorEmpty: true, extensionFooterText: '' },
+    context: { taskBrowserAvailable: true, extensionFooterText: '' },
   })
   const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
   assert.ok(plain.includes('25%'), `the compact context form must survive:\n${plain}`)
@@ -242,6 +242,56 @@ test('the activity setters repaint the run-state item (no status refresh needed)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(!view.includes('working'), `idle must restore after setWorking(false):\n${view}`)
+  app.stop()
+})
+
+test('approval open/close repaint the run-state item IMMEDIATELY (the unified store-notify render path)', async () => {
+  const { vt, app } = startApp()
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  app.setWorking(true)
+  app.setStatus({})
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `the run-state must show working:\n${view}`)
+  // Approval OPENS: run-state must switch to waiting-approval on the
+  // same frame — the old code projected the activity without a paired
+  // render, so the footer kept `working` until an unrelated event
+  // repainted (the review's P2).
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('waiting-approval'), `approval open must repaint run-state:\n${view}`)
+  // Approve: the dialog closes and run-state returns to working
+  // immediately (the old settle path re-rendered on the STALE snapshot
+  // and never again — it stayed waiting-approval).
+  vt.sendInput('y')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `approval close must repaint run-state:\n${view}`)
+  await decision
+  app.stop()
+})
+
+test('getEffectiveFooterLayout follows the ACTIVE MODE (custom, then compact, then default)', () => {
+  const { vt, app } = startApp()
+  // Default mode: the builtin default layout.
+  assert.equal(app.getEffectiveFooterLayout(), DEFAULT_FOOTER_LAYOUT)
+  assert.equal(app.getEffectiveFooterLayout().rows.length, 2)
+  // Custom mode: the custom layout wins.
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  assert.equal(app.getEffectiveFooterLayout().rows[0]!.left[0]!.id, 'run-state')
+  // Compact mode: the compact preset, NOT the default (the /footer
+  // configurator's initialization source — the review's P2).
+  app.setFooterLayout(undefined)
+  app.setFooterPreset('compact')
+  assert.equal(app.getEffectiveFooterLayout().rows.length, 1, 'compact must resolve to the one-row compact preset')
+  assert.equal(app.getEffectiveFooterLayout().rows[0]!.left[0]!.id, 'view-scope')
   app.stop()
 })
 

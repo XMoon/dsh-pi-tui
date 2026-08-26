@@ -137,23 +137,39 @@ export class FooterComposer {
       ? '  '
       : styleTone(row.separator.text, row.separator.tone)
     if (left.length === 0 && right.length === 0) return ''
+    // NO right zone: the left zone joins in LAYOUT ORDER — never fitted
+    // to the width (the legacy contract: an over-wide status row WRAPS
+    // within the footer budget; fitZone would truncate it to one line).
     if (right.length === 0) return left.map(item => item.text).join(separator)
-    if (left.length === 0) return right.map(item => item.text).join(separator)
-    // Right zone first (plan §9.1): reserve it, then the left zone fits
-    // the remaining width by compact → drop → truncate. The right zone is
-    // NOT absolutely undeletable: when the left zone alone fills the
-    // width, the right zone truncates to the leftover room — and drops
-    // entirely when even one cell is left (plan §9.4: the right zone
-    // never crosses the terminal width, never a negative gap).
-    const rightText = right.map(item => item.text).join(separator)
-    const rightWidth = visibleWidth(rightText)
+    if (left.length === 0) {
+      // The right zone ALONE still owns its alignment: a RIGHT zone is
+      // flush to the right edge even with nothing on the left — an
+      // unavailable left zone must not drag right items to the left edge
+      // (the review's P2: the old code joined them at the left).
+      const fitted = this.fitZone(right, separator, width)
+      const gap = ' '.repeat(Math.max(0, width - visibleWidth(fitted)))
+      return `${gap}${fitted}`
+    }
+    // Right zone first (plan §9.1): reserve its IDEAL width, then the
+    // left zone fits the remaining width by compact → drop → truncate.
+    // The right zone is NOT absolutely undeletable: when the left zone
+    // alone fills the width, the right zone fits the leftover room — and
+    // drops entirely when even one cell is left (plan §9.4: the right
+    // zone never crosses the terminal width, never a negative gap).
+    const rightFull = right.map(item => item.text).join(separator)
+    const rightWidth = visibleWidth(rightFull)
     const minGap = 1
     const leftBudget = Math.max(1, width - rightWidth - minGap)
     const leftText = this.fitZone(left, separator, leftBudget)
     const leftWidth = visibleWidth(leftText)
     const rightRoom = Math.max(0, width - leftWidth - minGap)
     if (rightRoom < 1) return leftText
-    const finalRight = rightWidth > rightRoom ? truncateToWidth(rightText, rightRoom, '…') : rightText
+    // The right zone fits through the SAME item-level compact → drop →
+    // truncate discipline as the left (the review finding: a whole-string
+    // truncate cut the RIGHTMOST item even when a LOWER-importance item
+    // was the better victim — e.g. `version(10) focus(120)` on a narrow
+    // screen must drop version, never the pinned focus).
+    const finalRight = this.fitZone(right, separator, rightRoom)
     const gap = ' '.repeat(Math.max(0, width - leftWidth - visibleWidth(finalRight)))
     return `${leftText}${gap}${finalRight}`
   }

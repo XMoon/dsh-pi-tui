@@ -734,6 +734,65 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
   app.stop()
 })
 
+test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the review regression)', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  let opened = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenTasks: () => { opened += 1; app.requestRender() },
+  }, { editorRegistry: registry })
+  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.start()
+  await vt.waitForRender()
+  app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
+  // Scenario 1 (host shell mode, EMPTY body): `!` composes a command —
+  // the old host-editor-emptiness check advertised ↓, but the routing
+  // gate (prompt mode only) refuses it. The hint must NOT show, and ↓
+  // must NOT open the browser.
+  vt.sendInput('!')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('↓ view'), `a shell-mode empty body must not advertise ↓:\n${view}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened, 0, 'a shell-mode body must never open the task browser')
+  // Scenario 2 (plugin replacement editor with a DRAFT, host editor
+  // empty): the old host-based check advertised ↓, but the seat text
+  // blocks the gate. The hint must not show.
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'hint-draft-plugin',
+    priority: 0,
+    create: (_host: EditorHost) => {
+      const editor = pluginEditor('typed draft')
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('↓ view'), `a plugin editor draft must not advertise ↓:\n${view}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened, 0, 'a non-empty visible draft must never open the task browser')
+  // The plugin editor clears its draft: the hint returns (the visible
+  // seat is empty + prompt again). A plugin's own text edits reach the
+  // host chrome through its invalidation seam (refreshChrome — the same
+  // path the host editor's onChange takes).
+  created[0]!.setText('')
+  app.refreshChrome()
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('↓ view'), `an emptied plugin editor must advertise ↓ again:\n${view}`)
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
+
 // ── review round 5: sink steer serialization + adapter fallback ──────────
 
 test('the plugin action sink steers the wire form and clears the editor', async () => {

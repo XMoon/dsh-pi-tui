@@ -17,7 +17,7 @@ import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const composer = new FooterComposer(createBuiltinFooterRegistry())
-const CONTEXT = { editorEmpty: true, extensionFooterText: '[EXT]' }
+const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '[EXT]' }
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
 type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }

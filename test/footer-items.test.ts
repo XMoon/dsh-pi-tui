@@ -13,7 +13,7 @@ import type { FooterItemRef } from '../src/footer/types.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
 
 const registry = createBuiltinFooterRegistry()
-const CONTEXT = { editorEmpty: true, extensionFooterText: '' }
+const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '' }
 const REF: FooterItemRef = { id: 'x' }
 
 /** Strip ANSI SGR sequences for text-level assertions. */
@@ -103,7 +103,7 @@ test('tasks renders the combined badge with the ↓ hint from the context', () =
   assert.equal(both, '[1 task running · 2 agents · ↓ view]')
   // The hint drops when the editor has a draft (the host surface context).
   const def = registry.get('tasks')!
-  const withDraft = def.render(snapshotWith(snap => { snap.activity.taskCount = 1 }), REF, 'preferred', { ...CONTEXT, editorEmpty: false })
+  const withDraft = def.render(snapshotWith(snap => { snap.activity.taskCount = 1 }), REF, 'preferred', { ...CONTEXT, taskBrowserAvailable: false })
   assert.equal(withDraft === null ? '' : plain(renderSpans(withDraft.spans)), '[1 task running]')
   assert.equal(render('tasks', emptyStatusSnapshot()), '')
 })

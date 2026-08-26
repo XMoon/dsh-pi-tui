@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isFooterLayout, parseFooterLayout } from '../src/footer/layout.ts'
+import { isFooterLayout, parseFooterLayout, resolveCommandFallbackLayout } from '../src/footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 
 test('the builtin default layout parses as valid', () => {
@@ -58,6 +58,12 @@ test('invalid documents fail soft with a message', () => {
     [{ schemaVersion: 1, rows: [{ left: [{ id: 'model', suffix: '\u001b[2J' }] }] }, /control characters/],
     [{ schemaVersion: 1, rows: [{ separator: { text: '\u001b[?1049h' } }] }, /control characters/],
     [{ schemaVersion: 1, rows: [{ separator: { text: '\u0000' } }] }, /control characters/],
+    // An id with control characters is the same injection class: an
+    // UNKNOWN id renders verbatim in the configurator (OSC 52 clipboard,
+    // CSI title/screen control via the raw id label).
+    [{ schemaVersion: 1, rows: [{ left: [{ id: '\u001b]52;c;bWFsaWNpb3Vz\u0007' }] }] }, /control characters/],
+    [{ schemaVersion: 1, rows: [{ right: [{ id: '\u001b[2J' }] }] }, /control characters/],
+    [{ schemaVersion: 1, rows: [{ left: [{ id: '\u0000' }] }] }, /control characters/],
   ]
   for (const [input, pattern] of cases) {
     const parsed = parseFooterLayout(input)
@@ -93,4 +99,23 @@ test('a separator-less layout survives the settings-service round-trip (schemast
   })
   assert.ok(isFooterLayout(withSep))
   assert.equal(withSep.rows[0]!.separator?.text, ' │ ')
+})
+
+test('resolveCommandFallbackLayout: the persisted custom layout is the command mode\'s fallback', () => {
+  const custom = {
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  }
+  // A persisted custom layout under command mode: the fallback is THAT
+  // layout (the restart case — the memory has no "last layout").
+  const fallback = resolveCommandFallbackLayout({ footerLayout: custom })
+  assert.deepEqual(fallback, custom, 'a valid persisted layout must be the fallback')
+  // An INVALID persisted layout: undefined (the caller keeps the current
+  // state — the builtin default at startup).
+  assert.equal(resolveCommandFallbackLayout({ footerLayout: { schemaVersion: 9 } }), undefined)
+  // No layout in the document: undefined.
+  assert.equal(resolveCommandFallbackLayout({}), undefined)
+  assert.equal(resolveCommandFallbackLayout(undefined), undefined)
+  // A layout with a control-char id is invalid → undefined.
+  assert.equal(resolveCommandFallbackLayout({ footerLayout: { schemaVersion: 1, rows: [{ left: [{ id: '\u001b[2J' }] }] } }), undefined)
 })
