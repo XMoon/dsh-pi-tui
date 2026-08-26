@@ -167,20 +167,20 @@ export class RendererRegistry {
    */
   renderMessage(
     snapshot: MessagePresentationSnapshot,
-    onError: (id: string, error: unknown) => void,
-    canUse?: (id: string, view: ExtensionView) => boolean,
-  ): { view: ExtensionView; rendererId: string } | undefined {
+    onError: (id: string, owner: string, error: unknown) => void,
+    canUse?: (id: string, owner: string, view: ExtensionView) => boolean,
+  ): { view: ExtensionView; rendererId: string; owner: string } | undefined {
     const records = [...this.messageRenderers.values()]
       .filter(record => !record.disposed && (record.kind === undefined || record.kind === snapshot.kind))
       .sort((left, right) => left.order - right.order || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
     for (const record of records) {
       try {
         const view = record.render(snapshot)
-        if (view !== undefined && (canUse === undefined || canUse(record.id, view))) {
-          return { view, rendererId: record.id }
+        if (view !== undefined && (canUse === undefined || canUse(record.id, record.owner, view))) {
+          return { view, rendererId: record.id, owner: record.owner }
         }
       } catch (error) {
-        try { onError(record.id, error) } catch {}
+        try { onError(record.id, record.owner, error) } catch {}
       }
     }
     return undefined
@@ -193,20 +193,20 @@ export class RendererRegistry {
    */
   renderTool(
     snapshot: ToolPresentationSnapshot,
-    onError: (id: string, error: unknown) => void,
-    canUse?: (id: string, view: ExtensionView) => boolean,
-  ): { view: ExtensionView; rendererId: string } | undefined {
+    onError: (id: string, owner: string, error: unknown) => void,
+    canUse?: (id: string, owner: string, view: ExtensionView) => boolean,
+  ): { view: ExtensionView; rendererId: string; owner: string } | undefined {
     const records = [...this.toolRenderers.values()]
       .filter(record => !record.disposed && record.toolName === snapshot.toolName)
       .sort((left, right) => left.priority - right.priority || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
     for (const record of records) {
       try {
         const view = record.render(snapshot)
-        if (view !== undefined && (canUse === undefined || canUse(record.id, view))) {
-          return { view, rendererId: record.id }
+        if (view !== undefined && (canUse === undefined || canUse(record.id, record.owner, view))) {
+          return { view, rendererId: record.id, owner: record.owner }
         }
       } catch (error) {
-        try { onError(record.id, error) } catch {}
+        try { onError(record.id, record.owner, error) } catch {}
       }
     }
     return undefined

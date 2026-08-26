@@ -717,18 +717,19 @@ export interface TuiRendererHandle {
 
 /** The read-side of the renderer registry (M7): the host's message cache
  * asks it to present a message/tool through the plugin chain. The
- * concrete registry is host-internal. */
+ * concrete registry is host-internal. The OWNER rides the callbacks and
+ * the result: the health ledger keys records by (slot, owner, id). */
 export interface TuiRendererRegistryView {
   renderMessage(
     snapshot: MessagePresentationSnapshot,
-    onError: (id: string, error: unknown) => void,
-    canUse?: (id: string, view: ExtensionView) => boolean,
-  ): { view: ExtensionView; rendererId: string } | undefined
+    onError: (id: string, owner: string, error: unknown) => void,
+    canUse?: (id: string, owner: string, view: ExtensionView) => boolean,
+  ): { view: ExtensionView; rendererId: string; owner: string } | undefined
   renderTool(
     snapshot: ToolPresentationSnapshot,
-    onError: (id: string, error: unknown) => void,
-    canUse?: (id: string, view: ExtensionView) => boolean,
-  ): { view: ExtensionView; rendererId: string } | undefined
+    onError: (id: string, owner: string, error: unknown) => void,
+    canUse?: (id: string, owner: string, view: ExtensionView) => boolean,
+  ): { view: ExtensionView; rendererId: string; owner: string } | undefined
   snapshot(): TuiRendererRegistrySnapshot
 }
 

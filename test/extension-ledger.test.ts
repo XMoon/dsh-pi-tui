@@ -247,12 +247,12 @@ test('health records track lifecycle states and deduplicate error generations', 
   let health = ledger.healthSnapshot()
   assert.equal(health.length, 1)
   assert.equal(health[0]?.state, 'active')
-  ledger.recordError('chrome.header.badge', 'h', 'render boom')
+  ledger.recordError('chrome.header.badge', 'h', 'p1', 'render boom')
   health = ledger.healthSnapshot()
   assert.equal(health[0]?.state, 'failed')
   assert.equal(health[0]?.lastError, 'render boom')
   // Same failure generation: deduplicated (message unchanged).
-  ledger.recordError('chrome.header.badge', 'h', 'render boom again')
+  ledger.recordError('chrome.header.badge', 'h', 'p1', 'render boom again')
   health = ledger.healthSnapshot()
   assert.equal(health[0]?.lastError, 'render boom')
   // Disposal removes the record.
@@ -266,23 +266,56 @@ test('a contribution recovers after a successful render and a NEW failure starts
   const { ledger } = makeLedger()
   ledger.register('chrome.header.badge', { id: 'r' }, V('r'), 'p1')
   // Failure 1: generation 1.
-  ledger.recordError('chrome.header.badge', 'r', 'first boom')
+  ledger.recordError('chrome.header.badge', 'r', 'p1', 'first boom')
   let health = ledger.healthSnapshot()
   assert.equal(health[0]?.state, 'failed')
   assert.equal(health[0]?.errorGeneration, 1)
   // Recovery: the outlet's success path calls clearError — the record is
   // active again and the error generation is dropped.
-  ledger.clearError('chrome.header.badge', 'r')
+  ledger.clearError('chrome.header.badge', 'r', 'p1')
   health = ledger.healthSnapshot()
   assert.equal(health[0]?.state, 'active')
   assert.equal(health[0]?.errorGeneration, undefined)
   assert.equal(health[0]?.lastError, undefined)
   // Failure 2: a NEW generation (the old failure must not be conflated).
-  ledger.recordError('chrome.header.badge', 'r', 'second boom')
+  ledger.recordError('chrome.header.badge', 'r', 'p1', 'second boom')
   health = ledger.healthSnapshot()
   assert.equal(health[0]?.state, 'failed')
   assert.equal(health[0]?.errorGeneration, 2, 'a post-recovery failure must start a NEW generation (P2)')
   assert.equal(health[0]?.lastError, 'second boom')
+})
+
+test('health records are OWNER-scoped: same-id contributions from two owners never conflate diagnostics', () => {
+  // The review's P2: the ledger allows (slot, owner-a, id) + (slot,
+  // owner-b, id) simultaneously — the health ledger must key by the SAME
+  // identity, or one owner's failure would surface as the other's and a
+  // successful render by A would clear B's failure.
+  const { ledger } = makeLedger()
+  const a = ledger.register('chrome.header.badge', { id: 'dup' }, V('a'), 'owner-a')
+  const b = ledger.register('chrome.header.badge', { id: 'dup' }, V('b'), 'owner-b')
+  // One record per owner (the old (slot, id) health ledger collapsed them
+  // into a single record).
+  let health = ledger.healthSnapshot()
+  assert.equal(health.length, 2, 'two owners must carry two health records')
+  assert.equal(health.filter(record => record.id === 'dup').length, 2)
+  // B fails: only B's record carries the error — A stays active.
+  ledger.recordError('chrome.header.badge', 'dup', 'owner-b', 'b boom')
+  health = ledger.healthSnapshot()
+  assert.equal(health.find(record => record.owner === 'owner-a')?.state, 'active')
+  assert.equal(health.find(record => record.owner === 'owner-b')?.state, 'failed')
+  assert.equal(health.find(record => record.owner === 'owner-b')?.lastError, 'b boom')
+  // A renders fine afterwards: clearing A must NOT clear B's failure.
+  ledger.clearError('chrome.header.badge', 'dup', 'owner-a')
+  health = ledger.healthSnapshot()
+  assert.equal(health.find(record => record.owner === 'owner-b')?.state, 'failed',
+    "one owner's recovery must never clear the other owner's failure")
+  // A disposes: B's record survives.
+  a.dispose()
+  health = ledger.healthSnapshot()
+  assert.equal(health.length, 1)
+  assert.equal(health[0]?.owner, 'owner-b')
+  b.dispose()
+  assert.equal(ledger.healthSnapshot().length, 0)
 })
 
 test('invalidation coalesces into one batched sink call per tick', async () => {

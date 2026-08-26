@@ -53,7 +53,7 @@ function canonicalKey(service: PiTuiExtensionServiceLike, slot: string, id: stri
   assert.ok(record !== undefined, `record ${id} missing`)
   // Match the host's canonical key construction (the owner's `/` — an npm
   // scoped plugin name — is ESCAPED to `~`).
-  return `ext:${record.owner.replaceAll('/', '~')}/${record.id}`
+  return `ext:${encodeURIComponent(record.owner)}/${record.id}`
 }
 
 /** Attach a live TuiApp + SurfaceHost to the tree. */
@@ -295,7 +295,7 @@ test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the
     const keyOf = (owner: string): string => {
       const record = records.find(entry => entry.owner === owner)
       assert.ok(record !== undefined, `record for owner ${owner} missing`)
-      return `ext:${record.owner.replaceAll('/', '~')}/${record.id}`
+      return `ext:${encodeURIComponent(record.owner)}/${record.id}`
     }
     const keyA2 = keyOf('quota-a')
     const keyB = keyOf('quota-b')
@@ -518,7 +518,9 @@ test('a chrome.footer.item registration id containing "/" is rejected; a SCOPED 
     widget.dispose()
     // An npm-SCOPED plugin (fiber name `@scope/name` contains `/`) must
     // STILL be able to register a chrome.footer.item: its owner is
-    // escaped (`~`) in the canonical key.
+    // percent-encoded in the canonical key (encodeURIComponent — the
+    // INJECTIVE encoding; the old `/`→`~` escape collided with literal
+    // `~` owners).
     const scopedFiber = ctx.plugin({ name: '@quota/scope', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as PiTuiExtensionServiceLike
       svc.register<FooterItemContribution>('chrome.footer.item', { id: 'quota', order: 100 }, {
@@ -527,10 +529,22 @@ test('a chrome.footer.item registration id containing "/" is rejected; a SCOPED 
     } })
     await scopedFiber
     const scopedKey = canonicalKey(service, 'chrome.footer.item', 'quota')
-    assert.equal(scopedKey, 'ext:@quota~scope/quota', `the scoped owner must be ESCAPED exactly: ${scopedKey}`)
+    assert.equal(scopedKey, 'ext:%40quota%2Fscope/quota', `the scoped owner must be encoded exactly: ${scopedKey}`)
     assert.ok(!scopedKey.includes('@quota/scope/'), `a raw slash owner must never appear: ${scopedKey}`)
     await (scopedFiber as { dispose(): Promise<void> }).dispose()
     await settle()
+    // The encoding is INJECTIVE: a literal `~` owner and a slash owner
+    // can never produce the same key (the review's P2 — the old `/`→`~`
+    // escape mapped both `@scope/name` and `@scope~name` to the same
+    // key). `~` survives the encoding untouched; `/` and `@` are
+    // percent-encoded.
+    assert.equal(encodeURIComponent('@scope~name'), '%40scope~name', '~ is left as-is by the encoding')
+    assert.equal(encodeURIComponent('@scope/name'), '%40scope%2Fname', '/ and @ are percent-encoded')
+    assert.notEqual(
+      `ext:${encodeURIComponent('@scope~name')}/quota`,
+      `ext:${encodeURIComponent('@scope/name')}/quota`,
+      'a literal ~ owner must never collide with an encoded slash owner',
+    )
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

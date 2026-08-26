@@ -1546,9 +1546,13 @@ export function registerTuiCommands(
           if (settings !== undefined) {
             // Persist FIRST; the memory commit happens only after the
             // settings write succeeds (plan §15.7 — a failed write keeps
-            // the old layout and notifies).
+            // the old layout and notifies). footerFallbackMode rides
+            // ALONG: the /settings path records the last native mode, and
+            // saving a custom layout IS a native-mode change — the command
+            // surface's restart fallback must resolve to THIS custom
+            // layout, not the mode the user had before opening /footer.
             detach('footer configurator write', async () => {
-              await settings.replace({ ...settings.get(), footer: 'custom', footerLayout: parsed })
+              await settings.replace({ ...settings.get(), footer: 'custom', footerFallbackMode: 'custom', footerLayout: parsed })
               runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed })
               app.notify('footer layout saved', 'info')
             }, { notify: true })

@@ -285,17 +285,20 @@ export class SurfaceHost {
 
   /** The canonical config id for one contribution: `ext:<owner>/<id>` (the
    * plan §16.4 key — stable across HMR, never collides across owners).
-   * The key is used WHOLE (never parsed), so the OWNER's `/` (an npm
-   * scoped plugin name like `@scope/name` is the fiber name) is ESCAPED
-   * to `~` — `ext:@scope~name/<id>` is unambiguous while the id stays
-   * `/`-free (register() enforces that). */
+   * The key is used WHOLE (never parsed). The OWNER is encoded with
+   * encodeURIComponent — an INJECTIVE encoding: a literal `@scope~name`
+   * owner can never collide with `@scope/name` (the old `/`→`~` escape
+   * was NOT one-to-one — two legal owners produced the same key, and the
+   * ledger's owner-scoped uniqueness made the collision reachable; the
+   * review's P2). The id stays `/`-free (register() enforces that), so
+   * the `owner/id` boundary is unambiguous. */
   private static footerItemKey(owner: string, id: string): string {
     if (id.includes('/')) {
       // Unreachable in practice: register() enforces the constraint; this
       // guards a future caller that bypasses it.
       throw new Error(`chrome.footer.item id must not contain "/" (owner "${owner}", id "${id}")`)
     }
-    return `ext:${owner.replaceAll('/', '~')}/${id}`
+    return `ext:${encodeURIComponent(owner)}/${id}`
   }
 
   /** Every live chrome.footer.item contribution's canonical config id. */

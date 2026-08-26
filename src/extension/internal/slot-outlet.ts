@@ -64,9 +64,9 @@ export class HeaderBadgeOutlet {
         if (styled !== '') parts.push(` ${styled}`)
         // A successful render clears any earlier failure (P2: recovery —
         // the next failure starts a NEW error generation).
-        this.ledger.clearError('chrome.header.badge', record.id)
+        this.ledger.clearError('chrome.header.badge', record.id, record.owner)
       } catch (error) {
-        this.ledger.recordError('chrome.header.badge', record.id, safeMessage(error))
+        this.ledger.recordError('chrome.header.badge', record.id, record.owner, safeMessage(error))
       }
     }
     // Host-owned width budget (plan §19): the badge run must never exceed
@@ -151,16 +151,16 @@ export class DockItemOutlet {
         // still ZERO visible cells — a valid no-display abdication. It must
         // clear health like any successful render AND produce no row.
         if (visibleWidth(label) === 0) {
-          this.ledger.clearError('input.dock.item', record.id)
+          this.ledger.clearError('input.dock.item', record.id, record.owner)
           continue
         }
         const detail = item.detail === undefined ? '' : truncateToWidth(renderSpans(item.detail), lineBudget, '…')
         items.push({ label, detail, importance: item.importance ?? 0 })
         // A successful render clears any earlier failure (P2: recovery).
-        this.ledger.clearError('input.dock.item', record.id)
+        this.ledger.clearError('input.dock.item', record.id, record.owner)
       } catch (error) {
         // Per-contribution error isolation (P1-4).
-        this.ledger.recordError('input.dock.item', record.id, safeMessage(error))
+        this.ledger.recordError('input.dock.item', record.id, record.owner, safeMessage(error))
       }
     }
     const budget = Math.max(1, maxRows)
@@ -258,10 +258,10 @@ export class FooterSegmentOutlet {
           minWidth: segment.minWidth,
         })
         // A successful render clears any earlier failure (P2: recovery).
-        this.ledger.clearError('chrome.footer.status', record.id)
+        this.ledger.clearError('chrome.footer.status', record.id, record.owner)
       } catch (error) {
         // Per-contribution error isolation (P1-4).
-        this.ledger.recordError('chrome.footer.status', record.id, safeMessage(error))
+        this.ledger.recordError('chrome.footer.status', record.id, record.owner, safeMessage(error))
       }
     }
     const budget = Math.max(1, widthBudget)

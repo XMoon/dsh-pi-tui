@@ -195,8 +195,10 @@ the owner is the registering plugin fiber's stable name (the nearest named
 ancestor's display name; anonymous plugins share `root`) — stable across
 HMR, because a reloaded plugin gets a NEW fiber (new uid) but the same
 name. An npm-scoped plugin name (`@scope/name`) is legal: its `/` is
-ESCAPED to `~` in the key (`ext:@scope~name/<id>`), so scoped plugins get
-an unambiguous identity; the id itself must not contain `/` or terminal
+percent-ENCODED in the key via `encodeURIComponent`
+(`ext:@scope%2Fname/<id>`) — an injective encoding, so scoped plugins get
+an unambiguous identity and a literal `~` owner can never collide with an
+encoded slash owner; the id itself must not contain `/` or terminal
 control characters (both rejected at registration: a control-char id
 would be persisted into user layouts and rendered raw by the configurator
 when the plugin is gone — the same injection class as a malicious

@@ -118,7 +118,7 @@ export class WidgetOutlet {
           this.compiledNodes.set(record.id, { value: widget, node })
         }
         if (node.isEmpty) {
-          this.ledger.clearError(this.slot, record.id)
+          this.ledger.clearError(this.slot, record.id, record.owner)
           continue
         }
         // Render at the CURRENT width so the height is truthful for the
@@ -134,9 +134,9 @@ export class WidgetOutlet {
           importance,
           maxHeight,
         })
-        this.ledger.clearError(this.slot, record.id)
+        this.ledger.clearError(this.slot, record.id, record.owner)
       } catch (error) {
-        this.ledger.recordError(this.slot, record.id, safeMessage(error))
+        this.ledger.recordError(this.slot, record.id, record.owner, safeMessage(error))
       }
     }
     // P2-03: prune cache entries whose contribution left the ledger (a

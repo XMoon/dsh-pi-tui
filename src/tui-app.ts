@@ -5696,21 +5696,23 @@ export class TuiApp {
   /** M7: a renderer failure sink (the runner wires the extension
    * service's health ledger — round-1 finding 3: failures must be
    * observable, never swallowed). Optional. */
-  private rendererError: ((record: { id: string; error: unknown; slot?: 'message' | 'tool' }) => void) | undefined
+  private rendererError: ((record: { id: string; error: unknown; slot?: 'message' | 'tool'; owner: string }) => void) | undefined
 
   /** M7 (P1-08): a renderer RECOVERY sink — called when a renderer that
    * previously failed renders successfully again, so its health record
    * clears (the next failure starts a NEW error generation). */
-  private rendererRecovered: ((record: { id: string; slot?: 'message' | 'tool' }) => void) | undefined
+  private rendererRecovered: ((record: { id: string; slot?: 'message' | 'tool'; owner: string }) => void) | undefined
 
   /** M7: wire the renderer-failure sink (the runner calls this with the
-   * extension service's health recording). */
-  setRendererErrorSink(sink: (record: { id: string; error: unknown; slot?: 'message' | 'tool' }) => void): void {
+   * extension service's health recording). The OWNER rides the payload:
+   * the health ledger keys records by (slot, owner, id) — two plugins
+   * sharing a local renderer id must never conflate diagnostics. */
+  setRendererErrorSink(sink: (record: { id: string; error: unknown; slot?: 'message' | 'tool'; owner: string }) => void): void {
     this.rendererError = sink
   }
 
-  /** M7 (P1-08): wire the renderer-recovery sink. */
-  setRendererRecoveredSink(sink: (record: { id: string; slot?: 'message' | 'tool' }) => void): void {
+  /** M7 (P1-08): wire the renderer-recovery sink (owner rides along). */
+  setRendererRecoveredSink(sink: (record: { id: string; slot?: 'message' | 'tool'; owner: string }) => void): void {
     this.rendererRecovered = sink
   }
 
@@ -7493,31 +7495,31 @@ export class TuiApp {
       // Thought when the host keeps it compact (review finding).
       const tool = { ...snapshot.tool, expanded }
       const compiled = new Map<string, Component>()
-      const rendered = registry.renderTool(tool, (id, error) => this.rendererError?.({ id, error, slot: 'tool' }), (id, view) => {
-        const component = this.compileExtensionViewIsolated(view, id, 'tool')
+      const rendered = registry.renderTool(tool, (id, owner, error) => this.rendererError?.({ id, error, slot: 'tool', owner }), (id, owner, view) => {
+        const component = this.compileExtensionViewIsolated(view, id, owner, 'tool')
         if (component === undefined) return false
         compiled.set(id, component)
         return true
       })
       if (rendered === undefined) return undefined
-      const component = compiled.get(rendered.rendererId) ?? this.compileExtensionViewIsolated(rendered.view, rendered.rendererId, 'tool')
+      const component = compiled.get(rendered.rendererId) ?? this.compileExtensionViewIsolated(rendered.view, rendered.rendererId, rendered.owner, 'tool')
       if (component === undefined) return undefined
       // P1-08: a SUCCESSFUL render clears the renderer's failure record.
-      this.rendererRecovered?.({ id: rendered.rendererId, slot: 'tool' })
+      this.rendererRecovered?.({ id: rendered.rendererId, slot: 'tool', owner: rendered.owner })
       return { component, rendererId: rendered.rendererId }
     }
     const compiled = new Map<string, Component>()
-    const rendered = registry.renderMessage(snapshot, (id, error) => this.rendererError?.({ id, error, slot: 'message' }), (id, view) => {
-      const component = this.compileExtensionViewIsolated(view, id, 'message')
+    const rendered = registry.renderMessage(snapshot, (id, owner, error) => this.rendererError?.({ id, error, slot: 'message', owner }), (id, owner, view) => {
+      const component = this.compileExtensionViewIsolated(view, id, owner, 'message')
       if (component === undefined) return false
       compiled.set(id, component)
       return true
     })
     if (rendered === undefined) return undefined
-    const component = compiled.get(rendered.rendererId) ?? this.compileExtensionViewIsolated(rendered.view, rendered.rendererId, 'message')
+    const component = compiled.get(rendered.rendererId) ?? this.compileExtensionViewIsolated(rendered.view, rendered.rendererId, rendered.owner, 'message')
     if (component === undefined) return undefined
     // P1-08: a SUCCESSFUL render clears the renderer's failure record.
-    this.rendererRecovered?.({ id: rendered.rendererId, slot: 'message' })
+    this.rendererRecovered?.({ id: rendered.rendererId, slot: 'message', owner: rendered.owner })
     return { component, rendererId: rendered.rendererId }
   }
 
@@ -7530,11 +7532,11 @@ export class TuiApp {
    * render throw, never escape into the render path. The failure is
    * recorded through the same bounded health sink.
    */
-  private compileExtensionViewIsolated(view: ExtensionView, rendererId: string, slot?: 'message' | 'tool'): Component | undefined {
+  private compileExtensionViewIsolated(view: ExtensionView, rendererId: string, owner: string, slot?: 'message' | 'tool'): Component | undefined {
     try {
       return compileView(view).component
     } catch (error) {
-      this.rendererError?.({ id: rendererId, error, slot })
+      this.rendererError?.({ id: rendererId, error, slot, owner })
       return undefined
     }
   }

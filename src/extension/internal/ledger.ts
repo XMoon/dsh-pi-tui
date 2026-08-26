@@ -246,36 +246,36 @@ export class ExtensionLedger {
 
   /** Track a NON-ledger contribution's health slot (P1-08: renderers and
    * editors live in their own registries, not the ledger — their health
-   * must still be observable via /status). Idempotent per (slot, id). */
+   * must still be observable via /status). Idempotent per (slot, owner, id). */
   trackHealth(slot: string, id: string, owner: string): void {
     this.health.track(slot, id, owner)
   }
 
   /** Drop a NON-ledger contribution's health record (registry disposal). */
-  untrackHealth(slot: string, id: string): void {
-    this.health.untrack(slot, id)
+  untrackHealth(slot: string, id: string, owner: string): void {
+    this.health.untrack(slot, id, owner)
   }
 
   /** Record a contribution failure (render errors in M2+). */
-  recordError(slot: string, id: string, message: string): void {
-    this.health.recordError(slot, id, message)
+  recordError(slot: string, id: string, owner: string, message: string): void {
+    this.health.recordError(slot, id, owner, message)
   }
 
   /** Clear a contribution's failure record after a SUCCESSFUL render (P2:
    * a contribution that threw once and then renders fine is active again —
    * the next failure starts a NEW error generation). */
-  clearError(slot: string, id: string): void {
-    this.health.clearError(slot, id)
+  clearError(slot: string, id: string, owner: string): void {
+    this.health.clearError(slot, id, owner)
   }
 
   /** Record a callback failure from an external registry. */
-  recordExternalError(slot: string, id: string, message: string): void {
-    this.health.recordError(slot, id, message)
+  recordExternalError(slot: string, id: string, owner: string, message: string): void {
+    this.health.recordError(slot, id, owner, message)
   }
 
   /** Clear a recovered callback failure from an external registry. */
-  clearExternalError(slot: string, id: string): void {
-    this.health.clearError(slot, id)
+  clearExternalError(slot: string, id: string, owner: string): void {
+    this.health.clearError(slot, id, owner)
   }
 
   private handleFor<T>(registration: Registration<T>): RegistrationHandle<T> {
@@ -319,13 +319,9 @@ export class ExtensionLedger {
     // re-register). A same-id registration under a DIFFERENT owner is a
     // separate key and stays.
     this.registrations.delete(registryKey(registration.slot, registration.owner, registration.id))
-    // Drop the health record ONLY when no OTHER live registration shares
-    // this (slot, id): with owner-scoped keys a same-id sibling from a
-    // different owner must keep its diagnostics (the health ledger is
-    // (slot, id)-keyed — diagnostic-only).
-    const stillLive = [...this.registrations.values()].some(other =>
-      other.slot === registration.slot && other.id === registration.id && !other.disposed)
-    if (!stillLive) this.health.untrack(registration.slot, registration.id)
+    // The health record is owner-scoped too: only THIS owner's record
+    // drops (a same-id sibling under another owner keeps its diagnostics).
+    this.health.untrack(registration.slot, registration.id, registration.owner)
     this.revision += 1
     this.onInvalidate()
   }
