@@ -2368,6 +2368,19 @@ export function apply(ctx: Context, config: Config): void {
     // 0600 temp files holding FULL local-shell output (for truncated runs);
     // removed at TUI exit (default), never on their own.
     const shellTempFiles = new Set<string>()
+    // M2: the plugin keybinding-sync unsubscribe slot. Hoisted here BEFORE
+    // cleanup (TDZ guard, review finding): cleanup is already registered
+    // into the effect below, so a throwing subscription registration at
+    // startup must never turn the teardown into a second ReferenceError
+    // that masks the original failure and skips the extension detach /
+    // diag dispose.
+    let stopPluginKeybindingSync: (() => void) | undefined
+    // The catalog refresh coordinator: the ONE post-mount refresh owner
+    // (first session, switches, /preset, /reload). Declared here (before
+    // cleanup) for the same TDZ guard — cleanup disposes it, and a
+    // mid-startup HMR unload must never reference it while it is still in
+    // the temporal dead zone; it is assigned during command registration.
+    let catalogCoordinator: CatalogRefreshCoordinator | undefined
     // Idempotent teardown: abort lifecycle loads, stop the TUI, close diag.
     // Shared by /exit, the effect cleanup, and the startup-failure path.
     let cleanedUp = false
@@ -2401,12 +2414,10 @@ export function apply(ctx: Context, config: Config): void {
       }
       shellTempFiles.clear()
       app?.dispose()
-      // M3: stop the keybinding settings watch (the manager dies with the
-      // app; the watch must not outlive the surface).
-      stopKeybindingWatch?.()
       // M2: unsubscribe the plugin keybinding sync (the registry outlives
       // the surface — a stale listener must not resync into a dead app).
       stopPluginKeybindingSync?.()
+      stopPluginKeybindingSync = undefined
       // Detach the extension service's surface bridge (its capability set
       // and state listeners die with the surface). The surfaceId lease
       // makes a stale detach a no-op (P1).
@@ -4344,24 +4355,29 @@ export function apply(ctx: Context, config: Config): void {
       diag.info('keybindings', { safeMode: true })
     }
     const applyUserKeybindings = (): void => {
-      // Fail-soft hot reload (review finding): a transient settings read
-      // error must never abort the watcher or leave the keymap in a
-      // partial state — the previous (last-known-good) configuration
-      // stays active, and the failure is a diagnostic.
+      // Fail-soft reload (review finding): a transient settings read
+      // error must never abort the startup application or leave the
+      // keymap in a partial state — the previous (last-known-good)
+      // configuration stays active, and the failure is a diagnostic.
       try {
         const parsed = parseUserKeybindings(tuiSettings?.get().keybindings)
         for (const message of parsed.diagnostics) diag.warn('keybindings', { message })
         keybindings.setUserConfiguration(parsed)
       } catch (error: unknown) {
-        diag.warn('keybindings', { error: String(error), message: 'keybindings reload aborted — keeping the last-known-good configuration' })
+        diag.warn('keybindings', { error: String(error), message: 'keybindings startup apply failed — keeping the last-known-good configuration' })
       }
     }
     applyUserKeybindings()
-    // M3: hot reload — a settings change re-validates and rebuilds the
-    // keymap without a restart (plan §12/§16). The settings watcher
-    // contains listener failures; the try/catch above keeps the keymap's
+    // M3: the user keybindings reload seam is EXPLICIT — `/keybindings
+    // reload` re-reads the settings document and re-validates/rebuilds the
+    // keymap (plan §12/§16). There is deliberately NO automatic settings
+    // watch here: a `watch(callback)` would be a Direct-only dependency —
+    // the TuiSettingsConfig port is get/replace only, a future Remote
+    // adapter cannot map a callback across the process boundary, and the
+    // migration rule forbids callbacks across the wire (see
+    // docs/client-server-migration.md). A settings edit takes effect after
+    // `/keybindings reload`; the fail-soft parser above keeps the keymap's
     // last-known-good state on any read/parse error.
-    const stopKeybindingWatch = tuiSettings?.watch(() => applyUserKeybindings())
     // M2: the plugin contributions compile into the effective keymap at
     // the LOWEST priority (a Host action always wins). The runner syncs
     // the registry snapshot on every invalidation (the manager skips
@@ -4382,7 +4398,8 @@ export function apply(ctx: Context, config: Config): void {
     // keymap (the initial snapshot is not enough). Subscribe to the
     // registry's change notifications so every register/dispose
     // re-syncs; the subscription is disposed with the runner teardown.
-    const stopPluginKeybindingSync = extensionService?.keybindings?.subscribe(() => syncPluginKeybindings())
+    // The unsubscribe slot was hoisted before cleanup (TDZ guard).
+    stopPluginKeybindingSync = extensionService?.keybindings?.subscribe(() => syncPluginKeybindings())
     /**
      * One follow-up send settled (plan §10/§11/§12):
      * - ACCEPTED: the child inbox owns the message — never restore the
@@ -5218,9 +5235,9 @@ export function apply(ctx: Context, config: Config): void {
     let wasAdvertisedClaim: ((name: string) => boolean) | undefined
     /** The catalog refresh coordinator: the ONE post-mount refresh owner
      * (first session, switches, /preset, /reload). Built inside
-     * registerCommands once the surface hooks exist. */
+     * registerCommands once the surface hooks exist. (Declared before
+     * cleanup — see the hoisted slot above.) */
     let catalogRefreshRequest: ((request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>) | undefined
-    let catalogCoordinator: CatalogRefreshCoordinator | undefined
     /** `skills/change` coalescing: bursts of invalidation notifications cost
      * at most two reads, and the follow-up re-read observes the CURRENT
      * ownership (live agent vs standing preset). */

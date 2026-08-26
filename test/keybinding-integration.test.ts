@@ -227,7 +227,8 @@ test('a remap of the thinking key refreshes cached fold hints (keymap revision)'
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('(alt+t to expand)'), `default thinking hint missing:\n${view}`)
-  // Remap the thinking owner (hot reload path: manager rebuild bumps the revision).
+  // Remap the thinking owner (explicit manager rebuild path: the rebuild
+  // bumps the keymap revision, so the cached card copy follows).
   managerWith({ 'app.transcript.toggleThinking': 'ctrl+x' })(app.keybindingsManager())
   await vt.waitForRender()
   view = vt.getViewport().join('\n')

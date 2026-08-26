@@ -16,6 +16,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
+import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'
 import { SESSIONLESS_COMMANDS } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
@@ -605,29 +606,121 @@ test('/reload with a live agent refreshes the AGENT target, never the standing p
   t.app.stop()
 })
 
-test('/keybindings reset awaits the settings write and reports its real outcome', async () => {
+test('/keybindings reload re-reads the settings document LAZILY (the explicit reload seam, no watch)', async () => {
+  // Server/client migration boundary (review finding): the keybinding
+  // reload is EXPLICIT — /keybindings reload calls `settings.get()` at
+  // reload time and rebuilds the keymap. There is deliberately NO settings
+  // `watch` callback: the TuiSettingsConfig port is get/replace only, and
+  // a callback could not cross the process boundary in the future Remote
+  // adapter. This test proves the command reads the CURRENT document at
+  // reload time (a stale cached parse would miss a later settings edit).
+  let settingsDoc = {
+    theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue',
+    localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off',
+    iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' },
+  }
+  let reads = 0
+  const tuiSettings: TuiSettingsLike = {
+    // get/replace ONLY — no watch on the port (the structural type
+    // enforces it: a watch method would not exist on TuiSettingsLike).
+    get: () => { reads += 1; return settingsDoc },
+    replace: async () => {},
+  }
+  const t = setup({ tuiSettings })
+  // The runner applies the startup configuration ONCE at mount (this
+  // command-surface harness mounts only the command layer, so apply the
+  // same parse the runner's applyUserKeybindings performs).
+  t.app.keybindingsManager().setUserConfiguration(parseUserKeybindings(tuiSettings.get().keybindings))
+  const readsAfterSetup = reads
+  // A later settings edit (the user changes the keybindings in the YAML);
+  // the keymap must NOT change until /keybindings reload.
+  settingsDoc = { ...settingsDoc, keybindings: { 'app.input.steer': 'ctrl+y' } }
+  // The app's effective table still shows the startup keys (no watch).
+  const before = t.app.keybindingsManager().keysFor('app.input.steer')
+  assert.deepEqual(before, ['ctrl+x'], 'no watch: the keymap must keep the startup configuration until a reload')
+  const result = await t.runCommand('keybindings', 'reload')
+  assert.equal((result as { kind: string }).kind, 'success', 'the reload must succeed')
+  assert.ok(reads > readsAfterSetup, 'the reload must re-read the settings document')
+  const after = t.app.keybindingsManager().keysFor('app.input.steer')
+  assert.deepEqual(after, ['ctrl+y'], 'the reload must apply the CURRENT settings document')
+  t.app.stop()
+})
+
+test('/keybindings reset awaits the settings write, applies the cleared config, and reports its real outcome', async () => {
   // Review finding: the reset must not report success before the async
   // persistence write resolves — a failed write is an error result.
+  // Review round 28: with the automatic settings watch removed (the reload
+  // seam is explicit), a reset that only persisted would leave the RUNNING
+  // keymap with the old overrides — the reset must also REBUILD from the
+  // now-keybindings-less document.
   let replaced = 0
   const failing: TuiSettingsLike = {
     get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }),
     replace: async () => { replaced += 1; throw new Error('write refused') },
   }
   let t = setup({ tuiSettings: failing })
+  t.app.keybindingsManager().setUserConfiguration(parseUserKeybindings(failing.get().keybindings))
   const failed = await t.runCommand('keybindings', 'reset')
   assert.equal((failed as { kind: string }).kind, 'error', 'a failed write must report an error result')
   assert.ok((failed as { text: string }).text.includes('failed'), `error text missing: ${JSON.stringify(failed)}`)
   assert.equal(replaced, 1, 'the write must be attempted')
+  assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'a failed reset must keep the running keymap')
   t.app.stop()
 
   let okReplaced = 0
+  // The fixture models the storage: after a successful replace the
+  // document has no keybindings field.
+  let okDoc = { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } } as { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string; focusMode: string; iconStyle: string; keybindings?: unknown }
   const ok: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }),
-    replace: async () => { okReplaced += 1 },
+    get: () => okDoc,
+    replace: async (doc) => { okReplaced += 1; okDoc = doc as typeof okDoc },
   }
   t = setup({ tuiSettings: ok })
+  t.app.keybindingsManager().setUserConfiguration(parseUserKeybindings(ok.get().keybindings))
+  assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'the pre-reset keymap must carry the override')
   const succeeded = await t.runCommand('keybindings', 'reset')
   assert.equal((succeeded as { kind: string }).kind, 'success', 'a resolved write must report success')
   assert.equal(okReplaced, 1)
+  assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+s'], 'the reset must REBUILD the running keymap from the cleared document (defaults)')
+  t.app.stop()
+
+  // Round 30: a throwing FIRST read must not escape the handler either —
+  // the reset reports an error and the running keymap stays untouched.
+  let readsFailing = 0
+  const throwingRead: TuiSettingsLike = {
+    get: () => { readsFailing += 1; throw new Error('settings read exploded') },
+    replace: async () => {},
+  }
+  t = setup({ tuiSettings: throwingRead })
+  t.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.steer': 'ctrl+x' }))
+  const readFailed = await t.runCommand('keybindings', 'reset')
+  assert.equal((readFailed as { kind: string }).kind, 'error', 'a throwing first read must report an error result')
+  assert.ok((readFailed as { text: string }).text.includes('failed'), `error text missing: ${JSON.stringify(readFailed)}`)
+  assert.equal(readsFailing, 1, 'the initial read must be attempted once')
+  assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'a failed reset must keep the running keymap')
+  t.app.stop()
+})
+
+test('/keybindings reload is fail-soft: a throwing settings read keeps the last-known-good keymap', async () => {
+  // Review round 28: reload is now the ONLY reload seam, so its fail-soft
+  // contract must match the startup application — a transient `get()`
+  // failure must not throw out of the handler; the keymap keeps its
+  // last-known-good configuration and the command reports an error.
+  let failing = false
+  const tuiSettings: TuiSettingsLike = {
+    get: () => {
+      if (failing) throw new Error('settings read exploded')
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }
+    },
+    replace: async () => {},
+  }
+  const t = setup({ tuiSettings })
+  t.app.keybindingsManager().setUserConfiguration(parseUserKeybindings(tuiSettings.get().keybindings))
+  assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'startup configuration')
+  failing = true
+  const result = await t.runCommand('keybindings', 'reload')
+  assert.equal((result as { kind: string }).kind, 'error', 'a throwing settings read must report an error result')
+  assert.ok((result as { text: string }).text.includes('failed'), `error text missing: ${JSON.stringify(result)}`)
+  assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'the keymap must keep the last-known-good configuration')
   t.app.stop()
 })

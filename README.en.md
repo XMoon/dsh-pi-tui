@@ -192,7 +192,9 @@ Use `/help` inside the TUI for the current command and keybinding list.
 Host shortcuts are semantic actions (`app.*`) resolved through a
 context-aware keymap — the UI (footer hints, `/help`, `/keybindings`)
 always shows the EFFECTIVE keys, so a remap updates every hint. Configure
-them in the `dsh-pi-tui` settings namespace (hot-reloaded, no restart):
+them in the `dsh-pi-tui` settings namespace; apply with `/keybindings
+reload` (explicit — a settings edit takes effect after the reload, no
+restart):
 
 ```yaml
 dsh-pi-tui:
@@ -213,8 +215,11 @@ dsh-pi-tui:
   defaults only).
 - `/keybindings` shows the effective table; `/keybindings conflicts`
   lists conflicts (same key + overlapping scope + same priority — never
-  silent last-write-wins); `/keybindings reload` re-reads the settings;
-  `/keybindings reset` clears the overrides through the settings service.
+  silent last-write-wins); `/keybindings reload` re-reads the settings
+  (fail-soft: a bad entry is diagnosed and skipped, a throwing read is an
+  error notice — never a crash; the keymap keeps the last-known-good
+  configuration); `/keybindings reset` clears the overrides through the
+  settings service and rebuilds the running keymap immediately.
 - The subagent viewer blocks PARENT actions by action id, so a remapped
   parent shortcut stays blocked inside the viewer.
 - Conditional affordances are ADDITIVE: binding `app.tasks.open: ctrl+x`

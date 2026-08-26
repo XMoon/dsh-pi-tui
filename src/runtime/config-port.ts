@@ -52,14 +52,19 @@ export interface TuiSettingsDoc {
 
 /** The TUI settings document surface (get/replace — the same shape the
  * commands surface consumes; the runner wires the registered settings
- * document). */
+ * document). The port is deliberately get/replace ONLY: no watch /
+ * subscribe callback. Change observation is explicit on the consumer
+ * side — e.g. `/keybindings reload` re-reads the document — because a
+ * callback could not map across the process boundary in the future
+ * Remote adapter (migration rule: no callbacks across the wire). */
 export interface TuiSettingsConfig {
   get(): TuiSettingsDoc
   replace(doc: TuiSettingsDoc): unknown
 }
 
 /** The TUI settings document surface as the commands surface names it
- * (kept as the public commands-surface type — see commands.ts). */
+ * (kept as the public commands-surface type — see commands.ts). Like
+ * TuiSettingsConfig: get/replace only, never a watch callback. */
 export interface TuiSettingsLike {
   get(): TuiSettingsDoc
   replace(doc: TuiSettingsDoc): unknown

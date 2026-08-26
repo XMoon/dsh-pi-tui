@@ -190,8 +190,9 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 Host 快捷键是语义 action(`app.*`),通过 context-aware keymap 解析——
 UI(页脚提示、`/help`、`/keybindings`)始终显示**生效**的按键,因此
-改键后所有提示自动更新。在 `dsh-pi-tui` settings 命名空间中配置
-(热加载,无需重启):
+改键后所有提示自动更新。在 `dsh-pi-tui` settings 命名空间中配置,
+然后用 `/keybindings reload` 应用(显式 reload——改设置后执行 reload
+即生效,无需重启):
 
 ```yaml
 dsh-pi-tui:
@@ -210,8 +211,10 @@ dsh-pi-tui:
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖(仅使用内置默认)。
 - `/keybindings` 显示生效表;`/keybindings conflicts` 列出冲突(同键 +
   作用域重叠 + 同优先级——绝不静默 last-write-wins);`/keybindings
-  reload` 重新读取设置;`/keybindings reset` 通过 settings 服务清除
-  覆盖。
+  reload` 重新读取设置(fail-soft:坏配置会被诊断并跳过,读取异常才会
+  给出错误提示——都不会崩溃,keymap 保留 last-known-good 配置);
+  `/keybindings reset` 通过 settings 服务清除覆盖,并立即重建运行中的
+  keymap。
 - 子代理查看器按 action id 阻止父级 action,因此改键后的父级快捷键
   在查看器内依然被阻止。
 - 条件 affordance 是**累加**的:绑定 `app.tasks.open: ctrl+x` 是**增加**
