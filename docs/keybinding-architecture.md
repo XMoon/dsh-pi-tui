@@ -278,6 +278,14 @@ semantic core. The fixed viewer close stays independent.
 `configurable: false` + `availability: 'reserved'` — never bindable
 no-ops.
 
-Final gates: 2452 bundle tests, 985 fork tests, 11 docs tests,
+**Remapped interrupt is semantic.** Only the physical Escape key runs
+the editor Escape seams; a remapped interrupt key goes straight to the
+semantic core AND keeps its own consecutive-press idle semantics (its
+first press does not disarm its own double-action window). Shift+Enter
+can never be bound to submit (the fork editor's fixed newline key —
+parser-rejected, aliases included).
+
+Final gates: 2455 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
-styles, either casing), `git diff --check` — all green.
+styles, either casing), `git diff --check` — all green. The final
+convergence review round was accepted with no findings.
