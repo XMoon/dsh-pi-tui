@@ -15,6 +15,7 @@
 import type { KeyId } from '@xmoon76/pi-tui'
 import { matchesKey } from '@xmoon76/pi-tui'
 import { APP_KEYBINDINGS } from './definitions.ts'
+import { DEFAULT_LEADER_TIMEOUT_MS } from './config.ts'
 import { EffectiveKeymap, type CompositionRule, type PluginKeybindingRule } from './effective-keymap.ts'
 import { formatLeaderSequence, formatKeyId } from './hints.ts'
 import { LeaderStateMachine } from './leader.ts'
@@ -204,7 +205,14 @@ export class HostKeybindingManager {
       // the leader prefix would otherwise enter a dead pending state that
       // can never complete.
       if (effectiveLeaderConfig !== undefined && effectiveLeaderConfig.key !== undefined && leaderBindings.length > 0) {
-        this.leader = new LeaderStateMachine(effectiveLeaderConfig, leaderBindings, {
+        // The manager's leaderTimeoutMs option is the SURFACE-LEVEL
+        // override: it wins over the config-parse default (the manager
+        // owns the machine's timing; a runner/tests can tune it without
+        // touching the user config — convergence finding).
+        const machineConfig = this.leaderTimeoutMs !== DEFAULT_LEADER_TIMEOUT_MS
+          ? { ...effectiveLeaderConfig, timeoutMs: this.leaderTimeoutMs }
+          : effectiveLeaderConfig
+        this.leader = new LeaderStateMachine(machineConfig, leaderBindings, {
           onActivate: (action) => this.onLeaderActivate(action),
           onStateChange: () => this.onLeaderStateChange(),
         })

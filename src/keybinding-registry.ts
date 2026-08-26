@@ -104,9 +104,27 @@ export class KeybindingRegistry {
   private readonly records = new Map<string, BindingRecord>()
   private revision = 0
   private readonly onInvalidate: () => void
+  /** Change listeners: invoked on EVERY register/dispose/disposeOwner
+   * AFTER the repaint invalidation — consumers (the runner's
+   * HostKeybindingManager sync) resync the effective keymap so plugin
+   * bindings registered after mount fire and unloaded ones stop
+   * (convergence finding: the initial snapshot sync is not enough). */
+  private readonly listeners = new Set<() => void>()
 
   constructor(onInvalidate: () => void = () => {}) {
     this.onInvalidate = onInvalidate
+  }
+
+  /** Subscribe to keybinding set changes (register/dispose/unload). The
+   * listener is called after every mutation; returns an unsubscribe. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  private notifyChanged(): void {
+    this.onInvalidate()
+    for (const listener of this.listeners) listener()
   }
 
   /**
@@ -140,7 +158,7 @@ export class KeybindingRegistry {
       disposed: false,
     })
     this.revision += 1
-    this.onInvalidate()
+    this.notifyChanged()
     return {
       id: contribution.id,
       dispose: () => this.dispose(contribution.id),
@@ -154,7 +172,7 @@ export class KeybindingRegistry {
     record.disposed = true
     this.records.delete(id)
     this.revision += 1
-    this.onInvalidate()
+    this.notifyChanged()
   }
 
   /** Dispose every binding owned by one fiber (owner unload). */

@@ -2404,6 +2404,9 @@ export function apply(ctx: Context, config: Config): void {
       // M3: stop the keybinding settings watch (the manager dies with the
       // app; the watch must not outlive the surface).
       stopKeybindingWatch?.()
+      // M2: unsubscribe the plugin keybinding sync (the registry outlives
+      // the surface — a stale listener must not resync into a dead app).
+      stopPluginKeybindingSync?.()
       // Detach the extension service's surface bridge (its capability set
       // and state listeners die with the surface). The surfaceId lease
       // makes a stale detach a no-op (P1).
@@ -4374,6 +4377,12 @@ export function apply(ctx: Context, config: Config): void {
       })))
     }
     syncPluginKeybindings()
+    // M2 DYNAMIC LIFECYCLE (convergence finding): plugin bindings
+    // registered AFTER mount — or unloaded — must resync the effective
+    // keymap (the initial snapshot is not enough). Subscribe to the
+    // registry's change notifications so every register/dispose
+    // re-syncs; the subscription is disposed with the runner teardown.
+    const stopPluginKeybindingSync = extensionService?.keybindings?.subscribe(() => syncPluginKeybindings())
     /**
      * One follow-up send settled (plan §10/§11/§12):
      * - ACCEPTED: the child inbox owns the message — never restore the
@@ -4664,7 +4673,6 @@ export function apply(ctx: Context, config: Config): void {
         },
       )
     }
-    // Fullscreen is a persisted preference like the theme and the footer
     // (new installs default to 'on' — alt screen by default): boot applies
     // it FIRST so the alt screen owns the terminal input handler before any
     // theme query below targets "the active screen" — a query sent while the
