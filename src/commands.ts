@@ -2946,6 +2946,13 @@ export function registerTuiCommands(
         return { kind: 'success' }
       }
       if (verb === 'reload') {
+        const settings = runner.tuiSettings
+        // The reload seam needs a settings document (review round 35:
+        // without the backend, "reading the defaults" would be a lie —
+        // mirror /keybindings reset's explicit refusal so a degraded /
+        // Remote backend cannot misrepresent an absent settings service
+        // as a successful defaults read).
+        if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
         // Re-validate the settings document and rebuild the keymap
         // (fail-soft: bad entries are diagnostics, never a crash). The
         // settings read itself is guarded too — a transient `get()`
@@ -2954,7 +2961,7 @@ export function registerTuiCommands(
         // (review round 28: reload is now the ONLY reload seam, so its
         // fail-soft contract must match the startup application).
         try {
-          const parsed = parseUserKeybindings(runner.tuiSettings?.get().keybindings)
+          const parsed = parseUserKeybindings(settings.get().keybindings)
           for (const message of parsed.diagnostics) runner.diag.warn('keybindings', { message })
           keybindings.setUserConfiguration(parsed)
         } catch (error: unknown) {
@@ -2979,14 +2986,23 @@ export function registerTuiCommands(
             // Await the persistence write: the command result reflects the
             // ACTUAL outcome (a failed write must not report success — review
             // finding). The handler may return a Promise<CommandResult>.
+            // NOTE (review round 35): after a successful write there is
+            // deliberately NO second `settings.get()`. The reset doc is
+            // already the canonical projection (the `keybindings` field was
+            // deleted above), so the runtime is rebuilt from THAT local
+            // state — `parseUserKeybindings(doc.keybindings)` — never from
+            // a second Host read. A post-write read could fail (leaving the
+            // disk reset but the runtime claiming "reset failed"), and a
+            // Remote adapter must not be a GET → PUT → GET round trip:
+            // reset is write + local projection.
             await settings.replace(doc as unknown as import('./runtime/config-port.ts').TuiSettingsDoc)
             // Apply the cleared configuration NOW: with the automatic
             // settings watch removed (review round 28 — the reload seam is
             // explicit), a reset that only persisted would leave the
             // RUNNING keymap with the old overrides until a manual
             // /keybindings reload. The reset is a full reset: persist AND
-            // rebuild from the (now keybindings-less) document.
-            const parsed = parseUserKeybindings(settings.get().keybindings)
+            // rebuild from the cleared document.
+            const parsed = parseUserKeybindings(doc.keybindings)
             for (const message of parsed.diagnostics) runner.diag.warn('keybindings', { message })
             keybindings.setUserConfiguration(parsed)
             app.notify('Keybindings reset to defaults.', 'info')

@@ -668,19 +668,32 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   t.app.stop()
 
   let okReplaced = 0
-  // The fixture models the storage: after a successful replace the
-  // document has no keybindings field.
-  let okDoc = { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } } as { theme: string; footer: string; fullscreen: string; busyEnter: string; localShellSandbox: string; homeEndKeys: string; focusMode: string; iconStyle: string; keybindings?: unknown }
+  // Round 35: the success fixture is the reviewer's regression shape — the
+  // storage may NOT be re-read after a successful write (a post-write read
+  // could fail: disk reset + runtime "reset failed" fork). `get()` throws
+  // on ANY read after the FIRST, so a post-write second read would fail
+  // the test; the reset must project the cleared state locally from the
+  // doc it already holds (`keybindings` deleted above) — write + local
+  // projection, never GET → PUT → GET (the future Remote adapter
+  // contract too). The counter is armed right before the command so the
+  // harness's own setup reads do not trip it.
+  let okReads = 0
   const ok: TuiSettingsLike = {
-    get: () => okDoc,
-    replace: async (doc) => { okReplaced += 1; okDoc = doc as typeof okDoc },
+    get: () => {
+      okReads += 1
+      if (okReads > 1) throw new Error('no second read allowed')
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }
+    },
+    replace: async () => { okReplaced += 1 },
   }
   t = setup({ tuiSettings: ok })
   t.app.keybindingsManager().setUserConfiguration(parseUserKeybindings(ok.get().keybindings))
   assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'the pre-reset keymap must carry the override')
+  okReads = 0
   const succeeded = await t.runCommand('keybindings', 'reset')
   assert.equal((succeeded as { kind: string }).kind, 'success', 'a resolved write must report success')
   assert.equal(okReplaced, 1)
+  assert.equal(okReads, 1, 'the reset must read the settings document exactly ONCE (no post-write read)')
   assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+s'], 'the reset must REBUILD the running keymap from the cleared document (defaults)')
   t.app.stop()
 
@@ -722,5 +735,17 @@ test('/keybindings reload is fail-soft: a throwing settings read keeps the last-
   assert.equal((result as { kind: string }).kind, 'error', 'a throwing settings read must report an error result')
   assert.ok((result as { text: string }).text.includes('failed'), `error text missing: ${JSON.stringify(result)}`)
   assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'the keymap must keep the last-known-good configuration')
+  t.app.stop()
+})
+
+test('/keybindings reload refuses an absent settings service (no false "reloaded" success)', async () => {
+  // Review round 35 P3: without the settings backend, reload must NOT
+  // misrepresent "reading the defaults" as a success — it mirrors
+  // /keybindings reset's explicit refusal, so a degraded / Remote
+  // backend cannot claim a successful defaults read.
+  const t = setup({ tuiSettings: undefined })
+  const result = await t.runCommand('keybindings', 'reload')
+  assert.equal((result as { kind: string }).kind, 'error', 'an absent settings service must report an error result')
+  assert.ok((result as { text: string }).text.includes('unavailable'), `error text missing: ${JSON.stringify(result)}`)
   t.app.stop()
 })
