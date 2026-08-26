@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the previous UI; Symbols expresses the same semantics with a small
   set of single-cell Unicode symbols (tool cards, context cards, Focus
   disclosure, Working indicator); Minimal hides ordinary decorative icons
-  and keeps only markers with real status or interaction value (`×` error,
-  `■` interrupted, `?` question, `▸/▾` disclosure, `•/◦` working). All
+  and keeps only markers with real status or interaction value (`⨯` error,
+  `∎` interrupted, `?` question, `▸/▾` disclosure, `∙/◦` working). All
   icons converge on a semantic registry (`src/icons.ts`): fold state
   stores the semantic identity, never the final glyph, so switching in
   `/settings` repaints already-rendered cards immediately in the same

@@ -10,23 +10,33 @@
  * active, so a captured `TuiMainScreen` would freeze the animation at the
  * first frame. The callback routes to whichever screen is active.
  *
- * Frames follow the icon style through {@link workingFramesFor}: the whale
- * pair under `emoji`, the `• / ◦` pair under `symbols` AND `minimal`
- * (minimal removes static icons — it does not change animation semantics).
- * An EXPLICIT `frames` option (an extension/advanced custom indicator) is
- * never overwritten by an icon-style change.
+ * Frames follow the icon style through {@link workingFramesFor}, which
+ * DERIVES them from the icon registry (`working-a` / `working-b`): the
+ * whale pair under `emoji`, the `∙ / ◦` pair under `symbols` AND
+ * `minimal` (minimal removes static icons — it does not change animation
+ * semantics). Deriving from the registry keeps the EAW-safe width gate
+ * covering the ACTUAL running glyphs — a hard-coded frame literal here
+ * would silently bypass it. An EXPLICIT `frames` option (an
+ * extension/advanced custom indicator) is never overwritten by an
+ * icon-style change.
  * @module @xmoon76/dsh-pi-tui/working
  */
 
 import { Text } from '@xmoon76/pi-tui'
-import type { IconStyle } from './icons.ts'
+import { iconFor, type IconStyle } from './icons.ts'
 import { color } from './theme.ts'
 
-/** The DEFAULT animation frames for one icon style. `symbols` and
- * `minimal` share the low-noise pair — a reduced-motion preference would
- * be its own setting, never smuggled into the icon style. */
+/** The DEFAULT animation frames for one icon style, DERIVED from the icon
+ * registry — the single source of truth, so the palette's width gate also
+ * guards the running indicator glyphs (a drift between this and the
+ * registry is impossible by construction). `symbols` and `minimal` share
+ * the low-noise pair — a reduced-motion preference would be its own
+ * setting, never smuggled into the icon style. */
 export function workingFramesFor(style: IconStyle): readonly string[] {
-  return style === 'emoji' ? ['🐋', '🐳'] : ['•', '◦']
+  return [
+    iconFor('working-a', style),
+    iconFor('working-b', style),
+  ]
 }
 
 export interface WorkingIndicatorOptions {
