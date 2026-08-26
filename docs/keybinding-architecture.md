@@ -226,9 +226,13 @@ throwing read keeps the last-known-good keymap and reports an error);
 service (never a direct settings.yaml write) AND rebuilds the running
 keymap from the cleared document — the reset takes effect immediately,
 no follow-up reload needed (the reload seam is explicit since the
-automatic settings watch was removed). `/help` and the footer hints
-render through `keyHint`/`keysFor` — a user remap updates every hint
-automatically.
+automatic settings watch was removed). The reset is ONE transaction:
+read → construct the cleared doc → persist → apply the SAME local
+projection (no post-write re-read of the Host document — a Remote
+adapter's reset is write + local projection, never GET → PUT → GET; a
+post-write read that failed would fork the disk reset from the runtime).
+`/help` and the footer hints render through `keyHint`/`keysFor` — a user
+remap updates every hint automatically.
 
 ## Out of scope (first version)
 
