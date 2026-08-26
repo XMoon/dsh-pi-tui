@@ -204,8 +204,15 @@ export class EffectiveKeymap {
     }
     // 4. Plugin contributions (lowest priority; never beats a Host rule).
     for (const plugin of this.pluginRules) {
+      // The rule id is NAMESPACED (convergence finding): the public
+      // contribution id is arbitrary and could equal a HOST rule id
+      // (e.g. `app.input.steer@builtin:ctrl+s`); deactivation is by id,
+      // so a plugin-id collision would deactivate the HOST rule too. The
+      // `plugin:` prefix is impossible for a host rule (host ids are
+      // `${action}@${source}:${key}`) and preserves the public id for
+      // diagnostics.
       const pluginRule = {
-        id: plugin.id,
+        id: `plugin:${plugin.id}`,
         action: plugin.action,
         key: canonicalizeKeyId(plugin.key),
         source: 'plugin' as const,
