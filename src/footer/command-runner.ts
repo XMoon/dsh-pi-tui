@@ -122,7 +122,12 @@ export class FooterCommandRunner {
       this.onResult(rows)
     }
     const timeout = setTimeout(() => {
-      this.killChild()
+      // The timeout is generation- AND child-scoped: if a NEW child has
+      // already replaced this one (a config change / refresh started
+      // while this child's close event was delayed), the stale timeout
+      // must NOT kill the current process. `finish` below already
+      // guards the generation; this guards the kill.
+      if (this.child === child) this.killChild()
       finish(undefined)
     }, Math.min(config.timeoutMs, MAX_COMMAND_TIMEOUT_MS))
     child.stdout?.on('data', (chunk: Buffer) => {
