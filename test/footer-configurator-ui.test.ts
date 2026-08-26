@@ -144,10 +144,10 @@ test('Shift+↑/↓ reorder and Tab switches the row', async () => {
 test('an UNKNOWN item id renders its label SANITIZED (control chars never reach the panel)', async () => {
   const { vt, app } = startApp()
   // The model carries a ref whose id is NOT in the registry (an unloaded
-  // plugin) and contains terminal control characters: the raw id must
-  // never reach the panel (the parser rejects such ids in layouts — this
-  // is the defense-in-depth layer for any other id source).
-  const malicious = 'ext:gone/\u001b]52;c;bWFsaWNpb3Vz\u0007'
+  // plugin) and contains MULTIPLE terminal control characters: the raw id
+  // must never reach the panel (the parser rejects such ids in layouts —
+  // this is the defense-in-depth layer for any other id source).
+  const malicious = 'ext:gone/\u001b]52;c;bWFsaWNpb3Vz\u0007\u001b[2J'
   const model = new FooterConfiguratorModel({
     schemaVersion: 1,
     rows: [{ left: [{ id: malicious }], right: [] }],
@@ -160,7 +160,7 @@ test('an UNKNOWN item id renders its label SANITIZED (control chars never reach 
   })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('\u001b]'), `an ESC sequence must never reach the panel:\n${view}`)
+  assert.ok(!view.includes('\u001b'), `an ESC must never reach the panel:\n${view}`)
   assert.ok(!view.includes('\u0007'), `a BEL must never reach the panel:\n${view}`)
   // The visible label keeps the readable parts (the control chars are
   // stripped, the rest stays).
