@@ -28,7 +28,7 @@
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'
-import { canonicalizeKeyId, EDITOR_OWNED_KEY_IDS, EDITOR_POST_SUBMIT_KEYS, isTextProducingKeyId, isValidKeyId } from './key-identity.ts'
+import { canonicalizeKeyId, EDITOR_OWNED_KEY_IDS, EDITOR_POST_SUBMIT_KEYS, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from './key-identity.ts'
 import { APP_KEYBINDINGS, NON_CONFIGURABLE_ACTIONS } from './definitions.ts'
 import type { AppKeybindingId, LeaderBinding, LeaderConfig, UserKeybindingValue, UserKeybindingsConfig } from './types.ts'
 
@@ -168,7 +168,9 @@ export function parseUserKeybindings(
   if (leaderValue !== undefined) {
     if (typeof leaderValue === 'string' && isValidKeyId(leaderValue)) {
       const canonicalLeader = canonicalizeKeyId(leaderValue as KeyId)
-      if (isTextProducingKeyId(canonicalLeader)) {
+      if (!isRuntimeBindableKeyId(canonicalLeader)) {
+        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — the runtime can never match a modified F-key or Escape — ignored`)
+      } else if (isTextProducingKeyId(canonicalLeader)) {
         diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — a text-producing leader would swallow typing — ignored`)
       } else if (TERMINAL_AMBIGUOUS_KEY_IDS.has(canonicalLeader)) {
         // Legacy terminal collisions are REJECTED for the leader prefix too
@@ -251,6 +253,12 @@ export function parseUserKeybindings(
           diagnostics.push(`keybindings: "${actionId}" binds a "<leader>escape" sequence — Esc is the leader cancel key and cannot be a completion — ignored`)
           continue
         }
+        // The runtime-bindable gate (round-22 finding): a completion on a
+        // modified F-key or modified Escape can never be matched.
+        if (!isRuntimeBindableKeyId(canonicalCompleting)) {
+          diagnostics.push(`keybindings: "${actionId}" binds a "<leader>${completing}" sequence — the runtime can never match a modified F-key or Escape — ignored`)
+          continue
+        }
         // Legacy terminal collisions are REJECTED for completions too
         // (convergence finding): a completion on ctrl+[ / ctrl+j / ctrl+m
         // would swallow the lifecycle Esc/Enter on legacy terminals.
@@ -271,6 +279,15 @@ export function parseUserKeybindings(
       // never bypass the printable guard or the collision sets — the raw
       // spelling is only used in the diagnostic text.
       const canonicalEntry = canonicalizeKeyId(entry as KeyId)
+      // RUNTIME-BINDABLE GATE (round-22 finding): the fork matcher can
+      // never match a modified F-key or modified Escape (keys.ts:
+      // `modifier !== 0` → false), so accepting them would advertise a
+      // key that can never fire. Separates "valid grammar" from
+      // "runtime-bindable" — the plugin registry shares the gate.
+      if (!isRuntimeBindableKeyId(canonicalEntry)) {
+        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — the runtime can never match a modified F-key or Escape — ignored`)
+        continue
+      }
       if (isTextProducingKeyId(canonicalEntry)) {
         diagnostics.push(`keybindings: "${actionId}" cannot bind the text-producing key "${entry}" to a Host action — ignored`)
         continue
