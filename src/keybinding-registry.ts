@@ -19,7 +19,7 @@
  * - reserved Host lifecycle keys cannot be claimed by a plugin (the
  *   registry REJECTS a reserved key loudly), and TEXT-PRODUCING keys
  *   (letters/digits/symbols/space — shift-only printables included,
- *   round-17 finding) and FORK EDITOR-owned keys (tab/arrows/home/end/
+ *   round-17 finding) and FORK EDITOR-owned keys (tab/arrows/Home/End/
  *   backspace/kill-yank/undo — round-19 finding) are rejected too (they
  *   never reach the plugin stage);
  * - unload removes the bindings (fiber-bound);
@@ -277,7 +277,7 @@ export class KeybindingRegistry {
     }
     // FORK EDITOR-OWNED REJECTION (round-19 finding): the InputRouter's
     // editorAccepts probe claims the fork editor's whole binding set for
-    // the focused editor on EVERY keystroke (tab, arrows, home/end, page
+    // the focused editor on EVERY keystroke (tab, arrows, Home/End, page
     // keys, backspace/delete, word moves, kill/yank/undo, newline — the
     // shared EDITOR_OWNED_KEY_IDS inventory), so a plugin registration
     // on one of these could never fire — yet it used to enter the
