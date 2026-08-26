@@ -56,8 +56,15 @@ test('4.1b enter and return are the SAME physical key (conflict)', () => {
     'app.history.search': 'enter',
     'app.todo.toggle': 'return',
   }))
-  assert.equal(manager.resolve('\r', editorContext), undefined,
-    'enter/return aliases must conflict')
+  // The two USER rules conflict and deactivate; the surviving Enter rule is
+  // the EDITOR-OWNED builtin submit (owner-aware winner selection — the
+  // resolver reports WHO executes, it never erases the key). The host
+  // ladder must NOT consume the editor-owned winner.
+  assert.equal(manager.resolve('\r', editorContext)?.action, 'app.input.submit',
+    'enter/return aliases must conflict — only the builtin editor-owned submit survives')
+  assert.equal(manager.resolve('\r', editorContext)?.owner, 'editor')
+  assert.equal(manager.hostResolves('\r', editorContext), false,
+    'the surviving editor-owned submit must not be host-resolved')
   assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')))
 })
 
@@ -768,4 +775,234 @@ test('5.15 a disabled submit never fires on LF/Enter through the host editor', a
   await vt.waitForRender()
   assert.deepEqual(submitted, [], 'a disabled submit must not fire on Enter or LF')
   app.stop()
+})
+
+// ── 6.x owner-aware winner selection (round-9 findings) ────────────────────
+
+test('6.1a submit remapped onto a HOST key: the editor-owned winner submits, steer NEVER fires', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const steered: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text: string) => submitted.push(text),
+    onSteer: (text: string) => steered.push(text),
+    onExit: () => {},
+  })
+  app.start()
+  // The user moves submit onto Ctrl+S — the steer BUILTIN's key. The user
+  // rule (200) beats the builtin (100), and the WINNER's owner decides the
+  // executor: editor → the fork editor submits. The host ladder must NOT
+  // dispatch steer first (round-9 P1 finding: the resolver used to skip
+  // editor-owned rules BEFORE picking a winner, so steer won at runtime
+  // while the read model advertised submit).
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+s' }))
+  await vt.waitForRender()
+  app.setDraft('draft')
+  await vt.waitForRender()
+  vt.sendInput('\x13') // ctrl+s
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['draft'], 'Ctrl+S must submit through the editor-owned winner')
+  assert.deepEqual(steered, [], 'Ctrl+S must NEVER steer')
+  // The read model agrees: Ctrl+S belongs to submit only.
+  assert.deepEqual(app.keybindingsManager().keysFor('app.input.submit'), ['ctrl+s'])
+  assert.deepEqual(app.keybindingsManager().keysFor('app.input.steer'), [],
+    'steer must not advertise the ctrl+s it lost')
+  const snapshot = app.keybindingsManager().snapshot()
+  const submitRow = snapshot.bindings.find(binding => binding.action === 'app.input.submit')
+  assert.deepEqual(submitRow?.keys, ['ctrl+s'], 'the snapshot advertises submit on Ctrl+S')
+  const steerRow = snapshot.bindings.find(binding => binding.action === 'app.input.steer')
+  assert.equal(steerRow, undefined, 'the snapshot must not carry steer on ctrl+s')
+  app.stop()
+})
+
+test('6.1b resolve() carries the EXECUTING owner; hostResolves follows the winner', () => {
+  // Default surface: the builtin Enter resolves to the EDITOR-owned submit.
+  const plain = new HostKeybindingManager()
+  assert.equal(plain.resolve('\r', editorContext)?.action, 'app.input.submit')
+  assert.equal(plain.resolve('\r', editorContext)?.owner, 'editor')
+  assert.equal(plain.hostResolves('\r', editorContext), false,
+    'the editor-owned winner must never be host-resolved')
+  // A host-owned key stays host-resolved.
+  assert.equal(plain.resolve('\x13', editorContext)?.owner, 'host') // ctrl+s → steer
+  assert.equal(plain.hostResolves('\x13', editorContext), true)
+  // submit: ctrl+s — the editor-owned user rule WINS the key; the host
+  // must not resolve it.
+  const remapped = new HostKeybindingManager()
+  remapped.setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+s' }))
+  const resolution = remapped.resolve('\x13', editorContext)
+  assert.equal(resolution?.action, 'app.input.submit')
+  assert.equal(resolution?.owner, 'editor')
+  assert.equal(resolution?.ruleId, 'app.input.submit@user:ctrl+s')
+  assert.equal(remapped.hostResolves('\x13', editorContext), false)
+  // A plugin-owner winner stays out of hostResolves too.
+  const withPlugin = new HostKeybindingManager()
+  withPlugin.setPluginRules([{ id: 'p1', action: 'app.todo.toggle', key: 'ctrl+alt+x' }])
+  assert.equal(withPlugin.resolve('\x1b[120;7u', editorContext)?.owner, 'plugin')
+  assert.equal(withPlugin.hostResolves('\x1b[120;7u', editorContext), false)
+})
+
+test('6.2 submit on fork-editor PRE-SUBMIT keys is rejected (they can never fire)', () => {
+  // The fork editor dispatches these bindings BEFORE its submit check
+  // (packages/pi-tui/src/components/editor.ts), so a submit remap onto one
+  // of them would be advertised by the read model but could never fire.
+  // Same unsupported-key policy as the Shift+Enter newline rejection
+  // (round-9 finding: submit: tab silently stayed autocomplete).
+  const preSubmit = [
+    'tab', 'backspace', 'delete', 'ctrl+a', 'ctrl+e', 'ctrl+u', 'ctrl+k',
+    'ctrl+w', 'ctrl+y', 'ctrl+c', 'ctrl+d', 'ctrl+-', 'alt+backspace',
+    'alt+delete', 'alt+d', 'alt+y', 'alt+b', 'alt+f', 'alt+left', 'alt+right',
+    'ctrl+left', 'ctrl+right', 'home', 'end', 'ctrl+home', 'ctrl+end',
+    'shift+backspace', 'shift+delete',
+  ]
+  for (const key of preSubmit) {
+    const parsed = parseUserKeybindings({ 'app.input.submit': key })
+    assert.deepEqual(parsed.bindings, {}, `submit on "${key}" must be rejected`)
+    assert.ok(parsed.diagnostics.some(message => message.includes('editor consumes')),
+      `no rejection diagnostic for "${key}": ${parsed.diagnostics.join(' | ')}`)
+  }
+  // The alias spellings canonicalize onto the same rejected keys.
+  const aliased = parseUserKeybindings({ 'app.input.submit': 'shift+Backspace' })
+  assert.deepEqual(aliased.bindings, {}, 'shift+Backspace must canonicalize into the rejected set')
+  assert.ok(aliased.diagnostics.some(message => message.includes('editor consumes')))
+  // A key the fork editor does NOT consume before submit stays bindable:
+  // ctrl+backspace is not in the fork's editor keybindings, so a submit
+  // remap on it genuinely reaches the submit check.
+  const works = parseUserKeybindings({ 'app.input.submit': 'ctrl+backspace' })
+  assert.deepEqual(works.bindings, { 'app.input.submit': 'ctrl+backspace' })
+  assert.ok(!works.diagnostics.some(message => message.includes('editor consumes')))
+  // OTHER actions may still bind an editor-pre-submit key: the HOST ladder
+  // consumes them before the editor, so they really fire.
+  const other = parseUserKeybindings({ 'app.todo.toggle': 'tab' })
+  assert.deepEqual(other.bindings, { 'app.todo.toggle': 'tab' }, 'tab stays bindable for a host action')
+  assert.ok(!other.diagnostics.some(message => message.includes('editor consumes')))
+})
+
+test('6.3 mixed direct + leader submit: BOTH triggers stay, Enter is removed', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.submit': ['ctrl+z', '<leader>s'] },
+  }))
+  await vt.waitForRender()
+  // The DIRECT key survives the leader sequence (round-9 finding: any
+  // leader binding used to clear EVERY direct editor key).
+  assert.deepEqual(app.keybindingsManager().editorSubmitKeysFor(), ['ctrl+z'])
+  assert.equal(app.keybindingsManager().keyHint('app.input.submit'), 'Ctrl+Z / Leader S')
+  const snapshot = app.keybindingsManager().snapshot()
+  const submitRow = snapshot.bindings.find(binding => binding.action === 'app.input.submit')
+  assert.deepEqual(submitRow?.keys, ['ctrl+z'])
+  assert.deepEqual(submitRow?.leaderKeys, ['s'])
+  // Ctrl+Z submits…
+  app.setDraft('one')
+  await vt.waitForRender()
+  vt.sendInput('\x1a') // ctrl+z
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['one'], 'the direct key submits')
+  // …Enter does NOT…
+  app.setDraft('two')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['one'], 'Enter must not submit (the override replaced the builtin)')
+  // …and the leader sequence submits too.
+  app.setDraft('three')
+  await vt.waitForRender()
+  vt.sendInput('\x18') // leader
+  await vt.waitForRender()
+  vt.sendInput('s')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['one', 'three'], 'the leader sequence must submit')
+  app.stop()
+})
+
+test('6.4 canonical casing: ctrl+A == ctrl+a; SPACE/Space are printable', () => {
+  // Single-character bases canonicalize to lowercase — ctrl+A and ctrl+a
+  // are the SAME physical key and must conflict (round-9 finding: the
+  // canonicalizer skipped single-char bases, the fork runtime lowercases,
+  // so two spellings of one key coexisted).
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    'app.history.search': 'ctrl+A',
+    'app.todo.toggle': 'ctrl+a',
+  }))
+  assert.deepEqual(manager.keysFor('app.history.search'), [], 'ctrl+A and ctrl+a must conflict')
+  assert.deepEqual(manager.keysFor('app.todo.toggle'), [])
+  assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')),
+    `no conflict diagnostic: ${manager.diagnosticsList().join(' | ')}`)
+  // The canonical spelling is lowercase everywhere.
+  const single = new HostKeybindingManager()
+  single.setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'ctrl+A' }))
+  assert.deepEqual(single.keysFor('app.transcript.toggleExpand'), ['ctrl+a'])
+  // UPPERCASE space spellings are still the printable spacebar: rejected as
+  // direct bindings and as the leader prefix (round-9 finding: the policy
+  // checks ran on the RAW spelling, so `SPACE` bypassed the typing guard).
+  for (const spelling of ['SPACE', 'Space']) {
+    const direct = parseUserKeybindings({ 'app.todo.toggle': spelling })
+    assert.deepEqual(direct.bindings, {}, `${spelling} direct must be rejected`)
+    assert.ok(direct.diagnostics.some(message => message.includes('plain printable')),
+      `no printable rejection for ${spelling}: ${direct.diagnostics.join(' | ')}`)
+    const leader = parseUserKeybindings({ leader: spelling, bindings: { 'app.tasks.open': '<leader>t' } })
+    assert.equal(leader.leader, undefined, `${spelling} leader must be rejected`)
+  }
+})
+
+test('6.5 a working submit remap is not advertised alongside the replaced Enter (snapshot)', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
+  assert.deepEqual(manager.editorSubmitKeysFor(), ['ctrl+x'])
+  assert.equal(manager.keyHint('app.input.submit'), 'Ctrl+X')
+  // Round-9 finding: the keymap snapshot iterated the raw top-trigger set
+  // and re-advertised the builtin Enter next to the working override —
+  // /keybindings lied while /help was right. Snapshot now projects the
+  // SAME visible rules as keysFor/keyHint/editorSubmitKeysFor.
+  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.input.submit')
+  assert.ok(binding !== undefined)
+  assert.deepEqual(binding!.keys, ['ctrl+x'], 'the snapshot must not re-advertise the replaced Enter')
+})
+
+test('6.5b a LEADER-ONLY submit override removes the builtin Enter from the snapshot too', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.submit': '<leader>s' },
+  }))
+  // The leader-only override removes Enter from the editor sync and the
+  // hints (review round: the leader is the ONLY trigger) — the snapshot
+  // must agree (external-review finding: it still advertised the builtin
+  // Enter, so /keybindings lied while Enter was inert at runtime).
+  assert.deepEqual(manager.editorSubmitKeysFor(), [], 'the leader is the only submit trigger')
+  assert.deepEqual(manager.keysFor('app.input.submit'), [])
+  assert.equal(manager.keyHint('app.input.submit'), 'Leader S')
+  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.input.submit')
+  assert.ok(binding !== undefined)
+  assert.deepEqual(binding!.keys, [], 'the snapshot must not advertise the removed Enter')
+  assert.deepEqual(binding!.leaderKeys, ['s'], 'the leader sequence is carried')
+})
+
+test('6.6 a conditional top rule does not permanently hide the fallback in the read model', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({ 'app.tasks.open': 'ctrl+s' }))
+  // tasks.open (conditional — the empty-editor affordance predicate) claims
+  // ctrl+s at priority 200; steer's builtin ctrl+s (100) is the CONTEXT
+  // FALLBACK. The read model must show BOTH (round-9 finding: the static
+  // read model shadowed the lower rule forever, so keyHint/snapshot hid
+  // steer even in contexts where steer genuinely fires).
+  assert.ok(manager.keysFor('app.tasks.open').includes('ctrl+s'), 'tasks.open advertises its conditional ctrl+s claim')
+  assert.deepEqual(manager.keysFor('app.input.steer'), ['ctrl+s'],
+    'a conditional claim must not hide the fallback in the read model')
+  assert.equal(manager.keyHint('app.input.steer'), 'Ctrl+S')
+  const steerRow = manager.snapshot().bindings.find(entry => entry.action === 'app.input.steer')
+  assert.ok(steerRow !== undefined, 'the snapshot must carry the fallback steer row')
+  assert.deepEqual(steerRow!.keys, ['ctrl+s'])
+  // The runtime still resolves by the predicate (the fallback FIRES when
+  // the conditional claim cannot).
+  const noTasks = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: false, tasksActive: false })
+  assert.equal(manager.resolve('\x13', noTasks)?.action, 'app.input.steer')
+  // An UNCONDITIONAL higher rule still shadows in the read model.
+  const unconditional = new HostKeybindingManager()
+  unconditional.setUserConfiguration(parseUserKeybindings({ 'app.todo.toggle': 'ctrl+s' }))
+  assert.deepEqual(unconditional.keysFor('app.input.steer'), [], 'an unconditional top trigger still hides the lower rule')
 })

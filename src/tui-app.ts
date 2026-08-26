@@ -2824,12 +2824,25 @@ export class TuiApp {
     const resolution = this.keybindings.resolve(data, this.keybindingContext())
     let hostDeclined = false
     if (resolution !== undefined) {
-      const consumed = this.dispatchResolvedAction(resolution.action as AppKeybindingId, data, resolution.key)
-      if (consumed) return { consume: true }
-      // The HOST dispatcher declined (e.g. pasteMedia without a handler):
-      // the key must reach the editor/plugin remainder — never be
-      // re-reserved by the same host action (convergence §6/§4.9).
-      hostDeclined = true
+      // OWNER-AWARE DISPATCH (review finding): the resolution's owner says
+      // WHO executes the winner — 'host'/'plugin' → the host dispatcher
+      // (a plugin-owner winner still dispatches its semantic action; the
+      // plugin remainder only claims keys nothing earlier consumed);
+      // 'editor' → the FORK EDITOR executes (hostResolved: false — the
+      // editor's tui.input.submit was synced by onEditorSubmitSync, so
+      // the key really submits there with paste-burst/backslash-newline
+      // semantics). An editor-owned winner must NOT be dispatched here:
+      // the old code skipped editor rules before winner selection, so
+      // `submit: ctrl+s` resolved to the steer builtin and steered at
+      // runtime while the read model advertised submit (round-9 finding).
+      if (resolution.owner !== 'editor') {
+        const consumed = this.dispatchResolvedAction(resolution.action as AppKeybindingId, data, resolution.key)
+        if (consumed) return { consume: true }
+        // The HOST dispatcher declined (e.g. pasteMedia without a
+        // handler): the key must reach the editor/plugin remainder — never
+        // be re-reserved by the same host action (convergence §6/§4.9).
+        hostDeclined = true
+      }
     }
     // M6: the router first determines whether a capturing path owns the key.
     // A replacement editor gets the first chance for editor-routed input;

@@ -79,30 +79,46 @@ configurable action first (plan §3.3).
 
 1. **One canonical physical-key identity.** Every key spelling collapses
    onto ONE canonical KeyId (`esc`→`escape`, `return`→`enter`, modifier
-   order → `ctrl`→`shift`→`alt`→`super`) at every rule entry point
-   (builtin defaults, user keys, leader prefix/completions, composition,
-   plugin rules, the fixed-overlay/terminal-unreliable inventories, rule
-   ids and conflict grouping). Aliases can never bypass conflict
-   detection, leader-prefix collision or dedup (convergence §1/§4.1).
+   order → `ctrl`→`shift`→`alt`→`super`, and every base LOWERCASED —
+   including single characters: `A`→`a`, `ctrl+A`→`ctrl+a`) at every rule
+   entry point (builtin defaults, user keys, leader prefix/completions,
+   composition, plugin rules, the fixed-overlay/terminal-unreliable
+   inventories, rule ids and conflict grouping). Aliases and CASING can
+   never bypass conflict detection, leader-prefix collision or dedup
+   (convergence §1/§4.1; the fork's runtime parser lowercases, so
+   `ctrl+A` and `ctrl+a` are one physical key).
 2. **Declared / effective / shadowed / conflicted are distinct states.**
    The effective keymap compiles declared rules, DEDUPES same-action
    same-canonical-key declarations, DEACTIVATES same-priority conflicts
    (with a diagnostic), and SHADOWS lower-priority rules on an
-   overlapping key. Only EFFECTIVE rules feed `resolve`, `keysFor`,
-   `keyHint`, `hostResolves` and `snapshot` — a shadowed or conflicted
-   rule is never advertised, and no fabricated builtin fallback
-   resurrects a replaced default (convergence §2/§4.3/§4.4).
-3. **Editor-owned submit lives in the unified rule model.** `app.input
-   .submit` is `hostResolved: false` — the fork editor's submit path
-   owns paste-burst suppression and the backslash-newline workaround, so
-   the HOST ladder never consumes a direct submit key. But submit
-   PARTICIPATES in the unified model: user remaps/`false` sync into the
-   fork editor's `tui.input.submit` (`onEditorSubmitSync`), conflict and
-   shadow apply, the read model (`keysFor`/`keyHint`/`keysLabelFor`/
-   `snapshot`/`canActivate`) reports the editor-owned facts, and
+   overlapping key — but only UNCONDITIONAL higher rules shadow in the
+   read model: a CONDITIONAL top trigger (a context predicate exists)
+   advertises BOTH its claim and the lower rule's fallback, because the
+   fallback genuinely fires in the contexts where the predicate fails
+   (round-9 finding: the read model must never hide a key that fires).
+   Only EFFECTIVE rules feed `resolve`, `keysFor`, `keyHint`,
+   `hostResolves` and `snapshot` — and they all project from the SAME
+   visible-rule set (a working user override never leaves the replaced
+   builtin advertised anywhere), with no fabricated builtin fallback
+   (convergence §2/§4.3/§4.4).
+3. **Editor-owned submit lives in the unified rule model — winner-aware.**
+   `app.input.submit` is `hostResolved: false` — the fork editor's submit
+   path owns paste-burst suppression and the backslash-newline workaround.
+   Editor-owned rules PARTICIPATE in the winner selection on equal
+   footing with host/plugin rules (round 9 finding: the resolver used to
+   skip editor rules BEFORE picking a winner, so `submit: ctrl+s`
+   steered at runtime while the read model advertised submit). The
+   resolution carries the winner's OWNER and the caller routes execution
+   by it: 'host'/'plugin' → the host dispatcher, 'editor' → the fork
+   editor (its `tui.input.submit` is synced by `onEditorSubmitSync`).
+   `hostResolves` is winner-based — an editor-owned winner is never
+   host-reserved, so the key reaches the fork editor. User remaps/`false`
+   sync into the fork editor's binding, conflict and shadow apply,
    fail-soft (a dead override restores the builtin Enter unless `false`)
-   is evaluated on the EFFECTIVE rules — never the raw config
-   (convergence §3/§4.5).
+   is evaluated on the EFFECTIVE rules — never the raw config, and a
+   leader sequence NEVER clears the direct keys (`submit:
+   ['ctrl+z', '<leader>s']` keeps BOTH triggers; only a truly leader-only
+   override removes Enter) (convergence §3/§4.5).
 4. **The viewer guard is action-based.** `viewerParentLockedKey` resolves
    the key through the effective keymap and blocks
    `VIEWER_BLOCKED_PARENT_ACTIONS` (which includes `app.agent.interrupt`)
@@ -173,9 +189,18 @@ dsh-pi-tui:
 
 Semantics: string = one key; array = several; `false` = disable the
 action's effective binding; absent = builtin default; `<leader>X` = a
-leader sequence (requires `leader`). A plain printable key can never be
-bound to a Host action (it would swallow typing). Hot reload: the runner
-watches the settings document and rebuilds the keymap without a restart.
+leader sequence (requires `leader`). The validation pipeline is
+**grammar → canonicalize → policy → store** (round-9 finding): every
+policy check (printable, lifecycle collisions, editor-owned constraints)
+runs on the CANONICAL key, so an uppercase spelling (`SPACE`, `ctrl+A`)
+can never bypass the typing guard or the collision sets. A plain
+printable key can never be bound to a Host action (it would swallow
+typing), and `app.input.submit` can never be bound to a key the fork
+editor consumes BEFORE its submit check (tab/backspace/Ctrl+A/E/U/K/W/
+Y/C/D/Home/End/word-moves/undo/copy — the editor would consume it first,
+so the binding could never fire; rejected like Shift+Enter, other
+actions are unaffected). Hot reload: the runner watches the settings
+document and rebuilds the keymap without a restart.
 
 **Conditional affordances are ADDITIVE, never replaced.** A composition
 rule (the empty-editor `↓` task-browser affordance → `app.tasks.open`)
@@ -308,7 +333,25 @@ leader + clears the interrupt double-action window. The host editor
 submits ONLY through the synced `tui.input.submit` binding — a disabled
 submit never fires on Enter or LF (LF is a newline).
 
-Final gates: 2474 bundle tests, 985 fork tests, 11 docs tests,
+**Owner-aware winner selection (round 9).** All owners (host/editor/
+plugin) compete in the resolver on equal footing; the resolution carries
+the winner's OWNER and the app routes execution by it ('editor' → the
+fork editor, never the host dispatcher). `hostResolves` is winner-based,
+so `submit: ctrl+s` really submits and NEVER steers, and the read model
+agrees (`/keybindings` shows Ctrl+S under submit only). A submit remap
+onto a fork-editor pre-submit key (tab/backspace/Ctrl+A/E/U/K/W/Y/C/D/
+Home/End/…) is parser-rejected (it could never fire). A leader sequence
+never clears the direct submit keys — `submit: ['ctrl+z', '<leader>s']`
+keeps both triggers; only a truly leader-only override removes Enter.
+The canonical identity lowercases single-character bases too (`ctrl+A`
+≡ `ctrl+a` — one key, conflict-detected), and all policy checks run
+AFTER canonicalization (`SPACE`/`Space` are printable and rejected).
+The read model is ONE projection: `keysFor`/`keyHint`/
+`editorSubmitKeysFor`/`snapshot` all render the same visible rules (a
+working submit remap never leaves the replaced Enter advertised), and a
+CONDITIONAL top claim never permanently hides its context fallback.
+
+Final gates: 2482 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The final
 convergence review round was accepted with no findings.
