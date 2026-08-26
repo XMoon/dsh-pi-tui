@@ -1650,11 +1650,12 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.clearRegistryError(ref.slot, ref.id, ref.owner)
   }
 
-  /** The identity ({id, owner}) of one external-registry contribution,
-   * resolved by (slot, id). The theme registry additionally matches the
-   * SELECTABLE name AND normalizes it to the contribution id (the runner
-   * addresses themes by name, health records them by id — resolving only
-   * the owner would still miss the record). */
+  /** The identity ({id, owner}) of one external-registry contribution.
+   * Non-theme slots resolve by the contribution ID; the THEME slot
+   * resolves by the SELECTABLE NAME ONLY (the unified theme protocol —
+   * a mixed name/id lookup is inherently ambiguous because one theme's
+   * name may equal another's id; see ThemeRegistry.identityOf). The
+   * resolved id is the contribution id health records key by. */
   private registryIdentity(slot: string, idOrName: string): { id: string; owner: string } | undefined {
     switch (slot) {
       case 'command': {
