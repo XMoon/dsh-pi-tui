@@ -119,10 +119,8 @@ test('the custom layout renders the screenshot-like acceptance fixture', async (
     }],
   })
   app.setFocusMode(true)
-  // The runner repaints the footer on the status refresh that follows a
-  // focus toggle; the test mirrors that (the app's setFocusMode only
-  // updates the store, it never paints).
-  app.setStatus({})
+  // The focus projection's store notify re-renders the footer (the
+  // unified render path) — no status refresh is needed.
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   // The plan's screenshot-like line: model │ cwd │ context │ cache │

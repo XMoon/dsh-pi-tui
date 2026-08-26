@@ -125,6 +125,69 @@ test('a TERM-resistant child is HARD-killed after the grace period (no detached 
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('repeated TERM-resistant children are each hard-killed (the termination ledger cleans up between cycles)', async () => {
+  // The round-2 review catch: the terminating set never removed closed
+  // children. Behaviourally: a SECOND TERM-resistant child must still be
+  // escalated and killed after the first one completed its cycle — the
+  // ledger entry of the first child must not block or leak into the next.
+  const dir = mkdtempSync(join(tmpdir(), 'footer-kill-loop-'))
+  const marker = join(dir, 'child.pid')
+  let pid = -1
+  const runCycle = async (): Promise<void> => {
+    const rows = await new Promise<string[] | undefined>((resolve) => {
+      const runner = new FooterCommandRunner({
+        config: {
+          ...CONFIG,
+          timeoutMs: 150,
+          command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done`,
+        },
+        snapshot: () => emptyStatusSnapshot(),
+        width: () => 100,
+        height: () => 30,
+        onOutput: (out) => {
+          runner.dispose()
+          resolve(out)
+        },
+        signal: new AbortController().signal,
+      })
+      runner.requestRefresh()
+    })
+    assert.equal(rows, undefined, 'each cycle must fall back on timeout')
+    // Read the new child's pid (bounded poll).
+    pid = -1
+    const readDeadline = Date.now() + 3000
+    while (pid < 0 && Date.now() < readDeadline) {
+      try {
+        pid = Number.parseInt(readFileSync(marker, 'utf8').trim(), 10)
+      } catch {
+        // Not written yet.
+      }
+      if (pid < 0) await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(pid > 0, 'each cycle child must write its pid')
+  }
+  await runCycle()
+  const firstPid = pid
+  await runCycle()
+  // Both children must actually be dead (a fresh kill(pid, 0) proves the
+  // second cycle's escalation ran; the first pid proves the ledger never
+  // suppressed a later kill).
+  const deadDeadline = Date.now() + KILL_GRACE_MS + 3000
+  for (const victim of [firstPid, pid]) {
+    let dead = false
+    while (!dead && Date.now() < deadDeadline) {
+      try {
+        process.kill(victim, 0)
+        await new Promise(resolve => setTimeout(resolve, 20))
+      } catch {
+        dead = true
+      }
+    }
+    assert.ok(dead, `cycle child pid ${victim} must be hard-killed (no orphan, no ledger leak)`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('huge stdout is capped at 16 KiB', async () => {
   const rows = await runOnce(CONFIG, 'process.stdout.write("x".repeat(20000) + "\\n")')
   assert.ok(rows !== undefined)

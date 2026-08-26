@@ -250,7 +250,13 @@ export class FooterCommandRunner {
         signalGroup('SIGKILL')
       }
     }, KILL_GRACE_MS)
-    child.once('close', () => clearTimeout(escalation))
+    child.once('close', () => {
+      clearTimeout(escalation)
+      // The child is gone: drop it from the termination ledger — the
+      // set must not retain every terminated ChildProcess (streams +
+      // listeners) for the runner's lifetime.
+      this.terminating.delete(child)
+    })
   }
 
   /** Dispose: terminate the child, drop the coalescing timer. */

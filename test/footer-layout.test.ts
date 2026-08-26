@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isFooterLayout, parseFooterLayout, resolveCommandFallbackLayout } from '../src/footer/layout.ts'
+import { isFooterLayout, parseFooterLayout, resolveCommandFallbackLayout, stripControlChars } from '../src/footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 
 test('the builtin default layout parses as valid', () => {
@@ -118,4 +118,23 @@ test('resolveCommandFallbackLayout: the persisted custom layout is the command m
   assert.equal(resolveCommandFallbackLayout(undefined), undefined)
   // A layout with a control-char id is invalid → undefined.
   assert.equal(resolveCommandFallbackLayout({ footerLayout: { schemaVersion: 1, rows: [{ left: [{ id: '\u001b[2J' }] }] } }), undefined)
+})
+
+test('stripControlChars removes EVERY control character, not just the first (the review round-2 catch)', () => {
+  // A non-global replace would remove only the leading ESC and leave the
+  // BEL (and any later ESC/CSI) alive in the configurator label.
+  const stripped = stripControlChars('a\u001b]52;c;x\u0007b\u001b[2Jc\u0000d\u009be')
+  assert.equal(stripped, 'a]52;c;xb[2Jcde', `every control must go: ${JSON.stringify(stripped)}`)
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(stripped), 'no control character may survive')
+  // Plain text is untouched.
+  assert.equal(stripControlChars('ext:owner/id'), 'ext:owner/id')
+  // The parser's own rejections (the non-global .test path) stay correct
+  // for EVERY control position — a later-position control must still
+  // fail the parse (the global regex used for stripping is separate from
+  // the validation regex for exactly this reason).
+  const parsed = parseFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'ok\u0007id' }] }],
+  })
+  assert.ok(!isFooterLayout(parsed), 'a control AFTER the first char must still be rejected')
 })

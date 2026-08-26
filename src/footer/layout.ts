@@ -40,12 +40,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * configurator's unknown-id label fallback, which renders a raw id). */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/
 
-/** Strip terminal control characters from display text (the configurator's
- * unknown-item label fallback: a raw id must never carry ESC/OSC/C0 into
- * the panel — the parser already rejects such ids, this is defense in
- * depth for any other id source). */
+/** The GLOBAL form, used only for stripping (a non-global replace removes
+ * just the FIRST control character — the `.test()` callers above must
+ * keep the non-global regex: a global one is stateful across calls). */
+const CONTROL_CHARS_GLOBAL = /[\u0000-\u001f\u007f-\u009f]/g
+
+/** Strip EVERY terminal control character from display text (the
+ * configurator's unknown-item label fallback: a raw id must never carry
+ * ESC/OSC/C0 into the panel — the parser already rejects such ids, this
+ * is defense in depth for any other id source). */
 export function stripControlChars(text: string): string {
-  return text.replace(CONTROL_CHARS, '')
+  return text.replace(CONTROL_CHARS_GLOBAL, '')
 }
 
 /** Narrow a parse result onto the error arm (the ref type has no kind). */

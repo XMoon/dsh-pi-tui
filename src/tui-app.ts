@@ -1596,6 +1596,10 @@ export class TuiApp {
   /** The unified status projection store (M0): the footer's single input.
    * The runner's store when wired; an internal projection otherwise. */
   private readonly statusStore: StatusStore
+  /** The store-notify render subscription (M0/M5): the unified footer
+   * render path. Disposed with the surface so a long-lived EXTERNAL store
+   * never retains a dead TuiApp's listener. */
+  private statusStoreUnsubscribe: (() => void) | undefined
   /** The builtin footer item registry (M1): the composer's catalog. */
   private readonly footerItemRegistry: FooterItemRegistry
   /** The footer composer (M1): renders the active layout against the
@@ -2102,7 +2106,9 @@ export class TuiApp {
     // WITHOUT a paired render, so run-state went stale until an unrelated
     // event repainted); the store's no-churn discipline keeps this
     // event-driven (a same-value refresh never notifies, never renders).
-    this.statusStore.subscribe(() => this.renderFooter())
+    // The disposer is kept so dispose() drops the listener (a long-lived
+    // externally supplied store must not retain the dead surface).
+    this.statusStoreUnsubscribe = this.statusStore.subscribe(() => this.renderFooter())
     this.footerItemRegistry = createBuiltinFooterRegistry()
     // M4: the extension host's configurable footer items join the catalog
     // as a live external source (resolved on demand — replace()/dispose()
@@ -2490,6 +2496,12 @@ export class TuiApp {
     } catch {
       // Best effort: the global keybindings may already be torn down.
     }
+    // The store listener dies with the surface FIRST: the approval/flow
+    // settlements below project into the store, and the notify must not
+    // render a dead footer (a long-lived external store also stops
+    // retaining this instance here).
+    this.statusStoreUnsubscribe?.()
+    this.statusStoreUnsubscribe = undefined
     // Settle every pending approval BEFORE stop(): settling hides overlay
     // handles (hideCursor), and stop() ends with showCursor — the reverse
     // order would leave the user's cursor hidden after exit. Iterate a COPY:
@@ -5208,9 +5220,9 @@ export class TuiApp {
   /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
   setPlanMode(active: boolean): void {
     this.planMode = active
+    // The collaboration projection's store notify re-renders the footer.
     this.projectStatus({ collaboration: { plan: { effective: active } } })
     this.renderHeader()
-    this.renderFooter()
     const seat = this.seatEditor()
     seat.borderColor = active ? color.warning : this.editorBorder
     seat.invalidate()
@@ -8585,7 +8597,9 @@ export class TuiApp {
       if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
       this.projectStatus(patch)
     }
-    this.renderFooter()
+    // No explicit renderFooter here: the store notify IS the render path
+    // (a changed patch re-renders; a content-equal patch could not change
+    // the composer's output).
     this.renderDock()
     this.renderGoalLine()
     this.syncExtensionState()
