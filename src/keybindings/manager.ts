@@ -227,32 +227,27 @@ export class HostKeybindingManager {
    * only consumer. */
   editorSubmitKeysFor(): KeyId[] {
     if (this.isDisabled('app.input.submit')) return []
-    // HOST sources only: a PLUGIN submit binding is additive — it never
-    // replaces the builtin Enter (PR review finding).
-    const keys = this.keymap.hostKeysFor('app.input.submit')
-    if (keys.length > 0) return keys
-    // SAFE MODE (PR review finding): the raw user overrides are IGNORED —
-    // a previously remapped/disabled submit must not keep Enter inert
-    // under DSH_PI_TUI_SAFE_KEYBINDINGS=1; the builtin default ('enter')
-    // is restored.
-    // A leader-only submit override counts ONLY when the sequence is
-    // EFFECTIVE (not raw leaderBindings): if the leader was shadowed by a
-    // prefix collision or the completing key was ambiguous (both
-    // disabled), the sequence cannot fire — fail-soft back to the
-    // builtin Enter (PR review finding: a dead leader-only submit must
-    // not disable Enter entirely).
-    const hasSubmitOverride = !this.safeMode && (
-      this.userBindings['app.input.submit'] !== undefined
-      || this.effectiveLeaderBindings.some(binding => binding.action === 'app.input.submit'))
-    if (hasSubmitOverride) return []
-    // The builtin submit rule is hostResolved: false (the host ladder
-    // never consumes it), so keysFor() is EMPTY by default — fall back to
-    // the definition's default ('enter'). A user remap compiles as a
-    // `user` rule and is returned above; `false` was handled above.
-    const definition = APP_KEYBINDINGS['app.input.submit']
-    if (definition !== undefined && definition.defaultKeys.length > 0) {
-      return [...definition.defaultKeys]
-    }
+    // A live leader-ONLY submit override (an effective sequence) removes
+    // Enter: the leader is the only trigger (checked BEFORE the editor-key
+    // fallback — the builtin Enter rule is always in the effective set).
+    if (this.effectiveLeaderBindings.some(binding => binding.action === 'app.input.submit')) return []
+    // The sync derives ONLY from the effective EDITOR-OWNED rules
+    // (convergence §3 finding): submit's rules (builtin Enter + user
+    // overrides) compile with owner=editor and participate in the unified
+    // model, so a conflicted/shadowed override already vanished from the
+    // effective set — no raw-config reading here. A user remap that
+    // CONFLICTS away (e.g. submit=ctrl+x vs history=ctrl+x) therefore
+    // fails soft back to the builtin Enter; only an explicit `false`
+    // disables submission entirely.
+    const editorKeys = this.keymap.editorKeysFor('app.input.submit')
+    if (editorKeys.length > 0) return editorKeys
+    // NO definition-default fallback here (convergence §4.5 finding): the
+    // builtin Enter is ALREADY compiled as an effective editor-owned rule,
+    // so an empty editorKeysFor means the builtin was SHADOWED or
+    // CONFLICTED away — resurrecting it would both violate the read model
+    // and re-introduce a runtime/UI mismatch. (Safe mode restores the
+    // builtin because the keymap compiles it when the user overrides are
+    // ignored; an explicit `false` was handled at the top.)
     return []
   }
 
@@ -350,11 +345,10 @@ export class HostKeybindingManager {
    * completions check this before dispatching — a leader sequence obeys
    * the action's context predicate, convergence §4.7). */
   canActivate(action: AppKeybindingId, context: KeybindingContext): boolean {
-    // Editor-owned submit: the action is active whenever it has an
-    // EFFECTIVE editor trigger (the fork editor's tui.input.submit or a
-    // live leader sequence) — the host keymap has no submit rule to
-    // evaluate (hostResolved:false). A leader submit completion must
-    // activate iff submit itself is available (convergence §4.7).
+    // Editor-owned submit: active whenever it has an EFFECTIVE editor
+    // trigger (the fork editor's tui.input.submit or a live leader
+    // sequence) — a leader submit completion must activate iff submit
+    // itself is available (convergence §4.7).
     if (action === 'app.input.submit') {
       if (this.isDisabled(action)) return false
       return this.editorSubmitKeysFor().length > 0

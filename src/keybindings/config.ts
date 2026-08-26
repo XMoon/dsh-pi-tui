@@ -78,10 +78,19 @@ export function isPlainPrintableKey(key: KeyId): boolean {
   return key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) <= 126
 }
 
-/** Terminal-unreliable combinations (plan §13 item 5): legacy terminals
- * send Ctrl+J as LF (Enter) and Ctrl+M as CR (Enter), so binding them is
- * a silent no-op on those terminals. Warned, not rejected. */
-const TERMINAL_UNRELIABLE_KEYS = new Set(['ctrl+j', 'ctrl+m'].map(key => canonicalizeKeyId(key as KeyId)))
+/** LEGACY TERMINAL COLLISIONS — REJECTED, never warned (convergence §4.5
+ * finding): on legacy/non-Kitty terminals these keys are INDISTINGUISHABLE
+ * from fixed lifecycle keys, so a binding on them would silently steal the
+ * lifecycle key (or never fire):
+ * - `ctrl+[` is the legacy ESC sequence (0x1b) — binding it would steal
+ *   the interrupt/viewer-close key on legacy terminals;
+ * - `ctrl+j` / `ctrl+m` are LF/CR (Enter) — binding them would steal
+ *   submit/queue on legacy terminals.
+ * A binding that depends on the terminal protocol to be distinguishable
+ * from a lifecycle key is unsupported: rejected with a diagnostic. */
+const LEGACY_COLLISION_KEYS = new Set(
+  ['ctrl+[', 'ctrl+j', 'ctrl+m'].map(key => canonicalizeKeyId(key as KeyId)),
+)
 
 /** The NON-CONFIGURABLE overlay/component default keys (plan §3.3 fixed
  * overlay contracts: search close/next/previous, question/tasks flows).
@@ -229,8 +238,12 @@ export function parseUserKeybindings(
         continue
       }
       const canonicalEntry = canonicalizeKeyId(entry as KeyId)
-      if (TERMINAL_UNRELIABLE_KEYS.has(canonicalEntry)) {
-        diagnostics.push(`keybindings: "${actionId}" binds "${entry}", which legacy terminals report as Enter — the binding may not fire there`)
+      // Legacy terminal collisions are REJECTED (convergence §4.5): a
+      // binding indistinguishable from a lifecycle key on legacy
+      // terminals is unsupported, never a warning.
+      if (LEGACY_COLLISION_KEYS.has(canonicalEntry)) {
+        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — it collides with a lifecycle key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter) — ignored`)
+        continue
       }
       // Fixed overlay-key precedence (review finding): a configurable
       // action bound to a non-configurable overlay's key is eclipsed
