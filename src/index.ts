@@ -2378,7 +2378,10 @@ export function apply(ctx: Context, config: Config): void {
       }
       // The fold settled (resolved OR definitively absent): repaint the
       // status once so a first projection that ran before the probe
-      // settled picks up the sandbox fact (review round 25).
+      // settled picks up the sandbox fact (review round 25). SKIPPED
+      // when the runner is already torn down (the detached task outlives
+      // the surface — a stale refresh would touch disposed state).
+      if (signal.aborted) return
       refreshStatus()
     }
     runDetached('sandbox fold probe', resolveSandboxFold, { diag })

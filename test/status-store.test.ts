@@ -182,3 +182,11 @@ test('a same-value setStatus does not bump the store revision', async () => {
   assert.equal(store.revision(), revision, 'a same-value setStatus must not bump the revision')
   app.stop()
 })
+
+test('deriveRunnerPermission degrades when the permission service throws', async () => {
+  const { deriveRunnerPermission } = await import('../src/status/derive-permission.ts')
+  const agent = { session: { events: [] } }
+  const exploding = { current: () => { throw new Error('boom') } }
+  assert.equal(deriveRunnerPermission(exploding, agent as never), undefined,
+    'a throwing permission service must degrade to the clear signal, never throw')
+})

@@ -309,3 +309,23 @@ test('an emptied footer surface reflows with no stale content', async () => {
   app.setFullscreen(false)
   app.stop()
 })
+
+test('setFooterPreset clears an active custom layout (a preset switch means a builtin layout)', async () => {
+  const { vt, app } = startApp()
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  app.setStatus({ model: 'p/m', cwd: '/ws' })
+  await vt.waitForRender()
+  assert.equal(app.getFooterMode(), 'custom', 'the custom layout must be active first')
+  // Switch back to compact: the custom layout must be CLEARED, so the
+  // builtin compact layout renders (the custom run-state item disappears).
+  app.setFooterPreset('compact')
+  await vt.waitForRender()
+  assert.equal(app.getFooterMode(), 'compact', 'a preset switch must leave custom mode')
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('p/m'), `the builtin compact layout must render:\n${view}`)
+  assert.ok(!view.includes('working'), `the custom run-state item must be gone:\n${view}`)
+  app.stop()
+})

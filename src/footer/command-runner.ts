@@ -163,6 +163,10 @@ export class FooterCommandRunner {
         finish(undefined)
         return
       }
+      // A trailing INCOMPLETE multibyte sequence is DROPPED (the decoder
+      // keeps it buffered without end()); end() would emit a U+FFFD
+      // replacement, which the status surface must never show — the raw
+      // output string below holds only fully-decoded characters.
       const sanitized = sanitizeCommandOutput(output)
       const lines = sanitized.split('\n').map(line => line.replace(/\r$/, '')).filter(line => line.trim() !== '')
       if (lines.length === 0) {
