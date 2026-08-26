@@ -152,6 +152,7 @@ TUI 使用 DSH 提供的模型和设置服务。
 /goal
 /compact
 /footer
+/statusline
 ```
 
 模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。

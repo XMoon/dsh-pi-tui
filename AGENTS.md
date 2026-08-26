@@ -33,6 +33,12 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
 - **No near-synonym command names.** `/session` was renamed to `/status`
   after colliding with `/sessions`; before adding a command, check the
   existing set and the official dsh command set for confusion risk.
+  Approved exception (2026-08): `/statusline` is an EXPLICIT alias of
+  `/footer` — kept for other-agent muscle memory, unambiguous because it
+  resolves to the same configurator, `/status` keeps priority matching,
+  and the completion catalog marks it "(alias of /footer)". The rule
+  still applies to NEW independent commands; the rationale lives in the
+  `/footer` registration comment (src/commands.ts).
 - **Changelog must be updated on every release (hard rule).** Any release
   (a `chore: release vX.Y.Z` bump + `v*` tag) MUST update `CHANGELOG.md`
   in the same commit, following

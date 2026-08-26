@@ -76,7 +76,9 @@
 - **`/footer` — 交互式 Footer 配置器。** 开关条目、在左/右区域间
   移动、Shift+↑/↓ 排序、Tab 切换行、F 循环 formatter,并实时预览由
   真实 Footer 引擎基于当前会话状态合成的效果。`Enter` 保存(持久化),
-  `Esc` 取消且不影响当前生效布局。无会话时也可使用。
+  `Esc` 取消且不影响当前生效布局。无会话时也可使用。`/statusline`
+  是它的别名(为其他 agent 的习惯命名;`/status` 保持优先匹配,
+  别名在补全目录中标记为 "(alias of /footer)")。
 - **插件可以贡献可配置的 Footer 条目。** 新的 `chrome.footer.item`
   槽位(`slot.chrome.footer.item` 能力)让插件注册纯数据 Footer 条目
   (label、segment、默认区域、importance、min-width),用户可像内置

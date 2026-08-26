@@ -1513,9 +1513,22 @@ export function registerTuiCommands(
   // placeholders/unavailable items and the config stays editable). Enter
   // validates + persists + applies; Esc cancels without touching the
   // active layout.
-  commands.register({
+  //
+  // `/statusline` is a deliberate alias (approved): other agents (and
+  // users coming from tools that name this surface "statusline") reach
+  // the SAME configurator through it. The name is a PREFIX-neighbor of
+  // the existing `/status` command — the AGENTS near-synonym rule usually
+  // forbids that, and it stays forbidden for NEW independent commands —
+  // but as an EXPLICIT alias of `/footer` the pairing is unambiguous:
+  // `/status` keeps priority matching (a bare `status` input always
+  // resolves to the session-status command), `/statusline` resolves to
+  // the footer configurator, and the completion catalog shows both with
+  // the alias marked "(alias of /footer)". The alias rides the same
+  // LOCAL/SESSIONLESS ownership sets, so it never steers while busy.
+  registerTuiCommand({
     name: 'footer',
     description: 'Configure the footer layout interactively',
+    aliases: ['statusline'],
     handler: () => {
       const settings = runner.tuiSettings
       const doc = settings?.get()

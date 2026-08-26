@@ -152,6 +152,7 @@ Common entry points:
 /goal
 /compact
 /footer
+/statusline
 ```
 
 Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics.

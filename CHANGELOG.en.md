@@ -93,7 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows with Tab, cycle formatters with F, and watch a live preview
   composed by the real footer engine against the current session state.
   `Enter` saves (persisted), `Esc` cancels without touching the active
-  layout. Usable before any session exists.
+  layout. Usable before any session exists. `/statusline` is its alias
+  (named for other agents' muscle memory; `/status` keeps priority
+  matching, and the alias is marked "(alias of /footer)" in the
+  completion catalog).
 - **Plugins can contribute configurable footer items.** The new
   `chrome.footer.item` slot (`slot.chrome.footer.item` capability) lets a
   plugin register a plain-data footer item (label, segment, default zone,
