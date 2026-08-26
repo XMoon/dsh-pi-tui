@@ -200,6 +200,14 @@ export class WidgetOutlet {
   dispose(): void {
     this.textValue = ''
   }
+
+  /** Test hook: the live compile-cache identities (owner-scoped keys).
+   * The owner-scoped cache invariant is not black-box observable (an
+   * id-only cache still renders correctly — it merely recompiles and
+   * misprunes) — the regression test asserts the KEY SET directly. */
+  compiledIdentitiesForTest(): readonly string[] {
+    return [...this.compiledNodes.keys()]
+  }
 }
 
 /** A safe single-line error message for the health ledger (no stack
