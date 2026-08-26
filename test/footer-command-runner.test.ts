@@ -456,7 +456,10 @@ test('the output cap is a UTF-8 BYTE cap (multibyte output cannot exceed 16 KiB)
 
 test('command rows are width-truncated ANSI-safely before the sink', async () => {
   const { visibleWidth } = await import('@xmoon76/pi-tui')
-  const rows = await runOnce({ ...CONFIG, maxRows: 1 }, 'process.stdout.write("x".repeat(500) + "\\n")')
+  // A generous timeout: the test proves OUTPUT semantics (truncation),
+  // never the timeout behavior — under the packed parallel suite a spawn
+  // can exceed the 300ms production default (the maxRows-test pattern).
+  const rows = await runOnce({ ...CONFIG, maxRows: 1, timeoutMs: 10000 }, 'process.stdout.write("x".repeat(500) + "\\n")')
   assert.ok(rows !== undefined)
   // The runner's width is 100: the row must be truncated to 100 VISIBLE
   // cells (the JS length includes the ANSI resets).
@@ -467,10 +470,11 @@ test('command rows are width-truncated ANSI-safely before the sink', async () =>
 test('a byte-budget slice never emits U+FFFD replacement characters', async () => {
   // A huge width so the width truncation cannot hide the byte-cap issue:
   // 6000 CJK chars = 18000 UTF-8 bytes; the cap cuts mid-stream. The
-  // StringDecoder must never emit a replacement char.
+  // StringDecoder must never emit a replacement char. Generous timeout —
+  // the test proves byte semantics, never the timeout behavior.
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
-      config: { ...CONFIG, command: 'node -e "process.stdout.write(\'\\u4f60\'.repeat(6000) + \'\\n\')"' },
+      config: { ...CONFIG, timeoutMs: 10000, command: 'node -e "process.stdout.write(\'\\u4f60\'.repeat(6000) + \'\\n\')"' },
       snapshot: () => emptyStatusSnapshot(),
       width: () => 20000,
       height: () => 30,
@@ -490,10 +494,11 @@ test('a byte-budget slice never emits U+FFFD replacement characters', async () =
 test('a multibyte sequence split ACROSS stdout chunks never emits U+FFFD and the input budget holds', async () => {
   // The child writes the first byte of a CJK char, pauses, then the rest —
   // two separate stdout chunks. The width is huge so the width truncation
-  // cannot hide the byte-cap behavior.
+  // cannot hide the byte-cap behavior. Generous timeout — byte semantics,
+  // never the timeout behavior.
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
-      config: { ...CONFIG, command: 'node -e "process.stdout.write(Buffer.from([0xe4])); setTimeout(() => { process.stdout.write(Buffer.from([0xbd, 0xa0])); process.stdout.write(\'\\n\') }, 50)"' },
+      config: { ...CONFIG, timeoutMs: 10000, command: 'node -e "process.stdout.write(Buffer.from([0xe4])); setTimeout(() => { process.stdout.write(Buffer.from([0xbd, 0xa0])); process.stdout.write(\'\\n\') }, 50)"' },
       snapshot: () => emptyStatusSnapshot(),
       width: () => 20000,
       height: () => 30,
@@ -540,8 +545,10 @@ test('setConfig invalidates the in-flight child (its result never commits under 
 test('setConfig clears the OLD config\'s committed rows immediately (no stale surface)', async () => {
   const outputs: Array<string[] | undefined> = []
   let notifyCount = 0
+  // Generous timeout: the test proves the synchronous clear, never the
+  // timeout behavior (packed-suite spawn latency can exceed 300ms).
   const runner = new FooterCommandRunner({
-    config: { ...CONFIG, command: 'node -e "process.stdout.write(\'first\\n\')"' },
+    config: { ...CONFIG, timeoutMs: 10000, command: 'node -e "process.stdout.write(\'first\\n\')"' },
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,
@@ -558,7 +565,7 @@ test('setConfig clears the OLD config\'s committed rows immediately (no stale su
   // explicit undefined from setConfig — not a failure, so no notify),
   // before the new config's result lands.
   const before = outputs.length
-  runner.setConfig({ ...CONFIG, command: 'node -e "process.stdout.write(\'second\\n\')"' })
+  runner.setConfig({ ...CONFIG, timeoutMs: 10000, command: 'node -e "process.stdout.write(\'second\\n\')"' })
   assert.equal(outputs[before], undefined, 'the old config rows must clear synchronously on setConfig')
   assert.equal(notifyCount, 0, 'a config change is not a failure (no notify)')
   const deadline2 = Date.now() + 5000
