@@ -250,8 +250,8 @@ span;Host 会剥离任何终端控制序列,插件永远不能直接给终端上
 存在之前就已声明)。条目的配置身份是规范键 `ext:<owner>/<id>`,其中
 owner 是插件的稳定名称——**跨 HMR 稳定**:引用已卸载插件条目的布局
 保留引用,插件重载后自动恢复。npm scoped 插件名(`@scope/name`)合法:
-其 `/` 在键中转义为 `~`(`ext:@scope~name/<id>`);id 本身不得包含
-`/`。旧的 `chrome.footer.status` 槽位不变:
+其 `/` 在键中按 `encodeURIComponent` 百分号编码(`ext:%40scope%2Fname/<id>`);
+id 本身不得包含 `/`。旧的 `chrome.footer.status` 槽位不变:
 其 segment 聚合为单一的 `ext:*` 条目。完整作者指南:
 [docs/extension-api.md](docs/extension-api.md)。
 
