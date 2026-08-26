@@ -98,7 +98,7 @@ import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/ty
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
-import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
+import { color, type ColorPalette } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
 import type { AppKeybindingId } from './keybindings/types.ts'
@@ -114,7 +114,7 @@ import type { TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime } from './task-browser-runtime.ts'
 import type { TaskBrowserHandle } from './tui-app.ts'
 import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
-import { customThemeNames } from './theme.ts'
+import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
@@ -2542,8 +2542,11 @@ export function apply(ctx: Context, config: Config): void {
       // authoritative bridge protocol — keep it in sync with the
       // service's implementations.
       // Theme-unload notification (the selected-plugin-theme fallback):
-      // called with the SELECTABLE name of every theme that unloads.
-      setThemeUnloadedHook(hook: (name: string) => void): void
+      // called with the SOURCE-QUALIFIED selectable value (+ display
+      // name) of every theme that unloads. Returns the GENERATION-LEASED
+      // release (the review's P2: an old runner's cleanup must never
+      // clear a newer generation's hook).
+      setThemeUnloadedHook(hook: (unloaded: { selectableValue: string; name: string }) => void): () => void
       _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined
       _recordRegistryError(ref: { slot: string; id: string; owner: string }, error: unknown): void
       _clearRegistryError(ref: { slot: string; id: string; owner: string }): void
@@ -2580,6 +2583,10 @@ export function apply(ctx: Context, config: Config): void {
       setUnstableSurfaceSeam(surfaceId: string, handle: import('./extension/unstable-types.ts').UnstableSurfaceHandle): void
     }) | undefined
     let extensionHost: SurfaceHost | undefined
+    // The generation-LEASED release of THIS runner's theme-unload hook
+    // (the review's P2): the HMR cleanup releases only its own hook, never
+    // a newer runner generation's.
+    let releaseThemeUnloadedHook: (() => void) | undefined
     // Tool-card presentation bridge: the Web's render intents resolved from
     // the LIVE tool registry as the agent sees it (scoped lookup), so the
     // rendered card matches the definition that actually executed. The scope
@@ -2654,6 +2661,13 @@ export function apply(ctx: Context, config: Config): void {
       // the surface — a stale listener must not resync into a dead app).
       stopPluginKeybindingSync?.()
       stopPluginKeybindingSync = undefined
+      // Release THIS generation's theme-unload hook BEFORE the app dies:
+      // without the generation lease, the old callback (capturing the
+      // disposed app) would stay installed until the next runner installed
+      // its own — and a theme fiber unloading in the window would reach
+      // into the disposed app (the review's P2).
+      releaseThemeUnloadedHook?.()
+      releaseThemeUnloadedHook = undefined
       // Detach the extension service's surface bridge (its capability set
       // and state listeners die with the surface). The surfaceId lease
       // makes a stale detach a no-op (P1).
@@ -4089,8 +4103,13 @@ export function apply(ctx: Context, config: Config): void {
       // currently applied unloads (HMR), the host must restore the
       // builtin dark palette — the registry alone only removes the
       // record and repaints, leaving the dead plugin's palette on screen.
-      extensionService.setThemeUnloadedHook((name) => {
-        if (app.activePluginTheme() === name) {
+      // The hook is keyed on the SOURCE-QUALIFIED selectable value (the
+      // same identity applyPluginPalette records — the review's P2: a
+      // bare name shared the file namespace and could collide). The
+      // GENERATION-LEASED release is stored so THIS runner's HMR cleanup
+      // releases only its own hook (never a newer generation's).
+      releaseThemeUnloadedHook = extensionService.setThemeUnloadedHook(({ selectableValue }) => {
+        if (app.activePluginTheme() === selectableValue) {
           app.clearActivePluginTheme()
           app.applyTheme('dark')
           app.trackTerminalTheme(false)
@@ -4313,14 +4332,20 @@ export function apply(ctx: Context, config: Config): void {
       // Phase 4: the advanced host-state setTheme for a NON-built-in name
       // (a registered plugin theme). The runner resolves the palette
       // through the theme registry; unknown names are a no-op; a throwing
-      // palette is recorded in the theme health slot.
+      // palette is recorded in the theme health slot. The path is
+      // NAME-addressed (the documented Phase-4 contract), so the runner
+      // maps the NAME to its SOURCE-QUALIFIED selectable value FIRST
+      // (the review's P2: the value is what gets applied, persisted and
+      // health-tracked — a bare name can never be a selection identity).
       onAdvancedSetTheme: (name) => {
-        const palette = extensionService?.themes.paletteFor(name)
+        const selectable = extensionService?.themes.selectableValueForName(name)
+        if (selectable === undefined) return
+        const palette = extensionService?.themes.paletteForSelectable(selectable)
         if (palette === undefined) return
-        // NAME-addressed (the unified theme protocol — see identityOf).
-        const themeRef = extensionService?._recordRegistryHealthRef('theme', name)
+        // VALUE-addressed (the unified theme protocol).
+        const themeRef = extensionService?._recordRegistryHealthRef('theme', selectable)
         try {
-          app.applyPluginPalette(name, palette)
+          app.applyPluginPalette(selectable, palette)
           if (themeRef !== undefined) extensionService?._clearRegistryError(themeRef)
         } catch (error) {
           if (themeRef !== undefined) extensionService?._recordRegistryError(themeRef, error)
@@ -5024,28 +5049,34 @@ export function apply(ctx: Context, config: Config): void {
     } else if (storedTheme === 'dark' || storedTheme === 'light') {
       app.applyTheme(storedTheme)
       app.trackTerminalTheme(false)
-    } else if (storedTheme?.startsWith('custom:')) {
-      const name = storedTheme.slice('custom:'.length)
-      // M5: a plugin-registered theme resolves through the ThemeRegistry
-      // FIRST; custom files are the fallback. A selected plugin theme whose
-      // owner unloaded resolves undefined and falls back to the built-in
-      // palette (the M5 gate: selected theme unload → built-in fallback).
-      const pluginPalette = extensionService?.themes.paletteFor(name)
-      const customPalette = loadCustomTheme(name)
-      const palette = pluginPalette ?? customPalette
-      // NAME-addressed (the unified theme protocol).
-      const themeRef = extensionService?._recordRegistryHealthRef('theme', name)
-      if (palette !== undefined) {
+    } else if (storedTheme !== undefined && storedTheme !== '') {
+      // Any non-builtin persisted theme. SOURCE-QUALIFIED resolution (the
+      // review's P2): the persisted value is the identity — `file:<name>`
+      // resolves the file, `plugin:<owner>/<id>` resolves the registry,
+      // and the legacy `custom:<name>` / bare-name forms normalize to
+      // `file:<name>` (existing documents keep working). A selection
+      // whose source is gone (an unloaded plugin / deleted file) resolves
+      // undefined and falls back to the built-in dark palette — never
+      // silently to a same-named file (the M5 gate: selected theme unload
+      // → built-in fallback).
+      const qualified = normalizePersistedTheme(storedTheme)
+      const selection = resolveThemeSelection(qualified, extensionService?.themes)
+      // VALUE-addressed (the unified theme protocol).
+      const themeRef = extensionService?._recordRegistryHealthRef('theme', qualified)
+      if (selection !== undefined) {
         try {
-          if (pluginPalette !== undefined) app.applyPluginPalette(name, pluginPalette)
+          // A PLUGIN palette records the selection (the unload fallback
+          // restores builtin dark when it disappears); a custom FILE
+          // clears it.
+          if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette)
           else {
             app.clearActivePluginTheme()
-            app.applyPalette(palette)
+            app.applyPalette(selection.palette)
           }
-          if (pluginPalette !== undefined && themeRef !== undefined) extensionService?._clearRegistryError(themeRef)
+          if (selection.kind === 'plugin' && themeRef !== undefined) extensionService?._clearRegistryError(themeRef)
         } catch (error) {
           if (themeRef !== undefined) extensionService?._recordRegistryError(themeRef, error)
-          app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+          app.notify(`theme ${storedTheme} failed: ${safeErrorMessage(error)}`, 'error')
         }
       } else {
         // Neither a plugin theme nor a custom file: the selection is gone

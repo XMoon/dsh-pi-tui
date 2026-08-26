@@ -43,6 +43,8 @@ import { consumeDraftImages, pruneUnreferencedDrafts } from './image/submit.ts'
 import { readImageFile } from './image/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
+import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf, themeDisplayToValue } from './theme-menu.ts'
+import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.ts'
 import { suggestPathArgument } from './mentions.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
@@ -1189,13 +1191,17 @@ export function registerTuiCommands(
       const liveAgent = runner.liveAgent
       const tuiSettings = runner.tuiSettings
       const theme = tuiSettings?.get().theme ?? 'auto'
-      const themeValue = theme.startsWith('custom:') ? theme.slice('custom:'.length) : theme
+      // The DISPLAYED current theme: the friendly name (the persisted
+      // value may still be the legacy `custom:<name>` / bare-name form —
+      // the display derives from it, the /settings handler reads and
+      // writes SOURCE-QUALIFIED values).
+      const themeDisplayName = themeDisplayNameOf(theme, runner.extensions?.themes)
       // The autodetect guard reads THIS synchronous "latest choice", never
       // the persisted doc: the settings write is asynchronous, so at the
       // moment an OSC 11 reply lands the doc may still hold the PREVIOUS
       // theme — a doc-based guard would wrongly refuse a just-selected
       // `auto` (and wrongly apply over a just-selected explicit theme).
-      let lastThemeChoice = themeValue
+      let lastThemeChoice = theme
       // The permission-presets service owns the composed preset table and the
       // persisted default for new sessions (settings namespace 'permission').
       // Both panel rows degrade gracefully when the service is absent.
@@ -1225,10 +1231,25 @@ export function registerTuiCommands(
             id: 'theme',
             label: 'Theme',
             description: 'Palette: auto follows the terminal; custom from ~/.dsh-pi-tui/themes',
-            currentValue: themeValue,
             // M5: plugin-registered themes (ThemeRegistry) join the
-            // picker's built-in auto/dark/light + custom list.
-            values: ['auto', 'dark', 'light', ...customThemeNames(), ...(runner.extensions?.themes.names() ?? [])],
+            // picker's built-in auto/dark/light + custom list. The theme
+            // row DISPLAYS the friendly name; the picker is an in-place
+            // submenu (the fork's SettingItem.submenu slot — the /model
+            // pattern) whose rows carry BOTH the display name and the
+            // SOURCE-QUALIFIED selectable value (`auto|dark|light`,
+            // `file:<name>`, `plugin:<owner>/<id>` — the review's P2: a
+            // plugin theme must never share the value namespace of a
+            // custom FILE of the same name, so a persisted value's meaning
+            // never depends on which source exists; a gone plugin's
+            // persisted value degrades deterministically and never
+            // silently becomes the same-named file). The old
+            // bare-name/custom:<name> persisted forms display their
+            // friendly name.
+            currentValue: themeDisplayName,
+            submenu: (currentValue, done) => new ThemeSubmenu(themeDisplayName, runner.extensions?.themes, (picked) => {
+              if (picked !== undefined) done(picked)
+              else done()
+            }),
           },
           {
             id: 'icon-style',
@@ -1352,10 +1373,15 @@ export function registerTuiCommands(
               detach('permission default write', () => runner.config.permissions.setDefaultPreset(value) as Promise<unknown>, { notify: true })
             }
           } else if (id === 'theme') {
-            if (value === 'auto' || value === 'dark' || value === 'light' || customThemeNames().includes(value)
-              || runner.extensions?.themes.byName(value) !== undefined) {
-              lastThemeChoice = value
-              if (value === 'auto') {
+            // The submenu fires onChange with the DISPLAY name; map it back
+            // to the SOURCE-QUALIFIED selectable value (the identity that
+            // is applied and persisted). An unmapped display (a row that
+            // vanished between the picker and the confirm) is ignored.
+            const displayToValue = themeDisplayToValue(runner.extensions?.themes)
+            const qualified = displayToValue.get(value)
+            if (qualified !== undefined) {
+              lastThemeChoice = qualified
+              if (qualified === 'auto') {
                 // The settled detection applies only while the preference is
                 // STILL auto — a late result must never override a theme the
                 // user picked while the query was in flight (rapid cycling).
@@ -1367,31 +1393,30 @@ export function registerTuiCommands(
                   shouldApply: () => lastThemeChoice === 'auto',
                 }))
                 app.trackTerminalTheme(true)
-              } else if (value === 'dark' || value === 'light') {
+              } else if (qualified === 'dark' || qualified === 'light') {
                 app.clearActivePluginTheme()
-                app.applyTheme(value)
+                app.applyTheme(qualified)
                 app.trackTerminalTheme(false)
               } else {
                 // M5: a plugin-registered theme applies through the host's
                 // applyPalette (the ONLY application path — the registry
                 // never applies itself). Custom files resolve as before.
-                const themes = runner.extensions?.themes
-                const pluginPalette = themes?.paletteFor(value)
-                const palette = pluginPalette ?? loadCustomTheme(value)
-                // NAME-addressed (the unified theme protocol — the health
-                // bridge resolves the selectable name only; converting to
-                // the contribution id here re-introduced the name/id
-                // ambiguity the review flagged).
-                const themeRef = captureExtensionHealthRef?.('theme', value)
-                if (palette !== undefined) {
+                // SOURCE-QUALIFIED resolution (the review's P2): a `file:`
+                // value resolves the FILE, a `plugin:` value resolves the
+                // registry — a bare name can never be a selection identity.
+                const selection = resolveThemeSelection(qualified, runner.extensions?.themes)
+                // VALUE-addressed (the unified theme protocol — the health
+                // bridge resolves the selectable value only).
+                const themeRef = captureExtensionHealthRef?.('theme', qualified)
+                if (selection !== undefined) {
                   try {
                     // A PLUGIN palette records the selection (the unload
                     // fallback restores builtin dark when it disappears);
                     // a custom FILE clears it.
-                    if (pluginPalette !== undefined) app.applyPluginPalette(value, pluginPalette)
+                    if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette)
                     else {
                       app.clearActivePluginTheme()
-                      app.applyPalette(palette)
+                      app.applyPalette(selection.palette)
                     }
                     if (themeRef !== undefined) clearExtensionError?.(themeRef)
                     app.trackTerminalTheme(false)
@@ -1407,10 +1432,11 @@ export function registerTuiCommands(
                 }
               }
               // Spread the current doc: a replace is wholesale, so the
-              // other preference keys must ride along.
+              // other preference keys must ride along. The persisted value
+              // IS the source-qualified identity.
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings theme write', () => settings.replace({ ...settings.get(), theme: value === 'auto' || value === 'dark' || value === 'light' ? value : `custom:${value}` }) as Promise<unknown>, { notify: true })
+                detach('settings theme write', () => settings.replace({ ...settings.get(), theme: qualified }) as Promise<unknown>, { notify: true })
               }
             }
           } else if (id.startsWith('ext-setting:')) {
@@ -2166,35 +2192,42 @@ export function registerTuiCommands(
           app.clearActivePluginTheme()
           app.applyTheme(reloadTheme)
           app.trackTerminalTheme(false)
-        } else if (reloadTheme.startsWith('custom:')) {
-          const name = reloadTheme.slice('custom:'.length)
+        } else if (reloadTheme !== 'auto') {
+          // Any non-builtin persisted theme: SOURCE-QUALIFIED resolution
+          // (the review's P2). The persisted value is the identity —
+          // `file:<name>` resolves the file, `plugin:<owner>/<id>`
+          // resolves the registry, and the legacy `custom:<name>` /
+          // bare-name forms normalize to `file:<name>` (existing
+          // documents keep working). A selection whose source is gone
+          // (an unloaded plugin, a deleted file) falls back to the
+          // builtin dark palette.
+          const qualified = normalizePersistedTheme(reloadTheme)
           const themes = runner.extensions?.themes
-          const pluginPalette = themes?.paletteFor(name)
-          const customPalette = loadCustomTheme(name)
-          const palette = pluginPalette ?? customPalette
-          // NAME-addressed (the unified theme protocol).
-          const themeRef = captureExtensionHealthRef?.('theme', name)
-          if (palette !== undefined) {
+          const selection = resolveThemeSelection(qualified, themes)
+          // VALUE-addressed (the unified theme protocol).
+          const themeRef = captureExtensionHealthRef?.('theme', qualified)
+          if (selection !== undefined) {
             try {
               // A PLUGIN palette records the selection (the unload
               // fallback restores builtin dark when it disappears); a
               // custom FILE clears it.
-              if (pluginPalette !== undefined) app.applyPluginPalette(name, pluginPalette)
+              if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette)
               else {
                 app.clearActivePluginTheme()
-                app.applyPalette(palette)
+                app.applyPalette(selection.palette)
               }
               if (themeRef !== undefined) clearExtensionError?.(themeRef)
             } catch (error) {
               if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
-              else app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+              else app.notify(`theme ${reloadTheme} failed: ${safeErrorMessage(error)}`, 'error')
             }
           } else {
-            // A missing custom selection is a host settings problem, not a
-            // plugin contribution failure. Do not create a theme health row.
-            // The plugin selection is cleared (same rationale as startup).
+            // A missing selection is a host settings problem, not a
+            // plugin contribution failure. Do not create a theme health
+            // row. The plugin selection is cleared (same rationale as
+            // startup).
             app.clearActivePluginTheme()
-            app.notify(`theme ${name} not found`, 'error')
+            app.notify(`theme ${reloadTheme} not found`, 'error')
           }
           app.trackTerminalTheme(false)
         }

@@ -189,8 +189,14 @@ function stubRunner(options: {
       ?? ((slot, id) => {
         // Real-service semantics: only a REGISTERED plugin theme resolves
         // (a custom-file name must not produce a health ref).
-        const themes = options.extensions?.themes as { paletteFor?: (name: string) => unknown } | undefined
-        return themes?.paletteFor?.(id) !== undefined ? { slot, id, owner: 'test-owner' } : undefined
+        if (slot === 'theme') {
+          const themes = options.extensions?.themes as { paletteForSelectable?: (value: string) => unknown } | undefined
+          if (themes?.paletteForSelectable?.(id) === undefined) return undefined
+          // Real-service semantics: the ref carries the CONTRIBUTION id
+          // (the value `plugin:<owner>/<id>` maps to `<id>`).
+          return { slot, id: id.startsWith('plugin:') ? id.slice(id.lastIndexOf('/') + 1) : id, owner: 'test-owner' }
+        }
+        return { slot, id, owner: 'test-owner' }
       }),
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,
@@ -247,8 +253,14 @@ function setup(options: {
       ?? ((slot, id) => {
         // Real-service semantics: only a REGISTERED plugin theme resolves
         // (a custom-file name must not produce a health ref).
-        const themes = options.extensions?.themes as { paletteFor?: (name: string) => unknown } | undefined
-        return themes?.paletteFor?.(id) !== undefined ? { slot, id, owner: 'test-owner' } : undefined
+        if (slot === 'theme') {
+          const themes = options.extensions?.themes as { paletteForSelectable?: (value: string) => unknown } | undefined
+          if (themes?.paletteForSelectable?.(id) === undefined) return undefined
+          // Real-service semantics: the ref carries the CONTRIBUTION id
+          // (the value `plugin:<owner>/<id>` maps to `<id>`).
+          return { slot, id: id.startsWith('plugin:') ? id.slice(id.lastIndexOf('/') + 1) : id, owner: 'test-owner' }
+        }
+        return { slot, id, owner: 'test-owner' }
       }),
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,
@@ -489,8 +501,8 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
   }
 }
 
-function themeExtensions(paletteFor: (name: string) => typeof darkColors | undefined): NonNullable<TuiCommandRunner['extensions']> {
-  return { themes: { paletteFor } } as unknown as NonNullable<TuiCommandRunner['extensions']>
+function themeExtensions(paletteForSelectable: (value: string) => typeof darkColors | undefined): NonNullable<TuiCommandRunner['extensions']> {
+  return { themes: { paletteForSelectable } } as unknown as NonNullable<TuiCommandRunner['extensions']>
 }
 
 test('/reload theme autodetect rechecks the latest persisted choice before applying', async () => {
@@ -561,21 +573,25 @@ test('/reload custom file theme failure does not record plugin health', async ()
 })
 
 test('/reload plugin theme failure records and later success clears its health', async () => {
-  const name = `reload-plugin-${randomUUID()}`
+  const id = `reload-plugin-${randomUUID()}`
+  // The persisted value is the SOURCE-QUALIFIED identity
+  // `plugin:<owner>/<id>` (the review's P2); the health ref carries the
+  // CONTRIBUTION id (the part after the last slash).
+  const sourceQualified = `plugin:test-owner/${id}`
   const recorded: string[] = []
   const cleared: string[] = []
   const t = setup({
-    tuiSettings: reloadSettings(`custom:${name}`),
-    extensions: themeExtensions(candidate => candidate === name ? darkColors : undefined),
+    tuiSettings: reloadSettings(sourceQualified),
+    extensions: themeExtensions(value => value === sourceQualified ? darkColors : undefined),
     recordExtensionError: (ref) => recorded.push(ref.id),
     clearExtensionError: (ref) => cleared.push(ref.id),
   })
   t.app.applyPalette = () => { throw new Error('plugin palette failed') }
   await t.runCommand('reload')
-  assert.deepEqual(recorded, [name], 'plugin palette failure must record its contribution')
+  assert.deepEqual(recorded, [id], 'plugin palette failure must record its contribution')
   t.app.applyPalette = () => {}
   await t.runCommand('reload')
-  assert.deepEqual(cleared, [name], 'a later plugin palette success must clear its contribution')
+  assert.deepEqual(cleared, [id], 'a later plugin palette success must clear its contribution')
   t.app.stop()
 })
 

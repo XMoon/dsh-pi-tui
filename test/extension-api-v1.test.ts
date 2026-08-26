@@ -198,9 +198,11 @@ test('the runner health bridge is a CAPTURED REF: (slot, id) at invocation start
       svc.registerTheme({ id: 'health-theme', name: 'Health Theme', palette: {} })
     } })
     await themeFiber
-    // Capture at invocation start (NAME-addressed, the unified theme
-    // protocol); the settlement reports against the captured ref.
-    const ref = service._recordRegistryHealthRef('theme', 'Health Theme')
+    // Capture at invocation start (VALUE-addressed, the unified theme
+    // protocol — the source-qualified selectable value); the settlement
+    // reports against the captured ref.
+    const selectable = 'plugin:health-owner/health-theme'
+    const ref = service._recordRegistryHealthRef('theme', selectable)
     assert.ok(ref !== undefined, 'the capture must resolve the live contribution')
     assert.equal(ref.id, 'health-theme', 'the ref must carry the normalized contribution id')
     assert.ok(ref.owner.endsWith(':health-owner'), `the ref must carry the invoking owner: ${ref.owner}`)
@@ -214,25 +216,29 @@ test('the runner health bridge is a CAPTURED REF: (slot, id) at invocation start
     service._clearRegistryError(ref)
     const after = service._ledger().healthSnapshot().find(entry => entry.id === 'health-theme')
     assert.equal(after?.state, 'active', 'the ref clear must recover the record')
-    // An UNKNOWN id yields no ref: the caller skips health reporting —
-    // a ghost error must not mint a record.
+    // An UNKNOWN value yields no ref: the caller skips health reporting —
+    // a ghost error must not mint a record. A BARE NAME (the old
+    // protocol) also never resolves — a name is a label, not an identity
+    // (the review's P2).
     assert.equal(service._recordRegistryHealthRef('theme', 'No Such Theme'), undefined)
+    assert.equal(service._recordRegistryHealthRef('theme', 'Health Theme'), undefined,
+      'a bare display name must never resolve a health ref')
     assert.equal(service._ledger().healthSnapshot().length, 1, 'a ghost error must not mint a health record')
-    // The name/id cross-resolution (the review's P2): another theme whose
-    // CONTRIBUTION ID equals this theme's SELECTABLE name must not shadow
-    // it — the name-addressed protocol resolves the NAME only.
+    // The value/id cross-resolution (the review's P2): another theme whose
+    // CONTRIBUTION ID equals this theme's SELECTABLE value string must not
+    // shadow it — the value-addressed protocol resolves the VALUE only.
     const secondFiber = ctx.plugin({ name: 'id-clash-owner', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): unknown }
-      svc.registerTheme({ id: 'Health Theme', name: 'other-name', palette: {} })
+      svc.registerTheme({ id: 'plugin:health-owner/health-theme', name: 'other-name', palette: {} })
     } })
     await secondFiber
-    const clashRef = service._recordRegistryHealthRef('theme', 'Health Theme')
+    const clashRef = service._recordRegistryHealthRef('theme', selectable)
     assert.ok(clashRef !== undefined)
-    service._recordRegistryError(clashRef, new Error('name-first boom'))
+    service._recordRegistryError(clashRef, new Error('value-first boom'))
     const clash = service._ledger().healthSnapshot().find(entry => entry.id === 'health-theme')
-    assert.equal(clash?.lastError, 'name-first boom',
-      'the name-addressed capture must win over a same-string contribution id')
-    assert.ok(clash?.owner.endsWith(':health-owner'), `the error must land on the NAMED theme's owner: ${clash?.owner}`)
+    assert.equal(clash?.lastError, 'value-first boom',
+      'the value-addressed capture must win over a same-string contribution id')
+    assert.ok(clash?.owner.endsWith(':health-owner'), `the error must land on the VALUED theme's owner: ${clash?.owner}`)
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
@@ -264,27 +270,32 @@ test('a captured health ref is a GENERATION FENCE: stale settlements never land 
       _clearRegistryError(ref: { slot: string; id: string; owner: string }): void
       _ledger(): { healthSnapshot(): Array<{ id: string; owner: string; state: string; lastError?: string }> }
     }
-    // Owner A registers the theme and an async invocation captures its ref.
+    // Owner A registers the theme and an async invocation captures its ref
+    // (VALUE-addressed — the source-qualified selectable value, stable
+    // across HMR because the stableOwner is the plugin NAME).
     const fiberA = ctx.plugin({ name: 'gen-a', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): unknown }
       svc.registerTheme({ id: 'gen-theme', name: 'Gen Theme', palette: {} })
     } })
     await fiberA
-    const refA = service._recordRegistryHealthRef('theme', 'Gen Theme')
+    const selectable = 'plugin:gen-a/gen-theme'
+    const refA = service._recordRegistryHealthRef('theme', selectable)
     assert.ok(refA !== undefined)
     // HMR: A unloads (its health record is untracked), B reloads the
-    // same theme id under a NEW owner.
+    // same theme id under a NEW owner — but the SAME plugin name, so the
+    // selectable value is identical (the persisted identity recovers).
     await (fiberA as { dispose(): Promise<void> }).dispose()
     await Promise.resolve()
     await Promise.resolve()
-    const fiberB = ctx.plugin({ name: 'gen-b', apply(c) {
+    const fiberB = ctx.plugin({ name: 'gen-a', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): unknown }
       svc.registerTheme({ id: 'gen-theme', name: 'Gen Theme', palette: {} })
     } })
     await fiberB
-    const refB = service._recordRegistryHealthRef('theme', 'Gen Theme')
+    const refB = service._recordRegistryHealthRef('theme', selectable)
     assert.ok(refB !== undefined)
     assert.notEqual(refB.owner, refA.owner, 'the reloaded owner must differ from the captured one')
+    assert.equal(refB.id, 'gen-theme', 'the value resolves the same contribution id after reload')
     // A's STALE failure settles: the captured ref must not mint a NEW
     // record (A's health was untracked on dispose) and must not mark B's
     // fresh record failed.
@@ -316,12 +327,15 @@ test('a captured health ref is a GENERATION FENCE: stale settlements never land 
   }
 })
 
-test('the theme-unload hook fires with the SELECTABLE name (the host\'s unload-fallback trigger)', async () => {
+test('the theme-unload hook fires with the SOURCE-QUALIFIED selectable value, and its release is generation-leased', async () => {
   // The review's P2: when the currently-applied plugin theme unloads, the
   // HOST must restore the builtin palette — the registry alone only
   // removes the record and repaints. The service notifies the runner's
-  // hook (which owns the selection knowledge) with the theme NAME on
-  // EVERY unload path (fiber unload, explicit dispose).
+  // hook (which owns the selection knowledge) with the SOURCE-QUALIFIED
+  // selectable value on EVERY unload path (fiber unload, explicit
+  // dispose). The setter returns a DISPOSER, and only the CURRENT token's
+  // disposer clears the callback — an old runner generation's cleanup
+  // must never clear a newer generation's hook (the stale-app trap).
   const { Context } = await import('@deepseek-ai/cordis')
   const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
   const { apply: applyExtensionHost } = await import('../src/extensions.ts')
@@ -336,27 +350,48 @@ test('the theme-unload hook fires with the SELECTABLE name (the host\'s unload-f
     await ctx.plugin(applyExtensionHost)
     const service = ctx.get('piTuiExtensions') as unknown as {
       registerTheme(contribution: { id: string; name: string; palette: unknown }): { id: string; dispose(): void }
-      setThemeUnloadedHook(hook: (name: string) => void): void
+      setThemeUnloadedHook(hook: (unloaded: { selectableValue: string; name: string }) => void): () => void
     }
     const unloaded: string[] = []
-    service.setThemeUnloadedHook(name => unloaded.push(name))
+    const release = service.setThemeUnloadedHook(({ selectableValue, name }) => {
+      unloaded.push(selectableValue)
+      unloaded.push(name)
+    })
     const fiber = ctx.plugin({ name: 'theme-unload', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): { id: string; dispose(): void } }
       svc.registerTheme({ id: 't1', name: 'Foo Theme', palette: {} })
     } })
     await fiber
-    // Fiber unload: the hook fires with the SELECTABLE name.
+    // Fiber unload: the hook fires with the SOURCE-QUALIFIED value (the
+    // plugin's stable name 'theme-unload' + the id) AND the display name.
     await (fiber as { dispose(): Promise<void> }).dispose()
     await Promise.resolve()
     await Promise.resolve()
-    assert.ok(unloaded.includes('Foo Theme'), `the hook must receive the selectable name on owner unload: ${unloaded}`)
-    // Explicit dispose: the hook fires too. (The same theme may notify
-    // again when its fiber's effect disposer runs at teardown — the host
-    // fallback is idempotent: only a name matching the LIVE selection
+    assert.ok(unloaded.includes('plugin:theme-unload/t1'), `the hook must receive the selectable value on owner unload: ${unloaded}`)
+    assert.ok(unloaded.includes('Foo Theme'), `the hook must receive the display name on owner unload: ${unloaded}`)
+    // Explicit dispose (registered from the ROOT fiber — the stable name
+    // is 'root'): the hook fires too. (The same theme may notify again
+    // when its fiber's effect disposer runs at teardown — the host
+    // fallback is idempotent: only a value matching the LIVE selection
     // triggers the restore, so repeats are no-ops.)
     const handle = service.registerTheme({ id: 't2', name: 'Bar Theme', palette: {} })
     handle.dispose()
-    assert.ok(unloaded.includes('Bar Theme'), `the hook must receive the selectable name on explicit dispose: ${unloaded}`)
+    assert.ok(unloaded.includes('plugin:root/t2'), `the hook must receive the selectable value on explicit dispose: ${unloaded}`)
+    // GENERATION LEASE: releasing the OLD generation's hook must not
+    // clear the NEW generation's hook (the HMR window the review flagged).
+    const second: string[] = []
+    const releaseSecond = service.setThemeUnloadedHook(({ selectableValue }) => second.push(selectableValue))
+    release() // THIS runner (old generation) unloads...
+    const handle2 = service.registerTheme({ id: 't3', name: 'Baz Theme', palette: {} })
+    handle2.dispose()
+    assert.ok(second.includes('plugin:root/t3'),
+      `a stale release must never clear the NEWER generation's hook: ${second}`)
+    // The NEW generation's own release clears ITS hook — a later unload
+    // no longer notifies.
+    releaseSecond()
+    const handle3 = service.registerTheme({ id: 't4', name: 'Qux Theme', palette: {} })
+    handle3.dispose()
+    assert.ok(!second.includes('plugin:root/t4'), 'releasing the current hook must stop notifications')
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

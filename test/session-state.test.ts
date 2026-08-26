@@ -813,29 +813,33 @@ test('/settings theme autodetect applies only while auto stays the latest choice
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // → Theme 行（起点 auto）
   await vt.waitForRender()
-  // auto → dark → light → auto：最后一次选择是 auto，落地应应用。
-  // 注入与当前调色板（light，上一步显式选择）不同的深色应答：只有
-  // 检测真正落地才能变 dark——断言不能被显式选择的副作用掩盖。
-  vt.sendInput('\r')
+  // The theme row opens an in-place SUBMENU (the /model pattern — the row
+  // displays the friendly name, the picker's rows carry the SOURCE-
+  // QUALIFIED values; the first row is the current selection's row).
+  // 选 auto（第一项）：最后一次选择是 auto，落地应应用。
+  // 注入与当前调色板不同（上一个显式选择是 auto 之前的默认 dark）
+  // 的浅色应答：只有检测真正落地才能变 light——断言不能被显式选择的
+  // 副作用掩盖。
+  vt.sendInput('\r') // 打开 Theme 子菜单
   await vt.waitForRender()
-  vt.sendInput('\r')
+  vt.sendInput('\r') // 第一项 = auto（autodetect 发出）
   await vt.waitForRender()
-  vt.sendInput('\r') // light → auto（autodetect 发出）
-  await vt.waitForRender()
-  vt.sendInput('\x1b]11;#000000\x07') // 深色应答
+  vt.sendInput('\x1b]11;#eeeeee\x07') // 浅色应答
   await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(currentPalette, darkColors,
+  assert.equal(currentPalette, lightColors,
     'a detection landing while auto is the latest choice must apply')
   // 再选 auto，然后在查询落地前切走：落地必须被拒绝。
-  vt.sendInput('\r') // auto → dark
+  vt.sendInput('\r') // 打开 Theme 子菜单
   await vt.waitForRender()
-  vt.sendInput('\r') // dark → light
+  vt.sendInput('\r') // 第一项 = auto（新查询）
   await vt.waitForRender()
-  vt.sendInput('\r') // light → auto（新查询）
+  vt.sendInput('\r') // 打开子菜单，切到 dark（查询仍在途）
   await vt.waitForRender()
-  vt.sendInput('\r') // auto → dark（查询仍在途，latest choice = dark）
+  vt.sendInput('\x1b[B') // → dark（第二项）
   await vt.waitForRender()
-  vt.sendInput('\x1b]11;#eeeeee\x07') // 浅色应答：守卫应拒绝，保持 dark
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\x1b]11;#000000\x07') // 深色应答：守卫应拒绝，保持 dark
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.equal(currentPalette, darkColors,
     'a detection landing after the user left auto must not apply')
