@@ -779,13 +779,16 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // `ext:<owner>/<id>` is PERSISTED in user layouts, so it must survive
     // HMR — a reloaded plugin gets a NEW fiber (new uid) but the SAME name,
     // and the layout reference recovers. Anonymous plugins share 'root';
-    // the ledger's (slot, id) uniqueness already rejects two live
-    // registrations of the same id regardless of owner, so the name-based
-    // owner never conflates LIVE records — it only makes the persisted key
-    // stable. The fiber-bound effect disposer performs the cleanup on
-    // unload. `this.ctx.fiber.effect()` throws INACTIVE_EFFECT when the
-    // caller fiber is already disposed — the registration must then be
-    // rolled back so the (slot, id) pair is not blocked by a ghost.
+    // the ledger's (slot, owner, id) uniqueness rejects two live
+    // registrations of the same id under the SAME owner while DIFFERENT
+    // owners may register the same local id (their canonical keys stay
+    // distinct — the public contract: an id is unique per (slot, owner)),
+    // so the name-based owner never conflates LIVE records — it only
+    // makes the persisted key stable. The fiber-bound effect disposer
+    // performs the cleanup on unload. `this.ctx.fiber.effect()` throws
+    // INACTIVE_EFFECT when the caller fiber is already disposed — the
+    // registration must then be rolled back so the (slot, owner, id)
+    // triple is not blocked by a ghost.
     const caller = this.ctx
     const owner = caller.fiber.name
     // The chrome.footer.item canonical key is ext:<owner>/<id> — the

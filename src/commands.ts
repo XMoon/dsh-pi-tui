@@ -1434,12 +1434,17 @@ export function registerTuiCommands(
                     ? DEFAULT_FOOTER_LAYOUT
                     : doc.footerLayout
                   : doc.footerLayout
+                // footerFallbackMode records the LAST NATIVE mode (M5):
+                // `footer` is overwritten by 'command' when the command
+                // surface arms, so the command failure fallback must be
+                // able to recover THIS choice (a compact user's fallback
+                // survives a restart).
                 // PERSIST FIRST (the configurator's discipline): the app
                 // applies only from the successful write — a failed
                 // settings write must not leave the live layout ahead of
                 // the document (the next reload would silently revert).
                 detach('settings footer write', async () => {
-                  await settings.replace({ ...doc, footer: value, footerLayout: nextLayout })
+                  await settings.replace({ ...doc, footer: value, footerLayout: nextLayout, footerFallbackMode: value })
                   runner.applyFooterSettings({ footer: value, footerLayout: nextLayout })
                 }, { notify: true })
               } else {

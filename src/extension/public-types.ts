@@ -292,14 +292,15 @@ export interface FooterItemContribution {
   /** The picker label (shown in /footer and /settings). */
   readonly label: string
   readonly description?: string
-  /** The rendered segment (the LIVE value — replace() swaps it). */
+  /** The rendered segment (the LIVE value — replace() swaps it). The
+   * segment's OWN `minWidth` is the item's minimum renderable width
+   * (never truncated below it) — the segment is the single authority
+   * (there is deliberately NO top-level minWidth duplicate). */
   readonly segment: FooterSegment
   /** Where the item lands by default in a fresh layout. */
   readonly defaultZone?: 'left' | 'right'
   /** Layout weight: lower importance items drop first under pressure. */
   readonly importance?: number
-  /** The item's minimum renderable width (never truncated below it). */
-  readonly minWidth?: number
 }
 
 /** One styled run of text. The host owns ANSI compilation; plugins supply

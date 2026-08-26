@@ -32,17 +32,49 @@ test('list slots order contributions by order ASC then id ASC, independent of lo
   assert.equal(snapshot.winner, undefined, 'list slots have no winner')
 })
 
-test('duplicate (slot, id) registration is an explicit error carrying both owners', () => {
+test('a duplicate (slot, owner, id) registration is an explicit error; the SAME id under a DIFFERENT owner is legal', () => {
   const { ledger } = makeLedger()
   ledger.register('chrome.header.badge', { id: 'dup' }, V('first'), 'owner-a')
+  // Same id, DIFFERENT owner: legal (the M4 canonical ext:<owner>/<id>
+  // keys stay distinct — the public contract: an id is unique per
+  // (slot, owner)). The old (slot, id)-keyed ledger wrongly rejected
+  // this (the review's P2).
+  const second = ledger.register('chrome.header.badge', { id: 'dup' }, V('second'), 'owner-b')
+  assert.equal(ledger.snapshot('chrome.header.badge').records.length, 2,
+    'the same id under two LIVE owners must coexist')
+  // The SAME owner registering the same id again: explicit error carrying
+  // the holder.
   assert.throws(
-    () => ledger.register('chrome.header.badge', { id: 'dup' }, V('second'), 'owner-b'),
+    () => ledger.register('chrome.header.badge', { id: 'dup' }, V('third'), 'owner-a'),
     /duplicate extension registration: slot "chrome.header.badge" id "dup"/,
   )
   assert.throws(
-    () => ledger.register('chrome.header.badge', { id: 'dup' }, V('third'), 'owner-b'),
+    () => ledger.register('chrome.header.badge', { id: 'dup' }, V('fourth'), 'owner-a'),
     /owner "owner-a" already holds it/,
   )
+  // Disposing ONE owner frees only ITS registration: the other owner's
+  // same-id record survives, and the (slot, owner, id) triple becomes
+  // re-registerable by the disposed owner.
+  second.dispose()
+  assert.equal(ledger.snapshot('chrome.header.badge').records.length, 1)
+  assert.equal(ledger.snapshot('chrome.header.badge').records[0]!.owner, 'owner-a')
+  ledger.register('chrome.header.badge', { id: 'dup' }, V('again'), 'owner-b')
+  assert.equal(ledger.snapshot('chrome.header.badge').records.length, 2)
+})
+
+test('same-id same-order contributions from DIFFERENT owners order deterministically (owner tie-break)', () => {
+  const { ledger } = makeLedger()
+  // Identical order + id: only the owner can decide — load order never
+  // decides (the owner tie-break keeps the sort total).
+  ledger.register('chrome.header.badge', { id: 'shared', order: 0 }, V('z'), 'owner-z')
+  ledger.register('chrome.header.badge', { id: 'shared', order: 0 }, V('a'), 'owner-a')
+  const snapshot = ledger.snapshot('chrome.header.badge')
+  assert.deepEqual(snapshot.records.map(record => record.owner), ['owner-a', 'owner-z'])
+  // Reload in the REVERSE order: the same deterministic result.
+  const { ledger: ledger2 } = makeLedger()
+  ledger2.register('chrome.header.badge', { id: 'shared', order: 0 }, V('a'), 'owner-a')
+  ledger2.register('chrome.header.badge', { id: 'shared', order: 0 }, V('z'), 'owner-z')
+  assert.deepEqual(ledger2.snapshot('chrome.header.badge').records.map(record => record.owner), ['owner-a', 'owner-z'])
 })
 
 test('the same id may register under DIFFERENT slots', () => {

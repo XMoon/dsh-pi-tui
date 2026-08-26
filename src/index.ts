@@ -96,7 +96,7 @@ import { usageFromStats } from './status/derive-usage.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
-import { parseFooterLayout, isFooterLayout, resolveCommandFallbackLayout } from './footer/layout.ts'
+import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { color, loadCustomTheme, resolveCustomTheme, type ColorPalette, type CustomThemeFile } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
@@ -1444,6 +1444,13 @@ export function apply(ctx: Context, config: Config): void {
       z.object({
         theme: z.string(),
         footer: z.string(),
+        // M5: the user's LAST NATIVE footer mode, persisted separately
+        // because `footer` itself is overwritten by 'command' when the
+        // command surface arms. The command surface's failure fallback
+        // resolves from THIS (default | compact | custom) — a compact
+        // user's fallback survives a restart. Absent on documents written
+        // before the field existed → 'default'.
+        footerFallbackMode: z.string(),
         // M2: the versioned custom footer layout (nested object — never a
         // JSON string). The base is the builtin default layout, so an
         // absent key always resolves to a valid layout. Schemastery object
@@ -1519,7 +1526,7 @@ export function apply(ctx: Context, config: Config): void {
       // The base layout is the builtin default; the schemastery output
       // type is fully-populated, so the cast bridges the sparse literal
       // (the runtime validation accepts missing optional fields).
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
@@ -5000,19 +5007,23 @@ export function apply(ctx: Context, config: Config): void {
       if (doc.footer === 'command') {
         // The native FALLBACK layout must be established from the
         // PERSISTED document, never from whatever the memory happens to
-        // hold: at STARTUP the memory is still the builtin default, so a
-        // persisted custom layout (footerLayout) must be applied BEFORE
-        // the command surface arms — a failed command then restores the
-        // user's OWN layout (M5 contract), never the builtin default
-        // (the review's P2: compact could not survive a restart either —
-        // the mode itself is persisted, the layout is what is lost). A
-        // runtime switch re-applies the same value the memory already
-        // holds (no visible change); an absent/invalid layout keeps the
-        // current state (the builtin default at startup).
-        const fallback = resolveCommandFallbackLayout(doc)
-        if (fallback !== undefined) {
+        // hold: at STARTUP the memory is still the builtin default. The
+        // fallback MODE comes from footerFallbackMode — the `footer`
+        // field itself is overwritten by 'command', so the user's last
+        // native mode is persisted separately (a compact user's fallback
+        // must survive a restart as compact, never silently become the
+        // full default — the review's P2). 'custom' additionally restores
+        // the persisted footerLayout; a failed command then falls back to
+        // the user's OWN surface (M5 contract). A runtime switch
+        // re-applies the same state the memory already holds (no visible
+        // change); an absent/invalid fallback keeps the current state.
+        const fallback = resolveCommandFooterFallback(doc)
+        if (fallback.mode === 'compact') {
+          app.setFooterPreset('compact')
+          app.setFooterLayout(undefined)
+        } else if (fallback.mode === 'custom' && fallback.layout !== undefined) {
           app.setFooterPreset('full')
-          app.setFooterLayout(fallback)
+          app.setFooterLayout(fallback.layout)
         }
         // The trust gate: the COMMAND must live in the USER layer of the
         // settings descriptor (never the merged/project value), AND the

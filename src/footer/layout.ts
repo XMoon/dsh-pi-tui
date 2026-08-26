@@ -207,15 +207,31 @@ export function isFooterLayout(value: FooterLayoutV1 | FooterLayoutError): value
   return !isError(value)
 }
 
-/** M5: resolve the persisted NATIVE fallback layout a command surface
- * restores when the command fails (undefined rows). The fallback must
- * come from the DOCUMENT, never from in-memory state — a restart has no
- * "last in-memory layout" (the app starts on the builtin default), so a
- * persisted custom layout is the user's own fallback; an absent or
- * invalid layout means "keep the current state" (the builtin default at
- * startup). */
-export function resolveCommandFallbackLayout(doc: { footerLayout?: unknown } | undefined): FooterLayoutV1 | undefined {
-  if (doc === undefined || doc.footerLayout === undefined) return undefined
-  const parsed = parseFooterLayout(doc.footerLayout)
-  return isFooterLayout(parsed) ? parsed : undefined
+/** The native footer mode a command surface falls back to. `footer` is
+ * OVERWRITTEN by 'command' when the command mode arms, so the user's
+ * last native mode must be persisted SEPARATELY (footerFallbackMode) or
+ * a compact user's fallback would silently become the full default on
+ * the next restart (the review's P2). */
+export type FooterFallbackMode = 'default' | 'compact' | 'custom'
+
+/** The resolved fallback: the mode plus the persisted custom layout when
+ * the mode is 'custom' and the layout parses. */
+export interface FooterFallbackResolution {
+  readonly mode: FooterFallbackMode
+  readonly layout: FooterLayoutV1 | undefined
+}
+
+/** M5: resolve the command surface's native fallback from the PERSISTED
+ * document. The resolution is explicit and restart-proof: 'compact' keeps
+ * the compact preset; 'custom' uses the persisted custom layout (an
+ * invalid one degrades to the builtin default); 'default' (or an absent
+ * field — existing documents predate the field) keeps the current state.
+ * Never reads in-memory state. */
+export function resolveCommandFooterFallback(doc: { footerFallbackMode?: unknown; footerLayout?: unknown } | undefined): FooterFallbackResolution {
+  if (doc?.footerFallbackMode === 'compact') return { mode: 'compact', layout: undefined }
+  if (doc?.footerFallbackMode === 'custom') {
+    const parsed = parseFooterLayout(doc.footerLayout)
+    return { mode: 'custom', layout: isFooterLayout(parsed) ? parsed : undefined }
+  }
+  return { mode: 'default', layout: undefined }
 }

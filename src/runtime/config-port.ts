@@ -45,6 +45,7 @@ export interface TuiSettingsDoc {
   theme: string
   iconStyle: string
   footer: string
+  footerFallbackMode?: string
   footerLayout?: unknown
   fullscreen: string
   busyEnter: string

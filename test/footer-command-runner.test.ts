@@ -194,6 +194,71 @@ test('repeated TERM-resistant children are each hard-killed (the termination led
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exits on TERM (group-scoped escalation)', async () => {
+  // The review's P1b scenario: the command starts a BACKGROUND descendant
+  // that traps TERM and redirects its stdio; the OUTER shell (the group
+  // leader) receives TERM and exits NORMALLY — Node's 'close' fires — but
+  // the descendant keeps the process group alive. A leader-bound
+  // escalation would be cancelled by that close and leak the descendant;
+  // the escalation must probe the WHOLE GROUP.
+  const dir = mkdtempSync(join(tmpdir(), 'footer-desc-'))
+  const leaderMarker = join(dir, 'leader.pid')
+  const descendantMarker = join(dir, 'descendant.pid')
+  const rows = await new Promise<string[] | undefined>((resolve) => {
+    const runner = new FooterCommandRunner({
+      config: {
+        ...CONFIG,
+        timeoutMs: 150,
+        command: `sh -c 'trap "" TERM; echo $$ > ${descendantMarker}; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 & echo $$ > ${leaderMarker}; wait`,
+      },
+      snapshot: () => emptyStatusSnapshot(),
+      width: () => 100,
+      height: () => 30,
+      onOutput: (out) => {
+        runner.dispose()
+        resolve(out)
+      },
+      signal: new AbortController().signal,
+    })
+    runner.requestRefresh()
+  })
+  assert.equal(rows, undefined, 'the timeout must fall back')
+  const readPid = async (file: string): Promise<number> => {
+    const deadline = Date.now() + 3000
+    let pid = -1
+    while (pid < 0 && Date.now() < deadline) {
+      try {
+        pid = Number.parseInt(readFileSync(file, 'utf8').trim(), 10)
+      } catch {
+        // Not written yet.
+      }
+      if (pid < 0) await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(pid > 0, `pid marker ${file} must be written`)
+    return pid
+  }
+  const leader = await readPid(leaderMarker)
+  const descendant = await readPid(descendantMarker)
+  // BOTH must actually be dead: the leader on TERM, the TERM-resistant
+  // descendant via the group-scoped SIGKILL at the grace. With the old
+  // leader-bound escalation the descendant survives forever and this
+  // assertion fails.
+  const deadDeadline = Date.now() + KILL_GRACE_MS + 3000
+  for (const victim of [leader, descendant]) {
+    let dead = false
+    while (!dead && Date.now() < deadDeadline) {
+      try {
+        process.kill(victim, 0)
+        await new Promise(resolve => setTimeout(resolve, 20))
+      } catch {
+        dead = true
+      }
+    }
+    assert.ok(dead, `pid ${victim} must be dead (no descendant orphan): leader=${leader} descendant=${descendant}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('huge stdout is capped at 16 KiB', async () => {
   const rows = await runOnce(CONFIG, 'process.stdout.write("x".repeat(20000) + "\\n")')
   assert.ok(rows !== undefined)

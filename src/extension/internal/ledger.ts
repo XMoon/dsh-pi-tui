@@ -5,8 +5,12 @@
  * ledger's current snapshot.
  *
  * Rules (plan §5.2–5.3, M1):
- * - `list` slots: deterministic order `order ASC, id ASC`; duplicate
- *   (slot, id) is an ERROR — load order never decides.
+ * - `list` slots: deterministic order `order ASC, id ASC, owner ASC`;
+ *   duplicate (slot, OWNER, id) is an ERROR — load order never decides.
+ *   The SAME id may register under DIFFERENT owners simultaneously (the
+ *   M4 canonical keys `ext:<owner>/<id>` stay distinct — the public
+ *   RegistrationSpec contract says id is unique per (slot, owner), and
+ *   the ledger enforces exactly that).
  * - `single` slots: lowest `priority` wins; a priority TIE is an ERROR
  *   (never a registration-time guess).
  * - owner: the Cordis fiber name that registered. Owner unload disposes
@@ -124,13 +128,13 @@ export class ExtensionLedger {
     this.onInvalidate = () => {}
   }
 
-  /** Whether a (slot, id) pair is already registered. */
-  has(slot: string, id: string): boolean {
-    return this.registrations.has(registryKey(slot, id))
+  /** Whether a (slot, owner, id) registration exists. */
+  has(slot: string, owner: string, id: string): boolean {
+    return this.registrations.has(registryKey(slot, owner, id))
   }
 
   /** Register one contribution under a slot. Throws on unknown slots,
-   * duplicate (slot, id), and single-slot priority ties. */
+   * duplicate (slot, owner, id), and single-slot priority ties. */
   register<T>(
     slot: string,
     spec: RegistrationSpec,
@@ -140,11 +144,11 @@ export class ExtensionLedger {
     if (!isSlotName(slot)) {
       throw new Error(`unknown extension slot "${slot}" (known: ${slotNames().join(', ')})`)
     }
-    const key = registryKey(slot, spec.id)
+    const key = registryKey(slot, owner, spec.id)
     if (this.registrations.has(key)) {
       throw new Error(
         `duplicate extension registration: slot "${slot}" id "${spec.id}" ` +
-        `(owner "${this.registrations.get(key)?.owner ?? 'unknown'}" already holds it)`,
+        `(owner "${owner}" already holds it)`,
       )
     }
     const semantic = this.semanticOf(slot)
@@ -194,7 +198,9 @@ export class ExtensionLedger {
     const records = live
       .sort(semantic === 'single'
         ? (left, right) => left.priority - right.priority
-        : (left, right) => left.order - right.order || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+        : (left, right) => left.order - right.order
+          || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+          || (left.owner < right.owner ? -1 : left.owner > right.owner ? 1 : 0))
       .map(registration => contributionRecord(registration) as ContributionRecord<T>)
     let winner: ContributionRecord<T> | undefined
     if (semantic === 'single' && records.length > 0) {
@@ -307,11 +313,19 @@ export class ExtensionLedger {
 
   private disposeRegistration(registration: Registration<unknown>): void {
     registration.disposed = true
-    // Remove from the map so the (slot, id) pair is free again: a disposed
-    // registration must not block a fresh registration of the same id
-    // (owner unload → reload must be able to re-register).
-    this.registrations.delete(registryKey(registration.slot, registration.id))
-    this.health.untrack(registration.slot, registration.id)
+    // Remove from the map so the (slot, owner, id) triple is free again: a
+    // disposed registration must not block a fresh registration of the
+    // same id by the SAME owner (owner unload → reload must be able to
+    // re-register). A same-id registration under a DIFFERENT owner is a
+    // separate key and stays.
+    this.registrations.delete(registryKey(registration.slot, registration.owner, registration.id))
+    // Drop the health record ONLY when no OTHER live registration shares
+    // this (slot, id): with owner-scoped keys a same-id sibling from a
+    // different owner must keep its diagnostics (the health ledger is
+    // (slot, id)-keyed — diagnostic-only).
+    const stillLive = [...this.registrations.values()].some(other =>
+      other.slot === registration.slot && other.id === registration.id && !other.disposed)
+    if (!stillLive) this.health.untrack(registration.slot, registration.id)
     this.revision += 1
     this.onInvalidate()
   }
@@ -330,7 +344,9 @@ function contributionRecord<T>(registration: Registration<T>): ContributionRecor
   }
 }
 
-/** Registry key: slot + id. */
-function registryKey(slot: string, id: string): string {
-  return `${slot}\u0000${id}`
+/** Registry key: slot + owner + id (owner-scoped — the public contract
+ * says an id is unique per (slot, owner), and the M4 canonical config
+ * keys embed the owner). */
+function registryKey(slot: string, owner: string, id: string): string {
+  return `${slot}\u0000${owner}\u0000${id}`
 }
