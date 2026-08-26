@@ -63,7 +63,9 @@
  */
 
 import { isKeyRelease, isKeyRepeat, matchesKey, parseKey } from '@xmoon76/pi-tui'
+import type { KeyId } from '@xmoon76/pi-tui'
 import type { NormalizedKey, TuiAction } from './extension/public-types.ts'
+import { isTextProducingKeyId } from './keybindings/key-identity.ts'
 
 /** The live surface context the router reads (provided by TuiApp). */
 export interface InputRouterContext {
@@ -230,7 +232,8 @@ export class InputRouter {
     // physical reservation. The plugin-registration guard
     // (RESERVED_HOST_KEYS) keeps the Stable v1 compatibility rejection;
     // the RUNTIME swallowing here is purely action-driven.
-    const normalized = this.normalize(data)
+    const parsed = parseKey(data)
+    const normalized = parsed === undefined ? undefined : keyIdToNormalized(parsed)
     if (!ctx.hostDeclined && normalized !== undefined && ctx.hostResolves?.(data) === true) {
       return { kind: 'consumed' }
     }
@@ -239,10 +242,14 @@ export class InputRouter {
     // the key, then retry plugin resolution only when the editor declined.
     if (ctx.editorReplacement) return this.viewerEditor(ctx)
     // Non-capturing plugin keybindings are consulted last for the host
-    // editor. Printable keys always stay with normal text entry, and an
-    // editor-owned binding (navigation, deletion, completion) keeps priority
-    // over a plugin action.
-    if (normalized !== undefined && !isPrintableKey(normalized)) {
+    // editor. TEXT-PRODUCING keys always stay with normal text entry
+    // (round-17 finding: the guard used to treat ANY shift as a chord, so
+    // Shift+A reached the plugin stage on Kitty while typing 'A' on
+    // legacy — the shared isTextProducingKeyId policy treats shift-only
+    // printables as text on EVERY protocol), and an editor-owned binding
+    // (navigation, deletion, completion) keeps priority over a plugin
+    // action.
+    if (normalized !== undefined && parsed !== undefined && !isTextProducingKeyId(parsed as KeyId)) {
       const action = pluginActionFor(normalized)
       if (action !== undefined) {
         if (ctx.editorAccepts?.(data) === true) return this.viewerEditor(ctx)
@@ -274,15 +281,4 @@ function keyIdToNormalized(keyId: string): NormalizedKey {
     shift: parts.includes('shift'),
     super: parts.includes('super'),
   }
-}
-
-/** Whether a normalized key is a plain printable (a plugin binding for a
- * printable key would swallow typing — the editor's text input wins).
- * The `space` key name (the spacebar) is printable too: a plugin binding
- * on it would swallow every typed space (convergence finding). */
-function isPrintableKey(key: NormalizedKey): boolean {
-  if (key.ctrl || key.alt || key.super) return false
-  if (key.shift) return false
-  if (key.key === 'space') return true
-  return key.key.length === 1 && key.key.charCodeAt(0) >= 32 && key.key.charCodeAt(0) <= 126
 }

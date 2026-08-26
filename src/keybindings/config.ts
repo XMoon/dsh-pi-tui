@@ -28,7 +28,7 @@
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'
-import { canonicalizeKeyId } from './key-identity.ts'
+import { canonicalizeKeyId, isTextProducingKeyId, isValidKeyId } from './key-identity.ts'
 import { APP_KEYBINDINGS, NON_CONFIGURABLE_ACTIONS } from './definitions.ts'
 import type { AppKeybindingId, LeaderBinding, LeaderConfig, UserKeybindingValue, UserKeybindingsConfig } from './types.ts'
 
@@ -39,21 +39,10 @@ const BINDINGS_KEY = 'bindings'
 /** The leader sequence marker (`<leader>t`). */
 export const LEADER_PREFIX = '<leader>'
 
-/** The base keys the fork's KeyId grammar accepts (keys.ts). */
-const BASE_KEYS = new Set([
-  'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
-  '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-  '`', '-', '=', '[', ']', '\\', ';', "'", ',', '.', '/', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '|', '~', '{', '}', ':', '<', '>', '?',
-  'escape', 'esc', 'enter', 'return', 'tab', 'space', 'backspace', 'delete', 'insert', 'clear',
-  'home', 'end', 'pageUp', 'pageDown', 'up', 'down', 'left', 'right',
-  'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
-])
-
-const MODIFIERS = new Set(['ctrl', 'shift', 'alt', 'super'])
-
-/** Case-insensitive view of the base-key grammar: `pageUp` and `pageup`
- * are the SAME physical key (the canonical identity is lowercase). */
-const BASE_KEYS_LOWER = new Set([...BASE_KEYS].map(key => key.toLowerCase()))
+/** The fork's KeyId grammar (moved to key-identity.ts — the SHARED
+ * policy of the config parser and the plugin registry; re-exported here
+ * for callers of the parser module). */
+export { isValidKeyId }
 
 /** The FORK EDITOR's UNCONDITIONAL pre-submit keys (packages/pi-tui
  * TUI_KEYBINDINGS + components/editor.ts handleInput): the editor
@@ -89,31 +78,12 @@ const EDITOR_PRE_SUBMIT_KEYS = new Set([
 ].map(key => canonicalizeKeyId(key as KeyId)),
 )
 
-/** Whether a string is a valid KeyId (the fork's grammar). */
-export function isValidKeyId(value: string): value is KeyId {
-  if (value === '') return false
-  const parts = value.split('+')
-  if (parts.length === 0) return false
-  const base = parts[parts.length - 1]!
-  // Named keys are CASE-INSENSITIVE at parse time: the fork grammar
-  // spells pageUp/pageDown with camelCase, but the canonical identity is
-  // lowercase (pageup) — accept either spelling (convergence: one
-  // physical key has one canonical identity).
-  if (!BASE_KEYS.has(base) && !BASE_KEYS_LOWER.has(base.toLowerCase())) return false
-  for (let index = 0; index < parts.length - 1; index += 1) {
-    if (!MODIFIERS.has(parts[index]!)) return false
-  }
-  // No duplicate modifiers.
-  return new Set(parts.slice(0, -1)).size === parts.length - 1
-}
-
-/** Whether a key is a plain printable (plan §14: a direct user binding of
- * a plain printable to a Host action would swallow typing). Unmodified
- * single characters (32–126) AND the `space` key name (the fork alias for
- * the spacebar, which types char 32 — a bare `space` binding would swallow
- * every space the user types) are printable; everything with a modifier,
- * a named editing key (enter/tab/escape/arrows/f-keys) or a multi-char
- * sequence is not. */
+/** Whether a key is a PLAIN (unmodified) printable — the strict subset of
+ * {@link isTextProducingKeyId} with no modifier at all (plan §14). The
+ * parser rejects the BROADER text-producing set (shift-only printables
+ * included — round-17 finding: Shift+A is the raw 'A' byte on legacy
+ * terminals, so a Host binding on it would steal typing); this helper is
+ * kept for the exact "no modifier" classification. */
 export function isPlainPrintableKey(key: KeyId): boolean {
   if (key.includes('+')) return false
   if (key === 'space') return true
@@ -211,8 +181,8 @@ export function parseUserKeybindings(
   if (leaderValue !== undefined) {
     if (typeof leaderValue === 'string' && isValidKeyId(leaderValue)) {
       const canonicalLeader = canonicalizeKeyId(leaderValue as KeyId)
-      if (isPlainPrintableKey(canonicalLeader)) {
-        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — a plain printable leader would swallow typing — ignored`)
+      if (isTextProducingKeyId(canonicalLeader)) {
+        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — a text-producing leader would swallow typing — ignored`)
       } else if (LEGACY_COLLISION_KEY_IDS.has(canonicalLeader)) {
         // Legacy terminal collisions are REJECTED for the leader prefix too
         // (convergence finding): a leader on ctrl+[ / ctrl+j / ctrl+m would
@@ -314,8 +284,8 @@ export function parseUserKeybindings(
       // never bypass the printable guard or the collision sets — the raw
       // spelling is only used in the diagnostic text.
       const canonicalEntry = canonicalizeKeyId(entry as KeyId)
-      if (isPlainPrintableKey(canonicalEntry)) {
-        diagnostics.push(`keybindings: "${actionId}" cannot bind the plain printable key "${entry}" to a Host action — ignored`)
+      if (isTextProducingKeyId(canonicalEntry)) {
+        diagnostics.push(`keybindings: "${actionId}" cannot bind the text-producing key "${entry}" to a Host action — ignored`)
         continue
       }
       // Shift+Enter is the fork editor's FIXED newline key (tui.input

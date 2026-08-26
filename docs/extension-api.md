@@ -87,21 +87,26 @@ actions (`submit-draft`, `queue-draft`, `steer-draft`,
 `cycle-permission` — the `TuiAction` set). Registrations are validated
 and REJECTED loudly (a thrown error, nothing is silently dropped) when:
 the action is outside the public set (Host-private `app.*` actions are
-never plugin-triggerable); the key is a Host-reserved lifecycle key
-(Exit/steer/search/fold/todo/external-editor/history/clipboard/queue/
-submit/Esc/Shift+Tab/Alt+Up/Alt+T/Alt+K defaults); the key is a plain
-printable (bare letters and the spacebar never reach the plugin stage);
-or the key is a legacy-terminal collision (`ctrl+[`, `ctrl+j`,
-`ctrl+m`, `ctrl+i`, `ctrl+h`, `ctrl+_`, `ctrl+-` — on legacy terminals
-these are indistinguishable from Esc/Enter/Tab/Backspace/Ctrl+-, so the
-binding could never fire through the normalized lookup; the plugin
-registry shares the Host config parser's legacy inventory). Keys are
-canonicalized (aliases `esc`→`escape`, `return`→`enter`, modifier
-order) before every check, so a spelling variant cannot bypass the
-policy. Duplicate keys are an explicit conflict error; every
-registration is fiber-bound and removed on owner unload. Modified
-chords (e.g. `Ctrl+Alt+X`, `Ctrl+Space`) are the bindable surface.
-
+never plugin-triggerable); the key name is outside the host's key
+grammar (the runtime parser can never produce it, so the binding could
+never fire — e.g. `f13`, arbitrary strings); the key is a Host-reserved
+lifecycle key (Exit/steer/search/fold/todo/external-editor/history/
+clipboard/queue/submit/Esc/Shift+Tab/Alt+Up/Alt+T/Alt+K defaults); the
+key is TEXT-PRODUCING — a bare letter, digit, symbol or the spacebar,
+WITH OR WITHOUT Shift (Shift+A is the raw `A` byte on legacy terminals
+and `a`+shift on Kitty — either way it produces text, so a binding on
+it would steal the user's typing on some terminals; `Ctrl+Alt+X`-style
+chords and named keys like `Shift+Tab`/`Shift+Left`/`Shift+F5` are NOT
+text-producing and stay bindable); or the key is a legacy-terminal
+collision (`ctrl+[`, `ctrl+j`, `ctrl+m`, `ctrl+i`, `ctrl+h`, `ctrl+_`,
+`ctrl+-` — on legacy terminals these are indistinguishable from
+Esc/Enter/Tab/Backspace/Ctrl+-, so the binding could never fire through
+the normalized lookup; the plugin registry shares the Host config
+parser's legacy inventory). Keys are canonicalized (aliases
+`esc`→`escape`, `return`→`enter`, modifier order) before every check,
+so a spelling variant cannot bypass the policy. Duplicate keys are an
+explicit conflict error; every registration is fiber-bound and removed
+on owner unload.
 Editor replacement input is the ONE deliberate exception to the
 normalized-key rule: while a replacement occupies the seat, its optional
 `handleInput(event)` hook receives a SEMANTIC {@link EditorInputEvent} —

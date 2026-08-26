@@ -17,9 +17,10 @@
  *   Host-private `app.*` action and reach the Host dispatcher, round-12
  *   finding) — the host executes;
  * - reserved Host lifecycle keys cannot be claimed by a plugin (the
- *   registry REJECTS a reserved key loudly), and plain printable keys
- *   (letters, the spacebar) are rejected too (they never reach the
- *   plugin stage — round-12 finding);
+ *   registry REJECTS a reserved key loudly), and TEXT-PRODUCING keys
+ *   (letters/digits/symbols/space — shift-only printables included,
+ *   round-17 finding) are rejected too (they never reach the plugin
+ *   stage);
  * - unload removes the bindings (fiber-bound);
  * - duplicates are an explicit conflict error.
  *
@@ -38,7 +39,7 @@
 
 import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
-import { canonicalizeKeyId } from './keybindings/key-identity.ts'
+import { canonicalizeKeyId, isTextProducingKeyId, isValidKeyId } from './keybindings/key-identity.ts'
 import { isLegacyCollisionKeyId } from './keybindings/config.ts'
 import { PROTECTED_HOST_ACTIONS } from './keybindings/definitions.ts'
 
@@ -64,16 +65,13 @@ export const TUI_ACTIONS: ReadonlySet<TuiAction> = new Set<TuiAction>([
   'cycle-permission',
 ])
 
-/** Whether a NORMALIZED key is a plain printable (a plugin binding for a
- * printable key would swallow typing — the router keeps printable keys
- * with the editor's text entry, so the binding could never fire; the
- * registration must be rejected, never advertised as an effective rule —
- * review finding). The `space` key name (the spacebar) is printable too.
- * Mirrors the InputRouter's isPrintableKey — both guards must agree. */
+/** Whether a NORMALIZED key is a plain printable — kept for callers of
+ * the registry module; the registration guard itself uses the SHARED
+ * {@link isTextProducingKeyId} policy (which also covers shift-only
+ * printables — Shift+A is text on every protocol, round-17 finding).
+ * Mirrors the InputRouter's text-producing guard: both must agree. */
 export function isPlainPrintableNormalizedKey(key: NormalizedKey): boolean {
-  if (key.ctrl || key.alt || key.shift || key.super) return false
-  if (key.key === 'space') return true
-  return key.key.length === 1 && key.key.charCodeAt(0) >= 32 && key.key.charCodeAt(0) <= 126
+  return isTextProducingKeyId(canonicalNormalizedKeyId(key))
 }
 
 
@@ -235,15 +233,28 @@ export class KeybindingRegistry {
     // `return` is bound to the reserved `escape`/`enter` and must be
     // rejected, not accepted under an alias spelling.
     const canonicalKey = canonicalNormalizedKey(contribution.key)
-    // PLAIN PRINTABLE REJECTION (review finding): the router keeps plain
-    // printable keys (and the spacebar) with the editor's text entry, so
-    // a plugin binding on one can never fire. Accepting it would
-    // advertise an "effective rule" that never executes — rejected here,
-    // mirroring the config parser's Host-side rule. Modified chords
-    // (ctrl+space) stay bindable — they really reach the plugin stage.
-    if (isPlainPrintableNormalizedKey(canonicalKey)) {
+    const canonicalKeyId = canonicalNormalizedKeyId(canonicalKey)
+    // KEY-ID GRAMMAR (round-17 finding): the runtime's only identity
+    // source is parseKey, which can never produce a non-grammar key name
+    // ('definitely-not-a-key', 'f13', ...) — a registration on one would
+    // be an advertised rule that can never fire. The registry shares the
+    // config parser's grammar policy.
+    if (!isValidKeyId(canonicalKeyId)) {
       throw new Error(
-        `keybinding for "${describeKey(canonicalKey)}" is a plain printable key and cannot be bound by a plugin (it would never reach the plugin stage)`,
+        `keybinding key "${describeKey(canonicalKey)}" is not a valid key name (the host grammar cannot produce it)`,
+      )
+    }
+    // TEXT-PRODUCING REJECTION (review findings): the router keeps text-
+    // producing keys with the editor's text entry — bare letters, digits,
+    // symbols and the spacebar, WITH OR WITHOUT Shift (Shift+A is the raw
+    // 'A' byte on legacy terminals and 'a'+shift on Kitty — either way it
+    // produces text, round-17 finding). Accepting such a registration
+    // would advertise an "effective rule" that never executes (or steals
+    // typing on some terminals). Named keys (shift+tab, shift+left, f-keys,
+    // ...) are NOT text-producing and stay bindable.
+    if (isTextProducingKeyId(canonicalKeyId)) {
+      throw new Error(
+        `keybinding for "${describeKey(canonicalKey)}" is a text-producing key and cannot be bound by a plugin (it would steal the user's text input)`,
       )
     }
     // LEGACY C0 COLLISION REJECTION (round-13 finding): the registry
@@ -253,7 +264,7 @@ export class KeybindingRegistry {
     // such a registration (matchesKey accepts the raw byte), but the
     // router's plugin stage normalizes \t to `tab` and could never match
     // it — an advertised plugin rule that can never fire.
-    if (isLegacyCollisionKeyId(canonicalNormalizedKeyId(canonicalKey))) {
+    if (isLegacyCollisionKeyId(canonicalKeyId)) {
       throw new Error(
         `keybinding for "${describeKey(canonicalKey)}" collides with a fixed key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter; Ctrl+I/H are Tab/Backspace; Ctrl+_ and Ctrl+- are one key) and cannot be claimed by a plugin`,
       )
