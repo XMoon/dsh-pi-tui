@@ -99,7 +99,7 @@ it would steal the user's typing on some terminals; `Ctrl+Alt+X`-style
 chords and named keys like `Shift+Left`/`Shift+F5` are NOT
 text-producing and stay bindable); or the key is a legacy-terminal
 collision (`ctrl+[`, `ctrl+j`, `ctrl+m`, `ctrl+i`, `ctrl+h`, `ctrl+_`,
-`ctrl+-` — on legacy terminals these are indistinguishable from
+`ctrl+-`, `ctrl+backspace` — on legacy terminals these are indistinguishable from
 Esc/Enter/Tab/Backspace/Ctrl+-, so the binding could never fire through
 the normalized lookup; the plugin registry shares the Host config
 parser's legacy inventory); or the key is a FORK EDITOR-owned key (Tab,

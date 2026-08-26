@@ -867,10 +867,11 @@ test('6.2 submit on fork-editor PRE-SUBMIT keys is rejected (they can never fire
   assert.deepEqual(aliased.bindings, {}, 'shift+Backspace must canonicalize into the rejected set')
   assert.ok(aliased.diagnostics.some(message => message.includes('editor consumes')))
   // A key the fork editor does NOT consume before submit stays bindable:
-  // ctrl+backspace is not in the fork's editor keybindings, so a submit
-  // remap on it genuinely reaches the submit check.
-  const works = parseUserKeybindings({ 'app.input.submit': 'ctrl+backspace' })
-  assert.deepEqual(works.bindings, { 'app.input.submit': 'ctrl+backspace' })
+  // ctrl+alt+backspace is not in the fork's editor keybindings (and not
+  // terminal-ambiguous — plain ctrl+backspace is, round-20 finding), so
+  // a submit remap on it genuinely reaches the submit check.
+  const works = parseUserKeybindings({ 'app.input.submit': 'ctrl+alt+backspace' })
+  assert.deepEqual(works.bindings, { 'app.input.submit': 'ctrl+alt+backspace' })
   assert.ok(!works.diagnostics.some(message => message.includes('editor consumes')))
   // OTHER actions may still bind an editor-pre-submit key: the HOST ladder
   // consumes them before the editor, so they really fire.
@@ -1182,15 +1183,15 @@ test('7.6 the registry REJECTS legacy C0 alias keys (ctrl+i / ctrl+h / ctrl+_ / 
   assert.equal(registry.snapshot().bindings.length, 0)
   // The canonical identity of the registered key is one shared policy:
   // the config parser and the registry reject the SAME key ids.
-  const { isLegacyCollisionKeyId, LEGACY_COLLISION_KEY_IDS } = await import('../src/keybindings/config.ts')
-  assert.ok(isLegacyCollisionKeyId('ctrl+i' as never))
-  assert.ok(isLegacyCollisionKeyId('ctrl+h' as never))
-  assert.ok(isLegacyCollisionKeyId('ctrl+_' as never))
-  assert.ok(isLegacyCollisionKeyId('ctrl+-' as never))
-  assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+i'))
-  assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+h'))
-  assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+_'))
-  assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+-'))
+  const { isTerminalAmbiguousKeyId, TERMINAL_AMBIGUOUS_KEY_IDS } = await import('../src/keybindings/config.ts')
+  assert.ok(isTerminalAmbiguousKeyId('ctrl+i' as never))
+  assert.ok(isTerminalAmbiguousKeyId('ctrl+h' as never))
+  assert.ok(isTerminalAmbiguousKeyId('ctrl+_' as never))
+  assert.ok(isTerminalAmbiguousKeyId('ctrl+-' as never))
+  assert.ok(TERMINAL_AMBIGUOUS_KEY_IDS.has('ctrl+i'))
+  assert.ok(TERMINAL_AMBIGUOUS_KEY_IDS.has('ctrl+h'))
+  assert.ok(TERMINAL_AMBIGUOUS_KEY_IDS.has('ctrl+_'))
+  assert.ok(TERMINAL_AMBIGUOUS_KEY_IDS.has('ctrl+-'))
 })
 
 test('7.7 the registry rejects SHIFT-only text keys and non-grammar key names', async () => {
@@ -1325,4 +1326,61 @@ test('7.8b a rejected editor-owned plugin key never disables a colliding leader'
     `no plugin collision expected: ${manager.diagnosticsList().join(' | ')}`)
   assert.ok(!manager.snapshot().bindings.some(binding => binding.action === 'open-search'),
     'no dead plugin rule is advertised')
+})
+
+test('7.9 ctrl+backspace is terminal-ambiguous: rejected for user configs', () => {
+  // The fork treats raw 0x08 as Ctrl+Backspace on Windows Terminal and
+  // plain Backspace on legacy terminals/tmux (matchesRawBackspace
+  // branches on WT_SESSION) — a ctrl+backspace binding fires on some
+  // terminals and can never fire on others (round-20 finding: the
+  // terminal-ambiguity policy missed it).
+  const direct = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+backspace' })
+  assert.deepEqual(direct.bindings, {}, 'ctrl+backspace must be rejected')
+  assert.ok(direct.diagnostics.some(message => message.includes('legacy terminals')),
+    `no rejection: ${direct.diagnostics.join(' | ')}`)
+  const submit = parseUserKeybindings({ 'app.input.submit': 'ctrl+backspace' })
+  assert.deepEqual(submit.bindings, {}, 'submit on ctrl+backspace must be rejected')
+  const leader = parseUserKeybindings({ leader: 'ctrl+backspace', bindings: { 'app.tasks.open': '<leader>t' } })
+  assert.equal(leader.leader, undefined, 'a ctrl+backspace leader must be rejected')
+  const completion = parseUserKeybindings({ leader: 'ctrl+x', bindings: { 'app.tasks.open': '<leader>ctrl+backspace' } })
+  assert.deepEqual(completion.leaderBindings, [], 'a ctrl+backspace completion must be rejected')
+})
+
+test('7.9b the registry rejects ctrl+backspace too', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  assert.throws(() => registry.register(
+    { id: 'ctrl-bs', key: { key: 'backspace', ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'x' },
+    'plugin',
+  ), (error: unknown) => /legacy terminal/.test(String(error))
+    && /Windows Terminal/.test(String(error))
+    && /Ctrl\+Backspace/.test(String(error)),
+  'ctrl+backspace must be rejected at registration with the ambiguity explained')
+  assert.equal(registry.snapshot().bindings.length, 0)
+})
+
+test('7.9c the fork premise: raw 0x08 is Backspace on legacy, Ctrl+Backspace on Windows Terminal', () => {
+  // isWindowsTerminalSession() requires WT_SESSION AND no SSH_* vars (the
+  // fork excludes remote sessions) — the probe clears both sides.
+  const saved: Record<string, string | undefined> = {
+    WT_SESSION: process.env.WT_SESSION,
+    SSH_CONNECTION: process.env.SSH_CONNECTION,
+    SSH_CLIENT: process.env.SSH_CLIENT,
+    SSH_TTY: process.env.SSH_TTY,
+  }
+  try {
+    for (const name of ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']) delete process.env[name]
+    delete process.env.WT_SESSION
+    assert.ok(matchesKey('\x08', 'backspace' as never), 'raw 0x08 is plain Backspace on legacy terminals')
+    assert.ok(!matchesKey('\x08', 'ctrl+backspace' as never),
+      '...so a ctrl+backspace binding can never fire on legacy terminals')
+    process.env.WT_SESSION = 'probe'
+    assert.ok(matchesKey('\x08', 'ctrl+backspace' as never),
+      '...while Windows Terminal reads the same byte as Ctrl+Backspace')
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
 })

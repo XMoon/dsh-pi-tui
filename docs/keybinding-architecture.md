@@ -33,7 +33,7 @@ handler.
 | `context.ts` | `deriveKeybindingContext`: the resolver's context, built in ONE place per surface. `editorEmpty` is a LAZY getter — the live editor is only read when a rule predicate needs it (the input path must not add a draft read per keystroke) |
 | `effective-keymap.ts` | The rule compiler + resolver: builtin (100) / composition (100) / user (200) / plugin (10) priorities; conflict detection; `includeScopes` (the HOST keymap resolves the non-capturing scopes only) |
 | `conflicts.ts` | The conflict model: same key + overlapping scope + same priority. Capturing scopes (question/approval/overlay/search/viewer/tasks) are mutually exclusive surfaces — they never conflict with non-capturing scopes or each other |
-| `config.ts` | The user settings parser: string / array / `false` / `<leader>X`; unknown action, invalid key, plain-printable-to-host-action and the SHARED legacy-terminal collision inventory (Ctrl+[ / Ctrl+J/M / Ctrl+I/H / Ctrl+_/-) diagnostics; fail-soft |
+| `config.ts` | The user settings parser: string / array / `false` / `<leader>X`; unknown action, invalid key, plain-printable-to-host-action and the SHARED terminal-ambiguous key inventory (TERMINAL_AMBIGUOUS_KEY_IDS: Ctrl+[ / Ctrl+J/M / Ctrl+I/H / Ctrl+_/- / Ctrl+Backspace) diagnostics; fail-soft |
 | `manager.ts` | The stateful facade: user config, safe mode, plugin rules, leader machine, diagnostics, snapshot |
 | `action-dispatcher.ts` | The semantic action → host method router (`AppActionHost`). The dispatcher NEVER re-implements business state |
 | `leader.ts` | The M6 leader state machine: pending prefix, timeout, ambiguous prefix, cancel, paste/typing isolation |
@@ -326,7 +326,10 @@ registrations are rejected as the reserved `escape`/`enter`).
 'ctrl+i')` is true, so a Host binding fires on Tab presses on legacy
 terminals), `ctrl+h` (the Backspace byte) and `ctrl+_`/`ctrl+-` (ONE
 0x1f byte — the fork's rawCtrlChar maps Ctrl+- to the same 31 as
-Ctrl+_, so both spellings are rejected, round-16 finding) are rejected
+Ctrl+_, so both spellings are rejected, round-16 finding) and
+`ctrl+backspace` (raw 0x08 is Ctrl+Backspace on Windows Terminal but
+plain Backspace on legacy/tmux — the fork's matchesRawBackspace branches
+on the session, round-20 finding) are rejected
 as direct bindings, leader prefixes and leader completions — a binding
 indistinguishable from a fixed key on legacy terminals is unsupported,
 never a warning.
@@ -352,12 +355,13 @@ printables as text on every protocol — the router and the registry
 agree, and the user config parser rejects them too), (c) non-grammar
 key names (the runtime parser can never produce them — `f13`,
 arbitrary strings — round-17 finding), (d) the legacy
-C0 collisions — the registry shares the config parser's legacy inventory
-(`isLegacyCollisionKeyId`), so `ctrl+i`/`ctrl+h`/`ctrl+_`/`ctrl+-`/
+C0 collisions — the registry shares the config parser's terminal-
+ambiguous inventory (`TERMINAL_AMBIGUOUS_KEY_IDS` / isTerminalAmbiguous-
+KeyId), so `ctrl+i`/`ctrl+h`/`ctrl+_`/`ctrl+-`/`ctrl+backspace`/
 `ctrl+[`/`ctrl+j`/`ctrl+m` registrations are rejected too (on a legacy
 terminal the raw byte is Tab/Backspace/0x1f/Esc/Enter — the router's
 normalized plugin lookup could never match it; the old "a plugin may
-claim Ctrl+J" exception is gone, round-13/16 findings), and (e) FORK
+claim Ctrl+J" exception is gone, round-13/16/20 findings), and (e) FORK
 EDITOR-owned keys (round-19 finding): Tab, arrows, Home/End,
 PageUp/PageDown, Backspace/Delete, word-moves, kill/yank/undo,
 Shift+Enter — the InputRouter's editorAccepts probe claims the editor's
@@ -391,7 +395,7 @@ The read model is ONE projection: `keysFor`/`keyHint`/
 working submit remap never leaves the replaced Enter advertised), and a
 CONDITIONAL top claim never permanently hides its context fallback.
 
-Final gates: 2496 bundle tests, 985 fork tests, 11 docs tests,
+Final gates: 2499 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The final
 convergence review round was accepted with no findings.
