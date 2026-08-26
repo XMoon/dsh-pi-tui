@@ -5688,6 +5688,9 @@ export class TuiApp {
   /** Phase 4: the current theme id ('dark' | 'light' | 'custom'), tracked
    * by applyTheme/applyPalette (the advanced host-state getTheme). */
   private currentThemeId: string = 'dark'
+  /** The plugin theme name currently applied (undefined when a builtin or
+   * custom-file theme is live) — the unload-fallback hook consults it. */
+  private activePluginThemeName: string | undefined
 
   /** Persistent components per transcript message (stage J cache). */
   private readonly messageComponents = new Map<TranscriptMessage, MessageComponentEntry>()
@@ -9718,6 +9721,27 @@ export class TuiApp {
     // Same ordering as applyTheme (F-14).
     this.extensionHost?.updateSurface({ themeId: 'custom', themeRevision: this.themeRevision })
     this.repaintAllSurfaces()
+  }
+
+  /** Apply a PLUGIN theme palette and remember which plugin theme is the
+   * live selection: when that theme unloads (HMR), the runner's unload
+   * hook consults {@link activePluginTheme} and restores the builtin
+   * fallback — a gone plugin must not leave its palette on screen (the
+   * review's P2). */
+  applyPluginPalette(name: string, palette: ColorPalette): void {
+    this.activePluginThemeName = name
+    this.applyPalette(palette)
+  }
+
+  /** Drop the plugin-theme selection (a builtin or custom-file theme is
+   * being applied — no unload fallback applies). */
+  clearActivePluginTheme(): void {
+    this.activePluginThemeName = undefined
+  }
+
+  /** The plugin theme name currently applied, if any. */
+  activePluginTheme(): string | undefined {
+    return this.activePluginThemeName
   }
 
   /** Re-render every palette-dependent surface from its semantic state. */

@@ -157,14 +157,19 @@ export class SettingsRegistry {
       try {
         accepted = await onChange(value)
       } catch {
-        // The plugin's onChange THREW — a real failure of the
-        // contribution, distinct from a stale supersede.
+        // GENERATION/LIFETIME FIRST (the review's P2): a callback that
+        // settled after a NEWER apply superseded it (or after the row was
+        // disposed) is STALE/GONE even when it threw — the plugin never
+        // refused the CURRENT state, and the host must stay silent.
+        if (record.disposed || this.records.get(id) !== record) return 'gone'
+        if (record.applyEpoch !== epoch) return 'stale'
         return 'rejected'
       }
-      if (accepted === false) return 'rejected'
-      // A newer apply started while this onChange was in flight: this
-      // result is stale — never commit it.
+      // Same precedence for a resolved outcome: lifetime, then generation,
+      // then the callback's own answer.
+      if (record.disposed || this.records.get(id) !== record) return 'gone'
       if (record.applyEpoch !== epoch) return 'stale'
+      if (accepted === false) return 'rejected'
     }
     // The row may have been disposed (or replaced under the same id) while
     // an async callback was in flight. A detached callback must never commit

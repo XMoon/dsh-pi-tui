@@ -415,6 +415,8 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** Phase 3: the still-open UNSTABLE mount close functions (closed by
    * the emergency fail-safe and by owner unload). */
   private readonly unstableMounts = new Set<() => void>()
+  /** The runner's theme-unload notification (see setThemeUnloadedHook). */
+  private themeUnloadedHook: ((name: string) => void) | undefined
   /** Track health for one external registry contribution. */
   private trackRegistryHealth(slot: string, id: string, owner: string): void {
     this.ledger.trackHealth(slot, id, owner)
@@ -886,10 +888,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
         this.untrackRegistryHealth('theme', contribution.id, owner)
+        // The selected-theme fallback contract: when the unloaded theme is
+        // the one currently applied, the HOST must restore the builtin
+        // palette — the service does not know the selection, so the
+        // runner's hook (setThemeUnloadedHook) is asked (the review's P2:
+        // the old code only removed the record and repainted, leaving the
+        // dead plugin's palette on screen until the user switched).
+        this.themeUnloadedHook?.(contribution.name)
       }, 'piTuiExtensions.registerTheme()')
     } catch (error) {
       handle.dispose()
       this.untrackRegistryHealth('theme', contribution.id, owner)
+      this.themeUnloadedHook?.(contribution.name)
       throw error
     }
     return {
@@ -897,9 +907,17 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       dispose: () => {
         handle.dispose()
         this.untrackRegistryHealth('theme', contribution.id, owner)
+        this.themeUnloadedHook?.(contribution.name)
         dispose()
       },
     }
+  }
+
+  /** Runner-only seam: notified with the SELECTABLE name of every theme
+   * that unloads (fiber unload or explicit dispose). The runner restores
+   * the builtin fallback when the unloaded theme is the live selection. */
+  setThemeUnloadedHook(hook: (name: string) => void): void {
+    this.themeUnloadedHook = hook
   }
 
   /**

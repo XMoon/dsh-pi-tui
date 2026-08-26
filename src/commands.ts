@@ -1362,11 +1362,13 @@ export function registerTuiCommands(
                 // The guard reads the synchronous lastThemeChoice, NOT the
                 // persisted doc (whose write is asynchronous and may lag the
                 // query settlement by hundreds of ms).
+                app.clearActivePluginTheme()
                 detach('theme autodetect', () => app.autoDetectTheme({
                   shouldApply: () => lastThemeChoice === 'auto',
                 }))
                 app.trackTerminalTheme(true)
               } else if (value === 'dark' || value === 'light') {
+                app.clearActivePluginTheme()
                 app.applyTheme(value)
                 app.trackTerminalTheme(false)
               } else {
@@ -1383,7 +1385,14 @@ export function registerTuiCommands(
                 const themeRef = captureExtensionHealthRef?.('theme', value)
                 if (palette !== undefined) {
                   try {
-                    app.applyPalette(palette)
+                    // A PLUGIN palette records the selection (the unload
+                    // fallback restores builtin dark when it disappears);
+                    // a custom FILE clears it.
+                    if (pluginPalette !== undefined) app.applyPluginPalette(value, pluginPalette)
+                    else {
+                      app.clearActivePluginTheme()
+                      app.applyPalette(palette)
+                    }
                     if (themeRef !== undefined) clearExtensionError?.(themeRef)
                     app.trackTerminalTheme(false)
                   } catch (error) {
@@ -2146,6 +2155,7 @@ export function registerTuiCommands(
         // from the panel may still be in flight when the reply lands.
         const reloadTheme = doc.theme
         if (reloadTheme === 'auto') {
+          app.clearActivePluginTheme()
           detach('theme autodetect', () => app.autoDetectTheme({
             // A settings panel write may complete while OSC 11 is in flight;
             // only apply the late result if auto is still the latest choice.
@@ -2153,6 +2163,7 @@ export function registerTuiCommands(
           }))
           app.trackTerminalTheme(true)
         } else if (reloadTheme === 'dark' || reloadTheme === 'light') {
+          app.clearActivePluginTheme()
           app.applyTheme(reloadTheme)
           app.trackTerminalTheme(false)
         } else if (reloadTheme.startsWith('custom:')) {
@@ -2165,7 +2176,14 @@ export function registerTuiCommands(
           const themeRef = captureExtensionHealthRef?.('theme', name)
           if (palette !== undefined) {
             try {
-              app.applyPalette(palette)
+              // A PLUGIN palette records the selection (the unload
+              // fallback restores builtin dark when it disappears); a
+              // custom FILE clears it.
+              if (pluginPalette !== undefined) app.applyPluginPalette(name, pluginPalette)
+              else {
+                app.clearActivePluginTheme()
+                app.applyPalette(palette)
+              }
               if (themeRef !== undefined) clearExtensionError?.(themeRef)
             } catch (error) {
               if (themeRef !== undefined) recordExtensionError?.(themeRef, error)

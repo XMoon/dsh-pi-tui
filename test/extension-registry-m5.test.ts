@@ -287,6 +287,46 @@ test('SettingsRegistry: a throwing onChange is a REJECTION, not a stale/gone', a
   assert.equal(registry.rows()[0]?.currentValue, 'old')
 })
 
+test('SettingsRegistry: a STALE callback that resolves false or THROWS is still stale, never rejected', async () => {
+  // The review's P2: generation/lifetime precedence over the callback
+  // outcome — a callback that settles after a NEWER apply superseded it
+  // must report 'stale' even when it returns false or throws (the host
+  // must stay silent; the old order classified them as real rejections
+  // and rolled the panel back from the value the user actually sees).
+  const registry = new SettingsRegistry()
+  let release1!: (accepted: boolean) => void
+  const gate1 = new Promise<boolean>(resolve => { release1 = resolve })
+  let release2!: (accepted: boolean) => void
+  const gate2 = new Promise<boolean>(resolve => { release2 = resolve })
+  registry.register({
+    id: 'race2', label: 'R', currentValue: '0',
+    onChange: (value) => value === '1' ? gate1 : value === '2' ? gate2 : true,
+  }, 'o')
+  // Scenario A: the superseded callback RESOLVES FALSE.
+  const p1 = registry.applyDetailed('race2', '1')
+  const p2 = registry.applyDetailed('race2', '2')
+  release2(true)
+  assert.equal(await p2, 'accepted')
+  release1(false) // the stale callback REFUSES — but it is superseded
+  assert.equal(await p1, 'stale', 'a superseded callback that returns false must be stale, not rejected')
+  assert.equal(registry.rows()[0]?.currentValue, '2')
+  // Scenario B: the superseded callback THROWS.
+  let releaseThrow!: () => void
+  const gateThrow = new Promise<void>(resolve => { releaseThrow = resolve })
+  registry.register({
+    id: 'throw-race', label: 'T', currentValue: '0',
+    onChange: (value) => value === '1' ? gateThrow.then(() => { throw new Error('late boom') }) : value === '2' ? gate2 : true,
+  }, 'o')
+  const t1 = registry.applyDetailed('throw-race', '1')
+  const t2 = registry.applyDetailed('throw-race', '2')
+  release2(true)
+  assert.equal(await t2, 'accepted')
+  // t1's onChange settles LATE and THROWS — but it was superseded.
+  releaseThrow()
+  assert.equal(await t1, 'stale', 'a superseded callback that throws must be stale, not rejected')
+  assert.equal(registry.rows()[0]?.currentValue, '2')
+})
+
 test('SettingsRegistry: in-flight apply after disposal does not commit (P2-R3)', async () => {
   const invalidations: number[] = []
   const registry = new SettingsRegistry(() => { invalidations.push(1) })
