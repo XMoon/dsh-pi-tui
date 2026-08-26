@@ -542,13 +542,17 @@ test('a plugin submit binding is ADDITIVE — the builtin Enter stays (PR review
   app.stop()
 })
 
-test('a plugin key does NOT collide with the leader prefix (PR review P2)', () => {
+test('a live plugin key colliding with the leader prefix disables the leader (review round 12)', () => {
   const manager = new HostKeybindingManager()
   manager.setPluginRules([{ id: 'plugin-x', action: 'app.tasks.open', key: 'ctrl+alt+x' }])
   manager.setUserConfiguration(parseUserKeybindings({ leader: 'ctrl+alt+x', bindings: { 'app.transcript.toggleFullscreen': '<leader>n' } }))
-  assert.ok(manager.leaderMachine() !== undefined, 'a plugin-only key must not disable the leader')
-  assert.ok(!manager.diagnosticsList().some(message => message.includes('active host key')),
-    `no collision expected: ${manager.diagnosticsList().join(' | ')}`)
+  // The leader machine feeds BEFORE the plugin stage: a leader key equal
+  // to a live plugin key would silently swallow the plugin binding while
+  // the read model still advertised it. Fail-soft like a host-key
+  // collision: the plugin key wins, the leader machine is disabled.
+  assert.equal(manager.leaderMachine(), undefined, 'a live plugin key must disable the leader')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('leader key') && message.includes('plugin key')),
+    `no plugin collision diagnostic: ${manager.diagnosticsList().join(' | ')}`)
 })
 
 test('read-only viewer: Esc ALWAYS closes it, even with interrupt remapped (PR review P1)', async () => {

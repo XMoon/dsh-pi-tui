@@ -22,6 +22,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { matchesKey } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/keybindings/manager.ts'
@@ -1005,4 +1006,148 @@ test('6.6 a conditional top rule does not permanently hide the fallback in the r
   const unconditional = new HostKeybindingManager()
   unconditional.setUserConfiguration(parseUserKeybindings({ 'app.todo.toggle': 'ctrl+s' }))
   assert.deepEqual(unconditional.keysFor('app.input.steer'), [], 'an unconditional top trigger still hides the lower rule')
+})
+
+// ── 7.x Stable plugin boundary + legacy C0 inventory (round-12 findings) ───
+
+test('7.1 the registry REJECTS a non-public action string (runtime whitelist)', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  // A public TuiAction registers fine.
+  registry.register(
+    { id: 'good', key: { key: 'x', ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'ok' },
+    'plugin',
+  )
+  // A Host-private app.* action smuggled through the PUBLIC API must be
+  // rejected at registration — the registry has no runtime action
+  // whitelist, so a JS/`as any` plugin could otherwise register
+  // `app.exit.request` and the plugin-owner winner would reach the Host
+  // dispatcher (capability boundary — review finding). The public
+  // TuiAction set is the ONLY thing a plugin may trigger.
+  assert.throws(() => registry.register(
+    { id: 'smuggled-exit', key: { key: 'y', ctrl: true, alt: false, shift: false, super: false }, action: 'app.exit.request' as never, description: 'bad' },
+    'plugin',
+  ), /not a public TuiAction/, 'a Host-private action string must be rejected')
+  // Any arbitrary string is rejected the same way.
+  assert.throws(() => registry.register(
+    { id: 'smuggled-arbitrary', key: { key: 'z', ctrl: true, alt: false, shift: false, super: false }, action: 'definitely-not-an-action' as never, description: 'bad' },
+    'plugin',
+  ), /not a public TuiAction/)
+  // The rejected actions never entered the registry.
+  assert.equal(registry.snapshot().bindings.length, 1)
+})
+
+test('7.2 a plugin-owner winner NEVER enters the Host dispatcher', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let exits = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => { exits += 1 },
+  })
+  app.start()
+  // A smuggled plugin rule (the internal keymap path) carrying a
+  // HOST-private action — the registry rejects it at registration, and
+  // the host dispatcher must never execute it either (review finding:
+  // plugin-owner winners used to enter dispatchResolvedAction, so an
+  // `app.exit.request` string would run the Host exit path).
+  app.keybindingsManager().setPluginRules([{ id: 'smuggled', action: 'app.exit.request' as never, key: 'ctrl+alt+x' }])
+  await vt.waitForRender()
+  vt.sendInput('\x1b\x18') // ctrl+alt+x
+  await vt.waitForRender()
+  assert.equal(exits, 0, 'the Host dispatcher must never execute a plugin-supplied action string')
+  // The resolution is plugin-owned (the remainder owns it, not the Host).
+  const resolution = app.keybindingsManager().resolve('\x1b[120;7u', deriveKeybindingContext({ focusedSeat: 'editor' }))
+  assert.equal(resolution?.owner, 'plugin', 'the winner is plugin-owned')
+  app.stop()
+})
+
+test('7.2b a legit plugin action still executes through the Stable remainder', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const actions: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onExtensionAction: (action: string) => { actions.push(action) },
+  }, {
+    // The router's plugin stage maps the same key to the public action.
+    pluginActionFor: (key) => key.key === 'x' && key.ctrl && key.alt ? 'open-search' : undefined,
+  })
+  app.start()
+  app.keybindingsManager().setPluginRules([{ id: 'plugin', action: 'open-search', key: 'ctrl+alt+x' }])
+  await vt.waitForRender()
+  vt.sendInput('\x1b\x18') // ctrl+alt+x
+  await vt.waitForRender()
+  assert.deepEqual(actions, ['open-search'], 'the plugin action executes through the Stable plugin remainder')
+  app.stop()
+})
+
+test('7.3 the registry rejects plain printable keys (space/letters) at registration', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  // The router keeps printable keys with the editor's text entry, so a
+  // plugin binding on one can never fire — the registration must be
+  // rejected, not advertised as an effective rule (review finding).
+  assert.throws(() => registry.register(
+    { id: 'space', key: { key: 'space', ctrl: false, alt: false, shift: false, super: false }, action: 'open-search', description: 'space' },
+    'plugin',
+  ), /printable/, 'the spacebar must be rejected at registration')
+  assert.throws(() => registry.register(
+    { id: 'letter', key: { key: 'a', ctrl: false, alt: false, shift: false, super: false }, action: 'open-search', description: 'a' },
+    'plugin',
+  ), /printable/, 'a bare letter must be rejected at registration')
+  // A MODIFIED chord stays bindable (it really reaches the plugin stage).
+  registry.register(
+    { id: 'ctrl-space', key: { key: 'space', ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'chord' },
+    'plugin',
+  )
+  assert.equal(registry.actionFor({ key: 'space', ctrl: true, alt: false, shift: false, super: false }), 'open-search')
+})
+
+test('7.4 a live plugin key disables a colliding leader prefix (never a silent swallow)', () => {
+  const manager = new HostKeybindingManager()
+  manager.setPluginRules([{ id: 'plugin-x', action: 'app.tasks.open', key: 'ctrl+alt+x' }])
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+alt+x',
+    bindings: { 'app.transcript.toggleFullscreen': '<leader>n' },
+  }))
+  // The leader machine feeds BEFORE the plugin stage, so a leader key
+  // that equals a live plugin key would silently swallow the plugin
+  // binding while the read model still advertised it (review finding).
+  assert.equal(manager.leaderMachine(), undefined, 'the leader must not swallow the plugin key')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('leader key') && message.includes('plugin key')),
+    `no plugin collision diagnostic: ${manager.diagnosticsList().join(' | ')}`)
+  assert.equal(manager.keyHint('app.transcript.toggleFullscreen'), '', 'the dead leader sequence is not advertised')
+  assert.ok(manager.keysFor('app.tasks.open').includes('ctrl+alt+x'), 'the plugin binding stays effective')
+})
+
+test('7.5 legacy C0 aliases are rejected everywhere (ctrl+i / ctrl+h / ctrl+_)', () => {
+  // On legacy terminals Ctrl+I is the Tab byte (0x09), Ctrl+H is
+  // Backspace (0x08) and Ctrl+_ / Ctrl+- are 0x1f — indistinguishable
+  // from the editor's own keys, so a binding on them is protocol-
+  // dependent and unsupported (review finding — same class as
+  // ctrl+[/ctrl+j/ctrl+m).
+  for (const key of ['ctrl+i', 'ctrl+h', 'ctrl+_']) {
+    const direct = parseUserKeybindings({ 'app.todo.toggle': key })
+    assert.deepEqual(direct.bindings, {}, `"${key}" direct must be rejected`)
+    assert.ok(direct.diagnostics.some(message => message.includes('legacy terminals')),
+      `no rejection for "${key}": ${direct.diagnostics.join(' | ')}`)
+    const submit = parseUserKeybindings({ 'app.input.submit': key })
+    assert.deepEqual(submit.bindings, {}, `"${key}" submit must be rejected`)
+    const leader = parseUserKeybindings({ leader: key, bindings: { 'app.tasks.open': '<leader>t' } })
+    assert.equal(leader.leader, undefined, `"${key}" leader prefix must be rejected`)
+    const completion = parseUserKeybindings({ leader: 'ctrl+x', bindings: { 'app.tasks.open': `<leader>${key}` } })
+    assert.deepEqual(completion.leaderBindings, [], `"<leader>${key}" completion must be rejected`)
+  }
+})
+
+test('7.5b the C0 byte premise: raw \\t / \\x08 / \\x1f are the legacy spellings', () => {
+  // Why the rejections exist: the fork's matchesKey accepts the raw
+  // control bytes for BOTH spellings of one physical key, so on a legacy
+  // terminal a `ctrl+i` binding fires on Tab bytes (and vice versa).
+  assert.ok(matchesKey('\t', 'ctrl+i' as never), 'Ctrl+I is the Tab byte on legacy terminals')
+  assert.ok(matchesKey('\t', 'tab' as never), '…and the same byte is Tab for the editor')
+  assert.ok(matchesKey('\x08', 'ctrl+h' as never), 'Ctrl+H is the Backspace byte on legacy terminals')
+  assert.ok(matchesKey('\x08', 'backspace' as never), '…and the same byte is Backspace for the editor')
+  assert.ok(matchesKey('\x1f', 'ctrl+_' as never), 'Ctrl+_ is the 0x1f byte')
+  assert.ok(matchesKey('\x1f', 'ctrl+-' as never), 'Ctrl+- is the SAME 0x1f byte (the fork maps - to _)')
 })

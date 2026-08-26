@@ -164,11 +164,12 @@ export class HostKeybindingManager {
     }
     this.keymap = this.buildKeymap()
     this.effectiveLeaderBindings = leaderBindings
-    // Leader PREFIX collision (PR review finding): the leader key is fed
-    // BEFORE the host ladder, so a leader key that is ALSO an ACTIVE
-    // direct key of any host action would silently shadow that action
-    // (e.g. `leader: ctrl+f` swallows app.transcript.search). Fail-soft:
-    // the direct key wins, the leader machine is DISABLED, and the
+    // Leader PREFIX collision (PR review finding + round-12 finding): the
+    // leader key is fed BEFORE the host ladder AND before the plugin
+    // stage, so a leader key that is ALSO an ACTIVE direct key of any
+    // host action (e.g. `leader: ctrl+f` swallows app.transcript.search)
+    // or a LIVE plugin binding would silently shadow it. Fail-soft: the
+    // direct/plugin key wins, the leader machine is DISABLED, and the
     // collision is a diagnostic — never a silent shadow. A leader key
     // that only collides with a DISABLED action's key is fine (no active
     // rule).
@@ -177,14 +178,21 @@ export class HostKeybindingManager {
     // EDITOR-OWNED submit keys (hostResolved:false actions — the fork
     // editor's tui.input.submit owns them; the keymap does not list them,
     // so e.g. `leader: enter` would silently swallow Enter — PR review
-    // finding).
+    // finding) AND the live PLUGIN keys (the leader machine feeds before
+    // the plugin stage — round-12 finding).
+    const pluginCollision = leaderKey !== undefined
+      ? this.keymap.pluginActiveKeys().some(key => key === leaderKey)
+      : false
     const leaderCollision = leaderKey !== undefined
       ? this.keymap.hostActiveKeys().some(key => key === leaderKey)
         || this.editorSubmitKeysFor().some(key => key === leaderKey)
+        || pluginCollision
       : false
     if (leaderCollision && leaderKey !== undefined) {
       this.diagnostics.push(
-        `keybinding: leader key ${formatKeyId(leaderKey)} is also an active host key — the leader machine is disabled (the direct key wins)`,
+        pluginCollision
+          ? `keybinding: leader key ${formatKeyId(leaderKey)} is also a live plugin key — the leader machine is disabled (the plugin binding wins)`
+          : `keybinding: leader key ${formatKeyId(leaderKey)} is also an active host key — the leader machine is disabled (the direct key wins)`,
       )
       // Disable the leader machine AND its advertised bindings: the
       // direct key wins (never a silent shadow — PR review finding). The
