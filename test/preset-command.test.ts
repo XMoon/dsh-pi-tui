@@ -610,7 +610,7 @@ test('/keybindings reset awaits the settings write and reports its real outcome'
   // persistence write resolves — a failed write is an error result.
   let replaced = 0
   const failing: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }),
     replace: async () => { replaced += 1; throw new Error('write refused') },
   }
   let t = setup({ tuiSettings: failing })
@@ -622,7 +622,7 @@ test('/keybindings reset awaits the settings write and reports its real outcome'
 
   let okReplaced = 0
   const ok: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }),
     replace: async () => { okReplaced += 1 },
   }
   t = setup({ tuiSettings: ok })
