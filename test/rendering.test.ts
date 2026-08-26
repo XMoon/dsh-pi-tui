@@ -2100,23 +2100,27 @@ test('setIconStyleFrames never overwrites an explicit custom frame set', () => {
   indicator.dispose()
 })
 
-test('setFrames to an empty set clears the running interval (no stale tick, no modulo-zero)', async () => {
+test('setFrames to an empty set clears the running interval (no stale tick, no modulo-zero)', (t) => {
+  // Deterministic clock: the node:test mock timers drive the indicator's
+  // setInterval — no fixed real-time sleeps (the repo's timing rule).
+  t.mock.timers.enable({ apis: ['setInterval'] })
   const renders: string[] = []
   const capture = (): void => { renders.push(indicator.render(80).join('')) }
   const indicator = new WorkingIndicator(capture, { frames: ['🐋', '🐳'], intervalMs: 10 })
   indicator.start()
   const afterStart = renders.length
   // Shrink the ACTIVE indicator to zero frames: it repaints once with the
-  // new (empty) set, and the interval MUST be cleared — no ticks after.
+  // new (empty) set, and the interval MUST be cleared — tick() must not
+  // produce further renders (and never modulo-zeros the frame index).
   indicator.setFrames([])
   const afterSet = renders.length
   assert.ok(afterSet > afterStart, 'an active indicator must repaint with the new frame set')
-  await new Promise(resolve => setTimeout(resolve, 40))
+  t.mock.timers.tick(100)
   assert.equal(renders.length, afterSet, `the interval must be cleared for a zero-frame set:\n${renders.join('\n')}`)
-  // Growing back re-arms the animation.
-  indicator.setFrames(['🐋', '🐳'])
+  // Growing back re-arms the animation deterministically.
+  indicator.setFrames(['😊', '🙂'])
   const afterGrow = renders.length
-  await new Promise(resolve => setTimeout(resolve, 40))
+  t.mock.timers.tick(100)
   assert.ok(renders.length > afterGrow, 'the interval must re-arm when frames grow back')
   indicator.dispose()
 })

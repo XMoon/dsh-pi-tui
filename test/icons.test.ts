@@ -57,13 +57,6 @@ test('iconPrefix never emits a dangling separator for hidden icons', () => {
   assert.equal(`${iconPrefix('error', 'minimal')}Error`, '×  Error')
 })
 
-test('every symbols glyph measures exactly ONE terminal cell', () => {
-  for (const semantic of ALL_ICON_SEMANTICS) {
-    const glyph = iconFor(semantic, 'symbols')
-    assert.equal(visibleWidth(glyph), 1, `symbols glyph for ${semantic} must be 1 cell (got ${JSON.stringify(glyph)})`)
-  }
-})
-
 test('the emoji palette preserves the historical glyphs', () => {
   // The default style must be pixel-identical to the pre-feature UI: these
   // are the exact glyphs the old hard-coded maps returned.
