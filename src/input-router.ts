@@ -277,9 +277,12 @@ function keyIdToNormalized(keyId: string): NormalizedKey {
 }
 
 /** Whether a normalized key is a plain printable (a plugin binding for a
- * printable key would swallow typing — the editor's text input wins). */
+ * printable key would swallow typing — the editor's text input wins).
+ * The `space` key name (the spacebar) is printable too: a plugin binding
+ * on it would swallow every typed space (convergence finding). */
 function isPrintableKey(key: NormalizedKey): boolean {
   if (key.ctrl || key.alt || key.super) return false
   if (key.shift) return false
+  if (key.key === 'space') return true
   return key.key.length === 1 && key.key.charCodeAt(0) >= 32 && key.key.charCodeAt(0) <= 126
 }
