@@ -2192,6 +2192,8 @@ export function registerTuiCommands(
           } else {
             // A missing custom selection is a host settings problem, not a
             // plugin contribution failure. Do not create a theme health row.
+            // The plugin selection is cleared (same rationale as startup).
+            app.clearActivePluginTheme()
             app.notify(`theme ${name} not found`, 'error')
           }
           app.trackTerminalTheme(false)
