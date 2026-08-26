@@ -115,6 +115,27 @@ export class AutocompleteRegistry {
    */
   async suggest(
     query: TuiAutocompleteQuery,
+    onError?: (id: string, error: unknown) => void,
+    onSuccess?: (id: string) => void,
+  ): Promise<TuiAutocompleteSuggestions | null> {
+    // The PUBLIC contract (the Stable TuiAutocompleteRegistryView ABI) is
+    // owner-less: a third-party caller's (id, error) callback must never
+    // receive the host's owner in the error slot. The host's OWNER-scoped
+    // path is suggestOwned (the review's P2 — the public declaration and
+    // the runtime ABI drifted because TS's parameter contravariance let
+    // the wider internal signature satisfy the narrower public one).
+    return this.suggestOwned(
+      query,
+      onError === undefined ? undefined : (id, _owner, error) => onError(id, error),
+      onSuccess === undefined ? undefined : (id, _owner) => onSuccess(id),
+    )
+  }
+
+  /** HOST-ONLY variant: the callbacks carry the SNAPSHOT owner (captured
+   * at request start — an HMR reload cannot redirect a stale settlement
+   * to the new owner). Not part of the public view. */
+  async suggestOwned(
+    query: TuiAutocompleteQuery,
     onError?: (id: string, owner: string, error: unknown) => void,
     onSuccess?: (id: string, owner: string) => void,
   ): Promise<TuiAutocompleteSuggestions | null> {

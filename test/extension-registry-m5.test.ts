@@ -178,6 +178,25 @@ test('ThemeRegistry: selectable names are deterministic and collisions error', (
   assert.deepEqual(registry.names(), [], 'dispose removes the theme')
 })
 
+test('ThemeRegistry: the host-builtin names (auto/dark/light) are RESERVED at registration', () => {
+  // The /settings picker and apply path dispatch 'auto'/'dark'/'light' to
+  // the BUILTIN branches BEFORE the plugin branch — a plugin theme with
+  // one of these names would register, appear in the picker, and never be
+  // selectable (the review's P2/P3). Rejected explicitly instead.
+  const registry = new ThemeRegistry()
+  for (const name of ['auto', 'dark', 'light']) {
+    assert.throws(() => registry.register({
+      id: `reserved-${name}`,
+      name,
+      palette: { text: '#000' } as never,
+    }, 'owner-a'), /reserved by the host/, `theme name "${name}" must be rejected`)
+  }
+  assert.deepEqual(registry.names(), [], 'no reserved-named theme may register')
+  // Non-reserved names still register.
+  registry.register({ id: 'ok', name: 'Solarized', palette: { text: '#000' } as never }, 'owner-a')
+  assert.deepEqual(registry.names(), ['Solarized'])
+})
+
 test('ThemeRegistry: owner unload removes the theme (selected-theme fallback gate)', () => {
   const registry = new ThemeRegistry()
   registry.register({ id: 'gone', name: 'Gone', palette: { text: '#fff' } as never }, 'owner-a')
@@ -234,6 +253,38 @@ test('SettingsRegistry: a slow EARLIER apply never overwrites a newer completed 
   release1(true) // the OLDER change completes LATE
   assert.equal(await p1, false, 'a stale apply reports not-committed')
   assert.equal(registry.rows()[0]?.currentValue, '2', 'the stale change must NOT overwrite the newer one')
+  // The DETAILED outcome distinguishes the false-positives: the stale
+  // apply is 'stale' (NOT a plugin rejection — the review's P2: the host
+  // must stay silent, never record health / revert / notify), a plugin
+  // refusal is 'rejected', an orphaned row is 'gone'.
+  const detailedP1 = registry.applyDetailed('race', '1')
+  const detailedP2 = registry.applyDetailed('race', '2')
+  release2(true)
+  assert.equal(await detailedP2, 'accepted')
+  release1(true)
+  assert.equal(await detailedP1, 'stale', 'a superseded apply must be stale, not rejected')
+  // A real plugin rejection is 'rejected'.
+  registry.register({ id: 'deny', label: 'D', currentValue: 'old', onChange: () => false }, 'o')
+  assert.equal(await registry.applyDetailed('deny', 'new'), 'rejected')
+  // An unknown / disposed row is 'gone'.
+  assert.equal(await registry.applyDetailed('no-such', 'x'), 'gone')
+  const disposeHandle = registry.register({ id: 'gone-row', label: 'G', currentValue: 'old' }, 'o')
+  disposeHandle.dispose()
+  assert.equal(await registry.applyDetailed('gone-row', 'x'), 'gone')
+  // The public boolean API keeps its semantics.
+  assert.equal(await registry.apply('deny', 'new'), false)
+})
+
+test('SettingsRegistry: a throwing onChange is a REJECTION, not a stale/gone', async () => {
+  const registry = new SettingsRegistry()
+  registry.register({
+    id: 'boom', label: 'B', currentValue: 'old',
+    onChange: () => { throw new Error('boom') },
+  }, 'o')
+  assert.equal(await registry.applyDetailed('boom', 'new'), 'rejected',
+    'a throwing plugin callback is a real failure — the host records health')
+  assert.equal(await registry.apply('boom', 'new'), false, 'the public boolean API stays consistent')
+  assert.equal(registry.rows()[0]?.currentValue, 'old')
 })
 
 test('SettingsRegistry: in-flight apply after disposal does not commit (P2-R3)', async () => {
@@ -312,9 +363,28 @@ test('AutocompleteRegistry: null providers fall through; a throwing provider is 
     id: 'worker',
     provider: provider(async () => ({ items: [{ value: 'work', label: 'work' }], prefix: 'w' })),
   }, 'c')
-  const result = await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal }, (id, _owner, error) => {
+  const result = await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal }, (id, error) => {
     errors.push(`${id}:${error instanceof Error ? error.message : String(error)}`)
   })
+  // The PUBLIC suggest is owner-less: a third-party (id, error) callback
+  // must receive the ERROR in the second slot — the ABI regression test
+  // for the review's P2 (the owner must never leak into the error slot).
+  const publicErrors: string[] = []
+  await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal }, (id, second) => {
+    publicErrors.push(`${id}:${typeof second}:${String(second)}`)
+  }, () => {})
+  assert.ok(publicErrors.length > 0, 'the throwing provider must report through the public callback')
+  for (const entry of publicErrors) {
+    assert.ok(entry.includes('provider boom'), `the public error slot must carry the ERROR, not the owner: ${entry}`)
+  }
+  // The HOST-ONLY suggestOwned carries the snapshot owner for the health
+  // ref protocol.
+  const owned: Array<{ id: string; owner: string }> = []
+  await registry.suggestOwned({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal }, (id, owner) => {
+    owned.push({ id, owner })
+  }, () => {})
+  assert.equal(owned.length, 1)
+  assert.equal(owned[0]!.id, 'thrower')
   assert.equal(result?.items[0]?.value, 'work', 'the chain continues past null + throw')
   assert.equal(errors.length, 1)
   assert.match(errors[0] ?? '', /thrower:provider boom/)

@@ -21,6 +21,11 @@
 import type { ColorPalette } from './theme.ts'
 import type { TuiThemeContribution, TuiThemeHandle, TuiThemeRegistrySnapshot } from './extension/public-types.ts'
 
+/** Host-reserved theme names: the /settings picker dispatches these to
+ * the builtin branches BEFORE the plugin branch, so a plugin theme with
+ * one of these names could never be selected. Rejected at registration. */
+const RESERVED_THEME_NAMES: ReadonlySet<string> = new Set(['auto', 'dark', 'light'])
+
 
 /** Internal registration record. */
 interface ThemeRecord {
@@ -65,6 +70,14 @@ export class ThemeRegistry {
       }
     }
     if (contribution.name === '') throw new Error('theme name must not be empty')
+    // The HOST-BUILTIN theme names are reserved: the /settings picker and
+    // the apply path dispatch 'auto'/'dark'/'light' to the BUILTIN
+    // branches BEFORE the plugin branch, so a plugin theme with one of
+    // these names would register, appear in the picker, and never be
+    // selectable (the review's P2/P3).
+    if (RESERVED_THEME_NAMES.has(contribution.name)) {
+      throw new Error(`theme name "${contribution.name}" is reserved by the host (auto/dark/light)`)
+    }
     this.records.set(contribution.id, {
       id: contribution.id,
       name: contribution.name,

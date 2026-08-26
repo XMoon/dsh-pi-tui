@@ -1052,7 +1052,7 @@ export function registerTuiCommands(
       extensionAutocomplete === undefined
         ? undefined
         : async (query) => {
-            const result = await extensionAutocomplete.suggest(query, (id, owner, error) => {
+            const result = await extensionAutocomplete.suggestOwned(query, (id, owner, error) => {
               recordExtensionError?.({ slot: 'autocomplete', id, owner }, error)
               try {
                 ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
@@ -1420,12 +1420,19 @@ export function registerTuiCommands(
               // flight — the settlement must report against the INVOKING
               // owner, never the reloaded one (the review's P2 fence).
               const settingRef = captureExtensionHealthRef?.('setting', settingId)
-              detach('extension setting apply', () => extSettings.apply(settingId, value).then(accepted => {
-                if (!accepted) {
+              detach('extension setting apply', () => extSettings.applyDetailed(settingId, value).then(outcome => {
+                if (outcome === 'rejected') {
+                  // ONLY a real plugin rejection is a failure: record
+                  // health, revert the optimistic row and notify. A
+                  // 'stale' outcome (a newer apply superseded this one)
+                  // or 'gone' (the row was disposed mid-apply) is NOT a
+                  // plugin refusal — recording/reverting/notifying would
+                  // be a false alarm that rolls the panel back from the
+                  // value the user actually sees (the review's P2).
                   if (settingRef !== undefined) recordExtensionError?.(settingRef, new Error('setting rejected'))
                   if (previous !== undefined) revert(previous)
                   app.notify('setting rejected', 'error')
-                } else {
+                } else if (outcome === 'accepted') {
                   if (settingRef !== undefined) clearExtensionError?.(settingRef)
                 }
               }).catch(error => {
