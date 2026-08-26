@@ -29,6 +29,8 @@
  */
 
 import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
+import type { KeyId } from '@xmoon76/pi-tui'
+import { canonicalizeKeyId } from './keybindings/key-identity.ts'
 import { PROTECTED_HOST_ACTIONS } from './keybindings/definitions.ts'
 
 export { PROTECTED_HOST_ACTIONS }
@@ -95,6 +97,31 @@ function keyEquals(left: NormalizedKey, right: NormalizedKey): boolean {
     && left.shift === right.shift && left.super === right.super
 }
 
+/** Canonicalize a NORMALIZED key (the plugin public shape): collapse
+ * base-key aliases (esc→escape, return→enter) and order modifiers
+ * ctrl→shift→alt→super, so a plugin registering `esc` or `return` is
+ * found by the runtime's `escape`/`enter` lookups and duplicate
+ * detection sees one identity (convergence finding). The public
+ * NormalizedKey contract is unchanged. */
+function canonicalNormalizedKey(key: NormalizedKey): NormalizedKey {
+  const parts: string[] = []
+  if (key.ctrl) parts.push('ctrl')
+  if (key.shift) parts.push('shift')
+  if (key.alt) parts.push('alt')
+  if (key.super) parts.push('super')
+  parts.push(key.key)
+  const canonicalKeyId = canonicalizeKeyId(parts.join('+') as KeyId)
+  const canonicalParts = canonicalKeyId.split('+')
+  const base = canonicalParts[canonicalParts.length - 1]!
+  return {
+    key: base,
+    ctrl: canonicalParts.includes('ctrl'),
+    shift: canonicalParts.includes('shift'),
+    alt: canonicalParts.includes('alt'),
+    super: canonicalParts.includes('super'),
+  }
+}
+
 /**
  * The keybinding registry (metadata only until the InputRouter lands in
  * M6). One instance backs the runner; the extension service exposes
@@ -143,15 +170,16 @@ export class KeybindingRegistry {
         `keybinding for "${describeKey(contribution.key)}" is reserved by the host and cannot be claimed by a plugin`,
       )
     }
+    const canonicalKey = canonicalNormalizedKey(contribution.key)
     for (const record of this.records.values()) {
       if (record.disposed) continue
-      if (keyEquals(record.key, contribution.key)) {
-        throw new Error(`duplicate keybinding for "${describeKey(contribution.key)}" (owner "${record.owner}")`)
+      if (keyEquals(record.key, canonicalKey)) {
+        throw new Error(`duplicate keybinding for "${describeKey(canonicalKey)}" (owner "${record.owner}")`)
       }
     }
     this.records.set(contribution.id, {
       id: contribution.id,
-      key: contribution.key,
+      key: canonicalKey,
       action: contribution.action,
       description: contribution.description,
       owner,
@@ -184,18 +212,20 @@ export class KeybindingRegistry {
 
   /** The action bound to one normalized key, or undefined. */
   actionFor(key: NormalizedKey): TuiAction | undefined {
+    const canonical = canonicalNormalizedKey(key)
     for (const record of this.records.values()) {
       if (record.disposed) continue
-      if (keyEquals(record.key, key)) return record.action
+      if (keyEquals(record.key, canonical)) return record.action
     }
     return undefined
   }
 
   /** The contribution id bound to one normalized key, or undefined. */
   idFor(key: NormalizedKey): string | undefined {
+    const canonical = canonicalNormalizedKey(key)
     for (const record of this.records.values()) {
       if (record.disposed) continue
-      if (keyEquals(record.key, key)) return record.id
+      if (keyEquals(record.key, canonical)) return record.id
     }
     return undefined
   }
