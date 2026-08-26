@@ -30,16 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a settings edit takes effect after the reload, no restart): a string for
   one key, an array for several, `false` to disable an action's keys, and
   a `leader` key plus `<leader>X` sequences for multi-key bindings (M6).
-  A plain printable key can never be bound to a Host action; a bad entry
-  is a warning, never a startup failure (fail-soft); conflicts (same key
-  + overlapping scope + same priority) are diagnosed and deactivated —
-  never silent last-write-wins. `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores
-  all user overrides. `/keybindings` shows the effective table,
-  `/keybindings conflicts` lists conflicts, `/keybindings reload`
-  re-reads the settings (fail-soft — a throwing read keeps the
-  last-known-good keymap and reports an error), and `/keybindings reset`
-  clears the overrides through the settings service and rebuilds the
-  running keymap immediately.
+  Any user declaration REPLACES the action's builtin default keys (a
+  leader-only binding is the sole trigger rather than an addition to the
+  builtin; a mixed direct + leader keeps both user triggers; `false`
+  removes every trigger). A plain printable key can never be bound to a
+  Host action; a bad entry is a warning, never a startup failure
+  (fail-soft); conflicts (same key + overlapping scope + same priority)
+  are diagnosed and deactivated — never silent last-write-wins.
+  `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores all user overrides.
+  `/keybindings` shows the effective table, `/keybindings conflicts`
+  lists conflicts, `/keybindings reload` re-reads the settings
+  (fail-soft — a throwing read keeps the last-known-good keymap and
+  reports an error), and `/keybindings reset` clears the overrides
+  through the settings service and rebuilds the running keymap
+  immediately.
+- **The `/help` and `/settings` key copy is key-neutral.** The help rows
+  describe the SEMANTIC action (e.g. "press the interrupt action twice"
+  instead of "double-Esc") and the busy preference is "Submit while
+  busy" — never a physical Enter/Esc claim that would go stale after a
+  remap; the LABEL column always shows the effective keys.
 - **The subagent viewer guard is action-based.** The continuable viewer
   blocks PARENT actions by action id (not by physical key), so a
   remapped parent shortcut stays blocked inside the viewer — the

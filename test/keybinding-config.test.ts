@@ -107,7 +107,14 @@ test('leader key + leader sequences parse', () => {
     { action: 'app.tasks.open', key: 't' },
     { action: 'app.history.search', key: 'r' },
   ])
-  assert.deepEqual(parsed.bindings, {})
+  // Round 37: a LEADER-ONLY declaration emits an EMPTY-ARRAY marker per
+  // action — the effective keymap sees a user declaration and REPLACES
+  // the builtin default (the unified override contract: any declaration
+  // replaces the builtin; only `false` removes every trigger).
+  assert.deepEqual(parsed.bindings, {
+    'app.tasks.open': [],
+    'app.history.search': [],
+  })
 })
 
 test('leader sequences without a leader key are inert with a diagnostic', () => {

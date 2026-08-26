@@ -147,8 +147,9 @@ export class EffectiveKeymap {
       }
       if (userValue !== undefined) {
         // 2. User overrides replace the builtin keys for this action.
-        // (`false` was handled above, so this is a key or key list.) A
-        // conditional action's user rules inherit its predicate.
+        // (`false` was handled above, so this is a key, key list, or the
+        // LEADER-ONLY EMPTY-ARRAY marker.) A conditional action's user
+        // rules inherit its predicate.
         const predicate = predicateByAction.get(definition.id)
         const keys = Array.isArray(userValue) ? userValue : [userValue]
         for (const key of keys) {
@@ -156,14 +157,20 @@ export class EffectiveKeymap {
           if (!isDuplicate(rule.action, rule.key)) rules.push(rule)
         }
         // For an EDITOR-OWNED action (submit) the BUILTIN also compiles as
-        // an owner=editor rule: the user override (priority 200) shadows it
-        // when effective, but if the override CONFLICTS away (e.g.
-        // submit=ctrl+x vs history=ctrl+x), the builtin Enter survives the
-        // shadow as the fail-soft (convergence §4.5 — no fabricated
-        // fallback: the builtin was always a declared rule, it just gets
-        // shadowed by a WORKING override). Explicit `false` was handled
-        // above and skips this entirely.
-        if (definition.hostResolved === false) {
+        // an owner=editor rule: a NON-EMPTY user override (priority 200)
+        // shadows it when effective, but if the override CONFLICTS away
+        // (e.g. submit=ctrl+x vs history=ctrl+x), the builtin Enter
+        // survives the shadow as the fail-soft (convergence §4.5 — no
+        // fabricated fallback: the builtin was always a declared rule, it
+        // just gets shadowed by a WORKING override). The LEADER-ONLY
+        // marker (an EMPTY user array) is a full replacement declaration
+        // and does NOT compile the builtin fallback either — the leader
+        // sequence is the only trigger (review round 37: the unified
+        // override contract — a leader-only submit must not keep the
+        // builtin Enter declared in the unified model, so resolve(Enter)
+        // returns undefined and matches(Enter, submit) is false). Explicit
+        // `false` was handled above and skips this entirely.
+        if (definition.hostResolved === false && keys.length > 0) {
           for (const key of definition.defaultKeys) {
             const rule = this.rule(definition, key, 'builtin', PRIORITY.builtin)
             if (!isDuplicate(rule.action, rule.key)) rules.push(rule)
@@ -228,8 +235,33 @@ export class EffectiveKeymap {
       if (!isDuplicate(pluginRule.action, pluginRule.key)) rules.push(pluginRule)
     }
     // 5. Conflict detection: deactivate conflicting rules, report them.
-    const { conflicts, deactivated } = detectConflicts(rules)
+    const { conflicts, deactivated: conflicted } = detectConflicts(rules)
+    // The deactivation set is mutated below (the editor-owned fail-soft
+    // deactivation), so copy the conflict result.
+    const deactivated = new Set(conflicted)
     this.conflicts = conflicts
+    // 5b. EDITOR-OWNED FAIL-SOFT deactivation (review round 37 — the
+    // unified override contract): for an editor-owned action (submit), a
+    // WORKING user direct override must remove the builtin default from
+    // the RUNTIME resolver too — not just from the read model. The
+    // builtin Enter rule compiles as a fail-soft (convergence §4.5) so a
+    // CONFLICTED override restores it, but when a user-owned editor rule
+    // of the same action is LIVE (not deactivated), the builtin default
+    // is removed from the resolution set: resolve(Enter) is undefined and
+    // matches(Enter, submit) is false — one effective truth everywhere.
+    // (A conflicted-away override has no live user editor rule, so the
+    // builtin survives — the documented conflict fail-soft.)
+    const userEditorLive = new Set<string>()
+    for (const rule of rules) {
+      if (deactivated.has(rule.id)) continue
+      if (rule.owner === 'editor' && rule.source === 'user') userEditorLive.add(rule.action)
+    }
+    for (const rule of rules) {
+      if (rule.owner === 'editor' && rule.source === 'builtin'
+        && userEditorLive.has(rule.action)) {
+        deactivated.add(rule.id)
+      }
+    }
     // 6. PRIORITY SHADOW (plan §6.2, convergence §4.3): for each key, the
     // highest-priority tier that still has a live (non-deactivated) rule
     // is the TOP TRIGGER; every LOWER-priority rule on the same key with
@@ -370,15 +402,18 @@ export class EffectiveKeymap {
     return false
   }
 
-  /** The read-model projection of ONE action: its visible rules with a
-   * working user override REPLACING the editor-owned builtin default of
-   * the same action (a user remap of submit moves the key — the builtin
-   * Enter is not advertised alongside, convergence §4.5). HOST-owned
-   * builtins stay ADDITIVE (the documented additive affordance: a user
-   * key joins the action's default keys). This is the SINGLE projection
-   * behind keysFor/editorKeysFor/hostKeysFor/snapshot — one fact
-   * everywhere (review finding: the snapshot used to iterate the raw
-   * visible set and re-advertised a replaced builtin). */
+  /** The read-model projection of ONE action: its visible rules. A
+   * working user override already REPLACED the builtin at compile time
+   * (the user-declaration branch skips the builtin compilation — unified
+   * override contract, review round 37), and any unconditionally shadowed
+   * rule was removed by the priority-shadow step, so this set is the
+   * effective truth. The editor-owned builtin of submit is additionally
+   * filtered here for safety (convergence §4.5: a working user remap
+   * never advertises the replaced Enter alongside), though the step-5b
+   * deactivation already removes it from the resolution set. This is the
+   * SINGLE projection behind keysFor/editorKeysFor/hostKeysFor/snapshot —
+   * one fact everywhere (review finding: the snapshot used to iterate the
+   * raw visible set and re-advertised a replaced builtin). */
   private visibleRulesFor(action: string): EffectiveBindingRule[] {
     const rules = this.visibleRules.filter(rule => rule.action === action)
     if (!rules.some(rule => rule.source === 'user')) return rules

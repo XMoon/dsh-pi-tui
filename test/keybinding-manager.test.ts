@@ -159,7 +159,9 @@ test('duplicate leader bindings of the SAME action are not ambiguous (review rou
   })
   assert.ok(!manager.diagnosticsList().some(message => message.includes('ambiguous')), `no ambiguity expected: ${manager.diagnosticsList().join(' | ')}`)
   assert.deepEqual(manager.leaderKeysFor('app.history.search'), ['h'], 'the deduped binding fires')
-  assert.equal(manager.keyHint('app.history.search'), 'Ctrl+R / Leader H', 'the default direct key plus the deduped leader')
+  // Round 37: a leader-only declaration REPLACES the builtin default —
+  // the deduped leader is the ONLY trigger (no Ctrl+R advertised).
+  assert.equal(manager.keyHint('app.history.search'), 'Leader H', 'the leader-only declaration replaced the builtin Ctrl+R')
   // Two DIFFERENT actions on the same completing key are still ambiguous.
   const ambiguous = managerWith({
     leader: 'ctrl+x',

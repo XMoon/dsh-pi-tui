@@ -114,7 +114,9 @@ configurable action first (plan §3.3).
    `hostResolves` is winner-based — an editor-owned winner is never
    host-reserved, so the key reaches the fork editor. User remaps/`false`
    sync into the fork editor's binding, conflict and shadow apply,
-   fail-soft (a dead override restores the builtin Enter unless `false`)
+   fail-soft (a CONFLICTED direct submit override restores the builtin
+   Enter — convergence §4.5; a DEAD leader-only override stays inert,
+   never a fabricated restore; explicit `false` removes everything)
    is evaluated on the EFFECTIVE rules — never the raw config, and a
    leader sequence NEVER clears the direct keys (`submit:
    ['ctrl+z', '<leader>s']` keeps BOTH triggers; only a truly leader-only
@@ -207,6 +209,30 @@ only and a callback could not map across the process boundary in the
 future Remote adapter (migration rule: no callbacks across the wire;
 see docs/client-server-migration.md).
 
+**The UNIFIED override contract (review round 37).** One rule for every
+action, enforced by the parser AND the effective keymap together:
+
+```text
+absent             -> builtin default keys
+direct user keys   -> REPLACE the builtin
+leader-only        -> REPLACE the builtin (the leader is the only trigger)
+direct + leader    -> both USER triggers, builtin removed
+false              -> remove every trigger (builtin included)
+composition        -> additive affordance (never removed by a remap)
+```
+
+A leader-only declaration is recorded as an EMPTY-ARRAY marker in the
+parsed user bindings, so the effective keymap sees a real user
+declaration and suppresses the builtin (including the editor-owned
+builtin for submit — `resolve(Enter)` is undefined and
+`matches(Enter, submit)` is false for a leader-only submit; the unified
+model has ONE effective truth). The conflict fail-soft is the only
+exception: a DIRECT submit override that CONFLICTS away (all user rules
+deactivated) restores the builtin Enter — the documented convergence
+§4.5 rule, never a fabricated fallback for a working override. A dead
+leader (shadowed/ambiguous) leaves a leader-only action inert — the
+diagnostic explains why; no silent builtin restoration.
+
 **Conditional affordances are ADDITIVE, never replaced.** A composition
 rule (the empty-editor `↓` task-browser affordance → `app.tasks.open`)
 stays live alongside a user binding of the same action: binding
@@ -214,7 +240,8 @@ stays live alongside a user binding of the same action: binding
 editor + active tasks) still opens the browser. Only `false` disables
 the affordance along with every other key of the action. The README
 uses "override" loosely; the effective semantics are: *a user binding
-adds a trigger for that semantic action; `false` removes them all*.
+replaces the action's builtin default keys and adds its triggers;
+`false` removes them all*.
 
 ## Diagnostics
 
@@ -409,7 +436,7 @@ The read model is ONE projection: `keysFor`/`keyHint`/
 working submit remap never leaves the replaced Enter advertised), and a
 CONDITIONAL top claim never permanently hides its context fallback.
 
-Final gates: 2527 bundle tests, 985 fork tests, 11 docs tests,
+Final gates: 2536 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
-styles, either casing), `git diff --check` — all green. The final
-convergence review round was accepted with no findings.
+styles, either casing), `git diff --check` — all green. The latest
+external convergence review round was accepted with no findings.

@@ -16,6 +16,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { LOCAL_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
+import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
@@ -199,11 +200,23 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
       rawInput,
       signal: new AbortController().signal,
     })
+  // Run ANY registered command (defaults to /settings for the existing
+  // tests; /help uses the same surface).
+  const runCommand = async (name: string, rawInput = ''): Promise<unknown> => {
+    const found = commands.defs.find(entry => entry.name === name)
+    assert.ok(found?.handler !== undefined, `${name} handler missing`)
+    return (found!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
+      commandId: CommandId('cmd-test-1'),
+      agent: undefined as never,
+      rawInput,
+      signal: new AbortController().signal,
+    })
+  }
   const view = async (): Promise<string> => {
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, view, settings, registered: commands.defs.map(def => def.name) }
+  return { vt, app, run, runCommand, view, settings, registered: commands.defs.map(def => def.name) }
 }
 
 test('every command registerTuiCommands registers is in LOCAL_COMMANDS', () => {
@@ -220,7 +233,10 @@ test('/settings shows the busy-enter row with the persisted value', async () => 
   const t = setup({ busyEnter: 'steer' })
   await t.run('')
   const view = await t.view()
-  assert.ok(view.includes('Enter while busy'), `busy-enter row missing:\n${view}`)
+  // Key-neutral label (review round 37): the preference is the semantic
+  // SUBMIT action's busy behavior — never a physical Enter claim (the
+  // submit key may be remapped).
+  assert.ok(view.includes('Submit while busy'), `busy-enter row missing:\n${view}`)
   assert.ok(view.includes('steer'), `persisted value missing:\n${view}`)
   t.app.stop()
 })
@@ -304,4 +320,35 @@ test('shouldSteerOnEnter: /skill <name> with args steers; the bare picker does n
   assert.equal(bare, false, 'the bare /skill picker stays local')
   const idle = shouldSteerOnEnter({ name: 'skill', rawInput: 'grilling x' }, false, 'steer', false)
   assert.equal(idle, false, 'idle never steers')
+})
+
+test('/help copy is key-neutral after a remap — no stale bare Esc/Enter claims (review round 37)', async () => {
+  // The effective-key copy convention: after remapping interrupt -> ctrl+x
+  // and submit -> ctrl+z, /help must NOT claim the physical Esc (the
+  // double-action follows the EFFECTIVE interrupt key) or Enter (submit).
+  // The prose is semantic/key-neutral; the LABEL column shows the
+  // effective keys (`Ctrl+X`, `Ctrl+Z`). The settings panel shows the
+  // SELECTED row's description only, so navigate to each row.
+  const t = setup()
+  t.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.agent.interrupt': 'ctrl+x',
+    'app.input.submit': 'ctrl+z',
+  }))
+  await t.runCommand('help')
+  let view = await t.view()
+  // The first row (submit) is selected: its label shows the effective key
+  // and its description is visible.
+  assert.ok(view.includes('Ctrl+Z'), `the effective submit key must be shown:\n${view}`)
+  const submitRow = view.split('\n').find(line => line.includes('Submit the draft'))
+  assert.ok(submitRow !== undefined, 'the selected submit row must render its description')
+  assert.ok(!submitRow!.includes('Enter'), `the submit row must not claim physical Enter:\n${submitRow}`)
+  // Navigate down to the cancel row (row 3: submit, queue, exit, cancel).
+  for (let i = 0; i < 3; i += 1) t.vt.sendInput('\x1b[B')
+  view = await t.view()
+  // The cancel description wraps across panel lines — search the whole
+  // viewport (the label row itself only carries the effective key).
+  assert.ok(view.includes('Cancel the active turn'), 'the selected cancel row must render its description')
+  assert.ok(!view.includes('one Esc while'), `the cancel copy must not claim physical Esc:\n${view}`)
+  assert.ok(view.includes('interrupt action twice'), 'the cancel prose is key-neutral (semantic action)')
+  t.app.stop()
 })
