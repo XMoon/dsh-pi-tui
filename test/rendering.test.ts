@@ -15,6 +15,9 @@ import { color, currentPalette, darkColors, lightColors, setTheme } from '../src
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
 import type { TurnActivity } from '../src/transcript.ts'
+import { TranscriptFolder } from '../src/transcript.ts'
+import { ImageLoader } from '../src/image/loader.ts'
+import type { ImageAttachmentRefLike } from '../src/image/admission.ts'
 import { Text, visibleWidth, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -3656,4 +3659,83 @@ test('a terminal resize re-bakes the folded rows at the new content width (never
   assert.ok(visibleWidth(lines[sysIdx]!) <= transcriptContentWidth(20),
     `the re-baked fold must fit the 18-col content width: ${JSON.stringify(lines[sysIdx])}`)
   app.stop()
+})
+
+test('assistant bullet, thinking and compaction follow the symbols palette', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'symbols' })
+  t.after(() => app.stop())
+  app.start()
+  app.setTranscript([
+    { kind: 'assistant', turn: 0, text: 'para one\n\npara two' },
+    { kind: 'thinking', turn: 0, text: 'reasoning preview line' },
+    { kind: 'compaction', turn: 0, text: 'summary', items: 3, tokens: 100 },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('•  para one'), `symbols bullet missing:\n${view}`)
+  assert.ok(view.includes('∿ Thinking'), `symbols thinking title missing:\n${view}`)
+  assert.ok(view.includes('↧ Context compacted'), `symbols compaction title missing:\n${view}`)
+  // The header brand whale stays by design; the content-area glyphs must all be symbols.
+  assert.ok(!view.includes('🌊') && !view.includes('🗜') && !view.includes('🐋  para'), `emoji glyphs leaked into symbols:\n${view}`)
+})
+
+test('minimal keeps the bullet and notice hourglass; thinking/compaction titles go bare', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'minimal' })
+  t.after(() => app.stop())
+  app.start()
+  app.setTranscript([
+    { kind: 'assistant', turn: 0, text: 'para one' },
+    { kind: 'thinking', turn: 0, text: 'reasoning preview line' },
+    { kind: 'compaction', turn: 0, text: 'summary', items: 3, tokens: 2 },
+  ])
+  app.setQueueItems([{ id: 'j-1', text: 'job done: exit 0', mode: 'steer', notice: true }])
+  const view = await viewport(vt)
+  const lines = view.split('\n').map(stripTerminalSequences)
+  assert.ok(lines.some(line => line.startsWith('•  para one')), `the bullet must survive minimal:\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('Thinking')), `thinking title must go bare (no leading space):\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('Context compacted')), `compaction title must go bare:\n${view}`)
+  assert.ok(view.includes('⧗ job done: exit 0'), `the queue-notice hourglass must survive minimal:\n${view}`)
+})
+
+test('the image attachment marker follows the icon style in bubbles and info bars', async (t) => {
+  const ref: ImageAttachmentRefLike = {
+    attachmentId: 'att-img-1',
+    mediaType: 'image/png',
+    bytes: 4,
+    width: 800,
+    height: 600,
+    name: 'shot.png',
+  }
+  const mkApp = (iconStyle: 'symbols' | 'minimal'): { vt: VirtualTerminal; app: TuiApp } => {
+    const vt = new VirtualTerminal(100, 24)
+    const loader = new ImageLoader(async () => ({ ref: {}, data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) }))
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      iconStyle,
+      imageLoader: loader,
+      imageTheme: { fallbackColor: (text) => text },
+    })
+    t.after(() => app.stop())
+    app.start()
+    return { vt, app }
+  }
+  for (const style of ['symbols', 'minimal'] as const) {
+    const { vt, app } = mkApp(style)
+    const folder = new TranscriptFolder()
+    folder.apply([{
+      type: 'user/message', seq: 1, time: 1,
+      data: {
+        content: [
+          { type: 'text', text: 'check ' },
+          { type: 'image', attachment: ref },
+        ],
+        source: { kind: 'user' },
+      },
+    }] as never)
+    app.setTranscript(folder.messages())
+    const view = await viewport(vt)
+    assert.ok(view.includes('▧ shot.png · 800×600'), `${style} info-bar marker missing:\n${view}`)
+    assert.ok(view.includes('check ▧ shot.png'), `${style} bubble marker missing:\n${view}`)
+    assert.ok(!view.includes('🖼️'), `emoji marker leaked into ${style}:\n${view}`)
+  }
 })

@@ -100,7 +100,7 @@ import { MentionProvider } from './mentions.ts'
 import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
 import { FocusActivityComponent, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
-import { iconPrefix, type IconStyle } from './icons.ts'
+import { iconFor, iconLead, iconPrefix, type IconStyle } from './icons.ts'
 import { indeterminateProgressFrames } from './progress.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
@@ -517,6 +517,17 @@ export class TranscriptGutterComponent implements Component {
   }
 }
 
+/** Swap the TUI-generated image-attachment marker (`🖼️` with or without
+ * its U+FE0F variation selector) inside RENDERED user-message text for the
+ * CURRENT icon style's marker. This is a CONTROLLED substitution of the
+ * TUI's own attachment fact — never a global emoji sanitizer: the folded
+ * `message.text` keeps the emoji for search/export, and user-typed emoji
+ * are untouched. No marker → no work (the fast path). */
+function renderImageMarkers(text: string, marker: string): string {
+  if (!text.includes('\u{1F5BC}')) return text
+  return text.replace(/\u{1F5BC}\uFE0F?/gu, marker)
+}
+
 /**
  * Bullet + continuation-indent wrapper that keeps its child LIVE, so a
  * terminal resize re-renders the child at the new width instead of
@@ -591,15 +602,17 @@ export class BulletedComponent implements Component {
 export class ThinkingCompactComponent implements Component {
   private readonly message: Extract<TranscriptMessage, { kind: 'thinking' }>
   private readonly hint: ExpandHint
+  private readonly iconStyle: IconStyle
   /** TRUE per-width cache: the same component + same width returns the
    * same array instance even after intermediate widths (a single
    * last-width slot would re-create the array on a width A → B → A
    * sequence and break the reference-stable contract). */
   private readonly cached = new Map<number, string[]>()
 
-  constructor(message: Extract<TranscriptMessage, { kind: 'thinking' }>, hint: ExpandHint) {
+  constructor(message: Extract<TranscriptMessage, { kind: 'thinking' }>, hint: ExpandHint, iconStyle: IconStyle = 'emoji') {
     this.message = message
     this.hint = hint
+    this.iconStyle = iconStyle
   }
 
   invalidate(): void {
@@ -610,15 +623,16 @@ export class ThinkingCompactComponent implements Component {
     const existing = this.cached.get(width)
     if (existing !== undefined) return existing
     const previewLine = latestLine(this.message.text)
+    const title = color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`)
     let lines: string[]
     if (previewLine === '') {
       // An existing block with no text yet (a very short streaming /
       // replay edge): the bare title — never a fake "No reasoning" row.
-      lines = [truncateToWidth(color.textDim('🌊 Thinking'), Math.max(1, width), '…')]
+      lines = [truncateToWidth(title, Math.max(1, width), '…')]
     } else {
       const hintVerb = this.hint ?? 'ctrl+o'
       lines = [
-        truncateToWidth(color.textDim('🌊 Thinking'), Math.max(1, width), '…'),
+        truncateToWidth(title, Math.max(1, width), '…'),
         truncateToWidth(color.textDimItalic(`  ${previewLine}`), Math.max(1, width), '…'),
         truncateToWidth(color.textDim(`  (${hintVerb} to expand)`), Math.max(1, width), '…'),
       ]
@@ -6608,7 +6622,10 @@ export class TuiApp {
   ): Component {
     const container = new Container()
     container.addChild(new UserBubbleComponent(
-      new Text(textWithImageMarkers(content), 0, 0),
+      // The folded flat text keeps the emoji marker (search/export fact);
+      // the RENDER swaps in the current icon style's marker — the marker
+      // is TUI-owned text, never a user-typed emoji.
+      new Text(renderImageMarkers(textWithImageMarkers(content), iconFor('image-marker', this.iconStyle)), 0, 0),
       `${color.roleUser('❯')} `,
       color.roleUserBg,
     ))
@@ -6620,6 +6637,7 @@ export class TuiApp {
           this.imageLoader!,
           this.imageTheme!,
           this.occurrenceCollapsedRef(message, imageIndex),
+          iconFor('image-marker', this.iconStyle),
         ))
         imageIndex += 1
       }
@@ -6639,22 +6657,26 @@ export class TuiApp {
         return this.renderUserBlocks(message.content, message)
       }
       return new UserBubbleComponent(
-        new Text(message.text, 0, 0),
+        new Text(renderImageMarkers(message.text, iconFor('image-marker', this.iconStyle)), 0, 0),
         `${color.roleUser('❯')} `,
         color.roleUserBg,
       )
     }
     if (message.kind === 'assistant') {
-      // The whale bullet leads the FIRST markdown line; wrapped continuation
-      // lines indent under it (kimi prefix+indent parity), so the bullet
-      // never floats alone on its own row. The markdown stays a LIVE child:
-      // a terminal resize re-renders it at the new width, so tables reflow
-      // instead of re-wrapping a frozen render (the 5a76526 regression).
+      // The leading bullet marks the FIRST markdown line; wrapped
+      // continuation lines indent under it (kimi prefix+indent parity), so
+      // the bullet never floats alone on its own row. The bullet follows
+      // the icon style (the whale under emoji, the list bullet under
+      // symbols/minimal — the continuation indent depends on it, so it is
+      // never hidden). The markdown stays a LIVE child: a terminal resize
+      // re-renders it at the new width, so tables reflow instead of
+      // re-wrapping a frozen render (the 5a76526 regression).
+      const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
       if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
         return this.renderBlockSequence(message.content, (text) =>
-          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme), `${color.primary('🐋')}  `), message)
+          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme), bullet), message)
       }
-      return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), `${color.primary('🐋')}  `)
+      return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), bullet)
     }
     if (message.kind === 'thinking') {
       // The unified Thinking disclosure card (plan §4/§13): COMPACT is
@@ -6667,9 +6689,9 @@ export class TuiApp {
       // output), wrapping normally per the Text/Markdown policy; the
       // compact preview is never repeated next to the full body.
       if (!expanded) {
-        return new ThinkingCompactComponent(message, expandHint)
+        return new ThinkingCompactComponent(message, expandHint, this.iconStyle)
       }
-      const head = color.textDim('🌊 Thinking')
+      const head = color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`)
       const body = message.text === '' ? '' : message.text.split('\n').map(line => `  ${line}`).join('\n')
       return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
     }
@@ -6739,11 +6761,14 @@ export class TuiApp {
       // Compaction card (web CompactionItem parity): a title row with the
       // shadowed item/token counts, expandable to the summary body. The
       // running card shows "Compacting context…" until the summary lands.
+      // The title icon follows the icon style (hidden under minimal — the
+      // text and the error colour carry the state).
+      const lead = iconLead('compaction', this.iconStyle)
       const title = message.error !== undefined
-        ? color.error('🗜 Compaction failed')
+        ? color.error(`${lead}Compaction failed`)
         : message.running === true
-          ? color.textMuted('🗜 Compacting context…')
-          : color.text('🗜 Context compacted')
+          ? color.textMuted(`${lead}Compacting context…`)
+          : color.text(`${lead}Context compacted`)
       const counts = (message.items > 0 || message.tokens > 0)
         ? `Compacted ${message.items} history item${message.items === 1 ? '' : 's'} (~${message.tokens} tokens)`
         : ''
@@ -7313,6 +7338,8 @@ export class TuiApp {
                     block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
                     this.imageLoader,
                     this.imageTheme,
+                    undefined,
+                    iconFor('image-marker', this.iconStyle),
                   ))
                 } else {
                   // Non-text/non-image blocks keep the legacy JSON form,
@@ -7456,6 +7483,8 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
+              undefined,
+              iconFor('image-marker', this.iconStyle),
             ))
           } else {
             // Non-text/non-image blocks keep the legacy JSON form, in order
@@ -7502,6 +7531,8 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader,
           this.imageTheme,
+          undefined,
+          iconFor('image-marker', this.iconStyle),
         ))
       }
     }
@@ -8006,12 +8037,14 @@ export class TuiApp {
       lines.push(`${color.roleUser('❯')} ${truncated}`)
     }
     for (const item of shownNotices) {
-      // Notices are NOT steerable: they carry their own ⏳ marker so they
-      // never read as user input, and the hint below drops the steer/edit
-      // verbs when nothing else is queued.
+      // Notices are NOT steerable: they carry their own waiting-state
+      // marker (the ⏳ under emoji, the ⧗ hourglass under symbols/minimal)
+      // so they never read as user input, and the hint below drops the
+      // steer/edit verbs when nothing else is queued.
       const text = item.text.replace(/\s+/g, ' ').trim()
-      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth('⏳ ')), '…')
-      lines.push(`${color.textDim('⏳')} ${color.textDim(truncated)}`)
+      const lead = iconLead('queue-notice', this.iconStyle)
+      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth(lead)), '…')
+      lines.push(`${color.textDim(lead)}${color.textDim(truncated)}`)
     }
     const folded = noticeRows.length - shownNotices.length
     if (folded > 0) {
