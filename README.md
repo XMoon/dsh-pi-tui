@@ -155,6 +155,10 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。
 
+`/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
+彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
+保留状态/交互标记);切换立即生效并持久化。
+
 其他插件注册到 `ctx.commands` 的 Slash Command 也会被自动发现。
 
 ## 常用按键
