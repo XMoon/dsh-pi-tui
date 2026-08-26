@@ -66,7 +66,6 @@ export type IconSemantic =
   | 'assistant-bullet'
   | 'thinking'
   | 'compaction'
-  | 'image-marker'
   | 'queue-notice'
 
 /** Every semantic, for exhaustive palette/width sweeps. */
@@ -97,7 +96,6 @@ export const ALL_ICON_SEMANTICS: readonly IconSemantic[] = [
   'assistant-bullet',
   'thinking',
   'compaction',
-  'image-marker',
   'queue-notice',
 ]
 
@@ -134,41 +132,42 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'assistant-bullet': '🐋',
     thinking: '🌊',
     compaction: '🗜',
-    'image-marker': '🖼️',
     'queue-notice': '⏳',
   },
   symbols: {
-    'tool-read': '▤',
+    // EVERY glyph here is verified by the width gate to be BOTH 1 cell
+    // under the fork's visibleWidth() AND a Unicode EAW neutral/narrow/
+    // halfwidth class — ambiguous (A) glyphs (▤ ◆ • × ■ · …) were
+    // rejected because CJK-width terminals may paint them 2 cells.
+    'tool-read': '≣',
     'tool-search': '⌕',
     'tool-shell': '›',
     'tool-write': '+',
     'tool-edit': '~',
-    'tool-code': '◆',
-    'tool-generic': '•',
-    subagent: '◆',
-    workflow: '◇',
-    error: '×',
-    interrupted: '■',
+    'tool-code': '⊞',
+    'tool-generic': '∗',
+    subagent: '⋄',
+    workflow: '⇄',
+    error: '⨯',
+    interrupted: '∎',
     question: '?',
     'slash-command': '›',
-    'context-file': '▤',
-    'context-skill': '◆',
-    'context-plugin': '◇',
+    'context-file': '≣',
+    'context-skill': '⋈',
+    'context-plugin': '◻',
     'context-notice': '!',
     'context-recall': '↶',
-    'context-generic': '·',
+    'context-generic': '⋅',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
-    'working-a': '•',
+    'working-a': '∙',
     'working-b': '◦',
-    // The markdown bullet (the list-bullet glyph itself), the thinking
-    // wave (U+223F echoes the 🌊 idea), the compaction squeeze (U+21A7),
-    // the attachment marker (U+25A7) and the queued-notice hourglass
-    // (U+29D7) — all verified 1 cell by the width gate.
-    'assistant-bullet': '•',
+    // The markdown bullet (the neutral bullet-operator U+2219), the
+    // thinking wave (U+223F echoes the 🌊 idea), the compaction squeeze
+    // (U+21A7) and the queued-notice hourglass (U+29D7).
+    'assistant-bullet': '∙',
     thinking: '∿',
     compaction: '↧',
-    'image-marker': '▧',
     'queue-notice': '⧗',
   },
   minimal: {
@@ -190,23 +189,21 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'context-notice': '',
     'context-recall': '',
     'context-generic': '',
-    error: '×',
-    interrupted: '■',
+    error: '⨯',
+    interrupted: '∎',
     question: '?',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
     // The working pair is UNIFIED with symbols — minimal removes static
     // icons, it does not change animation semantics.
-    'working-a': '•',
+    'working-a': '∙',
     'working-b': '◦',
     // Structure anchors survive minimal: the message bullet (the
-    // continuation indent depends on it), the attachment marker (the
-    // image's position in the text flow must stay visible) and the
-    // queued-notice hourglass (a real waiting state).
-    'assistant-bullet': '•',
+    // continuation indent depends on it) and the queued-notice hourglass
+    // (a real waiting state).
+    'assistant-bullet': '∙',
     thinking: '',
     compaction: '',
-    'image-marker': '▧',
     'queue-notice': '⧗',
   },
 }

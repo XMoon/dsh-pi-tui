@@ -517,17 +517,6 @@ export class TranscriptGutterComponent implements Component {
   }
 }
 
-/** Swap the TUI-generated image-attachment marker (`🖼️` with or without
- * its U+FE0F variation selector) inside RENDERED user-message text for the
- * CURRENT icon style's marker. This is a CONTROLLED substitution of the
- * TUI's own attachment fact — never a global emoji sanitizer: the folded
- * `message.text` keeps the emoji for search/export, and user-typed emoji
- * are untouched. No marker → no work (the fast path). */
-function renderImageMarkers(text: string, marker: string): string {
-  if (!text.includes('\u{1F5BC}')) return text
-  return text.replace(/\u{1F5BC}\uFE0F?/gu, marker)
-}
-
 /**
  * Bullet + continuation-indent wrapper that keeps its child LIVE, so a
  * terminal resize re-renders the child at the new width instead of
@@ -6622,10 +6611,10 @@ export class TuiApp {
   ): Component {
     const container = new Container()
     container.addChild(new UserBubbleComponent(
-      // The folded flat text keeps the emoji marker (search/export fact);
-      // the RENDER swaps in the current icon style's marker — the marker
-      // is TUI-owned text, never a user-typed emoji.
-      new Text(renderImageMarkers(textWithImageMarkers(content), iconFor('image-marker', this.iconStyle)), 0, 0),
+      // The attachment marker is deliberately NOT style-swapped (the plan
+      // defers it): the flat text keeps the constant 🖼️ fact, so a
+      // user-typed 🖼️ in their own words is never rewritten.
+      new Text(textWithImageMarkers(content), 0, 0),
       `${color.roleUser('❯')} `,
       color.roleUserBg,
     ))
@@ -6637,7 +6626,6 @@ export class TuiApp {
           this.imageLoader!,
           this.imageTheme!,
           this.occurrenceCollapsedRef(message, imageIndex),
-          iconFor('image-marker', this.iconStyle),
         ))
         imageIndex += 1
       }
@@ -6657,7 +6645,7 @@ export class TuiApp {
         return this.renderUserBlocks(message.content, message)
       }
       return new UserBubbleComponent(
-        new Text(renderImageMarkers(message.text, iconFor('image-marker', this.iconStyle)), 0, 0),
+        new Text(message.text, 0, 0),
         `${color.roleUser('❯')} `,
         color.roleUserBg,
       )
@@ -7338,8 +7326,6 @@ export class TuiApp {
                     block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
                     this.imageLoader,
                     this.imageTheme,
-                    undefined,
-                    iconFor('image-marker', this.iconStyle),
                   ))
                 } else {
                   // Non-text/non-image blocks keep the legacy JSON form,
@@ -7483,8 +7469,6 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
-              undefined,
-              iconFor('image-marker', this.iconStyle),
             ))
           } else {
             // Non-text/non-image blocks keep the legacy JSON form, in order
@@ -7531,8 +7515,6 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader,
           this.imageTheme,
-          undefined,
-          iconFor('image-marker', this.iconStyle),
         ))
       }
     }

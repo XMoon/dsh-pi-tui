@@ -15,9 +15,6 @@ import { color, currentPalette, darkColors, lightColors, setTheme } from '../src
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
 import type { TurnActivity } from '../src/transcript.ts'
-import { TranscriptFolder } from '../src/transcript.ts'
-import { ImageLoader } from '../src/image/loader.ts'
-import type { ImageAttachmentRefLike } from '../src/image/admission.ts'
 import { Text, visibleWidth, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -1973,17 +1970,17 @@ test('tool and context cards render the symbols palette', async (t) => {
     { kind: 'system', turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' },
   ])
   const view = await viewport(vt)
-  assert.ok(view.includes('▤  Read /ws/src/foo.ts'), `symbols read icon missing:\n${view}`)
+  assert.ok(view.includes('≣  Read /ws/src/foo.ts'), `symbols read icon missing:\n${view}`)
   assert.ok(view.includes('›  Bash'), `symbols bash icon missing:\n${view}`)
   assert.ok(view.includes('⌕  Search'), `symbols search icon missing:\n${view}`)
   assert.ok(view.includes('~  Edit'), `symbols edit icon missing:\n${view}`)
-  assert.ok(view.includes('•  Tool call'), `symbols generic icon missing:\n${view}`)
-  assert.ok(view.includes('◆  Subagent'), `symbols subagent icon missing:\n${view}`)
-  assert.ok(view.includes('◇  Workflow'), `symbols workflow icon missing:\n${view}`)
-  assert.ok(view.includes('×  Error'), `symbols error icon missing:\n${view}`)
+  assert.ok(view.includes('∗  Tool call'), `symbols generic icon missing:\n${view}`)
+  assert.ok(view.includes('⋄  Subagent'), `symbols subagent icon missing:\n${view}`)
+  assert.ok(view.includes('⇄  Workflow'), `symbols workflow icon missing:\n${view}`)
+  assert.ok(view.includes('⨯  Error'), `symbols error icon missing:\n${view}`)
   assert.ok(view.includes('?  Question'), `symbols question icon missing:\n${view}`)
   assert.ok(view.includes('›  compact [ok]'), `symbols slash icon missing:\n${view}`)
-  assert.ok(view.includes('▤  Context injection AGENTS.md'), `symbols context icon missing:\n${view}`)
+  assert.ok(view.includes('≣  Context injection AGENTS.md'), `symbols context icon missing:\n${view}`)
 })
 
 test('minimal hides decorative icons with no dangling whitespace', async (t) => {
@@ -2015,12 +2012,12 @@ test('minimal hides decorative icons with no dangling whitespace', async (t) => 
   const context = lines.find(line => line.startsWith('Context injection AGENTS.md'))
   assert.ok(context !== undefined, `minimal context row missing or space-prefixed:\n${view}`)
   // No decorative glyphs survived anywhere.
-  assert.ok(!view.includes('📖') && !view.includes('▤') && !view.includes('🤖') && !view.includes('◆')
+  assert.ok(!view.includes('📖') && !view.includes('≣') && !view.includes('🤖') && !view.includes('⋄')
     && !view.includes('🎛️') && !view.includes('›  '), `decorative icons leaked into minimal:\n${view}`)
   // The important state markers survive — the synthetic error card keeps
   // its `×` while an ordinary failed tool stays icon-free (the [error]
   // pill carries it).
-  assert.ok(lines.some(line => line.startsWith('×  Error')), `minimal error marker missing:\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('⨯  Error')), `minimal error marker missing:\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Tool call [error]')), `a failed ordinary tool must not gain a marker:\n${view}`)
 })
 
@@ -2041,8 +2038,8 @@ test('the same folded messages repaint across emoji → symbols → minimal → 
   // Symbols: the SAME folded messages, no reload, no re-fold.
   app.setIconStyle('symbols')
   view = await viewport(vt)
-  assert.ok(view.includes('▤  Read /ws/src/foo.ts'), `symbols read icon missing after switch:\n${view}`)
-  assert.ok(view.includes('▤  Context injection AGENTS.md'), `symbols context icon missing after switch:\n${view}`)
+  assert.ok(view.includes('≣  Read /ws/src/foo.ts'), `symbols read icon missing after switch:\n${view}`)
+  assert.ok(view.includes('≣  Context injection AGENTS.md'), `symbols context icon missing after switch:\n${view}`)
   // Minimal: icons disappear, no dangling whitespace.
   app.setIconStyle('minimal')
   view = await viewport(vt)
@@ -2171,8 +2168,8 @@ test('fullscreen cards and the Focus disclosure repaint across an icon style swi
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('▾ Thought'), `symbols disclosure missing after fullscreen switch:\n${view}`)
-  assert.ok(view.includes('▤  Read /ws/src/foo.ts'), `symbols read icon missing after fullscreen switch:\n${view}`)
-  assert.ok(view.includes('▤  Context injection AGENTS.md'), `symbols context icon missing after fullscreen switch:\n${view}`)
+  assert.ok(view.includes('≣  Read /ws/src/foo.ts'), `symbols read icon missing after fullscreen switch:\n${view}`)
+  assert.ok(view.includes('≣  Context injection AGENTS.md'), `symbols context icon missing after fullscreen switch:\n${view}`)
   // Minimal: decorative icons vanish (no dangling space), the disclosure
   // affordance survives.
   app.setIconStyle('minimal')
@@ -3672,7 +3669,7 @@ test('assistant bullet, thinking and compaction follow the symbols palette', asy
     { kind: 'compaction', turn: 0, text: 'summary', items: 3, tokens: 100 },
   ])
   const view = await viewport(vt)
-  assert.ok(view.includes('•  para one'), `symbols bullet missing:\n${view}`)
+  assert.ok(view.includes('∙  para one'), `symbols bullet missing:\n${view}`)
   assert.ok(view.includes('∿ Thinking'), `symbols thinking title missing:\n${view}`)
   assert.ok(view.includes('↧ Context compacted'), `symbols compaction title missing:\n${view}`)
   // The header brand whale stays by design; the content-area glyphs must all be symbols.
@@ -3692,50 +3689,8 @@ test('minimal keeps the bullet and notice hourglass; thinking/compaction titles 
   app.setQueueItems([{ id: 'j-1', text: 'job done: exit 0', mode: 'steer', notice: true }])
   const view = await viewport(vt)
   const lines = view.split('\n').map(stripTerminalSequences)
-  assert.ok(lines.some(line => line.startsWith('•  para one')), `the bullet must survive minimal:\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('∙  para one')), `the bullet must survive minimal:\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Thinking')), `thinking title must go bare (no leading space):\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Context compacted')), `compaction title must go bare:\n${view}`)
   assert.ok(view.includes('⧗ job done: exit 0'), `the queue-notice hourglass must survive minimal:\n${view}`)
-})
-
-test('the image attachment marker follows the icon style in bubbles and info bars', async (t) => {
-  const ref: ImageAttachmentRefLike = {
-    attachmentId: 'att-img-1',
-    mediaType: 'image/png',
-    bytes: 4,
-    width: 800,
-    height: 600,
-    name: 'shot.png',
-  }
-  const mkApp = (iconStyle: 'symbols' | 'minimal'): { vt: VirtualTerminal; app: TuiApp } => {
-    const vt = new VirtualTerminal(100, 24)
-    const loader = new ImageLoader(async () => ({ ref: {}, data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) }))
-    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
-      iconStyle,
-      imageLoader: loader,
-      imageTheme: { fallbackColor: (text) => text },
-    })
-    t.after(() => app.stop())
-    app.start()
-    return { vt, app }
-  }
-  for (const style of ['symbols', 'minimal'] as const) {
-    const { vt, app } = mkApp(style)
-    const folder = new TranscriptFolder()
-    folder.apply([{
-      type: 'user/message', seq: 1, time: 1,
-      data: {
-        content: [
-          { type: 'text', text: 'check ' },
-          { type: 'image', attachment: ref },
-        ],
-        source: { kind: 'user' },
-      },
-    }] as never)
-    app.setTranscript(folder.messages())
-    const view = await viewport(vt)
-    assert.ok(view.includes('▧ shot.png · 800×600'), `${style} info-bar marker missing:\n${view}`)
-    assert.ok(view.includes('check ▧ shot.png'), `${style} bubble marker missing:\n${view}`)
-    assert.ok(!view.includes('🖼️'), `emoji marker leaked into ${style}:\n${view}`)
-  }
 })
