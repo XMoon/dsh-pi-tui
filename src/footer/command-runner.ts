@@ -121,6 +121,10 @@ export class FooterCommandRunner {
     const config = this.options.config
     const child = spawn(config.command, { shell: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.child = child
+    // The child's STDERR is never surfaced: DRAIN it (a user command that
+    // writes enough stderr to fill the pipe buffer would BLOCK and get
+    // misjudged as a timeout otherwise).
+    child.stderr?.on('data', () => {})
     let output = ''
     let outputBytes = 0
     // The decoder buffers a PARTIAL multibyte sequence across chunks, so a

@@ -13,13 +13,6 @@ test('API v1: the deprecation map is part of the api() contract and empty at v1'
   // from it — the contract is asserted against the implementation, not a
   // locally fabricated object.
   const { mountRealService } = await import('./extension-lifecycle-helpers.ts')
-    .catch(() => ({ mountRealService: undefined }))
-  if (mountRealService === undefined) {
-    // Fallback: the public type declares the contract.
-    const { API_VERSION } = await import('../src/extension/public-types.ts')
-    assert.equal(API_VERSION, 1)
-    return
-  }
   const { service, dispose } = await mountRealService()
   try {
     const info = service.api()
@@ -34,17 +27,14 @@ test('API v1: capabilities are feature-detected, never version-parsed', async ()
   // The REAL service advertises the full slot set from provide-time (no
   // surface attached yet) — the feature-detect contract plugins rely on.
   const { mountRealService } = await import('./extension-lifecycle-helpers.ts')
-    .catch(() => ({ mountRealService: undefined }))
-  if (mountRealService !== undefined) {
-    const { service, dispose } = await mountRealService()
-    try {
-      const advertised = service.api().capabilities
-      for (const slot of ['slot.chrome.header.badge', 'slot.input.dock.item', 'slot.chrome.footer.status', 'slot.chrome.footer.item', 'slot.input.widget']) {
-        assert.ok(advertised.has(slot), `the real service must advertise ${slot} pre-surface`)
-      }
-    } finally {
-      dispose()
+  const { service, dispose } = await mountRealService()
+  try {
+    const advertised = service.api().capabilities
+    for (const slot of ['slot.chrome.header.badge', 'slot.input.dock.item', 'slot.chrome.footer.status', 'slot.chrome.footer.item', 'slot.input.widget']) {
+      assert.ok(advertised.has(slot), `the real service must advertise ${slot} pre-surface`)
     }
+  } finally {
+    dispose()
   }
   // The documented stability contract: a plugin checks capabilities.has()
   // and treats an absent capability as unavailable.
